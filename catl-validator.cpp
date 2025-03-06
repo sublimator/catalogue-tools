@@ -1,334 +1,582 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
-#include <set>
-#include <map>
-#include <cstring>
-#include <cstdint>
 #include <string>
-#include <algorithm>
-#include <stdexcept>
 #include <iomanip>
+#include <cstring>
+#include <cctype>
+#include <algorithm>
+#include <ctime>
 
-// Constants from the original code
-static constexpr uint32_t HAS_NEXT_FLAG = 0x80000000;
-static constexpr uint32_t SIZE_MASK = 0x0FFFFFFF;
+// Constants from the rippled code
+static constexpr uint32_t CATL = 0x4C544143UL; // "CATL" in LE
+static constexpr uint16_t CATALOGUE_VERSION = 1;
 
-// File header structure
-#pragma pack(push, 1)
+
+// The header structure from the rippled code
+#pragma pack(push, 1)  // pack the struct tightly
 struct CATLHeader {
-    char magic[4];
-    uint32_t version;
+    uint32_t magic = 0x4C544143UL;  // "CATL" in LE
     uint32_t min_ledger;
     uint32_t max_ledger;
-    uint32_t network_id;
-    uint32_t ledger_tx_offset;
+    uint16_t version;
+    uint16_t network_id;
 };
 #pragma pack(pop)
 
-// Structure to track state entry positions
-struct StatePosition {
-    std::streampos filePos;
-    uint32_t sequence;
-    uint32_t size;
+enum SHAMapNodeType : uint8_t {
+    tnINNER = 1,
+    tnTRANSACTION_NM = 2,  // transaction, no metadata
+    tnTRANSACTION_MD = 3,  // transaction, with metadata
+    tnACCOUNT_STATE = 4,
+    tnREMOVE = 254,
+    tnTERMINAL = 255  // special type to mark the end of a serialization stream
 };
-
-// Simple 256-bit hash class for tracking keys
-class uint256 {
-    unsigned char data_[32];
-
-public:
-    uint256() {
-        std::memset(data_, 0, sizeof(data_));
+// Function to get node type description
+std::string getNodeTypeDescription(uint8_t type) {
+    switch (type) {
+        case 1: return "tnINNER";
+        case 2: return "tnTRANSACTION_NM";
+        case 3: return "tnTRANSACTION_MD";
+        case 4: return "tnACCOUNT_STATE";
+        case 254: return "tnREMOVE";
+        case 255: return "tnTERMINAL";
+        default: return "UNKNOWN_TYPE_" + std::to_string(type);
     }
+}
 
-    const unsigned char* data() const { return data_; }
-    unsigned char* data() { return data_; }
-
-    bool operator<(const uint256& other) const {
-        return std::memcmp(data_, other.data_, 32) < 0;
-    }
-
-    friend std::ostream& operator<<(std::ostream& os, const uint256& h) {
-        os << std::hex;
-        for (int i = 0; i < 32; ++i) {
-            os << std::setw(2) << std::setfill('0') 
-               << static_cast<int>(h.data_[i]);
-        }
-        os << std::dec;
-        return os;
-    }
-};
-
-class CATLValidator {
-    std::string filepath_;
-    std::ifstream file_;
-    CATLHeader header_;
-    size_t total_bytes_read_ = 0;
-    std::set<uint256> unique_keys_;
+// Convert NetClock epoch time to human-readable string
+std::string timeToString(uint64_t netClockTime) {
+    // NetClock uses seconds since January 1st, 2000 (946684800)
+    static const time_t rippleEpochOffset = 946684800;
     
-    // Statistics
-    struct Statistics {
-        size_t total_keys = 0;
-        size_t total_state_entries = 0;
-        size_t total_ledgers = 0;
-        size_t total_transactions = 0;
-        size_t total_bytes = 0;
-        std::map<uint32_t, size_t> states_per_ledger;
-    } stats_;
+    time_t unixTime = netClockTime + rippleEpochOffset;
+    std::tm* tm = std::gmtime(&unixTime);
+    if (!tm) return "Invalid time";
+    
+    char timeStr[30];
+    std::strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S UTC", tm);
+    return timeStr;
+}
 
-    void validateHeader() {
-        std::cout << "Validating header...\n";
+// Hex dump utility function - prints bytes with file offsets and annotations
+void hexDump(std::ostream& os, const std::vector<uint8_t>& data, size_t offset, 
+             const std::string& annotation = "", size_t bytesPerLine = 16) {
+    
+    for (size_t i = 0; i < data.size(); i += bytesPerLine) {
+        // Print offset
+        os << std::setfill('0') << std::setw(8) << std::hex << (offset + i) << ": ";
         
-        if (std::memcmp(header_.magic, "CATL", 4) != 0) {
-            throw std::runtime_error("Invalid magic number in header");
-        }
-
-        if (header_.version != 1) {
-            throw std::runtime_error("Unsupported version: " + 
-                                   std::to_string(header_.version));
-        }
-
-        if (header_.min_ledger > header_.max_ledger) {
-            throw std::runtime_error("Invalid ledger range: min > max");
-        }
-
-        if (header_.ledger_tx_offset <= sizeof(CATLHeader)) {
-            throw std::runtime_error("Invalid ledger_tx_offset");
-        }
-
-        std::cout << "Header validation successful:\n"
-                  << "  Version: " << header_.version << "\n"
-                  << "  Network ID: " << header_.network_id << "\n"
-                  << "  Ledger range: " << header_.min_ledger 
-                  << " - " << header_.max_ledger << "\n"
-                  << "  Ledger/TX offset: " << header_.ledger_tx_offset << "\n";
-    }
-
-    void validateStateData() {
-        std::cout << "Validating state data section...\n";
-        
-        file_.seekg(sizeof(CATLHeader));
-        if (file_.fail()) {
-            throw std::runtime_error("Failed to seek to state data section");
-        }
-
-        while (file_.tellg() < header_.ledger_tx_offset) {
-            uint256 key;
-            if (!file_.read(reinterpret_cast<char*>(key.data()), 32)) {
-                throw std::runtime_error("Failed to read state key");
+        // Print hex values
+        for (size_t j = 0; j < bytesPerLine; j++) {
+            if (i + j < data.size()) {
+                os << std::setfill('0') << std::setw(2) << std::hex << static_cast<int>(data[i + j]) << " ";
+            } else {
+                os << "   "; // 3 spaces for missing bytes
             }
-            total_bytes_read_ += 32;
+            
+            // Add extra space after 8 bytes for readability
+            if (j == 7) {
+                os << " ";
+            }
+        }
+        
+        // Print ASCII representation
+        os << " | ";
+        for (size_t j = 0; j < bytesPerLine && (i + j) < data.size(); j++) {
+            char c = data[i + j];
+            os << (std::isprint(c) ? c : '.');
+        }
+        
+        // Add annotation on first line only
+        if (i == 0 && !annotation.empty()) {
+            size_t extraSpaces = bytesPerLine - std::min(bytesPerLine, data.size());
+            os << std::string(extraSpaces, ' ');
+            os << " | " << annotation;
+        }
+        
+        os << std::dec << std::endl;
+    }
+}
 
-            unique_keys_.insert(key);
-            stats_.total_keys++;
+// Convert bytes to hex string
+std::string bytesToHexString(const uint8_t* data, size_t length) {
+    std::stringstream ss;
+    for (size_t i = 0; i < length; ++i) {
+        ss << std::setw(2) << std::setfill('0') << std::hex << static_cast<int>(data[i]);
+    }
+    return ss.str();
+}
 
-            bool has_next = true;
-            while (has_next) {
-                uint32_t sequence, flags_and_size;
+class CatalogueAnalyzer {
+private:
+    std::string filename_;
+    std::ifstream file_;
+    std::ostream& output_;
+    size_t fileSize_;
+    bool verbose_;
+    
+    // Read a block of data from file at specified offset
+    std::vector<uint8_t> readBytes(size_t offset, size_t size) {
+        std::vector<uint8_t> buffer(size);
+        file_.seekg(offset, std::ios::beg);
+        file_.read(reinterpret_cast<char*>(buffer.data()), size);
+        size_t bytesRead = file_.gcount();
+        buffer.resize(bytesRead); // Adjust for actual bytes read
+        return buffer;
+    }
+    
+    // Analyze and dump header information
+    size_t analyzeHeader(size_t offset) {
+        output_ << "=== CATALOGUE HEADER ===\n";
+        auto headerBytes = readBytes(offset, sizeof(CATLHeader));
+        
+        if (headerBytes.size() < sizeof(CATLHeader)) {
+            output_ << "ERROR: Incomplete header. File is truncated.\n";
+            return offset + headerBytes.size();
+        }
+        
+        // Read the header values
+        CATLHeader header;
+        std::memcpy(&header, headerBytes.data(), sizeof(CATLHeader));
+        
+        // Dump the entire header with annotations
+        hexDump(output_, headerBytes, offset, "CATL Header");
+        
+        // Validate header fields
+        bool valid = true;
+        if (header.magic != CATL) {
+            output_ << "WARNING: Invalid magic value, expected 0x" << std::hex << CATL << std::dec << "\n";
+            valid = false;
+        }
+        
+        if (header.version != CATALOGUE_VERSION) {
+            output_ << "WARNING: Unexpected version. Expected " << CATALOGUE_VERSION 
+                    << ", got " << header.version << "\n";
+            valid = false;
+        }
+        
+        if (header.min_ledger > header.max_ledger) {
+            output_ << "WARNING: Invalid ledger range: min_ledger (" << header.min_ledger 
+                    << ") > max_ledger (" << header.max_ledger << ")\n";
+            valid = false;
+        }
+        
+        // Summary
+        output_ << "Header Summary:\n"
+                << "  Magic: 0x" << std::hex << header.magic << std::dec 
+                << (header.magic == CATL ? " (valid)" : " (INVALID)") << "\n"
+                << "  Min Ledger: " << header.min_ledger << "\n"
+                << "  Max Ledger: " << header.max_ledger << "\n"
+                << "  Version: " << header.version << "\n"
+                << "  Network ID: " << header.network_id << "\n\n";
+        
+        return offset + sizeof(CATLHeader);
+    }
+    
+    // Analyze a ledger's information block
+    size_t analyzeLedgerInfo(size_t offset) {
+        output_ << "=== LEDGER INFO at offset 0x" << std::hex << offset << std::dec << " ===\n";
+        
+        size_t startOffset = offset;
+        
+        // Read sequence number (first 4 bytes)
+        auto seqBytes = readBytes(offset, 4);
+        if (seqBytes.size() < 4) {
+            output_ << "ERROR: Unexpected EOF reading ledger sequence\n";
+            return fileSize_;
+        }
+        
+        uint32_t sequence = 0;
+        std::memcpy(&sequence, seqBytes.data(), 4);
+        hexDump(output_, seqBytes, offset, "Ledger Sequence: " + std::to_string(sequence));
+        offset += 4;
+        
+        // Read hash (32 bytes)
+        auto hashBytes = readBytes(offset, 32);
+        if (hashBytes.size() < 32) {
+            output_ << "ERROR: Unexpected EOF reading hash\n";
+            return fileSize_;
+        }
+        std::string hashHex = bytesToHexString(hashBytes.data(), 32);
+        hexDump(output_, hashBytes, offset, "Hash: " + hashHex);
+        offset += 32;
+        
+        // Read txHash (32 bytes)
+        auto txHashBytes = readBytes(offset, 32);
+        if (txHashBytes.size() < 32) {
+            output_ << "ERROR: Unexpected EOF reading txHash\n";
+            return fileSize_;
+        }
+        std::string txHashHex = bytesToHexString(txHashBytes.data(), 32);
+        hexDump(output_, txHashBytes, offset, "Tx Hash: " + txHashHex);
+        offset += 32;
+        
+        // Read accountHash (32 bytes)
+        auto accountHashBytes = readBytes(offset, 32);
+        if (accountHashBytes.size() < 32) {
+            output_ << "ERROR: Unexpected EOF reading accountHash\n";
+            return fileSize_;
+        }
+        std::string accountHashHex = bytesToHexString(accountHashBytes.data(), 32);
+        hexDump(output_, accountHashBytes, offset, "Account Hash: " + accountHashHex);
+        offset += 32;
+        
+        // Read parentHash (32 bytes)
+        auto parentHashBytes = readBytes(offset, 32);
+        if (parentHashBytes.size() < 32) {
+            output_ << "ERROR: Unexpected EOF reading parentHash\n";
+            return fileSize_;
+        }
+        std::string parentHashHex = bytesToHexString(parentHashBytes.data(), 32);
+        hexDump(output_, parentHashBytes, offset, "Parent Hash: " + parentHashHex);
+        offset += 32;
+        
+        // Read drops (8 bytes) - XRPAmount (uint64_t here)
+        auto dropsBytes = readBytes(offset, 8);
+        if (dropsBytes.size() < 8) {
+            output_ << "ERROR: Unexpected EOF reading drops\n";
+            return fileSize_;
+        }
+        
+        uint64_t drops = 0;
+        std::memcpy(&drops, dropsBytes.data(), 8);
+        hexDump(output_, dropsBytes, offset, "Drops: " + std::to_string(drops));
+        offset += 8;
+        
+        // Read closeFlags (4 bytes, since it's an int in LedgerInfo)
+        auto closeFlagsBytes = readBytes(offset, 4);
+        if (closeFlagsBytes.size() < 4) {
+            output_ << "ERROR: Unexpected EOF reading closeFlags\n";
+            return fileSize_;
+        }
+        
+        int32_t closeFlags = 0;
+        std::memcpy(&closeFlags, closeFlagsBytes.data(), 4);
+        hexDump(output_, closeFlagsBytes, offset, "Close Flags: " + std::to_string(closeFlags));
+        offset += 4;
+        
+        // Read closeTimeResolution (4 bytes)
+        auto ctrBytes = readBytes(offset, 4);
+        if (ctrBytes.size() < 4) {
+            output_ << "ERROR: Unexpected EOF reading closeTimeResolution\n";
+            return fileSize_;
+        }
+        
+        uint32_t closeTimeResolution = 0;
+        std::memcpy(&closeTimeResolution, ctrBytes.data(), 4);
+        hexDump(output_, ctrBytes, offset, "Close Time Resolution: " + std::to_string(closeTimeResolution));
+        offset += 4;
+        
+        // Read closeTime (8 bytes) - uint64_t
+        auto ctBytes = readBytes(offset, 8);
+        if (ctBytes.size() < 8) {
+            output_ << "ERROR: Unexpected EOF reading closeTime\n";
+            return fileSize_;
+        }
+        
+        uint64_t closeTime = 0;
+        std::memcpy(&closeTime, ctBytes.data(), 8);
+        std::string closeTimeStr = timeToString(closeTime);
+        hexDump(output_, ctBytes, offset, "Close Time: " + std::to_string(closeTime) + 
+                " (" + closeTimeStr + ")");
+        offset += 8;
+        
+        // Read parentCloseTime (8 bytes) - uint64_t
+        auto pctBytes = readBytes(offset, 8);
+        if (pctBytes.size() < 8) {
+            output_ << "ERROR: Unexpected EOF reading parentCloseTime\n";
+            return fileSize_;
+        }
+        
+        uint64_t parentCloseTime = 0;
+        std::memcpy(&parentCloseTime, pctBytes.data(), 8);
+        
+        std::string timeStr = timeToString(parentCloseTime);
+        hexDump(output_, pctBytes, offset, "Parent Close Time: " + std::to_string(parentCloseTime) + 
+                " (" + timeStr + ")");
+        offset += 8;
+        
+        output_ << "Ledger " << sequence << " Info - Size: " << (offset - startOffset) << " bytes\n\n";
+        return offset;
+    }
+    
+    // Analyze a SHAMap structure and its leaf nodes
+    size_t analyzeSHAMap(size_t offset, const std::string& mapType, uint32_t ledgerSeq) {
+        output_ << "=== " << mapType << " for Ledger " << ledgerSeq 
+                << " at offset 0x" << std::hex << offset << std::dec << " ===\n";
+        
+        size_t nodeCount = 0;
+        bool foundTerminal = false;
+        
+        while (offset < fileSize_) {
+            // Check for terminal marker
+            auto nodeTypeBytes = readBytes(offset, 1);
+            if (nodeTypeBytes.size() < 1) {
+                output_ << "ERROR: Unexpected EOF reading node type\n";
+                return fileSize_;
+            }
+            
+            uint8_t nodeType = nodeTypeBytes[0];
+            
+            if (nodeType == static_cast<uint8_t>(SHAMapNodeType::tnTERMINAL)) {
+                hexDump(output_, nodeTypeBytes, offset, "Terminal Marker - End of " + mapType);
+                output_ << "Found terminal marker. " << mapType << " complete with " 
+                        << nodeCount << " nodes.\n\n";
+                foundTerminal = true;
+                return offset + 1;
+            }
+            
+            // Not a terminal marker, parse as a node
+            output_ << "--- Node " << (nodeCount+1) << " at offset 0x" << std::hex << offset << std::dec << " ---\n";
+            
+            // Node type
+            hexDump(output_, nodeTypeBytes, offset, "Node Type: " + getNodeTypeDescription(nodeType));
+            offset += 1;
+            
+            // Key (32 bytes)
+            auto keyBytes = readBytes(offset, 32);
+            if (keyBytes.size() < 32) {
+                output_ << "ERROR: Unexpected EOF reading node key\n";
+                return fileSize_;
+            }
+            
+            std::string keyHex = bytesToHexString(keyBytes.data(), keyBytes.size());
+            
+            hexDump(output_, keyBytes, offset, "Key: " + keyHex);
+            offset += 32;
+            
+            if (nodeType == tnREMOVE)
+            {
+                output_ << "  (This is a deletion marker)\n";
+                continue;
+            }
+
+            // Data size (4 bytes)
+            auto dataSizeBytes = readBytes(offset, 4);
+            if (dataSizeBytes.size() < 4) {
+                output_ << "ERROR: Unexpected EOF reading data size\n";
+                return fileSize_;
+            }
+            
+            uint32_t dataSize = 0;
+            std::memcpy(&dataSize, dataSizeBytes.data(), 4);
+            
+            // Suspiciously large value check
+            std::string sizeNote = "Data Size: " + std::to_string(dataSize);
+            if (dataSize > 10*1024*1024) {
+                sizeNote += " (SUSPICIOUS!)";
+            }
+            
+            hexDump(output_, dataSizeBytes, offset, sizeNote);
+            offset += 4;
+            
+            if (dataSize == 0) {
+                output_ << "  (This is a error = zero sized object)\n";
+            } else if (dataSize > 10*1024*1024) {
+                output_ << "WARNING: Data size is suspiciously large!\n";
+                output_ << "  Possible file corruption detected.\n";
                 
-                if (!file_.read(reinterpret_cast<char*>(&sequence), 4) ||
-                    !file_.read(reinterpret_cast<char*>(&flags_and_size), 4)) {
-                    throw std::runtime_error("Failed to read state metadata");
-                }
-                total_bytes_read_ += 8;
-
-                uint32_t size = flags_and_size & SIZE_MASK;
-                has_next = (flags_and_size & HAS_NEXT_FLAG) != 0;
-
-                if (sequence < header_.min_ledger || 
-                    sequence > header_.max_ledger) {
-                    throw std::runtime_error(
-                        "State entry sequence " + std::to_string(sequence) + 
-                        " outside valid range");
-                }
-
-                if (size > 0) {
-                    stats_.total_state_entries++;
-                    stats_.states_per_ledger[sequence]++;
+                // Attempt to find next valid node or terminal marker
+                output_ << "  Attempting to recover by scanning for next valid node...\n";
+                
+                size_t scanOffset = offset;
+                size_t maxScan = 1024; // Limit scan distance
+                bool recovered = false;
+                
+                for (size_t i = 0; i < maxScan && scanOffset < fileSize_; i++, scanOffset++) {
+                    auto probeByte = readBytes(scanOffset, 1);
+                    if (probeByte.size() < 1) break;
                     
-                    // Skip the state data
-                    file_.seekg(size, std::ios::cur);
-                    if (file_.fail()) {
-                        throw std::runtime_error(
-                            "Failed to skip state data of size " + 
-                            std::to_string(size));
+                    if (probeByte[0] <= 3 || probeByte[0] == 255) {
+                        // This could be a valid node type, check if it looks reasonable
+                        output_ << "  Found possible node boundary at offset 0x" << std::hex 
+                                << scanOffset << std::dec << "\n";
+                        
+                        // If we've found a potential node, try to read a key to see if it's valid
+                        if (scanOffset + 33 <= fileSize_) {
+                            auto possibleKeyBytes = readBytes(scanOffset + 1, 32);
+                            bool couldBeKey = true;
+                            
+                            // Check if the key bytes look reasonable
+                            for (auto b : possibleKeyBytes) {
+                                if (!std::isprint(b) && b != 0) {
+                                    couldBeKey = false;
+                                    break;
+                                }
+                            }
+                            
+                            if (couldBeKey) {
+                                output_ << "  Found potential valid node at offset 0x" << std::hex 
+                                        << scanOffset << std::dec << "\n";
+                                offset = scanOffset;
+                                recovered = true;
+                                break;
+                            }
+                        }
                     }
-                    total_bytes_read_ += size;
                 }
+                
+                if (!recovered) {
+                    output_ << "  Unable to recover. Stopping analysis.\n";
+                    return fileSize_;
+                }
+                
+                continue; // Skip to next iteration with the new offset
+            } else {
+                // Show a preview of the data (up to 64 bytes)
+                size_t previewSize = std::min(static_cast<size_t>(dataSize), static_cast<size_t>(64));
+                auto dataPreview = readBytes(offset, previewSize);
+                
+                if (dataPreview.size() < previewSize) {
+                    output_ << "ERROR: Unexpected EOF reading data preview\n";
+                    return fileSize_;
+                }
+                
+                hexDump(output_, dataPreview, offset, "Data Preview (" + std::to_string(previewSize) + 
+                        " bytes of " + std::to_string(dataSize) + " total)");
+                
+                // Skip remaining data
+                offset += dataSize;
             }
-
-            if (stats_.total_keys % 1000 == 0) {
-                std::cout << "Processed " << stats_.total_keys << " keys, " 
-                         << stats_.total_state_entries << " state entries\n";
+            
+            nodeCount++;
+            
+            if (verbose_) {
+                output_ << "  Node " << nodeCount << " Complete\n";
             }
         }
-
-        if (file_.tellg() != header_.ledger_tx_offset) {
-            throw std::runtime_error(
-                "State data section size mismatch with ledger_tx_offset");
-        }
-
-        std::cout << "State data validation completed:\n"
-                  << "  Total unique keys: " << unique_keys_.size() << "\n"
-                  << "  Total state entries: " << stats_.total_state_entries 
-                  << "\n";
-    }
-
-    void validateLedgerAndTxData() {
-        std::cout << "Validating ledger and transaction data...\n";
         
-        file_.seekg(header_.ledger_tx_offset);
-        
-        while (!file_.eof()) {
-            uint64_t next_offset;
-            if (!file_.read(reinterpret_cast<char*>(&next_offset), 8)) {
-                if (file_.eof()) break;
-                throw std::runtime_error("Failed to read next offset");
-            }
-            total_bytes_read_ += 8;
-
-            // Read ledger header (fixed size)
-            constexpr size_t LEDGER_HEADER_SIZE = 
-                32 * 4 + // Four 256-bit hashes
-                8 +      // drops
-                4 * 5;   // Five 32-bit fields
-            
-            std::vector<char> ledger_header(LEDGER_HEADER_SIZE);
-            if (!file_.read(ledger_header.data(), LEDGER_HEADER_SIZE)) {
-                throw std::runtime_error("Failed to read ledger header");
-            }
-            total_bytes_read_ += LEDGER_HEADER_SIZE;
-            
-            // Extract sequence from ledger header (first 4 bytes)
-            uint32_t sequence;
-            std::memcpy(&sequence, ledger_header.data(), 4);
-            
-            if (sequence < header_.min_ledger || 
-                sequence > header_.max_ledger) {
-                throw std::runtime_error(
-                    "Ledger sequence " + std::to_string(sequence) + 
-                    " outside valid range");
-            }
-
-            size_t tx_count = 0;
-            auto current_pos = file_.tellg();
-            
-            // Read transactions until we reach the next ledger
-            while (current_pos < next_offset && !file_.eof()) {
-                // Transaction ID (32 bytes)
-                uint256 tx_id;
-                if (!file_.read(reinterpret_cast<char*>(tx_id.data()), 32)) {
-                    throw std::runtime_error("Failed to read transaction ID");
-                }
-                total_bytes_read_ += 32;
-
-                // Transaction size
-                uint32_t tx_size;
-                if (!file_.read(reinterpret_cast<char*>(&tx_size), 4)) {
-                    throw std::runtime_error("Failed to read transaction size");
-                }
-                total_bytes_read_ += 4;
-
-                // Skip transaction data
-                file_.seekg(tx_size, std::ios::cur);
-                if (file_.fail()) {
-                    throw std::runtime_error(
-                        "Failed to skip transaction data of size " + 
-                        std::to_string(tx_size));
-                }
-                total_bytes_read_ += tx_size;
-
-                // Metadata size
-                uint32_t meta_size;
-                if (!file_.read(reinterpret_cast<char*>(&meta_size), 4)) {
-                    throw std::runtime_error("Failed to read metadata size");
-                }
-                total_bytes_read_ += 4;
-
-                // Skip metadata if present
-                if (meta_size > 0) {
-                    file_.seekg(meta_size, std::ios::cur);
-                    if (file_.fail()) {
-                        throw std::runtime_error(
-                            "Failed to skip metadata of size " + 
-                            std::to_string(meta_size));
-                    }
-                    total_bytes_read_ += meta_size;
-                }
-
-                tx_count++;
-                current_pos = file_.tellg();
-            }
-
-            stats_.total_transactions += tx_count;
-            stats_.total_ledgers++;
-
-            if (stats_.total_ledgers % 100 == 0) {
-                std::cout << "Processed " << stats_.total_ledgers 
-                         << " ledgers, " << stats_.total_transactions 
-                         << " total transactions\n";
-            }
-
-            // Verify we're at the expected position
-            if (current_pos != next_offset) {
-                throw std::runtime_error(
-                    "Ledger data size mismatch with next_offset");
-            }
+        if (!foundTerminal) {
+            output_ << "WARNING: No terminal marker found for " << mapType << "\n";
         }
-
-        std::cout << "Ledger and transaction validation completed:\n"
-                  << "  Total ledgers: " << stats_.total_ledgers << "\n"
-                  << "  Total transactions: " << stats_.total_transactions 
-                  << "\n";
+        
+        return offset;
     }
-
+    
 public:
-    explicit CATLValidator(const std::string& filepath) 
-        : filepath_(filepath) {
-        file_.open(filepath, std::ios::binary);
-        if (!file_) {
-            throw std::runtime_error(
-                "Failed to open file: " + filepath);
+    CatalogueAnalyzer(const std::string& filename, std::ostream& output, bool verbose = false)
+        : filename_(filename), output_(output), verbose_(verbose) {
+        
+        file_.open(filename, std::ios::binary);
+        if (!file_.is_open()) {
+            throw std::runtime_error("Failed to open file: " + filename);
+        }
+        
+        // Get file size
+        file_.seekg(0, std::ios::end);
+        fileSize_ = file_.tellg();
+        file_.seekg(0, std::ios::beg);
+        
+        output_ << "Analyzing file: " << filename << "\n";
+        output_ << "File size: " << fileSize_ << " bytes\n\n";
+    }
+    
+    ~CatalogueAnalyzer() {
+        if (file_.is_open()) {
+            file_.close();
         }
     }
-
-    void validate() {
-        std::cout << "Starting validation of: " << filepath_ << "\n";
-
-        // Read and validate header
-        if (!file_.read(reinterpret_cast<char*>(&header_), 
-                       sizeof(CATLHeader))) {
-            throw std::runtime_error("Failed to read file header");
+    
+    void analyze() {
+        try {
+            size_t offset = 0;
+            
+            // Analyze header
+            offset = analyzeHeader(offset);
+            if (offset >= fileSize_) return;
+            
+            // Process each ledger
+            int ledgerCount = 0;
+            while (offset < fileSize_) {
+                // Read ledger info
+                uint32_t ledgerSeq = 0;
+                auto seqBytes = readBytes(offset, 4);
+                if (seqBytes.size() < 4) break;
+                std::memcpy(&ledgerSeq, seqBytes.data(), 4);
+                
+                output_ << "Processing Ledger " << ledgerSeq << "\n";
+                
+                size_t ledgerInfoStart = offset;
+                offset = analyzeLedgerInfo(offset);
+                if (offset >= fileSize_) break;
+                
+                // Analyze state map
+                output_ << "Analyzing STATE MAP...\n";
+                offset = analyzeSHAMap(offset, "STATE MAP", ledgerSeq);
+                if (offset >= fileSize_) break;
+                
+                // Analyze transaction map
+                output_ << "Analyzing TRANSACTION MAP...\n";
+                offset = analyzeSHAMap(offset, "TRANSACTION MAP", ledgerSeq);
+                if (offset >= fileSize_) break;
+                
+                ledgerCount++;
+                
+                output_ << "Ledger " << ledgerSeq << " processing complete.\n";
+                output_ << "----------------------------------------------\n\n";
+            }
+            
+            output_ << "Analysis complete. Processed " << ledgerCount << " ledgers.\n";
+            
+            // Check for remaining bytes
+            size_t remainingBytes = fileSize_ - offset;
+            if (remainingBytes > 0) {
+                output_ << "WARNING: " << remainingBytes << " unprocessed bytes at end of file!\n";
+                
+                // Dump some of the trailing bytes
+                size_t bytesToDump = std::min(remainingBytes, static_cast<size_t>(64));
+                auto trailingBytes = readBytes(offset, bytesToDump);
+                
+                output_ << "Trailing bytes:\n";
+                hexDump(output_, trailingBytes, offset, "Unprocessed data");
+            }
+            
+        } catch (const std::exception& e) {
+            output_ << "ERROR during analysis: " << e.what() << "\n";
         }
-        total_bytes_read_ += sizeof(CATLHeader);
-
-        validateHeader();
-        validateStateData();
-        validateLedgerAndTxData();
-
-        std::cout << "\nValidation completed successfully\n"
-                  << "Summary:\n"
-                  << "  Total bytes read: " << total_bytes_read_ << "\n"
-                  << "  Unique keys: " << unique_keys_.size() << "\n"
-                  << "  State entries: " << stats_.total_state_entries << "\n"
-                  << "  Ledgers: " << stats_.total_ledgers << "\n"
-                  << "  Transactions: " << stats_.total_transactions << "\n";
     }
 };
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " <catalogue_file>\n";
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <catalogue_file> [output_file] [--verbose]\n";
         return 1;
     }
-
+    
+    std::string inputFile = argv[1];
+    std::ofstream outputFile;
+    std::ostream* output = &std::cout;
+    bool verbose = false;
+    
+    // Check for verbose flag
+    for (int i = 2; i < argc; i++) {
+        if (std::string(argv[i]) == "--verbose") {
+            verbose = true;
+        }
+    }
+    
+    // Check for output file
+    if (argc > 2 && std::string(argv[2]) != "--verbose") {
+        outputFile.open(argv[2]);
+        if (!outputFile.is_open()) {
+            std::cerr << "Failed to open output file: " << argv[2] << "\n";
+            return 1;
+        }
+        output = &outputFile;
+    }
+    
     try {
-        CATLValidator validator(argv[1]);
-        validator.validate();
-        return 0;
+        CatalogueAnalyzer analyzer(inputFile, *output, verbose);
+        analyzer.analyze();
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        *output << "ERROR: " << e.what() << "\n";
         return 1;
     }
+    
+    if (outputFile.is_open()) {
+        outputFile.close();
+    }
+    
+    return 0;
 }
