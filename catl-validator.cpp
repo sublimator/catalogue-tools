@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <array>
 #include <map>
+#include <sstream>
 
 // For decompression
 #include <boost/iostreams/filtering_stream.hpp>
