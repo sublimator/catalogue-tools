@@ -23,14 +23,20 @@ message(STATUS "OpenSSL Libraries: ${OPENSSL_LIBRARIES}")
 # find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL) might help
 message(STATUS "OpenSSL Version: ${OPENSSL_VERSION}") # May or may not be set
 
+# Common source files
+set(SOURCES_COMMON
+        Logger.cpp
+)
 
 # Add source files
 set(SOURCES_VALIDATOR
         catl-validator.cpp
+        ${SOURCES_COMMON}
 )
 
 set(SOURCES_HASHER
         catl-hasher.cpp
+        ${SOURCES_COMMON}
 )
 
 # Create executables
@@ -43,6 +49,7 @@ foreach(target catl-validator catl-hasher)
             ${BOOST_ROOT}
             ${OPENSSL_INCLUDE_DIR}
             ${ZLIB_INCLUDE_DIRS}
+            ${CMAKE_CURRENT_SOURCE_DIR}  # This ensures the targets can find Logger.h
     )
 endforeach()
 

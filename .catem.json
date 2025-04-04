@@ -1,0 +1,17 @@
+{
+  "global_exclude": [
+    "**/venv/**",
+    "**/__pycache__/**",
+    "**/.git/**",
+    "**/.pytest_cache/**",
+    "**/.mypy_cache/**"
+  ],
+  "files_patterns": {
+    "hasher": {
+      "include": [
+        "CMakeLists.txt",
+        "catl-hasher.cpp"
+      ]
+    }
+  }
+}

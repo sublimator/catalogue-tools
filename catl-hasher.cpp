@@ -7,9 +7,7 @@
 #include <stdexcept>
 #include <map>
 #include <chrono>
-#include <sstream> // Needed for Logger
-#include <mutex>   // Needed for Logger
-#include <iomanip> // For potential formatting later
+#include <iomanip>
 
 // For memory mapping
 #include <boost/iostreams/device/mapped_file.hpp>
@@ -18,118 +16,8 @@
 // For crypto
 #include <openssl/evp.h>
 
-// --- Performant Logger Implementation ---
+#include "Logger.h"
 
-enum class LogLevel {
-    NONE = -1, // Special level to disable all logging
-    ERROR = 0,
-    WARNING = 1,
-    INFO = 2,
-    DEBUG = 3
-};
-
-class Logger {
-private:
-    static LogLevel currentLevel;
-    static std::mutex logMutex;
-
-    // Fast level check method
-    static bool shouldLog(LogLevel level) {
-        // Ensure NONE level truly disables everything
-        return currentLevel != LogLevel::NONE && level <= currentLevel;
-    }
-
-public:
-    static void setLevel(LogLevel level) {
-        // Log level change *before* the lock for potential self-logging
-        LogLevel oldLevel = currentLevel;
-        currentLevel = level;
-        if (shouldLog(LogLevel::INFO) || (oldLevel != LogLevel::NONE && level > oldLevel)) {
-            // Log if increasing level or level is INFO+
-            // Use a temporary string stream to avoid locking issues if logging itself fails
-            std::ostringstream oss;
-            oss << "[INFO]  Log level set to " << static_cast<int>(level);
-            // Now lock and print
-            std::lock_guard<std::mutex> lock(logMutex);
-            std::cout << oss.str() << std::endl;
-        }
-    }
-
-    static LogLevel getLevel() {
-        return currentLevel;
-    }
-
-    // Log with efficient formatting using variadic templates
-    template<typename... Args>
-    static void log(LogLevel level, const Args &... args) {
-        // Early exit if level is too low
-        if (!shouldLog(level)) return;
-
-        // Use a stringstream to format the message before locking
-        std::ostringstream oss;
-        switch (level) {
-            case LogLevel::ERROR: oss << "[ERROR] ";
-                break;
-            case LogLevel::WARNING: oss << "[WARN]  ";
-                break;
-            case LogLevel::INFO: oss << "[INFO]  ";
-                break;
-            case LogLevel::DEBUG: oss << "[DEBUG] ";
-                break;
-            case LogLevel::NONE: return; // Should not happen due to shouldLog
-        }
-
-        // Use fold expression to append all arguments to the stream
-        (oss << ... << args);
-
-        // Lock only for the actual output operation
-        std::lock_guard<std::mutex> lock(logMutex);
-        std::ostream &out = (level <= LogLevel::WARNING) ? std::cerr : std::cout;
-        out << oss.str() << std::endl;
-    }
-
-    // Specialized version for expensive-to-format values (like hashes)
-    template<typename Formatter, typename... Args>
-    static void logWithFormat(LogLevel level, Formatter formatter, const Args &... args) {
-        // Early exit if level is too low
-        if (!shouldLog(level)) return;
-
-        // Only format when we know we'll log
-        std::string formatted = formatter(args...);
-
-        // Use a stringstream for the prefix and final output assembly
-        std::ostringstream oss;
-        switch (level) {
-            case LogLevel::ERROR: oss << "[ERROR] ";
-                break;
-            case LogLevel::WARNING: oss << "[WARN]  ";
-                break;
-            case LogLevel::INFO: oss << "[INFO]  ";
-                break;
-            case LogLevel::DEBUG: oss << "[DEBUG] ";
-                break;
-            case LogLevel::NONE: return; // Should not happen
-        }
-        oss << formatted;
-
-        // Lock only for the actual output operation
-        std::lock_guard<std::mutex> lock(logMutex);
-        std::ostream &out = (level <= LogLevel::WARNING) ? std::cerr : std::cout;
-        out << oss.str() << std::endl;
-    }
-};
-
-// Initialize static members
-LogLevel Logger::currentLevel = LogLevel::INFO; // Default log level
-std::mutex Logger::logMutex;
-
-// Convenient macros with early-out checks embedded
-#define LOGE(...)   Logger::log(LogLevel::ERROR, __VA_ARGS__)
-// Note: The check `Logger::getLevel() >= LogLevel::X` prevents the function call overhead entirely
-// when the level is too low. This is crucial for performance.
-#define LOGW(...)    if(Logger::getLevel() >= LogLevel::WARNING) Logger::log(LogLevel::WARNING, __VA_ARGS__)
-#define LOGI(...)    if(Logger::getLevel() >= LogLevel::INFO) Logger::log(LogLevel::INFO, __VA_ARGS__)
-#define LOGD(...)   if(Logger::getLevel() >= LogLevel::DEBUG) Logger::log(LogLevel::DEBUG, __VA_ARGS__)
 
 // Macro for logging hashes efficiently (only formats if DEBUG is enabled)
 #define LOGD_HASH(label, hash_obj)  if(Logger::getLevel() >= LogLevel::DEBUG) Logger::logWithFormat(LogLevel::DEBUG, \
