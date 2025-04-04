@@ -18,6 +18,7 @@
 
 #include "core-types.h"
 #include "logger.h"
+#include "utils.h"
 
 
 // Macro for logging hashes efficiently (only formats if DEBUG is enabled)
@@ -584,18 +585,6 @@ public:
     }
 };
 
-// timeToString
-std::string format_ripple_time(uint64_t netClockTime) {
-    static constexpr time_t rippleEpochOffset = 946684800;
-    time_t unixTime = netClockTime + rippleEpochOffset;
-    std::tm *tm = std::gmtime(&unixTime);
-    if (!tm) return "Invalid time";
-    char timeStr[30];
-    std::strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S UTC", tm);
-    return timeStr;
-}
-
-
 class CATLHasher {
 private:
     boost::iostreams::mapped_file_source mmapFile;
@@ -814,7 +803,7 @@ private:
         LOGI("  Parent Hash:      ", Hash256(info.parentHash).hex());
         LOGI("  AccountState Hash:", Hash256(info.accountHash).hex());
         LOGI("  Transaction Hash: ", Hash256(info.txHash).hex());
-        LOGI("  Close Time:       ", format_ripple_time(info.closeTime));
+        LOGI("  Close Time:       ", utils::format_ripple_time(info.closeTime));
         LOGI("  Drops:            ", info.drops);
         LOGI("  Close Flags:      ", info.closeFlags);
         LOGI("  Offset at start:  ", initialOffset);
