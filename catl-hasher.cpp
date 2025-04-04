@@ -16,7 +16,7 @@
 // For crypto
 #include <openssl/evp.h>
 
-#include "Logger.h"
+#include "logger.h"
 
 
 // Macro for logging hashes efficiently (only formats if DEBUG is enabled)

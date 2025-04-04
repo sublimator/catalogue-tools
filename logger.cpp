@@ -1,4 +1,4 @@
-#include "Logger.h"
+#include "logger.h"
 
 // Initialize static members
 LogLevel Logger::currentLevel = LogLevel::INFO; // Default log level
