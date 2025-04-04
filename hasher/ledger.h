@@ -69,7 +69,7 @@ public:
     LedgerStore() = default;
 
     // Core methods
-    void addLedger(std::shared_ptr<Ledger> ledger);
+    void addLedger(const std::shared_ptr<Ledger> &ledger);
     std::shared_ptr<Ledger> getLedger(uint32_t sequence) const;
 
     // Simple utility

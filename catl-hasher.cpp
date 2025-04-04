@@ -18,6 +18,7 @@
 
 #include "hasher/catalogue-consts.h"
 #include "hasher/core-types.h"
+#include "hasher/ledger.h"
 #include "hasher/log-macros.h"
 #include "hasher/logger.h"
 #include "hasher/shamap.h"
@@ -591,13 +592,7 @@ public:
     {
         LOGI("Starting CATL file processing...");
 
-        std::unordered_map<
-            uint32_t,
-            std::shared_ptr<std::tuple<
-                LedgerInfo,
-                std::shared_ptr<SHAMap>,
-                std::shared_ptr<SHAMap>>>>
-            accountStates;
+        LedgerStore ledgerStore;
 
         try
         {
@@ -635,31 +630,14 @@ public:
 
             while (currentFileOffset < fileSize)
             {
-                // Check if we might be reading padding or garbage at the end
-                if (fileSize - currentFileOffset < sizeof(LedgerInfo))
-                {
-                    LOGW(
-                        "Only ",
-                        (fileSize - currentFileOffset),
-                        " bytes remaining, less than LedgerInfo size (",
-                        sizeof(LedgerInfo),
-                        "). Assuming end of meaningful data at offset ",
-                        currentFileOffset);
-                    break;
-                }
-
                 LedgerInfo info;
                 size_t nextOffset = processLedger(currentFileOffset, info);
 
-                accountStates[info.sequence] = std::make_shared<std::tuple<
-                    LedgerInfo,
-                    std::shared_ptr<SHAMap>,
-                    std::shared_ptr<SHAMap>>>(
-                    std::make_tuple(
-                        info,
-                        stateMap.snapshot(),
-                        std::make_shared<SHAMap>(txMap)));
-                stateMap = *stateMap.snapshot();
+                ledgerStore.addLedger(std::make_shared<Ledger>(
+                    data + currentFileOffset,
+                    stateMap.snapshot(),
+                    std::make_shared<SHAMap>(txMap)));
+
 
                 if (nextOffset == currentFileOffset)
                 {
@@ -739,31 +717,19 @@ public:
                 " Failed");
             LOGI("--- End Summary ---");
 
-            for (auto const& accountState : accountStates)
-            {
-                auto const& ledgerInfo = std::get<0>(*accountState.second);
-                auto const& stateMap = std::get<1>(*accountState.second);
-                auto const& txMap = std::get<2>(*accountState.second);
-                LOGI("Ledger Info: ", ledgerInfo.sequence);
-                LOGI("State Map hash: ", stateMap->getHash().hex());
-                LOGI("Transaction Map hash: ", txMap->getHash().hex());
-                if (memcmp(
-                        ledgerInfo.accountHash,
-                        stateMap->getHash().data(),
-                        Hash256::size()) != 0)
-                {
-                    LOGE("State map hash does not match ledger info hash");
-                }
-                if (memcmp(
-                        ledgerInfo.txHash,
-                        txMap->getHash().data(),
-                        Hash256::size()) != 0)
-                {
-                    LOGE(
-                        "Transaction map hash does not match ledger info hash");
+            /// header.min_ledger to header.max_ledger
+            for (uint32_t ledgerSeq = header.min_ledger; ledgerSeq <= header.max_ledger; ledgerSeq++) {
+                if (const auto ledger = ledgerStore.getLedger(ledgerSeq)) {
+                    LOGI("Ledger Info: ", ledger->header().sequence());
+                    LOGI("State Map hash: ", ledger->getStateMap()->getHash().hex());
+                    LOGI("Transaction Map hash: ", ledger->getTxMap()->getHash().hex());
+                    auto valid_ledger = ledger->validate();
+                    LOGI("Valid ledger:", valid_ledger ? "yes" : "no");
+                    if (!valid_ledger) {
+                        throw std::runtime_error(std::string("Invalid ledger: ") + ledger->header().toString());
+                    }
                 }
             }
-
             // Return true if processing completed, potentially with
             // warnings/hash failures Return false only if a fatal error
             // occurred preventing continuation. Consider hash failures fatal?

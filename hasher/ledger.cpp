@@ -87,7 +87,7 @@ bool Ledger::validate() const {
 
 // ---------- LedgerStore Implementation ----------
 
-void LedgerStore::addLedger(std::shared_ptr<Ledger> ledger) {
+void LedgerStore::addLedger(const std::shared_ptr<Ledger> &ledger) {
     if (ledger) {
         ledgers[ledger->header().sequence()] = ledger;
     }
