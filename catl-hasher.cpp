@@ -16,41 +16,18 @@
 // For crypto
 #include <openssl/evp.h>
 
+#include "catalogue-consts.h"
 #include "core-types.h"
+#include "log-macros.h"
 #include "logger.h"
 #include "utils.h"
 
 
-// Macro for logging hashes efficiently (only formats if DEBUG is enabled)
-#define LOGD_HASH(label, hash_obj)  if(Logger::getLevel() >= LogLevel::DEBUG) Logger::logWithFormat(LogLevel::DEBUG, \
-                                            [](const std::string& lbl, const Hash256& h) { return lbl + h.toString(); }, label, hash_obj)
-#define LOGD_KEY(label, key_obj)    if(Logger::getLevel() >= LogLevel::DEBUG) Logger::logWithFormat(LogLevel::DEBUG, \
-                                            [](const std::string& lbl, const Key& k) { return lbl + k.toString(); }, label, key_obj)
 
 
 // --- End of Logger Implementation ---
 
 
-static constexpr uint32_t CATL = 0x4C544143UL; // "CATL" in LE
-static constexpr uint16_t CATALOGUE_VERSION_MASK = 0x00FF;
-static constexpr uint16_t CATALOGUE_COMPRESS_LEVEL_MASK = 0x0F00;
-
-// TODO: reuse this
-constexpr std::uint32_t
-make_hash_prefix(char a, char b, char c) {
-    return (static_cast<std::uint32_t>(a) << 24) +
-           (static_cast<std::uint32_t>(b) << 16) +
-           (static_cast<std::uint32_t>(c) << 8);
-}
-
-// Hash prefixes from rippled
-namespace HashPrefix {
-    // TODO: just use std::uint32_t enum but need to handle endian flip
-    // when passing to hasher
-    constexpr std::array<unsigned char, 4> txNode = {'S', 'N', 'D', 0x00};
-    constexpr std::array<unsigned char, 4> leafNode = {'M', 'L', 'N', 0x00};
-    constexpr std::array<unsigned char, 4> innerNode = {'M', 'I', 'N', 0x00};
-};
 
 // SHAMap node types
 enum SHAMapNodeType : uint8_t {
@@ -62,32 +39,6 @@ enum SHAMapNodeType : uint8_t {
     tnREMOVE = 254,
     tnTERMINAL = 255
 };
-
-// Header structures
-#pragma pack(push, 1)
-struct CATLHeader {
-    uint32_t magic;
-    uint32_t min_ledger;
-    uint32_t max_ledger;
-    uint16_t version;
-    uint16_t network_id;
-    uint64_t filesize;
-    std::array<uint8_t, 64> hash; // Note: This hash is usually unused/zero in practice
-};
-
-struct LedgerInfo {
-    uint32_t sequence;
-    uint8_t hash[32];
-    uint8_t txHash[32];
-    uint8_t accountHash[32];
-    uint8_t parentHash[32];
-    uint64_t drops;
-    uint32_t closeFlags;
-    uint32_t closeTimeResolution;
-    uint64_t closeTime;
-    uint64_t parentCloseTime;
-};
-#pragma pack(pop)
 
 //----------------------------------------------------------
 // Custom Exception Classes
@@ -883,7 +834,7 @@ private:
 public:
     // Constructor uses initializer list and handles file opening errors
     CATLHasher(const std::string &filename)
-        : stateMap(tnACCOUNT_STATE), // Initialize maps here
+        : header(), stateMap(tnACCOUNT_STATE), // Initialize maps here
           txMap(tnTRANSACTION_MD) {
         LOGI("Attempting to open and map file: ", filename);
         try {
