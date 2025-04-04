@@ -64,7 +64,7 @@ HashCalculationException::HashCalculationException(const std::string& reason)
 // Helper Functions Implementation
 //----------------------------------------------------------
 int
-selectBranch(const Key& key, int depth)
+select_branch(const Key& key, int depth)
 {
     int byteIdx = depth / 2;
     if (byteIdx < 0 || byteIdx >= static_cast<int>(Key::size()))
@@ -202,7 +202,7 @@ SHAMapLeafNode::copy() const
 // SHAMapInnerNode Implementation
 //----------------------------------------------------------
 SHAMapInnerNode::SHAMapInnerNode(uint8_t nodeDepth)
-    : depth(nodeDepth), version(0), doCoW(false)
+    : depth_(nodeDepth), version(0), do_cow_(false)
 {
 }
 
@@ -210,7 +210,7 @@ SHAMapInnerNode::SHAMapInnerNode(
     bool isCopy,
     uint8_t nodeDepth,
     int initialVersion)
-    : depth(nodeDepth), version(initialVersion), doCoW(isCopy)
+    : depth_(nodeDepth), version(initialVersion), do_cow_(isCopy)
 {
 }
 
@@ -229,13 +229,13 @@ SHAMapInnerNode::is_inner() const
 uint8_t
 SHAMapInnerNode::getDepth() const
 {
-    return depth;
+    return depth_;
 }
 
 void
 SHAMapInnerNode::setDepth(uint8_t newDepth)
 {
-    depth = newDepth;
+    depth_ = newDepth;
 }
 
 void
@@ -265,9 +265,9 @@ SHAMapInnerNode::update_hash()
     for (int i = 0; i < 16; i++)
     {
         const uint8_t* hashData = zeroHash.data();
-        if (children[i])
+        if (children_[i])
         {
-            hashData = children[i]
+            hashData = children_[i]
                            ->get_hash()
                            .data();  // Recursive call might trigger update
         }
@@ -302,7 +302,7 @@ SHAMapInnerNode::set_child(
     }
     if (child)
     {
-        children[branch] = child;
+        children_[branch] = child;
         branch_mask_ |= (1 << branch);
         // TODO: AI added this hackery but I'm 99.99% it's not needed
         // if (child->isInner()) {
@@ -313,7 +313,7 @@ SHAMapInnerNode::set_child(
     }
     else
     {
-        children[branch] = nullptr;
+        children_[branch] = nullptr;
         branch_mask_ &= ~(1 << branch);
     }
     invalidate_hash();  // Mark self as invalid, not children
@@ -327,7 +327,7 @@ SHAMapInnerNode::get_child(int branch) const
     {
         throw InvalidBranchException(branch);
     }
-    return children[branch];
+    return children_[branch];
 }
 
 bool
@@ -363,7 +363,7 @@ SHAMapInnerNode::get_only_child_leaf() const
 {
     std::shared_ptr<SHAMapLeafNode> resultLeaf = nullptr;
     int leafCount = 0;
-    for (const std::shared_ptr<SHAMapTreeNode>& childNodePtr : children)
+    for (const std::shared_ptr<SHAMapTreeNode>& childNodePtr : children_)
     {
         if (childNodePtr)
         {
@@ -390,12 +390,12 @@ std::shared_ptr<SHAMapInnerNode>
 SHAMapInnerNode::copy(int newVersion) const
 {
     // Create a new inner node with same depth
-    auto newNode = std::make_shared<SHAMapInnerNode>(true, depth, newVersion);
+    auto newNode = std::make_shared<SHAMapInnerNode>(true, depth_, newVersion);
 
     // Copy children array (shallow copy)
     for (int i = 0; i < 16; i++)
     {
-        newNode->children[i] = children[i];
+        newNode->children_[i] = children_[i];
     }
 
     // Copy other properties
@@ -434,7 +434,7 @@ PathFinder::find_path(std::shared_ptr<SHAMapInnerNode> root)
     std::shared_ptr<SHAMapInnerNode> currentInner = root;
     while (true)
     {
-        int branch = selectBranch(targetKey, currentInner->getDepth());
+        int branch = select_branch(targetKey, currentInner->getDepth());
         std::shared_ptr<SHAMapTreeNode> child = currentInner->get_child(branch);
         if (!child)
         {
@@ -859,8 +859,8 @@ SHAMap::add_item(std::shared_ptr<MmapItem>& item, bool allowUpdate)
             {
                 // Max depth check
                 int existingBranch =
-                    selectBranch(existingItem->key(), currentDepth);
-                int newBranch = selectBranch(item->key(), currentDepth);
+                    select_branch(existingItem->key(), currentDepth);
+                int newBranch = select_branch(item->key(), currentDepth);
 
                 if (existingBranch != newBranch)
                 {
@@ -914,7 +914,7 @@ SHAMap::add_item(std::shared_ptr<MmapItem>& item, bool allowUpdate)
                 throw SHAMapException(
                     "Maximum SHAMap depth reached during collision resolution "
                     "for key: " +
-                    item->key().toString());
+                    item->key().hex());
             }
 
             pathFinder.dirty_path();
@@ -924,25 +924,21 @@ SHAMap::add_item(std::shared_ptr<MmapItem>& item, bool allowUpdate)
         // Should ideally not be reached if PathFinder logic is correct
         LOGE(
             "Unexpected state in addItem for key: ",
-            item->key().toString(),
+            item->key().hex(),
             ". PathFinder logic error?");
         throw SHAMapException(
             "Unexpected state in addItem - PathFinder logic error");
     }
     catch (const SHAMapException& e)
     {
-        LOGE(
-            "Error adding item with key ",
-            item->key().toString(),
-            ": ",
-            e.what());
+        LOGE("Error adding item with key ", item->key().hex(), ": ", e.what());
         return false;
     }
     catch (const std::exception& e)
     {
         LOGE(
             "Standard exception adding item with key ",
-            item->key().toString(),
+            item->key().hex(),
             ": ",
             e.what());
         return false;
@@ -1008,14 +1004,14 @@ SHAMap::remove_item(const Key& key)
     }
     catch (const SHAMapException& e)
     {
-        LOGE("Error removing item with key ", key.toString(), ": ", e.what());
+        LOGE("Error removing item with key ", key.hex(), ": ", e.what());
         return false;
     }
     catch (const std::exception& e)
     {
         LOGE(
             "Standard exception removing item with key ",
-            key.toString(),
+            key.hex(),
             ": ",
             e.what());
         return false;

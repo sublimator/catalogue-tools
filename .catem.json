@@ -10,7 +10,8 @@
     "hasher": {
       "include": [
         "CMakeLists.txt",
-        "catl-hasher.cpp"
+        "catl-hasher.cpp",
+        "hasher/**/*"
       ]
     }
   }

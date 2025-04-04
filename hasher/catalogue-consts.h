@@ -13,17 +13,6 @@ static constexpr uint16_t CATALOGUE_VERSION_MASK = 0x00FF;
 static constexpr uint16_t CATALOGUE_COMPRESS_LEVEL_MASK = 0x0F00;
 
 /**
- * Create a hash prefix from three characters
- */
-constexpr std::uint32_t
-make_hash_prefix(char a, char b, char c)
-{
-    return (static_cast<std::uint32_t>(a) << 24) +
-        (static_cast<std::uint32_t>(b) << 16) +
-        (static_cast<std::uint32_t>(c) << 8);
-}
-
-/**
  * Hash prefixes from rippled
  */
 namespace HashPrefix {

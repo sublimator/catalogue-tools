@@ -17,18 +17,18 @@ enum class LogLevel {
 class Logger
 {
 private:
-    static LogLevel currentLevel;
-    static std::mutex logMutex;
+    static LogLevel current_level_;
+    static std::mutex log_mutex_;
 
     // Fast level check method
     static bool
-    shouldLog(LogLevel level);
+    should_log(LogLevel level);
 
 public:
     static void
     setLevel(LogLevel level);
     static LogLevel
-    getLevel();
+    get_level();
 
     // Log with efficient formatting using variadic templates
     template <typename... Args>
@@ -36,7 +36,7 @@ public:
     log(LogLevel level, const Args&... args)
     {
         // Early exit if level is too low
-        if (!shouldLog(level))
+        if (!should_log(level))
             return;
 
         // Use a stringstream to format the message before locking
@@ -63,7 +63,7 @@ public:
         (oss << ... << args);
 
         // Lock only for the actual output operation
-        std::lock_guard<std::mutex> lock(logMutex);
+        std::lock_guard<std::mutex> lock(log_mutex_);
         std::ostream& out =
             (level <= LogLevel::WARNING) ? std::cerr : std::cout;
         out << oss.str() << std::endl;
@@ -72,10 +72,10 @@ public:
     // Specialized version for expensive-to-format values (like hashes)
     template <typename Formatter, typename... Args>
     static void
-    logWithFormat(LogLevel level, Formatter formatter, const Args&... args)
+    log_with_format(LogLevel level, Formatter formatter, const Args&... args)
     {
         // Early exit if level is too low
-        if (!shouldLog(level))
+        if (!should_log(level))
             return;
 
         // Only format when we know we'll log
@@ -103,7 +103,7 @@ public:
         oss << formatted;
 
         // Lock only for the actual output operation
-        std::lock_guard<std::mutex> lock(logMutex);
+        std::lock_guard<std::mutex> lock(log_mutex_);
         std::ostream& out =
             (level <= LogLevel::WARNING) ? std::cerr : std::cout;
         out << oss.str() << std::endl;
@@ -112,15 +112,15 @@ public:
 
 // Convenient macros with early-out checks embedded
 #define LOGE(...) Logger::log(LogLevel::ERROR, __VA_ARGS__)
-// Note: The check `Logger::getLevel() >= LogLevel::X` prevents the function
+// Note: The check `Logger::get_level() >= LogLevel::X` prevents the function
 // call overhead entirely when the level is too low. This is crucial for
 // performance.
-#define LOGW(...)                                \
-    if (Logger::getLevel() >= LogLevel::WARNING) \
+#define LOGW(...)                                 \
+    if (Logger::get_level() >= LogLevel::WARNING) \
     Logger::log(LogLevel::WARNING, __VA_ARGS__)
-#define LOGI(...)                             \
-    if (Logger::getLevel() >= LogLevel::INFO) \
+#define LOGI(...)                              \
+    if (Logger::get_level() >= LogLevel::INFO) \
     Logger::log(LogLevel::INFO, __VA_ARGS__)
-#define LOGD(...)                              \
-    if (Logger::getLevel() >= LogLevel::DEBUG) \
+#define LOGD(...)                               \
+    if (Logger::get_level() >= LogLevel::DEBUG) \
     Logger::log(LogLevel::DEBUG, __VA_ARGS__)

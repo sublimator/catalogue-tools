@@ -127,14 +127,14 @@ public:
         return 32;
     }
     Hash256
-    toHash() const
+    to_hash() const
     {
         return Hash256(data_);
     }
     std::string
-    toString() const
+    hex() const
     {
-        return toHash().hex();
+        return to_hash().hex();
     }
 
     bool
@@ -173,7 +173,7 @@ public:
         return key_;
     }
     Slice
-    keySlice() const
+    key_slice() const
     {
         return {key_.data(), Key::size()};
     }

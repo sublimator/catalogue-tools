@@ -75,7 +75,7 @@ public:
  * Helper function to select a branch based on a key and depth
  */
 int
-selectBranch(const Key& key, int depth);
+select_branch(const Key& key, int depth);
 
 //----------------------------------------------------------
 // SHAMap Node Classes
@@ -152,13 +152,13 @@ protected:
 class SHAMapInnerNode : public SHAMapTreeNode
 {
 private:
-    std::array<std::shared_ptr<SHAMapTreeNode>, 16> children;
+    std::array<std::shared_ptr<SHAMapTreeNode>, 16> children_;
     uint16_t branch_mask_ = 0;
-    uint8_t depth = 0;
+    uint8_t depth_ = 0;
 
     // CoW support
     std::atomic<int> version{0};
-    bool doCoW = false;
+    bool do_cow_ = false;
 
 public:
     explicit SHAMapInnerNode(uint8_t nodeDepth = 0);
@@ -204,12 +204,12 @@ protected:
     bool
     is_cow_enabled() const
     {
-        return doCoW;
+        return do_cow_;
     }
     void
     enable_cow(bool enable)
     {
-        doCoW = enable;
+        do_cow_ = enable;
     }
     std::shared_ptr<SHAMapInnerNode>
     copy(int newVersion) const;

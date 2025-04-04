@@ -209,7 +209,7 @@ private:
                         LOGE(
                             "Failed to remove state item (may not exist), "
                             "key: ",
-                            itemKey.toString());
+                            itemKey.hex());
                         return startOffset;  // error
                     }
                 }
@@ -220,7 +220,7 @@ private:
                         "offset ",
                         offset - 1 - Key::size(),
                         " for key: ",
-                        itemKey.toString());
+                        itemKey.hex());
                     return startOffset;  // error
                 }
                 continue;  // Move to the next node
@@ -286,7 +286,7 @@ private:
                     "Failed to add item from ",
                     mapTypeName,
                     " map to SHAMap, key: ",
-                    itemKey.toString(),
+                    itemKey.hex(),
                     " at offset ",
                     stats.currentOffset);
                 // Consider if processing should stop here. Returning
@@ -478,7 +478,7 @@ private:
                 ledgerSeq,
                 "!");
             // Log details only at DEBUG level for performance
-            if (Logger::getLevel() >= LogLevel::DEBUG)
+            if (Logger::get_level() >= LogLevel::DEBUG)
             {
                 LOGD("  Computed Hash: ", computedHash.hex());
                 LOGD("  Expected Hash: ", expectedHash.hex());
