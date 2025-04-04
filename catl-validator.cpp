@@ -4,7 +4,6 @@
 #include <string>
 #include <iomanip>
 #include <cstring>
-#include <chrono>
 #include <cctype>
 #include <algorithm>
 #include <ctime>
@@ -12,9 +11,6 @@
 #include <stdexcept>
 #include <array>
 #include <map>
-#include <sstream>
-
-#include <openssl/sha.h>
 
 // For decompression
 #include <boost/iostreams/filtering_stream.hpp>
@@ -51,6 +47,7 @@ enum SHAMapNodeType : uint8_t {
     tnTERMINAL = 255  // special type to mark the end of a serialization stream
 };
 
+#include <openssl/sha.h>
 
 // Function to compute SHA512 using OpenSSL
 std::string computeSHA512(const std::string& filename) {
@@ -111,7 +108,7 @@ std::string getNodeTypeDescription(uint8_t type) {
 }
 
 // Convert NetClock epoch time to human-readable string
-std::string format_ripple_time(uint64_t netClockTime) {
+std::string timeToString(uint64_t netClockTime) {
     // NetClock uses seconds since January 1st, 2000 (946684800)
     static const time_t rippleEpochOffset = 946684800;
     
@@ -429,7 +426,7 @@ private:
         if (ctBytes.size() < 8) return;
         uint64_t closeTime = 0;
         std::memcpy(&closeTime, ctBytes.data(), 8);
-        std::string closeTimeStr = format_ripple_time(closeTime);
+        std::string closeTimeStr = timeToString(closeTime);
         hexDump(output_, ctBytes, 0, "Close Time: " + std::to_string(closeTime) + " (" + closeTimeStr + ")");
         
         // Read parentCloseTime (8 bytes)
@@ -437,7 +434,7 @@ private:
         if (pctBytes.size() < 8) return;
         uint64_t parentCloseTime = 0;
         std::memcpy(&parentCloseTime, pctBytes.data(), 8);
-        std::string timeStr = format_ripple_time(parentCloseTime);
+        std::string timeStr = timeToString(parentCloseTime);
         hexDump(output_, pctBytes, 0, "Parent Close Time: " + std::to_string(parentCloseTime) + " (" + timeStr + ")");
         
         output_ << "Ledger " << sequence << " Info - Total bytes read: " 
@@ -583,7 +580,7 @@ private:
             }
             
             if (verbose_) {
-                // output_ << "  Node " << nodeCount << " Complete\n";
+                output_ << "  Node " << nodeCount << " Complete\n";
             }
         }
         
@@ -873,16 +870,13 @@ int main(int argc, char* argv[]) {
         std::cerr << "  --skip-hash-verification  Skip verifying the SHA-512 hash of the file\n";
         return 1;
     }
-
-    // Start timing
-    auto startTime = std::chrono::high_resolution_clock::now();
-
+    
     std::string inputFile = argv[1];
     std::ofstream outputFile;
     std::ostream* output = &std::cout;
     bool verbose = false;
     bool verifyHash = true;  // Default to verifying hash
-
+    
     // Check for flags
     for (int i = 2; i < argc; i++) {
         if (std::string(argv[i]) == "--verbose") {
@@ -899,9 +893,7 @@ int main(int argc, char* argv[]) {
             output = &outputFile;
         }
     }
-
-    int exitCode = 0;
-
+    
     try {
         // Print banner
         *output << "===================================================================\n";
@@ -913,27 +905,17 @@ int main(int argc, char* argv[]) {
             *output << "SHA-512 hash verification disabled\n";
         }
         *output << "===================================================================\n\n";
-
+        
         CatalogueAnalyzer analyzer(inputFile, *output, verbose, verifyHash);
         analyzer.analyze();
     } catch (const std::exception& e) {
         *output << "ERROR: " << e.what() << "\n";
-        exitCode = 1;
+        return 1;
     }
-
-    // Calculate execution time
-    auto endTime = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-
-    // Output timing information
-    *output << "\n===================================================================\n";
-    *output << "Execution completed in " << (duration.count() / 1000.0)
-            << " seconds (" << duration.count() << " ms)\n";
-    *output << "===================================================================\n";
-
+    
     if (outputFile.is_open()) {
         outputFile.close();
     }
-
-    return exitCode;
+    
+    return 0;
 }
