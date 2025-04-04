@@ -168,7 +168,7 @@ private:
                     " map at offset ",
                     offset - 1);
                 return startOffset;  // Indicate error by returning original
-                                     // offset
+                // offset
             }
 
             // Read key (32 bytes) - check bounds
@@ -329,7 +329,7 @@ private:
 
     // Process a single ledger
     size_t
-    processLedger(size_t offset, LedgerInfo& info)
+    processLedger(size_t offset)
     {
         stats.currentOffset = offset;
         size_t initialOffset = offset;
@@ -347,6 +347,7 @@ private:
             return initialOffset;  // Return original offset on error
         }
 
+        LedgerInfo info;
         std::memcpy(&info, data + offset, sizeof(LedgerInfo));
         offset += sizeof(LedgerInfo);
         stats.currentOffset = offset;
@@ -630,7 +631,6 @@ public:
 
             while (currentFileOffset < fileSize)
             {
-                LedgerInfo info;
                 size_t nextOffset = processLedger(currentFileOffset, info);
 
                 ledgerStore.addLedger(std::make_shared<Ledger>(
