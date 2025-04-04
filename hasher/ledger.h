@@ -10,7 +10,8 @@
 /**
  * LedgerHeaderView - Zero-copy view into ledger headers
  */
-class LedgerHeaderView {
+class LedgerHeaderView
+{
 private:
     const uint8_t* data;  // Raw pointer to header data
 
@@ -19,23 +20,33 @@ public:
     explicit LedgerHeaderView(const uint8_t* headerData);
 
     // Core accessor methods
-    uint32_t sequence() const;
-    Hash256 hash() const;
-    Hash256 parentHash() const;
-    Hash256 txHash() const;
-    Hash256 accountHash() const;
-    uint32_t closeTime() const;
-    uint64_t drops() const;
-    uint8_t closeFlags() const;
+    uint32_t
+    sequence() const;
+    Hash256
+    hash() const;
+    Hash256
+    parentHash() const;
+    Hash256
+    txHash() const;
+    Hash256
+    accountHash() const;
+    uint32_t
+    closeTime() const;
+    uint64_t
+    drops() const;
+    uint8_t
+    closeFlags() const;
 
     // Utility method for debugging/logging
-    std::string toString() const;
+    std::string
+    toString() const;
 };
 
 /**
  * Ledger - Simple container for header view and maps
  */
-class Ledger {
+class Ledger
+{
 private:
     LedgerHeaderView headerView;
     std::shared_ptr<SHAMap> stateMap;
@@ -49,18 +60,32 @@ public:
         std::shared_ptr<SHAMap> tx);
 
     // Core accessor methods
-    const LedgerHeaderView& header() const { return headerView; }
-    std::shared_ptr<SHAMap> getStateMap() const { return stateMap; }
-    std::shared_ptr<SHAMap> getTxMap() const { return txMap; }
+    const LedgerHeaderView&
+    header() const
+    {
+        return headerView;
+    }
+    std::shared_ptr<SHAMap>
+    getStateMap() const
+    {
+        return stateMap;
+    }
+    std::shared_ptr<SHAMap>
+    getTxMap() const
+    {
+        return txMap;
+    }
 
     // Validation method
-    bool validate() const;
+    bool
+    validate() const;
 };
 
 /**
  * LedgerStore - Simple map of sequence numbers to ledgers
  */
-class LedgerStore {
+class LedgerStore
+{
 private:
     std::unordered_map<uint32_t, std::shared_ptr<Ledger>> ledgers;
 
@@ -69,9 +94,15 @@ public:
     LedgerStore() = default;
 
     // Core methods
-    void addLedger(const std::shared_ptr<Ledger> &ledger);
-    std::shared_ptr<Ledger> getLedger(uint32_t sequence) const;
+    void
+    addLedger(const std::shared_ptr<Ledger>& ledger);
+    std::shared_ptr<Ledger>
+    getLedger(uint32_t sequence) const;
 
     // Simple utility
-    size_t size() const { return ledgers.size(); }
+    size_t
+    size() const
+    {
+        return ledgers.size();
+    }
 };

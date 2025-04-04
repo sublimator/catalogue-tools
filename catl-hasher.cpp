@@ -638,7 +638,6 @@ public:
                     stateMap.snapshot(),
                     std::make_shared<SHAMap>(txMap)));
 
-
                 if (nextOffset == currentFileOffset)
                 {
                     // No progress was made, indicates an error in processLedger
@@ -718,15 +717,26 @@ public:
             LOGI("--- End Summary ---");
 
             /// header.min_ledger to header.max_ledger
-            for (uint32_t ledgerSeq = header.min_ledger; ledgerSeq <= header.max_ledger; ledgerSeq++) {
-                if (const auto ledger = ledgerStore.getLedger(ledgerSeq)) {
+            for (uint32_t ledgerSeq = header.min_ledger;
+                 ledgerSeq <= header.max_ledger;
+                 ledgerSeq++)
+            {
+                if (const auto ledger = ledgerStore.getLedger(ledgerSeq))
+                {
                     LOGI("Ledger Info: ", ledger->header().sequence());
-                    LOGI("State Map hash: ", ledger->getStateMap()->getHash().hex());
-                    LOGI("Transaction Map hash: ", ledger->getTxMap()->getHash().hex());
+                    LOGI(
+                        "State Map hash: ",
+                        ledger->getStateMap()->getHash().hex());
+                    LOGI(
+                        "Transaction Map hash: ",
+                        ledger->getTxMap()->getHash().hex());
                     auto valid_ledger = ledger->validate();
                     LOGI("Valid ledger:", valid_ledger ? "yes" : "no");
-                    if (!valid_ledger) {
-                        throw std::runtime_error(std::string("Invalid ledger: ") + ledger->header().toString());
+                    if (!valid_ledger)
+                    {
+                        throw std::runtime_error(
+                            std::string("Invalid ledger: ") +
+                            ledger->header().toString());
                     }
                 }
             }
