@@ -147,7 +147,7 @@ private:
     bool leafKeyMatches = false;
     int terminalBranch = -1;
 
-    void findPath(std::shared_ptr<SHAMapInnerNode> root);
+    void findPath(std::shared_ptr<SHAMapInnerNode> const& root);
 
 public:
     PathFinder(std::shared_ptr<SHAMapInnerNode> &root, const Key &key);
@@ -160,7 +160,7 @@ public:
     std::shared_ptr<const SHAMapInnerNode> getParentOfTerminal() const;
     int getTerminalBranch() const;
     void dirtyPath() const;
-    void collapsePath();
+    void collapsePath() const;
 };
 
 /**
@@ -173,7 +173,7 @@ private:
 
 public:
     explicit SHAMap(SHAMapNodeType type = tnACCOUNT_STATE);
-    Hash256 getChildHash(int ix);
+    Hash256 getChildHash(int ix) const;
     bool addItem(std::shared_ptr<MmapItem> &item, bool allowUpdate = true);
     bool removeItem(const Key &key);
     Hash256 getHash() const;

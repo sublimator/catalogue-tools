@@ -270,7 +270,7 @@ PathFinder::PathFinder(std::shared_ptr<SHAMapInnerNode>& root, const Key &key)
     findPath(root);
 }
 
-void PathFinder::findPath(std::shared_ptr<SHAMapInnerNode> root) {
+void PathFinder::findPath(std::shared_ptr<SHAMapInnerNode> const& root) {
     if (!root) { throw NullNodeException("PathFinder: null root node"); }
     searchRoot = root;
     foundLeaf = nullptr;
@@ -336,7 +336,7 @@ void PathFinder::dirtyPath() const {
     for (auto &inner: inners) { inner->invalidateHash(); }
 }
 
-void PathFinder::collapsePath() {
+void PathFinder::collapsePath() const {
     if (inners.size() <= 1) return;
     std::shared_ptr<SHAMapLeafNode> onlyChild = nullptr;
     auto innermost = inners.back();
@@ -359,11 +359,10 @@ SHAMap::SHAMap(SHAMapNodeType type) : nodeType(type) {
     LOGD("SHAMap created with type: ", static_cast<int>(type));
 }
 
-Hash256 SHAMap::getChildHash(int ix) {
+Hash256 SHAMap::getChildHash(int ix) const {
     try {
         if (!root) return Hash256::zero();
-        auto child = root->getChild(ix);
-        if (child) {
+        if (auto child = root->getChild(ix)) {
             return child->getHash();
         } else {
             return Hash256::zero();
