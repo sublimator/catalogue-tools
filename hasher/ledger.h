@@ -25,21 +25,21 @@ public:
     Hash256
     hash() const;
     Hash256
-    parentHash() const;
+    parent_hash() const;
     Hash256
-    txHash() const;
+    transaction_hash() const;
     Hash256
-    accountHash() const;
+    account_hash() const;
     uint32_t
-    closeTime() const;
+    close_time() const;
     uint64_t
     drops() const;
     uint8_t
-    closeFlags() const;
+    close_flags() const;
 
     // Utility method for debugging/logging
     std::string
-    toString() const;
+    to_string() const;
 };
 
 /**
@@ -95,9 +95,9 @@ public:
 
     // Core methods
     void
-    addLedger(const std::shared_ptr<Ledger>& ledger);
+    add_ledger(const std::shared_ptr<Ledger>& ledger);
     std::shared_ptr<Ledger>
-    getLedger(uint32_t sequence) const;
+    get_ledger(uint32_t sequence) const;
 
     // Simple utility
     size_t

@@ -27,25 +27,25 @@ LedgerHeaderView::hash() const
 }
 
 Hash256
-LedgerHeaderView::parentHash() const
+LedgerHeaderView::parent_hash() const
 {
     return Hash256(data + offsetof(LedgerInfo, parentHash));
 }
 
 Hash256
-LedgerHeaderView::txHash() const
+LedgerHeaderView::transaction_hash() const
 {
     return Hash256(data + offsetof(LedgerInfo, txHash));
 }
 
 Hash256
-LedgerHeaderView::accountHash() const
+LedgerHeaderView::account_hash() const
 {
     return Hash256(data + offsetof(LedgerInfo, accountHash));
 }
 
 uint32_t
-LedgerHeaderView::closeTime() const
+LedgerHeaderView::close_time() const
 {
     uint32_t time;
     std::memcpy(
@@ -62,7 +62,7 @@ LedgerHeaderView::drops() const
 }
 
 uint8_t
-LedgerHeaderView::closeFlags() const
+LedgerHeaderView::close_flags() const
 {
     uint8_t flags;
     std::memcpy(
@@ -71,17 +71,17 @@ LedgerHeaderView::closeFlags() const
 }
 
 std::string
-LedgerHeaderView::toString() const
+LedgerHeaderView::to_string() const
 {
     std::ostringstream oss;
     oss << "Ledger " << sequence() << ":\n"
         << "  Hash:         " << hash().hex() << "\n"
-        << "  Parent Hash:  " << parentHash().hex() << "\n"
-        << "  Account Hash: " << accountHash().hex() << "\n"
-        << "  TX Hash:      " << txHash().hex() << "\n"
-        << "  Close Time:   " << utils::format_ripple_time(closeTime()) << "\n"
+        << "  Parent Hash:  " << parent_hash().hex() << "\n"
+        << "  Account Hash: " << account_hash().hex() << "\n"
+        << "  TX Hash:      " << transaction_hash().hex() << "\n"
+        << "  Close Time:   " << utils::format_ripple_time(close_time()) << "\n"
         << "  Drops:        " << drops() << "\n"
-        << "  Close Flags:  " << static_cast<int>(closeFlags());
+        << "  Close Flags:  " << static_cast<int>(close_flags());
     return oss.str();
 }
 
@@ -99,8 +99,8 @@ bool
 Ledger::validate() const
 {
     // Verify that map hashes match header
-    bool stateHashValid = (stateMap->getHash() == header().accountHash());
-    bool txHashValid = (txMap->getHash() == header().txHash());
+    bool stateHashValid = (stateMap->get_hash() == header().account_hash());
+    bool txHashValid = (txMap->get_hash() == header().transaction_hash());
 
     return stateHashValid && txHashValid;
 }
@@ -108,7 +108,7 @@ Ledger::validate() const
 // ---------- LedgerStore Implementation ----------
 
 void
-LedgerStore::addLedger(const std::shared_ptr<Ledger>& ledger)
+LedgerStore::add_ledger(const std::shared_ptr<Ledger>& ledger)
 {
     if (ledger)
     {
@@ -117,7 +117,7 @@ LedgerStore::addLedger(const std::shared_ptr<Ledger>& ledger)
 }
 
 std::shared_ptr<Ledger>
-LedgerStore::getLedger(uint32_t sequence) const
+LedgerStore::get_ledger(uint32_t sequence) const
 {
     auto it = ledgers.find(sequence);
     if (it != ledgers.end())

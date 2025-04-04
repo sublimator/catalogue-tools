@@ -197,7 +197,7 @@ private:
                 {
                     LOGD_KEY("Processing tnREMOVE for key: ", itemKey);
                     stats.stateRemovalsAttempted++;
-                    if (map.removeItem(itemKey))
+                    if (map.remove_item(itemKey))
                     {
                         stats.stateRemovalsSucceeded++;
                         nodesProcessedCount++;
@@ -273,7 +273,7 @@ private:
                 std::make_shared<MmapItem>(keyData, itemDataPtr, dataSize);
 
             // Add item to the appropriate map
-            if (map.addItem(item))
+            if (map.add_item(item))
             {
                 // addItem handles logging internally now
                 nodesProcessedCount++;
@@ -466,7 +466,7 @@ private:
         const std::string& mapType,
         uint32_t ledgerSeq)
     {
-        Hash256 computedHash = map.getHash();  // getHash is const
+        Hash256 computedHash = map.get_hash();  // getHash is const
         bool hashMatch = (computedHash == expectedHash);
 
         if (!hashMatch)
@@ -635,7 +635,7 @@ public:
             {
                 size_t nextOffset = processLedger(currentFileOffset);
 
-                ledgerStore->addLedger(std::make_shared<Ledger>(
+                ledgerStore->add_ledger(std::make_shared<Ledger>(
                     data + currentFileOffset,
                     stateMap.snapshot(),
                     std::make_shared<SHAMap>(txMap)));
@@ -723,7 +723,7 @@ public:
                  ledgerSeq <= header.max_ledger;
                  ledgerSeq++)
             {
-                if (const auto ledger = ledgerStore->getLedger(ledgerSeq))
+                if (const auto ledger = ledgerStore->get_ledger(ledgerSeq))
                 {
                     auto valid_ledger = ledger->validate();
                     if (!valid_ledger)
@@ -731,14 +731,14 @@ public:
                         LOGE("Ledger Info: ", ledger->header().sequence());
                         LOGE(
                             "State Map hash: ",
-                            ledger->getStateMap()->getHash().hex());
+                            ledger->getStateMap()->get_hash().hex());
                         LOGE(
                             "Transaction Map hash: ",
-                            ledger->getTxMap()->getHash().hex());
+                            ledger->getTxMap()->get_hash().hex());
 
                         throw std::runtime_error(
                             std::string("Invalid ledger: ") +
-                            ledger->header().toString());
+                            ledger->header().to_string());
                     }
                 }
             }

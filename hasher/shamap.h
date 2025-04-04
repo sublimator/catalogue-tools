@@ -35,7 +35,7 @@ public:
     int
     depth() const;
     size_t
-    maxAllowed() const;
+    max_allowed() const;
 
 private:
     int depth_;
@@ -93,15 +93,15 @@ protected:
 public:
     virtual ~SHAMapTreeNode() = default;
     void
-    invalidateHash();
+    invalidate_hash();
     virtual bool
-    isLeaf() const = 0;
+    is_leaf() const = 0;
     virtual bool
-    isInner() const = 0;
+    is_inner() const = 0;
     virtual void
-    updateHash() = 0;  // NO LOGGING INSIDE IMPLEMENTATIONS
+    update_hash() = 0;  // NO LOGGING INSIDE IMPLEMENTATIONS
     const Hash256&
-    getHash();
+    get_hash();
 };
 
 /**
@@ -117,15 +117,15 @@ private:
 public:
     SHAMapLeafNode(std::shared_ptr<MmapItem> i, SHAMapNodeType t);
     bool
-    isLeaf() const override;
+    is_leaf() const override;
     bool
-    isInner() const override;
+    is_inner() const override;
     void
-    updateHash() override;
+    update_hash() override;
     std::shared_ptr<MmapItem>
-    getItem() const;
+    get_item() const;
     SHAMapNodeType
-    getType() const;
+    get_type() const;
 
 protected:
     friend class PathFinder;
@@ -135,12 +135,12 @@ protected:
     std::shared_ptr<SHAMapLeafNode>
     copy() const;
     int
-    getVersion() const
+    get_version() const
     {
         return version;
     }
     void
-    setVersion(int v)
+    set_version(int v)
     {
         version = v;
     }
@@ -153,7 +153,7 @@ class SHAMapInnerNode : public SHAMapTreeNode
 {
 private:
     std::array<std::shared_ptr<SHAMapTreeNode>, 16> children;
-    uint16_t branchMask = 0;
+    uint16_t branch_mask_ = 0;
     uint8_t depth = 0;
 
     // CoW support
@@ -164,27 +164,27 @@ public:
     explicit SHAMapInnerNode(uint8_t nodeDepth = 0);
     SHAMapInnerNode(bool isCopy, uint8_t nodeDepth, int initialVersion);
     bool
-    isLeaf() const override;
+    is_leaf() const override;
     bool
-    isInner() const override;
+    is_inner() const override;
     uint8_t
     getDepth() const;
     void
     setDepth(uint8_t newDepth);
     void
-    updateHash() override;
+    update_hash() override;
     bool
-    setChild(int branch, std::shared_ptr<SHAMapTreeNode> const& child);
+    set_child(int branch, std::shared_ptr<SHAMapTreeNode> const& child);
     std::shared_ptr<SHAMapTreeNode>
-    getChild(int branch) const;
+    get_child(int branch) const;
     bool
-    hasChild(int branch) const;
+    has_child(int branch) const;
     int
-    getBranchCount() const;
+    get_branch_count() const;
     uint16_t
-    getBranchMask() const;
+    get_branch_mask() const;
     std::shared_ptr<SHAMapLeafNode>
-    getOnlyChildLeaf() const;
+    get_only_child_leaf() const;
 
 protected:
     friend class PathFinder;
@@ -192,22 +192,22 @@ protected:
 
     // CoW support - only accessible to friends
     int
-    getVersion() const
+    get_version() const
     {
         return version.load(std::memory_order_acquire);
     }
     void
-    setVersion(int v)
+    set_version(int v)
     {
         version.store(v, std::memory_order_release);
     }
     bool
-    isCoWEnabled() const
+    is_cow_enabled() const
     {
         return doCoW;
     }
     void
-    enableCoW(bool enable)
+    enable_cow(bool enable)
     {
         doCoW = enable;
     }
@@ -229,9 +229,9 @@ private:
     int terminalBranch = -1;
 
     void
-    findPath(std::shared_ptr<SHAMapInnerNode> root);
+    find_path(std::shared_ptr<SHAMapInnerNode> root);
     bool
-    maybeCopyOnWrite() const;
+    maybe_copy_on_write() const;
 
 protected:
     friend class SHAMap;
@@ -240,31 +240,31 @@ protected:
 public:
     PathFinder(std::shared_ptr<SHAMapInnerNode>& root, const Key& key);
     bool
-    hasLeaf() const;
+    has_leaf() const;
     bool
-    didLeafKeyMatch() const;
+    did_leaf_key_match() const;
     bool
-    endedAtNullBranch() const;
+    ended_at_null_branch() const;
     std::shared_ptr<const SHAMapLeafNode>
-    getLeaf() const;
+    get_leaf() const;
     std::shared_ptr<SHAMapLeafNode>
-    getLeafMutable();
+    get_leaf_mutable();
     std::shared_ptr<SHAMapInnerNode>
-    getParentOfTerminal();
+    get_parent_of_terminal();
     std::shared_ptr<const SHAMapInnerNode>
-    getParentOfTerminal() const;
+    get_parent_of_terminal() const;
     int
-    getTerminalBranch() const;
+    get_terminal_branch() const;
     void
-    dirtyPath() const;
+    dirty_path() const;
     void
-    collapsePath();
+    collapse_path();
 
     // CoW support - used by SHAMap operations
     std::shared_ptr<SHAMapInnerNode>
-    dirtyOrCopyInners(int targetVersion);
+    dirty_or_copy_inners(int targetVersion);
     std::shared_ptr<SHAMapLeafNode>
-    invalidatedPossiblyCopiedLeafForUpdating(int targetVersion);
+    invalidated_possibly_copied_leaf_for_updating(int targetVersion);
 };
 
 /**
@@ -275,28 +275,28 @@ class SHAMap
 {
 private:
     std::shared_ptr<SHAMapInnerNode> root;
-    SHAMapNodeType nodeType;
+    SHAMapNodeType node_type_;
 
     // CoW support - all private
-    std::shared_ptr<std::atomic<int>> versionCounter;
-    int currentVersion = 0;
-    bool cowEnabled = false;
+    std::shared_ptr<std::atomic<int>> version_counter_;
+    int current_version_ = 0;
+    bool cow_enabled_ = false;
 
     // Private methods
     void
-    enableCoW(bool enable = true);
+    enable_cow(bool enable = true);
     bool
-    isCoWEnabled() const
+    is_cow_enabled() const
     {
-        return cowEnabled;
+        return cow_enabled_;
     }
     int
-    getVersion() const
+    get_version() const
     {
-        return currentVersion;
+        return current_version_;
     }
     int
-    newVersion();
+    new_version();
 
     // Private constructor for creating snapshots
     SHAMap(
@@ -307,14 +307,12 @@ private:
 
 public:
     explicit SHAMap(SHAMapNodeType type = tnACCOUNT_STATE);
-    Hash256
-    getChildHash(int ix) const;
     bool
-    addItem(std::shared_ptr<MmapItem>& item, bool allowUpdate = true);
+    add_item(std::shared_ptr<MmapItem>& item, bool allowUpdate = true);
     bool
-    removeItem(const Key& key);
+    remove_item(const Key& key);
     Hash256
-    getHash() const;
+    get_hash() const;
 
     // Only public CoW method - creates a snapshot
     std::shared_ptr<SHAMap>

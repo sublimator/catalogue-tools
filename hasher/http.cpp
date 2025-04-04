@@ -92,7 +92,7 @@ HttpServer::Session::handle_ledger(const std::string& path)
     if (std::regex_match(path, match, ledger_regex) && match.size() > 1)
     {
         uint32_t ledger_index = std::stoul(match[1].str());
-        auto ledger = ledgerStore_->getLedger(ledger_index);
+        auto ledger = ledgerStore_->get_ledger(ledger_index);
 
         if (ledger)
         {
@@ -103,19 +103,19 @@ HttpServer::Session::handle_ledger(const std::string& path)
             json << "{\n";
             json << "  \"ledger_index\": " << header.sequence() << ",\n";
             json << "  \"ledger_hash\": \"" << header.hash().hex() << "\",\n";
-            json << "  \"parent_hash\": \"" << header.parentHash().hex()
+            json << "  \"parent_hash\": \"" << header.parent_hash().hex()
                  << "\",\n";
-            json << "  \"account_hash\": \"" << header.accountHash().hex()
+            json << "  \"account_hash\": \"" << header.account_hash().hex()
                  << "\",\n";
-            json << "  \"transaction_hash\": \"" << header.txHash().hex()
+            json << "  \"transaction_hash\": \"" << header.transaction_hash().hex()
                  << "\",\n";
             json << "  \"close_time_unix\": "
-                 << utils::to_unix_time(header.closeTime()) << ",\n";
+                 << utils::to_unix_time(header.close_time()) << ",\n";
             json << "  \"close_time_human\": \""
-                 << utils::format_ripple_time(header.closeTime()) << "\",\n";
+                 << utils::format_ripple_time(header.close_time()) << "\",\n";
             json << "  \"total_coins\": " << header.drops() << ",\n";
             json << "  \"close_flags\": "
-                 << static_cast<int>(header.closeFlags()) << "\n";
+                 << static_cast<int>(header.close_flags()) << "\n";
             json << "}";
 
             res_.result(http::status::ok);

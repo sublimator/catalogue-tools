@@ -28,7 +28,7 @@ InvalidDepthException::depth() const
 }
 
 size_t
-InvalidDepthException::maxAllowed() const
+InvalidDepthException::max_allowed() const
 {
     return maxAllowed_;
 }
@@ -80,17 +80,17 @@ selectBranch(const Key& key, int depth)
 // SHAMapTreeNode Implementation
 //----------------------------------------------------------
 void
-SHAMapTreeNode::invalidateHash()
+SHAMapTreeNode::invalidate_hash()
 {
     hashValid = false;
 }
 
 const Hash256&
-SHAMapTreeNode::getHash()
+SHAMapTreeNode::get_hash()
 {
     if (!hashValid)
     {
-        updateHash();
+        update_hash();
         hashValid = true;
     }
     return hash;
@@ -109,19 +109,19 @@ SHAMapLeafNode::SHAMapLeafNode(std::shared_ptr<MmapItem> i, SHAMapNodeType t)
 }
 
 bool
-SHAMapLeafNode::isLeaf() const
+SHAMapLeafNode::is_leaf() const
 {
     return true;
 }
 
 bool
-SHAMapLeafNode::isInner() const
+SHAMapLeafNode::is_inner() const
 {
     return false;
 }
 
 void
-SHAMapLeafNode::updateHash()
+SHAMapLeafNode::update_hash()
 {
     std::array<unsigned char, 4> prefix = {0, 0, 0, 0};
     auto set = [&prefix](auto& from) {
@@ -177,13 +177,13 @@ SHAMapLeafNode::updateHash()
 }
 
 std::shared_ptr<MmapItem>
-SHAMapLeafNode::getItem() const
+SHAMapLeafNode::get_item() const
 {
     return item;
 }
 
 SHAMapNodeType
-SHAMapLeafNode::getType() const
+SHAMapLeafNode::get_type() const
 {
     return type;
 }
@@ -215,13 +215,13 @@ SHAMapInnerNode::SHAMapInnerNode(
 }
 
 bool
-SHAMapInnerNode::isLeaf() const
+SHAMapInnerNode::is_leaf() const
 {
     return false;
 }
 
 bool
-SHAMapInnerNode::isInner() const
+SHAMapInnerNode::is_inner() const
 {
     return true;
 }
@@ -239,9 +239,9 @@ SHAMapInnerNode::setDepth(uint8_t newDepth)
 }
 
 void
-SHAMapInnerNode::updateHash()
+SHAMapInnerNode::update_hash()
 {
-    if (branchMask == 0)
+    if (branch_mask_ == 0)
     {
         hash = Hash256::zero();
         hashValid = true;
@@ -268,7 +268,7 @@ SHAMapInnerNode::updateHash()
         if (children[i])
         {
             hashData = children[i]
-                           ->getHash()
+                           ->get_hash()
                            .data();  // Recursive call might trigger update
         }
         if (EVP_DigestUpdate(ctx, hashData, Hash256::size()) != 1)
@@ -292,7 +292,7 @@ SHAMapInnerNode::updateHash()
 }
 
 bool
-SHAMapInnerNode::setChild(
+SHAMapInnerNode::set_child(
     int branch,
     std::shared_ptr<SHAMapTreeNode> const& child)
 {
@@ -303,7 +303,7 @@ SHAMapInnerNode::setChild(
     if (child)
     {
         children[branch] = child;
-        branchMask |= (1 << branch);
+        branch_mask_ |= (1 << branch);
         // TODO: AI added this hackery but I'm 99.99% it's not needed
         // if (child->isInner()) {
         //     auto innerChild =
@@ -314,14 +314,14 @@ SHAMapInnerNode::setChild(
     else
     {
         children[branch] = nullptr;
-        branchMask &= ~(1 << branch);
+        branch_mask_ &= ~(1 << branch);
     }
-    invalidateHash();  // Mark self as invalid, not children
+    invalidate_hash();  // Mark self as invalid, not children
     return true;
 }
 
 std::shared_ptr<SHAMapTreeNode>
-SHAMapInnerNode::getChild(int branch) const
+SHAMapInnerNode::get_child(int branch) const
 {
     if (branch < 0 || branch >= 16)
     {
@@ -331,35 +331,35 @@ SHAMapInnerNode::getChild(int branch) const
 }
 
 bool
-SHAMapInnerNode::hasChild(int branch) const
+SHAMapInnerNode::has_child(int branch) const
 {
     if (branch < 0 || branch >= 16)
     {
         throw InvalidBranchException(branch);
     }
-    return (branchMask & (1 << branch)) != 0;
+    return (branch_mask_ & (1 << branch)) != 0;
 }
 
 int
-SHAMapInnerNode::getBranchCount() const
+SHAMapInnerNode::get_branch_count() const
 {
     int count = 0;
     for (int i = 0; i < 16; i++)
     {
-        if (hasChild(i))
+        if (has_child(i))
             count++;
     }
     return count;
 }
 
 uint16_t
-SHAMapInnerNode::getBranchMask() const
+SHAMapInnerNode::get_branch_mask() const
 {
-    return branchMask;
+    return branch_mask_;
 }
 
 std::shared_ptr<SHAMapLeafNode>
-SHAMapInnerNode::getOnlyChildLeaf() const
+SHAMapInnerNode::get_only_child_leaf() const
 {
     std::shared_ptr<SHAMapLeafNode> resultLeaf = nullptr;
     int leafCount = 0;
@@ -367,7 +367,7 @@ SHAMapInnerNode::getOnlyChildLeaf() const
     {
         if (childNodePtr)
         {
-            if (childNodePtr->isInner())
+            if (childNodePtr->is_inner())
             {
                 return nullptr;
             }  // Found inner node
@@ -399,13 +399,13 @@ SHAMapInnerNode::copy(int newVersion) const
     }
 
     // Copy other properties
-    newNode->branchMask = branchMask;
+    newNode->branch_mask_ = branch_mask_;
     newNode->hash = hash;
     newNode->hashValid = hashValid;  // force re-hash
 
     LOGD(
         "Cloned inner node from version ",
-        getVersion(),
+        get_version(),
         " to version ",
         newVersion);
     return newNode;
@@ -417,11 +417,11 @@ SHAMapInnerNode::copy(int newVersion) const
 PathFinder::PathFinder(std::shared_ptr<SHAMapInnerNode>& root, const Key& key)
     : targetKey(key)
 {
-    findPath(root);
+    find_path(root);
 }
 
 void
-PathFinder::findPath(std::shared_ptr<SHAMapInnerNode> root)
+PathFinder::find_path(std::shared_ptr<SHAMapInnerNode> root)
 {
     if (!root)
     {
@@ -435,21 +435,21 @@ PathFinder::findPath(std::shared_ptr<SHAMapInnerNode> root)
     while (true)
     {
         int branch = selectBranch(targetKey, currentInner->getDepth());
-        std::shared_ptr<SHAMapTreeNode> child = currentInner->getChild(branch);
+        std::shared_ptr<SHAMapTreeNode> child = currentInner->get_child(branch);
         if (!child)
         {
             terminalBranch = branch;
             inners.push_back(currentInner);
             break;
         }
-        if (child->isLeaf())
+        if (child->is_leaf())
         {
             terminalBranch = branch;
             inners.push_back(currentInner);
             foundLeaf = std::static_pointer_cast<SHAMapLeafNode>(child);
-            if (foundLeaf->getItem())
+            if (foundLeaf->get_item())
             {
-                leafKeyMatches = (foundLeaf->getItem()->key() == targetKey);
+                leafKeyMatches = (foundLeaf->get_item()->key() == targetKey);
             }
             else
             {
@@ -464,92 +464,92 @@ PathFinder::findPath(std::shared_ptr<SHAMapInnerNode> root)
 }
 
 bool
-PathFinder::hasLeaf() const
+PathFinder::has_leaf() const
 {
     return foundLeaf != nullptr;
 }
 
 bool
-PathFinder::didLeafKeyMatch() const
+PathFinder::did_leaf_key_match() const
 {
     return leafKeyMatches;
 }
 
 bool
-PathFinder::endedAtNullBranch() const
+PathFinder::ended_at_null_branch() const
 {
     return foundLeaf == nullptr && terminalBranch != -1;
 }
 
 std::shared_ptr<const SHAMapLeafNode>
-PathFinder::getLeaf() const
+PathFinder::get_leaf() const
 {
     return foundLeaf;
 }
 
 std::shared_ptr<SHAMapLeafNode>
-PathFinder::getLeafMutable()
+PathFinder::get_leaf_mutable()
 {
     return foundLeaf;
 }
 
 std::shared_ptr<SHAMapInnerNode>
-PathFinder::getParentOfTerminal()
+PathFinder::get_parent_of_terminal()
 {
     return inners.empty() ? nullptr : inners.back();
 }
 
 std::shared_ptr<const SHAMapInnerNode>
-PathFinder::getParentOfTerminal() const
+PathFinder::get_parent_of_terminal() const
 {
     return inners.empty() ? nullptr : inners.back();
 }
 
 int
-PathFinder::getTerminalBranch() const
+PathFinder::get_terminal_branch() const
 {
     return terminalBranch;
 }
 
 void
-PathFinder::dirtyPath() const
+PathFinder::dirty_path() const
 {
     for (auto& inner : inners)
     {
-        inner->invalidateHash();
+        inner->invalidate_hash();
     }
 }
 
 void
-PathFinder::collapsePath()
+PathFinder::collapse_path()
 {
     if (inners.size() <= 1)
         return;
     std::shared_ptr<SHAMapLeafNode> onlyChild = nullptr;
     auto innermost = inners.back();
-    onlyChild = innermost->getOnlyChildLeaf();
+    onlyChild = innermost->get_only_child_leaf();
     for (int i = static_cast<int>(inners.size()) - 2; i >= 0; --i)
     {
         auto inner = inners[i];
         int branch = branches[i];
         if (onlyChild)
         {
-            inner->setChild(branch, onlyChild);
+            inner->set_child(branch, onlyChild);
         }
-        onlyChild = inner->getOnlyChildLeaf();
+        onlyChild = inner->get_only_child_leaf();
         if (!onlyChild)
             break;
     }
 }
 
 bool
-PathFinder::maybeCopyOnWrite() const
+PathFinder::maybe_copy_on_write() const
 {
-    return !inners.empty() && inners.back()->isCoWEnabled();
+    return !inners.empty() && inners.back()->is_cow_enabled();
 }
 
 std::shared_ptr<SHAMapInnerNode>
-PathFinder::dirtyOrCopyInners(int targetVersion)
+PathFinder::dirty_or_copy_inners(int targetVersion)
 {
     if (inners.empty())
     {
@@ -565,7 +565,7 @@ PathFinder::dirtyOrCopyInners(int targetVersion)
         auto& currentInner = inners[i];
 
         // Skip if already at target version
-        if (currentInner->getVersion() == targetVersion)
+        if (currentInner->get_version() == targetVersion)
         {
             LOGD(
                 "Node at index ",
@@ -576,17 +576,17 @@ PathFinder::dirtyOrCopyInners(int targetVersion)
         }
 
         // Skip nodes that don't have CoW enabled
-        if (!currentInner->isCoWEnabled())
+        if (!currentInner->is_cow_enabled())
         {
             // Just update version
             LOGD(
                 "Node at index ",
                 i,
                 " has CoW disabled, updating version from ",
-                currentInner->getVersion(),
+                currentInner->get_version(),
                 " to ",
                 targetVersion);
-            currentInner->setVersion(targetVersion);
+            currentInner->set_version(targetVersion);
             continue;
         }
 
@@ -595,7 +595,7 @@ PathFinder::dirtyOrCopyInners(int targetVersion)
             "Creating CoW copy of node at index ",
             i,
             " version ",
-            currentInner->getVersion(),
+            currentInner->get_version(),
             " to version ",
             targetVersion);
 
@@ -619,7 +619,7 @@ PathFinder::dirtyOrCopyInners(int targetVersion)
                 " branch ",
                 branch,
                 " to point to new copy");
-            parent->setChild(branch, copy);
+            parent->set_child(branch, copy);
         }
 
         // Replace in our path vector
@@ -631,7 +631,7 @@ PathFinder::dirtyOrCopyInners(int targetVersion)
 }
 
 std::shared_ptr<SHAMapLeafNode>
-PathFinder::invalidatedPossiblyCopiedLeafForUpdating(int targetVersion)
+PathFinder::invalidated_possibly_copied_leaf_for_updating(int targetVersion)
 {
     if (!leafKeyMatches)
     {
@@ -639,7 +639,7 @@ PathFinder::invalidatedPossiblyCopiedLeafForUpdating(int targetVersion)
     }
 
     // Make sure we've handled the inner nodes first
-    auto terminal = dirtyOrCopyInners(targetVersion);
+    auto terminal = dirty_or_copy_inners(targetVersion);
     if (!terminal)
     {
         throw SHAMapException("Failed to prepare path for leaf update");
@@ -648,15 +648,15 @@ PathFinder::invalidatedPossiblyCopiedLeafForUpdating(int targetVersion)
     std::shared_ptr<SHAMapLeafNode> theLeaf = foundLeaf;
 
     // Check if we need to copy the leaf
-    if (foundLeaf->getVersion() != targetVersion)
+    if (foundLeaf->get_version() != targetVersion)
     {
         theLeaf = foundLeaf->copy();
-        theLeaf->setVersion(targetVersion);
-        terminal->setChild(terminalBranch, theLeaf);
+        theLeaf->set_version(targetVersion);
+        terminal->set_child(terminalBranch, theLeaf);
         foundLeaf = theLeaf;  // Update our reference
     }
 
-    theLeaf->invalidateHash();
+    theLeaf->invalidate_hash();
     return theLeaf;
 }
 
@@ -664,10 +664,10 @@ PathFinder::invalidatedPossiblyCopiedLeafForUpdating(int targetVersion)
 // SHAMap Implementation
 //----------------------------------------------------------
 SHAMap::SHAMap(SHAMapNodeType type)
-    : nodeType(type)
-    , versionCounter(std::make_shared<std::atomic<int>>(0))
-    , currentVersion(0)
-    , cowEnabled(false)
+    : node_type_(type)
+    , version_counter_(std::make_shared<std::atomic<int>>(0))
+    , current_version_(0)
+    , cow_enabled_(false)
 {
     root = std::make_shared<SHAMapInnerNode>(0);  // Root has depth 0
     LOGD("SHAMap created with type: ", static_cast<int>(type));
@@ -679,28 +679,28 @@ SHAMap::SHAMap(
     std::shared_ptr<std::atomic<int>> vCounter,
     int version)
     : root(rootNode)
-    , nodeType(type)
-    , versionCounter(vCounter)
-    , currentVersion(version)
-    , cowEnabled(true)
+    , node_type_(type)
+    , version_counter_(vCounter)
+    , current_version_(version)
+    , cow_enabled_(true)
 {
     LOGD("Created SHAMap snapshot with version ", version);
 }
 
 void
-SHAMap::enableCoW(bool enable)
+SHAMap::enable_cow(bool enable)
 {
-    cowEnabled = enable;
+    cow_enabled_ = enable;
 
     // Update root node if it exists
     if (root && enable)
     {
-        root->enableCoW(true);
+        root->enable_cow(true);
 
         // Set version if it's 0
-        if (root->getVersion() == 0)
+        if (root->get_version() == 0)
         {
-            root->setVersion(currentVersion);
+            root->set_version(current_version_);
         }
     }
 
@@ -708,19 +708,19 @@ SHAMap::enableCoW(bool enable)
         "Copy-on-Write ",
         (enable ? "enabled" : "disabled"),
         " for SHAMap with version ",
-        currentVersion);
+        current_version_);
 }
 
 int
-SHAMap::newVersion()
+SHAMap::new_version()
 {
-    if (!versionCounter)
+    if (!version_counter_)
     {
-        versionCounter = std::make_shared<std::atomic<int>>(0);
+        version_counter_ = std::make_shared<std::atomic<int>>(0);
     }
     // Increment shared counter and update current version
-    int newVer = ++(*versionCounter);
-    currentVersion = newVer;
+    int newVer = ++(*version_counter_);
+    current_version_ = newVer;
     LOGD("Generated new SHAMap version: ", newVer);
     return newVer;
 }
@@ -735,14 +735,14 @@ SHAMap::snapshot()
     }
 
     // Enable CoW if not already enabled
-    if (!cowEnabled)
+    if (!cow_enabled_)
     {
-        enableCoW(!cowEnabled);
+        enable_cow(!cow_enabled_);
     }
 
     // Create new version for both original and snapshot
-    const int originalVersion = newVersion();
-    int snapshotVersion = newVersion();
+    const int originalVersion = new_version();
+    int snapshotVersion = new_version();
 
     LOGI(
         "Creating snapshot: original version ",
@@ -752,41 +752,14 @@ SHAMap::snapshot()
 
     // Create a new SHAMap that shares the same root and version counter
     auto copy = std::make_shared<SHAMap>(
-        SHAMap(nodeType, root, versionCounter, snapshotVersion));
+        SHAMap(node_type_, root, version_counter_, snapshotVersion));
 
     return copy;
 }
 
-Hash256
-SHAMap::getChildHash(int ix) const
-{
-    try
-    {
-        if (!root)
-            return Hash256::zero();
-        auto child = root->getChild(ix);
-        if (child)
-        {
-            return child->getHash();
-        }
-        else
-        {
-            return Hash256::zero();
-        }
-    }
-    catch (const InvalidBranchException& e)
-    {
-        LOGW(
-            "Attempted to get child hash for invalid branch ",
-            ix,
-            " from root: ",
-            e.what());
-        return Hash256::zero();
-    }
-}
 
 bool
-SHAMap::addItem(std::shared_ptr<MmapItem>& item, bool allowUpdate)
+SHAMap::add_item(std::shared_ptr<MmapItem>& item, bool allowUpdate)
 {
     if (!item)
     {
@@ -800,16 +773,16 @@ SHAMap::addItem(std::shared_ptr<MmapItem>& item, bool allowUpdate)
         PathFinder pathFinder(root, item->key());
 
         // If CoW is enabled, handle versioning
-        if (cowEnabled)
+        if (cow_enabled_)
         {
             // First generate a new version if needed
-            if (currentVersion == 0)
+            if (current_version_ == 0)
             {
-                newVersion();
+                new_version();
             }
 
             // Apply CoW to path
-            auto innerNode = pathFinder.dirtyOrCopyInners(currentVersion);
+            auto innerNode = pathFinder.dirty_or_copy_inners(current_version_);
             if (!innerNode)
             {
                 throw NullNodeException(
@@ -817,18 +790,18 @@ SHAMap::addItem(std::shared_ptr<MmapItem>& item, bool allowUpdate)
             }
 
             // If root was copied, update our reference
-            if (pathFinder.getParentOfTerminal() != root)
+            if (pathFinder.get_parent_of_terminal() != root)
             {
                 root = pathFinder.searchRoot;
             }
         }
 
-        if (pathFinder.endedAtNullBranch() ||
-            (pathFinder.hasLeaf() && pathFinder.didLeafKeyMatch() &&
+        if (pathFinder.ended_at_null_branch() ||
+            (pathFinder.has_leaf() && pathFinder.did_leaf_key_match() &&
              allowUpdate))
         {
-            auto parent = pathFinder.getParentOfTerminal();
-            int branch = pathFinder.getTerminalBranch();
+            auto parent = pathFinder.get_parent_of_terminal();
+            int branch = pathFinder.get_terminal_branch();
             if (!parent)
             {
                 throw NullNodeException(
@@ -840,28 +813,28 @@ SHAMap::addItem(std::shared_ptr<MmapItem>& item, bool allowUpdate)
                 parent->getDepth() + 1,
                 " branch ",
                 branch);
-            auto newLeaf = std::make_shared<SHAMapLeafNode>(item, nodeType);
-            if (cowEnabled)
+            auto newLeaf = std::make_shared<SHAMapLeafNode>(item, node_type_);
+            if (cow_enabled_)
             {
-                newLeaf->setVersion(currentVersion);
+                newLeaf->set_version(current_version_);
             }
-            parent->setChild(branch, newLeaf);
-            pathFinder.dirtyPath();
+            parent->set_child(branch, newLeaf);
+            pathFinder.dirty_path();
             return true;
         }
 
-        if (pathFinder.hasLeaf() && !pathFinder.didLeafKeyMatch())
+        if (pathFinder.has_leaf() && !pathFinder.did_leaf_key_match())
         {
             LOGD_KEY("Handling collision for key: ", item->key());
-            auto parent = pathFinder.getParentOfTerminal();
-            int branch = pathFinder.getTerminalBranch();
+            auto parent = pathFinder.get_parent_of_terminal();
+            int branch = pathFinder.get_terminal_branch();
             if (!parent)
             {
                 throw NullNodeException(
                     "addItem collision: null parent node (should be root)");
             }
-            auto existingLeaf = pathFinder.getLeafMutable();
-            auto existingItem = existingLeaf->getItem();
+            auto existingLeaf = pathFinder.get_leaf_mutable();
+            auto existingItem = existingLeaf->get_item();
             if (!existingItem)
             {
                 throw NullItemException(); /* Should be caught by leaf
@@ -875,12 +848,12 @@ SHAMap::addItem(std::shared_ptr<MmapItem>& item, bool allowUpdate)
 
             // Create first new inner node to replace the leaf
             auto newInner = std::make_shared<SHAMapInnerNode>(currentDepth);
-            if (cowEnabled)
+            if (cow_enabled_)
             {
-                newInner->enableCoW(true);
-                newInner->setVersion(currentVersion);
+                newInner->enable_cow(true);
+                newInner->set_version(current_version_);
             }
-            parent->setChild(currentBranch, newInner);
+            parent->set_child(currentBranch, newInner);
             currentParent = newInner;
 
             while (currentDepth < 64)
@@ -900,20 +873,20 @@ SHAMap::addItem(std::shared_ptr<MmapItem>& item, bool allowUpdate)
                         " and ",
                         newBranch);
                     auto newLeaf =
-                        std::make_shared<SHAMapLeafNode>(item, nodeType);
-                    if (cowEnabled)
+                        std::make_shared<SHAMapLeafNode>(item, node_type_);
+                    if (cow_enabled_)
                     {
-                        newLeaf->setVersion(currentVersion);
+                        newLeaf->set_version(current_version_);
                         // May need to update existing leaf version as well
-                        if (existingLeaf->getVersion() != currentVersion)
+                        if (existingLeaf->get_version() != current_version_)
                         {
                             auto copiedLeaf = existingLeaf->copy();
-                            copiedLeaf->setVersion(currentVersion);
+                            copiedLeaf->set_version(current_version_);
                             existingLeaf = copiedLeaf;
                         }
                     }
-                    currentParent->setChild(existingBranch, existingLeaf);
-                    currentParent->setChild(newBranch, newLeaf);
+                    currentParent->set_child(existingBranch, existingLeaf);
+                    currentParent->set_child(newBranch, newLeaf);
                     break;  // Done
                 }
                 else
@@ -927,12 +900,12 @@ SHAMap::addItem(std::shared_ptr<MmapItem>& item, bool allowUpdate)
                         ". Descending further.");
                     auto nextInner =
                         std::make_shared<SHAMapInnerNode>(currentDepth + 1);
-                    if (cowEnabled)
+                    if (cow_enabled_)
                     {
-                        nextInner->enableCoW(true);
-                        nextInner->setVersion(currentVersion);
+                        nextInner->enable_cow(true);
+                        nextInner->set_version(current_version_);
                     }
-                    currentParent->setChild(existingBranch, nextInner);
+                    currentParent->set_child(existingBranch, nextInner);
                     currentParent = nextInner;
                     currentDepth++;
                 }
@@ -945,7 +918,7 @@ SHAMap::addItem(std::shared_ptr<MmapItem>& item, bool allowUpdate)
                     item->key().toString());
             }
 
-            pathFinder.dirtyPath();
+            pathFinder.dirty_path();
             return true;
         }
 
@@ -978,7 +951,7 @@ SHAMap::addItem(std::shared_ptr<MmapItem>& item, bool allowUpdate)
 }
 
 bool
-SHAMap::removeItem(const Key& key)
+SHAMap::remove_item(const Key& key)
 {
     LOGD_KEY("Attempting to remove item with key: ", key);
     try
@@ -986,16 +959,16 @@ SHAMap::removeItem(const Key& key)
         PathFinder pathFinder(root, key);
 
         // If CoW is enabled, handle versioning
-        if (cowEnabled)
+        if (cow_enabled_)
         {
             // First generate a new version if needed
-            if (currentVersion == 0)
+            if (current_version_ == 0)
             {
-                newVersion();
+                new_version();
             }
 
             // Apply CoW to path
-            auto innerNode = pathFinder.dirtyOrCopyInners(currentVersion);
+            auto innerNode = pathFinder.dirty_or_copy_inners(current_version_);
             if (!innerNode)
             {
                 throw NullNodeException(
@@ -1003,20 +976,20 @@ SHAMap::removeItem(const Key& key)
             }
 
             // If root was copied, update our reference
-            if (pathFinder.getParentOfTerminal() != root)
+            if (pathFinder.get_parent_of_terminal() != root)
             {
                 root = pathFinder.searchRoot;
             }
         }
 
-        if (!pathFinder.hasLeaf() || !pathFinder.didLeafKeyMatch())
+        if (!pathFinder.has_leaf() || !pathFinder.did_leaf_key_match())
         {
             LOGD_KEY("Item not found for removal, key: ", key);
             return false;  // Item not found
         }
 
-        auto parent = pathFinder.getParentOfTerminal();
-        int branch = pathFinder.getTerminalBranch();
+        auto parent = pathFinder.get_parent_of_terminal();
+        int branch = pathFinder.get_terminal_branch();
         if (!parent)
         {
             throw NullNodeException(
@@ -1028,9 +1001,9 @@ SHAMap::removeItem(const Key& key)
             parent->getDepth() + 1,
             " branch ",
             branch);
-        parent->setChild(branch, nullptr);  // Remove the leaf
-        pathFinder.dirtyPath();
-        pathFinder.collapsePath();  // Compress path if possible
+        parent->set_child(branch, nullptr);  // Remove the leaf
+        pathFinder.dirty_path();
+        pathFinder.collapse_path();  // Compress path if possible
         LOGD_KEY("Item removed successfully, key: ", key);
         return true;
     }
@@ -1051,7 +1024,7 @@ SHAMap::removeItem(const Key& key)
 }
 
 Hash256
-SHAMap::getHash() const
+SHAMap::get_hash() const
 {
     if (!root)
     {
@@ -1059,5 +1032,5 @@ SHAMap::getHash() const
         return Hash256::zero();
     }
     // getHash() inside the node handles lazy calculation
-    return root->getHash();
+    return root->get_hash();
 }
