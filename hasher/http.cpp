@@ -107,8 +107,8 @@ HttpServer::Session::handle_ledger(const std::string& path)
                  << "\",\n";
             json << "  \"account_hash\": \"" << header.account_hash().hex()
                  << "\",\n";
-            json << "  \"transaction_hash\": \"" << header.transaction_hash().hex()
-                 << "\",\n";
+            json << "  \"transaction_hash\": \""
+                 << header.transaction_hash().hex() << "\",\n";
             json << "  \"close_time_unix\": "
                  << utils::to_unix_time(header.close_time()) << ",\n";
             json << "  \"close_time_human\": \""

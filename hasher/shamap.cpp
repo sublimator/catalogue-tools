@@ -757,7 +757,6 @@ SHAMap::snapshot()
     return copy;
 }
 
-
 bool
 SHAMap::add_item(std::shared_ptr<MmapItem>& item, bool allowUpdate)
 {
