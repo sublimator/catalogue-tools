@@ -25,7 +25,7 @@ message(STATUS "OpenSSL Version: ${OPENSSL_VERSION}") # May or may not be set
 
 # Common source files
 set(SOURCES_COMMON
-        Logger.cpp
+
 )
 
 # Add source files
@@ -36,6 +36,8 @@ set(SOURCES_VALIDATOR
 
 set(SOURCES_HASHER
         catl-hasher.cpp
+        core-types.cpp
+        logger.cpp
         ${SOURCES_COMMON}
 )
 

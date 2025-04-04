@@ -16,6 +16,7 @@
 // For crypto
 #include <openssl/evp.h>
 
+#include "core-types.h"
 #include "logger.h"
 
 
@@ -148,96 +149,6 @@ public:
     }
 };
 
-class Slice {
-private:
-    const uint8_t *data_;
-    size_t size_;
-
-public:
-    Slice() : data_(nullptr), size_(0) {
-    }
-
-    Slice(const uint8_t *data, size_t size) : data_(data), size_(size) {
-    }
-
-    const uint8_t *data() const { return data_; }
-    size_t size() const { return size_; }
-    bool empty() const { return size_ == 0; }
-};
-
-void slice_hex(const Slice sl, std::string &result) {
-    static constexpr char hexChars[] = "0123456789abcdef";
-    result.reserve(sl.size() * 2);
-    const uint8_t *bytes = sl.data();
-    for (size_t i = 0; i < sl.size(); ++i) {
-        uint8_t byte = bytes[i];
-        result.push_back(hexChars[(byte >> 4) & 0xF]);
-        result.push_back(hexChars[byte & 0xF]);
-    }
-}
-
-class Hash256 {
-private:
-    std::array<uint8_t, 32> data_;
-
-public:
-    Hash256() : data_() { data_.fill(0); }
-
-    explicit Hash256(const std::array<uint8_t, 32> &data) : data_(data) {
-    }
-
-    explicit Hash256(const uint8_t *data) : data_() { std::memcpy(data_.data(), data, 32); }
-    uint8_t *data() { return data_.data(); }
-    const uint8_t *data() const { return data_.data(); }
-    static constexpr std::size_t size() { return 32; }
-    static Hash256 zero() { return {}; }
-    bool operator==(const Hash256 &other) const { return data_ == other.data_; }
-    bool operator!=(const Hash256 &other) const { return !(*this == other); }
-
-    [[nodiscard]] std::string hex() const {
-        std::string result;
-        slice_hex({data(), size()}, result);
-        return result;
-    }
-};
-
-class Key {
-private:
-    const std::uint8_t *data_;
-
-public:
-    Key(const std::uint8_t *data) : data_(data) {
-    }
-
-    const std::uint8_t *data() const { return data_; }
-    static constexpr std::size_t size() { return 32; }
-    Hash256 toHash() const { return Hash256(data_); }
-    std::string toString() const { return toHash().hex(); }
-    bool operator==(const Key &other) const { return std::memcmp(data_, other.data_, 32) == 0; }
-    bool operator!=(const Key &other) const { return !(*this == other); }
-};
-
-class MmapItem {
-private:
-    Key key_;
-    Slice data_;
-
-public:
-    MmapItem(const std::uint8_t *keyData, const std::uint8_t *data, std::size_t dataSize)
-        : key_(keyData), data_(data, dataSize) {
-    }
-
-    const Key &key() const { return key_; }
-    Slice keySlice() const { return {key_.data(), Key::size()}; }
-    const Slice &slice() const { return data_; }
-
-    std::string hex() const {
-        const auto sl = slice();
-        std::string result;
-        slice_hex(sl, result);
-        return result;
-    }
-};
 
 class SHAMapTreeNode;
 class SHAMapInnerNode;
