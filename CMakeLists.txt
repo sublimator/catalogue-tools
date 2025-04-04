@@ -30,10 +30,10 @@ set(SOURCES_VALIDATOR
 
 set(SOURCES_HASHER
         catl-hasher.cpp
-        core-types.cpp
-        shamap.cpp
-        utils.cpp
-        logger.cpp
+        hasher/core-types.cpp
+        hasher/shamap.cpp
+        hasher/utils.cpp
+        hasher/logger.cpp
 )
 
 # Create executables

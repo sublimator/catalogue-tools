@@ -2,8 +2,8 @@
 #include "logger.h"
 #include <openssl/evp.h>
 
-#include "catalogue-consts.h"
-#include "log-macros.h"
+#include "hasher/catalogue-consts.h"
+#include "hasher/log-macros.h"
 
 //----------------------------------------------------------
 // Exception Classes Implementation

@@ -6,8 +6,9 @@
 #include <stdexcept>
 #include <string>
 
-#include "core-types.h"
 #include <openssl/evp.h>
+
+#include "hasher/core-types.h"
 
 //----------------------------------------------------------
 // Shared Types

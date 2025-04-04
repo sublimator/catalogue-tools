@@ -16,12 +16,12 @@
 // For crypto
 #include <openssl/evp.h>
 
-#include "catalogue-consts.h"
-#include "core-types.h"
-#include "log-macros.h"
-#include "logger.h"
-#include "shamap.h"
-#include "utils.h"
+#include "hasher/catalogue-consts.h"
+#include "hasher/core-types.h"
+#include "hasher/log-macros.h"
+#include "hasher/logger.h"
+#include "hasher/shamap.h"
+#include "hasher/utils.h"
 
 
 class CATLHasher {
