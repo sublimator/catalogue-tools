@@ -31,6 +31,7 @@ set(SOURCES_VALIDATOR
 set(SOURCES_HASHER
         catl-hasher.cpp
         core-types.cpp
+        shamap.cpp
         utils.cpp
         logger.cpp
 )
