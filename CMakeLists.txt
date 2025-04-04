@@ -17,40 +17,61 @@ message(STATUS "Using Boost from: ${BOOST_ROOT}")
 find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
 
+message(STATUS "OpenSSL Include Dir: ${OPENSSL_INCLUDE_DIR}")
+message(STATUS "OpenSSL Libraries: ${OPENSSL_LIBRARIES}")
+# You might need to find specific components to get the version variable set reliably
+# find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL) might help
+message(STATUS "OpenSSL Version: ${OPENSSL_VERSION}") # May or may not be set
+
+
 # Add source files
-set(SOURCES
-    catl-validator.cpp
+set(SOURCES_VALIDATOR
+        catl-validator.cpp
 )
 
-# Create executable
-add_executable(catl-validator ${SOURCES})
+set(SOURCES_HASHER
+        catl-hasher.cpp
+)
+
+# Create executables
+add_executable(catl-validator ${SOURCES_VALIDATOR})
+add_executable(catl-hasher ${SOURCES_HASHER})
 
 # Add include directories
-target_include_directories(catl-validator PRIVATE
-    ${BOOST_ROOT}
-    ${OPENSSL_INCLUDE_DIR}
-    ${ZLIB_INCLUDE_DIRS}
-)
+foreach(target catl-validator catl-hasher)
+    target_include_directories(${target} PRIVATE
+            ${BOOST_ROOT}
+            ${OPENSSL_INCLUDE_DIR}
+            ${ZLIB_INCLUDE_DIRS}
+    )
+endforeach()
 
 # Platform-specific configurations
 if(APPLE)
     # For macOS, use static libraries directly
-    target_link_libraries(catl-validator PRIVATE
-        ${BOOST_ROOT}/stage/lib/libboost_iostreams.a
-        ${OPENSSL_LIBRARIES}
-        ${ZLIB_LIBRARIES}
-    )
+    foreach(target catl-validator catl-hasher)
+        target_link_libraries(${target} PRIVATE
+                ${BOOST_ROOT}/stage/lib/libboost_iostreams.a
+                ${BOOST_ROOT}/stage/lib/libboost_filesystem.a
+                ${OPENSSL_LIBRARIES}
+                ${ZLIB_LIBRARIES}
+        )
+    endforeach()
 else()
     # For Linux, use dynamic libraries with static linking option
-    target_link_libraries(catl-validator PRIVATE
-        -static
-        boost_iostreams
-        ${OPENSSL_LIBRARIES}
-        ${ZLIB_LIBRARIES}
-    )
+    foreach(target catl-validator catl-hasher)
+        target_link_libraries(${target} PRIVATE
+                -static
+                boost_iostreams
+                ${OPENSSL_LIBRARIES}
+                ${ZLIB_LIBRARIES}
+        )
+    endforeach()
 endif()
 
 # Add compiler options
-target_compile_options(catl-validator PRIVATE
-    -Wall -Wextra -O2 -Wno-deprecated-declarations
-)
+foreach(target catl-validator catl-hasher)
+    target_compile_options(${target} PRIVATE
+            -Wall -Wextra -O2 -Wno-deprecated-declarations
+    )
+endforeach()
