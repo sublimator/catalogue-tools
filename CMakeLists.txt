@@ -36,6 +36,7 @@ set(SOURCES_HASHER
         hasher/logger.cpp
         hasher/ledger.h
         hasher/ledger.cpp
+        hasher/http.cpp
 )
 
 # Create executables

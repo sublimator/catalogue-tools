@@ -18,6 +18,7 @@
 
 #include "hasher/catalogue-consts.h"
 #include "hasher/core-types.h"
+#include "hasher/http.h"
 #include "hasher/ledger.h"
 #include "hasher/log-macros.h"
 #include "hasher/logger.h"
@@ -593,7 +594,8 @@ public:
     {
         LOGI("Starting CATL file processing...");
 
-        LedgerStore ledgerStore;
+        std::shared_ptr<LedgerStore> ledgerStore =
+            std::make_shared<LedgerStore>();
 
         try
         {
@@ -633,7 +635,7 @@ public:
             {
                 size_t nextOffset = processLedger(currentFileOffset);
 
-                ledgerStore.addLedger(std::make_shared<Ledger>(
+                ledgerStore->addLedger(std::make_shared<Ledger>(
                     data + currentFileOffset,
                     stateMap.snapshot(),
                     std::make_shared<SHAMap>(txMap)));
@@ -721,7 +723,7 @@ public:
                  ledgerSeq <= header.max_ledger;
                  ledgerSeq++)
             {
-                if (const auto ledger = ledgerStore.getLedger(ledgerSeq))
+                if (const auto ledger = ledgerStore->getLedger(ledgerSeq))
                 {
                     auto valid_ledger = ledger->validate();
                     LOGI("Valid ledger:", valid_ledger ? "yes" : "no");
@@ -741,6 +743,10 @@ public:
                     }
                 }
             }
+
+            HttpServer httpServer(ledgerStore);
+            httpServer.run(4, true);
+
             // Return true if processing completed, potentially with
             // warnings/hash failures Return false only if a fatal error
             // occurred preventing continuation. Consider hash failures fatal?
