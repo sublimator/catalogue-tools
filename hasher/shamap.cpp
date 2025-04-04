@@ -1,14 +1,12 @@
 #include "shamap.h"
-#include "logger.h"
-#include <openssl/evp.h>
 
-#include "hasher/catalogue-consts.h"
+#include "catalogue-consts.h"
 #include "hasher/log-macros.h"
+#include "hasher/logger.h"
 
 //----------------------------------------------------------
 // Exception Classes Implementation
 //----------------------------------------------------------
-
 SHAMapException::SHAMapException(const std::string &message)
     : std::runtime_error(message) {
 }
@@ -52,7 +50,6 @@ HashCalculationException::HashCalculationException(const std::string &reason)
 //----------------------------------------------------------
 // Helper Functions Implementation
 //----------------------------------------------------------
-
 int selectBranch(const Key &key, int depth) {
     int byteIdx = depth / 2;
     if (byteIdx < 0 || byteIdx >= static_cast<int>(Key::size())) {
@@ -66,7 +63,6 @@ int selectBranch(const Key &key, int depth) {
 //----------------------------------------------------------
 // SHAMapTreeNode Implementation
 //----------------------------------------------------------
-
 void SHAMapTreeNode::invalidateHash() {
     hashValid = false;
 }
@@ -80,12 +76,86 @@ const Hash256 &SHAMapTreeNode::getHash() {
 }
 
 //----------------------------------------------------------
+// SHAMapLeafNode Implementation
+//----------------------------------------------------------
+SHAMapLeafNode::SHAMapLeafNode(std::shared_ptr<MmapItem> i, SHAMapNodeType t)
+    : item(std::move(i)), type(t) {
+  if (!item) {
+    throw NullItemException();
+  }
+}
+
+bool SHAMapLeafNode::isLeaf() const { return true; }
+
+bool SHAMapLeafNode::isInner() const { return false; }
+
+void SHAMapLeafNode::updateHash() {
+  std::array<unsigned char, 4> prefix = {0, 0, 0, 0};
+  auto set = [&prefix](auto &from) {
+    std::memcpy(prefix.data(), from.data(), 4);
+  };
+  switch (type) {
+  case tnTRANSACTION_NM:
+  case tnTRANSACTION_MD:
+    set(HashPrefix::txNode);
+    break;
+  case tnACCOUNT_STATE:
+  default:
+    set(HashPrefix::leafNode);
+    break;
+  }
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  if (ctx == nullptr) {
+    throw HashCalculationException("Failed to create EVP_MD_CTX");
+  }
+  if (EVP_DigestInit_ex(ctx, EVP_sha512(), nullptr) != 1) {
+    EVP_MD_CTX_free(ctx);
+    throw HashCalculationException("Failed to initialize SHA-512 digest");
+  }
+  if (EVP_DigestUpdate(ctx, &prefix, sizeof(prefix)) != 1) {
+    EVP_MD_CTX_free(ctx);
+    throw HashCalculationException("Failed to update digest with prefix");
+  }
+  if (EVP_DigestUpdate(ctx, item->slice().data(), item->slice().size()) != 1) {
+    EVP_MD_CTX_free(ctx);
+    throw HashCalculationException("Failed to update digest with item data");
+  }
+  if (EVP_DigestUpdate(ctx, item->key().data(), Key::size()) != 1) {
+    EVP_MD_CTX_free(ctx);
+    throw HashCalculationException("Failed to update digest with item key");
+  }
+  std::array<unsigned char, 64> fullHash;
+  unsigned int hashLen = 0;
+  if (EVP_DigestFinal_ex(ctx, fullHash.data(), &hashLen) != 1) {
+    EVP_MD_CTX_free(ctx);
+    throw HashCalculationException("Failed to finalize digest");
+  }
+  EVP_MD_CTX_free(ctx);
+  hash = Hash256(reinterpret_cast<const uint8_t *>(fullHash.data()));
+  hashValid = true;
+}
+
+std::shared_ptr<MmapItem> SHAMapLeafNode::getItem() const { return item; }
+
+SHAMapNodeType SHAMapLeafNode::getType() const { return type; }
+
+std::shared_ptr<SHAMapLeafNode> SHAMapLeafNode::copy() const {
+  auto newLeaf = std::make_shared<SHAMapLeafNode>(item, type);
+  newLeaf->hash = hash;
+  newLeaf->hashValid = hashValid;
+  newLeaf->version = version;
+  return newLeaf;
+}
+
+//----------------------------------------------------------
 // SHAMapInnerNode Implementation
 //----------------------------------------------------------
-
 SHAMapInnerNode::SHAMapInnerNode(uint8_t nodeDepth)
-    : depth(nodeDepth) {
-}
+    : depth(nodeDepth), version(0), doCoW(false) {}
+
+SHAMapInnerNode::SHAMapInnerNode(bool isCopy, uint8_t nodeDepth,
+                                 int initialVersion)
+    : depth(nodeDepth), version(initialVersion), doCoW(isCopy) {}
 
 bool SHAMapInnerNode::isLeaf() const {
     return false;
@@ -148,10 +218,12 @@ bool SHAMapInnerNode::setChild(int branch, std::shared_ptr<SHAMapTreeNode> const
     if (child) {
         children[branch] = child;
         branchMask |= (1 << branch);
-        if (child->isInner()) {
-            auto innerChild = std::static_pointer_cast<SHAMapInnerNode>(child);
-            innerChild->setDepth(depth + 1);
-        }
+        // TODO: AI added this hackery but I'm 99.99% it's not needed
+        // if (child->isInner()) {
+        //     auto innerChild =
+        //     std::static_pointer_cast<SHAMapInnerNode>(child);
+        //     innerChild->setDepth(depth + 1);
+        // }
     } else {
         children[branch] = nullptr;
         branchMask &= ~(1 << branch);
@@ -197,107 +269,65 @@ std::shared_ptr<SHAMapLeafNode> SHAMapInnerNode::getOnlyChildLeaf() const {
     return resultLeaf; // Returns the leaf if exactly one found, else nullptr
 }
 
-//----------------------------------------------------------
-// SHAMapLeafNode Implementation
-//----------------------------------------------------------
+std::shared_ptr<SHAMapInnerNode> SHAMapInnerNode::copy(int newVersion) const {
+  // Create a new inner node with same depth
+  auto newNode = std::make_shared<SHAMapInnerNode>(true, depth, newVersion);
 
-SHAMapLeafNode::SHAMapLeafNode(std::shared_ptr<MmapItem> i, SHAMapNodeType t)
-    : item(std::move(i)), type(t) {
-    if (!item) { throw NullItemException(); }
-}
+  // Copy children array (shallow copy)
+  for (int i = 0; i < 16; i++) {
+    newNode->children[i] = children[i];
+  }
 
-bool SHAMapLeafNode::isLeaf() const {
-    return true;
-}
+  // Copy other properties
+  newNode->branchMask = branchMask;
+  newNode->hash = hash;
+  newNode->hashValid = hashValid; // force re-hash
 
-bool SHAMapLeafNode::isInner() const {
-    return false;
-}
-
-void SHAMapLeafNode::updateHash() {
-    std::array<unsigned char, 4> prefix = {0, 0, 0, 0};
-    auto set = [&prefix](auto &from) { std::memcpy(prefix.data(), from.data(), 4); };
-    switch (type) {
-        case tnTRANSACTION_NM:
-        case tnTRANSACTION_MD: set(HashPrefix::txNode);
-            break;
-        case tnACCOUNT_STATE: default: set(HashPrefix::leafNode);
-            break;
-    }
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    if (ctx == nullptr) { throw HashCalculationException("Failed to create EVP_MD_CTX"); }
-    if (EVP_DigestInit_ex(ctx, EVP_sha512(), nullptr) != 1) {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to initialize SHA-512 digest");
-    }
-    if (EVP_DigestUpdate(ctx, &prefix, sizeof(prefix)) != 1) {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to update digest with prefix");
-    }
-    if (EVP_DigestUpdate(ctx, item->slice().data(), item->slice().size()) != 1) {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to update digest with item data");
-    }
-    if (EVP_DigestUpdate(ctx, item->key().data(), Key::size()) != 1) {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to update digest with item key");
-    }
-    std::array<unsigned char, 64> fullHash;
-    unsigned int hashLen = 0;
-    if (EVP_DigestFinal_ex(ctx, fullHash.data(), &hashLen) != 1) {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to finalize digest");
-    }
-    EVP_MD_CTX_free(ctx);
-    hash = Hash256(reinterpret_cast<const uint8_t *>(fullHash.data()));
-    hashValid = true;
-}
-
-std::shared_ptr<MmapItem> SHAMapLeafNode::getItem() const {
-    return item;
-}
-
-SHAMapNodeType SHAMapLeafNode::getType() const {
-    return type;
+  LOGD("Cloned inner node from version ", getVersion(), " to version ",
+       newVersion);
+  return newNode;
 }
 
 //----------------------------------------------------------
 // PathFinder Implementation
 //----------------------------------------------------------
-
-PathFinder::PathFinder(std::shared_ptr<SHAMapInnerNode>& root, const Key &key)
+PathFinder::PathFinder(std::shared_ptr<SHAMapInnerNode> &root, const Key &key)
     : targetKey(key) {
-    findPath(root);
+  findPath(root);
 }
 
-void PathFinder::findPath(std::shared_ptr<SHAMapInnerNode> const& root) {
-    if (!root) { throw NullNodeException("PathFinder: null root node"); }
-    searchRoot = root;
-    foundLeaf = nullptr;
-    leafKeyMatches = false;
-    terminalBranch = -1;
-    std::shared_ptr<SHAMapInnerNode> currentInner = root;
-    while (true) {
-        int branch = selectBranch(targetKey, currentInner->getDepth());
-        std::shared_ptr<SHAMapTreeNode> child = currentInner->getChild(branch);
-        if (!child) {
-            terminalBranch = branch;
-            inners.push_back(currentInner);
-            break;
-        }
-        if (child->isLeaf()) {
-            terminalBranch = branch;
-            inners.push_back(currentInner);
-            foundLeaf = std::static_pointer_cast<SHAMapLeafNode>(child);
-            if (foundLeaf->getItem()) {
-                leafKeyMatches = (foundLeaf->getItem()->key() == targetKey);
-            } else { throw NullItemException(); }
-            break;
-        }
-        inners.push_back(currentInner);
-        branches.push_back(branch);
-        currentInner = std::static_pointer_cast<SHAMapInnerNode>(child);
+void PathFinder::findPath(std::shared_ptr<SHAMapInnerNode> root) {
+  if (!root) {
+    throw NullNodeException("PathFinder: null root node");
+  }
+  searchRoot = root;
+  foundLeaf = nullptr;
+  leafKeyMatches = false;
+  terminalBranch = -1;
+  std::shared_ptr<SHAMapInnerNode> currentInner = root;
+  while (true) {
+    int branch = selectBranch(targetKey, currentInner->getDepth());
+    std::shared_ptr<SHAMapTreeNode> child = currentInner->getChild(branch);
+    if (!child) {
+      terminalBranch = branch;
+      inners.push_back(currentInner);
+      break;
     }
+    if (child->isLeaf()) {
+      terminalBranch = branch;
+      inners.push_back(currentInner);
+      foundLeaf = std::static_pointer_cast<SHAMapLeafNode>(child);
+      if (foundLeaf->getItem()) {
+        leafKeyMatches = (foundLeaf->getItem()->key() == targetKey);
+      } else {
+        throw NullItemException();
+      }
+      break;
+    }
+    inners.push_back(currentInner);
+    branches.push_back(branch);
+    currentInner = std::static_pointer_cast<SHAMapInnerNode>(child);
+  }
 }
 
 bool PathFinder::hasLeaf() const {
@@ -333,39 +363,194 @@ int PathFinder::getTerminalBranch() const {
 }
 
 void PathFinder::dirtyPath() const {
-    for (auto &inner: inners) { inner->invalidateHash(); }
+  for (auto &inner : inners) {
+    inner->invalidateHash();
+  }
 }
 
-void PathFinder::collapsePath() const {
-    if (inners.size() <= 1) return;
-    std::shared_ptr<SHAMapLeafNode> onlyChild = nullptr;
-    auto innermost = inners.back();
-    onlyChild = innermost->getOnlyChildLeaf();
-    for (int i = static_cast<int>(inners.size()) - 2; i >= 0; --i) {
-        auto inner = inners[i];
-        int branch = branches[i];
-        if (onlyChild) { inner->setChild(branch, onlyChild); }
-        onlyChild = inner->getOnlyChildLeaf();
-        if (!onlyChild) break;
+void PathFinder::collapsePath() {
+  if (inners.size() <= 1)
+    return;
+  std::shared_ptr<SHAMapLeafNode> onlyChild = nullptr;
+  auto innermost = inners.back();
+  onlyChild = innermost->getOnlyChildLeaf();
+  for (int i = static_cast<int>(inners.size()) - 2; i >= 0; --i) {
+    auto inner = inners[i];
+    int branch = branches[i];
+    if (onlyChild) {
+      inner->setChild(branch, onlyChild);
     }
+    onlyChild = inner->getOnlyChildLeaf();
+    if (!onlyChild)
+      break;
+  }
+}
+
+bool PathFinder::maybeCopyOnWrite() const {
+  return !inners.empty() && inners.back()->isCoWEnabled();
+}
+
+std::shared_ptr<SHAMapInnerNode>
+PathFinder::dirtyOrCopyInners(int targetVersion) {
+  if (inners.empty()) {
+    LOGW("No inner nodes in path to apply CoW");
+    return nullptr;
+  }
+
+  // Start from the root and work downward
+  // Remove the unused variable
+
+  for (size_t i = 0; i < inners.size(); ++i) {
+    auto &currentInner = inners[i];
+
+    // Skip if already at target version
+    if (currentInner->getVersion() == targetVersion) {
+      LOGD("Node at index ", i, " already at target version ", targetVersion);
+      continue;
+    }
+
+    // Skip nodes that don't have CoW enabled
+    if (!currentInner->isCoWEnabled()) {
+      // Just update version
+      LOGD("Node at index ", i, " has CoW disabled, updating version from ",
+           currentInner->getVersion(), " to ", targetVersion);
+      currentInner->setVersion(targetVersion);
+      continue;
+    }
+
+    // Need to create a copy (CoW)
+    LOGD("Creating CoW copy of node at index ", i, " version ",
+         currentInner->getVersion(), " to version ", targetVersion);
+
+    // Create copy with new version
+    auto copy = currentInner->copy(targetVersion);
+
+    // If this is the root, update the search root
+    if (i == 0) {
+      searchRoot = copy;
+    }
+
+    // If not the root, update parent's child pointer to point to this copy
+    if (i > 0) {
+      const auto &parent = inners[i - 1];
+      int branch = branches[i - 1];
+      LOGD("Updating parent at depth ", parent->getDepth(), " branch ", branch,
+           " to point to new copy");
+      parent->setChild(branch, copy);
+    }
+
+    // Replace in our path vector
+    inners[i] = copy;
+  }
+
+  // Return the innermost node for further operations
+  return inners.back();
+}
+
+std::shared_ptr<SHAMapLeafNode>
+PathFinder::invalidatedPossiblyCopiedLeafForUpdating(int targetVersion) {
+  if (!leafKeyMatches) {
+    throw SHAMapException("Cannot update leaf - key mismatch");
+  }
+
+  // Make sure we've handled the inner nodes first
+  auto terminal = dirtyOrCopyInners(targetVersion);
+  if (!terminal) {
+    throw SHAMapException("Failed to prepare path for leaf update");
+  }
+
+  std::shared_ptr<SHAMapLeafNode> theLeaf = foundLeaf;
+
+  // Check if we need to copy the leaf
+  if (foundLeaf->getVersion() != targetVersion) {
+    theLeaf = foundLeaf->copy();
+    theLeaf->setVersion(targetVersion);
+    terminal->setChild(terminalBranch, theLeaf);
+    foundLeaf = theLeaf; // Update our reference
+  }
+
+  theLeaf->invalidateHash();
+  return theLeaf;
 }
 
 //----------------------------------------------------------
 // SHAMap Implementation
 //----------------------------------------------------------
+SHAMap::SHAMap(SHAMapNodeType type)
+    : nodeType(type), versionCounter(std::make_shared<std::atomic<int>>(0)),
+      currentVersion(0), cowEnabled(false) {
+  root = std::make_shared<SHAMapInnerNode>(0); // Root has depth 0
+  LOGD("SHAMap created with type: ", static_cast<int>(type));
+}
 
-SHAMap::SHAMap(SHAMapNodeType type) : nodeType(type) {
-    root = std::make_shared<SHAMapInnerNode>(0); // Root has depth 0
-    LOGD("SHAMap created with type: ", static_cast<int>(type));
+SHAMap::SHAMap(SHAMapNodeType type, std::shared_ptr<SHAMapInnerNode> rootNode,
+               std::shared_ptr<std::atomic<int>> vCounter, int version)
+    : root(rootNode), nodeType(type), versionCounter(vCounter),
+      currentVersion(version), cowEnabled(true) {
+  LOGD("Created SHAMap snapshot with version ", version);
+}
+
+void SHAMap::enableCoW(bool enable) {
+  cowEnabled = enable;
+
+  // Update root node if it exists
+  if (root && enable) {
+    root->enableCoW(true);
+
+    // Set version if it's 0
+    if (root->getVersion() == 0) {
+      root->setVersion(currentVersion);
+    }
+  }
+
+  LOGD("Copy-on-Write ", (enable ? "enabled" : "disabled"),
+       " for SHAMap with version ", currentVersion);
+}
+
+int SHAMap::newVersion() {
+  if (!versionCounter) {
+    versionCounter = std::make_shared<std::atomic<int>>(0);
+  }
+  // Increment shared counter and update current version
+  int newVer = ++(*versionCounter);
+  currentVersion = newVer;
+  LOGD("Generated new SHAMap version: ", newVer);
+  return newVer;
+}
+
+std::shared_ptr<SHAMap> SHAMap::snapshot() {
+  if (!root) {
+    LOGW("Attempted to snapshot a SHAMap with null root");
+    return nullptr;
+  }
+
+  // Enable CoW if not already enabled
+  if (!cowEnabled) {
+    enableCoW(!cowEnabled);
+  }
+
+  // Create new version for both original and snapshot
+  const int originalVersion = newVersion();
+  int snapshotVersion = newVersion();
+
+  LOGI("Creating snapshot: original version ", originalVersion,
+       ", snapshot version ", snapshotVersion);
+
+  // Create a new SHAMap that shares the same root and version counter
+  auto copy = std::make_shared<SHAMap>(
+      SHAMap(nodeType, root, versionCounter, snapshotVersion));
+
+  return copy;
 }
 
 Hash256 SHAMap::getChildHash(int ix) const {
     try {
         if (!root) return Hash256::zero();
-        if (auto child = root->getChild(ix)) {
-            return child->getHash();
+        auto child = root->getChild(ix);
+        if (child) {
+          return child->getHash();
         } else {
-            return Hash256::zero();
+          return Hash256::zero();
         }
     } catch (const InvalidBranchException &e) {
         LOGW("Attempted to get child hash for invalid branch ", ix, " from root: ", e.what());
@@ -383,6 +568,26 @@ bool SHAMap::addItem(std::shared_ptr<MmapItem> &item, bool allowUpdate) {
     try {
         PathFinder pathFinder(root, item->key());
 
+        // If CoW is enabled, handle versioning
+        if (cowEnabled) {
+          // First generate a new version if needed
+          if (currentVersion == 0) {
+            newVersion();
+          }
+
+          // Apply CoW to path
+          auto innerNode = pathFinder.dirtyOrCopyInners(currentVersion);
+          if (!innerNode) {
+            throw NullNodeException(
+                "addItem: CoW failed to return valid inner node");
+          }
+
+          // If root was copied, update our reference
+          if (pathFinder.getParentOfTerminal() != root) {
+            root = pathFinder.searchRoot;
+          }
+        }
+
         if (pathFinder.endedAtNullBranch() || (
                 pathFinder.hasLeaf() && pathFinder.didLeafKeyMatch() && allowUpdate)) {
             auto parent = pathFinder.getParentOfTerminal();
@@ -391,6 +596,9 @@ bool SHAMap::addItem(std::shared_ptr<MmapItem> &item, bool allowUpdate) {
 
             LOGD("Adding/Updating leaf at depth ", parent->getDepth() + 1, " branch ", branch);
             auto newLeaf = std::make_shared<SHAMapLeafNode>(item, nodeType);
+            if (cowEnabled) {
+              newLeaf->setVersion(currentVersion);
+            }
             parent->setChild(branch, newLeaf);
             pathFinder.dirtyPath();
             return true;
@@ -411,6 +619,10 @@ bool SHAMap::addItem(std::shared_ptr<MmapItem> &item, bool allowUpdate) {
 
             // Create first new inner node to replace the leaf
             auto newInner = std::make_shared<SHAMapInnerNode>(currentDepth);
+            if (cowEnabled) {
+              newInner->enableCoW(true);
+              newInner->setVersion(currentVersion);
+            }
             parent->setChild(currentBranch, newInner);
             currentParent = newInner;
 
@@ -423,6 +635,15 @@ bool SHAMap::addItem(std::shared_ptr<MmapItem> &item, bool allowUpdate) {
                     LOGD("Collision resolved at depth ", currentDepth, ". Placing leaves at branches ",
                          existingBranch, " and ", newBranch);
                     auto newLeaf = std::make_shared<SHAMapLeafNode>(item, nodeType);
+                    if (cowEnabled) {
+                      newLeaf->setVersion(currentVersion);
+                      // May need to update existing leaf version as well
+                      if (existingLeaf->getVersion() != currentVersion) {
+                        auto copiedLeaf = existingLeaf->copy();
+                        copiedLeaf->setVersion(currentVersion);
+                        existingLeaf = copiedLeaf;
+                      }
+                    }
                     currentParent->setChild(existingBranch, existingLeaf);
                     currentParent->setChild(newBranch, newLeaf);
                     break; // Done
@@ -431,6 +652,10 @@ bool SHAMap::addItem(std::shared_ptr<MmapItem> &item, bool allowUpdate) {
                     LOGD("Collision continues at depth ", currentDepth, ", branch ", existingBranch,
                          ". Descending further.");
                     auto nextInner = std::make_shared<SHAMapInnerNode>(currentDepth + 1);
+                    if (cowEnabled) {
+                      nextInner->enableCoW(true);
+                      nextInner->setVersion(currentVersion);
+                    }
                     currentParent->setChild(existingBranch, nextInner);
                     currentParent = nextInner;
                     currentDepth++;
@@ -462,6 +687,26 @@ bool SHAMap::removeItem(const Key &key) {
     LOGD_KEY("Attempting to remove item with key: ", key);
     try {
         PathFinder pathFinder(root, key);
+
+        // If CoW is enabled, handle versioning
+        if (cowEnabled) {
+          // First generate a new version if needed
+          if (currentVersion == 0) {
+            newVersion();
+          }
+
+          // Apply CoW to path
+          auto innerNode = pathFinder.dirtyOrCopyInners(currentVersion);
+          if (!innerNode) {
+            throw NullNodeException(
+                "removeItem: CoW failed to return valid inner node");
+          }
+
+          // If root was copied, update our reference
+          if (pathFinder.getParentOfTerminal() != root) {
+            root = pathFinder.searchRoot;
+          }
+        }
 
         if (!pathFinder.hasLeaf() || !pathFinder.didLeafKeyMatch()) {
             LOGD_KEY("Item not found for removal, key: ", key);

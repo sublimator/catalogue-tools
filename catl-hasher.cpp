@@ -215,88 +215,95 @@ private:
 
 
     // Process a single ledger
-    size_t processLedger(size_t offset) {
-        stats.currentOffset = offset;
-        size_t initialOffset = offset;
+    size_t processLedger(size_t offset, LedgerInfo &info) {
+      stats.currentOffset = offset;
+      size_t initialOffset = offset;
 
-        // Check bounds for LedgerInfo
-        if (offset + sizeof(LedgerInfo) > fileSize) {
-            LOGE("Not enough data remaining (", (fileSize > offset ? fileSize - offset : 0),
-                 " bytes) for LedgerInfo structure (", sizeof(LedgerInfo), " bytes) at offset ", offset);
-            return initialOffset; // Return original offset on error
-        }
+      // Check bounds for LedgerInfo
+      if (offset + sizeof(LedgerInfo) > fileSize) {
+        LOGE("Not enough data remaining (",
+             (fileSize > offset ? fileSize - offset : 0),
+             " bytes) for LedgerInfo structure (", sizeof(LedgerInfo),
+             " bytes) at offset ", offset);
+        return initialOffset; // Return original offset on error
+      }
 
-        LedgerInfo info;
-        std::memcpy(&info, data + offset, sizeof(LedgerInfo));
-        offset += sizeof(LedgerInfo);
-        stats.currentOffset = offset;
+      std::memcpy(&info, data + offset, sizeof(LedgerInfo));
+      offset += sizeof(LedgerInfo);
+      stats.currentOffset = offset;
 
-        // Sanity check ledger sequence
-        if (info.sequence < header.min_ledger || info.sequence > header.max_ledger) {
-            LOGW("Ledger sequence ", info.sequence, " is outside the expected range [", header.min_ledger, ", ",
-                 header.max_ledger, "] specified in the header.");
-        }
+      // Sanity check ledger sequence
+      if (info.sequence < header.min_ledger ||
+          info.sequence > header.max_ledger) {
+        LOGW("Ledger sequence ", info.sequence,
+             " is outside the expected range [", header.min_ledger, ", ",
+             header.max_ledger, "] specified in the header.");
+      }
 
-        LOGI("--- Processing Ledger ", info.sequence, " ---");
-        LOGI("  Ledger Hash:      ", Hash256(info.hash).hex()); // Using efficient macro
-        LOGI("  Parent Hash:      ", Hash256(info.parentHash).hex());
-        LOGI("  AccountState Hash:", Hash256(info.accountHash).hex());
-        LOGI("  Transaction Hash: ", Hash256(info.txHash).hex());
-        LOGI("  Close Time:       ", utils::format_ripple_time(info.closeTime));
-        LOGI("  Drops:            ", info.drops);
-        LOGI("  Close Flags:      ", info.closeFlags);
-        LOGI("  Offset at start:  ", initialOffset);
+      LOGI("--- Processing Ledger ", info.sequence, " ---");
+      LOGI("  Ledger Hash:      ",
+           Hash256(info.hash).hex()); // Using efficient macro
+      LOGI("  Parent Hash:      ", Hash256(info.parentHash).hex());
+      LOGI("  AccountState Hash:", Hash256(info.accountHash).hex());
+      LOGI("  Transaction Hash: ", Hash256(info.txHash).hex());
+      LOGI("  Close Time:       ", utils::format_ripple_time(info.closeTime));
+      LOGI("  Drops:            ", info.drops);
+      LOGI("  Close Flags:      ", info.closeFlags);
+      LOGI("  Offset at start:  ", initialOffset);
 
+      // Process Account State Map
+      bool isFirstLedger = (info.sequence == header.min_ledger);
+      if (isFirstLedger) {
+        LOGI("Initializing new State SHAMap for first ledger ", info.sequence);
+        stateMap = SHAMap(tnACCOUNT_STATE); // Recreate for the first ledger
+      } else {
+        LOGI("Processing State Map delta for ledger ", info.sequence);
+        // stateMap persists from previous ledger
+      }
 
-        // Process Account State Map
-        bool isFirstLedger = (info.sequence == header.min_ledger);
-        if (isFirstLedger) {
-            LOGI("Initializing new State SHAMap for first ledger ", info.sequence);
-            stateMap = SHAMap(tnACCOUNT_STATE); // Recreate for the first ledger
-        } else {
-            LOGI("Processing State Map delta for ledger ", info.sequence);
-            // stateMap persists from previous ledger
-        }
+      uint32_t stateNodesProcessed = 0;
+      size_t stateMapEndOffset = processMap(
+          offset, stateMap, stateNodesProcessed, true); // true = isStateMap
+      if (stateMapEndOffset == offset && stateNodesProcessed == 0 &&
+          offset != fileSize) {
+        // Check if no progress was made and not EOF
+        LOGE("Error processing state map data for ledger ", info.sequence,
+             ". No progress made from offset ", offset);
+        return initialOffset; // Return original offset to signal failure
+      }
+      offset = stateMapEndOffset;
+      stats.currentOffset = offset;
+      stats.stateNodesAdded += stateNodesProcessed; // Accumulate stats
+      LOGI("  State map processing finished. Nodes processed in this ledger: ",
+           stateNodesProcessed, ". New offset: ", offset);
 
-        uint32_t stateNodesProcessed = 0;
-        size_t stateMapEndOffset = processMap(offset, stateMap, stateNodesProcessed, true); // true = isStateMap
-        if (stateMapEndOffset == offset && stateNodesProcessed == 0 && offset != fileSize) {
-            // Check if no progress was made and not EOF
-            LOGE("Error processing state map data for ledger ", info.sequence, ". No progress made from offset ",
-                 offset);
-            return initialOffset; // Return original offset to signal failure
-        }
-        offset = stateMapEndOffset;
-        stats.currentOffset = offset;
-        stats.stateNodesAdded += stateNodesProcessed; // Accumulate stats
-        LOGI("  State map processing finished. Nodes processed in this ledger: ", stateNodesProcessed,
-             ". New offset: ", offset);
+      // Process Transaction Map (always created fresh for each ledger)
+      LOGI("Processing Transaction Map for ledger ", info.sequence);
+      txMap = SHAMap(tnTRANSACTION_MD); // Create fresh transaction map
+      uint32_t txNodesProcessed = 0;
+      size_t txMapEndOffset = processMap(offset, txMap, txNodesProcessed,
+                                         false); // false = not isStateMap
+      if (txMapEndOffset == offset && txNodesProcessed == 0 &&
+          offset != fileSize) {
+        LOGE("Error processing transaction map data for ledger ", info.sequence,
+             ". No progress made from offset ", offset);
+        return initialOffset; // Signal failure
+      }
+      offset = txMapEndOffset;
+      stats.currentOffset = offset;
+      stats.txNodesAdded += txNodesProcessed; // Accumulate stats
+      LOGI("  Transaction map processing finished. Nodes processed: ",
+           txNodesProcessed, ". Final offset for ledger: ", offset);
 
+      // Verify Hashes
+      LOGI("Verifying map hashes for ledger ", info.sequence);
+      verifyMapHash(stateMap, Hash256(info.accountHash), "AccountState",
+                    info.sequence);
+      verifyMapHash(txMap, Hash256(info.txHash), "Transaction", info.sequence);
 
-        // Process Transaction Map (always created fresh for each ledger)
-        LOGI("Processing Transaction Map for ledger ", info.sequence);
-        txMap = SHAMap(tnTRANSACTION_MD); // Create fresh transaction map
-        uint32_t txNodesProcessed = 0;
-        size_t txMapEndOffset = processMap(offset, txMap, txNodesProcessed, false); // false = not isStateMap
-        if (txMapEndOffset == offset && txNodesProcessed == 0 && offset != fileSize) {
-            LOGE("Error processing transaction map data for ledger ", info.sequence,
-                 ". No progress made from offset ", offset);
-            return initialOffset; // Signal failure
-        }
-        offset = txMapEndOffset;
-        stats.currentOffset = offset;
-        stats.txNodesAdded += txNodesProcessed; // Accumulate stats
-        LOGI("  Transaction map processing finished. Nodes processed: ", txNodesProcessed,
-             ". Final offset for ledger: ", offset);
-
-        // Verify Hashes
-        LOGI("Verifying map hashes for ledger ", info.sequence);
-        verifyMapHash(stateMap, Hash256(info.accountHash), "AccountState", info.sequence);
-        verifyMapHash(txMap, Hash256(info.txHash), "Transaction", info.sequence);
-
-        stats.ledgersProcessed++;
-        // LOG_INFO("--- Completed Ledger ", info.sequence, " ---");
-        return offset; // Return the final offset for this ledger
+      stats.ledgersProcessed++;
+      // LOG_INFO("--- Completed Ledger ", info.sequence, " ---");
+      return offset; // Return the final offset for this ledger
     }
 
     // Helper to verify map hashes
@@ -380,6 +387,14 @@ public:
 
     bool processFile() {
         LOGI("Starting CATL file processing...");
+
+        auto num_ledgers = 0;
+        std::unordered_map<
+            uint32_t,
+            std::shared_ptr<std::tuple<LedgerInfo, std::shared_ptr<SHAMap>,
+                                       std::shared_ptr<SHAMap>>>>
+            accountStates;
+
         try {
             if (!data || fileSize == 0) {
                 LOGE("No data available to process. File not mapped correctly?");
@@ -411,7 +426,17 @@ public:
                     break;
                 }
 
-                size_t nextOffset = processLedger(currentFileOffset);
+                LedgerInfo info;
+                size_t nextOffset = processLedger(currentFileOffset, info);
+
+                accountStates[info.sequence] = std::make_shared<
+                    std::tuple<LedgerInfo, std::shared_ptr<SHAMap>,
+                               std::shared_ptr<SHAMap>>>(
+                    std::make_tuple(info, stateMap.snapshot(),
+                                    std::make_shared<SHAMap>(txMap)));
+                stateMap = *stateMap.snapshot();
+
+                num_ledgers++;
 
                 if (nextOffset == currentFileOffset) {
                     // No progress was made, indicates an error in processLedger
@@ -452,6 +477,23 @@ public:
             LOGI("Hash Verifications:   ", stats.successfulHashVerifications, " Succeeded, ",
                  stats.failedHashVerifications, " Failed");
             LOGI("--- End Summary ---");
+
+            for (auto const &accountState : accountStates) {
+              auto const &ledgerInfo = std::get<0>(*accountState.second);
+              auto const &stateMap = std::get<1>(*accountState.second);
+              auto const &txMap = std::get<2>(*accountState.second);
+              LOGI("Ledger Info: ", ledgerInfo.sequence);
+              LOGI("State Map hash: ", stateMap->getHash().hex());
+              LOGI("Transaction Map hash: ", txMap->getHash().hex());
+              if (memcmp(ledgerInfo.accountHash, stateMap->getHash().data(),
+                         Hash256::size()) != 0) {
+                LOGE("State map hash does not match ledger info hash");
+              }
+              if (memcmp(ledgerInfo.txHash, txMap->getHash().data(),
+                         Hash256::size()) != 0) {
+                LOGE("Transaction map hash does not match ledger info hash");
+              }
+            }
 
             // Return true if processing completed, potentially with warnings/hash failures
             // Return false only if a fatal error occurred preventing continuation.
