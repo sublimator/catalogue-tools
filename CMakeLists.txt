@@ -34,6 +34,8 @@ set(SOURCES_HASHER
         hasher/shamap.cpp
         hasher/utils.cpp
         hasher/logger.cpp
+        hasher/ledger.h
+        hasher/ledger.cpp
 )
 
 # Create executables

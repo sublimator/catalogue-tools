@@ -45,12 +45,6 @@ DisableFormat:   false
 ExperimentalAutoDetectBinPacking: false
 ForEachMacros:   [ Q_FOREACH,  BOOST_FOREACH ]
 IncludeCategories:
-  - Regex:           '^<(BeastConfig)'
-    Priority:        0
-  - Regex:           '^<(ripple)/'
-    Priority:        2
-  - Regex:           '^<(boost)/'
-    Priority:        3
   - Regex:           '.*'
     Priority:        4
 IncludeIsMainRegex: '$'

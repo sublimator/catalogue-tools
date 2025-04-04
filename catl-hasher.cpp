@@ -591,7 +591,6 @@ public:
     {
         LOGI("Starting CATL file processing...");
 
-        auto num_ledgers = 0;
         std::unordered_map<
             uint32_t,
             std::shared_ptr<std::tuple<
@@ -661,8 +660,6 @@ public:
                         stateMap.snapshot(),
                         std::make_shared<SHAMap>(txMap)));
                 stateMap = *stateMap.snapshot();
-
-                num_ledgers++;
 
                 if (nextOffset == currentFileOffset)
                 {
