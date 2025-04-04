@@ -631,7 +631,7 @@ public:
 
             while (currentFileOffset < fileSize)
             {
-                size_t nextOffset = processLedger(currentFileOffset, info);
+                size_t nextOffset = processLedger(currentFileOffset);
 
                 ledgerStore.addLedger(std::make_shared<Ledger>(
                     data + currentFileOffset,
@@ -723,17 +723,18 @@ public:
             {
                 if (const auto ledger = ledgerStore.getLedger(ledgerSeq))
                 {
-                    LOGI("Ledger Info: ", ledger->header().sequence());
-                    LOGI(
-                        "State Map hash: ",
-                        ledger->getStateMap()->getHash().hex());
-                    LOGI(
-                        "Transaction Map hash: ",
-                        ledger->getTxMap()->getHash().hex());
                     auto valid_ledger = ledger->validate();
                     LOGI("Valid ledger:", valid_ledger ? "yes" : "no");
                     if (!valid_ledger)
                     {
+                        LOGE("Ledger Info: ", ledger->header().sequence());
+                        LOGE(
+                            "State Map hash: ",
+                            ledger->getStateMap()->getHash().hex());
+                        LOGE(
+                            "Transaction Map hash: ",
+                            ledger->getTxMap()->getHash().hex());
+
                         throw std::runtime_error(
                             std::string("Invalid ledger: ") +
                             ledger->header().toString());
