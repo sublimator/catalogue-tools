@@ -17,6 +17,9 @@ namespace utils {
 std::string
 format_ripple_time(uint64_t netClockTime);
 
+uint32_t
+to_unix_time(uint32_t netClockTime);
+
 // Add more utility functions here as needed
 
 }  // namespace utils

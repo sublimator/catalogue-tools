@@ -726,7 +726,6 @@ public:
                 if (const auto ledger = ledgerStore->getLedger(ledgerSeq))
                 {
                     auto valid_ledger = ledger->validate();
-                    LOGI("Valid ledger:", valid_ledger ? "yes" : "no");
                     if (!valid_ledger)
                     {
                         LOGE("Ledger Info: ", ledger->header().sequence());

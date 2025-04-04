@@ -5,6 +5,8 @@
 
 #include "hasher/http.h"
 
+#include "utils.h"
+
 // Session implementation
 HttpServer::Session::Session(
     tcp::socket socket,
@@ -99,19 +101,21 @@ HttpServer::Session::handle_ledger(const std::string& path)
             std::ostringstream json;
 
             json << "{\n";
-            json << "  \"sequence\": " << header.sequence() << ",\n";
-            json << "  \"hash\": \"" << header.hash().hex() << "\",\n";
-            json << "  \"parentHash\": \"" << header.parentHash().hex()
+            json << "  \"ledger_index\": " << header.sequence() << ",\n";
+            json << "  \"ledger_hash\": \"" << header.hash().hex() << "\",\n";
+            json << "  \"parent_hash\": \"" << header.parentHash().hex()
                  << "\",\n";
-            json << "  \"accountHash\": \"" << header.accountHash().hex()
+            json << "  \"account_hash\": \"" << header.accountHash().hex()
                  << "\",\n";
-            json << "  \"txHash\": \"" << header.txHash().hex() << "\",\n";
-            json << "  \"closeTime\": " << header.closeTime() << ",\n";
-            json << "  \"drops\": " << header.drops() << ",\n";
-            json << "  \"closeFlags\": "
-                 << static_cast<int>(header.closeFlags()) << ",\n";
-            json << "  \"validated\": "
-                 << (ledger->validate() ? "true" : "false") << "\n";
+            json << "  \"transaction_hash\": \"" << header.txHash().hex()
+                 << "\",\n";
+            json << "  \"close_time_unix\": "
+                 << utils::to_unix_time(header.closeTime()) << ",\n";
+            json << "  \"close_time_human\": \""
+                 << utils::format_ripple_time(header.closeTime()) << "\",\n";
+            json << "  \"total_coins\": " << header.drops() << ",\n";
+            json << "  \"close_flags\": "
+                 << static_cast<int>(header.closeFlags()) << "\n";
             json << "}";
 
             res_.result(http::status::ok);

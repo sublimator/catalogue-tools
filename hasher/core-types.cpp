@@ -3,7 +3,7 @@
 void
 slice_hex(const Slice sl, std::string& result)
 {
-    static constexpr char hexChars[] = "0123456789abcdef";
+    static constexpr char hexChars[] = "0123456789ABCDEF";  // upper case
     result.reserve(sl.size() * 2);
     const uint8_t* bytes = sl.data();
     for (size_t i = 0; i < sl.size(); ++i)
