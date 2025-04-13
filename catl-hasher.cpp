@@ -36,6 +36,7 @@ private:
     // Maps for tracking state
     SHAMap stateMap;
     SHAMap txMap;
+    std::shared_ptr<LedgerStore> ledgerStore;
 
     // Statistics
     struct Stats
@@ -67,6 +68,7 @@ private:
 
         std::memcpy(&header, data, sizeof(CATLHeader));
         stats.currentOffset = sizeof(CATLHeader);
+        // header.max_ledger = 3'000'000; // TODO: hackery
 
         if (header.magic != CATL)
         {
@@ -498,11 +500,12 @@ private:
 
 public:
     // Constructor uses initializer list and handles file opening errors
-    CATLHasher(const std::string& filename)
+    explicit CATLHasher(const std::string& filename)
         : header()
         , stateMap(tnACCOUNT_STATE)
         ,  // Initialize maps here
         txMap(tnTRANSACTION_MD)
+        , ledgerStore(std::make_shared<LedgerStore>())
     {
         LOGI("Attempting to open and map file: ", filename);
         try
@@ -594,9 +597,6 @@ public:
     {
         LOGI("Starting CATL file processing...");
 
-        std::shared_ptr<LedgerStore> ledgerStore =
-            std::make_shared<LedgerStore>();
-
         try
         {
             if (!data || fileSize == 0)
@@ -635,10 +635,15 @@ public:
             {
                 size_t nextOffset = processLedger(currentFileOffset);
 
-                ledgerStore->add_ledger(std::make_shared<Ledger>(
+                auto ledger = std::make_shared<Ledger>(
                     data + currentFileOffset,
                     stateMap.snapshot(),
-                    std::make_shared<SHAMap>(txMap)));
+                    std::make_shared<SHAMap>(txMap));
+                if (ledger->header().sequence() == header.max_ledger)
+                {
+                    break;
+                }
+                ledgerStore->add_ledger(ledger);
 
                 if (nextOffset == currentFileOffset)
                 {
@@ -743,9 +748,6 @@ public:
                 }
             }
 
-            HttpServer httpServer(ledgerStore);
-            httpServer.run(4, true);
-
             // Return true if processing completed, potentially with
             // warnings/hash failures Return false only if a fatal error
             // occurred preventing continuation. Consider hash failures fatal?
@@ -777,6 +779,13 @@ public:
                 stats.currentOffset);
             return false;
         }
+    }
+
+    void
+    startHttpServer() const
+    {
+        HttpServer httpServer(ledgerStore);
+        httpServer.run(4, true);
     }
 };
 
@@ -856,11 +865,13 @@ main(int argc, char* argv[])
     auto startTime = std::chrono::high_resolution_clock::now();
     int exitCode = 1;  // Default to failure
 
+    std::optional<CATLHasher> hasher = std::nullopt;
+
     try
     {
         // Pass only filename, verbose removed
-        CATLHasher hasher(inputFile);
-        bool result = hasher.processFile();
+        hasher.emplace(inputFile);
+        bool result = hasher->processFile();
         exitCode = result ? 0 : 1;  // 0 on success, 1 on failure
     }
     catch (const std::exception& e)
@@ -887,6 +898,11 @@ main(int argc, char* argv[])
     timeOSS << "Execution completed in " << std::fixed << std::setprecision(3)
             << seconds << " seconds (" << duration.count() << " ms)";
     LOGW(timeOSS.str());
+
+    if (hasher)
+    {
+        hasher->startHttpServer();
+    }
 
     return exitCode;
 }

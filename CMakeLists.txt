@@ -39,24 +39,29 @@ set(SOURCES_HASHER
         hasher/http.cpp
 )
 
+set(SOURCES_DECOMP
+        catl-decomp.cpp
+)
+
 # Create executables
 add_executable(catl-validator ${SOURCES_VALIDATOR})
 add_executable(catl-hasher ${SOURCES_HASHER})
+add_executable(catl-decomp ${SOURCES_DECOMP})
 
 # Add include directories
-foreach (target catl-validator catl-hasher)
+foreach (target catl-validator catl-hasher catl-decomp)
     target_include_directories(${target} PRIVATE
             ${BOOST_ROOT}
             ${OPENSSL_INCLUDE_DIR}
             ${ZLIB_INCLUDE_DIRS}
-            ${CMAKE_CURRENT_SOURCE_DIR}  # This ensures the targets can find  the headers
+            ${CMAKE_CURRENT_SOURCE_DIR}  # This ensures the targets can find the headers
     )
 endforeach ()
 
 # Platform-specific configurations
 if (APPLE)
     # For macOS, use static libraries directly
-    foreach (target catl-validator catl-hasher)
+    foreach (target catl-validator catl-hasher catl-decomp)
         target_link_libraries(${target} PRIVATE
                 ${BOOST_ROOT}/stage/lib/libboost_iostreams.a
                 ${BOOST_ROOT}/stage/lib/libboost_filesystem.a
@@ -66,10 +71,11 @@ if (APPLE)
     endforeach ()
 else ()
     # For Linux, use dynamic libraries with static linking option
-    foreach (target catl-validator catl-hasher)
+    foreach (target catl-validator catl-hasher catl-decomp)
         target_link_libraries(${target} PRIVATE
                 -static
                 boost_iostreams
+                boost_filesystem
                 ${OPENSSL_LIBRARIES}
                 ${ZLIB_LIBRARIES}
         )
@@ -77,7 +83,7 @@ else ()
 endif ()
 
 # Add compiler options
-foreach (target catl-validator catl-hasher)
+foreach (target catl-validator catl-hasher catl-decomp)
     target_compile_options(${target} PRIVATE
             -Wall -Wextra -O2 -Wno-deprecated-declarations
     )
