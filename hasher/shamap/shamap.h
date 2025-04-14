@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "hasher/core-types.h"
+#include "hasher/shamap/shamap-errors.h"
 
 enum SHAMapNodeType : uint8_t {
     tnINNER = 1,
@@ -18,58 +19,6 @@ enum SHAMapNodeType : uint8_t {
     tnACCOUNT_STATE = 4,
     tnREMOVE = 254,
     tnTERMINAL = 255  // special type to mark the end of a serialization stream
-};
-
-//----------------------------------------------------------
-// Custom Exception Classes
-//----------------------------------------------------------
-class SHAMapException : public std::runtime_error
-{
-public:
-    explicit SHAMapException(const std::string& message);
-};
-
-class InvalidDepthException : public SHAMapException
-{
-public:
-    explicit InvalidDepthException(int depth, size_t maxAllowed);
-    int
-    depth() const;
-    size_t
-    max_allowed() const;
-
-private:
-    int depth_;
-    size_t maxAllowed_;
-};
-
-class InvalidBranchException : public SHAMapException
-{
-public:
-    explicit InvalidBranchException(int branch);
-    int
-    branch() const;
-
-private:
-    int branch_;
-};
-
-class NullNodeException : public SHAMapException
-{
-public:
-    explicit NullNodeException(const std::string& context);
-};
-
-class NullItemException : public SHAMapException
-{
-public:
-    explicit NullItemException();
-};
-
-class HashCalculationException : public SHAMapException
-{
-public:
-    explicit HashCalculationException(const std::string& reason);
 };
 
 /**

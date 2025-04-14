@@ -22,7 +22,7 @@
 #include "hasher/ledger.h"
 #include "hasher/log-macros.h"
 #include "hasher/logger.h"
-#include "hasher/shamap.h"
+#include "hasher/shamap/shamap.h"
 #include "hasher/utils.h"
 
 class CATLHasher

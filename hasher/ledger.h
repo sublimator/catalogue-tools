@@ -5,7 +5,7 @@
 #include <unordered_map>
 
 #include "hasher/core-types.h"
-#include "hasher/shamap.h"
+#include "hasher/shamap/shamap.h"
 
 /**
  * LedgerHeaderView - Zero-copy view into ledger headers

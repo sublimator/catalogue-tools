@@ -11,7 +11,8 @@
       "include": [
         "CMakeLists.txt",
         "catl-hasher.cpp",
-        "hasher/**/*"
+        "hasher/**/*.cpp",
+        "hasher/**/*.h"
       ]
     }
   }
