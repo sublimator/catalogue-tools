@@ -30,22 +30,14 @@ set(SOURCES_VALIDATOR
 
 # Recursively find all .cpp files in hasher/ and its subdirectories
 file(GLOB_RECURSE HASHER_SOURCES CONFIGURE_DEPENDS
-        "hasher/**/*.cpp"
-        "hasher/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/hasher/**/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/hasher/*.cpp"
 )
 
 set(SOURCES_HASHER
         catl-hasher.cpp
         ${HASHER_SOURCES}
 )
-
-# After defining SOURCES_HASHER
-message(STATUS "SOURCES_HASHER contains: ${SOURCES_HASHER}")
-
-# After the file(GLOB_RECURSE...) line
-message(STATUS "HASHER_SOURCES contains: ${HASHER_SOURCES}")
-
-
 
 set(SOURCES_DECOMP
         catl-decomp.cpp

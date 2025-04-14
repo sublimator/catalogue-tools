@@ -1,8 +1,9 @@
 #include <openssl/evp.h>
 
-#include "hasher/catalogue-consts.h"
 #include "hasher/shamap/shamap-errors.h"
 #include "hasher/shamap/shamap-leafnode.h"
+
+#include "hasher/shamap/shamap-hashprefix.h"
 
 //----------------------------------------------------------
 // SHAMapLeafNode Implementation

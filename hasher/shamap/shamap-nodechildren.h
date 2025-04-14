@@ -120,21 +120,21 @@ public:
 
     // Core operations
     boost::intrusive_ptr<SHAMapTreeNode>
-    getChild(int branch) const;
+    get_child(int branch) const;
     void
-    setChild(int branch, boost::intrusive_ptr<SHAMapTreeNode> child);
+    set_child(int branch, boost::intrusive_ptr<SHAMapTreeNode> child);
     bool
-    hasChild(int branch) const
+    has_child(int branch) const
     {
         return (branchMask_ & (1 << branch)) != 0;
     }
     int
-    getChildCount() const
+    get_child_count() const
     {
         return __builtin_popcount(branchMask_);
     }
     uint16_t
-    getBranchMask() const
+    get_branch_mask() const
     {
         return branchMask_;
     }
@@ -143,7 +143,7 @@ public:
     void
     canonicalize();
     bool
-    isCanonical() const
+    is_canonical() const
     {
         return canonicalized_;
     }

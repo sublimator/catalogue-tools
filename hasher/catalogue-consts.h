@@ -13,17 +13,6 @@ static constexpr uint16_t CATALOGUE_VERSION_MASK = 0x00FF;
 static constexpr uint16_t CATALOGUE_COMPRESS_LEVEL_MASK = 0x0F00;
 
 /**
- * Hash prefixes from rippled
- */
-namespace HashPrefix {
-// TODO: just use std::uint32_t enum but need to handle endian flip
-// when passing to hasher
-constexpr std::array<unsigned char, 4> txNode = {'S', 'N', 'D', 0x00};
-constexpr std::array<unsigned char, 4> leafNode = {'M', 'L', 'N', 0x00};
-constexpr std::array<unsigned char, 4> innerNode = {'M', 'I', 'N', 0x00};
-}  // namespace HashPrefix
-
-/**
  * Header structures for CATL file format
  */
 #pragma pack(push, 1)

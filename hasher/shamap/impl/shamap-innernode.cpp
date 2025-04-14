@@ -6,6 +6,7 @@
 #include "hasher/catalogue-consts.h"
 #include "hasher/logger.h"
 #include "hasher/shamap/shamap-errors.h"
+#include "hasher/shamap/shamap-hashprefix.h"
 
 //----------------------------------------------------------
 // SHAMapInnerNode Implementation
@@ -47,7 +48,7 @@ SHAMapInnerNode::get_depth() const
 void
 SHAMapInnerNode::update_hash()
 {
-    uint16_t branchMask = children_->getBranchMask();
+    uint16_t branchMask = children_->get_branch_mask();
 
     if (branchMask == 0)
     {
@@ -77,7 +78,7 @@ SHAMapInnerNode::update_hash()
     for (int i = 0; i < 16; i++)
     {
         const uint8_t* hashData = zeroHash.data();
-        auto child = children_->getChild(i);
+        auto child = children_->get_child(i);
         if (child)
         {
             hashData = child->get_hash().data();  // Recursive hash calculation
@@ -120,14 +121,14 @@ SHAMapInnerNode::set_child(
     }
 
     // Check if node is canonicalized - if yes, we need to make a copy first
-    if (children_->isCanonical())
+    if (children_->is_canonical())
     {
         // Create a non-canonicalized copy of children
         children_ = children_->copy();
     }
 
     // Now safe to modify
-    children_->setChild(branch, child);
+    children_->set_child(branch, child);
     invalidate_hash();  // Mark hash as invalid
     return true;
 }
@@ -140,7 +141,7 @@ SHAMapInnerNode::get_child(int branch) const
         throw InvalidBranchException(branch);
     }
 
-    return children_->getChild(branch);
+    return children_->get_child(branch);
 }
 
 bool
@@ -151,19 +152,19 @@ SHAMapInnerNode::has_child(int branch) const
         throw InvalidBranchException(branch);
     }
 
-    return children_->hasChild(branch);
+    return children_->has_child(branch);
 }
 
 int
 SHAMapInnerNode::get_branch_count() const
 {
-    return children_->getChildCount();
+    return children_->get_child_count();
 }
 
 uint16_t
 SHAMapInnerNode::get_branch_mask() const
 {
-    return children_->getBranchMask();
+    return children_->get_branch_mask();
 }
 
 boost::intrusive_ptr<SHAMapLeafNode>
@@ -175,9 +176,9 @@ SHAMapInnerNode::get_only_child_leaf() const
     // Iterate through all branches
     for (int i = 0; i < 16; i++)
     {
-        if (children_->hasChild(i))
+        if (children_->has_child(i))
         {
-            auto child = children_->getChild(i);
+            auto child = children_->get_child(i);
             if (child->is_inner())
             {
                 return nullptr;  // Found inner node, not a leaf-only node

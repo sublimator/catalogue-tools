@@ -25,7 +25,7 @@ NodeChildren::~NodeChildren()
 }
 
 boost::intrusive_ptr<SHAMapTreeNode>
-NodeChildren::getChild(int branch) const
+NodeChildren::get_child(int branch) const
 {
     if (branch < 0 || branch >= 16)
         return nullptr;
@@ -37,7 +37,7 @@ NodeChildren::getChild(int branch) const
 }
 
 void
-NodeChildren::setChild(int branch, boost::intrusive_ptr<SHAMapTreeNode> child)
+NodeChildren::set_child(int branch, boost::intrusive_ptr<SHAMapTreeNode> child)
 {
     if (branch < 0 || branch >= 16)
         return;

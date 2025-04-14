@@ -17,7 +17,7 @@ private:
     uint8_t depth_ = 0;
 
     // CoW support
-    std::atomic<int> version{0};
+    int version{0};
     bool do_cow_ = false;
 
 public:
@@ -52,12 +52,12 @@ protected:
     int
     get_version() const
     {
-        return version.load(std::memory_order_acquire);
+        return version;  // .load(std::memory_order_acquire);
     }
     void
     set_version(int v)
     {
-        version.store(v, std::memory_order_release);
+        version = v;  //.store(v, std::memory_order_release);
     }
     bool
     is_cow_enabled() const
