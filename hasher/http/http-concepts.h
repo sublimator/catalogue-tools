@@ -1,27 +1,6 @@
 #pragma once
 
-#include <concepts>
 #include <string>
-
-// Core concepts and interfaces without ANY Beast dependencies
-
-// Concept for any HTTP response type
-template <typename T>
-concept HttpResponseConcept = requires(T res, int code, const std::string& str)
-{
-    {
-        res.setStatus(code)
-    }
-    ->std::same_as<void>;
-    {
-        res.setBody(str)
-    }
-    ->std::same_as<void>;
-    {
-        res.setHeader(str, str)
-    }
-    ->std::same_as<void>;
-};
 
 // Pure abstract response interface for type erasure
 class AbstractResponse
