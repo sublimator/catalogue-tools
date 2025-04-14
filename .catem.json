@@ -14,6 +14,12 @@
         "hasher/**/*.cpp",
         "hasher/**/*.h"
       ]
+    },
+    "hasher-http": {
+      "include": [
+        "hasher/http.cpp",
+        "hasher/http.h"
+      ]
     }
   }
 }

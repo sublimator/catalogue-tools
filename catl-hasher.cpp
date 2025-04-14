@@ -18,7 +18,8 @@
 
 #include "hasher/catalogue-consts.h"
 #include "hasher/core-types.h"
-#include "hasher/http.h"
+#include "hasher/http-handler.h"
+#include "hasher/http-server.h"
 #include "hasher/ledger.h"
 #include "hasher/log-macros.h"
 #include "hasher/logger.h"
@@ -68,7 +69,7 @@ private:
 
         std::memcpy(&header, data, sizeof(CATLHeader));
         stats.currentOffset = sizeof(CATLHeader);
-        // header.max_ledger = 3'000'000; // TODO: hackery
+        header.max_ledger = 10'000;  // TODO: hackery
 
         if (header.magic != CATL)
         {
@@ -635,8 +636,9 @@ public:
                 LedgerInfo info = {};
                 size_t nextOffset = processLedger(currentFileOffset, info);
 
+                constexpr int every = 1;  // 0'000;
                 // TOOD: configurable
-                if (info.sequence % 10'000 == 0)
+                if (info.sequence % every == 0)
                 {
                     auto ledger = std::make_shared<Ledger>(
                         data + currentFileOffset,
@@ -793,8 +795,9 @@ public:
     void
     startHttpServer() const
     {
-        HttpServer httpServer(ledgerStore);
-        httpServer.run(4, true);
+        auto handler = std::make_shared<LedgerRequestHandler>(ledgerStore);
+        HttpServer httpServer(handler);
+        httpServer.run(8, true);
     }
 };
 
