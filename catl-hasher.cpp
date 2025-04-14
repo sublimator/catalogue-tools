@@ -332,7 +332,7 @@ private:
 
     // Process a single ledger
     size_t
-    processLedger(size_t offset)
+    processLedger(size_t offset, LedgerInfo& info)
     {
         stats.currentOffset = offset;
         size_t initialOffset = offset;
@@ -350,7 +350,6 @@ private:
             return initialOffset;  // Return original offset on error
         }
 
-        LedgerInfo info;
         std::memcpy(&info, data + offset, sizeof(LedgerInfo));
         offset += sizeof(LedgerInfo);
         stats.currentOffset = offset;
@@ -633,17 +632,27 @@ public:
 
             while (currentFileOffset < fileSize)
             {
-                size_t nextOffset = processLedger(currentFileOffset);
+                LedgerInfo info = {};
+                size_t nextOffset = processLedger(currentFileOffset, info);
 
-                auto ledger = std::make_shared<Ledger>(
-                    data + currentFileOffset,
-                    stateMap.snapshot(),
-                    std::make_shared<SHAMap>(txMap));
-                if (ledger->header().sequence() == header.max_ledger)
+                // TOOD: configurable
+                if (info.sequence % 10'000 == 0)
+                {
+                    auto ledger = std::make_shared<Ledger>(
+                        data + currentFileOffset,
+                        // TODO: configurable snapshots
+                        stateMap.snapshot(),
+                        std::make_shared<SHAMap>(txMap));
+                    // TODO: track only some ledgers, every 1000th or something
+                    // and then recompute lazily via deltas
+                    ledgerStore->add_ledger(ledger);
+                }
+
+                // Stop processing if we've reached the end of the ledger range
+                if (info.sequence == header.max_ledger)
                 {
                     break;
                 }
-                ledgerStore->add_ledger(ledger);
 
                 if (nextOffset == currentFileOffset)
                 {

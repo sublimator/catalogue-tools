@@ -348,9 +348,7 @@ public:
     bool
     is_inner() const override;
     uint8_t
-    getDepth() const;
-    void
-    setDepth(uint8_t newDepth);
+    get_depth() const;
     void
     update_hash() override;
     bool

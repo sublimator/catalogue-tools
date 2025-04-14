@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <sstream>
+#include <utility>
 
 // ---------- LedgerHeaderView Implementation ----------
 
@@ -91,7 +92,7 @@ Ledger::Ledger(
     const uint8_t* headerData,
     std::shared_ptr<SHAMap> state,
     std::shared_ptr<SHAMap> tx)
-    : headerView(headerData), stateMap(state), txMap(tx)
+    : headerView(headerData), stateMap(std::move(state)), txMap(std::move(tx))
 {
 }
 

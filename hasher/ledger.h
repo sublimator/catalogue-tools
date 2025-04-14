@@ -96,6 +96,7 @@ public:
     // Core methods
     void
     add_ledger(const std::shared_ptr<Ledger>& ledger);
+
     std::shared_ptr<Ledger>
     get_ledger(uint32_t sequence) const;
 

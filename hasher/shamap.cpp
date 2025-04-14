@@ -394,15 +394,9 @@ SHAMapInnerNode::is_inner() const
 }
 
 uint8_t
-SHAMapInnerNode::getDepth() const
+SHAMapInnerNode::get_depth() const
 {
     return depth_;
-}
-
-void
-SHAMapInnerNode::setDepth(uint8_t newDepth)
-{
-    depth_ = newDepth;
 }
 
 void
@@ -607,7 +601,7 @@ PathFinder::find_path(boost::intrusive_ptr<SHAMapInnerNode> root)
     boost::intrusive_ptr<SHAMapInnerNode> currentInner = root;
     while (true)
     {
-        int branch = select_branch(targetKey, currentInner->getDepth());
+        int branch = select_branch(targetKey, currentInner->get_depth());
         boost::intrusive_ptr<SHAMapTreeNode> child =
             currentInner->get_child(branch);
         if (!child)
@@ -789,7 +783,7 @@ PathFinder::dirty_or_copy_inners(int targetVersion)
             int branch = branches[i - 1];
             LOGD(
                 "Updating parent at depth ",
-                parent->getDepth(),
+                parent->get_depth(),
                 " branch ",
                 branch,
                 " to point to new copy");
@@ -983,7 +977,7 @@ SHAMap::add_item(boost::intrusive_ptr<MmapItem>& item, bool allowUpdate)
 
             LOGD(
                 "Adding/Updating leaf at depth ",
-                parent->getDepth() + 1,
+                parent->get_depth() + 1,
                 " branch ",
                 branch);
             auto newLeaf =
@@ -1018,7 +1012,7 @@ SHAMap::add_item(boost::intrusive_ptr<MmapItem>& item, bool allowUpdate)
             boost::intrusive_ptr<SHAMapInnerNode> currentParent = parent;
             int currentBranch = branch;
             uint8_t currentDepth =
-                parent->getDepth() + 1;  // Start depth below parent
+                parent->get_depth() + 1;  // Start depth below parent
 
             // Create first new inner node to replace the leaf
             auto newInner =
@@ -1169,7 +1163,7 @@ SHAMap::remove_item(const Key& key)
 
         LOGD(
             "Removing leaf at depth ",
-            parent->getDepth() + 1,
+            parent->get_depth() + 1,
             " branch ",
             branch);
         parent->set_child(branch, nullptr);  // Remove the leaf

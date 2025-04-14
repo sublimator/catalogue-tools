@@ -10,7 +10,7 @@
 #include <thread>
 #include <vector>
 
-#include "ledger.h"
+#include "hasher/ledger.h"
 
 namespace beast = boost::beast;
 namespace http = beast::http;
