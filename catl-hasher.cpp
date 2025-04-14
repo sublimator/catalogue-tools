@@ -18,8 +18,8 @@
 
 #include "hasher/catalogue-consts.h"
 #include "hasher/core-types.h"
-#include "hasher/http-handler.h"
-#include "hasher/http-server.h"
+#include "hasher/http/http-handler.h"
+#include "hasher/http/http-server.h"
 #include "hasher/ledger.h"
 #include "hasher/log-macros.h"
 #include "hasher/logger.h"

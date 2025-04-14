@@ -1,5 +1,5 @@
-#include "hasher/http-handler.h"
-#include "utils.h"
+#include "hasher/http/http-handler.h"
+#include "../utils.h"
 
 #include <regex>
 #include <sstream>

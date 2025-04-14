@@ -1,6 +1,6 @@
 #pragma once
 
-#include "hasher/http-concepts.h"
+#include "http-concepts.h"
 
 #include <memory>
 #include <string>
