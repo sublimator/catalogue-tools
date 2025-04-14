@@ -221,11 +221,155 @@ SHAMapLeafNode::copy() const
 }
 
 //----------------------------------------------------------
+// NodeChildren Implementation
+//----------------------------------------------------------
+
+NodeChildren::NodeChildren() : capacity_(16), canonicalized_(false)
+{
+    // Allocate full array of 16 slots
+    children_ = new boost::intrusive_ptr<SHAMapTreeNode>[16]();
+
+    // Initialize branch mapping for direct indexing
+    for (int i = 0; i < 16; i++)
+    {
+        branchToIndex_[i] = i;
+    }
+}
+
+NodeChildren::~NodeChildren()
+{
+    delete[] children_;
+}
+
+boost::intrusive_ptr<SHAMapTreeNode>
+NodeChildren::getChild(int branch) const
+{
+    if (branch < 0 || branch >= 16)
+        return nullptr;
+
+    if (!(branchMask_ & (1 << branch)))
+        return nullptr;
+
+    return children_[canonicalized_ ? branchToIndex_[branch] : branch];
+}
+
+void
+NodeChildren::setChild(int branch, boost::intrusive_ptr<SHAMapTreeNode> child)
+{
+    if (branch < 0 || branch >= 16)
+        return;
+
+    if (canonicalized_)
+    {
+        // IMPORTANT: Canonicalized nodes are immutable!
+        // This should never happen if used correctly
+        throw std::runtime_error("Attempted to modify a canonicalized node");
+    }
+
+    // Only non-canonicalized nodes can be modified
+    if (child)
+    {
+        children_[branch] = child;
+        branchMask_ |= (1 << branch);
+    }
+    else if (branchMask_ & (1 << branch))
+    {
+        children_[branch] = nullptr;
+        branchMask_ &= ~(1 << branch);
+    }
+}
+
+void
+NodeChildren::canonicalize()
+{
+    if (canonicalized_ || branchMask_ == 0)
+        return;
+
+    int childCount = __builtin_popcount(branchMask_);
+
+    // No need to canonicalize if nearly full
+    if (childCount >= 14)
+        return;
+
+    // Create optimally sized array
+    auto newChildren = new boost::intrusive_ptr<SHAMapTreeNode>[childCount];
+
+    // Initialize lookup table (all -1)
+    for (int i = 0; i < 16; i++)
+    {
+        branchToIndex_[i] = -1;
+    }
+
+    // Copy only non-null children
+    int newIndex = 0;
+    for (int i = 0; i < 16; i++)
+    {
+        if (branchMask_ & (1 << i))
+        {
+            newChildren[newIndex] = children_[i];
+            branchToIndex_[i] = newIndex++;
+        }
+    }
+
+    // Replace storage
+    delete[] children_;
+    children_ = newChildren;
+    capacity_ = childCount;
+    canonicalized_ = true;
+}
+
+std::unique_ptr<NodeChildren>
+NodeChildren::copy() const
+{
+    auto newChildren = std::make_unique<NodeChildren>();
+
+    // Copy branch mask
+    newChildren->branchMask_ = branchMask_;
+
+    // Always create a full non-canonicalized copy
+    for (int i = 0; i < 16; i++)
+    {
+        if (branchMask_ & (1 << i))
+        {
+            if (canonicalized_)
+            {
+                newChildren->children_[i] = children_[branchToIndex_[i]];
+            }
+            else
+            {
+                newChildren->children_[i] = children_[i];
+            }
+        }
+    }
+
+    // Never copy the canonicalized state!
+    newChildren->canonicalized_ = false;
+
+    return newChildren;
+}
+
+const boost::intrusive_ptr<SHAMapTreeNode>&
+NodeChildren::operator[](int branch) const
+{
+    static boost::intrusive_ptr<SHAMapTreeNode> nullPtr;
+
+    if (branch < 0 || branch >= 16 || !(branchMask_ & (1 << branch)))
+        return nullPtr;
+
+    return children_[canonicalized_ ? branchToIndex_[branch] : branch];
+}
+
+// NO NON-CONST OPERATOR[] - Canonicalized nodes are immutable!
+// This forces modifications to go through setChild which enforces immutability
+
+//----------------------------------------------------------
 // SHAMapInnerNode Implementation
 //----------------------------------------------------------
+
 SHAMapInnerNode::SHAMapInnerNode(uint8_t nodeDepth)
     : depth_(nodeDepth), version(0), do_cow_(false)
 {
+    children_ = std::make_unique<NodeChildren>();
 }
 
 SHAMapInnerNode::SHAMapInnerNode(
@@ -234,6 +378,7 @@ SHAMapInnerNode::SHAMapInnerNode(
     int initialVersion)
     : depth_(nodeDepth), version(initialVersion), do_cow_(isCopy)
 {
+    children_ = std::make_unique<NodeChildren>();
 }
 
 bool
@@ -263,36 +408,42 @@ SHAMapInnerNode::setDepth(uint8_t newDepth)
 void
 SHAMapInnerNode::update_hash()
 {
-    if (branch_mask_ == 0)
+    uint16_t branchMask = children_->getBranchMask();
+
+    if (branchMask == 0)
     {
         hash = Hash256::zero();
         hashValid = true;
         return;
     }
+
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
     if (!ctx)
         throw HashCalculationException("Failed to create EVP_MD_CTX");
+
     if (EVP_DigestInit_ex(ctx, EVP_sha512(), nullptr) != 1)
     {
         EVP_MD_CTX_free(ctx);
         throw HashCalculationException("Failed to initialize SHA-512 digest");
     }
+
     auto prefix = HashPrefix::innerNode;
     if (EVP_DigestUpdate(ctx, &prefix, sizeof(HashPrefix::innerNode)) != 1)
     {
         EVP_MD_CTX_free(ctx);
         throw HashCalculationException("Failed to update digest with prefix");
     }
+
     Hash256 zeroHash = Hash256::zero();
     for (int i = 0; i < 16; i++)
     {
         const uint8_t* hashData = zeroHash.data();
-        if (children_[i])
+        auto child = children_->getChild(i);
+        if (child)
         {
-            hashData = children_[i]
-                           ->get_hash()
-                           .data();  // Recursive call might trigger update
+            hashData = child->get_hash().data();  // Recursive hash calculation
         }
+
         if (EVP_DigestUpdate(ctx, hashData, Hash256::size()) != 1)
         {
             EVP_MD_CTX_free(ctx);
@@ -301,16 +452,22 @@ SHAMapInnerNode::update_hash()
                 std::to_string(i) + ")");
         }
     }
-    std::array<uint8_t, 64> fullHash;
+
+    std::array<uint8_t, 64> fullHash{};
     unsigned int hashLen = 0;
     if (EVP_DigestFinal_ex(ctx, fullHash.data(), &hashLen) != 1)
     {
         EVP_MD_CTX_free(ctx);
         throw HashCalculationException("Failed to finalize digest");
     }
+
     EVP_MD_CTX_free(ctx);
     hash = Hash256(reinterpret_cast<const uint8_t*>(fullHash.data()));
     hashValid = true;
+
+    // Once hash is calculated, canonicalize to save memory
+    // After this, the node becomes immutable until explicitly copied
+    children_->canonicalize();
 }
 
 bool
@@ -322,17 +479,17 @@ SHAMapInnerNode::set_child(
     {
         throw InvalidBranchException(branch);
     }
-    if (child)
+
+    // Check if node is canonicalized - if yes, we need to make a copy first
+    if (children_->isCanonical())
     {
-        children_[branch] = child;
-        branch_mask_ |= (1 << branch);
+        // Create a non-canonicalized copy of children
+        children_ = children_->copy();
     }
-    else
-    {
-        children_[branch] = nullptr;
-        branch_mask_ &= ~(1 << branch);
-    }
-    invalidate_hash();  // Mark self as invalid, not children
+
+    // Now safe to modify
+    children_->setChild(branch, child);
+    invalidate_hash();  // Mark hash as invalid
     return true;
 }
 
@@ -343,7 +500,8 @@ SHAMapInnerNode::get_child(int branch) const
     {
         throw InvalidBranchException(branch);
     }
-    return children_[branch];
+
+    return children_->getChild(branch);
 }
 
 bool
@@ -353,25 +511,20 @@ SHAMapInnerNode::has_child(int branch) const
     {
         throw InvalidBranchException(branch);
     }
-    return (branch_mask_ & (1 << branch)) != 0;
+
+    return children_->hasChild(branch);
 }
 
 int
 SHAMapInnerNode::get_branch_count() const
 {
-    int count = 0;
-    for (int i = 0; i < 16; i++)
-    {
-        if (has_child(i))
-            count++;
-    }
-    return count;
+    return children_->getChildCount();
 }
 
 uint16_t
 SHAMapInnerNode::get_branch_mask() const
 {
-    return branch_mask_;
+    return children_->getBranchMask();
 }
 
 boost::intrusive_ptr<SHAMapLeafNode>
@@ -379,27 +532,31 @@ SHAMapInnerNode::get_only_child_leaf() const
 {
     boost::intrusive_ptr<SHAMapLeafNode> resultLeaf = nullptr;
     int leafCount = 0;
-    for (const boost::intrusive_ptr<SHAMapTreeNode>& childNodePtr : children_)
+
+    // Iterate through all branches
+    for (int i = 0; i < 16; i++)
     {
-        if (childNodePtr)
+        if (children_->hasChild(i))
         {
-            if (childNodePtr->is_inner())
+            auto child = children_->getChild(i);
+            if (child->is_inner())
             {
-                return nullptr;
-            }  // Found inner node
+                return nullptr;  // Found inner node, not a leaf-only node
+            }
+
             leafCount++;
             if (leafCount == 1)
             {
-                resultLeaf =
-                    boost::static_pointer_cast<SHAMapLeafNode>(childNodePtr);
+                resultLeaf = boost::static_pointer_cast<SHAMapLeafNode>(child);
             }
             else
             {
-                return nullptr;  // Found more than one leaf
+                return nullptr;  // More than one leaf
             }
         }
     }
-    return resultLeaf;  // Returns the leaf if exactly one found, else nullptr
+
+    return resultLeaf;  // Returns leaf if exactly one found, else nullptr
 }
 
 boost::intrusive_ptr<SHAMapInnerNode>
@@ -409,22 +566,19 @@ SHAMapInnerNode::copy(int newVersion) const
     auto newNode =
         boost::intrusive_ptr(new SHAMapInnerNode(true, depth_, newVersion));
 
-    // Copy children array (shallow copy)
-    for (int i = 0; i < 16; i++)
-    {
-        newNode->children_[i] = children_[i];
-    }
+    // Copy children - this creates a non-canonicalized copy
+    newNode->children_ = children_->copy();
 
     // Copy other properties
-    newNode->branch_mask_ = branch_mask_;
     newNode->hash = hash;
-    newNode->hashValid = hashValid;  // force re-hash
+    newNode->hashValid = hashValid;
 
     LOGD(
         "Cloned inner node from version ",
         get_version(),
         " to version ",
         newVersion);
+
     return newNode;
 }
 
