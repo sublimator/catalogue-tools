@@ -157,6 +157,7 @@ class MmapItem
 private:
     Key key_;
     Slice data_;
+    mutable std::atomic<int> refCount_{0};
 
 public:
     MmapItem(
@@ -185,4 +186,13 @@ public:
 
     std::string
     hex() const;
+
+    void
+    intrusive_ptr_release(MmapItem* p);
+
+    // Friend declarations needed for boost::intrusive_ptr
+    friend void
+    intrusive_ptr_add_ref(MmapItem* p);
+    friend void
+    intrusive_ptr_release(MmapItem* p);
 };

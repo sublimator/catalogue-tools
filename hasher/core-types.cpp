@@ -30,3 +30,19 @@ MmapItem::hex() const
     slice_hex(sl, result);
     return result;
 }
+
+void
+intrusive_ptr_add_ref(MmapItem* p)
+{
+    p->refCount_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void
+intrusive_ptr_release(MmapItem* p)
+{
+    if (p->refCount_.fetch_sub(1, std::memory_order_release) == 1)
+    {
+        std::atomic_thread_fence(std::memory_order_acquire);
+        delete p;
+    }
+}

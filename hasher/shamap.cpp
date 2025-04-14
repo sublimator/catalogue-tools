@@ -1,4 +1,7 @@
 #include "hasher/shamap.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 #include "hasher/catalogue-consts.h"
 #include "hasher/log-macros.h"
 #include "hasher/logger.h"
@@ -79,6 +82,23 @@ select_branch(const Key& key, int depth)
 //----------------------------------------------------------
 // SHAMapTreeNode Implementation
 //----------------------------------------------------------
+
+void
+intrusive_ptr_add_ref(const SHAMapTreeNode* p)
+{
+    p->refCount_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void
+intrusive_ptr_release(const SHAMapTreeNode* p)
+{
+    if (p->refCount_.fetch_sub(1, std::memory_order_release) == 1)
+    {
+        std::atomic_thread_fence(std::memory_order_acquire);
+        delete p;
+    }
+}
+
 void
 SHAMapTreeNode::invalidate_hash()
 {
@@ -99,7 +119,9 @@ SHAMapTreeNode::get_hash()
 //----------------------------------------------------------
 // SHAMapLeafNode Implementation
 //----------------------------------------------------------
-SHAMapLeafNode::SHAMapLeafNode(std::shared_ptr<MmapItem> i, SHAMapNodeType t)
+SHAMapLeafNode::SHAMapLeafNode(
+    boost::intrusive_ptr<MmapItem> i,
+    SHAMapNodeType t)
     : item(std::move(i)), type(t)
 {
     if (!item)
@@ -176,7 +198,7 @@ SHAMapLeafNode::update_hash()
     hashValid = true;
 }
 
-std::shared_ptr<MmapItem>
+boost::intrusive_ptr<MmapItem>
 SHAMapLeafNode::get_item() const
 {
     return item;
@@ -188,10 +210,10 @@ SHAMapLeafNode::get_type() const
     return type;
 }
 
-std::shared_ptr<SHAMapLeafNode>
+boost::intrusive_ptr<SHAMapLeafNode>
 SHAMapLeafNode::copy() const
 {
-    auto newLeaf = std::make_shared<SHAMapLeafNode>(item, type);
+    auto newLeaf = boost::intrusive_ptr(new SHAMapLeafNode(item, type));
     newLeaf->hash = hash;
     newLeaf->hashValid = hashValid;
     newLeaf->version = version;
@@ -294,7 +316,7 @@ SHAMapInnerNode::update_hash()
 bool
 SHAMapInnerNode::set_child(
     int branch,
-    std::shared_ptr<SHAMapTreeNode> const& child)
+    boost::intrusive_ptr<SHAMapTreeNode> const& child)
 {
     if (branch < 0 || branch >= 16)
     {
@@ -304,12 +326,6 @@ SHAMapInnerNode::set_child(
     {
         children_[branch] = child;
         branch_mask_ |= (1 << branch);
-        // TODO: AI added this hackery but I'm 99.99% it's not needed
-        // if (child->isInner()) {
-        //     auto innerChild =
-        //     std::static_pointer_cast<SHAMapInnerNode>(child);
-        //     innerChild->setDepth(depth + 1);
-        // }
     }
     else
     {
@@ -320,7 +336,7 @@ SHAMapInnerNode::set_child(
     return true;
 }
 
-std::shared_ptr<SHAMapTreeNode>
+boost::intrusive_ptr<SHAMapTreeNode>
 SHAMapInnerNode::get_child(int branch) const
 {
     if (branch < 0 || branch >= 16)
@@ -358,12 +374,12 @@ SHAMapInnerNode::get_branch_mask() const
     return branch_mask_;
 }
 
-std::shared_ptr<SHAMapLeafNode>
+boost::intrusive_ptr<SHAMapLeafNode>
 SHAMapInnerNode::get_only_child_leaf() const
 {
-    std::shared_ptr<SHAMapLeafNode> resultLeaf = nullptr;
+    boost::intrusive_ptr<SHAMapLeafNode> resultLeaf = nullptr;
     int leafCount = 0;
-    for (const std::shared_ptr<SHAMapTreeNode>& childNodePtr : children_)
+    for (const boost::intrusive_ptr<SHAMapTreeNode>& childNodePtr : children_)
     {
         if (childNodePtr)
         {
@@ -375,7 +391,7 @@ SHAMapInnerNode::get_only_child_leaf() const
             if (leafCount == 1)
             {
                 resultLeaf =
-                    std::static_pointer_cast<SHAMapLeafNode>(childNodePtr);
+                    boost::static_pointer_cast<SHAMapLeafNode>(childNodePtr);
             }
             else
             {
@@ -386,11 +402,12 @@ SHAMapInnerNode::get_only_child_leaf() const
     return resultLeaf;  // Returns the leaf if exactly one found, else nullptr
 }
 
-std::shared_ptr<SHAMapInnerNode>
+boost::intrusive_ptr<SHAMapInnerNode>
 SHAMapInnerNode::copy(int newVersion) const
 {
     // Create a new inner node with same depth
-    auto newNode = std::make_shared<SHAMapInnerNode>(true, depth_, newVersion);
+    auto newNode =
+        boost::intrusive_ptr(new SHAMapInnerNode(true, depth_, newVersion));
 
     // Copy children array (shallow copy)
     for (int i = 0; i < 16; i++)
@@ -414,14 +431,16 @@ SHAMapInnerNode::copy(int newVersion) const
 //----------------------------------------------------------
 // PathFinder Implementation
 //----------------------------------------------------------
-PathFinder::PathFinder(std::shared_ptr<SHAMapInnerNode>& root, const Key& key)
+PathFinder::PathFinder(
+    boost::intrusive_ptr<SHAMapInnerNode>& root,
+    const Key& key)
     : targetKey(key)
 {
     find_path(root);
 }
 
 void
-PathFinder::find_path(std::shared_ptr<SHAMapInnerNode> root)
+PathFinder::find_path(boost::intrusive_ptr<SHAMapInnerNode> root)
 {
     if (!root)
     {
@@ -431,11 +450,12 @@ PathFinder::find_path(std::shared_ptr<SHAMapInnerNode> root)
     foundLeaf = nullptr;
     leafKeyMatches = false;
     terminalBranch = -1;
-    std::shared_ptr<SHAMapInnerNode> currentInner = root;
+    boost::intrusive_ptr<SHAMapInnerNode> currentInner = root;
     while (true)
     {
         int branch = select_branch(targetKey, currentInner->getDepth());
-        std::shared_ptr<SHAMapTreeNode> child = currentInner->get_child(branch);
+        boost::intrusive_ptr<SHAMapTreeNode> child =
+            currentInner->get_child(branch);
         if (!child)
         {
             terminalBranch = branch;
@@ -446,7 +466,7 @@ PathFinder::find_path(std::shared_ptr<SHAMapInnerNode> root)
         {
             terminalBranch = branch;
             inners.push_back(currentInner);
-            foundLeaf = std::static_pointer_cast<SHAMapLeafNode>(child);
+            foundLeaf = boost::static_pointer_cast<SHAMapLeafNode>(child);
             if (foundLeaf->get_item())
             {
                 leafKeyMatches = (foundLeaf->get_item()->key() == targetKey);
@@ -459,7 +479,7 @@ PathFinder::find_path(std::shared_ptr<SHAMapInnerNode> root)
         }
         inners.push_back(currentInner);
         branches.push_back(branch);
-        currentInner = std::static_pointer_cast<SHAMapInnerNode>(child);
+        currentInner = boost::static_pointer_cast<SHAMapInnerNode>(child);
     }
 }
 
@@ -481,25 +501,25 @@ PathFinder::ended_at_null_branch() const
     return foundLeaf == nullptr && terminalBranch != -1;
 }
 
-std::shared_ptr<const SHAMapLeafNode>
+boost::intrusive_ptr<const SHAMapLeafNode>
 PathFinder::get_leaf() const
 {
     return foundLeaf;
 }
 
-std::shared_ptr<SHAMapLeafNode>
+boost::intrusive_ptr<SHAMapLeafNode>
 PathFinder::get_leaf_mutable()
 {
     return foundLeaf;
 }
 
-std::shared_ptr<SHAMapInnerNode>
+boost::intrusive_ptr<SHAMapInnerNode>
 PathFinder::get_parent_of_terminal()
 {
     return inners.empty() ? nullptr : inners.back();
 }
 
-std::shared_ptr<const SHAMapInnerNode>
+boost::intrusive_ptr<const SHAMapInnerNode>
 PathFinder::get_parent_of_terminal() const
 {
     return inners.empty() ? nullptr : inners.back();
@@ -525,7 +545,7 @@ PathFinder::collapse_path()
 {
     if (inners.size() <= 1)
         return;
-    std::shared_ptr<SHAMapLeafNode> onlyChild = nullptr;
+    boost::intrusive_ptr<SHAMapLeafNode> onlyChild = nullptr;
     auto innermost = inners.back();
     onlyChild = innermost->get_only_child_leaf();
     for (int i = static_cast<int>(inners.size()) - 2; i >= 0; --i)
@@ -548,7 +568,7 @@ PathFinder::maybe_copy_on_write() const
     return !inners.empty() && inners.back()->is_cow_enabled();
 }
 
-std::shared_ptr<SHAMapInnerNode>
+boost::intrusive_ptr<SHAMapInnerNode>
 PathFinder::dirty_or_copy_inners(int targetVersion)
 {
     if (inners.empty())
@@ -630,7 +650,7 @@ PathFinder::dirty_or_copy_inners(int targetVersion)
     return inners.back();
 }
 
-std::shared_ptr<SHAMapLeafNode>
+boost::intrusive_ptr<SHAMapLeafNode>
 PathFinder::invalidated_possibly_copied_leaf_for_updating(int targetVersion)
 {
     if (!leafKeyMatches)
@@ -645,7 +665,7 @@ PathFinder::invalidated_possibly_copied_leaf_for_updating(int targetVersion)
         throw SHAMapException("Failed to prepare path for leaf update");
     }
 
-    std::shared_ptr<SHAMapLeafNode> theLeaf = foundLeaf;
+    boost::intrusive_ptr<SHAMapLeafNode> theLeaf = foundLeaf;
 
     // Check if we need to copy the leaf
     if (foundLeaf->get_version() != targetVersion)
@@ -669,18 +689,18 @@ SHAMap::SHAMap(SHAMapNodeType type)
     , current_version_(0)
     , cow_enabled_(false)
 {
-    root = std::make_shared<SHAMapInnerNode>(0);  // Root has depth 0
+    root = boost::intrusive_ptr(new SHAMapInnerNode(0));  // Root has depth 0
     LOGD("SHAMap created with type: ", static_cast<int>(type));
 }
 
 SHAMap::SHAMap(
-    SHAMapNodeType type,
-    std::shared_ptr<SHAMapInnerNode> rootNode,
+    const SHAMapNodeType type,
+    boost::intrusive_ptr<SHAMapInnerNode> rootNode,
     std::shared_ptr<std::atomic<int>> vCounter,
-    int version)
-    : root(rootNode)
+    const int version)
+    : root(std::move(rootNode))
     , node_type_(type)
-    , version_counter_(vCounter)
+    , version_counter_(std::move(vCounter))
     , current_version_(version)
     , cow_enabled_(true)
 {
@@ -758,7 +778,7 @@ SHAMap::snapshot()
 }
 
 bool
-SHAMap::add_item(std::shared_ptr<MmapItem>& item, bool allowUpdate)
+SHAMap::add_item(boost::intrusive_ptr<MmapItem>& item, bool allowUpdate)
 {
     if (!item)
     {
@@ -812,7 +832,8 @@ SHAMap::add_item(std::shared_ptr<MmapItem>& item, bool allowUpdate)
                 parent->getDepth() + 1,
                 " branch ",
                 branch);
-            auto newLeaf = std::make_shared<SHAMapLeafNode>(item, node_type_);
+            auto newLeaf =
+                boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
             if (cow_enabled_)
             {
                 newLeaf->set_version(current_version_);
@@ -840,13 +861,14 @@ SHAMap::add_item(std::shared_ptr<MmapItem>& item, bool allowUpdate)
                                               constructor */
             }
 
-            std::shared_ptr<SHAMapInnerNode> currentParent = parent;
+            boost::intrusive_ptr<SHAMapInnerNode> currentParent = parent;
             int currentBranch = branch;
             uint8_t currentDepth =
                 parent->getDepth() + 1;  // Start depth below parent
 
             // Create first new inner node to replace the leaf
-            auto newInner = std::make_shared<SHAMapInnerNode>(currentDepth);
+            auto newInner =
+                boost::intrusive_ptr(new SHAMapInnerNode(currentDepth));
             if (cow_enabled_)
             {
                 newInner->enable_cow(true);
@@ -871,8 +893,8 @@ SHAMap::add_item(std::shared_ptr<MmapItem>& item, bool allowUpdate)
                         existingBranch,
                         " and ",
                         newBranch);
-                    auto newLeaf =
-                        std::make_shared<SHAMapLeafNode>(item, node_type_);
+                    auto newLeaf = boost::intrusive_ptr(
+                        new SHAMapLeafNode(item, node_type_));
                     if (cow_enabled_)
                     {
                         newLeaf->set_version(current_version_);
@@ -897,8 +919,8 @@ SHAMap::add_item(std::shared_ptr<MmapItem>& item, bool allowUpdate)
                         ", branch ",
                         existingBranch,
                         ". Descending further.");
-                    auto nextInner =
-                        std::make_shared<SHAMapInnerNode>(currentDepth + 1);
+                    auto nextInner = boost::intrusive_ptr(
+                        new SHAMapInnerNode(currentDepth + 1));
                     if (cow_enabled_)
                     {
                         nextInner->enable_cow(true);

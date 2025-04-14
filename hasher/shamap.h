@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <memory>
 #include <openssl/evp.h>
 #include <stdexcept>
@@ -89,6 +90,7 @@ class SHAMapTreeNode
 protected:
     Hash256 hash;
     bool hashValid = false;
+    mutable std::atomic<int> refCount_{0};
 
 public:
     virtual ~SHAMapTreeNode() = default;
@@ -102,6 +104,12 @@ public:
     update_hash() = 0;  // NO LOGGING INSIDE IMPLEMENTATIONS
     const Hash256&
     get_hash();
+
+    // friend declarations needed for boost::intrusive_ptr
+    friend void
+    intrusive_ptr_add_ref(const SHAMapTreeNode* p);
+    friend void
+    intrusive_ptr_release(const SHAMapTreeNode* p);
 };
 
 /**
@@ -110,19 +118,19 @@ public:
 class SHAMapLeafNode : public SHAMapTreeNode
 {
 private:
-    std::shared_ptr<MmapItem> item;
+    boost::intrusive_ptr<MmapItem> item;
     SHAMapNodeType type;
     int version = -1;  // Version for CoW tracking
 
 public:
-    SHAMapLeafNode(std::shared_ptr<MmapItem> i, SHAMapNodeType t);
+    SHAMapLeafNode(boost::intrusive_ptr<MmapItem> i, SHAMapNodeType t);
     bool
     is_leaf() const override;
     bool
     is_inner() const override;
     void
     update_hash() override;
-    std::shared_ptr<MmapItem>
+    boost::intrusive_ptr<MmapItem>
     get_item() const;
     SHAMapNodeType
     get_type() const;
@@ -132,7 +140,7 @@ protected:
     friend class SHAMap;
 
     // CoW support - only accessible to friends
-    std::shared_ptr<SHAMapLeafNode>
+    boost::intrusive_ptr<SHAMapLeafNode>
     copy() const;
     int
     get_version() const
@@ -152,7 +160,7 @@ protected:
 class SHAMapInnerNode : public SHAMapTreeNode
 {
 private:
-    std::array<std::shared_ptr<SHAMapTreeNode>, 16> children_;
+    std::array<boost::intrusive_ptr<SHAMapTreeNode>, 16> children_;
     uint16_t branch_mask_ = 0;
     uint8_t depth_ = 0;
 
@@ -174,8 +182,8 @@ public:
     void
     update_hash() override;
     bool
-    set_child(int branch, std::shared_ptr<SHAMapTreeNode> const& child);
-    std::shared_ptr<SHAMapTreeNode>
+    set_child(int branch, boost::intrusive_ptr<SHAMapTreeNode> const& child);
+    boost::intrusive_ptr<SHAMapTreeNode>
     get_child(int branch) const;
     bool
     has_child(int branch) const;
@@ -183,7 +191,7 @@ public:
     get_branch_count() const;
     uint16_t
     get_branch_mask() const;
-    std::shared_ptr<SHAMapLeafNode>
+    boost::intrusive_ptr<SHAMapLeafNode>
     get_only_child_leaf() const;
 
 protected:
@@ -211,7 +219,7 @@ protected:
     {
         do_cow_ = enable;
     }
-    std::shared_ptr<SHAMapInnerNode>
+    boost::intrusive_ptr<SHAMapInnerNode>
     copy(int newVersion) const;
 };
 
@@ -222,36 +230,36 @@ class PathFinder
 {
 private:
     const Key& targetKey;
-    std::vector<std::shared_ptr<SHAMapInnerNode>> inners;
+    std::vector<boost::intrusive_ptr<SHAMapInnerNode>> inners;
     std::vector<int> branches;
-    std::shared_ptr<SHAMapLeafNode> foundLeaf = nullptr;
+    boost::intrusive_ptr<SHAMapLeafNode> foundLeaf = nullptr;
     bool leafKeyMatches = false;
     int terminalBranch = -1;
 
     void
-    find_path(std::shared_ptr<SHAMapInnerNode> root);
+    find_path(boost::intrusive_ptr<SHAMapInnerNode> root);
     bool
     maybe_copy_on_write() const;
 
 protected:
     friend class SHAMap;
-    std::shared_ptr<SHAMapInnerNode> searchRoot;
+    boost::intrusive_ptr<SHAMapInnerNode> searchRoot;
 
 public:
-    PathFinder(std::shared_ptr<SHAMapInnerNode>& root, const Key& key);
+    PathFinder(boost::intrusive_ptr<SHAMapInnerNode>& root, const Key& key);
     bool
     has_leaf() const;
     bool
     did_leaf_key_match() const;
     bool
     ended_at_null_branch() const;
-    std::shared_ptr<const SHAMapLeafNode>
+    boost::intrusive_ptr<const SHAMapLeafNode>
     get_leaf() const;
-    std::shared_ptr<SHAMapLeafNode>
+    boost::intrusive_ptr<SHAMapLeafNode>
     get_leaf_mutable();
-    std::shared_ptr<SHAMapInnerNode>
+    boost::intrusive_ptr<SHAMapInnerNode>
     get_parent_of_terminal();
-    std::shared_ptr<const SHAMapInnerNode>
+    boost::intrusive_ptr<const SHAMapInnerNode>
     get_parent_of_terminal() const;
     int
     get_terminal_branch() const;
@@ -261,9 +269,9 @@ public:
     collapse_path();
 
     // CoW support - used by SHAMap operations
-    std::shared_ptr<SHAMapInnerNode>
+    boost::intrusive_ptr<SHAMapInnerNode>
     dirty_or_copy_inners(int targetVersion);
-    std::shared_ptr<SHAMapLeafNode>
+    boost::intrusive_ptr<SHAMapLeafNode>
     invalidated_possibly_copied_leaf_for_updating(int targetVersion);
 };
 
@@ -274,7 +282,7 @@ public:
 class SHAMap
 {
 private:
-    std::shared_ptr<SHAMapInnerNode> root;
+    boost::intrusive_ptr<SHAMapInnerNode> root;
     SHAMapNodeType node_type_;
 
     // CoW support - all private
@@ -301,14 +309,14 @@ private:
     // Private constructor for creating snapshots
     SHAMap(
         SHAMapNodeType type,
-        std::shared_ptr<SHAMapInnerNode> rootNode,
+        boost::intrusive_ptr<SHAMapInnerNode> rootNode,
         std::shared_ptr<std::atomic<int>> vCounter,
         int version);
 
 public:
     explicit SHAMap(SHAMapNodeType type = tnACCOUNT_STATE);
     bool
-    add_item(std::shared_ptr<MmapItem>& item, bool allowUpdate = true);
+    add_item(boost::intrusive_ptr<MmapItem>& item, bool allowUpdate = true);
     bool
     remove_item(const Key& key);
     Hash256

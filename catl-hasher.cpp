@@ -271,8 +271,8 @@ private:
 
             // Create MmapItem (zero-copy reference)
             const uint8_t* itemDataPtr = data + offset;
-            auto item =
-                std::make_shared<MmapItem>(keyData, itemDataPtr, dataSize);
+            auto item = boost::intrusive_ptr(
+                new MmapItem(keyData, itemDataPtr, dataSize));
 
             // Add item to the appropriate map
             if (map.add_item(item))
