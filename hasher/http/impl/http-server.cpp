@@ -1,5 +1,5 @@
 #include "hasher/http/http-server.h"
-#include "http-concepts.h"
+#include "../http-concepts.h"
 
 #include <boost/asio.hpp>
 #include <boost/asio/signal_set.hpp>

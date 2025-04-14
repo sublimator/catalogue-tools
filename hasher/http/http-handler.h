@@ -26,11 +26,11 @@ public:
         const std::string& method,
         AbstractResponse& res) override
     {
-        if (path == "/health")
+        if (path == "/health" && method == "GET")
         {
             handle_health(res);
         }
-        else if (path.find("/ledger/") == 0)
+        else if (path.find("/ledger/") == 0 && method == "GET")
         {
             handle_ledger(path, res);
         }
