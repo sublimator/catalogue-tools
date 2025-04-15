@@ -19,15 +19,15 @@
 #include "catl/shamap/shamap-treenode.h"
 
 enum class SetResult {
-    arFAILED = 0,  // Operation failed
-    arADD = 1,     // New item was added
-    arUPDATE = 2,  // Existing item was updated
+    FAILED = 0,  // Operation failed
+    ADD = 1,     // New item was added
+    UPDATE = 2,  // Existing item was updated
 };
 
 enum class SetMode {
-    umADD_ONLY,      // Fail if the item already exists
-    umUPDATE_ONLY,   // Fail if the item doesn't exist
-    umADD_OR_UPDATE  // Allow either adding or updating
+    ADD_ONLY,      // Fail if the item already exists
+    UPDATE_ONLY,   // Fail if the item doesn't exist
+    ADD_OR_UPDATE  // Allow either adding or updating
 };
 
 /**
@@ -77,7 +77,7 @@ public:
     SetResult
     set_item(
         boost::intrusive_ptr<MmapItem>& item,
-        SetMode mode = SetMode::umADD_OR_UPDATE);
+        SetMode mode = SetMode::ADD_OR_UPDATE);
 
     SetResult
     add_item(boost::intrusive_ptr<MmapItem>& item);

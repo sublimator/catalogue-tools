@@ -106,13 +106,13 @@ SHAMap::snapshot()
 SetResult
 SHAMap::add_item(boost::intrusive_ptr<MmapItem>& item)
 {
-    return set_item(item, SetMode::umADD_ONLY);
+    return set_item(item, SetMode::ADD_ONLY);
 }
 
 SetResult
 SHAMap::update_item(boost::intrusive_ptr<MmapItem>& item)
 {
-    return set_item(item, SetMode::umUPDATE_ONLY);
+    return set_item(item, SetMode::UPDATE_ONLY);
 }
 
 SetResult
@@ -121,7 +121,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
     if (!item)
     {
         LOGW("Attempted to add null item to SHAMap.");
-        return SetResult::arFAILED;
+        return SetResult::FAILED;
     }
     LOGD_KEY("Attempting to add item with key: ", item->key());
 
@@ -157,26 +157,26 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
             pathFinder.has_leaf() && pathFinder.did_leaf_key_match();
 
         // Early checks based on mode
-        if (itemExists && mode == SetMode::umADD_ONLY)
+        if (itemExists && mode == SetMode::ADD_ONLY)
         {
             LOGW(
                 "Item with key ",
                 item->key().hex(),
                 " already exists, but ADD_ONLY specified");
-            return SetResult::arFAILED;
+            return SetResult::FAILED;
         }
 
-        if (!itemExists && mode == SetMode::umUPDATE_ONLY)
+        if (!itemExists && mode == SetMode::UPDATE_ONLY)
         {
             LOGW(
                 "Item with key ",
                 item->key().hex(),
                 " doesn't exist, but UPDATE_ONLY specified");
-            return SetResult::arFAILED;
+            return SetResult::FAILED;
         }
 
         if (pathFinder.ended_at_null_branch() ||
-            (itemExists && mode != SetMode::umADD_ONLY))
+            (itemExists && mode != SetMode::ADD_ONLY))
         {
             auto parent = pathFinder.get_parent_of_terminal();
             int branch = pathFinder.get_terminal_branch();
@@ -200,7 +200,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
             parent->set_child(branch, newLeaf);
             pathFinder.dirty_path();
             pathFinder.collapse_path();  // Add collapsing logic here
-            return itemExists ? SetResult::arUPDATE : SetResult::arADD;
+            return itemExists ? SetResult::UPDATE : SetResult::ADD;
         }
 
         if (pathFinder.has_leaf() && !pathFinder.did_leaf_key_match())
@@ -301,7 +301,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 
             pathFinder.dirty_path();
             pathFinder.collapse_path();  // Add collapsing logic here
-            return SetResult::arADD;
+            return SetResult::ADD;
         }
 
         // Should ideally not be reached if PathFinder logic is correct
@@ -315,7 +315,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
     catch (const SHAMapException& e)
     {
         LOGE("Error adding item with key ", item->key().hex(), ": ", e.what());
-        return SetResult::arFAILED;
+        return SetResult::FAILED;
     }
     catch (const std::exception& e)
     {
@@ -324,7 +324,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
             item->key().hex(),
             ": ",
             e.what());
-        return SetResult::arFAILED;
+        return SetResult::FAILED;
     }
 }
 

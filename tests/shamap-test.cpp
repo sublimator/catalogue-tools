@@ -21,7 +21,7 @@ TEST_F(ShaMapFixture, JsonFileOperations) {
             auto expectedHash = boost::json::value_to<std::string>(op.at("map_hash"));
 
             if (operation == "add") {
-                EXPECT_EQ(addItemFromHex(keyHex), SetResult::arADD);
+                EXPECT_EQ(addItemFromHex(keyHex), SetResult::ADD);
             } else if (operation == "remove") {
                 EXPECT_EQ(removeItemFromHex(keyHex), true);
             }
@@ -60,6 +60,63 @@ TEST(ShaMapTest, BasicOperations) {
     auto [data, item] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000000");
     map.set_item(item);
     EXPECT_EQ(map.get_hash().hex(), "B992A0C0480B32A2F32308EA2D64E85586A3DAF663F7B383806B5C4CEA84D8BF");
+}
+
+// Test for the add_item_only functionality
+TEST(ShaMapTest, AddItemOnly) {
+    auto map = SHAMap(tnACCOUNT_STATE);
+
+    // Create two test items with different keys
+    auto [data1, item1] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000001");
+    auto [data2, item2] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000002");
+
+    // First add should succeed
+    EXPECT_EQ(map.add_item(item1), SetResult::ADD);
+
+    // Adding it again should fail with add_item (add-only semantics)
+    EXPECT_EQ(map.add_item(item1), SetResult::FAILED);
+
+    // But adding a different item should succeed
+    EXPECT_EQ(map.add_item(item2), SetResult::ADD);
+}
+
+// Test for the update_item_only functionality
+TEST(ShaMapTest, UpdateItemOnly) {
+    auto map = SHAMap(tnACCOUNT_STATE);
+
+    // Create two items with the same key
+    auto [data1, item1] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000001");
+    auto [data2, item2] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000001");
+
+    // Update should fail since the item doesn't exist yet
+    EXPECT_EQ(map.update_item(item1), SetResult::FAILED);
+
+    // Add it first
+    EXPECT_EQ(map.set_item(item1), SetResult::ADD);
+
+    // Now update should succeed
+    EXPECT_EQ(map.update_item(item2), SetResult::UPDATE);
+}
+
+// Test for the set_item with different modes
+TEST(ShaMapTest, SetItemModes) {
+    auto map = SHAMap(tnACCOUNT_STATE);
+
+    // Create items with the same key but different content
+    auto [data1, item1] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000001");
+    auto [data2, item2] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000001");
+
+    // Add mode
+    EXPECT_EQ(map.set_item(item1, SetMode::ADD_ONLY), SetResult::ADD);
+    EXPECT_EQ(map.set_item(item2, SetMode::ADD_ONLY), SetResult::FAILED);
+
+    // Update mode
+    auto [data3, item3] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000002");
+    EXPECT_EQ(map.set_item(item3, SetMode::UPDATE_ONLY), SetResult::FAILED);
+
+    // Add or update mode
+    EXPECT_EQ(map.set_item(item2, SetMode::ADD_OR_UPDATE), SetResult::UPDATE);
+    EXPECT_EQ(map.set_item(item3, SetMode::ADD_OR_UPDATE), SetResult::ADD);
 }
 
 int main(int argc, char **argv) {

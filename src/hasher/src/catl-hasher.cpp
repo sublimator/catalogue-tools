@@ -276,7 +276,7 @@ private:
                 new MmapItem(keyData, itemDataPtr, dataSize));
 
             // Add item to the appropriate map
-            if (map.set_item(item) != SetResult::arFAILED)
+            if (map.set_item(item) != SetResult::FAILED)
             {
                 // addItem handles logging internally now
                 nodesProcessedCount++;

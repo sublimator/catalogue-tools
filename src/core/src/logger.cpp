@@ -1,7 +1,7 @@
 #include "catl/core/logger.h"
 
 // Initialize static members
-LogLevel Logger::current_level_ = LogLevel::INFO;  // Default log level
+LogLevel Logger::current_level_ = LogLevel::ERROR;  // Default log level
 std::mutex Logger::log_mutex_;
 
 bool
