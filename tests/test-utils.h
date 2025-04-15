@@ -35,10 +35,10 @@ protected:
     std::string getFixturePath(const std::string &filename);
 
     // Helper method to add an item from hex string
-    void addItemFromHex(const std::string &hexString);
+    AddResult addItemFromHex(const std::string &hexString);
 
     // Helper method to add an item from hex string
-    void removeItemFromHex(const std::string &hexString);
+    bool removeItemFromHex(const std::string &hexString);
 
     // Member variables
     SHAMap map;

@@ -18,6 +18,12 @@
 #include "catl/shamap/shamap-pathfinder.h"
 #include "catl/shamap/shamap-treenode.h"
 
+enum class AddResult {
+    arADD,     // New item was added
+    arUPDATE,  // Existing item was updated
+    arFAILED   // Operation failed
+};
+
 /**
  * Main SHAMap class implementing a pruned, binary prefix tree
  * with Copy-on-Write support for efficient snapshots
@@ -58,7 +64,8 @@ private:
 
 public:
     explicit SHAMap(SHAMapNodeType type = tnACCOUNT_STATE);
-    bool
+
+    AddResult
     add_item(boost::intrusive_ptr<MmapItem>& item, bool allowUpdate = true);
     bool
     remove_item(const Key& key);

@@ -103,13 +103,13 @@ SHAMap::snapshot()
     return copy;
 }
 
-bool
+AddResult
 SHAMap::add_item(boost::intrusive_ptr<MmapItem>& item, bool allowUpdate)
 {
     if (!item)
     {
         LOGW("Attempted to add null item to SHAMap.");
-        return false;
+        return AddResult::arFAILED;
     }
     LOGD_KEY("Attempting to add item with key: ", item->key());
 
@@ -141,9 +141,10 @@ SHAMap::add_item(boost::intrusive_ptr<MmapItem>& item, bool allowUpdate)
             }
         }
 
+        bool updating = pathFinder.did_leaf_key_match() && allowUpdate;
+
         if (pathFinder.ended_at_null_branch() ||
-            (pathFinder.has_leaf() && pathFinder.did_leaf_key_match() &&
-             allowUpdate))
+            (pathFinder.has_leaf() && updating))
         {
             auto parent = pathFinder.get_parent_of_terminal();
             int branch = pathFinder.get_terminal_branch();
@@ -166,7 +167,7 @@ SHAMap::add_item(boost::intrusive_ptr<MmapItem>& item, bool allowUpdate)
             }
             parent->set_child(branch, newLeaf);
             pathFinder.dirty_path();
-            return true;
+            return updating ? AddResult::arUPDATE : AddResult::arADD;
         }
 
         if (pathFinder.has_leaf() && !pathFinder.did_leaf_key_match())
@@ -266,7 +267,7 @@ SHAMap::add_item(boost::intrusive_ptr<MmapItem>& item, bool allowUpdate)
             }
 
             pathFinder.dirty_path();
-            return true;
+            return AddResult::arADD;
         }
 
         // Should ideally not be reached if PathFinder logic is correct
@@ -280,7 +281,7 @@ SHAMap::add_item(boost::intrusive_ptr<MmapItem>& item, bool allowUpdate)
     catch (const SHAMapException& e)
     {
         LOGE("Error adding item with key ", item->key().hex(), ": ", e.what());
-        return false;
+        return AddResult::arFAILED;
     }
     catch (const std::exception& e)
     {
@@ -289,7 +290,7 @@ SHAMap::add_item(boost::intrusive_ptr<MmapItem>& item, bool allowUpdate)
             item->key().hex(),
             ": ",
             e.what());
-        return false;
+        return AddResult::arFAILED;
     }
 }
 

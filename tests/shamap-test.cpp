@@ -21,9 +21,9 @@ TEST_F(ShaMapFixture, JsonFileOperations) {
             auto expectedHash = boost::json::value_to<std::string>(op.at("map_hash"));
 
             if (operation == "add") {
-                addItemFromHex(keyHex);
+                EXPECT_EQ(addItemFromHex(keyHex), AddResult::arADD);
             } else if (operation == "remove") {
-                removeItemFromHex(keyHex);
+                EXPECT_EQ(removeItemFromHex(keyHex), true);
             }
             EXPECT_EQ(map.get_hash().hex(), expectedHash)
                 << "Hash mismatch after adding key: " << keyHex;
