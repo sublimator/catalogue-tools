@@ -65,11 +65,11 @@ std::string ShaMapFixture::getFixturePath(const std::string &filename) {
     return TestDataPath::getPath(fixtureDir + "/" + filename);
 }
 
-AddResult
+SetResult
 ShaMapFixture::addItemFromHex(const std::string &hexString) {
     auto [data, item] = getItemFromHex(hexString);
     buffers.push_back(std::move(data)); // Keep buffer alive
-    return map.add_item(item);
+    return map.set_item(item);
 }
 
 bool ShaMapFixture::removeItemFromHex(const std::string &hexString) {

@@ -18,10 +18,16 @@
 #include "catl/shamap/shamap-pathfinder.h"
 #include "catl/shamap/shamap-treenode.h"
 
-enum class AddResult {
-    arADD,     // New item was added
-    arUPDATE,  // Existing item was updated
-    arFAILED   // Operation failed
+enum class SetResult {
+    arFAILED = 0,  // Operation failed
+    arADD = 1,     // New item was added
+    arUPDATE = 2,  // Existing item was updated
+};
+
+enum class SetMode {
+    umADD_ONLY,      // Fail if the item already exists
+    umUPDATE_ONLY,   // Fail if the item doesn't exist
+    umADD_OR_UPDATE  // Allow either adding or updating
 };
 
 /**
@@ -42,16 +48,19 @@ private:
     // Private methods
     void
     enable_cow(bool enable = true);
+
     bool
     is_cow_enabled() const
     {
         return cow_enabled_;
     }
+
     int
     get_version() const
     {
         return current_version_;
     }
+
     int
     new_version();
 
@@ -65,10 +74,20 @@ private:
 public:
     explicit SHAMap(SHAMapNodeType type = tnACCOUNT_STATE);
 
-    AddResult
-    add_item(boost::intrusive_ptr<MmapItem>& item, bool allowUpdate = true);
+    SetResult
+    set_item(
+        boost::intrusive_ptr<MmapItem>& item,
+        SetMode mode = SetMode::umADD_OR_UPDATE);
+
+    SetResult
+    add_item(boost::intrusive_ptr<MmapItem>& item);
+
+    SetResult
+    update_item(boost::intrusive_ptr<MmapItem>& item);
+
     bool
     remove_item(const Key& key);
+
     Hash256
     get_hash() const;
 

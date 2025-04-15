@@ -21,7 +21,7 @@ TEST_F(ShaMapFixture, JsonFileOperations) {
             auto expectedHash = boost::json::value_to<std::string>(op.at("map_hash"));
 
             if (operation == "add") {
-                EXPECT_EQ(addItemFromHex(keyHex), AddResult::arADD);
+                EXPECT_EQ(addItemFromHex(keyHex), SetResult::arADD);
             } else if (operation == "remove") {
                 EXPECT_EQ(removeItemFromHex(keyHex), true);
             }
@@ -58,7 +58,7 @@ TEST(ShaMapTest, BasicOperations) {
     EXPECT_EQ(map.get_hash().hex(), "0000000000000000000000000000000000000000000000000000000000000000");
 
     auto [data, item] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000000");
-    map.add_item(item);
+    map.set_item(item);
     EXPECT_EQ(map.get_hash().hex(), "B992A0C0480B32A2F32308EA2D64E85586A3DAF663F7B383806B5C4CEA84D8BF");
 }
 

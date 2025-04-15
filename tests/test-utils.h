@@ -35,7 +35,7 @@ protected:
     std::string getFixturePath(const std::string &filename);
 
     // Helper method to add an item from hex string
-    AddResult addItemFromHex(const std::string &hexString);
+    SetResult addItemFromHex(const std::string &hexString);
 
     // Helper method to add an item from hex string
     bool removeItemFromHex(const std::string &hexString);
