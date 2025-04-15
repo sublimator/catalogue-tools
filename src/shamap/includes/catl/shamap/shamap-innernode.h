@@ -44,6 +44,17 @@ public:
     boost::intrusive_ptr<SHAMapLeafNode>
     get_only_child_leaf() const;
 
+    // Helper methods for skipped inner handling
+    static boost::intrusive_ptr<SHAMapLeafNode>
+    first_leaf(const boost::intrusive_ptr<SHAMapInnerNode>& inner);
+
+    Hash256
+    compute_skipped_hash(
+        const boost::intrusive_ptr<SHAMapInnerNode>& inner,
+        const Key& index,
+        int round,
+        int skips) const;
+
 protected:
     friend class PathFinder;
     friend class SHAMap;
