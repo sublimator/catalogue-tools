@@ -7,12 +7,22 @@
     "**/.mypy_cache/**"
   ],
   "files_patterns": {
+    "src": {
+        "include": [
+            "CMakeLists.txt",
+            "src/**/CMakeLists.txt",
+            "src/**/*.cpp",
+            "src/**/*.h",
+            "tests/**/CMakeLists.txt",
+            "tests/**/*.cpp",
+            "tests/**/*.h"
+        ]
+    },
     "hasher": {
       "include": [
-        "CMakeLists.txt",
-        "catl-hasher.cpp",
-        "hasher/**/*.cpp",
-        "hasher/**/*.h"
+        "src/hasher/**/*.cpp",
+        "src/hasher/**/*.h",
+        "src/hasher/**/CMakeLists.txt"
       ]
     },
     "hasher-http": {

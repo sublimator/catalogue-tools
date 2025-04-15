@@ -1,63 +1,46 @@
-cmake_minimum_required(VERSION 3.14)
-project(catl-validator)
+cmake_minimum_required(VERSION 3.12)
+project(cataloguelib VERSION 0.1.0 LANGUAGES CXX)
 
-# Include the Conan-generated file
-include(${CMAKE_BINARY_DIR}/conanbuildinfo.cmake)
-conan_basic_setup(TARGETS)
-
+# Set C++ standard for all targets
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Add source files
-set(SOURCES_VALIDATOR
-        catl-validator.cpp
-)
+# Use Conan for package management if available
+if(EXISTS "${CMAKE_BINARY_DIR}/conanbuildinfo.cmake")
+    include("${CMAKE_BINARY_DIR}/conanbuildinfo.cmake")
+    conan_basic_setup(TARGETS)
+else()
+    message(WARNING "Conan build info not found, you may need to install dependencies manually")
+    # Add fallback find_package commands here for required libraries
+    find_package(Boost REQUIRED)
+    find_package(OpenSSL REQUIRED)
+    find_package(GTest REQUIRED)
+endif()
 
-# Recursively find all .cpp files in hasher/ and its subdirectories
-file(GLOB_RECURSE HASHER_SOURCES CONFIGURE_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/hasher/**/*.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/hasher/*.cpp"
-)
+# Set up default compile options
+add_compile_options(-Wall -Wextra -pedantic)
 
-set(SOURCES_HASHER
-        catl-hasher.cpp
-        ${HASHER_SOURCES}
-)
+# Define the include directory structure to be shared by all subprojects
+set(CATL_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/includes)
 
-set(SOURCES_DECOMP
-        catl-decomp.cpp
-)
+# Add the core library
+add_subdirectory(src/core)
 
-# Create executables
-add_executable(catl-validator ${SOURCES_VALIDATOR})
-add_executable(catl-hasher ${SOURCES_HASHER})
-add_executable(catl-decomp ${SOURCES_DECOMP})
+# Add the shamap library
+add_subdirectory(src/shamap)
 
-# Add include directories
-foreach (target catl-validator catl-hasher catl-decomp)
-    target_include_directories(${target} PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}  # This ensures the targets can find the headers
-    )
-endforeach ()
+# Add the hasher library
+add_subdirectory(src/hasher)
 
-# Link libraries using Conan targets
-foreach (target catl-validator catl-hasher catl-decomp)
-    target_link_libraries(${target} PRIVATE
-            CONAN_PKG::boost
-            CONAN_PKG::openssl
-            CONAN_PKG::zlib
-    )
-endforeach ()
-
-# Add compiler options
-foreach (target catl-validator catl-hasher catl-decomp)
-    target_compile_options(${target} PRIVATE
-            -Wall -Wextra -O2 -Wno-deprecated-declarations
-    )
-endforeach ()
-
-# Add tests directory if it exists
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+# Add tests if testing is enabled
+option(BUILD_TESTING "Build the testing tree" ON)
+if(BUILD_TESTING)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+# Print summary
+message(STATUS "Configuration:")
+message(STATUS "  C++ standard: ${CMAKE_CXX_STANDARD}")
+message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "  Testing: ${BUILD_TESTING}")
