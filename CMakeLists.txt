@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.12)
-project(cataloguelib VERSION 0.1.0 LANGUAGES CXX)
+project(catalogue-tools VERSION 0.1.0 LANGUAGES CXX)
 
 # Set C++ standard for all targets
 set(CMAKE_CXX_STANDARD 20)
