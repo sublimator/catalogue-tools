@@ -39,6 +39,8 @@ SHAMapInnerNode::is_inner() const
     return true;
 }
 
+// TODO: replace this with an int or something? or add get_depth_int() method
+// for debugging
 uint8_t
 SHAMapInnerNode::get_depth() const
 {
@@ -198,6 +200,17 @@ SHAMapInnerNode::compute_skipped_hash(
     // Store computed hashes for each level
     std::vector<Hash256> levelHashes(skips - round + 1);
 
+    // Log starting parameters for debugging
+    LOGD(
+        "compute_skipped_hash: inner depth=",
+        static_cast<int>(inner->get_depth()),
+        ", this depth=",
+        static_cast<int>(depth_),
+        ", round=",
+        round,
+        ", skips=",
+        skips);
+
     // Compute hash for each level, starting from the terminal level
     for (int currentRound = skips; currentRound >= round; currentRound--)
     {
@@ -220,8 +233,19 @@ SHAMapInnerNode::compute_skipped_hash(
                 "Failed to update digest with prefix");
         }
 
+        // CRITICAL: Ensure path depth calculation is correct
+        // The path depth should be based on the parent node (this) depth
+        // plus the current round
         int pathDepth = depth_ + currentRound;
         int selectedBranch = select_branch(index, pathDepth);
+
+        LOGD(
+            "compute_skipped_hash: round=",
+            currentRound,
+            ", pathDepth=",
+            pathDepth,
+            ", selectedBranch=",
+            selectedBranch);
 
         for (int i = 0; i < 16; i++)
         {
@@ -233,11 +257,15 @@ SHAMapInnerNode::compute_skipped_hash(
                 {
                     // Terminal level - use inner's hash
                     hashData = inner->get_hash().data();
+                    LOGD(
+                        "compute_skipped_hash: terminal level using inner "
+                        "hash");
                 }
                 else
                 {
                     // Non-terminal level - use hash from next level
                     hashData = levelHashes[currentRound - round + 1].data();
+                    LOGD("compute_skipped_hash: using hash from next level");
                 }
             }
             else
@@ -264,11 +292,102 @@ SHAMapInnerNode::compute_skipped_hash(
 
         EVP_MD_CTX_free(ctx);
         levelHashes[currentRound - round] = Hash256(fullHash.data());
+
+        LOGD(
+            "compute_skipped_hash: completed round=",
+            currentRound,
+            ", hash=",
+            levelHashes[currentRound - round].hex().substr(0, 8));
     }
 
     // Return the hash for the initial level
     return levelHashes[0];
 }
+
+// Hash256
+// SHAMapInnerNode::compute_skipped_hash(
+//     const boost::intrusive_ptr<SHAMapInnerNode>& inner,
+//     const Key& index,
+//     int round,
+//     int skips) const
+// {
+//     // Static zero hash
+//     static const Hash256 zeroHash = Hash256::zero();
+//
+//     // Store computed hashes for each level
+//     std::vector<Hash256> levelHashes(skips - round + 1);
+//
+//     // Compute hash for each level, starting from the terminal level
+//     for (int currentRound = skips; currentRound >= round; currentRound--)
+//     {
+//         EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+//         if (!ctx)
+//             throw HashCalculationException("Failed to create EVP_MD_CTX");
+//
+//         if (EVP_DigestInit_ex(ctx, EVP_sha512(), nullptr) != 1)
+//         {
+//             EVP_MD_CTX_free(ctx);
+//             throw HashCalculationException(
+//                 "Failed to initialize SHA-512 digest");
+//         }
+//
+//         auto prefix = HashPrefix::innerNode;
+//         if (EVP_DigestUpdate(ctx, prefix.data(), prefix.size()) != 1)
+//         {
+//             EVP_MD_CTX_free(ctx);
+//             throw HashCalculationException(
+//                 "Failed to update digest with prefix");
+//         }
+//
+//         int pathDepth = depth_ + currentRound;
+//         int selectedBranch = select_branch(index, pathDepth);
+//
+//         for (int i = 0; i < 16; i++)
+//         {
+//             const uint8_t* hashData;
+//
+//             if (i == selectedBranch)
+//             {
+//                 if (currentRound == skips)
+//                 {
+//                     // Terminal level - use inner's hash
+//                     hashData = inner->get_hash().data();
+//                 }
+//                 else
+//                 {
+//                     // Non-terminal level - use hash from next level
+//                     hashData = levelHashes[currentRound - round + 1].data();
+//                 }
+//             }
+//             else
+//             {
+//                 // Branch not on path - use zero hash
+//                 hashData = zeroHash.data();
+//             }
+//
+//             if (EVP_DigestUpdate(ctx, hashData, Hash256::size()) != 1)
+//             {
+//                 EVP_MD_CTX_free(ctx);
+//                 throw HashCalculationException(
+//                     "Failed to update digest in skipped hash");
+//             }
+//         }
+//
+//         std::array<uint8_t, 64> fullHash{};
+//         unsigned int hashLen = 0;
+//         if (EVP_DigestFinal_ex(ctx, fullHash.data(), &hashLen) != 1)
+//         {
+//             EVP_MD_CTX_free(ctx);
+//             throw HashCalculationException("Failed to finalize digest");
+//         }
+//
+//         EVP_MD_CTX_free(ctx);
+//         levelHashes[currentRound - round] = Hash256(fullHash.data());
+//     }
+//
+//     // Return the hash for the initial level
+//     return levelHashes[0];
+// }
 
 bool
 SHAMapInnerNode::set_child(

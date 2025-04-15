@@ -17,7 +17,9 @@ private:
     int terminalBranch = -1;
 
     void
-    find_path(boost::intrusive_ptr<SHAMapInnerNode> root);
+    find_path(
+        boost::intrusive_ptr<SHAMapInnerNode> root,
+        bool regenerateSkippedNodes = true);
     bool
     maybe_copy_on_write() const;
 

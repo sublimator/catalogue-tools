@@ -32,6 +32,13 @@
         "src/hasher/**/CMakeLists.txt"
       ]
     },
+    "shamap": {
+      "include": [
+        "src/shamap/**/*.cpp",
+        "src/shamap/**/*.h",
+        "src/shamap/**/CMakeLists.txt"
+      ]
+    },
     "hasher-http": {
       "include": [
         "src/hasher/src/http-server.cpp",

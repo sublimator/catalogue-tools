@@ -2,6 +2,7 @@
 #include <boost/json.hpp>
 #include <iostream>
 #include "test-utils.h"
+#include "catl/core/logger.h"
 
 // Test using the fixture with source-relative paths
 TEST_F(ShaMapFixture, JsonFileOperations) {
@@ -118,6 +119,23 @@ TEST(ShaMapTest, SetItemModes) {
     EXPECT_EQ(map.set_item(item2, SetMode::ADD_OR_UPDATE), SetResult::UPDATE);
     EXPECT_EQ(map.set_item(item3, SetMode::ADD_OR_UPDATE), SetResult::ADD);
 }
+
+// Test for node collapsing behavior, particularly with shallow trees
+TEST(ShaMapTest, CollapsePathWithSkips) {
+    // Logger::setLevel(LogLevel::DEBUG);
+    // Create a transaction-like tree (shallow)
+    auto map = SHAMap(tnTRANSACTION_MD);
+
+    // Add a series of items that will create a specific structure
+    // Force collisions to create deeper structures first
+    auto [data1, item1] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000100");
+    auto [data2, item2] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000101");
+
+
+    map.add_item(item1);
+    map.add_item(item2);
+}
+
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

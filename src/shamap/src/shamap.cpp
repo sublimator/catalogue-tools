@@ -248,7 +248,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                 {
                     LOGD(
                         "Collision resolved at depth ",
-                        currentDepth,
+                        std::to_string(currentDepth),
                         ". Placing leaves at branches ",
                         existingBranch,
                         " and ",
@@ -275,9 +275,9 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                     // Collision continues, create another inner node
                     LOGD(
                         "Collision continues at depth ",
-                        currentDepth,
+                        std::to_string(currentDepth),
                         ", branch ",
-                        existingBranch,
+                        std::to_string(existingBranch),
                         ". Descending further.");
                     auto nextInner = boost::intrusive_ptr(
                         new SHAMapInnerNode(currentDepth + 1));

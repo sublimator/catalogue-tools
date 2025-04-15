@@ -69,7 +69,7 @@ private:
 
         std::memcpy(&header, data, sizeof(CATLHeader));
         stats.currentOffset = sizeof(CATLHeader);
-        header.max_ledger = 10'000;  // TODO: hackery
+        header.max_ledger = 100'000;  // TODO: hackery
 
         if (header.magic != CATL)
         {
@@ -486,6 +486,9 @@ private:
                 LOGD("  Expected Hash: ", expectedHash.hex());
             }
             stats.failedHashVerifications++;
+            throw std::runtime_error(
+                "Hash verification failed for ledger: " +
+                std::to_string(ledgerSeq));
         }
         else
         {
