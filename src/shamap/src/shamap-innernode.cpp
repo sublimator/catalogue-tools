@@ -3,7 +3,6 @@
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 
-
 #include "catl/core/logger.h"
 #include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-hashprefix.h"

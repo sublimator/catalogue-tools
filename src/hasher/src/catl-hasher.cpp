@@ -23,8 +23,8 @@
 #include "catl/hasher/http/http-handler.h"
 #include "catl/hasher/http/http-server.h"
 #include "catl/hasher/ledger.h"
-#include "catl/shamap/shamap.h"
 #include "catl/hasher/utils.h"
+#include "catl/shamap/shamap.h"
 
 class CATLHasher
 {
