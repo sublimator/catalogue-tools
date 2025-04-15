@@ -17,7 +17,7 @@ private:
     uint8_t depth_ = 0;
 
     // CoW support
-    int version{0};
+    int version{0};  // TODO: make atomic or have clear reason not to
     bool do_cow_ = false;
 
 public:

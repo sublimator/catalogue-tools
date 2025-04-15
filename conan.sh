@@ -1,0 +1,1 @@
+conan install . --build=missing --install-folder=build -e CMAKE_GENERATOR=Ninja
