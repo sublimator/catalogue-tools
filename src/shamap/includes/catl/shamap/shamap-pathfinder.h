@@ -4,6 +4,7 @@
 #include "catl/core/types.h"
 #include "catl/shamap/shamap-innernode.h"
 #include "catl/shamap/shamap-leafnode.h"
+#include "shamap-options.h"
 /**
  * Helper class to find paths in the tree with CoW support
  */
@@ -11,6 +12,7 @@ class PathFinder
 {
 private:
     const Key& targetKey;
+    const SHAMapOptions options_;
     static LogPartition log_partition_;
     std::vector<boost::intrusive_ptr<SHAMapInnerNode>> inners;
     std::vector<int> branches;
@@ -25,12 +27,18 @@ private:
     bool
     maybe_copy_on_write() const;
 
+    void
+    collapse_path_inners();
+
 protected:
     friend class SHAMap;
     boost::intrusive_ptr<SHAMapInnerNode> searchRoot;
 
 public:
-    PathFinder(boost::intrusive_ptr<SHAMapInnerNode>& root, const Key& key);
+    PathFinder(
+        boost::intrusive_ptr<SHAMapInnerNode>& root,
+        const Key& key,
+        SHAMapOptions options);
     bool
     has_leaf() const;
     bool

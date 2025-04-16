@@ -243,7 +243,7 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
             std::cout << std::endl;
 
             {
-                auto map_ = SHAMap(tnTRANSACTION_MD);
+                auto map_ = SHAMap(tnTRANSACTION_MD, {.collapse_path_single_child_inners = false});
                 std::vector<std::shared_ptr<uint8_t[]>> buffers; // Keep alive
                 for (size_t j = 0; j < i + 1; ++j) {
                     const auto& txn_ = txns[j];

@@ -252,7 +252,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 
     try
     {
-        PathFinder pathFinder(root, item->key());
+        PathFinder pathFinder(root, item->key(), options_);
 
         // If CoW is enabled, handle versioning
         if (cow_enabled_)
@@ -461,7 +461,7 @@ SHAMap::remove_item(const Key& key)
     OLOGD_KEY("Attempting to remove item with key: ", key);
     try
     {
-        PathFinder pathFinder(root, key);
+        PathFinder pathFinder(root, key, options_);
 
         // If CoW is enabled, handle versioning
         if (cow_enabled_)

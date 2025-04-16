@@ -47,8 +47,9 @@ check_no_existing_skips(
 //----------------------------------------------------------
 PathFinder::PathFinder(
     boost::intrusive_ptr<SHAMapInnerNode>& root,
-    const Key& key)
-    : targetKey(key)
+    const Key& key,
+    SHAMapOptions options)
+    : targetKey(key), options_(options)
 {
     find_path(root);
 }
@@ -713,10 +714,13 @@ PathFinder::dirty_path() const
     }
 }
 
-#if not COLLAPSE_PATH_SINGLE_CHILD_INNERS
 void
 PathFinder::collapse_path()
 {
+    if (options_.collapse_path_single_child_inners)
+    {
+        return collapse_path_inners();
+    }
     if (inners.size() <= 1)
         return;
     boost::intrusive_ptr<SHAMapLeafNode> onlyChild = nullptr;
@@ -735,11 +739,9 @@ PathFinder::collapse_path()
             break;
     }
 }
-#endif
 
-#if COLLAPSE_PATH_SINGLE_CHILD_INNERS
 void
-PathFinder::collapse_path()
+PathFinder::collapse_path_inners()
 {
     // We need at least a node and its parent in the path to potentially
     // collapse the node. The root node (index 0) cannot be collapsed *by* a
@@ -995,7 +997,6 @@ PathFinder::collapse_path()
             std::dec);
     }
 }
-#endif
 
 bool
 PathFinder::maybe_copy_on_write() const
