@@ -111,10 +111,15 @@ SHAMap::snapshot()
 namespace json = boost::json;
 
 void
-SHAMap::trie_json(std::ostream& os) const
+SHAMap::trie_json(std::ostream& os, bool pretty) const
 {
     auto trie = root->trie_json();
-    pretty_print_json(os, trie);
+    if (pretty)
+        pretty_print_json(os, trie);
+    else
+    {
+        os << trie;
+    }
 }
 
 void

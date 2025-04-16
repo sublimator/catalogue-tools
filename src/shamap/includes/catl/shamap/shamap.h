@@ -123,7 +123,7 @@ public:
     snapshot();
 
     void
-    trie_json(std::ostream& os) const;
+    trie_json(std::ostream& os, bool pretty = true) const;
 
     void
     visit_items(const std::function<void(const MmapItem&)>& visitor) const;

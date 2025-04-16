@@ -79,7 +79,9 @@ private:
 
         std::memcpy(&header, data, sizeof(CATLHeader));
         stats.currentOffset = sizeof(CATLHeader);
-        header.max_ledger = 1000'000;  // TODO: hackery
+#if STOP_AT_LEDGER
+        header.max_ledger = STOP_AT_LEDGER;  // TODO: hackery
+#endif
 
         if (header.magic != CATL)
         {
@@ -157,7 +159,7 @@ private:
                 return startOffset;  // Return original offset on error
             }
             uint8_t nodeTypeVal = data[offset++];
-            SHAMapNodeType nodeType = static_cast<SHAMapNodeType>(nodeTypeVal);
+            auto nodeType = static_cast<SHAMapNodeType>(nodeTypeVal);
 
             if (nodeType == tnTERMINAL)
             {
@@ -518,9 +520,11 @@ private:
                 LOGD("  Expected Hash: ", expectedHash.hex());
             }
             stats.failedHashVerifications++;
-            throw std::runtime_error(
-                "Hash verification failed for ledger: " +
-                std::to_string(ledgerSeq));
+            if ((mapType == "Transaction" && THROW_ON_TX_HASH_MISMATCH) ||
+                (mapType == "AccountState" && THROW_ON_AS_HASH_MISMATCH))
+                throw std::runtime_error(
+                    "Hash verification failed for ledger: " +
+                    std::to_string(ledgerSeq));
         }
         else
         {

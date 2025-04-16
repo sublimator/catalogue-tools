@@ -130,8 +130,10 @@ TEST(ShaMapTest, CollapsePathWithSkips) {
     auto [data1, item1] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000100");
     auto [data2, item2] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000101");
 
+    SHAMapOptions options = {.collapse_path_single_child_inners = true};
+
     {
-        auto map = SHAMap(tnTRANSACTION_MD);
+        auto map = SHAMap(tnTRANSACTION_MD, {.collapse_path_single_child_inners = false});
         map.add_item(item1);
         map.add_item(item2);
         auto hash = map.get_hash();
@@ -139,7 +141,7 @@ TEST(ShaMapTest, CollapsePathWithSkips) {
     }
 
     {
-        auto map = SHAMap(tnTRANSACTION_MD);
+        auto map = SHAMap(tnTRANSACTION_MD, options);
         map.add_item(item1);
         auto snapshot = map.snapshot();
         snapshot->add_item(item2);
@@ -186,6 +188,9 @@ TEST_F(TransactionFixture, Ledger29952TransactionAddTest) {
             Hash256 currentHash = map.get_hash();
             std::cout << "Map hash after adding: " << currentHash.hex() << std::endl;
 
+            // map.collapse_tree();
+
+
             std::cout << "Map trie JSON: ";
             map.trie_json(std::cout);
             std::cout << std::endl;
@@ -231,6 +236,8 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
             // }
 
             EXPECT_EQ(addItemFromHex(keyHex,dataHex), SetResult::ADD);
+
+            // map.collapse_tree();
 
 
             // For additional verification, you could calculate the expected hash after each addition
