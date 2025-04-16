@@ -12,7 +12,7 @@ Logger::should_log(LogLevel level)
 }
 
 void
-Logger::setLevel(LogLevel level)
+Logger::set_level(LogLevel level)
 {
     // Log level change *before* the lock for potential self-logging
     LogLevel oldLevel = current_level_;
@@ -29,6 +29,30 @@ Logger::setLevel(LogLevel level)
         std::lock_guard<std::mutex> lock(log_mutex_);
         std::cout << oss.str() << std::endl;
     }
+}
+
+bool
+Logger::set_level(const std::string& levelStr)
+{
+    static const std::unordered_map<std::string, LogLevel> levelMap = {
+        {"error", LogLevel::ERROR},
+        {"warn", LogLevel::WARNING},
+        {"warning", LogLevel::WARNING},
+        {"info", LogLevel::INFO},
+        {"debug", LogLevel::DEBUG}};
+
+    // Convert input to lowercase
+    std::string lowerLevelStr = levelStr;
+    std::ranges::transform(lowerLevelStr, lowerLevelStr.begin(), ::tolower);
+
+    const auto it = levelMap.find(lowerLevelStr);
+    if (it == levelMap.end())
+    {
+        return false;
+    }
+
+    set_level(it->second);
+    return true;
 }
 
 LogLevel

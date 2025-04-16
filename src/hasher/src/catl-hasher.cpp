@@ -13,6 +13,9 @@
 #include <boost/filesystem.hpp>
 #include <boost/iostreams/device/mapped_file.hpp>
 
+// For command line parsing
+#include <boost/program_options.hpp>
+
 // For crypto
 #include <openssl/evp.h>
 
@@ -25,6 +28,9 @@
 #include "catl/hasher/ledger.h"
 #include "catl/hasher/utils.h"
 #include "catl/shamap/shamap.h"
+
+// Command line parsing
+namespace po = boost::program_options;
 
 class CATLHasher
 {
@@ -69,7 +75,7 @@ private:
 
         std::memcpy(&header, data, sizeof(CATLHeader));
         stats.currentOffset = sizeof(CATLHeader);
-        header.max_ledger = 100'000;  // TODO: hackery
+        header.max_ledger = 1000'000;  // TODO: hackery
 
         if (header.magic != CATL)
         {
@@ -808,73 +814,58 @@ public:
 int
 main(int argc, char* argv[])
 {
-    if (argc < 2)
+    // Define command line options
+    po::options_description desc("Allowed options");
+    desc.add_options()("help,h", "Display this help message")(
+        "input-file", po::value<std::string>(), "Path to the CATL file")(
+        "level,l",
+        po::value<std::string>()->default_value("info"),
+        "Set log verbosity (error, warn, info, debug)");
+
+    // Positional argument for input file
+    po::positional_options_description p;
+    p.add("input-file", 1);
+
+    // Parse command line arguments
+    po::variables_map vm;
+    try
     {
-        // Use std::cerr directly for usage message as Logger might not be
-        // configured yet
-        std::cerr << "Usage: " << argv[0]
-                  << " <catalogue_file> [--level <level>]" << std::endl;
-        std::cerr << "  <catalogue_file>: Path to the CATL file." << std::endl;
-        std::cerr << "  --level <level>: Set log verbosity (optional)."
-                  << std::endl;
-        std::cerr << "     Levels: error, warn, info (default), debug"
-                  << std::endl;
-        std::cerr << "\nProcesses CATL files, builds SHAMaps, verifies hashes."
-                  << std::endl;
+        po::store(
+            po::command_line_parser(argc, argv)
+                .options(desc)
+                .positional(p)
+                .run(),
+            vm);
+        po::notify(vm);
+    }
+    catch (const po::error& e)
+    {
+        std::cerr << "Error: " << e.what() << std::endl;
+        std::cerr << desc << std::endl;
         return 1;
     }
 
-    std::string inputFile = argv[1];
-    LogLevel desiredLevel = LogLevel::INFO;  // Default level
-
-    // Parse command line arguments for log level
-    for (int i = 2; i < argc; ++i)
+    // Display help if requested or if no input file provided
+    if (vm.count("help") || !vm.count("input-file"))
     {
-        std::string arg = argv[i];
-        if (arg == "--level" && i + 1 < argc)
-        {
-            std::string levelStr = argv[++i];
-            if (levelStr == "error" || levelStr == "ERROR")
-            {
-                desiredLevel = LogLevel::ERROR;
-            }
-            else if (
-                levelStr == "warn" || levelStr == "WARN" ||
-                levelStr == "warning" || levelStr == "WARNING")
-            {
-                desiredLevel = LogLevel::WARNING;
-            }
-            else if (levelStr == "info" || levelStr == "INFO")
-            {
-                desiredLevel = LogLevel::INFO;
-            }
-            else if (levelStr == "debug" || levelStr == "DEBUG")
-            {
-                desiredLevel = LogLevel::DEBUG;
-            }
-            else
-            {
-                std::cerr << "Warning: Unknown log level '" << levelStr
-                          << "'. Using default (info)." << std::endl;
-            }
-        }
-        // Deprecated verbose flags (map to debug for backward compatibility)
-        else if (arg == "--verbose" || arg == "--debug")
-        {
-            desiredLevel = LogLevel::DEBUG;
-            std::cerr << "Warning: --verbose/--debug flags are deprecated. Use "
-                         "'--level debug'."
-                      << std::endl;
-        }
-        else
-        {
-            std::cerr << "Warning: Unknown argument '" << arg << "'."
-                      << std::endl;
-        }
+        std::cout << "Usage: " << argv[0] << " [options] <catalogue_file>"
+                  << std::endl;
+        std::cout << desc << std::endl;
+        std::cout << "Processes CATL files, builds SHAMaps, verifies hashes."
+                  << std::endl;
+        return vm.count("help") ? 0 : 1;
     }
 
-    // Set the logger level *before* creating CATLHasher
-    Logger::setLevel(desiredLevel);
+    // Get input filename and desired log level
+    std::string inputFile = vm["input-file"].as<std::string>();
+    // Parse log level
+    std::string levelStr = vm["level"].as<std::string>();
+
+    if (!Logger::set_level(levelStr))
+    {
+        std::cerr << "Warning: Unknown log level '" << levelStr
+                  << "'. Using default (info)." << std::endl;
+    }
 
     // Start timing
     auto startTime = std::chrono::high_resolution_clock::now();
@@ -884,15 +875,14 @@ main(int argc, char* argv[])
 
     try
     {
-        // Pass only filename, verbose removed
+        // Create and process with CATLHasher
         hasher.emplace(inputFile);
         bool result = hasher->processFile();
         exitCode = result ? 0 : 1;  // 0 on success, 1 on failure
     }
     catch (const std::exception& e)
     {
-        // Catch errors during CATLHasher construction (e.g., file not found)
-        // Logger might already be set, so use it. If not, cerr is fallback.
+        // Catch errors during CATLHasher construction
         LOGE("Fatal error during initialization: ", e.what());
         exitCode = 1;
     }
@@ -902,13 +892,12 @@ main(int argc, char* argv[])
         exitCode = 1;
     }
 
-    // Calculate and display execution time using Logger
+    // Calculate and display execution time
     auto endTime = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
         endTime - startTime);
     double seconds = duration.count() / 1000.0;
 
-    // Use fixed/setprecision for consistent output format
     std::ostringstream timeOSS;
     timeOSS << "Execution completed in " << std::fixed << std::setprecision(3)
             << seconds << " seconds (" << duration.count() << " ms)";

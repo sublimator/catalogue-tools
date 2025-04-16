@@ -26,7 +26,9 @@ private:
 
 public:
     static void
-    setLevel(LogLevel level);
+    set_level(LogLevel level);
+    static bool
+    set_level(const std::string& level);
     static LogLevel
     get_level();
 
