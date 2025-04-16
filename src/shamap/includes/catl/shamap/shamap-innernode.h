@@ -5,6 +5,7 @@
 #include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap-treenode.h"
 #include <atomic>
+#include <boost/json/object.hpp>
 #include <memory>
 
 #include "catl/core/logger.h"
@@ -50,6 +51,9 @@ public:
     // Helper methods for skipped inner handling
     boost::intrusive_ptr<SHAMapLeafNode>
     first_leaf(const boost::intrusive_ptr<SHAMapInnerNode>& inner);
+
+    boost::json::object
+    trie_json() const;
 
     Hash256
     compute_skipped_hash(

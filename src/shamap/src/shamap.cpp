@@ -1,10 +1,12 @@
 #include "catl/shamap/shamap.h"
 
+#include <boost/json/serialize.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "catl/core/log-macros.h"
 #include "catl/core/logger.h"
 #include "catl/shamap/shamap-utils.h"
+#include "pretty-print-json.h"
 
 //----------------------------------------------------------
 // SHAMap Implementation
@@ -101,6 +103,15 @@ SHAMap::snapshot()
         SHAMap(node_type_, root, version_counter_, snapshotVersion));
 
     return copy;
+}
+
+namespace json = boost::json;
+
+void
+SHAMap::trie_json(std::ostream& os) const
+{
+    auto trie = root->trie_json();
+    pretty_print_json(os, trie);
 }
 
 SetResult

@@ -117,6 +117,9 @@ public:
     std::shared_ptr<SHAMap>
     snapshot();
 
+    void
+    trie_json(std::ostream& os) const;
+
     // Add this getter
     static LogPartition&
     get_log_partition()

@@ -49,6 +49,42 @@ SHAMapInnerNode::get_depth() const
     return depth_;
 }
 
+boost::json::object
+SHAMapInnerNode::trie_json() const
+{
+    boost::json::object result;
+    result["__depth__"] = depth_;
+
+    for (int i = 0; i < 16; i++)
+    {
+        if (has_child(i))
+        {
+            auto child = get_child(i);
+            if (child)
+            {
+                // Convert nibble to hex string
+                std::string nibble = (i < 10) ? std::to_string(i)
+                                              : std::string(1, 'A' + (i - 10));
+
+                if (child->is_leaf())
+                {
+                    auto leaf =
+                        boost::static_pointer_cast<SHAMapLeafNode>(child);
+                    result[nibble] = leaf->get_hash().hex();
+                }
+                else
+                {
+                    auto inner =
+                        boost::static_pointer_cast<SHAMapInnerNode>(child);
+                    result[nibble] = inner->trie_json();
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
 void
 SHAMapInnerNode::update_hash()
 {

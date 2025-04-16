@@ -183,6 +183,11 @@ TEST_F(TransactionFixture, LedgerTransactionAddTest) {
         Hash256 finalHash = map.get_hash();
         std::cout << "Final map hash: " << finalHash.hex() << std::endl;
         EXPECT_EQ(finalHash.hex(), "9138DB29694D9B7F125F56FE42520CAFF3C9870F28C4161A69E0C8597664C951");
+
+
+        std::cout << "Map trie JSON: ";
+        map.trie_json(std::cout);
+        std::cout << std::endl;
     } catch (const std::exception& e) {
         FAIL() << "Exception: " << e.what();
     }
@@ -190,8 +195,8 @@ TEST_F(TransactionFixture, LedgerTransactionAddTest) {
 
 
 int main(int argc, char **argv) {
-    Logger::set_level(LogLevel::DEBUG);
-    SHAMap::get_log_partition().set_level(LogLevel::DEBUG);
+    // Logger::set_level(LogLevel::DEBUG);
+    // SHAMap::get_log_partition().set_level(LogLevel::DEBUG);
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
