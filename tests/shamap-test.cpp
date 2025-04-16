@@ -177,7 +177,12 @@ TEST_F(TransactionFixture, LedgerTransactionAddTest) {
             // and compare it to the actual hash, but this would require precomputed hashes
             Hash256 currentHash = map.get_hash();
             std::cout << "Map hash after adding: " << currentHash.hex() << std::endl;
+
+            std::cout << "Map trie JSON: ";
+            map.trie_json(std::cout);
+            std::cout << std::endl;
         }
+
 
         // Final hash check if you have an expected final hash value
         Hash256 finalHash = map.get_hash();
@@ -185,9 +190,6 @@ TEST_F(TransactionFixture, LedgerTransactionAddTest) {
         EXPECT_EQ(finalHash.hex(), "9138DB29694D9B7F125F56FE42520CAFF3C9870F28C4161A69E0C8597664C951");
 
 
-        std::cout << "Map trie JSON: ";
-        map.trie_json(std::cout);
-        std::cout << std::endl;
     } catch (const std::exception& e) {
         FAIL() << "Exception: " << e.what();
     }
