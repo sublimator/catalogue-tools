@@ -18,6 +18,7 @@
 #include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap-pathfinder.h"
 #include "catl/shamap/shamap-treenode.h"
+#include "shamap-options.h"
 
 enum class SetResult {
     FAILED = 0,  // Operation failed
@@ -41,6 +42,7 @@ private:
     static LogPartition log_partition_;
     boost::intrusive_ptr<SHAMapInnerNode> root;
     SHAMapNodeType node_type_;
+    SHAMapOptions options_;
 
     // CoW support - all private
     std::shared_ptr<std::atomic<int>> version_counter_;
@@ -91,10 +93,13 @@ private:
         SHAMapNodeType type,
         boost::intrusive_ptr<SHAMapInnerNode> rootNode,
         std::shared_ptr<std::atomic<int>> vCounter,
-        int version);
+        int version,
+        SHAMapOptions options);
 
 public:
-    explicit SHAMap(SHAMapNodeType type = tnACCOUNT_STATE);
+    explicit SHAMap(
+        SHAMapNodeType type = tnACCOUNT_STATE,
+        SHAMapOptions options = SHAMapOptions());
 
     SetResult
     set_item(

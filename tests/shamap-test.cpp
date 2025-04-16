@@ -3,6 +3,7 @@
 #include <iostream>
 #include "test-utils.h"
 #include "catl/core/logger.h"
+#include "catl/shamap/shamap-impl.h"
 
 // Test using the fixture with source-relative paths
 TEST_F(AccountStateFixture, JsonFileOperations) {
@@ -220,9 +221,10 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
             auto keyHex = boost::json::value_to<std::string>(txn.at("key"));
             auto dataHex = boost::json::value_to<std::string>(txn.at("data"));
 
+            size_t txn_n = i + 1;
             // Add item to the map
-            std::cout << "Adding transaction " << (i + 1) << " with key: " << keyHex << std::endl;
-            // if (i + 1== 10) {
+            std::cout << "Adding transaction " << txn_n << " with key: " << keyHex << std::endl;
+            // if (txn_n >= 4 && txn_n <= 7) {
             //     Logger::set_level(LogLevel::DEBUG);
             // } else {
             //     Logger::set_level(LogLevel::INFO);
@@ -239,11 +241,36 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
             std::cout << "Map trie JSON: ";
             map.trie_json(std::cout);
             std::cout << std::endl;
+
+            {
+                auto map_ = SHAMap(tnTRANSACTION_MD);
+                std::vector<std::shared_ptr<uint8_t[]>> buffers; // Keep alive
+                for (size_t j = 0; j < i + 1; ++j) {
+                    const auto& txn_ = txns[j];
+                    auto key_str = boost::json::value_to<std::string>(txn_.at("key"));
+                    auto data_str = boost::json::value_to<std::string>(txn_.at("data"));
+                    auto [data, item] = getItemFromHex(key_str, data_str);
+                    std::ranges::copy(data, std::back_inserter(buffers));
+                    map_.add_item(item);
+                }
+                map_.collapse_tree();
+                std::cout << "Canonical Collapsed Map trie JSON: ";
+                map_.trie_json(std::cout);
+                std::cout << std::endl;
+            }
+
         }
 
 
         // Final hash check if you have an expected final hash value
         Hash256 finalHash = map.get_hash();
+#if not COLLAPSE_PATH_SINGLE_CHILD_INNERS
+        map.collapse_tree();
+        std::cout << "Map trie JSON after collapsing: ";
+        map.trie_json(std::cout);
+        std::cout << std::endl;
+
+#endif
         std::cout << "Final map hash: " << finalHash.hex() << std::endl;
         EXPECT_EQ(finalHash.hex(), "39460E5964D942A0E8A7A2C4E86EEF40B6C8FDF707BDA3874BE3CEE7D917D103");
 

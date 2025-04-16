@@ -11,8 +11,9 @@
 //----------------------------------------------------------
 // SHAMap Implementation
 //----------------------------------------------------------
-SHAMap::SHAMap(SHAMapNodeType type)
+SHAMap::SHAMap(SHAMapNodeType type, SHAMapOptions options)
     : node_type_(type)
+    , options_(options)
     , version_counter_(std::make_shared<std::atomic<int>>(0))
     , current_version_(0)
     , cow_enabled_(false)
@@ -25,9 +26,11 @@ SHAMap::SHAMap(
     const SHAMapNodeType type,
     boost::intrusive_ptr<SHAMapInnerNode> rootNode,
     std::shared_ptr<std::atomic<int>> vCounter,
-    const int version)
+    const int version,
+    SHAMapOptions options)
     : root(std::move(rootNode))
     , node_type_(type)
+    , options_(options)
     , version_counter_(std::move(vCounter))
     , current_version_(version)
     , cow_enabled_(true)
@@ -100,7 +103,7 @@ SHAMap::snapshot()
 
     // Create a new SHAMap that shares the same root and version counter
     auto copy = std::make_shared<SHAMap>(
-        SHAMap(node_type_, root, version_counter_, snapshotVersion));
+        SHAMap(node_type_, root, version_counter_, snapshotVersion, options_));
 
     return copy;
 }
