@@ -98,8 +98,8 @@ public:
     snapshot();
 
     // Add this getter
-    const LogPartition&
-    get_log_partition() const
+    static LogPartition&
+    get_log_partition()
     {
         return log_partition_;
     }

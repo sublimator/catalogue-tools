@@ -58,8 +58,8 @@ public:
     boost::intrusive_ptr<SHAMapLeafNode>
     invalidated_possibly_copied_leaf_for_updating(int targetVersion);
 
-    const LogPartition&
-    get_log_partition() const
+    static LogPartition&
+    get_log_partition()
     {
         return log_partition_;
     }

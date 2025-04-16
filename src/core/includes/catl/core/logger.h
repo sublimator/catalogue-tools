@@ -62,8 +62,10 @@ private:
 public:
     static void
     set_level(LogLevel level);
+
     static bool
     set_level(const std::string& level);
+
     static LogLevel
     get_level();
 
@@ -156,10 +158,10 @@ namespace detail {
 template <typename T>
 class has_log_partition
 {
-    // Check for get_log_partition method instead of direct member access
+    // Check for static get_log_partition method
     template <typename C>
     static constexpr auto
-    test(int) -> decltype(std::declval<C>().get_log_partition(), bool())
+    test(int) -> decltype(C::get_log_partition(), bool())
     {
         return true;
     }
@@ -182,12 +184,12 @@ log_with_partition_check(
     LogLevel level,
     const char* file,
     int line,
-    const T* obj,
+    const T* /* obj - not used anymore */,
     const Args&... args)
 {
     if constexpr (has_log_partition<T>::value)
     {
-        auto& partition = obj->get_log_partition();
+        auto& partition = T::get_log_partition();
         if (partition.should_log(level))
         {
             Logger::log(

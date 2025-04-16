@@ -131,7 +131,6 @@ TEST(ShaMapTest, CollapsePathWithSkips) {
     auto [data1, item1] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000100");
     auto [data2, item2] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000101");
 
-
     map.add_item(item1);
     map.add_item(item2);
 }
