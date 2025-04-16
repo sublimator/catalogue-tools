@@ -7,6 +7,8 @@
 #include "catl/shamap/shamap-leafnode.h"
 #include "catl/shamap/shamap-utils.h"
 
+// #define COLLAPSE_PATH_SINGLE_CHILD_INNERS 0
+
 //----------------------------------------------------------
 // PathFinder Implementation
 //----------------------------------------------------------
@@ -300,28 +302,31 @@ PathFinder::dirty_path() const
     }
 }
 
-// void
-// PathFinder::collapse_path()
-// {
-//      if (inners.size() <= 1)
-//          return;
-//      boost::intrusive_ptr<SHAMapLeafNode> onlyChild = nullptr;
-//      auto innermost = inners.back();
-//      onlyChild = innermost->get_only_child_leaf();
-//      for (int i = static_cast<int>(inners.size()) - 2; i >= 0; --i)
-//      {
-//          auto inner = inners[i];
-//          int branch = branches[i];
-//          if (onlyChild)
-//          {
-//              inner->set_child(branch, onlyChild);
-//          }
-//          onlyChild = inner->get_only_child_leaf();
-//          if (!onlyChild)
-//              break;
-//      }
-// }
+#ifndef COLLAPSE_PATH_SINGLE_CHILD_INNERS
+void
+PathFinder::collapse_path()
+{
+    if (inners.size() <= 1)
+        return;
+    boost::intrusive_ptr<SHAMapLeafNode> onlyChild = nullptr;
+    auto innermost = inners.back();
+    onlyChild = innermost->get_only_child_leaf();
+    for (int i = static_cast<int>(inners.size()) - 2; i >= 0; --i)
+    {
+        auto inner = inners[i];
+        int branch = branches[i];
+        if (onlyChild)
+        {
+            inner->set_child(branch, onlyChild);
+        }
+        onlyChild = inner->get_only_child_leaf();
+        if (!onlyChild)
+            break;
+    }
+}
+#endif
 
+#ifdef COLLAPSE_PATH_SINGLE_CHILD_INNERS
 void
 PathFinder::collapse_path()
 {
@@ -502,6 +507,7 @@ PathFinder::collapse_path()
             (inners[i]->hashValid ? "YES" : "NO"));
     }
 }
+#endif
 
 bool
 PathFinder::maybe_copy_on_write() const

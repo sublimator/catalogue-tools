@@ -36,7 +36,9 @@
       "include": [
         "src/shamap/**/*.cpp",
         "src/shamap/**/*.h",
-        "src/shamap/**/CMakeLists.txt"
+        "src/shamap/**/CMakeLists.txt",
+        "tests/**/shamap*.*",
+        "tests/**/test-utils.*"
       ]
     },
     "hasher-http": {
