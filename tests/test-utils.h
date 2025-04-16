@@ -20,28 +20,31 @@ public:
 };
 
 // Hex parsing helper
-std::pair<std::unique_ptr<uint8_t[]>, boost::intrusive_ptr<MmapItem>> getItemFromHex(const std::string &hexString);
+std::pair<std::vector<std::shared_ptr<uint8_t[]>>, boost::intrusive_ptr<MmapItem>>
+getItemFromHex(const std::string &hexString, std::optional<std::string> hexData = std::nullopt);
 
 // JSON loading helper
 boost::json::value loadJsonFromFile(const std::string &filePath);
 
-// Test fixture for SHAMap tests
+template <SHAMapNodeType NodeType = tnACCOUNT_STATE>
 class ShaMapFixture : public ::testing::Test {
 protected:
     ShaMapFixture();
 
     void SetUp() override;
 
-    std::string getFixturePath(const std::string &filename);
+    std::string getFixturePath(const std::string &filename) const;
 
-    // Helper method to add an item from hex string
-    SetResult addItemFromHex(const std::string &hexString);
+    SetResult addItemFromHex(const std::string &hexString, std::optional<std::string> hexData = std::nullopt);
 
-    // Helper method to add an item from hex string
     bool removeItemFromHex(const std::string &hexString);
 
     // Member variables
     SHAMap map;
-    std::vector<std::unique_ptr<uint8_t[]>> buffers;
+    std::vector<std::shared_ptr<uint8_t[]>> buffers;
     std::string fixtureDir;
 };
+
+
+using TransactionFixture = ShaMapFixture<tnTRANSACTION_MD>;
+using AccountStateFixture = ShaMapFixture<tnACCOUNT_STATE>;

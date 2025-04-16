@@ -5,7 +5,7 @@
 #include "catl/core/logger.h"
 
 // Test using the fixture with source-relative paths
-TEST_F(ShaMapFixture, JsonFileOperations) {
+TEST_F(AccountStateFixture, JsonFileOperations) {
     try {
         // Get path to the test data file relative to this source file
         std::string filePath = getFixturePath("op-adds.json");
@@ -22,7 +22,7 @@ TEST_F(ShaMapFixture, JsonFileOperations) {
             auto expectedHash = boost::json::value_to<std::string>(op.at("map_hash"));
 
             if (operation == "add") {
-                EXPECT_EQ(addItemFromHex(keyHex), SetResult::ADD);
+                EXPECT_EQ(addItemFromHex(keyHex,std::nullopt), SetResult::ADD);
             } else if (operation == "remove") {
                 EXPECT_EQ(removeItemFromHex(keyHex), true);
             }
@@ -124,20 +124,74 @@ TEST(ShaMapTest, SetItemModes) {
 TEST(ShaMapTest, CollapsePathWithSkips) {
     // Logger::setLevel(LogLevel::DEBUG);
     // Create a transaction-like tree (shallow)
-    auto map = SHAMap(tnTRANSACTION_MD);
-
     // Add a series of items that will create a specific structure
     // Force collisions to create deeper structures first
     auto [data1, item1] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000100");
     auto [data2, item2] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000101");
 
-    map.add_item(item1);
-    map.add_item(item2);
+    {
+        auto map = SHAMap(tnTRANSACTION_MD);
+        map.add_item(item1);
+        map.add_item(item2);
+        auto hash = map.get_hash();
+        EXPECT_EQ(hash.hex(), "C11AECD806E48EFF26D1A036B3EC6428C7C727895331135E44322F506616ADB5");
+    }
+
+    {
+        auto map = SHAMap(tnTRANSACTION_MD);
+        map.add_item(item1);
+        auto snapshot = map.snapshot();
+        snapshot->add_item(item2);
+        auto hash = snapshot->get_hash();
+        EXPECT_EQ(hash.hex(), "C11AECD806E48EFF26D1A036B3EC6428C7C727895331135E44322F506616ADB5");
+    }
+}
+
+
+
+
+// Test for adding ledger transaction data one by one
+TEST_F(TransactionFixture, LedgerTransactionAddTest) {
+    try {
+        // Get path to the test data file
+        std::string filePath = getFixturePath("ledger-29952-txns.json");
+        std::cout << "Loading transaction data from: " << filePath << std::endl;
+
+        // Load JSON from file
+        boost::json::value transactions = loadJsonFromFile(filePath);
+        boost::json::array& txns = transactions.as_array();
+
+        std::cout << "Found " << txns.size() << " transactions to process" << std::endl;
+
+        // Process each transaction from the JSON array
+        for (size_t i = 0; i < txns.size(); ++i) {
+            const auto& txn = txns[i];
+            auto keyHex = boost::json::value_to<std::string>(txn.at("key"));
+            auto dataHex = boost::json::value_to<std::string>(txn.at("data"));
+
+            // Add item to the map
+            std::cout << "Adding transaction " << (i + 1) << " with key: " << keyHex << std::endl;
+            EXPECT_EQ(addItemFromHex(keyHex,dataHex), SetResult::ADD);
+
+            // For additional verification, you could calculate the expected hash after each addition
+            // and compare it to the actual hash, but this would require precomputed hashes
+            Hash256 currentHash = map.get_hash();
+            std::cout << "Map hash after adding: " << currentHash.hex() << std::endl;
+        }
+
+        // Final hash check if you have an expected final hash value
+        Hash256 finalHash = map.get_hash();
+        std::cout << "Final map hash: " << finalHash.hex() << std::endl;
+        EXPECT_EQ(finalHash.hex(), "9138DB29694D9B7F125F56FE42520CAFF3C9870F28C4161A69E0C8597664C951");
+    } catch (const std::exception& e) {
+        FAIL() << "Exception: " << e.what();
+    }
 }
 
 
 int main(int argc, char **argv) {
     Logger::set_level(LogLevel::DEBUG);
-    ::testing::InitGoogleTest(&argc, argv);
+    SHAMap::get_log_partition().set_level(LogLevel::DEBUG);
+    testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

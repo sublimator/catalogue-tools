@@ -3,11 +3,10 @@
 
 #include "catl/core/logger.h"
 #include "catl/shamap/shamap-errors.h"
+#include "catl/shamap/shamap-impl.h"
 #include "catl/shamap/shamap-innernode.h"
 #include "catl/shamap/shamap-leafnode.h"
 #include "catl/shamap/shamap-utils.h"
-
-// #define COLLAPSE_PATH_SINGLE_CHILD_INNERS 0
 
 //----------------------------------------------------------
 // PathFinder Implementation
@@ -18,6 +17,13 @@ PathFinder::PathFinder(
     : targetKey(key)
 {
     find_path(root);
+}
+
+void
+PathFinder::update_path()
+{
+    // Check if we need to update the path
+    find_path(searchRoot, false);
 }
 
 void
@@ -190,13 +196,52 @@ PathFinder::find_path(
         pathLevel++;
     }
 
-    OLOGI(
+    static const auto logDepthSkips =
+        [this](
+            const std::vector<boost::intrusive_ptr<SHAMapInnerNode>>& inners) {
+            if (inners.size() <= 1)
+            {
+                return false;  // No skips possible with 0 or 1 node
+            }
+
+            auto found = false;
+
+            for (size_t i = 0; i < inners.size() - 1; i++)
+            {
+                uint8_t currentDepth = inners[i]->get_depth();
+                uint8_t nextDepth = inners[i + 1]->get_depth();
+
+                // Check if depths are not sequential (should differ by exactly
+                // 1)
+                if (nextDepth - currentDepth > 1)
+                {
+                    OLOGD(
+                        "Depth skip detected: node at index ",
+                        i,
+                        " (depth ",
+                        static_cast<int>(currentDepth),
+                        ") -> node at index ",
+                        i + 1,
+                        " (depth ",
+                        static_cast<int>(nextDepth),
+                        ") - skipped ",
+                        (nextDepth - currentDepth - 1),
+                        " levels");
+                    found = true;
+                }
+            }
+            return found;
+        };
+
+    OLOGD(
         "Path finding complete, found ",
         inners.size(),
         " inner nodes, leaf=",
         (foundLeaf ? "YES" : "NO"),
         ", matches=",
-        leafKeyMatches);
+        leafKeyMatches,
+        ", skipped=",
+        logDepthSkips(inners));
 }
 
 // void
@@ -300,7 +345,7 @@ PathFinder::dirty_path() const
     }
 }
 
-#ifndef COLLAPSE_PATH_SINGLE_CHILD_INNERS
+#if not COLLAPSE_PATH_SINGLE_CHILD_INNERS
 void
 PathFinder::collapse_path()
 {
@@ -324,7 +369,7 @@ PathFinder::collapse_path()
 }
 #endif
 
-#ifdef COLLAPSE_PATH_SINGLE_CHILD_INNERS
+#if COLLAPSE_PATH_SINGLE_CHILD_INNERS
 void
 PathFinder::collapse_path()
 {
@@ -333,14 +378,12 @@ PathFinder::collapse_path()
     // parent.
     if (inners.empty())
     {
-        LOGD(
-            "PathFinder::collapse_path: No inner nodes in path, nothing to "
-            "collapse");
+        OLOGD("No inner nodes in path, nothing to collapse");
         return;
     }
 
-    LOGI(
-        "PathFinder::collapse_path: Starting collapse for key ",
+    OLOGI(
+        "Starting collapse for key ",
         targetKey.hex(),
         ", path length=",
         inners.size());
@@ -358,8 +401,8 @@ PathFinder::collapse_path()
         int branch_in_parent =
             branches[i - 1];  // Branch in parent leading to current_inner
 
-        LOGD(
-            "PathFinder::collapse_path: Checking node at index ",
+        OLOGD(
+            "Checking node at index ",
             i,
             ", depth=",
             static_cast<int>(current_inner->get_depth()),
@@ -369,7 +412,14 @@ PathFinder::collapse_path()
             branch_in_parent);
 
         int child_count = current_inner->get_branch_count();
-        LOGD("PathFinder::collapse_path: Node has ", child_count, " children");
+        OLOGD("Node has ", child_count, " children");
+
+        // Log branch mask for more detailed debugging
+        OLOGD(
+            "Node branch mask: 0x",
+            std::hex,
+            current_inner->get_branch_mask(),
+            std::dec);
 
         if (child_count == 1)
         {
@@ -381,27 +431,43 @@ PathFinder::collapse_path()
             if (it != current_inner->children_->end())
             {
                 the_only_child = *it;
-                LOGD(
-                    "PathFinder::collapse_path: Found single child at branch ",
+                OLOGD(
+                    "Found single child at branch ",
                     it.branch(),
                     ", is_leaf=",
-                    (the_only_child->is_leaf() ? "YES" : "NO"),
-                    ", child hash=",
-                    the_only_child->get_hash().hex());
+                    (the_only_child->is_leaf() ? "YES" : "NO"));
+
+                // Add extra info about child node type
+                if (the_only_child->is_leaf())
+                {
+                    OLOGD("Child is a leaf node");
+                }
+                else
+                {
+                    OLOGD(
+                        "Child is an inner node at depth ",
+                        static_cast<int>(
+                            boost::static_pointer_cast<SHAMapInnerNode>(
+                                the_only_child)
+                                ->get_depth()),
+                        " with ",
+                        boost::static_pointer_cast<SHAMapInnerNode>(
+                            the_only_child)
+                            ->get_branch_count(),
+                        " branches");
+                }
             }
             else
             {
-                LOGW(
-                    "PathFinder::collapse_path: Iterator didn't find child "
-                    "despite child_count=1");
+                OLOGW("Iterator didn't find child despite child_count=1");
             }
 
             if (the_only_child)  // Should always be true if count is 1
             {
                 // Perform the collapse: Parent points directly to the
                 // grandchild
-                LOGI(
-                    "PathFinder::collapse_path: Collapsing inner node (depth ",
+                OLOGI(
+                    "Collapsing inner node (depth ",
                     static_cast<int>(current_inner->get_depth()),
                     ") under parent (depth ",
                     static_cast<int>(parent_inner->get_depth()),
@@ -411,26 +477,68 @@ PathFinder::collapse_path()
 
                 // The child keeps its original depth. This creates the "skip".
                 // Log the hash of the parent before and after
-                Hash256 parentHashBefore = parent_inner->hashValid
-                    ? parent_inner->hash
-                    : Hash256::zero();
+                // Hash256 parentHashBefore = parent_inner->hashValid
+                //     ? parent_inner->hash
+                //     : Hash256::zero();
+
+                // Check CoW status before modifying
+                if (parent_inner->is_cow_enabled())
+                {
+                    OLOGD(
+                        "Parent has CoW enabled with version ",
+                        parent_inner->get_version());
+
+                    if (the_only_child->is_inner())
+                    {
+                        auto child_inner =
+                            boost::static_pointer_cast<SHAMapInnerNode>(
+                                the_only_child);
+                        if (child_inner->is_cow_enabled())
+                        {
+                            OLOGD(
+                                "Child also has CoW enabled with version ",
+                                child_inner->get_version());
+                        }
+                        else
+                        {
+                            OLOGD("Child doesn't have CoW enabled yet");
+                        }
+                    }
+                }
 
                 parent_inner->set_child(branch_in_parent, the_only_child);
                 parent_inner
                     ->invalidate_hash();  // Parent's hash is now invalid
 
-                LOGD(
-                    "PathFinder::collapse_path: Parent hash before collapse: ",
-                    parentHashBefore.hex());
-                LOGD(
-                    "PathFinder::collapse_path: New skipped depth difference: ",
-                    (the_only_child->is_inner()
-                         ? std::to_string(
-                               boost::static_pointer_cast<SHAMapInnerNode>(
-                                   the_only_child)
-                                   ->get_depth() -
-                               parent_inner->get_depth())
-                         : "N/A (leaf)"));
+                // OLOGD(
+                //     "Parent hash before collapse: ",
+                //     parentHashBefore.hex());
+
+                // Log depth difference which creates a "skip"
+                if (the_only_child->is_inner())
+                {
+                    int depth_diff =
+                        boost::static_pointer_cast<SHAMapInnerNode>(
+                            the_only_child)
+                            ->get_depth() -
+                        parent_inner->get_depth();
+
+                    OLOGD(
+                        "New skipped depth difference: ",
+                        depth_diff,
+                        " (parent: ",
+                        static_cast<int>(parent_inner->get_depth()),
+                        ", child: ",
+                        static_cast<int>(
+                            boost::static_pointer_cast<SHAMapInnerNode>(
+                                the_only_child)
+                                ->get_depth()),
+                        ")");
+                }
+                else
+                {
+                    OLOGD("New child is a leaf node (no depth skipping)");
+                }
 
                 needs_invalidation = true;  // Mark that *some* change happened
 
@@ -439,9 +547,8 @@ PathFinder::collapse_path()
             }
             else
             {
-                LOGE(
-                    "PathFinder::collapse_path: Consistency error: Inner node "
-                    "(depth ",
+                OLOGE(
+                    "Consistency error: Inner node (depth ",
                     static_cast<int>(current_inner->get_depth()),
                     ") reported 1 child but child pointer is null");
                 // This indicates a bug elsewhere, possibly in NodeChildren or
@@ -451,8 +558,8 @@ PathFinder::collapse_path()
         else if (child_count == 0)
         {
             // Node has become completely empty - remove it from the parent.
-            LOGI(
-                "PathFinder::collapse_path: Removing empty inner node (depth ",
+            OLOGI(
+                "Removing empty inner node (depth ",
                 static_cast<int>(current_inner->get_depth()),
                 ") from parent (depth ",
                 static_cast<int>(parent_inner->get_depth()),
@@ -463,27 +570,31 @@ PathFinder::collapse_path()
             Hash256 parentHashBefore =
                 parent_inner->hashValid ? parent_inner->hash : Hash256::zero();
 
+            // Check CoW status before modifying
+            if (parent_inner->is_cow_enabled())
+            {
+                OLOGD(
+                    "Parent has CoW enabled with version ",
+                    parent_inner->get_version(),
+                    " - setting child to nullptr");
+            }
+
             parent_inner->set_child(branch_in_parent, nullptr);
             parent_inner->invalidate_hash();
 
-            LOGD(
-                "PathFinder::collapse_path: Parent hash before removal: ",
-                parentHashBefore.hex());
+            OLOGD("Parent hash before removal: ", parentHashBefore.hex());
 
             needs_invalidation = true;  // Mark that *some* change happened
         }
         else
         {
-            LOGD(
-                "PathFinder::collapse_path: No collapse needed for node with ",
-                child_count,
-                " children");
+            OLOGD(
+                "No collapse needed for node with ", child_count, " children");
         }
     }
 
-    LOGI(
-        "PathFinder::collapse_path: Collapse process complete, "
-        "needs_invalidation=",
+    OLOGI(
+        "Collapse process complete, needs_invalidation=",
         (needs_invalidation ? "YES" : "NO"));
 
     // Call dirty_path() to ensure all nodes on the original path are marked
@@ -491,18 +602,25 @@ PathFinder::collapse_path()
     dirty_path();
 
     // Log hash invalidation
-    LOGD(
-        "PathFinder::collapse_path: Called dirty_path() to invalidate all "
-        "hashes in path");
+    OLOGD("Called dirty_path() to invalidate all hashes in path");
+
+    // Log the state of each node in the path after collapse
     for (size_t i = 0; i < inners.size(); i++)
     {
-        LOGD(
-            "PathFinder::collapse_path: Node at index ",
+        auto node = inners[i];
+        OLOGD(
+            "Node at index ",
             i,
             ", depth=",
-            static_cast<int>(inners[i]->get_depth()),
+            static_cast<int>(node->get_depth()),
             ", hashValid=",
-            (inners[i]->hashValid ? "YES" : "NO"));
+            (node->hashValid ? "YES" : "NO"),
+            ", branchCount=",
+            node->get_branch_count(),
+            ", branchMask=0x",
+            std::hex,
+            node->get_branch_mask(),
+            std::dec);
     }
 }
 #endif

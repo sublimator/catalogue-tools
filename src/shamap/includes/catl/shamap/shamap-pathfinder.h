@@ -52,6 +52,9 @@ public:
     void
     collapse_path();
 
+    void
+    update_path();
+
     // CoW support - used by SHAMap operations
     boost::intrusive_ptr<SHAMapInnerNode>
     dirty_or_copy_inners(int targetVersion);

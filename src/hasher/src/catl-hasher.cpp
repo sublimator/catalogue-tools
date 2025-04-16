@@ -281,6 +281,15 @@ private:
             auto item = boost::intrusive_ptr(
                 new MmapItem(keyData, itemDataPtr, dataSize));
 
+            if (!isStateMap)
+            {
+                LOGD(
+                    "Adding item to transaction map key=",
+                    item->key().hex(),
+                    "data=",
+                    item->hex());
+            }
+
             // Add item to the appropriate map
             if (map.set_item(item) != SetResult::FAILED)
             {
@@ -644,10 +653,14 @@ public:
             {
                 LedgerInfo info = {};
                 size_t nextOffset = processLedger(currentFileOffset, info);
+                if (info.sequence == 36822)
+                {
+                    Logger::set_level(LogLevel::DEBUG);
+                }
 
                 constexpr int every = 1;  // 0'000;
                 // TOOD: configurable
-                if (info.sequence % every == 0)
+                if (false && info.sequence % every == 0)
                 {
                     auto ledger = std::make_shared<Ledger>(
                         data + currentFileOffset,
@@ -658,6 +671,7 @@ public:
                     // and then recompute lazily via deltas
                     ledgerStore->add_ledger(ledger);
                 }
+                stateMap.collapse_tree();
 
                 // Stop processing if we've reached the end of the ledger range
                 if (info.sequence == header.max_ledger)
@@ -877,14 +891,7 @@ main(int argc, char* argv[])
     {
         // Create and process with CATLHasher
         hasher.emplace(inputFile);
-        bool result = true;  // hasher->processFile();
-        std::cout << "DETECTION WORKING: "
-                  << (detail::has_log_partition<SHAMap>::value ? "YES" : "NO")
-                  << std::endl;
-        LOGE("Global log level: ", static_cast<int>(Logger::get_level()));
-        LOGE(
-            "SHAMap partition level: ",
-            static_cast<int>(SHAMap().get_log_partition().level()));
+        bool result = hasher->processFile();
         exitCode = result ? 0 : 1;  // 0 on success, 1 on failure
     }
     catch (const std::exception& e)

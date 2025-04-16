@@ -7,6 +7,8 @@
 #include <atomic>
 #include <memory>
 
+#include "catl/core/logger.h"
+
 /**
  * Inner (branch) node in the SHAMap tree
  */
@@ -15,6 +17,7 @@ class SHAMapInnerNode : public SHAMapTreeNode
 private:
     std::unique_ptr<NodeChildren> children_;
     uint8_t depth_ = 0;
+    static LogPartition log_partition_;
 
     // CoW support
     int version{0};  // TODO: make atomic or have clear reason not to
@@ -45,7 +48,7 @@ public:
     get_only_child_leaf() const;
 
     // Helper methods for skipped inner handling
-    static boost::intrusive_ptr<SHAMapLeafNode>
+    boost::intrusive_ptr<SHAMapLeafNode>
     first_leaf(const boost::intrusive_ptr<SHAMapInnerNode>& inner);
 
     Hash256
@@ -54,6 +57,12 @@ public:
         const Key& index,
         int round,
         int skips) const;
+
+    static LogPartition&
+    get_log_partition()
+    {
+        return log_partition_;
+    }
 
 protected:
     friend class PathFinder;

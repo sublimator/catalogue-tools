@@ -66,6 +66,26 @@ private:
     int
     new_version();
 
+    /**
+     * Recursively collapses inner nodes that have only a single inner child
+     * and no leaf children
+     *
+     * @param node The inner node to process
+     */
+    void
+    collapse_inner_node(boost::intrusive_ptr<SHAMapInnerNode>& node);
+
+    /**
+     * Finds a single inner child if this node has exactly one inner child
+     * and no leaf children
+     *
+     * @param node The inner node to check
+     * @return A pointer to the single inner child, or nullptr if condition not
+     * met
+     */
+    boost::intrusive_ptr<SHAMapInnerNode>
+    find_only_single_inner_child(boost::intrusive_ptr<SHAMapInnerNode>& node);
+
     // Private constructor for creating snapshots
     SHAMap(
         SHAMapNodeType type,
@@ -103,4 +123,11 @@ public:
     {
         return log_partition_;
     }
+
+    /**
+     * Collapses the entire tree by removing single-child inner nodes
+     * where possible to optimize the tree structure
+     */
+    void
+    collapse_tree();
 };
