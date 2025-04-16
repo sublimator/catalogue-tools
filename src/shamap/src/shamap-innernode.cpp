@@ -70,7 +70,11 @@ SHAMapInnerNode::trie_json() const
                 {
                     auto leaf =
                         boost::static_pointer_cast<SHAMapLeafNode>(child);
+#if TRIE_JSON_USE_ITEM_KEY_NOT_HASH
+                    result[nibble] = leaf->get_item()->key().hex();
+#else
                     result[nibble] = leaf->get_hash().hex();
+#endif
                 }
                 else
                 {

@@ -28,6 +28,11 @@
           "src/core/**/*logger*"
       ]
     },
+    "core-types": {
+      "include": [
+          "src/core/**/*types*"
+      ]
+    },
     "tests": {
       "include": [
         "tests/**/CMakeLists.txt",

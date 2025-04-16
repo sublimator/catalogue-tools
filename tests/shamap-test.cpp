@@ -151,7 +151,7 @@ TEST(ShaMapTest, CollapsePathWithSkips) {
 
 
 // Test for adding ledger transaction data one by one
-TEST_F(TransactionFixture, LedgerTransactionAddTest) {
+TEST_F(TransactionFixture, Ledger29952TransactionAddTest) {
     try {
         // Get path to the test data file
         std::string filePath = getFixturePath("ledger-29952-txns.json");
@@ -176,6 +176,57 @@ TEST_F(TransactionFixture, LedgerTransactionAddTest) {
             } else {
                 Logger::set_level(LogLevel::INFO);
             }
+
+            EXPECT_EQ(addItemFromHex(keyHex,dataHex), SetResult::ADD);
+
+
+            // For additional verification, you could calculate the expected hash after each addition
+            // and compare it to the actual hash, but this would require precomputed hashes
+            Hash256 currentHash = map.get_hash();
+            std::cout << "Map hash after adding: " << currentHash.hex() << std::endl;
+
+            std::cout << "Map trie JSON: ";
+            map.trie_json(std::cout);
+            std::cout << std::endl;
+        }
+
+
+        // Final hash check if you have an expected final hash value
+        Hash256 finalHash = map.get_hash();
+        std::cout << "Final map hash: " << finalHash.hex() << std::endl;
+        EXPECT_EQ(finalHash.hex(), "9138DB29694D9B7F125F56FE42520CAFF3C9870F28C4161A69E0C8597664C951");
+
+
+    } catch (const std::exception& e) {
+        FAIL() << "Exception: " << e.what();
+    }
+}
+
+TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
+    try {
+        // Get path to the test data file
+        std::string filePath = getFixturePath("ledger-81920-txns.json");
+        std::cout << "Loading transaction data from: " << filePath << std::endl;
+
+        // Load JSON from file
+        boost::json::value transactions = loadJsonFromFile(filePath);
+        boost::json::array& txns = transactions.as_array();
+
+        std::cout << "Found " << txns.size() << " transactions to process" << std::endl;
+
+        // Process each transaction from the JSON array
+        for (size_t i = 0; i < txns.size(); ++i) {
+            const auto& txn = txns[i];
+            auto keyHex = boost::json::value_to<std::string>(txn.at("key"));
+            auto dataHex = boost::json::value_to<std::string>(txn.at("data"));
+
+            // Add item to the map
+            std::cout << "Adding transaction " << (i + 1) << " with key: " << keyHex << std::endl;
+            // if (i + 1== 10) {
+            //     Logger::set_level(LogLevel::DEBUG);
+            // } else {
+            //     Logger::set_level(LogLevel::INFO);
+            // }
 
             EXPECT_EQ(addItemFromHex(keyHex,dataHex), SetResult::ADD);
 

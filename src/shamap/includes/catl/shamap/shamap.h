@@ -120,6 +120,12 @@ public:
     void
     trie_json(std::ostream& os) const;
 
+    void
+    visit_items(const std::function<void(const MmapItem&)>& visitor) const;
+
+    boost::json::array
+    items_json() const;
+
     // Add this getter
     static LogPartition&
     get_log_partition()

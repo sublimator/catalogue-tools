@@ -1,0 +1,7 @@
+#pragma once
+
+// Set to 0 to disable
+#define DEBUG_LEDGER_TX 81920
+#define COLLAPSE_STATE_MAP 0
+#define STORE_LEDGER_SNAPSHOTS 0
+#define STORE_LEDGER_SNAPSHOTS_EVERY 1

@@ -114,6 +114,117 @@ SHAMap::trie_json(std::ostream& os) const
     pretty_print_json(os, trie);
 }
 
+void
+SHAMap::visit_items(const std::function<void(const MmapItem&)>& visitor) const
+{
+    if (!visitor)
+    {
+        OLOGW("visit_items called with an invalid visitor function.");
+        return;
+    }
+    if (!root)
+    {
+        // Empty tree, nothing to visit
+        return;
+    }
+
+    // Stack holds const pointers to nodes yet to be processed
+    std::stack<boost::intrusive_ptr<const SHAMapTreeNode>> node_stack;
+
+    // Start traversal from the root node
+    node_stack.push(boost::static_pointer_cast<const SHAMapTreeNode>(root));
+
+    while (!node_stack.empty())
+    {
+        // Get the next node from the stack (LIFO -> depth-first)
+        boost::intrusive_ptr<const SHAMapTreeNode> current_node =
+            node_stack.top();
+        node_stack.pop();
+
+        // Safety check
+        if (!current_node)
+            continue;
+
+        // Process based on node type
+        if (current_node->is_leaf())
+        {
+            auto leaf =
+                boost::dynamic_pointer_cast<const SHAMapLeafNode>(current_node);
+            if (leaf)
+            {
+                auto item_ptr = leaf->get_item();
+                if (item_ptr)
+                {
+                    visitor(*item_ptr);  // Execute visitor for the leaf item
+                }
+                else
+                {
+                    OLOGW(
+                        "Encountered leaf node with null MmapItem during "
+                        "visit_items traversal.");
+                }
+            }
+            else
+            {
+                OLOGE(
+                    "Failed to cast node to const SHAMapLeafNode despite "
+                    "is_leaf() being true.");
+            }
+        }
+        else if (current_node->is_inner())
+        {
+            auto inner = boost::dynamic_pointer_cast<const SHAMapInnerNode>(
+                current_node);
+            if (inner)
+            {
+                // Push children onto the stack to visit them next.
+                // Pushing 0..15 results in processing 15..0 (right-to-left DFS)
+                for (int i = 0; i < 16; ++i)
+                {
+                    boost::intrusive_ptr<const SHAMapTreeNode> child =
+                        inner->get_child(i);
+                    if (child)
+                    {  // Only push valid children
+                        node_stack.push(child);
+                    }
+                }
+            }
+            else
+            {
+                OLOGE(
+                    "Failed to cast node to const SHAMapInnerNode despite "
+                    "is_inner() being true.");
+            }
+        }
+        // else: Unknown node type? Log error or ignore.
+    }  // End while stack not empty
+}
+
+boost::json::array
+SHAMap::items_json() const
+{
+    boost::json::array items_array;  // Create the array to be populated
+
+    // Define the visitor lambda that builds the JSON object for each item
+    auto json_builder = [&items_array](const MmapItem& item) {
+        // Get key hex using Key::hex()
+        std::string key_hex = item.key().hex();
+
+        // Get data hex using the existing slice_hex utility
+        std::string data_hex;
+        slice_hex(item.slice(), data_hex);  // Assumes slice_hex is available
+
+        // Add the object to the array captured by the lambda
+        items_array.emplace_back(
+            boost::json::object{{"key", key_hex}, {"data", data_hex}});
+    };
+
+    // Call the general (now iterative) visitor function, passing the lambda
+    this->visit_items(json_builder);
+
+    return items_array;  // Return the populated array
+}
+
 SetResult
 SHAMap::add_item(boost::intrusive_ptr<MmapItem>& item)
 {

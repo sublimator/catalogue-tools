@@ -29,6 +29,10 @@
 #include "catl/hasher/utils.h"
 #include "catl/shamap/shamap.h"
 
+#include "hasher-impl.h"
+// TODO: this should be in the shamap library perhaps?
+#include "../../shamap/src/pretty-print-json.h"
+
 // Command line parsing
 namespace po = boost::program_options;
 
@@ -123,6 +127,7 @@ private:
         size_t offset,
         SHAMap& map,
         uint32_t& nodesProcessedCount,
+        bool debugMap,
         bool isStateMap = false)
     {
         nodesProcessedCount = 0;
@@ -343,6 +348,13 @@ private:
             nodesProcessedCount,
             " nodes. Final offset: ",
             offset);
+
+        if (debugMap)
+        {
+            std::ostringstream oss;
+            pretty_print_json(oss, map.items_json());
+            LOGI("MAP JSON: ", oss.str());
+        }
         return offset;  // Return the new offset after successful processing
     }
 
@@ -414,7 +426,11 @@ private:
 
         uint32_t stateNodesProcessed = 0;
         size_t stateMapEndOffset = processMap(
-            offset, stateMap, stateNodesProcessed, true);  // true = isStateMap
+            offset,
+            stateMap,
+            stateNodesProcessed,
+            false,
+            true);  // true = isStateMap
         if (stateMapEndOffset == offset && stateNodesProcessed == 0 &&
             offset != fileSize)
         {
@@ -443,6 +459,7 @@ private:
             offset,
             txMap,
             txNodesProcessed,
+            info.sequence == DEBUG_LEDGER_TX,
             false);  // false = not isStateMap
         if (txMapEndOffset == offset && txNodesProcessed == 0 &&
             offset != fileSize)
@@ -654,9 +671,9 @@ public:
                 LedgerInfo info = {};
                 size_t nextOffset = processLedger(currentFileOffset, info);
 
-                constexpr int every = 1;  // 0'000;
-                // TOOD: configurable
-                if (false && info.sequence % every == 0)
+#if STORE_LEDGER_SNAPSHOTS
+                constexpr int every = STORE_LEDGER_SNAPSHOTS_EVERY;
+                if (every > 0 && info.sequence % every == 0)
                 {
                     auto ledger = std::make_shared<Ledger>(
                         data + currentFileOffset,
@@ -667,8 +684,10 @@ public:
                     // and then recompute lazily via deltas
                     ledgerStore->add_ledger(ledger);
                 }
+#endif
+#if COLLAPSE_STATE_MAP
                 stateMap.collapse_tree();
-
+#endif
                 // Stop processing if we've reached the end of the ledger range
                 if (info.sequence == header.max_ledger)
                 {
