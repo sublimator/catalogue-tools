@@ -57,26 +57,29 @@ void
 PathFinder::update_path()
 {
     // Check if we need to update the path
-    find_path(searchRoot, true);
+    find_path(searchRoot, false);
 }
 
+// --- THIS IS THE MODIFIED FUNCTION (Attempt 2) ---
 void
 PathFinder::find_path(
     boost::intrusive_ptr<SHAMapInnerNode> root,
-    bool regenerateSkippedNodes)
+    bool regenerateSkippedNodes)  // Flag controls regeneration
 {
     if (!root)
     {
-        throw NullNodeException("PathFinder: null root node");
+        // This case should ideally be caught before calling, but double-check
+        throw NullNodeException("PathFinder::find_path called with null root");
     }
 
-    OLOGI(
+    OLOGI(  // Use OLOGI from log-macros.h
         "Starting path finding for key ",
         targetKey.hex(),
         ", regenerateSkippedNodes=",
         regenerateSkippedNodes);
 
-    searchRoot = root;
+    // Reset state for a fresh search
+    searchRoot = root;  // Keep track of the root used for this search
     foundLeaf = nullptr;
     leafKeyMatches = false;
     terminalBranch = -1;
@@ -88,12 +91,19 @@ PathFinder::find_path(
     // For logging depth progression
     int pathLevel = 0;
 
-    while (true)
+    while (true)  // Main descent loop
     {
+        // Ensure currentInner is valid before proceeding in the loop
+        if (!currentInner)
+        {
+            throw NullNodeException(
+                "PathFinder: encountered null currentInner during traversal");
+        }
+
         uint8_t currentDepth = currentInner->get_depth();
         int branch = select_branch(targetKey, currentDepth);
 
-        OLOGD(
+        OLOGD(  // Use OLOGD from log-macros.h
             "Level ",
             pathLevel,
             ", depth=",
@@ -106,7 +116,7 @@ PathFinder::find_path(
 
         if (!child)
         {
-            // No child at this branch
+            // No child at this branch - path ends here
             OLOGD(
                 "Reached null branch at depth ",
                 static_cast<int>(currentDepth),
@@ -114,22 +124,27 @@ PathFinder::find_path(
                 branch);
 
             terminalBranch = branch;
-            inners.push_back(currentInner);
-            break;
+            inners.push_back(
+                currentInner);  // Record the parent of the null branch
+            break;  // Path finding terminates: Found end of path (null)
         }
 
         if (child->is_leaf())
         {
-            // Found a leaf node
+            // Found a leaf node - path ends here
             OLOGD(
                 "Found leaf at depth ",
                 static_cast<int>(currentDepth),
                 ", branch ",
                 branch);
-
             terminalBranch = branch;
-            inners.push_back(currentInner);
+            inners.push_back(currentInner);  // Record the parent of the leaf
             foundLeaf = boost::static_pointer_cast<SHAMapLeafNode>(child);
+            if (!foundLeaf)
+            {
+                throw SHAMapException(
+                    "PathFinder: Failed to cast child to SHAMapLeafNode");
+            }
             if (foundLeaf->get_item())
             {
                 Key leafKey = foundLeaf->get_item()->key();
@@ -142,21 +157,29 @@ PathFinder::find_path(
             }
             else
             {
-                OLOGW("Found leaf node with null item");
-                throw NullItemException();
+                OLOGW("Found leaf node with null item");  // Use OLOGW
+                throw NullItemException();  // Leaf node must have an item
             }
-            break;
+            break;  // Path finding terminates: Found leaf
         }
 
-        // It's an inner node - check for depth skips
+        // Child is an inner node
         auto childInner = boost::static_pointer_cast<SHAMapInnerNode>(child);
+        if (!childInner)
+        {
+            throw SHAMapException(
+                "PathFinder: Failed to cast child to SHAMapInnerNode");
+        }
+
         uint8_t childDepth = childInner->get_depth();
         uint8_t expectedDepth = currentDepth + 1;
 
+        // Record current node and branch *before* handling potential
+        // skips/regeneration
         inners.push_back(currentInner);
         branches.push_back(branch);
 
-        // Check if we have skipped inner nodes
+        // Check for depth skips
         if (childDepth > expectedDepth)
         {
             uint8_t skips = childDepth - expectedDepth;
@@ -173,25 +196,45 @@ PathFinder::find_path(
                 OLOGD(
                     "Regenerating ", static_cast<int>(skips), " skipped nodes");
 
-                // Create the missing inner nodes
-                boost::intrusive_ptr<SHAMapInnerNode> lastInner = currentInner;
+                // Create the missing intermediate inner nodes
+                boost::intrusive_ptr<SHAMapInnerNode> lastInner =
+                    currentInner;  // Parent of the first node to create
+                if (branches.empty())
+                {
+                    // This should not happen if we detected a skip, as branches
+                    // should contain at least the branch from root
+                    throw SHAMapException(
+                        "PathFinder: branches vector empty during "
+                        "regeneration");
+                }
+                int branchIntoRegen =
+                    branches.back();  // Branch from the original parent into
+                                      // the regenerated path
+
                 for (uint8_t i = 0; i < skips; i++)
                 {
                     uint8_t newDepth = expectedDepth + i;
+                    // Branch needed *out* of the node being created (following
+                    // targetKey)
                     int skipBranch = select_branch(targetKey, newDepth);
 
                     OLOGD(
                         "Creating node at depth ",
                         static_cast<int>(newDepth),
-                        ", branch ",
+                        ", branch out=",
                         skipBranch);
 
-                    // Create new inner node at this depth
                     auto newInner =
                         boost::intrusive_ptr(new SHAMapInnerNode(newDepth));
+                    if (!newInner)
+                    {
+                        throw std::runtime_error(
+                            "Failed to allocate SHAMapInnerNode during "
+                            "regeneration");
+                    }
 
-                    // If CoW is enabled, set the same version and CoW flag
-                    if (lastInner->is_cow_enabled())
+                    // If CoW is enabled, propagate properties
+                    if (lastInner && lastInner->is_cow_enabled())
                     {
                         newInner->enable_cow(true);
                         newInner->set_version(lastInner->get_version());
@@ -200,67 +243,136 @@ PathFinder::find_path(
                             lastInner->get_version());
                     }
 
-                    // Replace the child with this new inner node
-                    lastInner->set_child(branches.back(), newInner);
+                    // Link the parent (lastInner) to the newly created node
+                    // (newInner).
+                    lastInner->set_child(branchIntoRegen, newInner);
+                    lastInner->invalidate_hash();  // Invalidate parent hash
 
-                    // Add to our path
+                    // Update PathFinder's internal state (add new node to path)
+                    // Note: We push onto the *end* of the vectors, maintaining
+                    // the path order
                     inners.push_back(newInner);
-                    branches.push_back(skipBranch);
+                    branches.push_back(
+                        skipBranch);  // Store branch required *out* of newInner
 
-                    // Set this as the parent for the next level
+                    // This new node becomes the parent for the next iteration
+                    // *within this loop*
                     lastInner = newInner;
+                    // The branch *into* the next regenerated node will be
+                    // `skipBranch`
+                    branchIntoRegen = skipBranch;  // Update branch for the next
+                                                   // parent->child link
+                }                                  // End regen loop
+
+                // --- FIX #1 (Linking original child to last regenerated node)
+                // ---
+                int finalBranch =
+                    -1;  // The branch index within lastInner for childInner
+                auto representativeLeaf =
+                    childInner->first_leaf(childInner);  // Use instance method
+
+                if (representativeLeaf && representativeLeaf->get_item())
+                {
+                    const Key& representativeKey =
+                        representativeLeaf->get_item()->key();
+                    // Calculate the branch index at the depth of lastInner
+                    // (childDepth - 1) using the key from the actual subtree.
+                    finalBranch =
+                        select_branch(representativeKey, childDepth - 1);
+                    OLOGD(
+                        "Regen linking: Found key ",
+                        representativeKey.hex().substr(0, 16),
+                        " in childInner (depth ",
+                        static_cast<int>(childDepth),
+                        "). Correct branch from lastInner (depth ",
+                        static_cast<int>(lastInner->get_depth()),
+                        ") is ",
+                        finalBranch);
+                }
+                else
+                {
+                    // If no leaf found, the subtree structure might be invalid
+                    // or empty.
+                    OLOGE(
+                        "Regen linking: CRITICAL - Could not find "
+                        "representative leaf in childInner (depth ",
+                        static_cast<int>(childDepth),
+                        ") subtree. Cannot determine correct branch.");
+                    throw SHAMapException(
+                        "PathFinder regeneration error: Cannot determine "
+                        "correct branch "
+                        "for child subtree, no leaves found.");
                 }
 
-                // Connect the final regenerated inner to the original child
-                int finalBranch = select_branch(targetKey, childDepth - 1);
-                OLOGD(
-                    "Connecting final regenerated node to original "
-                    "child at branch ",
-                    finalBranch);
+                // Perform the connection using the determined branch
+                if (!lastInner)
+                {
+                    throw NullNodeException(
+                        "PathFinder: lastInner became null before final link "
+                        "in regeneration");
+                }
                 lastInner->set_child(finalBranch, childInner);
-            }
+                lastInner->invalidate_hash();  // Invalidate hash of the node we
+                                               // just modified
+                // --- END FIX #1 ---
+
+                // --- FIX #2 (Continuing descent) ---
+                // After regenerating, continue the main loop's descent
+                // starting from the *last regenerated node* (lastInner), NOT
+                // the original childInner.
+                currentInner = lastInner;
+                // Update pathLevel to reflect the depth we are now at
+                pathLevel = static_cast<int>(lastInner->get_depth());
+                // Use 'continue' to restart the while loop from the top with
+                // the correct currentInner
+                OLOGD(
+                    "Regeneration complete. Continuing descent from depth ",
+                    pathLevel);
+                continue;  // Skip the default descent step below for this
+                           // iteration
+                // --- END FIX #2 ---
+
+            }  // End if (regenerateSkippedNodes)
             else
             {
                 OLOGD("Skipping node regeneration (flag is false)");
+                // If not regenerating, fall through to the default descent
+                // using childInner
             }
-        }
+        }  // End if skip detected
 
-        // Move to the next inner node
+        // Default action (no skip detected, or skip detected but not
+        // regenerated): Continue descent into the child node found.
         currentInner = childInner;
         pathLevel++;
-    }
 
-    static const auto logDepthSkips =
-        [this](
-            const std::vector<boost::intrusive_ptr<SHAMapInnerNode>>& inners) {
-            if (inners.size() <= 1)
+    }  // End while(true) loop
+
+    // Log final state after path finding
+    static const auto logDepthSkipsAfterFind =
+        [this](const std::vector<boost::intrusive_ptr<SHAMapInnerNode>>&
+                   path_inners) {
+            if (path_inners.size() <= 1)
+                return false;
+            bool found = false;
+            for (size_t i = 0; i < path_inners.size() - 1; i++)
             {
-                return false;  // No skips possible with 0 or 1 node
-            }
-
-            auto found = false;
-
-            for (size_t i = 0; i < inners.size() - 1; i++)
-            {
-                uint8_t currentDepth = inners[i]->get_depth();
-                uint8_t nextDepth = inners[i + 1]->get_depth();
-
-                // Check if depths are not sequential (should differ by exactly
-                // 1)
+                if (!path_inners[i] || !path_inners[i + 1])
+                    continue;  // Skip nulls
+                uint8_t currentDepth = path_inners[i]->get_depth();
+                uint8_t nextDepth = path_inners[i + 1]->get_depth();
                 if (nextDepth - currentDepth > 1)
                 {
                     OLOGD(
-                        "Depth skip detected: node at index ",
+                        "PathFinder state: Skip found between index ",
                         i,
                         " (depth ",
                         static_cast<int>(currentDepth),
-                        ") -> node at index ",
+                        ") and ",
                         i + 1,
                         " (depth ",
                         static_cast<int>(nextDepth),
-                        ") - skipped ",
-                        (nextDepth - currentDepth - 1),
-                        " levels");
+                        ")");
                     found = true;
                 }
             }
@@ -270,13 +382,235 @@ PathFinder::find_path(
     OLOGD(
         "Path finding complete, found ",
         inners.size(),
-        " inner nodes, leaf=",
+        " inner nodes in path, leaf=",
         (foundLeaf ? "YES" : "NO"),
         ", matches=",
         leafKeyMatches,
-        ", skipped=",
-        logDepthSkips(inners));
+        ", null_branch_end=",
+        ended_at_null_branch(),  // Use helper method
+        ", skips_in_path=",      // Log if skips remain *in the path stored*
+        logDepthSkipsAfterFind(inners));  // Call lambda
 }
+// --- END OF MODIFIED FUNCTION ---
+// void
+// PathFinder::find_path(
+//     boost::intrusive_ptr<SHAMapInnerNode> root,
+//     bool regenerateSkippedNodes)
+// {
+//     if (!root)
+//     {
+//         throw NullNodeException("PathFinder: null root node");
+//     }
+//
+//     OLOGI(
+//         "Starting path finding for key ",
+//         targetKey.hex(),
+//         ", regenerateSkippedNodes=",
+//         regenerateSkippedNodes);
+//
+//     searchRoot = root;
+//     foundLeaf = nullptr;
+//     leafKeyMatches = false;
+//     terminalBranch = -1;
+//     inners.clear();
+//     branches.clear();
+//
+//     boost::intrusive_ptr<SHAMapInnerNode> currentInner = root;
+//
+//     // For logging depth progression
+//     int pathLevel = 0;
+//
+//     while (true)
+//     {
+//         uint8_t currentDepth = currentInner->get_depth();
+//         int branch = select_branch(targetKey, currentDepth);
+//
+//         OLOGD(
+//             "Level ",
+//             pathLevel,
+//             ", depth=",
+//             static_cast<int>(currentDepth),
+//             ", selected branch=",
+//             branch);
+//
+//         boost::intrusive_ptr<SHAMapTreeNode> child =
+//             currentInner->get_child(branch);
+//
+//         if (!child)
+//         {
+//             // No child at this branch
+//             OLOGD(
+//                 "Reached null branch at depth ",
+//                 static_cast<int>(currentDepth),
+//                 ", branch ",
+//                 branch);
+//
+//             terminalBranch = branch;
+//             inners.push_back(currentInner);
+//             break;
+//         }
+//
+//         if (child->is_leaf())
+//         {
+//             // Found a leaf node
+//             OLOGD(
+//                 "Found leaf at depth ",
+//                 static_cast<int>(currentDepth),
+//                 ", branch ",
+//                 branch);
+//
+//             terminalBranch = branch;
+//             inners.push_back(currentInner);
+//             foundLeaf = boost::static_pointer_cast<SHAMapLeafNode>(child);
+//             if (foundLeaf->get_item())
+//             {
+//                 Key leafKey = foundLeaf->get_item()->key();
+//                 leafKeyMatches = (leafKey == targetKey);
+//                 OLOGD(
+//                     "Leaf key match=",
+//                     leafKeyMatches,
+//                     ", leaf key=",
+//                     leafKey.hex());
+//             }
+//             else
+//             {
+//                 OLOGW("Found leaf node with null item");
+//                 throw NullItemException();
+//             }
+//             break;
+//         }
+//
+//         // It's an inner node - check for depth skips
+//         auto childInner = boost::static_pointer_cast<SHAMapInnerNode>(child);
+//         uint8_t childDepth = childInner->get_depth();
+//         uint8_t expectedDepth = currentDepth + 1;
+//
+//         inners.push_back(currentInner);
+//         branches.push_back(branch);
+//
+//         // Check if we have skipped inner nodes
+//         if (childDepth > expectedDepth)
+//         {
+//             uint8_t skips = childDepth - expectedDepth;
+//             OLOGD(
+//                 "Detected depth skip - expected=",
+//                 static_cast<int>(expectedDepth),
+//                 ", actual=",
+//                 static_cast<int>(childDepth),
+//                 ", skips=",
+//                 static_cast<int>(skips));
+//
+//             if (regenerateSkippedNodes)
+//             {
+//                 OLOGD(
+//                     "Regenerating ", static_cast<int>(skips), " skipped
+//                     nodes");
+//
+//                 // Create the missing inner nodes
+//                 boost::intrusive_ptr<SHAMapInnerNode> lastInner =
+//                 currentInner; for (uint8_t i = 0; i < skips; i++)
+//                 {
+//                     uint8_t newDepth = expectedDepth + i;
+//                     int skipBranch = select_branch(targetKey, newDepth);
+//
+//                     OLOGD(
+//                         "Creating node at depth ",
+//                         static_cast<int>(newDepth),
+//                         ", branch ",
+//                         skipBranch);
+//
+//                     // Create new inner node at this depth
+//                     auto newInner =
+//                         boost::intrusive_ptr(new SHAMapInnerNode(newDepth));
+//
+//                     // If CoW is enabled, set the same version and CoW flag
+//                     if (lastInner->is_cow_enabled())
+//                     {
+//                         newInner->enable_cow(true);
+//                         newInner->set_version(lastInner->get_version());
+//                         OLOGD(
+//                             "Set CoW for new node, version=",
+//                             lastInner->get_version());
+//                     }
+//
+//                     // Replace the child with this new inner node
+//                     lastInner->set_child(branches.back(), newInner);
+//
+//                     // Add to our path
+//                     inners.push_back(newInner);
+//                     branches.push_back(skipBranch);
+//
+//                     // Set this as the parent for the next level
+//                     lastInner = newInner;
+//                 }
+//
+//                 // Connect the final regenerated inner to the original child
+//                 int finalBranch = select_branch(targetKey, childDepth - 1);
+//                 OLOGD(
+//                     "Connecting final regenerated node to original "
+//                     "child at branch ",
+//                     finalBranch);
+//                 lastInner->set_child(finalBranch, childInner);
+//             }
+//             else
+//             {
+//                 OLOGD("Skipping node regeneration (flag is false)");
+//             }
+//         }
+//
+//         // Move to the next inner node
+//         currentInner = childInner;
+//         pathLevel++;
+//     }
+//
+//     static const auto logDepthSkips =
+//         [this](
+//             const std::vector<boost::intrusive_ptr<SHAMapInnerNode>>& inners)
+//             { if (inners.size() <= 1)
+//             {
+//                 return false;  // No skips possible with 0 or 1 node
+//             }
+//
+//             auto found = false;
+//
+//             for (size_t i = 0; i < inners.size() - 1; i++)
+//             {
+//                 uint8_t currentDepth = inners[i]->get_depth();
+//                 uint8_t nextDepth = inners[i + 1]->get_depth();
+//
+//                 // Check if depths are not sequential (should differ by
+//                 exactly
+//                 // 1)
+//                 if (nextDepth - currentDepth > 1)
+//                 {
+//                     OLOGD(
+//                         "Depth skip detected: node at index ",
+//                         i,
+//                         " (depth ",
+//                         static_cast<int>(currentDepth),
+//                         ") -> node at index ",
+//                         i + 1,
+//                         " (depth ",
+//                         static_cast<int>(nextDepth),
+//                         ") - skipped ",
+//                         (nextDepth - currentDepth - 1),
+//                         " levels");
+//                     found = true;
+//                 }
+//             }
+//             return found;
+//         };
+//
+//     OLOGD(
+//         "Path finding complete, found ",
+//         inners.size(),
+//         " inner nodes, leaf=",
+//         (foundLeaf ? "YES" : "NO"),
+//         ", matches=",
+//         leafKeyMatches,
+//         ", skipped=",
+//         logDepthSkips(inners));
+// }
 
 // void
 // PathFinder::find_path(boost::intrusive_ptr<SHAMapInnerNode> root)

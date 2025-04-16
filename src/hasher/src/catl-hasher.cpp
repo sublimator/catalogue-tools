@@ -653,10 +653,6 @@ public:
             {
                 LedgerInfo info = {};
                 size_t nextOffset = processLedger(currentFileOffset, info);
-                if (info.sequence == 36822)
-                {
-                    Logger::set_level(LogLevel::DEBUG);
-                }
 
                 constexpr int every = 1;  // 0'000;
                 // TOOD: configurable

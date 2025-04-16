@@ -311,7 +311,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                     item->key().hex());
             }
 
-            // pathFinder.update_path();
+            pathFinder.update_path();
             pathFinder.dirty_path();
             pathFinder.collapse_path();  // Add collapsing OLOGic here
             return SetResult::ADD;

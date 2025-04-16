@@ -171,7 +171,14 @@ TEST_F(TransactionFixture, LedgerTransactionAddTest) {
 
             // Add item to the map
             std::cout << "Adding transaction " << (i + 1) << " with key: " << keyHex << std::endl;
+            if (i + 1== 10) {
+                Logger::set_level(LogLevel::DEBUG);
+            } else {
+                Logger::set_level(LogLevel::INFO);
+            }
+
             EXPECT_EQ(addItemFromHex(keyHex,dataHex), SetResult::ADD);
+
 
             // For additional verification, you could calculate the expected hash after each addition
             // and compare it to the actual hash, but this would require precomputed hashes
@@ -197,8 +204,7 @@ TEST_F(TransactionFixture, LedgerTransactionAddTest) {
 
 
 int main(int argc, char **argv) {
-    // Logger::set_level(LogLevel::DEBUG);
-    // SHAMap::get_log_partition().set_level(LogLevel::DEBUG);
+
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
