@@ -16,7 +16,7 @@ SHAMap::SHAMap(SHAMapNodeType type)
     , cow_enabled_(false)
 {
     root = boost::intrusive_ptr(new SHAMapInnerNode(0));  // Root has depth 0
-    LOGD("SHAMap created with type: ", static_cast<int>(type));
+    OLOGD("SHAMap created with type: ", static_cast<int>(type));
 }
 
 SHAMap::SHAMap(
@@ -30,7 +30,7 @@ SHAMap::SHAMap(
     , current_version_(version)
     , cow_enabled_(true)
 {
-    LOGD("Created SHAMap snapshot with version ", version);
+    OLOGD("Created SHAMap snapshot with version ", version);
 }
 
 void
@@ -50,7 +50,7 @@ SHAMap::enable_cow(bool enable)
         }
     }
 
-    LOGD(
+    OLOGD(
         "Copy-on-Write ",
         (enable ? "enabled" : "disabled"),
         " for SHAMap with version ",
@@ -67,7 +67,7 @@ SHAMap::new_version()
     // Increment shared counter and update current version
     int newVer = ++(*version_counter_);
     current_version_ = newVer;
-    LOGD("Generated new SHAMap version: ", newVer);
+    OLOGD("Generated new SHAMap version: ", newVer);
     return newVer;
 }
 
@@ -120,10 +120,10 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 {
     if (!item)
     {
-        LOGW("Attempted to add null item to SHAMap.");
+        OLOGW("Attempted to add null item to SHAMap.");
         return SetResult::FAILED;
     }
-    LOGD_KEY("Attempting to add item with key: ", item->key());
+    OLOGD_KEY("Attempting to add item with key: ", item->key());
 
     try
     {
@@ -159,7 +159,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         // Early checks based on mode
         if (itemExists && mode == SetMode::ADD_ONLY)
         {
-            LOGW(
+            OLOGW(
                 "Item with key ",
                 item->key().hex(),
                 " already exists, but ADD_ONLY specified");
@@ -168,7 +168,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 
         if (!itemExists && mode == SetMode::UPDATE_ONLY)
         {
-            LOGW(
+            OLOGW(
                 "Item with key ",
                 item->key().hex(),
                 " doesn't exist, but UPDATE_ONLY specified");
@@ -186,7 +186,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                     "addItem: null parent node (should be root)");
             }
 
-            LOGD(
+            OLOGD(
                 "Adding/Updating leaf at depth ",
                 parent->get_depth() + 1,
                 " branch ",
@@ -199,13 +199,13 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
             }
             parent->set_child(branch, newLeaf);
             pathFinder.dirty_path();
-            pathFinder.collapse_path();  // Add collapsing logic here
+            pathFinder.collapse_path();  // Add collapsing OLOGic here
             return itemExists ? SetResult::UPDATE : SetResult::ADD;
         }
 
         if (pathFinder.has_leaf() && !pathFinder.did_leaf_key_match())
         {
-            LOGD_KEY("Handling collision for key: ", item->key());
+            OLOGD_KEY("Handling collision for key: ", item->key());
             auto parent = pathFinder.get_parent_of_terminal();
             int branch = pathFinder.get_terminal_branch();
             if (!parent)
@@ -246,7 +246,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 
                 if (existingBranch != newBranch)
                 {
-                    LOGD(
+                    OLOGD(
                         "Collision resolved at depth ",
                         std::to_string(currentDepth),
                         ". Placing leaves at branches ",
@@ -273,7 +273,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                 else
                 {
                     // Collision continues, create another inner node
-                    LOGD(
+                    OLOGD(
                         "Collision continues at depth ",
                         std::to_string(currentDepth),
                         ", branch ",
@@ -300,26 +300,26 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
             }
 
             pathFinder.dirty_path();
-            pathFinder.collapse_path();  // Add collapsing logic here
+            pathFinder.collapse_path();  // Add collapsing OLOGic here
             return SetResult::ADD;
         }
 
-        // Should ideally not be reached if PathFinder logic is correct
-        LOGE(
+        // Should ideally not be reached if PathFinder OLOGic is correct
+        OLOGE(
             "Unexpected state in addItem for key: ",
             item->key().hex(),
-            ". PathFinder logic error?");
+            ". PathFinder OLOGic error?");
         throw SHAMapException(
-            "Unexpected state in addItem - PathFinder logic error");
+            "Unexpected state in addItem - PathFinder OLOGic error");
     }
     catch (const SHAMapException& e)
     {
-        LOGE("Error adding item with key ", item->key().hex(), ": ", e.what());
+        OLOGE("Error adding item with key ", item->key().hex(), ": ", e.what());
         return SetResult::FAILED;
     }
     catch (const std::exception& e)
     {
-        LOGE(
+        OLOGE(
             "Standard exception adding item with key ",
             item->key().hex(),
             ": ",
@@ -331,7 +331,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 bool
 SHAMap::remove_item(const Key& key)
 {
-    LOGD_KEY("Attempting to remove item with key: ", key);
+    OLOGD_KEY("Attempting to remove item with key: ", key);
     try
     {
         PathFinder pathFinder(root, key);
@@ -362,7 +362,7 @@ SHAMap::remove_item(const Key& key)
 
         if (!pathFinder.has_leaf() || !pathFinder.did_leaf_key_match())
         {
-            LOGD_KEY("Item not found for removal, key: ", key);
+            OLOGD_KEY("Item not found for removal, key: ", key);
             return false;  // Item not found
         }
 
@@ -374,7 +374,7 @@ SHAMap::remove_item(const Key& key)
                 "removeItem: null parent node (should be root)");
         }
 
-        LOGD(
+        OLOGD(
             "Removing leaf at depth ",
             parent->get_depth() + 1,
             " branch ",
@@ -382,17 +382,17 @@ SHAMap::remove_item(const Key& key)
         parent->set_child(branch, nullptr);  // Remove the leaf
         pathFinder.dirty_path();
         pathFinder.collapse_path();  // Compress path if possible
-        LOGD_KEY("Item removed successfully, key: ", key);
+        OLOGD_KEY("Item removed successfully, key: ", key);
         return true;
     }
     catch (const SHAMapException& e)
     {
-        LOGE("Error removing item with key ", key.hex(), ": ", e.what());
+        OLOGE("Error removing item with key ", key.hex(), ": ", e.what());
         return false;
     }
     catch (const std::exception& e)
     {
-        LOGE(
+        OLOGE(
             "Standard exception removing item with key ",
             key.hex(),
             ": ",
@@ -406,9 +406,11 @@ SHAMap::get_hash() const
 {
     if (!root)
     {
-        LOGW("Attempting to get hash of a null root SHAMap.");
+        OLOGW("Attempting to get hash of a null root SHAMap.");
         return Hash256::zero();
     }
     // getHash() inside the node handles lazy calculation
     return root->get_hash();
 }
+
+LogPartition SHAMap::log_partition_{"SHAMap", LogLevel::DEBUG};

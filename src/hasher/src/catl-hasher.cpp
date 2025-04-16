@@ -877,7 +877,14 @@ main(int argc, char* argv[])
     {
         // Create and process with CATLHasher
         hasher.emplace(inputFile);
-        bool result = hasher->processFile();
+        bool result = true;  // hasher->processFile();
+        std::cout << "DETECTION WORKING: "
+                  << (detail::has_log_partition<SHAMap>::value ? "YES" : "NO")
+                  << std::endl;
+        LOGE("Global log level: ", static_cast<int>(Logger::get_level()));
+        LOGE(
+            "SHAMap partition level: ",
+            static_cast<int>(SHAMap().get_log_partition().level()));
         exitCode = result ? 0 : 1;  // 0 on success, 1 on failure
     }
     catch (const std::exception& e)

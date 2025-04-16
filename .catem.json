@@ -7,6 +7,11 @@
     "**/.mypy_cache/**"
   ],
   "files_patterns": {
+    "cmake" : {
+      "include": [
+          "**/*/CMakeLists.txt"
+      ]  
+    },
     "all": {
         "include": [
             "CMakeLists.txt",
@@ -17,6 +22,11 @@
             "tests/**/*.cpp",
             "tests/**/*.h"
         ]
+    },
+    "logger": {
+      "include": [
+          "src/core/**/*logger*"
+      ]
     },
     "tests": {
       "include": [

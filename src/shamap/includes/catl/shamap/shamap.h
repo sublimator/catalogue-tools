@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "catl/core/logger.h"
 #include "catl/core/types.h"
 #include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-innernode.h"
@@ -37,6 +38,7 @@ enum class SetMode {
 class SHAMap
 {
 private:
+    static LogPartition log_partition_;
     boost::intrusive_ptr<SHAMapInnerNode> root;
     SHAMapNodeType node_type_;
 
@@ -94,4 +96,11 @@ public:
     // Only public CoW method - creates a snapshot
     std::shared_ptr<SHAMap>
     snapshot();
+
+    // Add this getter
+    const LogPartition&
+    get_log_partition() const
+    {
+        return log_partition_;
+    }
 };

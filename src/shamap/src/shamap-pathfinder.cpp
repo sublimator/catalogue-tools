@@ -30,8 +30,8 @@ PathFinder::find_path(
         throw NullNodeException("PathFinder: null root node");
     }
 
-    LOGI(
-        "PathFinder: Starting path finding for key ",
+    OLOGI(
+        "Starting path finding for key ",
         targetKey.hex(),
         ", regenerateSkippedNodes=",
         regenerateSkippedNodes);
@@ -53,8 +53,8 @@ PathFinder::find_path(
         uint8_t currentDepth = currentInner->get_depth();
         int branch = select_branch(targetKey, currentDepth);
 
-        LOGD(
-            "PathFinder: Level ",
+        OLOGD(
+            "Level ",
             pathLevel,
             ", depth=",
             static_cast<int>(currentDepth),
@@ -67,8 +67,8 @@ PathFinder::find_path(
         if (!child)
         {
             // No child at this branch
-            LOGD(
-                "PathFinder: Reached null branch at depth ",
+            OLOGD(
+                "Reached null branch at depth ",
                 static_cast<int>(currentDepth),
                 ", branch ",
                 branch);
@@ -81,8 +81,8 @@ PathFinder::find_path(
         if (child->is_leaf())
         {
             // Found a leaf node
-            LOGD(
-                "PathFinder: Found leaf at depth ",
+            OLOGD(
+                "Found leaf at depth ",
                 static_cast<int>(currentDepth),
                 ", branch ",
                 branch);
@@ -94,15 +94,15 @@ PathFinder::find_path(
             {
                 Key leafKey = foundLeaf->get_item()->key();
                 leafKeyMatches = (leafKey == targetKey);
-                LOGD(
-                    "PathFinder: Leaf key match=",
+                OLOGD(
+                    "Leaf key match=",
                     leafKeyMatches,
                     ", leaf key=",
                     leafKey.hex());
             }
             else
             {
-                LOGW("PathFinder: Found leaf node with null item");
+                OLOGW("Found leaf node with null item");
                 throw NullItemException();
             }
             break;
@@ -120,8 +120,8 @@ PathFinder::find_path(
         if (childDepth > expectedDepth)
         {
             uint8_t skips = childDepth - expectedDepth;
-            LOGD(
-                "PathFinder: Detected depth skip - expected=",
+            OLOGD(
+                "Detected depth skip - expected=",
                 static_cast<int>(expectedDepth),
                 ", actual=",
                 static_cast<int>(childDepth),
@@ -130,10 +130,8 @@ PathFinder::find_path(
 
             if (regenerateSkippedNodes)
             {
-                LOGD(
-                    "PathFinder: Regenerating ",
-                    static_cast<int>(skips),
-                    " skipped nodes");
+                OLOGD(
+                    "Regenerating ", static_cast<int>(skips), " skipped nodes");
 
                 // Create the missing inner nodes
                 boost::intrusive_ptr<SHAMapInnerNode> lastInner = currentInner;
@@ -142,8 +140,8 @@ PathFinder::find_path(
                     uint8_t newDepth = expectedDepth + i;
                     int skipBranch = select_branch(targetKey, newDepth);
 
-                    LOGD(
-                        "PathFinder: Creating node at depth ",
+                    OLOGD(
+                        "Creating node at depth ",
                         static_cast<int>(newDepth),
                         ", branch ",
                         skipBranch);
@@ -157,8 +155,8 @@ PathFinder::find_path(
                     {
                         newInner->enable_cow(true);
                         newInner->set_version(lastInner->get_version());
-                        LOGD(
-                            "PathFinder: Set CoW for new node, version=",
+                        OLOGD(
+                            "Set CoW for new node, version=",
                             lastInner->get_version());
                     }
 
@@ -175,15 +173,15 @@ PathFinder::find_path(
 
                 // Connect the final regenerated inner to the original child
                 int finalBranch = select_branch(targetKey, childDepth - 1);
-                LOGD(
-                    "PathFinder: Connecting final regenerated node to original "
+                OLOGD(
+                    "Connecting final regenerated node to original "
                     "child at branch ",
                     finalBranch);
                 lastInner->set_child(finalBranch, childInner);
             }
             else
             {
-                LOGD("PathFinder: Skipping node regeneration (flag is false)");
+                OLOGD("Skipping node regeneration (flag is false)");
             }
         }
 
@@ -192,8 +190,8 @@ PathFinder::find_path(
         pathLevel++;
     }
 
-    LOGI(
-        "PathFinder: Path finding complete, found ",
+    OLOGI(
+        "Path finding complete, found ",
         inners.size(),
         " inner nodes, leaf=",
         (foundLeaf ? "YES" : "NO"),
@@ -626,3 +624,5 @@ PathFinder::invalidated_possibly_copied_leaf_for_updating(int targetVersion)
     theLeaf->invalidate_hash();
     return theLeaf;
 }
+
+LogPartition PathFinder::log_partition_{"PathFinder", LogLevel::DEBUG};

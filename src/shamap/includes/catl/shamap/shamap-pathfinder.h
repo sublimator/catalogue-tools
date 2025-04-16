@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catl/core/logger.h"
 #include "catl/core/types.h"
 #include "catl/shamap/shamap-innernode.h"
 #include "catl/shamap/shamap-leafnode.h"
@@ -10,6 +11,7 @@ class PathFinder
 {
 private:
     const Key& targetKey;
+    static LogPartition log_partition_;
     std::vector<boost::intrusive_ptr<SHAMapInnerNode>> inners;
     std::vector<int> branches;
     boost::intrusive_ptr<SHAMapLeafNode> foundLeaf = nullptr;
@@ -55,4 +57,10 @@ public:
     dirty_or_copy_inners(int targetVersion);
     boost::intrusive_ptr<SHAMapLeafNode>
     invalidated_possibly_copied_leaf_for_updating(int targetVersion);
+
+    const LogPartition&
+    get_log_partition() const
+    {
+        return log_partition_;
+    }
 };

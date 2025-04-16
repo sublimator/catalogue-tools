@@ -138,6 +138,7 @@ TEST(ShaMapTest, CollapsePathWithSkips) {
 
 
 int main(int argc, char **argv) {
+    Logger::set_level(LogLevel::DEBUG);
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
