@@ -84,6 +84,18 @@ private:
         int version,
         SHAMapOptions options);
 
+protected:
+    friend class PathFinder;
+    SetResult
+    set_item_reference(
+        boost::intrusive_ptr<MmapItem>& item,
+        SetMode mode = SetMode::ADD_OR_UPDATE);
+
+    SetResult
+    set_item_collapsed(
+        boost::intrusive_ptr<MmapItem>& item,
+        SetMode mode = SetMode::ADD_OR_UPDATE);
+
 public:
     explicit SHAMap(
         SHAMapNodeType type = tnACCOUNT_STATE,

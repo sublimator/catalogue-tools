@@ -20,10 +20,15 @@ private:
     bool leafKeyMatches = false;
     int terminalBranch = -1;
 
+    // TODO: check options and throw if not relevant, or!?
     void
-    find_path(
+    find_path_regenerative(
         boost::intrusive_ptr<SHAMapInnerNode> root,
         bool regenerateSkippedNodes = true);
+
+    void
+    find_path(boost::intrusive_ptr<SHAMapInnerNode> root);
+
     bool
     maybe_copy_on_write() const;
 

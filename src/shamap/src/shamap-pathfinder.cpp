@@ -51,19 +51,19 @@ PathFinder::PathFinder(
     SHAMapOptions options)
     : targetKey(key), options_(options)
 {
-    find_path(root);
+    find_path_regenerative(root);
 }
 
 void
 PathFinder::update_path()
 {
     // Check if we need to update the path
-    find_path(searchRoot, true);
+    find_path_regenerative(searchRoot, true);
 }
 
 // --- THIS IS THE MODIFIED FUNCTION (Attempt 2) ---
 void
-PathFinder::find_path(
+PathFinder::find_path_regenerative(
     boost::intrusive_ptr<SHAMapInnerNode> root,
     bool regenerateSkippedNodes)  // Flag controls regeneration
 {
@@ -395,49 +395,49 @@ PathFinder::find_path(
         logDepthSkipsAfterFind(inners));  // Call lambda
 }
 
-// void
-// PathFinder::find_path(boost::intrusive_ptr<SHAMapInnerNode> root)
-// {
-//     if (!root)
-//     {
-//         throw NullNodeException("PathFinder: null root node");
-//     }
-//     searchRoot = root;
-//     foundLeaf = nullptr;
-//     leafKeyMatches = false;
-//     terminalBranch = -1;
-//     boost::intrusive_ptr<SHAMapInnerNode> currentInner = root;
-//     while (true)
-//     {
-//         int branch = select_branch(targetKey, currentInner->get_depth());
-//         boost::intrusive_ptr<SHAMapTreeNode> child =
-//             currentInner->get_child(branch);
-//         if (!child)
-//         {
-//             terminalBranch = branch;
-//             inners.push_back(currentInner);
-//             break;
-//         }
-//         if (child->is_leaf())
-//         {
-//             terminalBranch = branch;
-//             inners.push_back(currentInner);
-//             foundLeaf = boost::static_pointer_cast<SHAMapLeafNode>(child);
-//             if (foundLeaf->get_item())
-//             {
-//                 leafKeyMatches = (foundLeaf->get_item()->key() == targetKey);
-//             }
-//             else
-//             {
-//                 throw NullItemException();
-//             }
-//             break;
-//         }
-//         inners.push_back(currentInner);
-//         branches.push_back(branch);
-//         currentInner = boost::static_pointer_cast<SHAMapInnerNode>(child);
-//     }
-// }
+void
+PathFinder::find_path(boost::intrusive_ptr<SHAMapInnerNode> root)
+{
+    if (!root)
+    {
+        throw NullNodeException("PathFinder: null root node");
+    }
+    searchRoot = root;
+    foundLeaf = nullptr;
+    leafKeyMatches = false;
+    terminalBranch = -1;
+    boost::intrusive_ptr<SHAMapInnerNode> currentInner = root;
+    while (true)
+    {
+        int branch = select_branch(targetKey, currentInner->get_depth());
+        boost::intrusive_ptr<SHAMapTreeNode> child =
+            currentInner->get_child(branch);
+        if (!child)
+        {
+            terminalBranch = branch;
+            inners.push_back(currentInner);
+            break;
+        }
+        if (child->is_leaf())
+        {
+            terminalBranch = branch;
+            inners.push_back(currentInner);
+            foundLeaf = boost::static_pointer_cast<SHAMapLeafNode>(child);
+            if (foundLeaf->get_item())
+            {
+                leafKeyMatches = (foundLeaf->get_item()->key() == targetKey);
+            }
+            else
+            {
+                throw NullItemException();
+            }
+            break;
+        }
+        inners.push_back(currentInner);
+        branches.push_back(branch);
+        currentInner = boost::static_pointer_cast<SHAMapInnerNode>(child);
+    }
+}
 
 bool
 PathFinder::has_leaf() const
