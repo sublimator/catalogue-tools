@@ -5,32 +5,31 @@
 #include "test-utils.h"
 #include "../src/shamap/src/pretty-print-json.h"
 #include "catl/core/logger.h"
-#include "catl/shamap/shamap-impl.h"
 
 // Test using the fixture with source-relative paths
 TEST_F(AccountStateFixture, JsonFileOperations) {
     try {
         // Get path to the test data file relative to this source file
-        std::string filePath = getFixturePath("op-adds.json");
-        std::cout << "Loading JSON from: " << filePath << std::endl;
+        std::string file_path = get_fixture_path("op-adds.json");
+        std::cout << "Loading JSON from: " << file_path << std::endl;
 
         // Load JSON from file
-        boost::json::value operations = loadJsonFromFile(filePath);
+        boost::json::value operations = load_json_from_file(file_path);
         boost::json::array &ops = operations.as_array();
 
         // Apply each operation from the JSON
         for (const auto &op: ops) {
             auto operation = boost::json::value_to<std::string>(op.at("op"));
-            auto keyHex = boost::json::value_to<std::string>(op.at("key"));
-            auto expectedHash = boost::json::value_to<std::string>(op.at("map_hash"));
+            auto key_hex = boost::json::value_to<std::string>(op.at("key"));
+            auto expected_hash = boost::json::value_to<std::string>(op.at("map_hash"));
 
             if (operation == "add") {
-                EXPECT_EQ(addItemFromHex(keyHex,std::nullopt), SetResult::ADD);
+                EXPECT_EQ(add_item_from_hex(key_hex, std::nullopt), SetResult::ADD);
             } else if (operation == "remove") {
-                EXPECT_EQ(removeItemFromHex(keyHex), true);
+                EXPECT_EQ(remove_item_from_hex(key_hex), true);
             }
-            EXPECT_EQ(map.get_hash().hex(), expectedHash)
-                << "Hash mismatch after adding key: " << keyHex;
+            EXPECT_EQ(map.get_hash().hex(), expected_hash)
+                << "Hash mismatch after adding key: " << key_hex;
 
             // Add handling for other operations if needed (remove, etc.)
         }
@@ -42,12 +41,12 @@ TEST_F(AccountStateFixture, JsonFileOperations) {
 // Simple test to verify our path resolution works
 TEST(FilePathTest, FindTestDataFile) {
     // Get the path to the test data file relative to this source file
-    std::string filePath = TestDataPath::getPath("fixture/op-adds.json");
-    std::cout << "Test data path: " << filePath << std::endl;
+    std::string file_path = TestDataPath::get_path("fixture/op-adds.json");
+    std::cout << "Test data path: " << file_path << std::endl;
 
     // Verify the file exists
-    std::ifstream file(filePath);
-    EXPECT_TRUE(file.good()) << "Could not find test data file at: " << filePath
+    std::ifstream file(file_path);
+    EXPECT_TRUE(file.good()) << "Could not find test data file at: " << file_path
         << "\nMake sure to create a 'fixture' directory next to this source file.";
 }
 
@@ -61,7 +60,8 @@ TEST(ShaMapTest, BasicOperations) {
     auto map = SHAMap(tnACCOUNT_STATE);
     EXPECT_EQ(map.get_hash().hex(), "0000000000000000000000000000000000000000000000000000000000000000");
 
-    auto [data, item] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000000");
+    TestItems items;
+    auto item = items.get_item("0000000000000000000000000000000000000000000000000000000000000000");
     map.set_item(item);
     EXPECT_EQ(map.get_hash().hex(), "B992A0C0480B32A2F32308EA2D64E85586A3DAF663F7B383806B5C4CEA84D8BF");
 }
@@ -69,10 +69,11 @@ TEST(ShaMapTest, BasicOperations) {
 // Test for the add_item_only functionality
 TEST(ShaMapTest, AddItemOnly) {
     auto map = SHAMap(tnACCOUNT_STATE);
+    TestItems items;
 
     // Create two test items with different keys
-    auto [data1, item1] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000001");
-    auto [data2, item2] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000002");
+    auto item1 = items.get_item("0000000000000000000000000000000000000000000000000000000000000001");
+    auto item2 = items.get_item("0000000000000000000000000000000000000000000000000000000000000002");
 
     // First add should succeed
     EXPECT_EQ(map.add_item(item1), SetResult::ADD);
@@ -87,10 +88,11 @@ TEST(ShaMapTest, AddItemOnly) {
 // Test for the update_item_only functionality
 TEST(ShaMapTest, UpdateItemOnly) {
     auto map = SHAMap(tnACCOUNT_STATE);
+    TestItems items;
 
     // Create two items with the same key
-    auto [data1, item1] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000001");
-    auto [data2, item2] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000001");
+    auto item1 = items.get_item("0000000000000000000000000000000000000000000000000000000000000001");
+    auto item2 = items.get_item("0000000000000000000000000000000000000000000000000000000000000001");
 
     // Update should fail since the item doesn't exist yet
     EXPECT_EQ(map.update_item(item1), SetResult::FAILED);
@@ -105,17 +107,18 @@ TEST(ShaMapTest, UpdateItemOnly) {
 // Test for the set_item with different modes
 TEST(ShaMapTest, SetItemModes) {
     auto map = SHAMap(tnACCOUNT_STATE);
+    TestItems items;
 
     // Create items with the same key but different content
-    auto [data1, item1] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000001");
-    auto [data2, item2] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000001");
+    auto item1 = items.get_item("0000000000000000000000000000000000000000000000000000000000000001");
+    auto item2 = items.get_item("0000000000000000000000000000000000000000000000000000000000000001");
 
     // Add mode
     EXPECT_EQ(map.set_item(item1, SetMode::ADD_ONLY), SetResult::ADD);
     EXPECT_EQ(map.set_item(item2, SetMode::ADD_ONLY), SetResult::FAILED);
 
     // Update mode
-    auto [data3, item3] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000002");
+    auto item3 = items.get_item("0000000000000000000000000000000000000000000000000000000000000002");
     EXPECT_EQ(map.set_item(item3, SetMode::UPDATE_ONLY), SetResult::FAILED);
 
     // Add or update mode
@@ -125,23 +128,14 @@ TEST(ShaMapTest, SetItemModes) {
 
 // Test for node collapsing behavior, particularly with shallow trees
 TEST(ShaMapTest, CollapsePathWithSkips) {
-    // Logger::setLevel(LogLevel::DEBUG);
     // Create a transaction-like tree (shallow)
     // Add a series of items that will create a specific structure
-    // Force collisions to create deeper structures first
-    // Keepalive the data
+    TestItems items;
 
-    std::vector<std::shared_ptr<uint8_t[]> > buffers;
-    auto get_item = [&buffers](const std::string &hexString, std::optional<std::string> hexData = std::nullopt) {
-        auto [data, item] = getItemFromHex(hexString, std::move(hexData));
-        std::ranges::copy(data, std::back_inserter(buffers));
-        return item;
-    };
-
-    auto item1 = get_item("0000000000000000000000000000000000000000000000000000000000010000");
-    auto item2 = get_item("0000000000000000000000000000000000000000000000000000000000010100");
-    auto item3 = get_item("0000000000500000000000000000000000000000000000000000000000010100");
-    auto item4 = get_item("0000000000600000000000000000000000000000000000000000000000010100");
+    auto item1 = items.get_item("0000000000000000000000000000000000000000000000000000000000010000");
+    auto item2 = items.get_item("0000000000000000000000000000000000000000000000000000000000010100");
+    auto item3 = items.get_item("0000000000500000000000000000000000000000000000000000000000010100");
+    auto item4 = items.get_item("0000000000600000000000000000000000000000000000000000000000010100");
 
     auto dump_json = [](const SHAMap &map) {
         std::cout << map.trie_json_string({.key_as_hash = true}) << std::endl;
@@ -169,29 +163,18 @@ TEST(ShaMapTest, CollapsePathWithSkips) {
         add_item(item3);
         Logger::set_level(LogLevel::INFO);
         add_item(item4);
-        // dump_json(map);
     }
-
-    // {
-    //     auto map = SHAMap(tnTRANSACTION_MD, options);
-    //     map.add_item(item1);
-    //     auto snapshot = map.snapshot();
-    //     snapshot->add_item(item2);
-    //     auto hash = snapshot->get_hash();
-    //     EXPECT_EQ(hash.hex(), "C11AECD806E48EFF26D1A036B3EC6428C7C727895331135E44322F506616ADB5");
-    // }
 }
-
 
 // Test for adding ledger transaction data one by one
 TEST_F(TransactionFixture, Ledger29952TransactionAddTest) {
     try {
         // Get path to the test data file
-        std::string filePath = getFixturePath("ledger-29952-txns.json");
-        std::cout << "Loading transaction data from: " << filePath << std::endl;
+        std::string file_path = get_fixture_path("ledger-29952-txns.json");
+        std::cout << "Loading transaction data from: " << file_path << std::endl;
 
         // Load JSON from file
-        boost::json::value transactions = loadJsonFromFile(filePath);
+        boost::json::value transactions = load_json_from_file(file_path);
         boost::json::array &txns = transactions.as_array();
 
         std::cout << "Found " << txns.size() << " transactions to process" << std::endl;
@@ -199,38 +182,33 @@ TEST_F(TransactionFixture, Ledger29952TransactionAddTest) {
         // Process each transaction from the JSON array
         for (size_t i = 0; i < txns.size(); ++i) {
             const auto &txn = txns[i];
-            auto keyHex = boost::json::value_to<std::string>(txn.at("key"));
-            auto dataHex = boost::json::value_to<std::string>(txn.at("data"));
+            auto key_hex = boost::json::value_to<std::string>(txn.at("key"));
+            auto data_hex = boost::json::value_to<std::string>(txn.at("data"));
 
             // Add item to the map
-            std::cout << "Adding transaction " << (i + 1) << " with key: " << keyHex << std::endl;
+            std::cout << "Adding transaction " << (i + 1) << " with key: " << key_hex << std::endl;
             if (i + 1 == 10) {
                 Logger::set_level(LogLevel::DEBUG);
             } else {
                 Logger::set_level(LogLevel::INFO);
             }
 
-            EXPECT_EQ(addItemFromHex(keyHex,dataHex), SetResult::ADD);
-
+            EXPECT_EQ(add_item_from_hex(key_hex, data_hex), SetResult::ADD);
 
             // For additional verification, you could calculate the expected hash after each addition
             // and compare it to the actual hash, but this would require precomputed hashes
-            Hash256 currentHash = map.get_hash();
-            std::cout << "Map hash after adding: " << currentHash.hex() << std::endl;
-
-            // map.collapse_tree();
-
+            Hash256 current_hash = map.get_hash();
+            std::cout << "Map hash after adding: " << current_hash.hex() << std::endl;
 
             std::cout << "Map trie JSON: ";
-            map.trie_json(std::cout);
-            std::cout << std::endl;
+            std::cout << map.trie_json_string({.key_as_hash = true}) <<
+                std::endl;
         }
 
-
         // Final hash check if you have an expected final hash value
-        Hash256 finalHash = map.get_hash();
-        std::cout << "Final map hash: " << finalHash.hex() << std::endl;
-        EXPECT_EQ(finalHash.hex(), "9138DB29694D9B7F125F56FE42520CAFF3C9870F28C4161A69E0C8597664C951");
+        Hash256 final_hash = map.get_hash();
+        std::cout << "Final map hash: " << final_hash.hex() << std::endl;
+        EXPECT_EQ(final_hash.hex(), "9138DB29694D9B7F125F56FE42520CAFF3C9870F28C4161A69E0C8597664C951");
     } catch (const std::exception &e) {
         FAIL() << "Exception: " << e.what();
     }
@@ -239,11 +217,11 @@ TEST_F(TransactionFixture, Ledger29952TransactionAddTest) {
 TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
     try {
         // Get path to the test data file
-        std::string filePath = getFixturePath("ledger-81920-txns.json");
-        std::cout << "Loading transaction data from: " << filePath << std::endl;
+        std::string file_path = get_fixture_path("ledger-81920-txns.json");
+        std::cout << "Loading transaction data from: " << file_path << std::endl;
 
         // Load JSON from file
-        boost::json::value transactions = loadJsonFromFile(filePath);
+        boost::json::value transactions = load_json_from_file(file_path);
         boost::json::array &txns = transactions.as_array();
 
         std::cout << "Found " << txns.size() << " transactions to process" << std::endl;
@@ -251,39 +229,32 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
         // Process each transaction from the JSON array
         for (size_t i = 0; i < txns.size(); ++i) {
             const auto &txn = txns[i];
-            auto keyHex = boost::json::value_to<std::string>(txn.at("key"));
-            auto dataHex = boost::json::value_to<std::string>(txn.at("data"));
+            auto key_hex = boost::json::value_to<std::string>(txn.at("key"));
+            auto data_hex = boost::json::value_to<std::string>(txn.at("data"));
 
             size_t txn_n = i + 1;
             // Add item to the map
-            std::cout << "Adding transaction " << txn_n << " with key: " << keyHex << std::endl;
-            // if (txn_n >= 4 && txn_n <= 7) {
-            //     Logger::set_level(LogLevel::DEBUG);
-            // } else {
-            //     Logger::set_level(LogLevel::INFO);
-            // }
+            std::cout << "Adding transaction " << txn_n << " with key: " << key_hex << std::endl;
 
-            EXPECT_EQ(addItemFromHex(keyHex,dataHex), SetResult::ADD);
-
-            // map.collapse_tree();
-
+            EXPECT_EQ(add_item_from_hex(key_hex, data_hex), SetResult::ADD);
 
             // For additional verification, you could calculate the expected hash after each addition
             // and compare it to the actual hash, but this would require precomputed hashes
-            Hash256 currentHash = map.get_hash();
-            std::cout << "Map hash after adding: " << currentHash.hex() << std::endl;
+            Hash256 current_hash = map.get_hash();
+            std::cout << "Map hash after adding: " << current_hash.hex() << std::endl;
 
             std::cout << "Map trie JSON: ";
             map.trie_json(std::cout);
-            std::cout << std::endl; {
+            std::cout << std::endl;
+            {
+                // Create a map with no collapsing for comparison
                 auto map_ = SHAMap(tnTRANSACTION_MD, {.tree_collapse_impl = TreeCollapseImpl::leafs_only});
-                std::vector<std::shared_ptr<uint8_t[]> > buffers; // Keep alive
+                TestItems items; // Local items manager
                 for (size_t j = 0; j < i + 1; ++j) {
                     const auto &txn_ = txns[j];
                     auto key_str = boost::json::value_to<std::string>(txn_.at("key"));
                     auto data_str = boost::json::value_to<std::string>(txn_.at("data"));
-                    auto [data, item] = getItemFromHex(key_str, data_str);
-                    std::ranges::copy(data, std::back_inserter(buffers));
+                    auto item = items.get_item(key_str, data_str);
                     map_.add_item(item);
                 }
                 map_.collapse_tree();
@@ -293,16 +264,14 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
             }
         }
 
-
         // Final hash check if you have an expected final hash value
-        Hash256 finalHash = map.get_hash();
-        std::cout << "Final map hash: " << finalHash.hex() << std::endl;
-        EXPECT_EQ(finalHash.hex(), "39460E5964D942A0E8A7A2C4E86EEF40B6C8FDF707BDA3874BE3CEE7D917D103");
+        Hash256 final_hash = map.get_hash();
+        std::cout << "Final map hash: " << final_hash.hex() << std::endl;
+        EXPECT_EQ(final_hash.hex(), "39460E5964D942A0E8A7A2C4E86EEF40B6C8FDF707BDA3874BE3CEE7D917D103");
     } catch (const std::exception &e) {
         FAIL() << "Exception: " << e.what();
     }
 }
-
 
 int main(int argc, char **argv) {
     testing::InitGoogleTest(&argc, argv);

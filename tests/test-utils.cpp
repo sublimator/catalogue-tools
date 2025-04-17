@@ -1,79 +1,87 @@
+// test-utils.cpp
 #include "test-utils.h"
 
-std::string TestDataPath::getPath(const std::string &relativePath) {
+std::string TestDataPath::get_path(const std::string &relative_path) {
     // Get the directory of the current source file
-    std::string sourceDir = CURRENT_SOURCE_DIR;
+    std::string source_dir = CURRENT_SOURCE_DIR;
 
     // Combine with the relative path
-    boost::filesystem::path fullPath = boost::filesystem::path(sourceDir) / relativePath;
+    boost::filesystem::path full_path = boost::filesystem::path(source_dir) / relative_path;
 
-    return fullPath.string();
+    return full_path.string();
 }
 
-// TODO: make this an object and encapsulate the buffers and cleanup in the destructor
-std::pair<std::vector<std::shared_ptr<uint8_t[]> >, boost::intrusive_ptr<MmapItem> >
-getItemFromHex(const std::string &hexString, std::optional<std::string> hexData) {
-    if (hexString.length() < 64) {
+// Convert hex string to byte vector
+std::vector<uint8_t> hex_to_vector(const std::string &hex_string) {
+    if (hex_string.empty()) {
+        return {};
+    }
+    
+    if (hex_string.length() % 2 != 0) {
+        throw std::invalid_argument("Hex string must have even length");
+    }
+    
+    std::vector<uint8_t> result;
+    result.reserve(hex_string.length() / 2);
+    
+    for (size_t i = 0; i < hex_string.length(); i += 2) {
+        std::string byte_str = hex_string.substr(i, 2);
+        uint8_t byte = static_cast<uint8_t>(std::stoi(byte_str, nullptr, 16));
+        result.push_back(byte);
+    }
+    
+    return result;
+}
+
+// Implementation of the TestItems methods
+boost::intrusive_ptr<MmapItem> 
+TestItems::get_item(const std::string &hex_string, std::optional<std::string> hex_data) {
+    if (hex_string.length() < 64) {
         throw std::invalid_argument("Hex string must be at least 64 characters");
     }
 
-    std::vector<std::shared_ptr<uint8_t[]> > buffers;
-
-    // Allocate memory for the key and add to buffers
-    auto key_buffer = std::make_shared<uint8_t[]>(32);
-    buffers.push_back(key_buffer);
-
-    // Parse hex string into bytes for the key
-    for (int i = 0; i < 32; i++) {
-        std::string byteStr = hexString.substr(i * 2, 2);
-        key_buffer[i] = static_cast<uint8_t>(std::stoi(byteStr, nullptr, 16));
-    }
-
-    // Pointer to data and its size
-    uint8_t *data_ptr;
+    // Convert key hex to bytes and store in buffers
+    auto key_bytes = hex_to_vector(hex_string.substr(0, 64));
+    buffers.push_back(key_bytes);
+    const uint8_t* key_ptr = buffers.back().data();
+    
+    // Handle data
+    const uint8_t* data_ptr;
     size_t data_size;
-
-    // Handle data if provided, otherwise use key as data
-    if (hexData.has_value() && !hexData.value().empty()) {
-        const std::string &dataStr = hexData.value();
-        data_size = dataStr.length() / 2; // Two hex chars = 1 byte
-
-        // Allocate memory for data and add to buffers
-        auto data_buffer = std::make_shared<uint8_t[]>(data_size);
-        buffers.push_back(data_buffer);
-
-        // Parse hex string into bytes for the data
-        for (size_t i = 0; i < data_size; i++) {
-            std::string byteStr = dataStr.substr(i * 2, 2);
-            data_buffer[i] = static_cast<uint8_t>(std::stoi(byteStr, nullptr, 16));
-        }
-
-        data_ptr = data_buffer.get();
+    
+    if (hex_data.has_value() && !hex_data.value().empty()) {
+        // Use separate buffer for data
+        auto data_bytes = hex_to_vector(hex_data.value());
+        buffers.push_back(data_bytes);
+        data_ptr = buffers.back().data();
+        data_size = buffers.back().size();
     } else {
-        // If no data provided, use key as data
-        data_ptr = key_buffer.get();
-        data_size = 32;
+        // Reuse key as data
+        data_ptr = key_ptr;
+        data_size = key_bytes.size();
     }
-
-    // Create the MmapItem using the key and data
-    auto item = boost::intrusive_ptr<MmapItem>(new MmapItem(key_buffer.get(), data_ptr, data_size));
-
-    // Return both the vector of buffers and the item
-    return std::make_pair(std::move(buffers), item);
+    
+    // Create and return the MmapItem
+    return boost::intrusive_ptr<MmapItem>(
+        new MmapItem(key_ptr, data_ptr, data_size));
 }
 
-boost::json::value loadJsonFromFile(const std::string &filePath) {
-    std::ifstream file(filePath);
+void TestItems::clear() {
+    buffers.clear();
+}
+
+boost::json::value load_json_from_file(const std::string &file_path) {
+    std::ifstream file(file_path);
     if (!file.is_open()) {
-        throw std::runtime_error("Could not open file: " + filePath);
+        throw std::runtime_error("Could not open file: " + file_path);
     }
 
     std::stringstream buffer;
     buffer << file.rdbuf();
-    std::string jsonStr = buffer.str();
+    std::string json_str = buffer.str();
 
     boost::system::error_code ec;
-    boost::json::value json = boost::json::parse(jsonStr, ec);
+    boost::json::value json = boost::json::parse(json_str, ec);
     if (ec) {
         throw std::runtime_error("Failed to parse JSON: " + ec.message());
     }
@@ -85,30 +93,43 @@ ShaMapFixture::ShaMapFixture() {
 }
 
 void ShaMapFixture::SetUp() {
-    // Test data location relative to this source file
-    fixtureDir = "fixture";
-    map = SHAMap(getNodeType());
+    // Get the fixture directory
+    fixture_dir = get_fixture_directory();
+    
+    // Create map with proper node type and options
+    auto options = get_map_options();
+    if (options) {
+        map = SHAMap(get_node_type(), *options);
+    } else {
+        map = SHAMap(get_node_type());
+    }
 
     // Verify empty map hash
     EXPECT_EQ(map.get_hash().hex(), "0000000000000000000000000000000000000000000000000000000000000000");
 }
 
-SHAMapNodeType ShaMapFixture::getNodeType() {
+SHAMapNodeType ShaMapFixture::get_node_type() {
     return tnACCOUNT_STATE;
 }
 
-std::string ShaMapFixture::getFixturePath(const std::string &filename) const {
-    return TestDataPath::getPath(fixtureDir + "/" + filename);
+std::optional<SHAMapOptions> ShaMapFixture::get_map_options() {
+    return std::nullopt;
 }
 
-SetResult ShaMapFixture::addItemFromHex(const std::string &hexString, std::optional<std::string> hexData) {
-    auto [data, item] = getItemFromHex(hexString, std::move(hexData));
-    std::ranges::copy(data, std::back_inserter(buffers));
+std::string ShaMapFixture::get_fixture_directory() {
+    return "fixture";
+}
+
+std::string ShaMapFixture::get_fixture_path(const std::string &filename) const {
+    return TestDataPath::get_path(fixture_dir + "/" + filename);
+}
+
+SetResult ShaMapFixture::add_item_from_hex(const std::string &hex_string, std::optional<std::string> hex_data) {
+    auto item = items.get_item(hex_string, std::move(hex_data));
     return map.set_item(item);
 }
 
-bool ShaMapFixture::removeItemFromHex(const std::string &hexString) {
-    auto [data, item] = getItemFromHex(hexString);
-    std::ranges::copy(data, std::back_inserter(buffers));
+bool ShaMapFixture::remove_item_from_hex(const std::string &hex_string) {
+    auto item = items.get_item(hex_string);
     return map.remove_item(item->key());
 }

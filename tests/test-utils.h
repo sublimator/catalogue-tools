@@ -1,3 +1,4 @@
+// test-utils.h
 #pragma once
 
 #include <gtest/gtest.h>
@@ -16,15 +17,30 @@
 // Helper class to manage file paths relative to the source file
 class TestDataPath {
 public:
-    static std::string getPath(const std::string &relativePath);
+    static std::string get_path(const std::string &relative_path);
 };
 
-// Hex parsing helper
-std::pair<std::vector<std::shared_ptr<uint8_t[]>>, boost::intrusive_ptr<MmapItem>>
-getItemFromHex(const std::string &hexString, std::optional<std::string> hexData = std::nullopt);
+// Convert hex string to byte vector
+std::vector<uint8_t> hex_to_vector(const std::string &hex_string);
+
+// Class to manage test items and their memory
+class TestItems {
+private:
+    // Store vectors for memory management
+    std::vector<std::vector<uint8_t>> buffers;
+
+public:
+    // Create an item from hex strings
+    boost::intrusive_ptr<MmapItem> get_item(
+        const std::string &hex_string, 
+        std::optional<std::string> hex_data = std::nullopt);
+    
+    // Helper to clear buffers if needed
+    void clear();
+};
 
 // JSON loading helper
-boost::json::value loadJsonFromFile(const std::string &filePath);
+boost::json::value load_json_from_file(const std::string &file_path);
 
 class ShaMapFixture : public ::testing::Test {
 protected:
@@ -32,28 +48,32 @@ protected:
 
     void SetUp() override;
 
-    virtual SHAMapNodeType getNodeType();
+    // Virtual methods for customization
+    virtual SHAMapNodeType get_node_type();
+    virtual std::optional<SHAMapOptions> get_map_options();
+    virtual std::string get_fixture_directory();
 
-    std::string getFixturePath(const std::string &filename) const;
+    std::string get_fixture_path(const std::string &filename) const;
 
-    SetResult addItemFromHex(const std::string &hexString, std::optional<std::string> hexData = std::nullopt);
-
-    bool removeItemFromHex(const std::string &hexString);
+    SetResult add_item_from_hex(const std::string &hex_string, std::optional<std::string> hex_data = std::nullopt);
+    bool remove_item_from_hex(const std::string &hex_string);
 
     // Member variables
     SHAMap map;
-    std::vector<std::shared_ptr<uint8_t[]>> buffers;
-    std::string fixtureDir;
+    TestItems items;
+    std::string fixture_dir;
 };
 
-
 class TransactionFixture : public ShaMapFixture {
-    SHAMapNodeType getNodeType() override {
+protected:
+    SHAMapNodeType get_node_type() override {
         return tnTRANSACTION_MD;
     }
 };
+
 class AccountStateFixture : public ShaMapFixture {
-    SHAMapNodeType getNodeType() override {
+protected:
+    SHAMapNodeType get_node_type() override {
         return tnACCOUNT_STATE;
     }
 };
