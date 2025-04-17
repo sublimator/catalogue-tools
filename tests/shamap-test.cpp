@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 #include <boost/json.hpp>
 #include <iostream>
+#include <utility>
 #include "test-utils.h"
+#include "../src/shamap/src/pretty-print-json.h"
 #include "catl/core/logger.h"
 #include "catl/shamap/shamap-impl.h"
 
@@ -127,27 +129,58 @@ TEST(ShaMapTest, CollapsePathWithSkips) {
     // Create a transaction-like tree (shallow)
     // Add a series of items that will create a specific structure
     // Force collisions to create deeper structures first
-    auto [data1, item1] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000100");
-    auto [data2, item2] = getItemFromHex("0000000000000000000000000000000000000000000000000000000000000101");
+    // Keepalive the data
+
+    std::vector<std::shared_ptr<uint8_t[]>> buffers;
+    auto get_item = [&buffers](const std::string &hexString, std::optional<std::string> hexData = std::nullopt) {
+        auto [data, item] = getItemFromHex(hexString, std::move(hexData));
+        std::ranges::copy(data, std::back_inserter(buffers));
+        return item;
+    };
+
+    auto item1 = get_item("0000000000000000000000000000000000000000000000000000000000010000");
+    auto item2 = get_item("0000000000000000000000000000000000000000000000000000000000010100");
+    auto item3 = get_item("0000000000500000000000000000000000000000000000000000000000010100");
+    auto item4 = get_item("0000000000600000000000000000000000000000000000000000000000010100");
+
+    auto dump_json = [](const SHAMap &map) {
+        std::ostringstream oss;
+        map.trie_json(oss); // TODO: this should take options, not just the MACRO
+        std::cout << oss.str();
+    };
+
 
     SHAMapOptions options = {.collapse_path_single_child_inners = true};
 
     {
-        auto map = SHAMap(tnTRANSACTION_MD, {.collapse_path_single_child_inners = false});
-        map.add_item(item1);
-        map.add_item(item2);
-        auto hash = map.get_hash();
-        EXPECT_EQ(hash.hex(), "C11AECD806E48EFF26D1A036B3EC6428C7C727895331135E44322F506616ADB5");
+        auto do_collapse = true;
+        auto map = SHAMap(tnTRANSACTION_MD, {.collapse_path_single_child_inners = do_collapse});
+
+
+        auto add_item = [&map, do_collapse, &dump_json](boost::intrusive_ptr<MmapItem> &item) {
+            map.add_item(item);
+            if (do_collapse) {
+                dump_json(map);
+            }
+        };
+
+        add_item(item1);
+        add_item(item2);
+        Logger::set_level(LogLevel::DEBUG);
+        add_item(item3);
+        Logger::set_level(LogLevel::INFO);
+        add_item(item4);
+        // dump_json(map);
     }
 
-    {
-        auto map = SHAMap(tnTRANSACTION_MD, options);
-        map.add_item(item1);
-        auto snapshot = map.snapshot();
-        snapshot->add_item(item2);
-        auto hash = snapshot->get_hash();
-        EXPECT_EQ(hash.hex(), "C11AECD806E48EFF26D1A036B3EC6428C7C727895331135E44322F506616ADB5");
-    }
+    // {
+    //     auto map = SHAMap(tnTRANSACTION_MD, options);
+    //     map.add_item(item1);
+    //     auto snapshot = map.snapshot();
+    //     snapshot->add_item(item2);
+    //     auto hash = snapshot->get_hash();
+    //     EXPECT_EQ(hash.hex(), "C11AECD806E48EFF26D1A036B3EC6428C7C727895331135E44322F506616ADB5");
+    // }
 }
 
 

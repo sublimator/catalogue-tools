@@ -10,6 +10,7 @@ std::string TestDataPath::getPath(const std::string &relativePath) {
     return fullPath.string();
 }
 
+// TODO: make this an object and encapsulate the buffers and cleanup in the destructor
 std::pair<std::vector<std::shared_ptr<uint8_t[]> >, boost::intrusive_ptr<MmapItem> >
 getItemFromHex(const std::string &hexString, std::optional<std::string> hexData) {
     if (hexString.length() < 64) {
