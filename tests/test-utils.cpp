@@ -81,38 +81,34 @@ boost::json::value loadJsonFromFile(const std::string &filePath) {
     return json;
 }
 
-template<SHAMapNodeType NodeType>
-ShaMapFixture<NodeType>::ShaMapFixture() : map(NodeType) {
+ShaMapFixture::ShaMapFixture() {
 }
 
-template<SHAMapNodeType NodeType>
-void ShaMapFixture<NodeType>::SetUp() {
+void ShaMapFixture::SetUp() {
     // Test data location relative to this source file
     fixtureDir = "fixture";
+    map = SHAMap(getNodeType());
 
     // Verify empty map hash
     EXPECT_EQ(map.get_hash().hex(), "0000000000000000000000000000000000000000000000000000000000000000");
 }
 
-template<SHAMapNodeType NodeType>
-std::string ShaMapFixture<NodeType>::getFixturePath(const std::string &filename) const {
+SHAMapNodeType ShaMapFixture::getNodeType() {
+    return tnACCOUNT_STATE;
+}
+
+std::string ShaMapFixture::getFixturePath(const std::string &filename) const {
     return TestDataPath::getPath(fixtureDir + "/" + filename);
 }
 
-template<SHAMapNodeType NodeType>
-SetResult ShaMapFixture<NodeType>::addItemFromHex(const std::string &hexString, std::optional<std::string> hexData) {
+SetResult ShaMapFixture::addItemFromHex(const std::string &hexString, std::optional<std::string> hexData) {
     auto [data, item] = getItemFromHex(hexString, std::move(hexData));
     std::ranges::copy(data, std::back_inserter(buffers));
     return map.set_item(item);
 }
 
-template<SHAMapNodeType NodeType>
-bool ShaMapFixture<NodeType>::removeItemFromHex(const std::string &hexString) {
+bool ShaMapFixture::removeItemFromHex(const std::string &hexString) {
     auto [data, item] = getItemFromHex(hexString);
     std::ranges::copy(data, std::back_inserter(buffers));
     return map.remove_item(item->key());
 }
-
-
-template class ShaMapFixture<tnACCOUNT_STATE>;
-template class ShaMapFixture<tnTRANSACTION_MD>;

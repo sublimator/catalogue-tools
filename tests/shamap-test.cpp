@@ -144,11 +144,8 @@ TEST(ShaMapTest, CollapsePathWithSkips) {
     auto item4 = get_item("0000000000600000000000000000000000000000000000000000000000010100");
 
     auto dump_json = [](const SHAMap &map) {
-        std::ostringstream oss;
-        map.trie_json(oss); // TODO: this should take options, not just the MACRO
-        std::cout << oss.str();
+        std::cout << map.trie_json_string({.key_as_hash = true}) << std::endl;
     };
-
 
     {
         auto do_collapse = true;
@@ -291,7 +288,7 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
                 }
                 map_.collapse_tree();
                 std::cout << "Canonical Collapsed Map trie JSON: ";
-                map_.trie_json(std::cout);
+                map_.trie_json(std::cout, {.key_as_hash = true});
                 std::cout << std::endl;
             }
         }

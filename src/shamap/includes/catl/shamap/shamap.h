@@ -113,6 +113,9 @@ public:
     void
     trie_json(std::ostream& os, TrieJsonOptions = {}) const;
 
+    std::string
+    trie_json_string(TrieJsonOptions options = {}) const;
+
     void
     visit_items(const std::function<void(const MmapItem&)>& visitor) const;
 

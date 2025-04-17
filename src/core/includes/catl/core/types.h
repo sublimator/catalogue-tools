@@ -43,7 +43,7 @@ public:
  * Utility function to convert a data slice to hexadecimal representation
  */
 void
-slice_hex(const Slice sl, std::string& result);
+slice_hex(Slice sl, std::string& result);
 
 /**
  * 256-bit hash value with utility methods

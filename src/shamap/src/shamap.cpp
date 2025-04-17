@@ -122,6 +122,14 @@ SHAMap::trie_json(std::ostream& os, TrieJsonOptions options) const
     }
 }
 
+std::string
+SHAMap::trie_json_string(TrieJsonOptions options) const
+{
+    std::ostringstream oss;
+    trie_json(oss, options);
+    return oss.str();
+}
+
 void
 SHAMap::visit_items(const std::function<void(const MmapItem&)>& visitor) const
 {
@@ -192,7 +200,8 @@ SHAMap::visit_items(const std::function<void(const MmapItem&)>& visitor) const
                     boost::intrusive_ptr<const SHAMapTreeNode> child =
                         inner->get_child(i);
                     if (child)
-                    {  // Only push valid children
+                    {
+                        // Only push valid children
                         node_stack.push(child);
                     }
                 }
@@ -644,7 +653,7 @@ SHAMap::find_only_single_inner_child(
                     else
                     {
                         return nullptr;  // More than one inner child, don't
-                                         // collapse
+                        // collapse
                     }
                 }
                 else if (child->is_leaf())

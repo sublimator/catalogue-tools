@@ -26,12 +26,13 @@ getItemFromHex(const std::string &hexString, std::optional<std::string> hexData 
 // JSON loading helper
 boost::json::value loadJsonFromFile(const std::string &filePath);
 
-template <SHAMapNodeType NodeType = tnACCOUNT_STATE>
 class ShaMapFixture : public ::testing::Test {
 protected:
     ShaMapFixture();
 
     void SetUp() override;
+
+    virtual SHAMapNodeType getNodeType();
 
     std::string getFixturePath(const std::string &filename) const;
 
@@ -46,5 +47,13 @@ protected:
 };
 
 
-using TransactionFixture = ShaMapFixture<tnTRANSACTION_MD>;
-using AccountStateFixture = ShaMapFixture<tnACCOUNT_STATE>;
+class TransactionFixture : public ShaMapFixture {
+    SHAMapNodeType getNodeType() override {
+        return tnTRANSACTION_MD;
+    }
+};
+class AccountStateFixture : public ShaMapFixture {
+    SHAMapNodeType getNodeType() override {
+        return tnACCOUNT_STATE;
+    }
+};
