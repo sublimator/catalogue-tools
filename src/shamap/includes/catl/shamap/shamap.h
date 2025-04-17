@@ -20,18 +20,6 @@
 #include "catl/shamap/shamap-treenode.h"
 #include "shamap-options.h"
 
-enum class SetResult {
-    FAILED = 0,  // Operation failed
-    ADD = 1,     // New item was added
-    UPDATE = 2,  // Existing item was updated
-};
-
-enum class SetMode {
-    ADD_ONLY,      // Fail if the item already exists
-    UPDATE_ONLY,   // Fail if the item doesn't exist
-    ADD_OR_UPDATE  // Allow either adding or updating
-};
-
 /**
  * Main SHAMap class implementing a pruned, binary prefix tree
  * with Copy-on-Write support for efficient snapshots
@@ -123,7 +111,7 @@ public:
     snapshot();
 
     void
-    trie_json(std::ostream& os, bool pretty = true) const;
+    trie_json(std::ostream& os, TrieJsonOptions = {}) const;
 
     void
     visit_items(const std::function<void(const MmapItem&)>& visitor) const;

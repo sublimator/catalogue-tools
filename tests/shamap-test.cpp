@@ -131,7 +131,7 @@ TEST(ShaMapTest, CollapsePathWithSkips) {
     // Force collisions to create deeper structures first
     // Keepalive the data
 
-    std::vector<std::shared_ptr<uint8_t[]>> buffers;
+    std::vector<std::shared_ptr<uint8_t[]> > buffers;
     auto get_item = [&buffers](const std::string &hexString, std::optional<std::string> hexData = std::nullopt) {
         auto [data, item] = getItemFromHex(hexString, std::move(hexData));
         std::ranges::copy(data, std::back_inserter(buffers));
@@ -150,11 +150,13 @@ TEST(ShaMapTest, CollapsePathWithSkips) {
     };
 
 
-    SHAMapOptions options = {.collapse_path_single_child_inners = true};
-
     {
         auto do_collapse = true;
-        auto map = SHAMap(tnTRANSACTION_MD, {.collapse_path_single_child_inners = do_collapse});
+        auto map = SHAMap(tnTRANSACTION_MD, {
+                              .tree_collapse_impl = do_collapse
+                                                        ? TreeCollapseImpl::leafs_and_inners
+                                                        : TreeCollapseImpl::leafs_only
+                          });
 
 
         auto add_item = [&map, do_collapse, &dump_json](boost::intrusive_ptr<MmapItem> &item) {
@@ -184,8 +186,6 @@ TEST(ShaMapTest, CollapsePathWithSkips) {
 }
 
 
-
-
 // Test for adding ledger transaction data one by one
 TEST_F(TransactionFixture, Ledger29952TransactionAddTest) {
     try {
@@ -195,19 +195,19 @@ TEST_F(TransactionFixture, Ledger29952TransactionAddTest) {
 
         // Load JSON from file
         boost::json::value transactions = loadJsonFromFile(filePath);
-        boost::json::array& txns = transactions.as_array();
+        boost::json::array &txns = transactions.as_array();
 
         std::cout << "Found " << txns.size() << " transactions to process" << std::endl;
 
         // Process each transaction from the JSON array
         for (size_t i = 0; i < txns.size(); ++i) {
-            const auto& txn = txns[i];
+            const auto &txn = txns[i];
             auto keyHex = boost::json::value_to<std::string>(txn.at("key"));
             auto dataHex = boost::json::value_to<std::string>(txn.at("data"));
 
             // Add item to the map
             std::cout << "Adding transaction " << (i + 1) << " with key: " << keyHex << std::endl;
-            if (i + 1== 10) {
+            if (i + 1 == 10) {
                 Logger::set_level(LogLevel::DEBUG);
             } else {
                 Logger::set_level(LogLevel::INFO);
@@ -234,9 +234,7 @@ TEST_F(TransactionFixture, Ledger29952TransactionAddTest) {
         Hash256 finalHash = map.get_hash();
         std::cout << "Final map hash: " << finalHash.hex() << std::endl;
         EXPECT_EQ(finalHash.hex(), "9138DB29694D9B7F125F56FE42520CAFF3C9870F28C4161A69E0C8597664C951");
-
-
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         FAIL() << "Exception: " << e.what();
     }
 }
@@ -249,13 +247,13 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
 
         // Load JSON from file
         boost::json::value transactions = loadJsonFromFile(filePath);
-        boost::json::array& txns = transactions.as_array();
+        boost::json::array &txns = transactions.as_array();
 
         std::cout << "Found " << txns.size() << " transactions to process" << std::endl;
 
         // Process each transaction from the JSON array
         for (size_t i = 0; i < txns.size(); ++i) {
-            const auto& txn = txns[i];
+            const auto &txn = txns[i];
             auto keyHex = boost::json::value_to<std::string>(txn.at("key"));
             auto dataHex = boost::json::value_to<std::string>(txn.at("data"));
 
@@ -280,13 +278,11 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
 
             std::cout << "Map trie JSON: ";
             map.trie_json(std::cout);
-            std::cout << std::endl;
-
-            {
-                auto map_ = SHAMap(tnTRANSACTION_MD, {.collapse_path_single_child_inners = false});
-                std::vector<std::shared_ptr<uint8_t[]>> buffers; // Keep alive
+            std::cout << std::endl; {
+                auto map_ = SHAMap(tnTRANSACTION_MD, {.tree_collapse_impl = TreeCollapseImpl::leafs_only});
+                std::vector<std::shared_ptr<uint8_t[]> > buffers; // Keep alive
                 for (size_t j = 0; j < i + 1; ++j) {
-                    const auto& txn_ = txns[j];
+                    const auto &txn_ = txns[j];
                     auto key_str = boost::json::value_to<std::string>(txn_.at("key"));
                     auto data_str = boost::json::value_to<std::string>(txn_.at("data"));
                     auto [data, item] = getItemFromHex(key_str, data_str);
@@ -298,31 +294,20 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
                 map_.trie_json(std::cout);
                 std::cout << std::endl;
             }
-
         }
 
 
         // Final hash check if you have an expected final hash value
         Hash256 finalHash = map.get_hash();
-#if not COLLAPSE_PATH_SINGLE_CHILD_INNERS
-        map.collapse_tree();
-        std::cout << "Map trie JSON after collapsing: ";
-        map.trie_json(std::cout);
-        std::cout << std::endl;
-
-#endif
         std::cout << "Final map hash: " << finalHash.hex() << std::endl;
         EXPECT_EQ(finalHash.hex(), "39460E5964D942A0E8A7A2C4E86EEF40B6C8FDF707BDA3874BE3CEE7D917D103");
-
-
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         FAIL() << "Exception: " << e.what();
     }
 }
 
 
 int main(int argc, char **argv) {
-
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

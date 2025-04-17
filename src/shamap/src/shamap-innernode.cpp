@@ -50,7 +50,7 @@ SHAMapInnerNode::get_depth() const
 }
 
 boost::json::object
-SHAMapInnerNode::trie_json() const
+SHAMapInnerNode::trie_json(TrieJsonOptions options) const
 {
     boost::json::object result;
     result["__depth__"] = depth_;
@@ -70,17 +70,20 @@ SHAMapInnerNode::trie_json() const
                 {
                     auto leaf =
                         boost::static_pointer_cast<SHAMapLeafNode>(child);
-#if TRIE_JSON_USE_ITEM_KEY_NOT_HASH
-                    result[nibble] = leaf->get_item()->key().hex();
-#else
-                    result[nibble] = leaf->get_hash().hex();
-#endif
+                    if (options.key_as_hash)
+                    {
+                        result[nibble] = leaf->get_item()->key().hex();
+                    }
+                    else
+                    {
+                        result[nibble] = leaf->get_hash().hex();
+                    }
                 }
                 else
                 {
                     auto inner =
                         boost::static_pointer_cast<SHAMapInnerNode>(child);
-                    result[nibble] = inner->trie_json();
+                    result[nibble] = inner->trie_json(options);
                 }
             }
         }

@@ -499,7 +499,7 @@ PathFinder::dirty_path() const
 void
 PathFinder::collapse_path()
 {
-    if (options_.collapse_path_single_child_inners)
+    if (options_.tree_collapse_impl == TreeCollapseImpl::leafs_and_inners)
     {
         return collapse_path_inners();
     }
