@@ -96,6 +96,12 @@ protected:
         boost::intrusive_ptr<MmapItem>& item,
         SetMode mode = SetMode::ADD_OR_UPDATE);
 
+    bool
+    remove_item_collapsed(const Key& key);
+
+    bool
+    remove_item_reference(const Key& key);
+
 public:
     explicit SHAMap(
         SHAMapNodeType type = tnACCOUNT_STATE,
