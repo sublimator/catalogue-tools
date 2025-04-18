@@ -10,6 +10,7 @@
 #include <memory>
 
 #include "catl/core/logger.h"
+#include "shamap-utils.h"
 
 /**
  * Inner (branch) node in the SHAMap tree
@@ -125,4 +126,10 @@ protected:
     }
     boost::intrusive_ptr<SHAMapInnerNode>
     copy(int newVersion) const;
+
+    int
+    select_branch_for_depth(const Key& key) const
+    {
+        return select_branch(key, depth_);
+    }
 };

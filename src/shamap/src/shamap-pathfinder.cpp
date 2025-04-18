@@ -8,40 +8,6 @@
 #include "catl/shamap/shamap-leafnode.h"
 #include "catl/shamap/shamap-utils.h"
 
-namespace {
-// Anonymous namespace - only visible in this file
-void
-check_no_existing_skips(
-    const std::vector<boost::intrusive_ptr<SHAMapInnerNode>>& inners)
-{
-    if (inners.size() <= 1)
-    {
-        return;  // No skips possible with 0 or 1 node
-    }
-
-    for (size_t i = 0; i < inners.size() - 1; i++)
-    {
-        uint8_t currentDepth = inners[i]->get_depth();
-        uint8_t nextDepth = inners[i + 1]->get_depth();
-
-        // Check if depths are not sequential (should differ by exactly 1)
-        if (nextDepth - currentDepth > 1)
-        {
-            std::ostringstream oss;
-            oss << "INVARIANT VIOLATION: Depth skip detected in path before "
-                   "collapse: "
-                << "node at index " << i << " has depth "
-                << static_cast<int>(currentDepth)
-                << " followed by node at depth " << static_cast<int>(nextDepth)
-                << " (skipped " << (nextDepth - currentDepth - 1) << " levels)";
-
-            LOGE("PathFinder", oss.str());
-            throw std::runtime_error(oss.str());
-        }
-    }
-}
-}  // anonymous namespace
-
 //----------------------------------------------------------
 // PathFinder Implementation
 //----------------------------------------------------------
@@ -200,10 +166,6 @@ PathFinder::collapse_path_inners()
         OLOGD("No inner nodes in path, nothing to collapse");
         return;
     }
-
-#if PATH_FINDER_CHECK_INVARIANTS
-    check_no_existing_skips(inners);
-#endif
 
     OLOGD(
         "Starting collapse for key ",
@@ -416,7 +378,7 @@ PathFinder::collapse_path_inners()
         }
     }
 
-    OLOGI(
+    OLOGD(
         "Collapse process complete, needs_invalidation=",
         (needs_invalidation ? "YES" : "NO"));
 

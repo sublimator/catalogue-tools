@@ -95,7 +95,7 @@ SHAMap::snapshot()
     const int originalVersion = new_version();
     int snapshotVersion = new_version();
 
-    OLOGI(
+    OLOGD(
         "Creating snapshot: original version ",
         originalVersion,
         ", snapshot version ",

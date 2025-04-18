@@ -1,4 +1,1 @@
 #pragma once
-
-#define USE_RECURSIVE_SKIPPED_HASH 0
-#define PATH_FINDER_CHECK_INVARIANTS 1
