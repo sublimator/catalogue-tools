@@ -6,7 +6,7 @@
 #include "catl/core/logger.h"
 
 // Test for node collapsing behavior, particularly with shallow trees
-TEST(ShaMapTest, CollapsePathWithSkips) {
+TEST(CollapseTest, WithSkips) {
     // Create a transaction-like tree (shallow)
     // Add a series of items that will create a specific structure
     TestItems items;
@@ -16,31 +16,66 @@ TEST(ShaMapTest, CollapsePathWithSkips) {
     auto i3 = items.make("0000000000500000000000000000000000000000000000000000000000010100");
     auto i4 = items.make("0000000000600000000000000000000000000000000000000000000000010100");
 
-    auto dump_json = [](const SHAMap &map) {
-        LOGD(map.trie_json_string({.key_as_hash = true}));
+    auto canonical_map = SHAMap(tnTRANSACTION_MD, {
+                                    .tree_collapse_impl = TreeCollapseImpl::leafs_only
+                                });
+    auto map = SHAMap(tnTRANSACTION_MD, {
+                          .tree_collapse_impl = TreeCollapseImpl::leafs_and_inners
+                      });
+
+
+    auto add_item = [
+                &canonical_map,
+                &map](boost::intrusive_ptr<MmapItem> &item) {
+        map.add_item(item);
+        canonical_map.add_item(item);
+        const auto copy = canonical_map.snapshot();
+        copy->collapse_tree();
+        LOGI("Actual: ", map.trie_json_string({.key_as_hash = true}));
+        LOGI("Canonical: ", copy->trie_json_string({.key_as_hash = true}));
+    };
+    Logger::set_level(LogLevel::INFO);
+    add_item(i1);
+    add_item(i2);
+
+    // add_item(i3);
+    // Logger::set_level(LogLevel::INFO);
+    // add_item(i4);
+}
+
+TEST(CollapseTest, BasicNoSkips) {
+    // Create a transaction-like tree (shallow)
+    // Add a series of items that will create a specific structure
+    TestItems items;
+
+    auto i1 = items.make("0000000000000000000000000000000000000000000000000000000000010000");
+    auto i2 = items.make("1000000000000000000000000000000000000000000000000000000000010100");
+    auto i3 = items.make("0000000000000000000000000000000000000000000000000000000000020000");
+
+    auto canonical_map = SHAMap(tnTRANSACTION_MD, {
+                                    .tree_collapse_impl = TreeCollapseImpl::leafs_only
+                                });
+    auto map = SHAMap(tnTRANSACTION_MD, {
+                          .tree_collapse_impl = TreeCollapseImpl::leafs_and_inners
+                      });
+
+    auto add_item = [
+                &canonical_map,
+                &map](boost::intrusive_ptr<MmapItem> &item) {
+        map.add_item(item);
+        canonical_map.add_item(item);
+        const auto copy = canonical_map.snapshot();
+        copy->collapse_tree();
+        LOGI("Actual: ", map.trie_json_string({.key_as_hash = true}));
+        LOGI("Canonical: ", copy->trie_json_string({.key_as_hash = true}));
     };
 
-    {
-        auto do_collapse = true;
-        auto map = SHAMap(tnTRANSACTION_MD, {
-                              .tree_collapse_impl = do_collapse
-                                                        ? TreeCollapseImpl::leafs_and_inners
-                                                        : TreeCollapseImpl::leafs_only
-                          });
+    Logger::set_level(LogLevel::INFO);
+    add_item(i1);
+    add_item(i2);
+    add_item(i3);
 
-
-        auto add_item = [&map, do_collapse, &dump_json](boost::intrusive_ptr<MmapItem> &item) {
-            map.add_item(item);
-            if (do_collapse) {
-                dump_json(map);
-            }
-        };
-
-        add_item(i1);
-        add_item(i2);
-        Logger::set_level(LogLevel::DEBUG);
-        add_item(i3);
-        Logger::set_level(LogLevel::INFO);
-        add_item(i4);
-    }
+    // add_item(i3);
+    // Logger::set_level(LogLevel::INFO);
+    // add_item(i4);
 }

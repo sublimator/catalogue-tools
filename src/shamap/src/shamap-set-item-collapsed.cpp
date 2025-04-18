@@ -172,8 +172,8 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
             return SetResult::FAILED;
         }
 
-        if (pathFinder.ended_at_null_branch() ||
-            (itemExists && mode != SetMode::ADD_ONLY))
+        bool update_mode = mode != SetMode::ADD_ONLY;
+        if (pathFinder.ended_at_null_branch() || (itemExists && update_mode))
         {
             auto parent = pathFinder.get_parent_of_terminal();
             int branch = pathFinder.get_terminal_branch();

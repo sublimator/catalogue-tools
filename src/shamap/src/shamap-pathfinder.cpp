@@ -205,7 +205,7 @@ PathFinder::collapse_path_inners()
     check_no_existing_skips(inners);
 #endif
 
-    OLOGI(
+    OLOGD(
         "Starting collapse for key ",
         targetKey.hex(),
         ", path length=",
@@ -289,7 +289,7 @@ PathFinder::collapse_path_inners()
             {
                 // Perform the collapse: Parent points directly to the
                 // grandchild
-                OLOGI(
+                OLOGD(
                     "Collapsing inner node (depth ",
                     static_cast<int>(current_inner->get_depth()),
                     ") under parent (depth ",
