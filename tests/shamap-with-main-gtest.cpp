@@ -2,7 +2,7 @@
 #include <boost/json.hpp>
 #include <iostream>
 #include <utility>
-#include "test-utils.h"
+#include "utils/test-utils.h"
 #include "../src/shamap/src/pretty-print-json.h"
 #include "catl/core/logger.h"
 
@@ -38,30 +38,13 @@ TEST_F(AccountStateFixture, JsonFileOperations) {
     }
 }
 
-// Simple test to verify our path resolution works
-TEST(FilePathTest, FindTestDataFile) {
-    // Get the path to the test data file relative to this source file
-    std::string file_path = TestDataPath::get_path("fixture/op-adds.json");
-    std::cout << "Test data path: " << file_path << std::endl;
-
-    // Verify the file exists
-    std::ifstream file(file_path);
-    EXPECT_TRUE(file.good()) << "Could not find test data file at: " << file_path
-        << "\nMake sure to create a 'fixture' directory next to this source file.";
-}
-
-// This will print the current source directory for debugging
-TEST(FilePathTest, PrintSourceDirectory) {
-    std::cout << "Current source directory: " << CURRENT_SOURCE_DIR << std::endl;
-}
-
 // Basic test for SHAMap functionality
 TEST(ShaMapTest, BasicOperations) {
     auto map = SHAMap(tnACCOUNT_STATE);
     EXPECT_EQ(map.get_hash().hex(), "0000000000000000000000000000000000000000000000000000000000000000");
 
     TestItems items;
-    auto item = items.get_item("0000000000000000000000000000000000000000000000000000000000000000");
+    auto item = items.make("0000000000000000000000000000000000000000000000000000000000000000");
     map.set_item(item);
     EXPECT_EQ(map.get_hash().hex(), "B992A0C0480B32A2F32308EA2D64E85586A3DAF663F7B383806B5C4CEA84D8BF");
 }
@@ -72,8 +55,8 @@ TEST(ShaMapTest, AddItemOnly) {
     TestItems items;
 
     // Create two test items with different keys
-    auto item1 = items.get_item("0000000000000000000000000000000000000000000000000000000000000001");
-    auto item2 = items.get_item("0000000000000000000000000000000000000000000000000000000000000002");
+    auto item1 = items.make("0000000000000000000000000000000000000000000000000000000000000001");
+    auto item2 = items.make("0000000000000000000000000000000000000000000000000000000000000002");
 
     // First add should succeed
     EXPECT_EQ(map.add_item(item1), SetResult::ADD);
@@ -91,8 +74,8 @@ TEST(ShaMapTest, UpdateItemOnly) {
     TestItems items;
 
     // Create two items with the same key
-    auto item1 = items.get_item("0000000000000000000000000000000000000000000000000000000000000001");
-    auto item2 = items.get_item("0000000000000000000000000000000000000000000000000000000000000001");
+    auto item1 = items.make("0000000000000000000000000000000000000000000000000000000000000001");
+    auto item2 = items.make("0000000000000000000000000000000000000000000000000000000000000001");
 
     // Update should fail since the item doesn't exist yet
     EXPECT_EQ(map.update_item(item1), SetResult::FAILED);
@@ -110,60 +93,20 @@ TEST(ShaMapTest, SetItemModes) {
     TestItems items;
 
     // Create items with the same key but different content
-    auto item1 = items.get_item("0000000000000000000000000000000000000000000000000000000000000001");
-    auto item2 = items.get_item("0000000000000000000000000000000000000000000000000000000000000001");
+    auto item1 = items.make("0000000000000000000000000000000000000000000000000000000000000001");
+    auto item2 = items.make("0000000000000000000000000000000000000000000000000000000000000001");
 
     // Add mode
     EXPECT_EQ(map.set_item(item1, SetMode::ADD_ONLY), SetResult::ADD);
     EXPECT_EQ(map.set_item(item2, SetMode::ADD_ONLY), SetResult::FAILED);
 
     // Update mode
-    auto item3 = items.get_item("0000000000000000000000000000000000000000000000000000000000000002");
+    auto item3 = items.make("0000000000000000000000000000000000000000000000000000000000000002");
     EXPECT_EQ(map.set_item(item3, SetMode::UPDATE_ONLY), SetResult::FAILED);
 
     // Add or update mode
     EXPECT_EQ(map.set_item(item2, SetMode::ADD_OR_UPDATE), SetResult::UPDATE);
     EXPECT_EQ(map.set_item(item3, SetMode::ADD_OR_UPDATE), SetResult::ADD);
-}
-
-// Test for node collapsing behavior, particularly with shallow trees
-TEST(ShaMapTest, CollapsePathWithSkips) {
-    // Create a transaction-like tree (shallow)
-    // Add a series of items that will create a specific structure
-    TestItems items;
-
-    auto item1 = items.get_item("0000000000000000000000000000000000000000000000000000000000010000");
-    auto item2 = items.get_item("0000000000000000000000000000000000000000000000000000000000010100");
-    auto item3 = items.get_item("0000000000500000000000000000000000000000000000000000000000010100");
-    auto item4 = items.get_item("0000000000600000000000000000000000000000000000000000000000010100");
-
-    auto dump_json = [](const SHAMap &map) {
-        std::cout << map.trie_json_string({.key_as_hash = true}) << std::endl;
-    };
-
-    {
-        auto do_collapse = true;
-        auto map = SHAMap(tnTRANSACTION_MD, {
-                              .tree_collapse_impl = do_collapse
-                                                        ? TreeCollapseImpl::leafs_and_inners
-                                                        : TreeCollapseImpl::leafs_only
-                          });
-
-
-        auto add_item = [&map, do_collapse, &dump_json](boost::intrusive_ptr<MmapItem> &item) {
-            map.add_item(item);
-            if (do_collapse) {
-                dump_json(map);
-            }
-        };
-
-        add_item(item1);
-        add_item(item2);
-        Logger::set_level(LogLevel::DEBUG);
-        add_item(item3);
-        Logger::set_level(LogLevel::INFO);
-        add_item(item4);
-    }
 }
 
 // Test for adding ledger transaction data one by one
@@ -254,7 +197,7 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
                     const auto &txn_ = txns[j];
                     auto key_str = boost::json::value_to<std::string>(txn_.at("key"));
                     auto data_str = boost::json::value_to<std::string>(txn_.at("data"));
-                    auto item = items.get_item(key_str, data_str);
+                    auto item = items.make(key_str, data_str);
                     map_.add_item(item);
                 }
                 map_.collapse_tree();

@@ -1,7 +1,7 @@
 # Create a test utility library
 add_library(test_utils STATIC
-        test-utils.cpp
-        test-utils.h
+        utils/test-utils.cpp
+        utils/test-utils.h
 )
 
 # Link the test utility library against needed dependencies
@@ -19,9 +19,13 @@ target_include_directories(test_utils
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+# **Non**-recursive glob for all test files, matching *-test.cpp
+file(GLOB_RECURSE TEST_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*-gtest.cpp)
+message(STATUS "Found test files: ${TEST_FILES}")
+
 # Add test executable for shamap tests
 add_executable(shamap_tests
-        shamap-test.cpp
+        ${TEST_FILES}
 )
 
 # Link to GTest and your modules (including test_utils)

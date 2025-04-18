@@ -145,8 +145,8 @@ TEST_F(SHAMapTest, CanCreateFixture) {
     ASSERT_TRUE(branch_E._5.isEmpty()) << "Branch E->5 should be empty";
 }
 
-// If you need a main function (though Google Test typically provides one)
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+// // If you need a main function (though Google Test typically provides one)
+// int main(int argc, char **argv) {
+//     ::testing::InitGoogleTest(&argc, argv);
+//     return RUN_ALL_TESTS();
+// }

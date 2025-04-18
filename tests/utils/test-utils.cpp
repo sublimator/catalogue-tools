@@ -6,7 +6,7 @@ std::string TestDataPath::get_path(const std::string &relative_path) {
     std::string source_dir = CURRENT_SOURCE_DIR;
 
     // Combine with the relative path
-    boost::filesystem::path full_path = boost::filesystem::path(source_dir) / relative_path;
+    boost::filesystem::path full_path = boost::filesystem::path(source_dir) / ".." / relative_path;
 
     return full_path.string();
 }
@@ -35,7 +35,7 @@ std::vector<uint8_t> hex_to_vector(const std::string &hex_string) {
 
 // Implementation of the TestItems methods
 boost::intrusive_ptr<MmapItem> 
-TestItems::get_item(const std::string &hex_string, std::optional<std::string> hex_data) {
+TestItems::make(const std::string &hex_string, std::optional<std::string> hex_data) {
     if (hex_string.length() < 64) {
         throw std::invalid_argument("Hex string must be at least 64 characters");
     }
@@ -125,11 +125,11 @@ std::string ShaMapFixture::get_fixture_path(const std::string &filename) const {
 }
 
 SetResult ShaMapFixture::add_item_from_hex(const std::string &hex_string, std::optional<std::string> hex_data) {
-    auto item = items.get_item(hex_string, std::move(hex_data));
+    auto item = items.make(hex_string, std::move(hex_data));
     return map.set_item(item);
 }
 
 bool ShaMapFixture::remove_item_from_hex(const std::string &hex_string) {
-    auto item = items.get_item(hex_string);
+    auto item = items.make(hex_string);
     return map.remove_item(item->key());
 }

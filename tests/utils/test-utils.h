@@ -31,7 +31,7 @@ private:
 
 public:
     // Create an item from hex strings
-    boost::intrusive_ptr<MmapItem> get_item(
+    boost::intrusive_ptr<MmapItem> make(
         const std::string &hex_string, 
         std::optional<std::string> hex_data = std::nullopt);
     
