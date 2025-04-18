@@ -20,9 +20,9 @@ struct TrieJsonOptions
     bool pretty = true;
 };
 
-enum class SHAMapHashImpl {
-    reference,
-    synthetic_inners,
+enum class ReferenceHashImpl {
+    recursive_simple,
+    stack_performant,
 };
 
 enum class SyntheticInnersHashImpl { recursive_simple, stack_performant };
@@ -34,7 +34,7 @@ enum class TreeCollapseImpl { leafs_only, leafs_and_inners };
 struct SHAMapOptions
 {
     TreeCollapseImpl tree_collapse_impl = TreeCollapseImpl::leafs_only;
-    SHAMapHashImpl hash_impl = SHAMapHashImpl::reference;
+    ReferenceHashImpl hash_impl = ReferenceHashImpl::recursive_simple;
     SyntheticInnersHashImpl synthetic_inners_hash_impl =
         SyntheticInnersHashImpl::stack_performant;
     SkippedInnersHashImpl skipped_inners_hash_impl =
