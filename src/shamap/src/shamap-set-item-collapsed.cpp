@@ -117,7 +117,7 @@ SHAMap::handle_collision_collapsed(
             }
             currentParent->set_child(existingBranch, nextInner);
             currentParent = nextInner;
-            currentDepth++;
+            currentDepth++;  // not necessaarily
         }
     }
     if (currentDepth >= 64)

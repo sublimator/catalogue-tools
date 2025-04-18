@@ -113,7 +113,7 @@ namespace json = boost::json;
 void
 SHAMap::trie_json(std::ostream& os, TrieJsonOptions options) const
 {
-    auto trie = root->trie_json(options);
+    auto trie = root->trie_json(options, options_);
     if (options.pretty)
         pretty_print_json(os, trie);
     else
@@ -502,7 +502,7 @@ SHAMap::get_hash() const
         return Hash256::zero();
     }
     // getHash() inside the node handles lazy calculation
-    return root->get_hash();
+    return root->get_hash(options_);
 }
 
 LogPartition SHAMap::log_partition_{"SHAMap", LogLevel::DEBUG};

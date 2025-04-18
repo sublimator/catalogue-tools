@@ -27,11 +27,11 @@ SHAMapTreeNode::invalidate_hash()
 }
 
 const Hash256&
-SHAMapTreeNode::get_hash()
+SHAMapTreeNode::get_hash(SHAMapOptions const& options)
 {
     if (!hashValid)
     {
-        update_hash();
+        update_hash(options);
         hashValid = true;
     }
     return hash;

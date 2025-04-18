@@ -52,8 +52,14 @@
         "src/shamap/**/*.cpp",
         "src/shamap/**/*.h",
         "src/shamap/**/CMakeLists.txt",
-        "tests/**/shamap*.*",
-        "tests/**/test-utils.*"
+        "tests/**/*.cpp",
+        "tests/**/*.h"
+      ]
+    },
+    "shamap-tests": {
+      "include": [
+        "tests/**/*.cpp",
+        "tests/**/*.h"
       ]
     },
     "hasher-http": {

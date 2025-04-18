@@ -33,7 +33,7 @@ SHAMapLeafNode::is_inner() const
 }
 
 void
-SHAMapLeafNode::update_hash()
+SHAMapLeafNode::update_hash(SHAMapOptions const&)
 {
     std::array<unsigned char, 4> prefix = {0, 0, 0, 0};
     auto set = [&prefix](auto& from) {

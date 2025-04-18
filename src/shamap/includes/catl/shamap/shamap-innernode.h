@@ -20,7 +20,6 @@ private:
     std::unique_ptr<NodeChildren> children_;
     uint8_t depth_ = 0;
     static LogPartition log_partition_;
-
     // CoW support
     int version{0};  // TODO: make atomic or have clear reason not to
     bool do_cow_ = false;
@@ -30,15 +29,16 @@ public:
     SHAMapInnerNode(bool isCopy, uint8_t nodeDepth, int initialVersion);
     bool
     is_leaf() const override;
+
     bool
     is_inner() const override;
     uint8_t
     get_depth() const;
-    void
-    update_hash() override;
+
     bool
     set_child(int branch, boost::intrusive_ptr<SHAMapTreeNode> const& child);
     boost::intrusive_ptr<SHAMapTreeNode>
+
     get_child(int branch) const;
     bool
     has_child(int branch) const;
@@ -46,22 +46,17 @@ public:
     get_branch_count() const;
     uint16_t
     get_branch_mask() const;
+
     boost::intrusive_ptr<SHAMapLeafNode>
     get_only_child_leaf() const;
 
     // Helper methods for skipped inner handling
     boost::intrusive_ptr<SHAMapLeafNode>
-    first_leaf(const boost::intrusive_ptr<SHAMapInnerNode>& inner);
+    first_leaf(const boost::intrusive_ptr<SHAMapInnerNode>& inner) const;
 
     boost::json::object
-    trie_json(TrieJsonOptions options) const;
-
-    Hash256
-    compute_skipped_hash(
-        const boost::intrusive_ptr<SHAMapInnerNode>& inner,
-        const Key& index,
-        int round,
-        int skips) const;
+    trie_json(TrieJsonOptions options, SHAMapOptions const& shamap_options)
+        const;
 
     static LogPartition&
     get_log_partition()
@@ -72,6 +67,22 @@ public:
 protected:
     friend class PathFinder;
     friend class SHAMap;
+
+    void
+    update_hash_reference();
+    void
+    update_hash_collapsed();
+
+    void
+    update_hash(const SHAMapOptions& options) override;
+
+    Hash256
+    compute_skipped_hash(
+        const SHAMapOptions& options,
+        const boost::intrusive_ptr<SHAMapInnerNode>& inner,
+        const Key& index,
+        int round,
+        int skips) const;
 
     // CoW support - only accessible to friends
     int

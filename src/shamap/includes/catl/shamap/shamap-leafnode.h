@@ -22,7 +22,7 @@ public:
     bool
     is_inner() const override;
     void
-    update_hash() override;
+    update_hash(SHAMapOptions const& options) override;
     boost::intrusive_ptr<MmapItem>
     get_item() const;
     SHAMapNodeType
