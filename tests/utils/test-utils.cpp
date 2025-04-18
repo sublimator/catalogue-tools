@@ -97,8 +97,7 @@ void ShaMapFixture::SetUp() {
     fixture_dir = get_fixture_directory();
     
     // Create map with proper node type and options
-    auto options = get_map_options();
-    if (options) {
+    if (auto options = get_map_options()) {
         map = SHAMap(get_node_type(), *options);
     } else {
         map = SHAMap(get_node_type());
