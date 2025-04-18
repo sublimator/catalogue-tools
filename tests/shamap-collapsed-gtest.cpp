@@ -17,7 +17,7 @@ TEST(ShaMapTest, CollapsePathWithSkips) {
     auto i4 = items.make("0000000000600000000000000000000000000000000000000000000000010100");
 
     auto dump_json = [](const SHAMap &map) {
-        std::cout << map.trie_json_string({.key_as_hash = true}) << std::endl;
+        LOGD(map.trie_json_string({.key_as_hash = true}));
     };
 
     {

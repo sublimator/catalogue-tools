@@ -91,6 +91,14 @@ protected:
         boost::intrusive_ptr<MmapItem>& item,
         SetMode mode = SetMode::ADD_OR_UPDATE);
 
+    void
+    configure_cow_collapsed(PathFinder pathFinder);
+
+    SetResult
+    handle_collision_collapsed(
+        const boost::intrusive_ptr<MmapItem>& item,
+        PathFinder pathFinder) const;
+
     SetResult
     set_item_collapsed(
         boost::intrusive_ptr<MmapItem>& item,

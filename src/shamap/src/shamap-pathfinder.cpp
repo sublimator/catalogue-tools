@@ -51,7 +51,14 @@ PathFinder::PathFinder(
     SHAMapOptions options)
     : targetKey(key), options_(options)
 {
-    find_path_regenerative(root);
+    if (options_.tree_collapse_impl == TreeCollapseImpl::leafs_only)
+    {
+        find_path(root);
+    }
+    else
+    {
+        find_path_regenerative(root);
+    }
 }
 
 void

@@ -7,10 +7,10 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 {
     if (!item)
     {
-        LOGW("Attempted to add null item to SHAMap.");
+        OLOGW("Attempted to add null item to SHAMap.");
         return SetResult::FAILED;
     }
-    LOGD_KEY("Attempting to add item with key: ", item->key());
+    OLOGD_KEY("Attempting to add item with key: ", item->key());
 
     try
     {
@@ -46,7 +46,7 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         // Early checks based on mode
         if (itemExists && mode == SetMode::ADD_ONLY)
         {
-            LOGW(
+            OLOGW(
                 "Item with key ",
                 item->key().hex(),
                 " already exists, but ADD_ONLY specified");
@@ -55,7 +55,7 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 
         if (!itemExists && mode == SetMode::UPDATE_ONLY)
         {
-            LOGW(
+            OLOGW(
                 "Item with key ",
                 item->key().hex(),
                 " doesn't exist, but UPDATE_ONLY specified");
@@ -73,7 +73,7 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                     "addItem: null parent node (should be root)");
             }
 
-            LOGD(
+            OLOGD(
                 "Adding/Updating leaf at depth ",
                 parent->get_depth() + 1,
                 " branch ",
@@ -92,7 +92,7 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 
         if (pathFinder.has_leaf() && !pathFinder.did_leaf_key_match())
         {
-            LOGD_KEY("Handling collision for key: ", item->key());
+            OLOGD_KEY("Handling collision for key: ", item->key());
             auto parent = pathFinder.get_parent_of_terminal();
             int branch = pathFinder.get_terminal_branch();
             if (!parent)
@@ -133,7 +133,7 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 
                 if (existingBranch != newBranch)
                 {
-                    LOGD(
+                    OLOGD(
                         "Collision resolved at depth ",
                         currentDepth,
                         ". Placing leaves at branches ",
@@ -160,7 +160,7 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                 else
                 {
                     // Collision continues, create another inner node
-                    LOGD(
+                    OLOGD(
                         "Collision continues at depth ",
                         currentDepth,
                         ", branch ",
@@ -192,7 +192,7 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         }
 
         // Should ideally not be reached if PathFinder logic is correct
-        LOGE(
+        OLOGE(
             "Unexpected state in addItem for key: ",
             item->key().hex(),
             ". PathFinder logic error?");
@@ -201,12 +201,12 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
     }
     catch (const SHAMapException& e)
     {
-        LOGE("Error adding item with key ", item->key().hex(), ": ", e.what());
+        OLOGE("Error adding item with key ", item->key().hex(), ": ", e.what());
         return SetResult::FAILED;
     }
     catch (const std::exception& e)
     {
-        LOGE(
+        OLOGE(
             "Standard exception adding item with key ",
             item->key().hex(),
             ": ",
