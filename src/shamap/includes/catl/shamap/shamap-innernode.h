@@ -69,15 +69,33 @@ protected:
     friend class SHAMap;
 
     void
-    update_hash_reference();
+    update_hash_reference(const SHAMapOptions& options);
     void
-    update_hash_collapsed();
+    update_hash_collapsed(const SHAMapOptions& options);
 
     void
-    update_hash(const SHAMapOptions& options) override;
+    update_hash(const SHAMapOptions& options) override
+    {
+        if (options.tree_collapse_impl == TreeCollapseImpl::leafs_only)
+        {
+            update_hash_reference(options);
+        }
+        else
+        {
+            update_hash_collapsed(options);
+        }
+    }
 
     Hash256
-    compute_skipped_hash(
+    compute_skipped_hash_stack(
+        const SHAMapOptions& options,
+        const boost::intrusive_ptr<SHAMapInnerNode>& inner,
+        const Key& index,
+        int round,
+        int skips) const;
+
+    Hash256
+    compute_skipped_hash_recursive(
         const SHAMapOptions& options,
         const boost::intrusive_ptr<SHAMapInnerNode>& inner,
         const Key& index,

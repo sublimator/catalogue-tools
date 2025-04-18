@@ -12,7 +12,7 @@
 
 // TODO: restore the old update hash function
 void
-SHAMapInnerNode::update_hash(SHAMapOptions const& options)
+SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
 {
     uint16_t branchMask = children_->get_branch_mask();
 
@@ -85,9 +85,19 @@ SHAMapInnerNode::update_hash(SHAMapOptions const& options)
                             "Found leaf for path in branch " +
                                 std::to_string(i) + " with key: ",
                             index);
-                        hashData = compute_skipped_hash(
-                                       options, innerChild, index, 1, skips)
-                                       .data();
+                        if (options.skipped_inners_hash_impl ==
+                            SkippedInnersHashImpl::recursive_simple)
+                        {
+                            hashData = compute_skipped_hash_recursive(
+                                           options, innerChild, index, 1, skips)
+                                           .data();
+                        }
+                        else
+                        {
+                            hashData = compute_skipped_hash_stack(
+                                           options, innerChild, index, 1, skips)
+                                           .data();
+                        }
                     }
                 }
                 else
@@ -195,9 +205,8 @@ SHAMapInnerNode::first_leaf(
     return nullptr;
 }
 
-#if USE_RECURSIVE_SKIPPED_HASH
 Hash256
-SHAMapInnerNode::compute_skipped_hash(
+SHAMapInnerNode::compute_skipped_hash_recursive(
     const SHAMapOptions& options,
     const boost::intrusive_ptr<SHAMapInnerNode>& inner,
     const Key& index,
@@ -264,7 +273,7 @@ SHAMapInnerNode::compute_skipped_hash(
             else
             {
                 // We need to recurse deeper
-                Hash256 nextHash = compute_skipped_hash(
+                Hash256 nextHash = compute_skipped_hash_recursive(
                     options, inner, index, round + 1, skips);
                 hashData = nextHash.data();
                 OLOGD(
@@ -309,9 +318,9 @@ SHAMapInnerNode::compute_skipped_hash(
 
     return result;
 }
-#else
+
 Hash256
-SHAMapInnerNode::compute_skipped_hash(
+SHAMapInnerNode::compute_skipped_hash_stack(
     const SHAMapOptions& options,
     const boost::intrusive_ptr<SHAMapInnerNode>& inner,
     const Key& index,
@@ -395,4 +404,3 @@ SHAMapInnerNode::compute_skipped_hash(
     // Return the hash for the initial level
     return levelHashes[0];
 }
-#endif

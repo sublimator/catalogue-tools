@@ -15,19 +15,13 @@ private:
     const SHAMapOptions options_;
     static LogPartition log_partition_;
     std::vector<boost::intrusive_ptr<SHAMapInnerNode>> inners;
-    std::vector<int> branches;
-    boost::intrusive_ptr<SHAMapLeafNode> foundLeaf = nullptr;
-    bool leafKeyMatches = false;
-    int terminalBranch = -1;
-
-    // TODO: check options and throw if not relevant, or!?
-    void
-    find_path_regenerative(
-        boost::intrusive_ptr<SHAMapInnerNode> root,
-        bool regenerateSkippedNodes = true);
+    std::vector<int> branches_;
+    boost::intrusive_ptr<SHAMapLeafNode> found_leaf_ = nullptr;
+    bool leaf_key_matches_ = false;
+    int terminal_branch_ = -1;
 
     void
-    find_path(boost::intrusive_ptr<SHAMapInnerNode> root);
+    find_path(const boost::intrusive_ptr<SHAMapInnerNode>& root);
 
     bool
     maybe_copy_on_write() const;

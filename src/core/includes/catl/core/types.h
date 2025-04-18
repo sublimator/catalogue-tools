@@ -81,10 +81,12 @@ public:
     {
         return 32;
     }
-    static Hash256
+
+    static Hash256 const&
     zero()
     {
-        return {};
+        static Hash256 zero;
+        return zero;
     }
 
     bool

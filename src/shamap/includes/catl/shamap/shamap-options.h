@@ -35,8 +35,10 @@ struct SHAMapOptions
 {
     TreeCollapseImpl tree_collapse_impl = TreeCollapseImpl::leafs_only;
     SHAMapHashImpl hash_impl = SHAMapHashImpl::reference;
-    std::optional<SyntheticInnersHashImpl> synthetic_inners_hash_impl;
-    std::optional<SkippedInnersHashImpl> skipped_inners_hash_impl;
+    SyntheticInnersHashImpl synthetic_inners_hash_impl =
+        SyntheticInnersHashImpl::stack_performant;
+    SkippedInnersHashImpl skipped_inners_hash_impl =
+        SkippedInnersHashImpl::stack_performant;
 };
 
 /**
