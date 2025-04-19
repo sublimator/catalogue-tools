@@ -71,7 +71,8 @@ public:
     boost::intrusive_ptr<SHAMapLeafNode>
     invalidated_possibly_copied_leaf_for_updating(int targetVersion);
 
-    void add_node_at_divergence();
+    void
+    add_node_at_divergence();
 
     static LogPartition&
     get_log_partition()

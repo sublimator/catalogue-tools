@@ -91,9 +91,10 @@ SHAMap::snapshot()
         enable_cow(!cow_enabled_);
     }
 
+    int snapshotVersion = new_version();
+
     // Create new version for both original and snapshot
     const int originalVersion = new_version();
-    int snapshotVersion = new_version();
 
     OLOGD(
         "Creating snapshot: original version ",
@@ -102,8 +103,12 @@ SHAMap::snapshot()
         snapshotVersion);
 
     // Create a new SHAMap that shares the same root and version counter
-    auto copy = std::make_shared<SHAMap>(
-        SHAMap(node_type_, root, version_counter_, snapshotVersion, options_));
+    auto copy = std::make_shared<SHAMap>(SHAMap(
+        node_type_,
+        root->copy(snapshotVersion),
+        version_counter_,
+        snapshotVersion,
+        options_));
 
     return copy;
 }

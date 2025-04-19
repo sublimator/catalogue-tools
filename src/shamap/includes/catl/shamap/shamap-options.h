@@ -34,7 +34,7 @@ enum class TreeCollapseImpl { leafs_only, leafs_and_inners };
 
 struct SHAMapOptions
 {
-    TreeCollapseImpl tree_collapse_impl = TreeCollapseImpl::leafs_only;
+    TreeCollapseImpl tree_collapse_impl = TreeCollapseImpl::leafs_and_inners;
     ReferenceHashImpl reference_hash_impl = ReferenceHashImpl::recursive_simple;
     SyntheticInnersHashImpl synthetic_inners_hash_impl =
         SyntheticInnersHashImpl::stack_performant;

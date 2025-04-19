@@ -144,7 +144,8 @@ protected:
     boost::intrusive_ptr<SHAMapInnerNode>
     copy(int newVersion) const;
 
-    boost::intrusive_ptr<SHAMapInnerNode> make_child(int depth) const;
+    boost::intrusive_ptr<SHAMapInnerNode>
+    make_child(int depth) const;
 
     int
     select_branch_for_depth(const Key& key) const

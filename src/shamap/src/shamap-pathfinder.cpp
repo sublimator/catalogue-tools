@@ -87,7 +87,8 @@ PathFinder::find_path()
         inners_.push_back(current_inner);
         branches_.push_back(branch);
 
-        if (child->is_inner() && options_.tree_collapse_impl == TreeCollapseImpl::leafs_and_inners)
+        if (child->is_inner() &&
+            options_.tree_collapse_impl == TreeCollapseImpl::leafs_and_inners)
         {
             auto inner_child =
                 boost::static_pointer_cast<SHAMapInnerNode>(child);
@@ -95,11 +96,22 @@ PathFinder::find_path()
             {
                 auto [belongs, divergence_depth] = key_belongs_in_inner(
                     inner_child, target_key_, current_inner->get_depth());
-                if (!belongs) {
-                    divergence_depth_ = divergence_depth;
-                    // We need to save this to relink it later
-                    diverged_inner_ = inner_child;
-                    break;
+                if (divergence_depth != inner_child->get_depth())
+                {
+                    if (!belongs)
+                    {
+                        OLOGI(
+                            "Found divergence at depth ",
+                            divergence_depth,
+                            " current inner depth: ",
+                            current_inner->get_depth_int(),
+                            " inner child depth: ",
+                            inner_child->get_depth_int());
+                        divergence_depth_ = divergence_depth;
+                        // We need to save this to relink it later
+                        diverged_inner_ = inner_child;
+                        break;
+                    }
                 }
             }
         }
@@ -562,18 +574,75 @@ PathFinder::invalidated_possibly_copied_leaf_for_updating(int targetVersion)
     return theLeaf;
 }
 
-void PathFinder::add_node_at_divergence() {
-    if (divergence_depth_ == -1) {
+// void PathFinder::add_node_at_divergence() {
+//     if (divergence_depth_ == -1) {
+//         return;
+//     }
+//
+//     // Get the divergence information
+//     auto divergence_depth = divergence_depth_;
+//     auto inner = inners_.back();
+//
+//     // Create a new inner node at the divergence depth
+//     auto new_inner = inner->make_child(divergence_depth);
+//
+//     // IMPORTANT FIX: Get a representative key from the existing subtree
+//     auto existing_key =
+//     diverged_inner_->first_leaf(diverged_inner_)->get_item()->key();
+//
+//     // Determine which branch each key should go under
+//     int existing_branch = new_inner->select_branch_for_depth(existing_key);
+//     int new_branch = new_inner->select_branch_for_depth(target_key_);
+//
+//     // Link the new inner node to its parent
+//     inner->set_child(inner->select_branch_for_depth(target_key_), new_inner);
+//
+//     // Place the existing subtree under the correct branch
+//     new_inner->set_child(existing_branch, diverged_inner_);
+//
+//     // Update terminal branch for further operations
+//     terminal_branch_ = new_branch;
+// }
+
+void
+PathFinder::add_node_at_divergence()
+{
+    if (divergence_depth_ == -1)
+    {
         return;
     }
 
     auto divergence_depth = divergence_depth_;
     auto inner = inners_.back();
+    if (divergence_depth == diverged_inner_->get_depth())
+    {
+        throw std::runtime_error("Cannot add node at divergence depth");
+        return;
+    }
+
     auto new_inner = inner->make_child(divergence_depth);
-    inner->set_child(inner->select_branch_for_depth(target_key_),new_inner);
-    new_inner->set_child(new_inner->select_branch_for_depth(target_key_), diverged_inner_);
-    terminal_branch_ = new_inner->select_branch_for_depth(target_key_);
-    //inner->set_child(divergence_depth, diverged_inner_);
+
+    // Get the common branch at the parent level
+    int common_branch = inner->select_branch_for_depth(target_key_);
+
+    // Get a representative key from the existing subtree
+    auto existing_key =
+        diverged_inner_->first_leaf(diverged_inner_)->get_item()->key();
+
+    // Determine branch for each key at the divergence depth
+    int existing_branch = select_branch(existing_key, divergence_depth);
+    int new_branch = select_branch(target_key_, divergence_depth);
+
+    // Place existing subtree under its branch
+    new_inner->set_child(existing_branch, diverged_inner_);
+
+    // Link new inner node to parent
+    inner->set_child(common_branch, new_inner);
+
+    // Set the terminal branch for the new item
+    terminal_branch_ = new_branch;
+    branches_.push_back(new_branch);
+    inners_.push_back(new_inner);
 }
 
 LogPartition PathFinder::log_partition_{"PathFinder", LogLevel::DEBUG};

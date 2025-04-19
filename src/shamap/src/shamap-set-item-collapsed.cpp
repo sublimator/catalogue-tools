@@ -46,6 +46,7 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         // SIMPLE CASE: Update existing item
         if (item_exists && mode != SetMode::ADD_ONLY)
         {
+            OLOGI("Updating existing key: ", item->key().hex());
             auto parent = path_finder.get_parent_of_terminal();
             auto newLeaf =
                 boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
@@ -61,6 +62,8 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         // DIRECT INSERTION: Insert at null branch
         if (path_finder.ended_at_null_branch())
         {
+            LOGI("ended_at_null_branch Inserting key: ", item->key().hex());
+            LOGI("Pathfinder size: ", path_finder.inners_.size());
             auto parent = path_finder.get_parent_of_terminal();
             int branch = path_finder.get_terminal_branch();
 
@@ -81,24 +84,32 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         // consideration
         if (path_finder.has_leaf() && !path_finder.did_leaf_key_match())
         {
+            LOGI("Handling collision for key: ", item->key().hex());
             auto parent = path_finder.get_parent_of_terminal();
             int parent_depth = parent->get_depth();
             auto other_key = path_finder.get_leaf()->get_item()->key();
-            int divergence_depth = find_divergence_depth(item->key(), other_key, parent_depth);
+            int divergence_depth =
+                find_divergence_depth(item->key(), other_key, parent_depth);
             auto new_inner = parent->make_child(divergence_depth);
-            parent->set_child(parent->select_branch_for_depth(item->key()), new_inner);
-            auto new_leaf = boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
-            if (cow_enabled_) {
+            parent->set_child(
+                parent->select_branch_for_depth(item->key()), new_inner);
+            auto new_leaf =
+                boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
+            if (cow_enabled_)
+            {
                 new_leaf->set_version(current_version_);
             }
-            new_inner->set_child(new_inner->select_branch_for_depth(item->key()), new_leaf);
+            new_inner->set_child(
+                new_inner->select_branch_for_depth(item->key()), new_leaf);
             auto existing_leaf = path_finder.get_leaf_mutable();
-            if (cow_enabled_) {
+            if (cow_enabled_)
+            {
                 existing_leaf = existing_leaf->copy();
                 existing_leaf->set_version(current_version_);
             }
             // TODO: leaf cow ?
-            new_inner->set_child(new_inner->select_branch_for_depth(other_key), existing_leaf);
+            new_inner->set_child(
+                new_inner->select_branch_for_depth(other_key), existing_leaf);
             path_finder.dirty_path();
             return SetResult::ADD;
         }

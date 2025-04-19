@@ -18,11 +18,14 @@ select_branch(const Key& key, int depth)
 }
 
 int
-find_divergence_depth(const Key& k1, const Key& k2, int start_depth) {
-    for (int depth = start_depth; depth < 64; depth++) {
+find_divergence_depth(const Key& k1, const Key& k2, int start_depth)
+{
+    for (int depth = start_depth; depth < 64; depth++)
+    {
         int b1 = select_branch(k1, depth);
         int b2 = select_branch(k2, depth);
-        if (b1 != b2) {
+        if (b1 != b2)
+        {
             return depth;
         }
     }
