@@ -14,6 +14,6 @@
 
 // Development mode OVERRIDES
 #if DEVELOP_MODE  // TODO: set by cmake or something
-#define STORE_LEDGER_SNAPSHOTS 0
+#define STORE_LEDGER_SNAPSHOTS 1
 #define DEBUG_LEDGER_TX 81920
 #endif

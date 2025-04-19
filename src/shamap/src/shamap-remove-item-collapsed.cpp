@@ -9,40 +9,18 @@ SHAMap::remove_item_collapsed(const Key& key)
     OLOGD_KEY("Attempting to remove item with key: ", key);
     try
     {
-        PathFinder pathFinder(root, key, options_);
+        PathFinder path_finder(root, key, options_);
+        path_finder.find_path();
+        handle_path_cow(path_finder);
 
-        // If CoW is enabled, handle versioning
-        if (cow_enabled_)
-        {
-            // First generate a new version if needed
-            if (current_version_ == 0)
-            {
-                new_version();
-            }
-
-            // Apply CoW to path
-            auto innerNode = pathFinder.dirty_or_copy_inners(current_version_);
-            if (!innerNode)
-            {
-                throw NullNodeException(
-                    "removeItem: CoW failed to return valid inner node");
-            }
-
-            // If root was copied, update our reference
-            if (pathFinder.get_parent_of_terminal() != root)
-            {
-                root = pathFinder.search_root_;
-            }
-        }
-
-        if (!pathFinder.has_leaf() || !pathFinder.did_leaf_key_match())
+        if (!path_finder.has_leaf() || !path_finder.did_leaf_key_match())
         {
             OLOGD_KEY("Item not found for removal, key: ", key);
             return false;  // Item not found
         }
 
-        auto parent = pathFinder.get_parent_of_terminal();
-        int branch = pathFinder.get_terminal_branch();
+        auto parent = path_finder.get_parent_of_terminal();
+        int branch = path_finder.get_terminal_branch();
         if (!parent)
         {
             throw NullNodeException(
@@ -55,8 +33,8 @@ SHAMap::remove_item_collapsed(const Key& key)
             " branch ",
             branch);
         parent->set_child(branch, nullptr);  // Remove the leaf
-        pathFinder.dirty_path();
-        pathFinder.collapse_path();  // Compress path if possible
+        path_finder.dirty_path();
+        path_finder.collapse_path();  // Compress path if possible
         OLOGD_KEY("Item removed successfully, key: ", key);
         return true;
     }

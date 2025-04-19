@@ -14,34 +14,12 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 
     try
     {
-        PathFinder pathFinder(root, item->key(), options_);
-
-        // If CoW is enabled, handle versioning
-        if (cow_enabled_)
-        {
-            // First generate a new version if needed
-            if (current_version_ == 0)
-            {
-                new_version();
-            }
-
-            // Apply CoW to path
-            auto innerNode = pathFinder.dirty_or_copy_inners(current_version_);
-            if (!innerNode)
-            {
-                throw NullNodeException(
-                    "addItem: CoW failed to return valid inner node");
-            }
-
-            // If root was copied, update our reference
-            if (pathFinder.get_parent_of_terminal() != root)
-            {
-                root = pathFinder.search_root_;
-            }
-        }
+        PathFinder path_finder(root, item->key(), options_);
+        path_finder.find_path();
+        handle_path_cow(path_finder);
 
         bool itemExists =
-            pathFinder.has_leaf() && pathFinder.did_leaf_key_match();
+            path_finder.has_leaf() && path_finder.did_leaf_key_match();
 
         // Early checks based on mode
         if (itemExists && mode == SetMode::ADD_ONLY)
@@ -62,11 +40,11 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
             return SetResult::FAILED;
         }
 
-        if (pathFinder.ended_at_null_branch() ||
+        if (path_finder.ended_at_null_branch() ||
             (itemExists && mode != SetMode::ADD_ONLY))
         {
-            auto parent = pathFinder.get_parent_of_terminal();
-            int branch = pathFinder.get_terminal_branch();
+            auto parent = path_finder.get_parent_of_terminal();
+            int branch = path_finder.get_terminal_branch();
             if (!parent)
             {
                 throw NullNodeException(
@@ -85,22 +63,22 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                 newLeaf->set_version(current_version_);
             }
             parent->set_child(branch, newLeaf);
-            pathFinder.dirty_path();
-            pathFinder.collapse_path();  // Add collapsing logic here
+            path_finder.dirty_path();
+            path_finder.collapse_path();  // Add collapsing logic here
             return itemExists ? SetResult::UPDATE : SetResult::ADD;
         }
 
-        if (pathFinder.has_leaf() && !pathFinder.did_leaf_key_match())
+        if (path_finder.has_leaf() && !path_finder.did_leaf_key_match())
         {
             OLOGD_KEY("Handling collision for key: ", item->key());
-            auto parent = pathFinder.get_parent_of_terminal();
-            int branch = pathFinder.get_terminal_branch();
+            auto parent = path_finder.get_parent_of_terminal();
+            int branch = path_finder.get_terminal_branch();
             if (!parent)
             {
                 throw NullNodeException(
                     "addItem collision: null parent node (should be root)");
             }
-            auto existingLeaf = pathFinder.get_leaf_mutable();
+            auto existingLeaf = path_finder.get_leaf_mutable();
             auto existingItem = existingLeaf->get_item();
             if (!existingItem)
             {
@@ -186,8 +164,8 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                     item->key().hex());
             }
 
-            pathFinder.dirty_path();
-            pathFinder.collapse_path();  // Add collapsing logic here
+            path_finder.dirty_path();
+            path_finder.collapse_path();  // Add collapsing logic here
             return SetResult::ADD;
         }
 

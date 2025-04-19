@@ -17,18 +17,8 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
     try
     {
         PathFinder pathFinder(root, item->key(), options_);
-
-        // Handle CoW if needed
-        if (cow_enabled_)
-        {
-            if (current_version_ == 0)
-                new_version();
-            auto innerNode = pathFinder.dirty_or_copy_inners(current_version_);
-            if (!innerNode)
-                throw NullNodeException("CoW failed");
-            if (pathFinder.get_parent_of_terminal() != root)
-                root = pathFinder.search_root_;
-        }
+        pathFinder.find_path();
+        handle_path_cow(pathFinder);
 
         // Check mode constraints
         bool item_exists =

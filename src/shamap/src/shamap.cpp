@@ -292,4 +292,31 @@ SHAMap::get_hash() const
     return root->get_hash(options_);
 }
 
+void
+SHAMap::handle_path_cow(PathFinder& path_finder)
+{
+    // If CoW is enabled, handle versioning
+    if (cow_enabled_)
+    {
+        if (current_version_ == 0)
+        {
+            new_version();
+        }
+
+        // Apply CoW to path
+        auto innerNode = path_finder.dirty_or_copy_inners(current_version_);
+        if (!innerNode)
+        {
+            throw NullNodeException(
+                "addItem: CoW failed to return valid inner node");
+        }
+
+        // If root was copied, update our reference
+        if (path_finder.search_root_ != root)
+        {
+            root = path_finder.search_root_;
+        }
+    }
+}
+
 LogPartition SHAMap::log_partition_{"SHAMap", LogLevel::DEBUG};

@@ -17,14 +17,7 @@ PathFinder::PathFinder(
     SHAMapOptions options)
     : target_key_(key), options_(options)
 {
-    find_path(root);
-}
-
-void
-PathFinder::update_path()
-{
-    // Check if we need to update the path
-    find_path(search_root_);
+    search_root_ = root;
 }
 
 std::pair<bool, int>
@@ -48,13 +41,17 @@ key_belongs_in_inner(
 }
 
 void
-PathFinder::find_path(const boost::intrusive_ptr<SHAMapInnerNode>& root)
+PathFinder::find_path()
 {
+    auto& root = search_root_;
     if (!root)
     {
         throw NullNodeException("PathFinder: null root node");
     }
-    search_root_ = root;
+    if (root->get_depth() != 0)
+    {
+        throw InvalidDepthException(root->get_depth(), 0);
+    }
     found_leaf_ = nullptr;
     leaf_key_matches_ = false;
     terminal_branch_ = -1;
@@ -67,13 +64,13 @@ PathFinder::find_path(const boost::intrusive_ptr<SHAMapInnerNode>& root)
         if (!child)
         {
             terminal_branch_ = branch;
-            inners.push_back(current_inner);
+            inners_.push_back(current_inner);
             break;
         }
         if (child->is_leaf())
         {
             terminal_branch_ = branch;
-            inners.push_back(current_inner);
+            inners_.push_back(current_inner);
             found_leaf_ = boost::static_pointer_cast<SHAMapLeafNode>(child);
             if (found_leaf_->get_item())
             {
@@ -86,17 +83,22 @@ PathFinder::find_path(const boost::intrusive_ptr<SHAMapInnerNode>& root)
             }
             break;
         }
-        if (child->is_inner())
-        {
-            auto inner_child =
-                boost::static_pointer_cast<SHAMapInnerNode>(child);
-            if (inner_child->get_depth() > current_inner->get_depth())
-            {
-                // We've found a skipped inner node
-                // TODO: handle skipped inner nodes
-            }
-        }
-        inners.push_back(current_inner);
+        // if (child->is_inner())
+        // {
+        //     auto inner_child =
+        //         boost::static_pointer_cast<SHAMapInnerNode>(child);
+        //     if (inner_child->get_depth() > current_inner->get_depth() + 1)
+        //     {
+        //         auto [belongs, divergence_depth] = key_belongs_in_inner(
+        //             inner_child, target_key_, current_inner->get_depth());
+        //         if (!belongs) {
+        //             divergence_depth_ = divergence_depth;
+        //             terminal_branch_ = branch;
+        //             break;
+        //         }
+        //     }
+        // }
+        inners_.push_back(current_inner);
         branches_.push_back(branch);
         current_inner = boost::static_pointer_cast<SHAMapInnerNode>(child);
     }
@@ -135,13 +137,13 @@ PathFinder::get_leaf_mutable()
 boost::intrusive_ptr<SHAMapInnerNode>
 PathFinder::get_parent_of_terminal()
 {
-    return inners.empty() ? nullptr : inners.back();
+    return inners_.empty() ? nullptr : inners_.back();
 }
 
 boost::intrusive_ptr<const SHAMapInnerNode>
 PathFinder::get_parent_of_terminal() const
 {
-    return inners.empty() ? nullptr : inners.back();
+    return inners_.empty() ? nullptr : inners_.back();
 }
 
 int
@@ -153,7 +155,7 @@ PathFinder::get_terminal_branch() const
 void
 PathFinder::dirty_path() const
 {
-    for (auto& inner : inners)
+    for (auto& inner : inners_)
     {
         inner->invalidate_hash();
     }
@@ -162,14 +164,14 @@ PathFinder::dirty_path() const
 bool
 PathFinder::collapse_path_single_leaf_child()
 {
-    if (inners.size() <= 1)
+    if (inners_.size() <= 1)
         return true;
     boost::intrusive_ptr<SHAMapLeafNode> onlyChild = nullptr;
-    auto innermost = inners.back();
+    auto innermost = inners_.back();
     onlyChild = innermost->get_only_child_leaf();
-    for (int i = static_cast<int>(inners.size()) - 2; i >= 0; --i)
+    for (int i = static_cast<int>(inners_.size()) - 2; i >= 0; --i)
     {
-        auto inner = inners[i];
+        auto inner = inners_[i];
         int branch = branches_[i];
         if (onlyChild)
         {
@@ -198,7 +200,7 @@ PathFinder::collapse_path_inners()
     // We need at least a node and its parent in the path to potentially
     // collapse the node. The root node (index 0) cannot be collapsed *by* a
     // parent.
-    if (inners.empty())
+    if (inners_.empty())
     {
         OLOGD("No inner nodes in path, nothing to collapse");
         return;
@@ -208,18 +210,18 @@ PathFinder::collapse_path_inners()
         "Starting collapse for key ",
         target_key_.hex(),
         ", path length=",
-        inners.size());
+        inners_.size());
 
     bool needs_invalidation = false;
 
     // Iterate upwards from the parent of the terminal position towards the
     // root. Stop *before* index 0, as the root itself cannot be removed by its
     // parent.
-    for (int i = static_cast<int>(inners.size()) - 1; i > 0; --i)
+    for (int i = static_cast<int>(inners_.size()) - 1; i > 0; --i)
     {
-        auto current_inner = inners[i];
+        auto current_inner = inners_[i];
         auto parent_inner =
-            inners[i - 1];  // Parent is guaranteed to exist since i > 0
+            inners_[i - 1];  // Parent is guaranteed to exist since i > 0
         int branch_in_parent =
             branches_[i - 1];  // Branch in parent leading to current_inner
 
@@ -428,9 +430,9 @@ PathFinder::collapse_path_inners()
     OLOGD("Called dirty_path() to invalidate all hashes in path");
 
     // Log the state of each node in the path after collapse
-    for (size_t i = 0; i < inners.size(); i++)
+    for (size_t i = 0; i < inners_.size(); i++)
     {
-        auto node = inners[i];
+        auto node = inners_[i];
         OLOGD(
             "Node at index ",
             i,
@@ -447,51 +449,43 @@ PathFinder::collapse_path_inners()
     }
 }
 
-bool
-PathFinder::maybe_copy_on_write() const
-{
-    return !inners.empty() && inners.back()->is_cow_enabled();
-}
-
 boost::intrusive_ptr<SHAMapInnerNode>
-PathFinder::dirty_or_copy_inners(int targetVersion)
+PathFinder::dirty_or_copy_inners(int target_version)
 {
-    if (inners.empty())
+    if (inners_.empty())
     {
         LOGW("No inner nodes in path to apply CoW");
         return nullptr;
     }
 
     // Start from the root and work downward
-    // Remove the unused variable
-
-    for (size_t i = 0; i < inners.size(); ++i)
+    for (size_t i = 0; i < inners_.size(); ++i)
     {
-        auto& currentInner = inners[i];
+        auto& current_inner = inners_[i];
 
         // Skip if already at target version
-        if (currentInner->get_version() == targetVersion)
+        if (current_inner->get_version() == target_version)
         {
             LOGD(
                 "Node at index ",
                 i,
                 " already at target version ",
-                targetVersion);
+                target_version);
             continue;
         }
 
         // Skip nodes that don't have CoW enabled
-        if (!currentInner->is_cow_enabled())
+        if (!current_inner->is_cow_enabled())
         {
             // Just update version
             LOGD(
                 "Node at index ",
                 i,
                 " has CoW disabled, updating version from ",
-                currentInner->get_version(),
+                current_inner->get_version(),
                 " to ",
-                targetVersion);
-            currentInner->set_version(targetVersion);
+                target_version);
+            current_inner->set_version(target_version);
             continue;
         }
 
@@ -500,12 +494,12 @@ PathFinder::dirty_or_copy_inners(int targetVersion)
             "Creating CoW copy of node at index ",
             i,
             " version ",
-            currentInner->get_version(),
+            current_inner->get_version(),
             " to version ",
-            targetVersion);
+            target_version);
 
         // Create copy with new version
-        auto copy = currentInner->copy(targetVersion);
+        auto copy = current_inner->copy(target_version);
 
         // If this is the root, update the search root
         if (i == 0)
@@ -516,7 +510,7 @@ PathFinder::dirty_or_copy_inners(int targetVersion)
         // If not the root, update parent's child pointer to point to this copy
         if (i > 0)
         {
-            const auto& parent = inners[i - 1];
+            const auto& parent = inners_[i - 1];
             int branch = branches_[i - 1];
             LOGD(
                 "Updating parent at depth ",
@@ -528,11 +522,11 @@ PathFinder::dirty_or_copy_inners(int targetVersion)
         }
 
         // Replace in our path vector
-        inners[i] = copy;
+        inners_[i] = copy;
     }
 
     // Return the innermost node for further operations
-    return inners.back();
+    return inners_.back();
 }
 
 boost::intrusive_ptr<SHAMapLeafNode>

@@ -58,7 +58,6 @@ public:
     boost::intrusive_ptr<SHAMapLeafNode>
     get_only_child_leaf() const;
 
-    // Helper methods for skipped inner handling
     boost::intrusive_ptr<SHAMapLeafNode>
     first_leaf(const boost::intrusive_ptr<SHAMapInnerNode>& inner) const;
 

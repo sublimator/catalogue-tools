@@ -9,30 +9,8 @@ SHAMap::remove_item_reference(const Key& key)
     try
     {
         PathFinder pathFinder(root, key, options_);
-
-        // If CoW is enabled, handle versioning
-        if (cow_enabled_)
-        {
-            // First generate a new version if needed
-            if (current_version_ == 0)
-            {
-                new_version();
-            }
-
-            // Apply CoW to path
-            auto innerNode = pathFinder.dirty_or_copy_inners(current_version_);
-            if (!innerNode)
-            {
-                throw NullNodeException(
-                    "removeItem: CoW failed to return valid inner node");
-            }
-
-            // If root was copied, update our reference
-            if (pathFinder.get_parent_of_terminal() != root)
-            {
-                root = pathFinder.search_root_;
-            }
-        }
+        pathFinder.find_path();
+        handle_path_cow(pathFinder);
 
         if (!pathFinder.has_leaf() || !pathFinder.did_leaf_key_match())
         {

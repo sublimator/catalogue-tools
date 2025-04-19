@@ -14,17 +14,15 @@ private:
     const Key& target_key_;
     const SHAMapOptions options_;
     static LogPartition log_partition_;
-    std::vector<boost::intrusive_ptr<SHAMapInnerNode>> inners;
+    std::vector<boost::intrusive_ptr<SHAMapInnerNode>> inners_;
     std::vector<int> branches_;
     boost::intrusive_ptr<SHAMapLeafNode> found_leaf_ = nullptr;
     bool leaf_key_matches_ = false;
     int terminal_branch_ = -1;
+    int divergence_depth_ = -1;
 
     void
-    find_path(const boost::intrusive_ptr<SHAMapInnerNode>& root);
-
-    bool
-    maybe_copy_on_write() const;
+    find_path();
 
     void
     collapse_path_inners();
@@ -48,10 +46,12 @@ public:
     get_leaf() const;
     boost::intrusive_ptr<SHAMapLeafNode>
     get_leaf_mutable();
+
     boost::intrusive_ptr<SHAMapInnerNode>
     get_parent_of_terminal();
     boost::intrusive_ptr<const SHAMapInnerNode>
     get_parent_of_terminal() const;
+
     int
     get_terminal_branch() const;
     void
@@ -63,12 +63,9 @@ public:
     void
     collapse_path();
 
-    void
-    update_path();
-
     // CoW support - used by SHAMap operations
     boost::intrusive_ptr<SHAMapInnerNode>
-    dirty_or_copy_inners(int targetVersion);
+    dirty_or_copy_inners(int target_version);
     boost::intrusive_ptr<SHAMapLeafNode>
     invalidated_possibly_copied_leaf_for_updating(int targetVersion);
 

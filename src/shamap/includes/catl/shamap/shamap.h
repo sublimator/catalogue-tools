@@ -86,6 +86,10 @@ private:
 
 protected:
     friend class PathFinder;
+
+    void
+    handle_path_cow(PathFinder& path_finder);
+
     SetResult
     set_item_reference(
         boost::intrusive_ptr<MmapItem>& item,
