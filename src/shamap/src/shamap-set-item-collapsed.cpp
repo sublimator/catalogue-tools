@@ -46,7 +46,7 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         // SIMPLE CASE: Update existing item
         if (item_exists && mode != SetMode::ADD_ONLY)
         {
-            OLOGI("Updating existing key: ", item->key().hex());
+            OLOGD("Updating existing key: ", item->key().hex());
             auto parent = path_finder.get_parent_of_terminal();
             auto newLeaf =
                 boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
@@ -62,8 +62,8 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         // DIRECT INSERTION: Insert at null branch
         if (path_finder.ended_at_null_branch())
         {
-            LOGI("ended_at_null_branch Inserting key: ", item->key().hex());
-            LOGI("Pathfinder size: ", path_finder.inners_.size());
+            OLOGD("ended_at_null_branch Inserting key: ", item->key().hex());
+            OLOGD("Pathfinder size: ", path_finder.inners_.size());
             auto parent = path_finder.get_parent_of_terminal();
             int branch = path_finder.get_terminal_branch();
 
@@ -84,7 +84,7 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         // consideration
         if (path_finder.has_leaf() && !path_finder.did_leaf_key_match())
         {
-            LOGI("Handling collision for key: ", item->key().hex());
+            OLOGI("Handling collision for key: ", item->key().hex());
             auto parent = path_finder.get_parent_of_terminal();
             int parent_depth = parent->get_depth();
             auto other_key = path_finder.get_leaf()->get_item()->key();
