@@ -1,3 +1,5 @@
+#include <filesystem>
+
 #include "catl/core/log-macros.h"
 #include "catl/core/logger.h"
 #include "catl/shamap/shamap-errors.h"
@@ -16,13 +18,14 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 
     try
     {
-        PathFinder pathFinder(root, item->key(), options_);
-        pathFinder.find_path();
-        handle_path_cow(pathFinder);
+        PathFinder path_finder(root, item->key(), options_);
+        path_finder.find_path();
+        handle_path_cow(path_finder);
+        path_finder.add_node_at_divergence();
 
         // Check mode constraints
         bool item_exists =
-            pathFinder.has_leaf() && pathFinder.did_leaf_key_match();
+            path_finder.has_leaf() && path_finder.did_leaf_key_match();
         if (item_exists && mode == SetMode::ADD_ONLY)
         {
             OLOGW(
@@ -43,23 +46,23 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         // SIMPLE CASE: Update existing item
         if (item_exists && mode != SetMode::ADD_ONLY)
         {
-            auto parent = pathFinder.get_parent_of_terminal();
+            auto parent = path_finder.get_parent_of_terminal();
             auto newLeaf =
                 boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
             if (cow_enabled_)
             {
                 newLeaf->set_version(current_version_);
             }
-            parent->set_child(pathFinder.get_terminal_branch(), newLeaf);
-            pathFinder.dirty_path();
+            parent->set_child(path_finder.get_terminal_branch(), newLeaf);
+            path_finder.dirty_path();
             return SetResult::UPDATE;
         }
 
         // DIRECT INSERTION: Insert at null branch
-        if (pathFinder.ended_at_null_branch())
+        if (path_finder.ended_at_null_branch())
         {
-            auto parent = pathFinder.get_parent_of_terminal();
-            int branch = pathFinder.get_terminal_branch();
+            auto parent = path_finder.get_parent_of_terminal();
+            int branch = path_finder.get_terminal_branch();
 
             // Create new leaf node
             auto newLeaf =
@@ -70,14 +73,34 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
             }
 
             parent->set_child(branch, newLeaf);
-            pathFinder.dirty_path();
+            path_finder.dirty_path();
             return SetResult::ADD;
         }
 
         // COLLISION HANDLING: Smart collision resolution with skips
         // consideration
-        if (pathFinder.has_leaf() && !pathFinder.did_leaf_key_match())
+        if (path_finder.has_leaf() && !path_finder.did_leaf_key_match())
         {
+            auto parent = path_finder.get_parent_of_terminal();
+            int parent_depth = parent->get_depth();
+            auto other_key = path_finder.get_leaf()->get_item()->key();
+            int divergence_depth = find_divergence_depth(item->key(), other_key, parent_depth);
+            auto new_inner = parent->make_child(divergence_depth);
+            parent->set_child(parent->select_branch_for_depth(item->key()), new_inner);
+            auto new_leaf = boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
+            if (cow_enabled_) {
+                new_leaf->set_version(current_version_);
+            }
+            new_inner->set_child(new_inner->select_branch_for_depth(item->key()), new_leaf);
+            auto existing_leaf = path_finder.get_leaf_mutable();
+            if (cow_enabled_) {
+                existing_leaf = existing_leaf->copy();
+                existing_leaf->set_version(current_version_);
+            }
+            // TODO: leaf cow ?
+            new_inner->set_child(new_inner->select_branch_for_depth(other_key), existing_leaf);
+            path_finder.dirty_path();
+            return SetResult::ADD;
         }
 
         throw SHAMapException("Unexpected state in set_item_collapsed");

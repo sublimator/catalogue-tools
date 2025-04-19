@@ -43,7 +43,7 @@ key_belongs_in_inner(
 void
 PathFinder::find_path()
 {
-    auto& root = search_root_;
+    auto root = search_root_;
     if (!root)
     {
         throw NullNodeException("PathFinder: null root node");
@@ -83,23 +83,26 @@ PathFinder::find_path()
             }
             break;
         }
-        // if (child->is_inner())
-        // {
-        //     auto inner_child =
-        //         boost::static_pointer_cast<SHAMapInnerNode>(child);
-        //     if (inner_child->get_depth() > current_inner->get_depth() + 1)
-        //     {
-        //         auto [belongs, divergence_depth] = key_belongs_in_inner(
-        //             inner_child, target_key_, current_inner->get_depth());
-        //         if (!belongs) {
-        //             divergence_depth_ = divergence_depth;
-        //             terminal_branch_ = branch;
-        //             break;
-        //         }
-        //     }
-        // }
+
         inners_.push_back(current_inner);
         branches_.push_back(branch);
+
+        if (child->is_inner() && options_.tree_collapse_impl == TreeCollapseImpl::leafs_and_inners)
+        {
+            auto inner_child =
+                boost::static_pointer_cast<SHAMapInnerNode>(child);
+            if (inner_child->get_depth() > current_inner->get_depth() + 1)
+            {
+                auto [belongs, divergence_depth] = key_belongs_in_inner(
+                    inner_child, target_key_, current_inner->get_depth());
+                if (!belongs) {
+                    divergence_depth_ = divergence_depth;
+                    // We need to save this to relink it later
+                    diverged_inner_ = inner_child;
+                    break;
+                }
+            }
+        }
         current_inner = boost::static_pointer_cast<SHAMapInnerNode>(child);
     }
 }
@@ -557,6 +560,20 @@ PathFinder::invalidated_possibly_copied_leaf_for_updating(int targetVersion)
 
     theLeaf->invalidate_hash();
     return theLeaf;
+}
+
+void PathFinder::add_node_at_divergence() {
+    if (divergence_depth_ == -1) {
+        return;
+    }
+
+    auto divergence_depth = divergence_depth_;
+    auto inner = inners_.back();
+    auto new_inner = inner->make_child(divergence_depth);
+    inner->set_child(inner->select_branch_for_depth(target_key_),new_inner);
+    new_inner->set_child(new_inner->select_branch_for_depth(target_key_), diverged_inner_);
+    terminal_branch_ = new_inner->select_branch_for_depth(target_key_);
+    //inner->set_child(divergence_depth, diverged_inner_);
 }
 
 LogPartition PathFinder::log_partition_{"PathFinder", LogLevel::DEBUG};

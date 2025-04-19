@@ -18,8 +18,10 @@ private:
     std::vector<int> branches_;
     boost::intrusive_ptr<SHAMapLeafNode> found_leaf_ = nullptr;
     bool leaf_key_matches_ = false;
+
     int terminal_branch_ = -1;
     int divergence_depth_ = -1;
+    boost::intrusive_ptr<SHAMapInnerNode> diverged_inner_ = nullptr;
 
     void
     find_path();
@@ -68,6 +70,8 @@ public:
     dirty_or_copy_inners(int target_version);
     boost::intrusive_ptr<SHAMapLeafNode>
     invalidated_possibly_copied_leaf_for_updating(int targetVersion);
+
+    void add_node_at_divergence();
 
     static LogPartition&
     get_log_partition()

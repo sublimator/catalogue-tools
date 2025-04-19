@@ -22,7 +22,7 @@ private:
     uint8_t depth_ = 0;
     static LogPartition log_partition_;
     // CoW support
-    int version{0};  // TODO: make atomic or have clear reason not to
+    int version_{0};  // TODO: make atomic or have clear reason not to
     bool do_cow_ = false;
 
 public:
@@ -38,6 +38,10 @@ public:
 
     uint8_t
     get_depth() const;
+
+    // Useful for debugging without static_cast<int> calls everywhere
+    int
+    get_depth_int() const;
 
     bool
     set_child(int branch, boost::intrusive_ptr<SHAMapTreeNode> const& child);
@@ -74,7 +78,7 @@ public:
     void
     set_version(int v)
     {
-        version = v;  //.store(v, std::memory_order_release);
+        version_ = v;  //.store(v, std::memory_order_release);
     }
 
     void
@@ -128,7 +132,7 @@ protected:
     int
     get_version() const
     {
-        return version;  // .load(std::memory_order_acquire);
+        return version_;  // .load(std::memory_order_acquire);
     }
 
     bool
@@ -139,6 +143,8 @@ protected:
 
     boost::intrusive_ptr<SHAMapInnerNode>
     copy(int newVersion) const;
+
+    boost::intrusive_ptr<SHAMapInnerNode> make_child(int depth) const;
 
     int
     select_branch_for_depth(const Key& key) const

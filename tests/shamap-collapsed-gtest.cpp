@@ -38,9 +38,9 @@ TEST(CollapseTest, WithSkips) {
     add_item(i1);
     add_item(i2);
 
-    // add_item(i3);
+    add_item(i3);
     // Logger::set_level(LogLevel::INFO);
-    // add_item(i4);
+    add_item(i4);
 }
 
 TEST(CollapseTest, BasicNoSkips) {

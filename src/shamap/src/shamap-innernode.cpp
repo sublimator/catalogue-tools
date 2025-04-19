@@ -15,7 +15,7 @@
 //----------------------------------------------------------
 
 SHAMapInnerNode::SHAMapInnerNode(uint8_t nodeDepth)
-    : depth_(nodeDepth), version(0), do_cow_(false)
+    : depth_(nodeDepth), version_(0), do_cow_(false)
 {
     children_ = std::make_unique<NodeChildren>();
 }
@@ -24,7 +24,7 @@ SHAMapInnerNode::SHAMapInnerNode(
     bool isCopy,
     uint8_t nodeDepth,
     int initialVersion)
-    : depth_(nodeDepth), version(initialVersion), do_cow_(isCopy)
+    : depth_(nodeDepth), version_(initialVersion), do_cow_(isCopy)
 {
     children_ = std::make_unique<NodeChildren>();
 }
@@ -45,6 +45,12 @@ SHAMapInnerNode::is_inner() const
 // for debugging
 uint8_t
 SHAMapInnerNode::get_depth() const
+{
+    return depth_;
+}
+
+int
+SHAMapInnerNode::get_depth_int() const
 {
     return depth_;
 }
@@ -110,7 +116,9 @@ SHAMapInnerNode::set_child(
         throw InvalidBranchException(branch);
     }
 
+    // it should be non-canonicalized
     // Check if node is canonicalized - if yes, we need to make a copy first
+    // When the map is mutable, with no copy-on-write, we need to make a copy
     if (children_->is_canonical())
     {
         // Create a non-canonicalized copy of children
@@ -210,6 +218,17 @@ SHAMapInnerNode::copy(int newVersion) const
         newVersion);
 
     return newNode;
+}
+
+boost::intrusive_ptr<SHAMapInnerNode>
+SHAMapInnerNode::make_child(int depth) const
+{
+    // Should at least be one level deeper
+    if (depth <= depth_)
+    {
+        throw InvalidDepthException(depth, 63);
+    }
+    return boost::intrusive_ptr(new SHAMapInnerNode(do_cow_, depth, version_));
 }
 
 LogPartition SHAMapInnerNode::log_partition_{

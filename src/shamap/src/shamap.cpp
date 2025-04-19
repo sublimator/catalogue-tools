@@ -312,7 +312,7 @@ SHAMap::handle_path_cow(PathFinder& path_finder)
         }
 
         // If root was copied, update our reference
-        if (path_finder.search_root_ != root)
+        if (path_finder.get_parent_of_terminal() != root)
         {
             root = path_finder.search_root_;
         }
