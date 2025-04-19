@@ -28,6 +28,12 @@ public:
     SHAMapNodeType
     get_type() const;
 
+    void
+    set_version(int v)
+    {
+        version = v;
+    }
+
 protected:
     friend class PathFinder;
     friend class SHAMap;
@@ -39,10 +45,5 @@ protected:
     get_version() const
     {
         return version;
-    }
-    void
-    set_version(int v)
-    {
-        version = v;
     }
 };

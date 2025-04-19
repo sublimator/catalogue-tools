@@ -17,7 +17,7 @@ SHAMapInnerNode::update_hash_reference(SHAMapOptions const& options)
     if (uint16_t branchMask = children_->get_branch_mask(); branchMask == 0)
     {
         hash = Hash256::zero();
-        hashValid = true;
+        hash_valid_ = true;
         return;
     }
 
@@ -65,7 +65,7 @@ SHAMapInnerNode::update_hash_reference(SHAMapOptions const& options)
 
     EVP_MD_CTX_free(ctx);
     hash = Hash256(reinterpret_cast<const uint8_t*>(fullHash.data()));
-    hashValid = true;
+    hash_valid_ = true;
 
     // Once hash is calculated, canonicalize to save memory
     // After this, the node becomes immutable until explicitly copied

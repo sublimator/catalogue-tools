@@ -15,7 +15,7 @@ PathFinder::PathFinder(
     boost::intrusive_ptr<SHAMapInnerNode>& root,
     const Key& key,
     SHAMapOptions options)
-    : targetKey(key), options_(options)
+    : target_key_(key), options_(options)
 {
     find_path(root);
 }
@@ -24,7 +24,27 @@ void
 PathFinder::update_path()
 {
     // Check if we need to update the path
-    find_path(searchRoot);
+    find_path(search_root_);
+}
+
+std::pair<bool, int>
+key_belongs_in_inner(
+    const boost::intrusive_ptr<SHAMapInnerNode>& inner,
+    const Key& key,
+    int start_depth)
+{
+    auto end_depth = inner->get_depth();
+    auto rep_key = inner->first_leaf(inner)->get_item()->key();
+
+    for (int depth = start_depth; depth <= end_depth; depth++)
+    {
+        int branch = select_branch(key, depth);
+        if (branch != select_branch(rep_key, depth))
+        {
+            return {false, depth};  // Return false and the divergence depth
+        }
+    }
+    return {true, -1};  // Key belongs in inner, no divergence found
 }
 
 void
@@ -34,31 +54,31 @@ PathFinder::find_path(const boost::intrusive_ptr<SHAMapInnerNode>& root)
     {
         throw NullNodeException("PathFinder: null root node");
     }
-    searchRoot = root;
+    search_root_ = root;
     found_leaf_ = nullptr;
     leaf_key_matches_ = false;
     terminal_branch_ = -1;
-    boost::intrusive_ptr<SHAMapInnerNode> currentInner = root;
+    boost::intrusive_ptr<SHAMapInnerNode> current_inner = root;
     while (true)
     {
-        int branch = select_branch(targetKey, currentInner->get_depth());
+        int branch = select_branch(target_key_, current_inner->get_depth());
         boost::intrusive_ptr<SHAMapTreeNode> child =
-            currentInner->get_child(branch);
+            current_inner->get_child(branch);
         if (!child)
         {
             terminal_branch_ = branch;
-            inners.push_back(currentInner);
+            inners.push_back(current_inner);
             break;
         }
         if (child->is_leaf())
         {
             terminal_branch_ = branch;
-            inners.push_back(currentInner);
+            inners.push_back(current_inner);
             found_leaf_ = boost::static_pointer_cast<SHAMapLeafNode>(child);
             if (found_leaf_->get_item())
             {
                 leaf_key_matches_ =
-                    (found_leaf_->get_item()->key() == targetKey);
+                    (found_leaf_->get_item()->key() == target_key_);
             }
             else
             {
@@ -66,9 +86,19 @@ PathFinder::find_path(const boost::intrusive_ptr<SHAMapInnerNode>& root)
             }
             break;
         }
-        inners.push_back(currentInner);
+        if (child->is_inner())
+        {
+            auto inner_child =
+                boost::static_pointer_cast<SHAMapInnerNode>(child);
+            if (inner_child->get_depth() > current_inner->get_depth())
+            {
+                // We've found a skipped inner node
+                // TODO: handle skipped inner nodes
+            }
+        }
+        inners.push_back(current_inner);
         branches_.push_back(branch);
-        currentInner = boost::static_pointer_cast<SHAMapInnerNode>(child);
+        current_inner = boost::static_pointer_cast<SHAMapInnerNode>(child);
     }
 }
 
@@ -129,15 +159,11 @@ PathFinder::dirty_path() const
     }
 }
 
-void
-PathFinder::collapse_path()
+bool
+PathFinder::collapse_path_single_leaf_child()
 {
-    if (options_.tree_collapse_impl == TreeCollapseImpl::leafs_and_inners)
-    {
-        return collapse_path_inners();
-    }
     if (inners.size() <= 1)
-        return;
+        return true;
     boost::intrusive_ptr<SHAMapLeafNode> onlyChild = nullptr;
     auto innermost = inners.back();
     onlyChild = innermost->get_only_child_leaf();
@@ -153,6 +179,17 @@ PathFinder::collapse_path()
         if (!onlyChild)
             break;
     }
+    return false;
+}
+
+void
+PathFinder::collapse_path()
+{
+    // if (options_.tree_collapse_impl == TreeCollapseImpl::leafs_and_inners)
+    // {
+    //     return collapse_path_inners();
+    // }
+    collapse_path_single_leaf_child();
 }
 
 void
@@ -169,7 +206,7 @@ PathFinder::collapse_path_inners()
 
     OLOGD(
         "Starting collapse for key ",
-        targetKey.hex(),
+        target_key_.hex(),
         ", path length=",
         inners.size());
 
@@ -352,8 +389,9 @@ PathFinder::collapse_path_inners()
                 branch_in_parent,
                 ")");
 
-            Hash256 parentHashBefore =
-                parent_inner->hashValid ? parent_inner->hash : Hash256::zero();
+            Hash256 parentHashBefore = parent_inner->hash_valid_
+                ? parent_inner->hash
+                : Hash256::zero();
 
             // Check CoW status before modifying
             if (parent_inner->is_cow_enabled())
@@ -399,7 +437,7 @@ PathFinder::collapse_path_inners()
             ", depth=",
             static_cast<int>(node->get_depth()),
             ", hashValid=",
-            (node->hashValid ? "YES" : "NO"),
+            (node->hash_valid_ ? "YES" : "NO"),
             ", branchCount=",
             node->get_branch_count(),
             ", branchMask=0x",
@@ -472,7 +510,7 @@ PathFinder::dirty_or_copy_inners(int targetVersion)
         // If this is the root, update the search root
         if (i == 0)
         {
-            searchRoot = copy;
+            search_root_ = copy;
         }
 
         // If not the root, update parent's child pointer to point to this copy

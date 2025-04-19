@@ -85,7 +85,7 @@ SHAMapLeafNode::update_hash(SHAMapOptions const&)
     }
     EVP_MD_CTX_free(ctx);
     hash = Hash256(fullHash.data());
-    hashValid = true;
+    hash_valid_ = true;
 }
 
 boost::intrusive_ptr<MmapItem>
@@ -105,7 +105,7 @@ SHAMapLeafNode::copy() const
 {
     auto newLeaf = boost::intrusive_ptr(new SHAMapLeafNode(item, type));
     newLeaf->hash = hash;
-    newLeaf->hashValid = hashValid;
+    newLeaf->hash_valid_ = hash_valid_;
     newLeaf->version = version;
     return newLeaf;
 }

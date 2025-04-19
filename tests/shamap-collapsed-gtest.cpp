@@ -54,25 +54,33 @@ TEST(CollapseTest, BasicNoSkips) {
     auto i4 = items.make("0000000000000000000000000000000000000000000000000000000000020001");
 
     auto canonical_map = SHAMap(tnTRANSACTION_MD, {
-                                    .tree_collapse_impl = TreeCollapseImpl::leafs_only
-                                });
+        .reference_hash_impl = ReferenceHashImpl::use_synthetic_inners,
+        .tree_collapse_impl = TreeCollapseImpl::leafs_only
+    });
     auto map = SHAMap(tnTRANSACTION_MD, {
                           .tree_collapse_impl = TreeCollapseImpl::leafs_and_inners
                       });
 
+    auto added_items = std::vector<boost::intrusive_ptr<MmapItem>>();
     auto add_item = [
                 &canonical_map,
+                &added_items,
                 &map](const std::string& name,boost::intrusive_ptr<MmapItem> &item) {
+        added_items.push_back(item);
         map.add_item(item);
         canonical_map.add_item(item);
-        LOGI("Adding item: ", name, item->key().hex());
         const auto copy = canonical_map.snapshot();
         copy->collapse_tree();
         auto actual = map.trie_json_string({.key_as_hash = true});
         auto canonical = copy->trie_json_string({.key_as_hash = true});
+        auto i = 1;
+        for (const auto &added_item: added_items) {
+            LOGI("Added item ", i++, ": ", added_item->key().hex());
+        }
         LOGI("Actual: ", actual);
         LOGI("Canonical: ", canonical);
         EXPECT_EQ(actual, canonical);
+        EXPECT_EQ(map.get_hash().hex(), copy->get_hash().hex());
     };
 
     Logger::set_level(LogLevel::INFO);

@@ -11,7 +11,7 @@
 class PathFinder
 {
 private:
-    const Key& targetKey;
+    const Key& target_key_;
     const SHAMapOptions options_;
     static LogPartition log_partition_;
     std::vector<boost::intrusive_ptr<SHAMapInnerNode>> inners;
@@ -31,7 +31,7 @@ private:
 
 protected:
     friend class SHAMap;
-    boost::intrusive_ptr<SHAMapInnerNode> searchRoot;
+    boost::intrusive_ptr<SHAMapInnerNode> search_root_;
 
 public:
     PathFinder(
@@ -56,6 +56,10 @@ public:
     get_terminal_branch() const;
     void
     dirty_path() const;
+
+    bool
+    collapse_path_single_leaf_child();
+
     void
     collapse_path();
 

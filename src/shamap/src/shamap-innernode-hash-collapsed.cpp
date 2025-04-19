@@ -10,7 +10,6 @@
 #include "catl/shamap/shamap-impl.h"
 #include "catl/shamap/shamap-utils.h"
 
-// TODO: restore the old update hash function
 void
 SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
 {
@@ -19,7 +18,7 @@ SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
     if (branchMask == 0)
     {
         hash = Hash256::zero();
-        hashValid = true;
+        hash_valid_ = true;
         OLOGD("Empty node (no branches), using zero hash");
         return;
     }
@@ -137,7 +136,7 @@ SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
 
     EVP_MD_CTX_free(ctx);
     hash = Hash256(fullHash.data());
-    hashValid = true;
+    hash_valid_ = true;
 
     OLOGD("Hash calculation complete: ", hash.hex());
 

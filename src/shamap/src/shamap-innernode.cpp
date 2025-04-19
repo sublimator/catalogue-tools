@@ -74,7 +74,13 @@ SHAMapInnerNode::trie_json(
                         boost::static_pointer_cast<SHAMapLeafNode>(child);
                     if (options.key_as_hash)
                     {
-                        result[nibble] = leaf->get_item()->key().hex();
+                        auto key_hex = leaf->get_item()->key().hex();
+                        // wrap [ and ] around the nibble at the inner node's
+                        // depth
+                        auto wrapped = key_hex.substr(0, depth_) + "[" +
+                            key_hex.substr(depth_, 1) + "]" +
+                            key_hex.substr(depth_ + 1, 63);
+                        result[nibble] = wrapped;
                     }
                     else
                     {
@@ -195,7 +201,7 @@ SHAMapInnerNode::copy(int newVersion) const
 
     // Copy other properties
     newNode->hash = hash;
-    newNode->hashValid = hashValid;
+    newNode->hash_valid_ = hash_valid_;
 
     LOGD(
         "Cloned inner node from version ",

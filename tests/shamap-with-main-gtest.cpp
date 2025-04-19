@@ -186,9 +186,9 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
             Hash256 current_hash = map.get_hash();
             std::cout << "Map hash after adding: " << current_hash.hex() << std::endl;
 
-            std::cout << "Map trie JSON: ";
-            map.trie_json(std::cout);
-            std::cout << std::endl;
+            auto map_trie = map.trie_json_string({.key_as_hash = true});
+            std::cout << "Map trie JSON: " << map_trie << std::endl;
+
             {
                 // Create a map with no collapsing for comparison
                 auto map_ = SHAMap(tnTRANSACTION_MD, {.tree_collapse_impl = TreeCollapseImpl::leafs_only});
@@ -201,9 +201,9 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
                     map_.add_item(item);
                 }
                 map_.collapse_tree();
-                std::cout << "Canonical Collapsed Map trie JSON: ";
-                map_.trie_json(std::cout, {.key_as_hash = true});
-                std::cout << std::endl;
+                auto canonical_trie = map_.trie_json_string({.key_as_hash = true});
+                std::cout << "Canonical Collapsed Map trie JSON: " << canonical_trie << std::endl;
+                // EXPECT_EQ(map_trie, canonical_trie);
             }
         }
 

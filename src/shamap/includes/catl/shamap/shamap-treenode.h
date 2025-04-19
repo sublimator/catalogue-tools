@@ -12,8 +12,8 @@ class SHAMapTreeNode
 {
 protected:
     Hash256 hash;
-    bool hashValid = false;
-    mutable std::atomic<int> refCount_{0};
+    bool hash_valid_ = false;
+    mutable std::atomic<int> ref_count_{0};
 
 public:
     virtual ~SHAMapTreeNode() = default;

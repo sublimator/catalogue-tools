@@ -36,7 +36,7 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
             // If root was copied, update our reference
             if (pathFinder.get_parent_of_terminal() != root)
             {
-                root = pathFinder.searchRoot;
+                root = pathFinder.search_root_;
             }
         }
 

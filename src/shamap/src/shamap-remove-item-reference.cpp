@@ -30,7 +30,7 @@ SHAMap::remove_item_reference(const Key& key)
             // If root was copied, update our reference
             if (pathFinder.get_parent_of_terminal() != root)
             {
-                root = pathFinder.searchRoot;
+                root = pathFinder.search_root_;
             }
         }
 
