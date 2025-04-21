@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cstdint>
 #include <string>
+#include <atomic>
 
 /**
  * Zero-copy reference to a data buffer.

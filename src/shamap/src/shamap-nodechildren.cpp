@@ -1,3 +1,5 @@
+#include <memory>
+
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "catl/shamap/shamap-nodechildren.h"

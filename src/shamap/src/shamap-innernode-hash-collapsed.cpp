@@ -1,3 +1,5 @@
+#include <stack>
+
 #include "catl/shamap/shamap-innernode.h"
 
 #include <openssl/evp.h>
