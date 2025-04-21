@@ -25,9 +25,9 @@ jobs:
             cxx: g++-13
             version: 13
           - compiler: clang
-            cc: clang
-            cxx: clang++
-            version: 18  # Will be detected automatically
+            cc: clang-16
+            cxx: clang++-16
+            version: 16  # Will be detected automatically
     env:
       build_dir: .build
       CACHE_VERSION: 4
@@ -47,9 +47,9 @@ jobs:
           
           # For Clang, install with libc++ support
           if [ "${{ matrix.compiler }}" = "clang" ]; then
-            sudo apt-get install -y clang libc++-dev libc++abi-dev
+            sudo apt-get install -y clang-16 libc++-dev libc++abi-dev
           fi
-          
+
           # Log clang and gcc versions
           echo "Running ${{ matrix.cc }} --version"
           ${{ matrix.cc }} --version
