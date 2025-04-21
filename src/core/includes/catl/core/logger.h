@@ -7,6 +7,7 @@
 #include <string>
 #include <unordered_map>
 #include <ranges>
+#include <algorithm>
 
 #ifndef PROJECT_ROOT
 #define PROJECT_ROOT ""
