@@ -54,7 +54,7 @@ jobs:
           echo "Running ${{ matrix.cc }} --version"
           ${{ matrix.cc }} --version
           echo "Running ${{ matrix.cxx }} --version"
-          ${{ matrix.ccx }} --version
+          ${{ matrix.cxx }} --version
 
           # Install specific Conan version needed
           pip install --upgrade "conan<2"
