@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04  # Use Ubuntu 24.04 which has GCC 14 by default
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Debug, Release]
+        generator: [Ninja, Makefiles]
+        include:
+          - compiler: gcc
+            cc: gcc-14
+            cxx: g++-14
+            version: 14
+          - compiler: clang
+            cc: clang-16
+            cxx: clang++-16
+            version: 16
+    env:
+      build_dir: .build
+      CACHE_VERSION: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+          
+          # GCC 14 is already available on Ubuntu 24.04
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            sudo apt-get install -y build-essential
+          fi
+          
+          # For Clang 16, we need to install it explicitly
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            wget https://apt.llvm.org/llvm.sh
+            chmod +x llvm.sh
+            sudo ./llvm.sh 16
+            sudo apt-get install -y clang-16 libc++-16-dev libc++abi-16-dev
+          fi
+          
+          # Install specific Conan version needed
+          pip install --upgrade "conan<2"
+
+      - name: Verify compiler versions
+        run: |
+          ${{ matrix.cc }} --version
+          ${{ matrix.cxx }} --version
+
+      - name: Restore Conan cache
+        id: cache-restore-conan
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.conan
+            ~/.conan2
+          key: ${{ runner.os }}-conan-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
+          restore-keys: |
+            ${{ runner.os }}-conan-${{ matrix.compiler }}-
+            ${{ runner.os }}-conan-
+
+      - name: Configure Conan
+        run: |
+          conan profile new default --detect || true
+          conan profile update settings.compiler.cppstd=20 default
+          conan profile update settings.compiler=${{ matrix.compiler }} default
+          conan profile update settings.compiler.version=${{ matrix.version }} default
+          conan profile update env.CC=/usr/bin/${{ matrix.cc }} default
+          conan profile update env.CXX=/usr/bin/${{ matrix.cxx }} default
+          conan profile update conf.tools.build:compiler_executables='{"c": "/usr/bin/${{ matrix.cc }}", "cpp": "/usr/bin/${{ matrix.cxx }}"}' default
+          
+          # Set libcxx based on compiler
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            conan profile update settings.compiler.libcxx=libstdc++11 default
+          elif [ "${{ matrix.compiler }}" = "clang" ]; then
+            conan profile update settings.compiler.libcxx=libc++ default
+          fi
+          
+          # Display profile for verification
+          conan profile show default
+
+      - name: Install dependencies
+        run: |
+          mkdir -p ${{ env.build_dir }}
+          cd ${{ env.build_dir }}
+          conan install \
+            --output-folder . \
+            --build missing \
+            --settings build_type=${{ matrix.build_type }} \
+            ..
+
+      - name: Save Conan cache
+        if: steps.cache-restore-conan.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.conan
+            ~/.conan2
+          key: ${{ runner.os }}-conan-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
+
+      - name: Configure CMake
+        run: |
+          cd ${{ env.build_dir }}
+          if [ "${{ matrix.generator }}" = "Ninja" ]; then
+            cmake -G "Ninja" \
+              -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+              -DCMAKE_C_COMPILER=/usr/bin/${{ matrix.cc }} \
+              -DCMAKE_CXX_COMPILER=/usr/bin/${{ matrix.cxx }} \
+              ..
+          else
+            cmake -G "Unix Makefiles" \
+              -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+              -DCMAKE_C_COMPILER=/usr/bin/${{ matrix.cc }} \
+              -DCMAKE_CXX_COMPILER=/usr/bin/${{ matrix.cxx }} \
+              ..
+          fi
+
+      - name: Build
+        run: |
+          cd ${{ env.build_dir }}
+          if [ "${{ matrix.generator }}" = "Ninja" ]; then
+            ninja
+          else
+            make -j$(nproc)
+          fi
+
+      - name: Run tests
+        run: |
+          cd ${{ env.build_dir }}
+          # Check if shamap_tests exists and run it
+          if [ -f "bin/shamap_tests" ]; then
+            echo "Running shamap_tests"
+            ./bin/shamap_tests
+          elif [ -f "tests/shamap_tests" ]; then
+            echo "Running shamap_tests from tests directory"
+            ./tests/shamap_tests  
+          elif [ -f "shamap_tests" ]; then
+            echo "Running shamap_tests from build root"
+            ./shamap_tests
+          else
+            echo "Error: shamap_tests executable not found in expected locations"
+            find . -name "shamap_tests" -type f
+            exit 1
+          fi
