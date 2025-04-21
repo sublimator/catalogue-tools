@@ -236,6 +236,12 @@ SHAMap::visit_items(const std::function<void(const MmapItem&)>& visitor) const
     }  // End while stack not empty
 }
 
+void
+SHAMap::invalidate_hash_recursive()
+{
+    root->invalidate_hash_recursive();
+}
+
 boost::json::array
 SHAMap::items_json() const
 {

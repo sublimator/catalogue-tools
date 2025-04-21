@@ -27,6 +27,7 @@ void
 SHAMapTreeNode::invalidate_hash()
 {
     hash_valid_ = false;
+    hash = Hash256::zero();
 }
 
 const Hash256&

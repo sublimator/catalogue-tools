@@ -51,7 +51,9 @@ SHAMapInnerNode::get_depth() const
     return depth_;
 }
 
-void SHAMapInnerNode::set_depth(uint8_t depth) {
+void
+SHAMapInnerNode::set_depth(uint8_t depth)
+{
     depth_ = depth;
 }
 
@@ -110,6 +112,24 @@ SHAMapInnerNode::trie_json(
     }
 
     return result;
+}
+
+void
+SHAMapInnerNode::invalidate_hash_recursive()
+{
+    for (int i = 0; i < 16; i++)
+    {
+        if (auto child = children_->get_child(i))
+        {
+            child->invalidate_hash();
+            if (child->is_inner())
+            {
+                auto inner = boost::static_pointer_cast<SHAMapInnerNode>(child);
+                inner->invalidate_hash_recursive();
+            }
+        }
+    }
+    invalidate_hash();
 }
 
 bool

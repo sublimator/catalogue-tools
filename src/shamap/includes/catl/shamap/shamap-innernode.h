@@ -72,6 +72,9 @@ public:
     trie_json(TrieJsonOptions options, SHAMapOptions const& shamap_options)
         const;
 
+    void
+    invalidate_hash_recursive();
+
     static LogPartition&
     get_log_partition()
     {

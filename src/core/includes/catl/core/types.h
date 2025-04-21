@@ -87,7 +87,7 @@ public:
     static Hash256 const&
     zero()
     {
-        static Hash256 zero;
+        static const Hash256 zero{};
         return zero;
     }
 

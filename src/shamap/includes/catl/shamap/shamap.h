@@ -137,10 +137,12 @@ public:
     void
     visit_items(const std::function<void(const MmapItem&)>& visitor) const;
 
+    void
+    invalidate_hash_recursive();
+
     boost::json::array
     items_json() const;
 
-    // Add this getter
     static LogPartition&
     get_log_partition()
     {

@@ -48,11 +48,13 @@ SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
         throw HashCalculationException("Failed to update digest with prefix");
     }
 
-    Hash256 zeroHash = Hash256::zero();
+    // Use local variable, not static
+    const Hash256 zeroHash = Hash256::zero();
 
     for (int i = 0; i < 16; i++)
     {
-        const uint8_t* hashData = zeroHash.data();
+        // Create a local Hash256 for each branch
+        Hash256 child_hash = zeroHash;
 
         if (auto child = children_->get_child(i))
         {
@@ -70,38 +72,36 @@ SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
                         " has skipped inner nodes: ",
                         skips,
                         " levels");
-                    // We have skipped inners - need to find a leaf to determine
-                    // the path
+
                     auto leaf = first_leaf(innerChild);
                     if (!leaf)
                     {
-                        // If there's no leaf, just use the regular hash
+                        // No leaf found, use regular hash
                         OLOGD(
                             "No leaf found in branch ",
                             i,
                             ", using regular inner hash");
-                        hashData = child->get_hash(options).data();
+                        child_hash = child->get_hash(options);
                     }
                     else
                     {
-                        // We found a leaf to use for the path
+                        // Use leaf key for path
                         auto index = leaf->get_item()->key();
                         OLOGD_KEY(
                             "Found leaf for path in branch " +
                                 std::to_string(i) + " with key: ",
                             index);
+
                         if (options.skipped_inners_hash_impl ==
                             SkippedInnersHashImpl::recursive_simple)
                         {
-                            hashData = compute_skipped_hash_recursive(
-                                           options, innerChild, index, 1, skips)
-                                           .data();
+                            child_hash = compute_skipped_hash_recursive(
+                                options, innerChild, index, 1, skips);
                         }
                         else
                         {
-                            hashData = compute_skipped_hash_stack(
-                                           options, innerChild, index, 1, skips)
-                                           .data();
+                            child_hash = compute_skipped_hash_stack(
+                                options, innerChild, index, 1, skips);
                         }
                     }
                 }
@@ -109,22 +109,24 @@ SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
                 {
                     // Normal case, no skips
                     OLOGD("Branch ", i, " has normal inner node (no skips)");
-                    hashData = child->get_hash(options).data();
+                    child_hash = child->get_hash(options);
                 }
             }
             else
             {
                 // Leaf node
                 OLOGD("Branch ", i, " has leaf node");
-                hashData = child->get_hash(options).data();
+                child_hash = child->get_hash(options);
             }
         }
         else
         {
             OLOGD("Branch ", i, " is empty, using zero hash");
+            // child_hash already contains zero hash
         }
 
-        if (EVP_DigestUpdate(ctx, hashData, Hash256::size()) != 1)
+        // Use this branch's hash for the digest update
+        if (EVP_DigestUpdate(ctx, child_hash.data(), Hash256::size()) != 1)
         {
             EVP_MD_CTX_free(ctx);
             throw HashCalculationException(
@@ -141,6 +143,7 @@ SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
     }
 
     EVP_MD_CTX_free(ctx);
+
     hash = Hash256(fullHash.data());
     hash_valid_ = true;
 
@@ -259,7 +262,7 @@ SHAMapInnerNode::compute_skipped_hash_recursive(
     // Process all 16 branches
     for (int i = 0; i < 16; i++)
     {
-        const uint8_t* hashData;
+        const uint8_t* hashData = nullptr;
 
         if (i == selectedBranch)
         {

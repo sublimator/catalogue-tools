@@ -2,8 +2,8 @@
 #include "catl/hasher/http/http-concepts.h"
 
 #include <boost/asio.hpp>
-#include <boost/beast.hpp>
 #include <boost/asio/signal_set.hpp>
+#include <boost/beast.hpp>
 #include <csignal>
 #include <cstddef>
 #include <iostream>
