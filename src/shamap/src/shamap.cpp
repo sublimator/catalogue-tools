@@ -39,12 +39,12 @@ SHAMap::SHAMap(
 }
 
 void
-SHAMap::enable_cow(bool enable)
+SHAMap::enable_cow()
 {
-    cow_enabled_ = enable;
+    cow_enabled_ = true;
 
     // Update root node if it exists
-    if (root && enable)
+    if (root)
     {
         root->enable_cow(true);
 
@@ -55,15 +55,11 @@ SHAMap::enable_cow(bool enable)
         }
     }
 
-    OLOGD(
-        "Copy-on-Write ",
-        (enable ? "enabled" : "disabled"),
-        " for SHAMap with version ",
-        current_version_);
+    OLOGD("Copy-on-Writ enabled for SHAMap with version ", current_version_);
 }
 
 int
-SHAMap::new_version()
+SHAMap::new_version(bool in_place)
 {
     if (!version_counter_)
     {
@@ -71,7 +67,12 @@ SHAMap::new_version()
     }
     // Increment shared counter and update current version
     int newVer = ++(*version_counter_);
-    current_version_ = newVer;
+
+    if (in_place)
+    {
+        current_version_ = newVer;
+    }
+
     OLOGD("Generated new SHAMap version: ", newVer);
     return newVer;
 }
@@ -88,13 +89,12 @@ SHAMap::snapshot()
     // Enable CoW if not already enabled
     if (!cow_enabled_)
     {
-        enable_cow(!cow_enabled_);
+        enable_cow();
     }
 
-    int snapshotVersion = new_version();
-
     // Create new version for both original and snapshot
-    const int originalVersion = new_version();
+    const int originalVersion = new_version(true);
+    int snapshotVersion = new_version(false);
 
     OLOGD(
         "Creating snapshot: original version ",
@@ -275,14 +275,7 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 bool
 SHAMap::remove_item(const Key& key)
 {
-    if (options_.tree_collapse_impl == TreeCollapseImpl::leafs_and_inners)
-    {
-        return remove_item_collapsed(key);
-    }
-    else
-    {
-        return remove_item_reference(key);
-    }
+    return remove_item_reference(key);
 }
 
 Hash256
@@ -293,7 +286,6 @@ SHAMap::get_hash() const
         OLOGW("Attempting to get hash of a null root SHAMap.");
         return Hash256::zero();
     }
-    // getHash() inside the node handles lazy calculation
     return root->get_hash(options_);
 }
 

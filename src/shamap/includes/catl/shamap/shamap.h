@@ -39,7 +39,7 @@ private:
 
     // Private methods
     void
-    enable_cow(bool enable = true);
+    enable_cow();
 
     bool
     is_cow_enabled() const
@@ -54,7 +54,7 @@ private:
     }
 
     int
-    new_version();
+    new_version(bool in_place = false);
 
     /**
      * Recursively collapses inner nodes that have only a single inner child
@@ -99,10 +99,6 @@ protected:
     set_item_collapsed(
         boost::intrusive_ptr<MmapItem>& item,
         SetMode mode = SetMode::ADD_OR_UPDATE);
-
-    bool
-    remove_item_collapsed(const Key& key);
-
     bool
     remove_item_reference(const Key& key);
 
