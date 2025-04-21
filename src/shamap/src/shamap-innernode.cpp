@@ -51,6 +51,10 @@ SHAMapInnerNode::get_depth() const
     return depth_;
 }
 
+void SHAMapInnerNode::set_depth(uint8_t depth) {
+    depth_ = depth;
+}
+
 int
 SHAMapInnerNode::get_depth_int() const
 {

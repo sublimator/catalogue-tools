@@ -8,6 +8,8 @@ ROOT_DIR=`git rev-parse --show-toplevel || pwd` # in case we are not in a git re
 cd $ROOT_DIR
 
 BUILD_DIR=${BUILD_DIR:-$ROOT_DIR/build}
+UPDATE_BOOST_MIRROR_URL=${UPDATE_BOOST_MIRROR_URL:-}
+CONFIGURE_GCC_13_PROFILE=${CONFIGURE_GCC_13_PROFILE:-}
 
 # Checks if CONFIGURE_PROFILE env IS set then echoes it
 if [ -n "$CONFIGURE_GCC_13_PROFILE" ]; then
@@ -22,6 +24,7 @@ if [ -n "$CONFIGURE_GCC_13_PROFILE" ]; then
     conan profile show default
 fi
 
+
 if [ -n "$UPDATE_BOOST_MIRROR_URL" ]; then
     conan info boost/1.86.0@ || echo "[INFO] Primed Boost recipe into cache"
     CONAN_HOME=$(conan config home)
@@ -33,7 +36,6 @@ if [ -n "$UPDATE_BOOST_MIRROR_URL" ]; then
 fi
 
 conan install $ROOT_DIR \
-      -v debug \
       --build=missing \
       --install-folder="$BUILD_DIR" \
       -e CMAKE_GENERATOR=Ninja

@@ -39,6 +39,9 @@ public:
     uint8_t
     get_depth() const;
 
+    void
+    set_depth(uint8_t depth);
+
     // Useful for debugging without static_cast<int> calls everywhere
     int
     get_depth_int() const;

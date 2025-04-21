@@ -9,6 +9,6 @@ cmake
 
 [options]
 gtest:shared=False
-gtest:shared=False
+boost:shared=False
 zlib:shared=False
 openssl:shared=False

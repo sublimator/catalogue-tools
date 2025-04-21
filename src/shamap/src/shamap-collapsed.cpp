@@ -143,7 +143,7 @@ SHAMap::collapse_inner_node(boost::intrusive_ptr<SHAMapInnerNode>& node)
         }
 
         // Update depth using direct access since no setter is visible
-        node->depth_ = singleInnerChild->get_depth();
+        node->set_depth(singleInnerChild->get_depth());
 
         // Invalidate the hash since we've changed the structure
         node->invalidate_hash();

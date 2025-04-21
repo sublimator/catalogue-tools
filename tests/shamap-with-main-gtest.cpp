@@ -216,6 +216,7 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest) {
         // Final hash check if you have an expected final hash value
         Hash256 final_hash = map.get_hash();
         std::cout << "Final map hash: " << final_hash.hex() << std::endl;
+        // https://xahscan.com/ledger/81920
         EXPECT_EQ(final_hash.hex(), "39460E5964D942A0E8A7A2C4E86EEF40B6C8FDF707BDA3874BE3CEE7D917D103");
     } catch (const std::exception &e) {
         FAIL() << "Exception: " << e.what();
