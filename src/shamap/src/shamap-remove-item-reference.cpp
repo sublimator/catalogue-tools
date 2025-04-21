@@ -1,6 +1,10 @@
 #include "catl/core/log-macros.h"
-#include "catl/shamap/shamap-utils.h"
+#include "catl/core/logger.h"
+#include "catl/core/types.h"
+#include "catl/shamap/shamap-errors.h"
+#include "catl/shamap/shamap-pathfinder.h"
 #include "catl/shamap/shamap.h"
+#include <exception>
 
 bool
 SHAMap::remove_item_reference(const Key& key)

@@ -1,9 +1,16 @@
+#include "catl/core/types.h"
+#include "catl/shamap/shamap-nodetype.h"
+#include "catl/shamap/shamap-options.h"
+#include <array>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <cstring>
 #include <openssl/evp.h>
 
 #include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-leafnode.h"
 
 #include "catl/shamap/shamap-hashprefix.h"
+#include <utility>
 
 //----------------------------------------------------------
 // SHAMapLeafNode Implementation

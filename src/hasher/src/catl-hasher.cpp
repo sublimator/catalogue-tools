@@ -1,23 +1,30 @@
-#include <array>
+#include "catl/shamap/shamap-errors.h"
+#include "catl/shamap/shamap-nodetype.h"
+#include "catl/shamap/shamap-options.h"
+#include <boost/filesystem.hpp>
+#include <boost/program_options.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <boost/system/detail/error_category.hpp>
 #include <chrono>
-#include <fstream>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 // For memory mapping
-#include <boost/filesystem.hpp>
 #include <boost/iostreams/device/mapped_file.hpp>
 
 // For command line parsing
-#include <boost/program_options.hpp>
 
 // For crypto
-#include <openssl/evp.h>
 
 #include "catl/core/log-macros.h"
 #include "catl/core/logger.h"

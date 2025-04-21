@@ -1,9 +1,15 @@
+#include "catl/shamap/shamap-nodetype.h"
+#include "catl/shamap/shamap-options.h"
+#include <boost/json/array.hpp>
+#include <boost/json/value.hpp>
+#include <boost/json/value_to.hpp>
+#include <cstddef>
+#include <exception>
 #include <gtest/gtest.h>
-#include <boost/json.hpp>
 #include <iostream>
-#include <utility>
+#include <optional>
+#include <string>
 #include "utils/test-utils.h"
-#include "../src/shamap/src/pretty-print-json.h"
 #include "catl/core/logger.h"
 
 // Test using the fixture with source-relative paths

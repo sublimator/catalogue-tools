@@ -1,8 +1,11 @@
 #include "catl/hasher/http/http-handler.h"
+#include "catl/hasher/http/http-concepts.h"
 #include "catl/hasher/utils.h"
 
+#include <cstdint>
 #include <regex>
 #include <sstream>
+#include <string>
 
 void
 LedgerRequestHandler::handle_health(AbstractResponse& res) const

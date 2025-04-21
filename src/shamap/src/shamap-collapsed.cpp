@@ -1,8 +1,8 @@
-#include "catl/core/log-macros.h"
 #include "catl/core/logger.h"
-#include "catl/shamap/shamap-errors.h"
-#include "catl/shamap/shamap-utils.h"
+#include "catl/shamap/shamap-innernode.h"
+#include "catl/shamap/shamap-leafnode.h"
 #include "catl/shamap/shamap.h"
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 void
 SHAMap::collapse_tree()

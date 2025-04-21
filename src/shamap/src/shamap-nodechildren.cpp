@@ -2,6 +2,8 @@
 
 #include "catl/shamap/shamap-nodechildren.h"
 #include "catl/shamap/shamap-treenode.h"
+#include <memory>
+#include <stdexcept>
 
 //----------------------------------------------------------
 // NodeChildren Implementation

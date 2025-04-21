@@ -1,15 +1,20 @@
+#include <algorithm>
 #include <array>
+#include <boost/filesystem/operations.hpp>
+#include <boost/system/detail/error_category.hpp>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 // For memory mapping
-#include <boost/filesystem.hpp>
 #include <boost/iostreams/device/mapped_file.hpp>
 
 // For compression/decompression

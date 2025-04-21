@@ -1,4 +1,7 @@
 #include "catl/shamap/shamap-treenode.h"
+#include "catl/core/types.h"
+#include "catl/shamap/shamap-options.h"
+#include <atomic>
 
 //----------------------------------------------------------
 // SHAMapTreeNode Implementation

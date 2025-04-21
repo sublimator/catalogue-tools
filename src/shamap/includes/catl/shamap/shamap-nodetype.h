@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 enum SHAMapNodeType : uint8_t {
     tnINNER = 1,
     tnTRANSACTION_NM = 2,  // transaction, no metadata

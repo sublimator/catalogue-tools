@@ -1,10 +1,8 @@
+#include <fstream>
 #include <gtest/gtest.h>
-#include <boost/json.hpp>
 #include <iostream>
-#include <utility>
+#include <string>
 #include "utils/test-utils.h"
-#include "../src/shamap/src/pretty-print-json.h"
-#include "catl/core/logger.h"
 
 // Simple test to verify our path resolution works
 TEST(FilePathTest, FindTestDataFile) {

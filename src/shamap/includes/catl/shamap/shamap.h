@@ -16,9 +16,9 @@
 #include "catl/shamap/shamap-leafnode.h"
 #include "catl/shamap/shamap-nodechildren.h"
 #include "catl/shamap/shamap-nodetype.h"
+#include "catl/shamap/shamap-options.h"
 #include "catl/shamap/shamap-pathfinder.h"
 #include "catl/shamap/shamap-treenode.h"
-#include "shamap-options.h"
 
 /**
  * Main SHAMap class implementing a pruned, binary prefix tree

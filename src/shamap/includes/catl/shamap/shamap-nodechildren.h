@@ -1,9 +1,9 @@
 #pragma once
 
-#include <memory>
-
 #include "catl/shamap/shamap-treenode.h"
-#include <boost/intrusive_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <cstdint>
+#include <memory>
 
 /**
  * Memory-optimized container for SHAMapInnerNode children with iteration
@@ -171,9 +171,6 @@ public:
         return iterator(this, 16);
     }
 
-    // Array-like access (both const and non-const versions)
     const boost::intrusive_ptr<SHAMapTreeNode>&
     operator[](int branch) const;
-    boost::intrusive_ptr<SHAMapTreeNode>&
-    operator[](int branch);
 };

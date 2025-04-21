@@ -1,8 +1,12 @@
 #include <algorithm>
 #include <array>
+#include <boost/core/ref.hpp>
 #include <cctype>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -13,8 +17,6 @@
 #include <vector>
 
 // For decompression
-#include <boost/iostreams/copy.hpp>
-#include <boost/iostreams/device/file.hpp>
 #include <boost/iostreams/filter/zlib.hpp>
 #include <boost/iostreams/filtering_stream.hpp>
 #include <sstream>

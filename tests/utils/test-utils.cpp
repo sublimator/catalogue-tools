@@ -1,5 +1,23 @@
 // test-utils.cpp
 #include "test-utils.h"
+#include "catl/core/types.h"
+#include "catl/shamap/shamap-nodetype.h"
+#include "catl/shamap/shamap-options.h"
+#include <boost/filesystem/path.hpp>
+#include <boost/json/parse.hpp>
+#include <boost/json/value.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <boost/system/detail/error_code.hpp>
+#include <cstddef>
+#include <cstdint>
+#include <fstream>
+#include <gtest/gtest.h>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 std::string TestDataPath::get_path(const std::string &relative_path) {
     // Get the directory of the current source file

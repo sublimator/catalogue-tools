@@ -1,3 +1,12 @@
+#include <algorithm>
+#include <cctype>
+#include <iostream>
+#include <mutex>
+#include <ostream>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+
 #include "catl/core/logger.h"
 
 // Initialize static members

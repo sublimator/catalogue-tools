@@ -1,6 +1,15 @@
 #include "catl/core/log-macros.h"
+#include "catl/core/logger.h"
+#include "catl/core/types.h"
+#include "catl/shamap/shamap-errors.h"
+#include "catl/shamap/shamap-leafnode.h"
+#include "catl/shamap/shamap-options.h"
+#include "catl/shamap/shamap-pathfinder.h"
 #include "catl/shamap/shamap-utils.h"
 #include "catl/shamap/shamap.h"
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <cstdint>
+#include <exception>
 
 SetResult
 SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)

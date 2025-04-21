@@ -1,5 +1,7 @@
 #include "catl/hasher/utils.h"
+#include <cstdint>
 #include <ctime>
+#include <string>
 
 namespace utils {
 std::string

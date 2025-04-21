@@ -1,4 +1,6 @@
 #include "catl/shamap/shamap-errors.h"
+#include <cstddef>
+#include <stdexcept>
 #include <string>
 
 //----------------------------------------------------------

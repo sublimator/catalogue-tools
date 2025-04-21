@@ -2,8 +2,12 @@
 #include "catl/hasher/catalogue-consts.h"
 #include "catl/hasher/utils.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <memory>
 #include <sstream>
+#include <string>
 #include <utility>
 
 #include "catl/core/types.h"

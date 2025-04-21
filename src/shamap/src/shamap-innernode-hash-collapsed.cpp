@@ -1,16 +1,20 @@
+#include "catl/shamap/shamap-options.h"
+#include <array>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <cstdint>
 #include <stack>
 
 #include "catl/shamap/shamap-innernode.h"
 
 #include <openssl/evp.h>
-#include <openssl/sha.h>
 
 #include "catl/core/log-macros.h"
 #include "catl/core/logger.h"
 #include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-hashprefix.h"
-#include "catl/shamap/shamap-impl.h"
 #include "catl/shamap/shamap-utils.h"
+#include <string>
+#include <vector>
 
 void
 SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)

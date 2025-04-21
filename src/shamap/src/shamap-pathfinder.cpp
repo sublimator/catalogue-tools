@@ -1,12 +1,17 @@
 #include "catl/shamap/shamap-pathfinder.h"
+#include "catl/core/types.h"
+#include "catl/shamap/shamap-options.h"
+#include "catl/shamap/shamap-treenode.h"
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "catl/core/logger.h"
 #include "catl/shamap/shamap-errors.h"
-#include "catl/shamap/shamap-impl.h"
 #include "catl/shamap/shamap-innernode.h"
 #include "catl/shamap/shamap-leafnode.h"
 #include "catl/shamap/shamap-utils.h"
+#include <cstddef>
+#include <stdexcept>
+#include <utility>
 
 //----------------------------------------------------------
 // PathFinder Implementation

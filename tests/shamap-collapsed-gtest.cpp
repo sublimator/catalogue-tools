@@ -1,9 +1,11 @@
+#include "catl/core/types.h"
+#include "catl/shamap/shamap-nodetype.h"
+#include "catl/shamap/shamap-options.h"
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <gtest/gtest.h>
-#include <iostream>
-#include <utility>
 #include "utils/test-utils.h"
-#include "../src/shamap/src/pretty-print-json.h"
 #include "catl/core/logger.h"
+#include <vector>
 
 // Test for node collapsing behavior, particularly with shallow trees
 TEST(CollapseTest, WithSkips) {

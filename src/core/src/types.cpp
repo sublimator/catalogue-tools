@@ -1,4 +1,8 @@
 #include "catl/core/types.h"
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <string>
 
 void
 slice_hex(const Slice sl, std::string& result)

@@ -1,5 +1,8 @@
 #include "catl/shamap/shamap-utils.h"
+#include "catl/core/types.h"
 #include "catl/shamap/shamap-errors.h"
+#include <cstdint>
+#include <stdexcept>
 
 //----------------------------------------------------------
 // Helper Functions Implementation

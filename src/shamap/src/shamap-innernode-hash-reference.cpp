@@ -1,14 +1,13 @@
 #include "catl/shamap/shamap-innernode.h"
 
+#include "catl/shamap/shamap-options.h"
+#include <array>
+#include <cstdint>
 #include <openssl/evp.h>
-#include <openssl/sha.h>
 
-#include "catl/core/log-macros.h"
-#include "catl/core/logger.h"
 #include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-hashprefix.h"
-#include "catl/shamap/shamap-impl.h"
-#include "catl/shamap/shamap-utils.h"
+#include <string>
 
 // TODO: restore the old update hash function
 void

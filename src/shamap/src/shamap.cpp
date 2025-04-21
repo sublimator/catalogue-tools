@@ -1,12 +1,26 @@
 #include "catl/shamap/shamap.h"
 
-#include <boost/json/serialize.hpp>
+#include "catl/core/types.h"
+#include "catl/shamap/shamap-errors.h"
+#include "catl/shamap/shamap-innernode.h"
+#include "catl/shamap/shamap-leafnode.h"
+#include "catl/shamap/shamap-nodetype.h"
+#include "catl/shamap/shamap-options.h"
+#include "catl/shamap/shamap-pathfinder.h"
+#include "catl/shamap/shamap-treenode.h"
+#include <atomic>
+#include <boost/json/array.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
-#include "catl/core/log-macros.h"
 #include "catl/core/logger.h"
-#include "catl/shamap/shamap-utils.h"
 #include "pretty-print-json.h"
+#include <functional>
+#include <memory>
+#include <ostream>
+#include <sstream>
+#include <stack>
+#include <string>
+#include <utility>
 
 //----------------------------------------------------------
 // SHAMap Implementation

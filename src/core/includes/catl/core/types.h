@@ -1,10 +1,10 @@
 #pragma once
 
 #include <array>
-#include <cstring>
-#include <cstdint>
-#include <string>
 #include <atomic>
+#include <cstdint>
+#include <cstring>
+#include <string>
 
 /**
  * Zero-copy reference to a data buffer.

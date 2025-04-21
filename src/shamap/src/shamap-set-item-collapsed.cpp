@@ -1,4 +1,9 @@
-#include <filesystem>
+#include "catl/core/types.h"
+#include "catl/shamap/shamap-leafnode.h"
+#include "catl/shamap/shamap-pathfinder.h"
+#include "catl/shamap/shamap-utils.h"
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <exception>
 
 #include "catl/core/log-macros.h"
 #include "catl/core/logger.h"

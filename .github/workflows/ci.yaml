@@ -21,9 +21,9 @@ jobs:
         generator: [Ninja, Makefiles]
         include:
           - compiler: gcc
-            cc: gcc-14
-            cxx: g++-14
-            version: 14
+            cc: gcc-13
+            cxx: g++-13
+            version: 13
           - compiler: clang
             cc: clang
             cxx: clang++
@@ -84,11 +84,12 @@ jobs:
           # Let Conan detect the version automatically for clang
           if [ "${{ matrix.compiler }}" = "gcc" ]; then
             conan profile update settings.compiler.version=${{ matrix.version }} default
+            
           fi
           
           # Use this for both GCC and Clang as per rippled
           conan profile update settings.compiler.libcxx=libstdc++11 default
-          
+
           conan profile update env.CC=/usr/bin/${{ matrix.cc }} default
           conan profile update env.CXX=/usr/bin/${{ matrix.cxx }} default
           conan profile update conf.tools.build:compiler_executables='{"c": "/usr/bin/${{ matrix.cc }}", "cpp": "/usr/bin/${{ matrix.cxx }}"}' default
