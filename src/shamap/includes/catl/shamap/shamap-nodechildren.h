@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include "catl/shamap/shamap-treenode.h"
 #include <boost/intrusive_ptr.hpp>
 
