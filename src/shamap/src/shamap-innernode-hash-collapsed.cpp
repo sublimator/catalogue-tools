@@ -16,6 +16,18 @@
 #include <string>
 #include <vector>
 
+/**
+ * Calculate the hash for this inner node using the collapsed tree approach.
+ *
+ * NOTE: We use direct Hash256 objects instead of pointer manipulation to avoid
+ * dangling pointer issues. The previous implementation used .data() on
+ * temporaries returned from hash functions, which could become invalid when the
+ * temporary is destroyed. Different compilers handle temporary lifetimes
+ * differently during optimization, causing inconsistent results between
+ * GCC/Clang and between debug/release builds. By storing complete Hash256
+ * objects and only getting .data() at the point of use, we ensure memory
+ * remains valid regardless of compiler optimization.
+ */
 void
 SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
 {
