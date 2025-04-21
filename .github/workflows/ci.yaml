@@ -27,10 +27,10 @@ jobs:
           - compiler: clang
             cc: clang
             cxx: clang++
-            version: default  # Will be detected automatically
+            version: 18  # Will be detected automatically
     env:
       build_dir: .build
-      CACHE_VERSION: 1
+      CACHE_VERSION: 2
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,12 +42,12 @@ jobs:
           
           # GCC 14 is already available on Ubuntu 24.04
           if [ "${{ matrix.compiler }}" = "gcc" ]; then
-            sudo apt-get install -y build-essential
+            sudo apt-get install -y build-essential libstdc++-14-dev
           fi
           
-          # For Clang, just install the default version
+          # For Clang, install with libc++ support
           if [ "${{ matrix.compiler }}" = "clang" ]; then
-            sudo apt-get install -y clang
+            sudo apt-get install -y clang libc++-dev libc++abi-dev
           fi
           
           # Log clang and gcc versions
@@ -71,9 +71,10 @@ jobs:
           path: |
             ~/.conan
             ~/.conan2
-          key: ${{ runner.os }}-conan-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
+          key: ${{ runner.os }}-conan-${{env.CACHE_VERSION}}=${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
           restore-keys: |
-            ${{ runner.os }}-conan-${{ matrix.compiler }}-
+            ${{ runner.os }}-conan-${{env.CACHE_VERSION}}-${{ matrix.compiler }}-
+            ${{ runner.os }}-conan-${{env.CACHE_VERSION}}
             ${{ runner.os }}-conan-
 
       - name: Configure Conan
