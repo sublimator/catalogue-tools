@@ -60,8 +60,8 @@ TEST(CollapseTest, BasicNoSkips) {
     auto i4 = items.make("0000000000000000000000000000000000000000000000000000000000020001");
 
     auto canonical_map = SHAMap(tnTRANSACTION_MD, {
-        .reference_hash_impl = ReferenceHashImpl::use_synthetic_inners,
-        .tree_collapse_impl = TreeCollapseImpl::leafs_only
+        .tree_collapse_impl = TreeCollapseImpl::leafs_only,
+        .reference_hash_impl = ReferenceHashImpl::use_synthetic_inners
     });
     auto map = SHAMap(tnTRANSACTION_MD, {
                           .tree_collapse_impl = TreeCollapseImpl::leafs_and_inners

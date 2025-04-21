@@ -22,7 +22,7 @@ COPY scripts/conan.sh .
 COPY conanfile.txt .
 
 RUN mkdir -p build-ubuntu
-RUN UPDATE_BOOST_MIRROR_URL=1 CONFIGURE_GCC_13_PROFILE=1 BUILD_DIR=/tmp-build-conan/build-ubuntu ./conan.sh
+RUN UPDATE_BOOST_MIRROR_URL=1 CONFIGURE_GCC_13_PROFILE=1 BUILD_DIR=/tmp/build-conan/build-ubuntu ./conan.sh
 
 WORKDIR /workspace
 
