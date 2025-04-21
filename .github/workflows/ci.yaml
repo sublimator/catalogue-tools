@@ -94,7 +94,7 @@ jobs:
           
           # Set libcxx based on compiler
           if [ "${{ matrix.compiler }}" = "gcc" ]; then
-            conan profile update settings.compiler.libcxx=libstdc++11 default
+            # conan profile update settings.compiler.libcxx=libstdc++11 default
           elif [ "${{ matrix.compiler }}" = "clang" ]; then
             conan profile update settings.compiler.libcxx=libc++ default
           fi
