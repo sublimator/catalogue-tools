@@ -57,3 +57,28 @@ message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Testing: ${BUILD_TESTING}")
 
 
+# cmake/StrictIncludeSettings.cmake
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND APPLE)
+    message(STATUS "Enabling strict include checking for Clang on macOS")
+
+    # Enable modules for stricter include checking
+    add_compile_options(
+            -fmodules
+            -fimplicit-module-maps
+            -fbuiltin-module-map
+    )
+
+    # Make missing includes an error
+    add_compile_options(
+            -Werror=implicit-function-declaration
+            -Werror=missing-declarations
+            -Wmissing-include-dirs
+    )
+
+    # For extra strictness, disable implicit includes from system headers
+    add_compile_options(
+            -nostdinc++
+            -isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1
+            -isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include
+    )
+endif()

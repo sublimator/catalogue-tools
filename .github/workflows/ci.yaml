@@ -30,7 +30,7 @@ jobs:
             version: 18  # Will be detected automatically
     env:
       build_dir: .build
-      CACHE_VERSION: 2
+      CACHE_VERSION: 3
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,7 +75,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-conan-${{env.CACHE_VERSION}}-${{ matrix.compiler }}-
             ${{ runner.os }}-conan-${{env.CACHE_VERSION}}
-            ${{ runner.os }}-conan-
 
       - name: Configure Conan
         run: |
