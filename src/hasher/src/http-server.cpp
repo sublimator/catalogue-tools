@@ -1,18 +1,9 @@
 #include "catl/hasher/http/http-server.h"
 #include "catl/hasher/http/http-concepts.h"
 
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio.hpp>
+#include <boost/beast.hpp>
 #include <boost/asio/signal_set.hpp>
-#include <boost/beast/core/error.hpp>
-#include <boost/beast/core/flat_buffer.hpp>
-#include <boost/beast/http/error.hpp>
-#include <boost/beast/http/field.hpp>
-#include <boost/beast/http/impl/read.hpp>
-#include <boost/beast/http/impl/write.hpp>
-#include <boost/beast/http/message.hpp>
-#include <boost/beast/http/status.hpp>
-#include <boost/beast/http/string_body.hpp>
 #include <csignal>
 #include <cstddef>
 #include <iostream>
