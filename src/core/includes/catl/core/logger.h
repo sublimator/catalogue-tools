@@ -5,6 +5,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 
 #ifndef PROJECT_ROOT
 #define PROJECT_ROOT ""
