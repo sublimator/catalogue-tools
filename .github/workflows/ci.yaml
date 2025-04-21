@@ -81,11 +81,7 @@ jobs:
           conan profile update settings.compiler.cppstd=20 default
           conan profile update settings.compiler=${{ matrix.compiler }} default
           
-          # Let Conan detect the version automatically for clang
-          if [ "${{ matrix.compiler }}" = "gcc" ]; then
-            conan profile update settings.compiler.version=${{ matrix.version }} default
-            
-          fi
+          conan profile update settings.compiler.version=${{ matrix.version }} default
           
           # Use this for both GCC and Clang as per rippled
           conan profile update settings.compiler.libcxx=libstdc++11 default

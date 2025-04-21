@@ -22,6 +22,16 @@ if [ -n "$CONFIGURE_GCC_13_PROFILE" ]; then
     conan profile show default
 fi
 
+if [-n "UPDATE_BOOST_MIRROR_URL"]; then
+        conan info boost/1.86.0 || echo "[INFO] Primed Boost recipe into cache"
+        CONAN_HOME=$(conan config home)
+        CONAN_BOOST_DATA="$CONAN_HOME/data/boost/1.86.0/_/_/export/conandata.yml"
+
+        if [ -f "$CONAN_BOOST_DATA" ]; then
+            sed -i 's|https://boostorg.jfrog.io/artifactory/main/release/1.86.0/source/boost_1_86_0.tar.bz2|https://archives.boost.io/release/1.86.0/source/boost_1_86_0.tar.bz2|' "$CONAN_BOOST_DATA"
+        fi
+fi
+
 conan install $ROOT_DIR \
       -v debug \
       --build=missing \
