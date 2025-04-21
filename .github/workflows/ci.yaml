@@ -25,9 +25,9 @@ jobs:
             cxx: g++-14
             version: 14
           - compiler: clang
-            cc: clang-16
-            cxx: clang++-16
-            version: 16
+            cc: clang
+            cxx: clang++
+            version: default  # Will be detected automatically
     env:
       build_dir: .build
       CACHE_VERSION: 1
@@ -45,14 +45,17 @@ jobs:
             sudo apt-get install -y build-essential
           fi
           
-          # For Clang 16, we need to install it explicitly
+          # For Clang, just install the default version
           if [ "${{ matrix.compiler }}" = "clang" ]; then
-            wget https://apt.llvm.org/llvm.sh
-            chmod +x llvm.sh
-            sudo ./llvm.sh 16
-            sudo apt-get install -y clang-16 libc++-16-dev libc++abi-16-dev
+            sudo apt-get install -y clang
           fi
           
+          # Log clang and gcc versions
+          echo "Running ${{ matrix.cc }} --version"
+          ${{ matrix.cc }} --version
+          echo "Running ${{ matrix.cxx }} --version"
+          ${{ matrix.ccx }} --version
+
           # Install specific Conan version needed
           pip install --upgrade "conan<2"
 
@@ -78,7 +81,12 @@ jobs:
           conan profile new default --detect || true
           conan profile update settings.compiler.cppstd=20 default
           conan profile update settings.compiler=${{ matrix.compiler }} default
-          conan profile update settings.compiler.version=${{ matrix.version }} default
+          
+          # Let Conan detect the version automatically for clang
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            conan profile update settings.compiler.version=${{ matrix.version }} default
+          fi
+          
           conan profile update env.CC=/usr/bin/${{ matrix.cc }} default
           conan profile update env.CXX=/usr/bin/${{ matrix.cxx }} default
           conan profile update conf.tools.build:compiler_executables='{"c": "/usr/bin/${{ matrix.cc }}", "cpp": "/usr/bin/${{ matrix.cxx }}"}' default
