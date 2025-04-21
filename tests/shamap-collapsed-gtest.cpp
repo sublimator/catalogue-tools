@@ -79,8 +79,8 @@ TEST(CollapseTest, BasicNoSkips) {
         copy->collapse_tree();
 
         auto rebuilt_canonical_map = SHAMap(tnTRANSACTION_MD, {
-            .reference_hash_impl = ReferenceHashImpl::use_synthetic_inners,
-            .tree_collapse_impl = TreeCollapseImpl::leafs_only
+            .tree_collapse_impl = TreeCollapseImpl::leafs_only,
+            .reference_hash_impl = ReferenceHashImpl::use_synthetic_inners
         });
         for (auto &added_item: added_items) {
             rebuilt_canonical_map.add_item(added_item);
