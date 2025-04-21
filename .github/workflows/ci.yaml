@@ -92,13 +92,6 @@ jobs:
           conan profile update env.CXX=/usr/bin/${{ matrix.cxx }} default
           conan profile update conf.tools.build:compiler_executables='{"c": "/usr/bin/${{ matrix.cc }}", "cpp": "/usr/bin/${{ matrix.cxx }}"}' default
           
-          # Set libcxx based on compiler
-          if [ "${{ matrix.compiler }}" = "gcc" ]; then
-            # conan profile update settings.compiler.libcxx=libstdc++11 default
-          elif [ "${{ matrix.compiler }}" = "clang" ]; then
-            conan profile update settings.compiler.libcxx=libc++ default
-          fi
-          
           # Display profile for verification
           conan profile show default
 
