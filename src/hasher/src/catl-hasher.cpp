@@ -4,7 +4,6 @@
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <boost/system/detail/error_category.hpp>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -860,7 +859,8 @@ main(int argc, char* argv[])
         "input-file", po::value<std::string>(), "Path to the CATL file")(
         "level,l",
         po::value<std::string>()->default_value("info"),
-        "Set log verbosity (error, warn, info, debug)");
+        "Set log verbosity (error, warn, info, debug)")(
+        "serve,s", po::bool_switch(), "Start HTTP server");
 
     // Positional argument for input file
     po::positional_options_description p;
@@ -943,7 +943,7 @@ main(int argc, char* argv[])
             << seconds << " seconds (" << duration.count() << " ms)";
     LOGW(timeOSS.str());
 
-    if (hasher)
+    if (hasher && vm["serve"].as<bool>())
     {
         hasher->startHttpServer();
     }

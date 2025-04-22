@@ -15,6 +15,9 @@
     "all": {
         "include": [
             "CMakeLists.txt",
+            ".github/**/*.yaml",
+            "scripts/**/*.py",
+            "scripts/**/*.sh",
             "src/**/CMakeLists.txt",
             "src/**/*.cpp",
             "src/**/*.h",
