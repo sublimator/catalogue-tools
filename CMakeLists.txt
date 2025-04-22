@@ -42,6 +42,9 @@ add_subdirectory(src/hasher)
 # Add the utils library
 add_subdirectory(src/utils)
 
+# Add the catalogue v1 library
+add_subdirectory(src/catalogue-v1)
+
 # Add tests if testing is enabled
 option(BUILD_TESTING "Build the testing tree" ON)
 if(BUILD_TESTING)
