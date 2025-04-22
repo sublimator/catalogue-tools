@@ -1,6 +1,6 @@
 # Find all source files for the catalogue-v1 library
 file(GLOB CATALOGUE_V1_SOURCES
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp" CACHE INTERNAL ""
 )
 
 # Create the catalogue-v1 library

@@ -20,6 +20,7 @@ foreach(EXECUTABLE ${UTILS_EXECUTABLES})
             PRIVATE
             catl_core
             catl_shamap
+            catl_catalogue_v1
             Boost::filesystem
             Boost::iostreams
             OpenSSL::SSL

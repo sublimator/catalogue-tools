@@ -24,41 +24,22 @@
 // For crypto
 #include <openssl/evp.h>
 
-// Magic number and parsing masks
-static constexpr uint32_t CATL = 0x4C544143UL;  // "CATL" in LE
-static constexpr uint16_t CATALOGUE_VERSION_MASK = 0x00FF;
-static constexpr uint16_t CATALOGUE_COMPRESS_LEVEL_MASK = 0x0F00;
-static constexpr uint16_t CATALOGUE_RESERVED_MASK = 0xF000;
+//
+#include "catl/v1/catl-v1-structs.h"
+#include "catl/v1/catl-v1-utils.h"
 
-// Helper functions for version field manipulation
-inline uint8_t
-getCatalogueVersion(uint16_t versionField)
-{
-    return versionField & CATALOGUE_VERSION_MASK;
-}
-
-inline uint8_t
-getCompressionLevel(uint16_t versionField)
-{
-    return (versionField & CATALOGUE_COMPRESS_LEVEL_MASK) >> 8;
-}
+using namespace catl::v1;
 
 inline bool
 isCompressed(uint16_t versionField)
 {
-    return getCompressionLevel(versionField) > 0;
+    return is_compressed(versionField);
 }
 
 inline uint16_t
 makeCatalogueVersionField(uint8_t version, uint8_t compressionLevel = 0)
-{  // 0 = no compression
-    // Ensure compression level is within valid range (0-9)
-    if (compressionLevel > 9)
-        compressionLevel = 9;
-
-    uint16_t result = version & CATALOGUE_VERSION_MASK;
-    result |= (compressionLevel << 8);  // Store level in bits 8-11
-    return result;
+{
+    return make_catalogue_version_field(version, compressionLevel);
 }
 
 // Helper function to convert binary hash to hex string
@@ -76,20 +57,6 @@ toHexString(unsigned char const* data, size_t len)
     }
     return result;
 }
-
-#pragma pack(push, 1)  // pack the struct tightly
-struct CATLHeader
-{
-    uint32_t magic = CATL;
-    uint32_t min_ledger;
-    uint32_t max_ledger;
-    uint16_t version;
-    uint16_t network_id;
-    uint64_t filesize = 0;  // Total size of the file including header
-    std::array<uint8_t, 64> hash = {};  // SHA-512 hash, initially set to zeros
-};
-#pragma pack(pop)
-
 // Format file size in human-readable format
 std::string
 format_file_size(uint64_t bytes)
@@ -118,7 +85,7 @@ private:
     boost::iostreams::mapped_file_source mmapFile;
     const uint8_t* data = nullptr;
     size_t fileSize = 0;
-    CATLHeader header;
+    CatlHeader header;
 
 public:
     CATLDecompressor(const std::string& inFile, const std::string& outFile)
@@ -163,24 +130,25 @@ public:
     bool
     validateHeader()
     {
-        if (fileSize < sizeof(CATLHeader))
+        if (fileSize < sizeof(CatlHeader))
         {
             std::cerr << "File too small to contain a valid CATL header"
                       << std::endl;
             return false;
         }
 
-        std::memcpy(&header, data, sizeof(CATLHeader));
+        std::memcpy(&header, data, sizeof(CatlHeader));
 
-        if (header.magic != CATL)
+        if (header.magic != CATL_MAGIC)
         {
-            std::cerr << "Invalid magic value: expected 0x" << std::hex << CATL
-                      << ", got 0x" << header.magic << std::dec << std::endl;
+            std::cerr << "Invalid magic value: expected 0x" << std::hex
+                      << CATL_MAGIC << ", got 0x" << header.magic << std::dec
+                      << std::endl;
             return false;
         }
 
-        uint8_t compressionLevel = getCompressionLevel(header.version);
-        uint8_t version = getCatalogueVersion(header.version);
+        uint8_t compressionLevel = get_compression_level(header.version);
+        uint8_t version = get_catalogue_version(header.version);
 
         if (compressionLevel == 0)
         {
@@ -284,8 +252,8 @@ public:
         }
 
         // Create a new header with compression level set to 0
-        CATLHeader newHeader = header;
-        uint8_t version = getCatalogueVersion(header.version);
+        CatlHeader newHeader = header;
+        uint8_t version = get_catalogue_version(header.version);
         newHeader.version =
             makeCatalogueVersionField(version, 0);  // Set compression to 0
         newHeader.filesize = 0;                     // Will be updated later
@@ -293,7 +261,7 @@ public:
 
         // Write the new header to the output file
         outFile.write(
-            reinterpret_cast<const char*>(&newHeader), sizeof(CATLHeader));
+            reinterpret_cast<const char*>(&newHeader), sizeof(CatlHeader));
         if (!outFile)
         {
             std::cerr << "Failed to write header to output file" << std::endl;
@@ -301,7 +269,7 @@ public:
         }
 
         // Set up decompression
-        uint8_t compressionLevel = getCompressionLevel(header.version);
+        uint8_t compressionLevel = get_compression_level(header.version);
 
         std::cout << "Decompressing data with compression level "
                   << static_cast<int>(compressionLevel) << "..." << std::endl;
@@ -315,7 +283,7 @@ public:
         }
 
         // Skip the header in the input file
-        inFile.seekg(sizeof(CATLHeader));
+        inFile.seekg(sizeof(CatlHeader));
 
         // Set up a zlib decompression stream
         boost::iostreams::filtering_istream decompStream;
@@ -328,7 +296,7 @@ public:
 
         // Copy data from decompression stream to output file
         char buffer[64 * 1024];  // 64K buffer
-        size_t totalBytesWritten = sizeof(CATLHeader);
+        size_t totalBytesWritten = sizeof(CatlHeader);
 
         auto startTime = std::chrono::high_resolution_clock::now();
         size_t lastReport = 0;
@@ -488,7 +456,7 @@ public:
         // Update the header with the final file size
         newHeader.filesize = totalBytesWritten;
         updateFile.write(
-            reinterpret_cast<const char*>(&newHeader), sizeof(CATLHeader));
+            reinterpret_cast<const char*>(&newHeader), sizeof(CatlHeader));
 
         if (!updateFile)
         {
@@ -506,30 +474,18 @@ public:
             return false;
         }
 
-        // Set up OpenSSL hash context for SHA-512
-        EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-        if (!ctx)
-        {
-            std::cerr << "Failed to create EVP_MD_CTX" << std::endl;
-            return false;
-        }
-
-        if (EVP_DigestInit_ex(ctx, EVP_sha512(), nullptr) != 1)
-        {
-            std::cerr << "Failed to initialize SHA-512 digest" << std::endl;
-            EVP_MD_CTX_free(ctx);
-            return false;
-        }
+        // Use the Sha512Hasher class from the catalogue-v1 library
+        Sha512Hasher hasher;
 
         // Read and process the header with zero hash
-        hashFile.read(reinterpret_cast<char*>(&newHeader), sizeof(CATLHeader));
+        hashFile.read(reinterpret_cast<char*>(&newHeader), sizeof(CatlHeader));
         std::fill(newHeader.hash.begin(), newHeader.hash.end(), 0);
 
         // Add the modified header to the hash
-        if (EVP_DigestUpdate(ctx, &newHeader, sizeof(CATLHeader)) != 1)
+        if (!hasher.update(&newHeader, sizeof(CatlHeader)))
         {
             std::cerr << "Failed to update digest with header" << std::endl;
-            EVP_MD_CTX_free(ctx);
+            hashFile.close();
             return false;
         }
 
@@ -540,11 +496,11 @@ public:
             std::streamsize bytesRead = hashFile.gcount();
             if (bytesRead > 0)
             {
-                if (EVP_DigestUpdate(ctx, buffer, bytesRead) != 1)
+                if (!hasher.update(buffer, bytesRead))
                 {
                     std::cerr << "Failed to update digest with file data"
                               << std::endl;
-                    EVP_MD_CTX_free(ctx);
+                    hashFile.close();
                     return false;
                 }
             }
@@ -553,13 +509,13 @@ public:
         // Get the hash result
         std::array<unsigned char, 64> hash_result;
         unsigned int hashLen = 0;
-        if (EVP_DigestFinal_ex(ctx, hash_result.data(), &hashLen) != 1)
+        if (!hasher.final(hash_result.data(), &hashLen) ||
+            hashLen != hash_result.size())
         {
             std::cerr << "Failed to finalize digest" << std::endl;
-            EVP_MD_CTX_free(ctx);
+            hashFile.close();
             return false;
         }
-        EVP_MD_CTX_free(ctx);
         hashFile.close();
 
         // Update the hash in the output file header
@@ -573,7 +529,7 @@ public:
         }
 
         // Seek to the hash position in the header
-        updateHashFile.seekp(offsetof(CATLHeader, hash), std::ios::beg);
+        updateHashFile.seekp(offsetof(CatlHeader, hash), std::ios::beg);
         updateHashFile.write(
             reinterpret_cast<const char*>(hash_result.data()),
             hash_result.size());
