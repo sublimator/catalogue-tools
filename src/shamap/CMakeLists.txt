@@ -26,10 +26,10 @@ target_include_directories(catl_shamap
 # Link dependencies
 target_link_libraries(catl_shamap
         PUBLIC
-        catl_core          # Depend on the core module
-        CONAN_PKG::boost    # Used in public API
+        catl_core       # Depend on the core module
+        Boost::json
         PRIVATE
-        CONAN_PKG::openssl  # Only used in implementation
+        OpenSSL::SSL  # Only used in implementation
 )
 
 # Set compile options

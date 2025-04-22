@@ -17,7 +17,7 @@ target_include_directories(catl_core
 # Link dependencies
 target_link_libraries(catl_core
     PUBLIC
-        CONAN_PKG::boost  # If your public headers use Boost
+        # Nothing yet
     PRIVATE
         # Any dependencies only used in implementation
 )

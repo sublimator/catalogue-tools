@@ -3,3 +3,4 @@ cmake-build-debug
 build
 build-ubuntu
 .DS_Store
+CMakeUserPresets.json

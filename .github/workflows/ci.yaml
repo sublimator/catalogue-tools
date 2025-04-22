@@ -122,12 +122,14 @@ jobs:
               -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
               -DCMAKE_C_COMPILER=/usr/bin/${{ matrix.cc }} \
               -DCMAKE_CXX_COMPILER=/usr/bin/${{ matrix.cxx }} \
+              -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake \
               ..
           else
             cmake -G "Unix Makefiles" \
               -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
               -DCMAKE_C_COMPILER=/usr/bin/${{ matrix.cc }} \
               -DCMAKE_CXX_COMPILER=/usr/bin/${{ matrix.cxx }} \
+              -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake \
               ..
           fi
 
