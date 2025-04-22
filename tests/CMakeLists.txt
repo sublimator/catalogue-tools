@@ -8,9 +8,9 @@ add_library(test_utils STATIC
 target_link_libraries(test_utils
         PRIVATE
         catl::shamap
-        CONAN_PKG::gtest
-        CONAN_PKG::boost
-        CONAN_PKG::openssl
+        GTest::gtest
+        OpenSSL::SSL
+        Boost::filesystem
 )
 
 # Make the headers accessible to targets linking against test_utils
@@ -33,8 +33,8 @@ target_link_libraries(shamap_tests
         PRIVATE
         test_utils
         catl::shamap
-        CONAN_PKG::gtest
-        CONAN_PKG::openssl
+        GTest::gtest
+        OpenSSL::SSL
 )
 
 # Create a fixture directory in the build directory

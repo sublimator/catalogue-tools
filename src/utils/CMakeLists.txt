@@ -20,8 +20,9 @@ foreach(EXECUTABLE ${UTILS_EXECUTABLES})
             PRIVATE
             catl_core
             catl_shamap
-            CONAN_PKG::boost
-            CONAN_PKG::openssl
+            Boost::filesystem
+            Boost::iostreams
+            OpenSSL::SSL
     )
 
     # Set properties - applied for each executable

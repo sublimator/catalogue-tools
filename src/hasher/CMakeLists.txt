@@ -17,8 +17,10 @@ target_link_libraries(catl-hasher
         PRIVATE
         catl_core
         catl_shamap
-        CONAN_PKG::boost
-        CONAN_PKG::openssl
+        Boost::filesystem
+        Boost::iostreams
+        Boost::program_options
+        OpenSSL::SSL
 )
 
 # output a message

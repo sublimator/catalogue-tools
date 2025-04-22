@@ -7,6 +7,7 @@ set -e
 ROOT_DIR=`git rev-parse --show-toplevel || pwd` # in case we are not in a git repo, such as the Dockerfile
 cd $ROOT_DIR
 
+BUILD_TYPE=${BUILD_TYPE:-Debug}
 BUILD_DIR=${BUILD_DIR:-$ROOT_DIR/build}
 UPDATE_BOOST_MIRROR_URL=${UPDATE_BOOST_MIRROR_URL:-}
 CONFIGURE_GCC_13_PROFILE=${CONFIGURE_GCC_13_PROFILE:-}
@@ -36,4 +37,5 @@ fi
 conan install $ROOT_DIR \
       --build=missing \
       --install-folder="$BUILD_DIR" \
-      -e CMAKE_GENERATOR=Ninja
+      -e CMAKE_GENERATOR=Ninja \
+      -s build_type="$BUILD_TYPE"
