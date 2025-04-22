@@ -1,0 +1,1 @@
+add_compile_definitions(HASHER_DEVELOP_MODE=1)

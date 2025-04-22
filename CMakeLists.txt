@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.12)
 project(catalogue-tools VERSION 0.1.0 LANGUAGES CXX)
 
+if(EXISTS "${CMAKE_SOURCE_DIR}/.local.cmake")
+    include("${CMAKE_SOURCE_DIR}/.local.cmake")
+    MESSAGE(STATUS "Executing .local.cmake in the root directory")
+else ()
+    message(STATUS "No .local.cmake file found in the root directory")
+endif()
+
 # Set C++ standard for all targets
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
