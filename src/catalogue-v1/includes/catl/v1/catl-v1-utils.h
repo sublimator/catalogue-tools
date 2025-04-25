@@ -1,6 +1,7 @@
 #pragma once
 
 #include "catl/v1/catl-v1-structs.h"
+#include <string>
 
 namespace catl::v1 {
 

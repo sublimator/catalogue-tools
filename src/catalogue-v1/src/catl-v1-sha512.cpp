@@ -1,6 +1,8 @@
 #include <openssl/evp.h>
 
 #include "catl/v1/catl-v1-utils.h"
+#include <stdexcept>
+
 using namespace catl::v1;
 
 // RAII wrapper for OpenSSL SHA-512 EVP API
