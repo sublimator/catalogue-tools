@@ -8,14 +8,15 @@ else ()
     message(STATUS "No .local.cmake file found in the root directory")
 endif()
 
-# Set C++ standard for all targets
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
 # Requires passing -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
 find_package(Boost REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(GTest REQUIRED)
+
+# Set C++ standard for all targets
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)  # This is optional but recommended to ensure portability
 
 # Set up default compile options
 add_compile_options(-Wall -Wextra -pedantic)
@@ -62,7 +63,6 @@ message(STATUS "Configuration:")
 message(STATUS "  C++ standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Testing: ${BUILD_TESTING}")
-
 
 # cmake/StrictIncludeSettings.cmake
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND APPLE)

@@ -8,7 +8,7 @@ target_include_directories(catl_catalogue_common
 )
 
 target_link_libraries(catl_catalogue_common
-    PUBLIC
+    PRIVATE
         OpenSSL::SSL
 )
 

@@ -25,12 +25,6 @@ foreach(EXECUTABLE ${UTILS_EXECUTABLES})
             Boost::iostreams
             OpenSSL::SSL
     )
-
-    # Set properties - applied for each executable
-    set_target_properties(${EXECUTABLE} PROPERTIES
-            CXX_STANDARD 20
-            CXX_STANDARD_REQUIRED ON
-    )
 endforeach()
 
 # Install all executables at once

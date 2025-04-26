@@ -32,18 +32,5 @@ target_link_libraries(catl_shamap
         OpenSSL::SSL  # Only used in implementation
 )
 
-# Set compile options
-target_compile_options(catl_shamap
-        PRIVATE
-        -Wall
-        -Wextra
-)
-
-# Set properties
-set_target_properties(catl_shamap PROPERTIES
-        CXX_STANDARD 20
-        CXX_STANDARD_REQUIRED ON
-)
-
 # Create alias target for easier reference in other CMake files
 add_library(catl::shamap ALIAS catl_shamap)

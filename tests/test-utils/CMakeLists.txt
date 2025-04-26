@@ -9,9 +9,10 @@ target_include_directories(catl_test_utils
 
 target_link_libraries(catl_test_utils
     PUBLIC
+        catl::core
+    PRIVATE
         OpenSSL::SSL
         Boost::filesystem
-        catl::core
         GTest::gtest
 )
 

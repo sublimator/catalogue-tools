@@ -27,12 +27,6 @@ target_link_libraries(catl-hasher
 
 message(STATUS "catl-hasher: ${HASHER_SOURCES}")
 
-# Set executable properties
-set_target_properties(catl-hasher PROPERTIES
-        CXX_STANDARD 20
-        CXX_STANDARD_REQUIRED ON
-)
-
 # Install the executable
 install(TARGETS catl-hasher
         RUNTIME DESTINATION bin

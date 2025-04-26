@@ -16,6 +16,7 @@ target_link_libraries(catl_shamap_test_utils
     PUBLIC
         catl::shamap
         catl::test_utils
+    PRIVATE
         OpenSSL::SSL
         GTest::gtest
 

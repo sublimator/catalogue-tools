@@ -28,11 +28,5 @@ target_link_libraries(catl_catalogue_v1
         OpenSSL::SSL
 )
 
-# Set properties
-set_target_properties(catl_catalogue_v1 PROPERTIES
-        CXX_STANDARD 20
-        CXX_STANDARD_REQUIRED ON
-)
-
 # Create alias target for easier reference
 add_library(catl::catalogue_v1 ALIAS catl_catalogue_v1)
