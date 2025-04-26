@@ -28,9 +28,11 @@ target_link_libraries(all_tests
         Boost::filesystem
         catl::shamap
         catl::catalogue_v1
+        catl_shamap_test_utils
         GTest::gtest
         OpenSSL::SSL
 )
 # Register with CTest
 include(GoogleTest)
 gtest_discover_tests(all_tests)
+

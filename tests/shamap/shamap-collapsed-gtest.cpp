@@ -6,7 +6,7 @@
 #include <gtest/gtest.h>
 #include <vector>
 
-#include "catl/test-utils/test-utils.h"
+#include "shamap-test-utils.h"
 
 // Test for node collapsing behavior, particularly with shallow trees
 TEST(CollapseTest, WithSkips)

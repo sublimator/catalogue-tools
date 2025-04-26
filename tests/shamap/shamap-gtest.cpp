@@ -11,7 +11,7 @@
 #include <optional>
 #include <string>
 
-#include "catl/test-utils/test-utils.h"
+#include "shamap-test-utils.h"
 
 // Test using the fixture with source-relative paths
 TEST_F(AccountStateFixture, JsonFileOperations)
