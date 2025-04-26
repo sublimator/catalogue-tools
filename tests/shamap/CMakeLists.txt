@@ -9,7 +9,7 @@ add_executable(shamap_gtest
 target_link_libraries(shamap_gtest
     PRIVATE
         catl::shamap
-        catl_test_utils
+        catl::test_utils
         GTest::gtest_main
         OpenSSL::SSL
         Boost::json

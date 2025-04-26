@@ -24,7 +24,7 @@ target_include_directories(all_tests
 # Link to GTest and your modules (including test_utils)
 target_link_libraries(all_tests
         PRIVATE
-        catl_test_utils
+        catl::test_utils
         Boost::filesystem
         catl::shamap
         catl::catalogue_v1
