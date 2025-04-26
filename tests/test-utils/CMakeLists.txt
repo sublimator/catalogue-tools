@@ -11,6 +11,7 @@ target_link_libraries(catl_test_utils
     PUBLIC
         OpenSSL::SSL
         Boost::filesystem
+        catl::core
         GTest::gtest
 )
 
