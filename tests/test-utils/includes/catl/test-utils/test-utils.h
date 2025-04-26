@@ -1,6 +1,5 @@
 #pragma once
 
-#include "catl/shamap/shamap.h"
 #include <boost/filesystem.hpp>
 #include <boost/json.hpp>
 #include <fstream>

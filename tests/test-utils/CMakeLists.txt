@@ -8,8 +8,7 @@ target_include_directories(catl_test_utils
 )
 
 target_link_libraries(catl_test_utils
-    PRIVATE
-        catl::shamap
+    PUBLIC
         OpenSSL::SSL
         Boost::filesystem
         GTest::gtest

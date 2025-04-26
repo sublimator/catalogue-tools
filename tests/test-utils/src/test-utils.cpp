@@ -1,8 +1,6 @@
 // test-utils.cpp
 #include "catl/test-utils/test-utils.h"
 #include "catl/core/types.h"
-#include "catl/shamap/shamap-nodetype.h"
-#include "catl/shamap/shamap-options.h"
 #include <boost/filesystem/path.hpp>
 #include <boost/json/parse.hpp>
 #include <boost/json/value.hpp>
