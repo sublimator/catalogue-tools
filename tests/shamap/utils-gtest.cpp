@@ -3,13 +3,14 @@
 #include <iostream>
 #include <string>
 
-#include "utils/test-utils.h"
+#include "catl/test-utils/test-utils.h"
 
 // Simple test to verify our path resolution works
 TEST(FilePathTest, FindTestDataFile)
 {
     // Get the path to the test data file relative to this source file
-    std::string file_path = TestDataPath::get_path("fixture/op-adds.json");
+    std::string file_path =
+        TestDataPath::get_path("shamap/fixture/op-adds.json");
     std::cout << "Test data path: " << file_path << std::endl;
 
     // Verify the file exists

@@ -21,6 +21,7 @@ target_link_libraries(catl_catalogue_v1
         PUBLIC
         catl_core
         catl_shamap
+        catl::catalogue_common
         PRIVATE
         Boost::filesystem
         Boost::iostreams

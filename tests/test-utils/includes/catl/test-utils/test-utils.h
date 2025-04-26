@@ -1,4 +1,3 @@
-// test-utils.h
 #pragma once
 
 #include "catl/shamap/shamap.h"

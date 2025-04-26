@@ -33,6 +33,12 @@ add_compile_definitions(
 # Add the core library
 add_subdirectory(src/core)
 
+# Add the catalogue-common library (shared functionality)
+add_subdirectory(src/catalogue-common)
+
+# Add the catalogue v1 library
+add_subdirectory(src/catalogue-v1)
+
 # Add the shamap library
 add_subdirectory(src/shamap)
 
@@ -42,8 +48,6 @@ add_subdirectory(src/hasher)
 # Add the utils library
 add_subdirectory(src/utils)
 
-# Add the catalogue v1 library
-add_subdirectory(src/catalogue-v1)
 
 # Add tests if testing is enabled
 option(BUILD_TESTING "Build the testing tree" ON)

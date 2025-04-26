@@ -2,16 +2,29 @@
 file(GLOB_RECURSE TEST_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*-gtest.cpp)
 message(STATUS "Found test files: ${TEST_FILES}")
 
-# Add test executable for shamap tests
+# Add test-utils subdirectory
+add_subdirectory(test-utils)
+
+# Add catalogue-common test subdirectory
+add_subdirectory(catalogue-common)
+add_subdirectory(catalogue-v1)
+add_subdirectory(shamap)
+
+# Add test executable for all tests
 add_executable(all_tests
         ${TEST_FILES}
-        shamap/utils/test-utils.cpp
+)
+
+target_include_directories(all_tests
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests/test-utils
+        ${CMAKE_SOURCE_DIR}/src/shamap/includes
 )
 
 # Link to GTest and your modules (including test_utils)
 target_link_libraries(all_tests
         PRIVATE
-#        test_utils
+        catl_test_utils
         Boost::filesystem
         catl::shamap
         catl::catalogue_v1

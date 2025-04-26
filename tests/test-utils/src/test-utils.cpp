@@ -1,5 +1,5 @@
 // test-utils.cpp
-#include "test-utils.h"
+#include "catl/test-utils/test-utils.h"
 #include "catl/core/types.h"
 #include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap-options.h"
@@ -22,13 +22,9 @@
 std::string
 TestDataPath::get_path(const std::string& relative_path)
 {
-    // Get the directory of the current source file
-    std::string source_dir = CURRENT_SOURCE_DIR;
-
-    // Combine with the relative path
+    // Use PROJECT_SOURCE_DIR macro set by CMake for project root
     boost::filesystem::path full_path =
-        boost::filesystem::path(source_dir) / ".." / relative_path;
-
+        boost::filesystem::path(PROJECT_ROOT) / "tests" / relative_path;
     return full_path.string();
 }
 
@@ -170,7 +166,7 @@ ShaMapFixture::get_map_options()
 std::string
 ShaMapFixture::get_fixture_directory()
 {
-    return "fixture";
+    return "shamap/fixture";
 }
 
 std::string
