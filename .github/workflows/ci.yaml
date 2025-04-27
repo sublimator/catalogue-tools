@@ -85,6 +85,7 @@ jobs:
             compiler.libcxx=libstdc++
             [conf]
             tools.build:compiler_executables={"c": "/usr/bin/${{ matrix.cc }}", "cpp": "/usr/bin/${{ matrix.cxx }}"}
+          EOF
           conan profile show default
 
       - name: Install dependencies
