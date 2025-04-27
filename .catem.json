@@ -23,7 +23,9 @@
             "src/**/*.h",
             "tests/**/CMakeLists.txt",
             "tests/**/*.cpp",
-            "tests/**/*.h"
+            "tests/**/*.h",
+            "Dockerfile",
+            "conanfile.*"
         ]
     },
     "logger": {

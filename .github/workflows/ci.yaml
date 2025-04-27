@@ -30,7 +30,7 @@ jobs:
             version: 16
     env:
       build_dir: .build
-      CACHE_VERSION: 5
+      CACHE_VERSION: 6
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,7 +57,7 @@ jobs:
           ${{ matrix.cxx }} --version
 
           # Install specific Conan version needed
-          pip install --upgrade "conan<2"
+          pip install --upgrade conan
 
       - name: Verify compiler versions
         run: |
@@ -69,7 +69,6 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.conan
             ~/.conan2
           key: ${{ runner.os }}-conan-${{env.CACHE_VERSION}}=${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
           restore-keys: |
@@ -77,20 +76,15 @@ jobs:
 
       - name: Configure Conan
         run: |
-          conan profile new default --detect || true
-          conan profile update settings.compiler.cppstd=20 default
-          conan profile update settings.compiler=${{ matrix.compiler }} default
-          
-          conan profile update settings.compiler.version=${{ matrix.version }} default
-          
-          # Use this for both GCC and Clang as per rippled
-          conan profile update settings.compiler.libcxx=libstdc++11 default
-
-          conan profile update env.CC=/usr/bin/${{ matrix.cc }} default
-          conan profile update env.CXX=/usr/bin/${{ matrix.cxx }} default
-          conan profile update conf.tools.build:compiler_executables='{"c": "/usr/bin/${{ matrix.cc }}", "cpp": "/usr/bin/${{ matrix.cxx }}"}' default
-          
-          # Display profile for verification
+          conan profile detect --name detected
+          mkdir -p "$(conan config home)/profiles"
+          cat >$(conan config home)/profiles/default <<EOF
+            include(detected)
+            [settings]
+            compiler.cppstd=20
+            compiler.libcxx=libstdc++
+            [conf]
+            tools.build:compiler_executables={"c": "/usr/bin/${{ matrix.cc }}", "cpp": "/usr/bin/${{ matrix.cxx }}"}
           conan profile show default
 
       - name: Install dependencies
@@ -110,7 +104,6 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: |
-            ~/.conan
             ~/.conan2
           key: ${{ runner.os }}-conan-${{env.CACHE_VERSION}}-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
 
