@@ -86,7 +86,7 @@ jobs:
             [conf]
             tools.build:compiler_executables={"c": "/usr/bin/${{ matrix.cc }}", "cpp": "/usr/bin/${{ matrix.cxx }}"}
           EOF
-          conan profile show default
+          conan profile show -pr default
 
       - name: Install dependencies
         id: conan-install
