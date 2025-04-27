@@ -76,7 +76,7 @@ jobs:
 
       - name: Configure Conan
         run: |
-          conan profile detect --name detected
+          conan profile detect --name detected --force
           mkdir -p "$(conan config home)/profiles"
           cat >$(conan config home)/profiles/default <<EOF
           include(detected)
