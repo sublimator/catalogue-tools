@@ -18,14 +18,14 @@ def get_git_root() -> Path:
         sys.exit(1)
 
 def get_all_cpp_files(root_dir: Path) -> List[Path]:
-    """Get all .h and .cpp files under src directory."""
-    src_dir = root_dir / 'src'
-    if not src_dir.exists():
-        return []
-    
+    """Get all .h and .cpp files under src and tests directories."""
     files: List[Path] = []
-    for ext in ['.h', '.cpp']:
-        files.extend(src_dir.rglob(f'*{ext}'))
+    for subdir in ['src', 'tests']:
+        dir_path = root_dir / subdir
+        if not dir_path.exists():
+            continue
+        for ext in ['.h', '.cpp']:
+            files.extend(dir_path.rglob(f'*{ext}'))
     return files
 
 def get_git_dirty_files(root_dir: Path) -> List[Path]:
@@ -52,14 +52,14 @@ def get_git_dirty_files(root_dir: Path) -> List[Path]:
     if result.stdout.strip():
         files.update(result.stdout.strip().split('\n'))
     
-    # Filter for C++ files in src directory
+    # Filter for C++ files in src and tests directories
     cpp_files: List[Path] = []
     for filename in files:
-        if filename.startswith('src/') and (filename.endswith('.h') or filename.endswith('.cpp')):
+        if (filename.startswith('src/') or filename.startswith('tests/')) and (filename.endswith('.h') or filename.endswith('.cpp')):
             file_path = root_dir / filename
             if file_path.exists():
                 cpp_files.append(file_path)
-    
+
     return cpp_files
 
 def format_file(file_path: Path) -> bool:

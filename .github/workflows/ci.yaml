@@ -145,18 +145,18 @@ jobs:
       - name: Run tests
         run: |
           cd ${{ env.build_dir }}
-          # Check if shamap_tests exists and run it
-          if [ -f "bin/shamap_tests" ]; then
-            echo "Running shamap_tests"
-            ./bin/shamap_tests
-          elif [ -f "tests/shamap_tests" ]; then
-            echo "Running shamap_tests from tests directory"
-            ./tests/shamap_tests  
-          elif [ -f "shamap_tests" ]; then
-            echo "Running shamap_tests from build root"
-            ./shamap_tests
+          # Check if all_tests exists and run it
+          if [ -f "bin/all_tests" ]; then
+            echo "Running all_tests"
+            ./bin/all_tests
+          elif [ -f "tests/all_tests" ]; then
+            echo "Running all_tests from tests directory"
+            ./tests/all_tests  
+          elif [ -f "all_tests" ]; then
+            echo "Running all_tests from build root"
+            ./all_tests
           else
-            echo "Error: shamap_tests executable not found in expected locations"
-            find . -name "shamap_tests" -type f
+            echo "Error: all_tests executable not found in expected locations"
+            find . -name "all_tests" -type f
             exit 1
           fi
