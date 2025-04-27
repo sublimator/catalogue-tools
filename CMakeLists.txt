@@ -11,7 +11,7 @@ else()
   message(STATUS "No .local.cmake file found in the root directory")
 endif()
 
-set(is_apple_clang "$<AND:$<CXX_COMPILER_ID:Clang>,$<PLATFORM_ID:Darwin>>")
+include(cmake/CheckCompiler.cmake)
 
 # Requires passing -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
 find_package(Boost REQUIRED)
