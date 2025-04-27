@@ -79,13 +79,13 @@ jobs:
           conan profile detect --name detected
           mkdir -p "$(conan config home)/profiles"
           cat >$(conan config home)/profiles/default <<EOF
-            include(detected)
-            [settings]
-            compiler.cppstd=20
-            compiler.libcxx=libstdc++
-            build_type=${{ matrix.build_type }}
-            [conf]
-            tools.build:compiler_executables={"c": "/usr/bin/${{ matrix.cc }}", "cpp": "/usr/bin/${{ matrix.cxx }}"}
+          include(detected)
+          [settings]
+          compiler.cppstd=20
+          compiler.libcxx=libstdc++
+          build_type=${{ matrix.build_type }}
+          [conf]
+          tools.build:compiler_executables={"c": "/usr/bin/${{ matrix.cc }}", "cpp": "/usr/bin/${{ matrix.cxx }}"}
           EOF
           echo "Detected conan profile:"
           conan profile show -pr detected
