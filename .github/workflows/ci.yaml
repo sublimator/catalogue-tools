@@ -29,8 +29,8 @@ jobs:
             cxx: clang++-16
             version: 16
     env:
-      build_dir: .build
-      CACHE_VERSION: 6
+      build_dir: build
+      CACHE_VERSION: 7
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -83,9 +83,13 @@ jobs:
             [settings]
             compiler.cppstd=20
             compiler.libcxx=libstdc++
+            build_type=${{ matrix.build_type }}
             [conf]
             tools.build:compiler_executables={"c": "/usr/bin/${{ matrix.cc }}", "cpp": "/usr/bin/${{ matrix.cxx }}"}
           EOF
+          echo "Detected conan profile:"
+          conan profile show -pr detected
+          echo "Default conan profile:"
           conan profile show -pr default
 
       - name: Install dependencies
