@@ -8,6 +8,8 @@ else ()
     message(STATUS "No .local.cmake file found in the root directory")
 endif()
 
+set(is_apple_clang "$<AND:$<CXX_COMPILER_ID:Clang>,$<PLATFORM_ID:Darwin>>")
+
 # Requires passing -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
 find_package(Boost REQUIRED)
 find_package(OpenSSL REQUIRED)
@@ -20,6 +22,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)  # This is optional but recommended to ensure port
 
 # Set up default compile options
 add_compile_options(-Wall -Wextra -pedantic)
+if(is_apple_clang)
+    # Matches gcc behaviour where this is a build error
+    add_compile_options(-Werror=reorder-init-list)
+endif ()
 
 # Define the include directory structure to be shared by all subprojects
 set(CATL_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/includes)
@@ -65,7 +71,7 @@ message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Testing: ${BUILD_TESTING}")
 
 # cmake/StrictIncludeSettings.cmake
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND APPLE)
+if(is_apple_clang)
     message(STATUS "Enabling strict include checking for Clang on macOS")
 
     # Enable modules for stricter include checking
