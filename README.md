@@ -116,7 +116,7 @@ For the state map deltas in subsequent ledgers, tnREMOVE nodes are used to indic
 
 - CMake 3.12+
 - C++20 compatible compiler (GCC 13+ or Clang 16+)
-- Conan package manager (version < 2)
+- Conan package manager (version 2)
 
 ### Building with Make
 
