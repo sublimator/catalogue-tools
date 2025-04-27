@@ -9,7 +9,7 @@ CMakeDeps
 CMakeToolchain
 
 [options]
-gtest:shared=False
-boost:shared=False
-zlib:shared=False
-openssl:shared=False
+gtest/*:shared=False
+boost/*:shared=False
+zlib/*:shared=False
+openssl/*:shared=False

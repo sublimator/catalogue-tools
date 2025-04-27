@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --break-system-packages "conan<2"
+RUN pip3 install --break-system-packages conan
 
 WORKDIR /tmp/build-conan
 
