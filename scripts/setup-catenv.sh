@@ -11,10 +11,10 @@ pip install --upgrade pip
 pip install -r "$root_dir/scripts/requirements.txt"
 
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
-    # Script is being sourced
-    echo "Env should be activated"
+  # Script is being sourced
+  echo "Env should be activated"
 else
-    echo "Run 'source ${BASH_SOURCE[0]}' to activate the virtual environment"
+  echo "Run 'source ${BASH_SOURCE[0]}' to activate the virtual environment"
 fi
 
 set +e # because if we source this script, we don't want to exit on error
