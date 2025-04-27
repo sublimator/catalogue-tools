@@ -5,3 +5,4 @@ build-ubuntu
 .DS_Store
 CMakeUserPresets.json
 .local.cmake
+catenv
