@@ -9,14 +9,14 @@ namespace catl::common {
 /**
  * LedgerHeaderView - Zero-copy view into ledger headers
  */
-class LedgerInfoView
+class LedgerInfoV1View
 {
 private:
     const uint8_t* data;  // Raw pointer to header data
 
 public:
     // Constructor with raw data pointer
-    explicit LedgerInfoView(const uint8_t* headerData);
+    explicit LedgerInfoV1View(const uint8_t* headerData);
 
     // Core accessor methods
     uint32_t

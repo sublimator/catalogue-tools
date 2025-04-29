@@ -185,36 +185,36 @@ MmapReader::eof() const
     return position_ >= file_size_;
 }
 
-catl::common::LedgerInfoView
+catl::common::LedgerInfoV1View
 MmapReader::read_ledger_info()
 {
     // Check if we have enough data left to read a ledger header
-    if (position_ + sizeof(catl::common::LedgerInfo) > file_size_)
+    if (position_ + sizeof(catl::common::LedgerInfoV1) > file_size_)
     {
         throw CatlV1Error("Not enough data left to read ledger header");
     }
 
     // Create a view directly into the memory-mapped data
-    auto view = catl::common::LedgerInfoView(data_ + position_);
+    auto view = catl::common::LedgerInfoV1View(data_ + position_);
 
     // Advance the position
-    position_ += sizeof(catl::common::LedgerInfo);
+    position_ += sizeof(catl::common::LedgerInfoV1);
 
     return view;
 }
 
-catl::common::LedgerInfoView
+catl::common::LedgerInfoV1View
 MmapReader::get_ledger_info_view(size_t position) const
 {
     // Check if the requested position is valid
-    if (position + sizeof(catl::common::LedgerInfo) > file_size_)
+    if (position + sizeof(catl::common::LedgerInfoV1) > file_size_)
     {
         throw CatlV1Error("Invalid position for ledger header view");
     }
 
     // Create a view directly into the memory-mapped data at the specified
     // position
-    return catl::common::LedgerInfoView(data_ + position);
+    return catl::common::LedgerInfoV1View(data_ + position);
 }
 
 }  // namespace catl::v1

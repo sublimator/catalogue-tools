@@ -22,7 +22,7 @@ static constexpr uint16_t CATALOGUE_COMPRESS_LEVEL_MASK =
 // Use the common header type
 using CatlHeader = catl::common::CATLHeader;
 
-using LedgerInfo = catl::common::LedgerInfo;
+using LedgerInfo = catl::common::LedgerInfoV1;
 
 // SHAMap node types
 enum SHAMapNodeType : uint8_t {

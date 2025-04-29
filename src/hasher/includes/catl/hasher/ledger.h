@@ -9,7 +9,7 @@
 #include "catl/shamap/shamap.h"
 
 // Use the common implementation
-using LedgerHeaderView = catl::common::LedgerInfoView;
+using LedgerHeaderView = catl::common::LedgerInfoV1View;
 
 /**
  * Ledger - Simple container for header view and maps
