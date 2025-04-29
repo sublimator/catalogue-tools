@@ -1,30 +1,24 @@
 #pragma once
 
+#include "catl/common/catalogue-types.h"
 #include <array>
 #include <cstdint>
 
 namespace catl::v1 {
 
-// Constants for CATL files
-static constexpr uint32_t CATL_MAGIC = 0x4C544143UL;  // "CATL" in LE
-static constexpr uint16_t CATALOGUE_VERSION_MASK = 0x00FF;
-static constexpr uint16_t CATALOGUE_COMPRESS_LEVEL_MASK = 0x0F00;
+// Additional v1-specific constants
 static constexpr uint16_t CATALOGUE_RESERVED_MASK = 0xF000;
 static constexpr uint16_t BASE_CATALOGUE_VERSION = 1;
 
-// The updated header structure with hash and filesize
-#pragma pack(push, 1)
-struct CatlHeader  // NOLINT(*-pro-type-member-init)
-{
-    uint32_t magic = CATL_MAGIC;
-    uint32_t min_ledger;
-    uint32_t max_ledger;
-    uint16_t version;
-    uint16_t network_id;
-    uint64_t filesize = 0;
-    std::array<uint8_t, 64> hash = {};
-};
-#pragma pack(pop)
+// Re-export constants from common for backward compatibility
+static constexpr uint32_t CATL_MAGIC = catl::common::CATL_MAGIC;
+static constexpr uint16_t CATALOGUE_VERSION_MASK =
+    catl::common::CATALOGUE_VERSION_MASK;
+static constexpr uint16_t CATALOGUE_COMPRESS_LEVEL_MASK =
+    catl::common::CATALOGUE_COMPRESS_LEVEL_MASK;
+
+// Use the common header type
+using CatlHeader = catl::common::CATLHeader;
 
 #pragma pack(push, 1)
 struct LedgerHeader
