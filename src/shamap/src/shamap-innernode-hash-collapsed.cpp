@@ -51,9 +51,7 @@ SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
 
         // Add the prefix
         auto prefix = HashPrefix::innerNode;
-        if (!hasher.update(prefix.data(), prefix.size()))
-            throw HashCalculationException(
-                "Failed to update digest with prefix");
+        hasher.update(prefix.data(), prefix.size());
 
         // Use local variable, not static
         const Hash256 zeroHash = Hash256::zero();
@@ -134,9 +132,7 @@ SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
             }
 
             // Use this branch's hash for the digest update
-            if (!hasher.update(child_hash.data(), Hash256::size()))
-                throw HashCalculationException(
-                    "Failed to update digest with child data");
+            hasher.update(child_hash.data(), Hash256::size());
         }
 
         // Finalize hash and take first 256 bits
@@ -232,9 +228,7 @@ SHAMapInnerNode::compute_skipped_hash_recursive(
 
         // Add the prefix
         auto prefix = HashPrefix::innerNode;
-        if (!hasher.update(prefix.data(), prefix.size()))
-            throw HashCalculationException(
-                "Failed to update digest with prefix");
+        hasher.update(prefix.data(), prefix.size());
 
         // Calculate the path depth - this is the parent depth (this->depth_)
         // plus the current round
@@ -292,9 +286,7 @@ SHAMapInnerNode::compute_skipped_hash_recursive(
                 OLOGD("Branch ", i, " not on path, using zero hash");
             }
 
-            if (!hasher.update(hashData, Hash256::size()))
-                throw HashCalculationException(
-                    "Failed to update digest in skipped hash");
+            hasher.update(hashData, Hash256::size());
         }
 
         // Finalize the hash
@@ -338,9 +330,7 @@ SHAMapInnerNode::compute_skipped_hash_stack(
 
             // Add the prefix
             auto prefix = HashPrefix::innerNode;
-            if (!hasher.update(prefix.data(), prefix.size()))
-                throw HashCalculationException(
-                    "Failed to update digest with prefix");
+            hasher.update(prefix.data(), prefix.size());
 
             int pathDepth = depth_ + currentRound;
             int selectedBranch = select_branch(index, pathDepth);
@@ -368,9 +358,7 @@ SHAMapInnerNode::compute_skipped_hash_stack(
                     hashData = zeroHash.data();
                 }
 
-                if (!hasher.update(hashData, Hash256::size()))
-                    throw HashCalculationException(
-                        "Failed to update digest in skipped hash");
+                hasher.update(hashData, Hash256::size());
             }
 
             // Finalize the hash

@@ -6,6 +6,7 @@
 
 namespace catl::v1 {
 
+// TODO: move to the catl-v1-utils.cpp
 using Sha512Hasher = crypto::Sha512Hasher;
 
 int

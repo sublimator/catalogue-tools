@@ -43,10 +43,10 @@ TEST(Sha512Hasher, TestVectors)
     for (const auto& [input, expected_hex] : vectors)
     {
         catl::crypto::Sha512Hasher hasher;
-        ASSERT_TRUE(hasher.update(input.data(), input.size()));
+        hasher.update(input.data(), input.size());
         unsigned char out[EVP_MAX_MD_SIZE];
         unsigned int out_len = 0;
-        ASSERT_TRUE(hasher.final(out, &out_len));
+        hasher.final(out, &out_len);
         std::string actual_hex = bytes_to_hex(out, out_len);
         // Remove spaces from expected_hex (in case of formatting)
         std::string expected = expected_hex;

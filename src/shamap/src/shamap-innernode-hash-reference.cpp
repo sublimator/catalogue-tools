@@ -26,9 +26,7 @@ SHAMapInnerNode::update_hash_reference(SHAMapOptions const& options)
 
         // Add the prefix
         auto prefix = HashPrefix::innerNode;
-        if (!hasher.update(prefix.data(), prefix.size()))
-            throw HashCalculationException(
-                "Failed to update digest with prefix");
+        hasher.update(prefix.data(), prefix.size());
 
         // Add each branch's hash (or zero hash for empty branches)
         for (int i = 0; i < 16; i++)
@@ -39,10 +37,7 @@ SHAMapInnerNode::update_hash_reference(SHAMapOptions const& options)
                 hashData = child->get_hash(options).data();
             }
 
-            if (!hasher.update(hashData, Hash256::size()))
-                throw HashCalculationException(
-                    "Failed to update digest with child data (branch " +
-                    std::to_string(i) + ")");
+            hasher.update(hashData, Hash256::size());
         }
 
         // Finalize hash and take first 256 bits

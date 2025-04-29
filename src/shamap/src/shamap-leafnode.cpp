@@ -65,17 +65,9 @@ SHAMapLeafNode::update_hash(SHAMapOptions const&)
         Sha512HalfHasher hasher;
 
         // Update with all hash components in order
-        if (!hasher.update(prefix.data(), prefix.size()))
-            throw HashCalculationException(
-                "Failed to update digest with prefix");
-
-        if (!hasher.update(item->slice().data(), item->slice().size()))
-            throw HashCalculationException(
-                "Failed to update digest with item data");
-
-        if (!hasher.update(item->key().data(), Key::size()))
-            throw HashCalculationException(
-                "Failed to update digest with item key");
+        hasher.update(prefix.data(), prefix.size());
+        hasher.update(item->slice().data(), item->slice().size());
+        hasher.update(item->key().data(), Key::size());
 
         // Finalize hash and take first 256 bits
         hash = hasher.finalize();

@@ -30,7 +30,7 @@ TEST(Sha512HalfHasher, BasicFunctionality)
     for (const auto& vector : test_vectors)
     {
         crypto::Sha512HalfHasher hasher;
-        ASSERT_TRUE(hasher.update(vector.input.data(), vector.input.size()));
+        hasher.update(vector.input.data(), vector.input.size());
 
         Hash256 result = hasher.finalize();
         std::string result_hex = result.hex();
@@ -47,14 +47,14 @@ TEST(Sha512HalfHasher, MultipleUpdates)
 
     // Single update
     crypto::Sha512HalfHasher single_hasher;
-    ASSERT_TRUE(single_hasher.update(input.data(), input.size()));
+    single_hasher.update(input.data(), input.size());
     Hash256 single_result = single_hasher.finalize();
 
     // Multiple updates
     crypto::Sha512HalfHasher multi_hasher;
     size_t mid = input.size() / 2;
-    ASSERT_TRUE(multi_hasher.update(input.data(), mid));
-    ASSERT_TRUE(multi_hasher.update(input.data() + mid, input.size() - mid));
+    multi_hasher.update(input.data(), mid);
+    multi_hasher.update(input.data() + mid, input.size() - mid);
     Hash256 multi_result = multi_hasher.finalize();
 
     // Results should be identical

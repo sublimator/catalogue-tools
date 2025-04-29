@@ -25,9 +25,9 @@ public:
      * Update the hash with more data.
      * @param data Pointer to data to hash
      * @param len Length of data in bytes
-     * @return true if successful, false on error
+     * @throws std::runtime_error if the update fails
      */
-    bool
+    void
     update(const void* data, size_t len);
 
     /**

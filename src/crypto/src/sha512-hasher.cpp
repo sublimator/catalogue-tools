@@ -15,8 +15,7 @@ Sha512Hasher::Sha512Hasher() : ctx_(nullptr)
     if (EVP_DigestInit_ex(
             static_cast<EVP_MD_CTX*>(ctx_), EVP_sha512(), nullptr) != 1)
     {
-        EVP_MD_CTX_free(static_cast<EVP_MD_CTX*>(ctx_));
-        throw std::runtime_error("Sha512Hasher: EVP_DigestInit_ex() failed");
+        cleanup_and_throw("Sha512Hasher: EVP_DigestInit_ex() failed");
     }
 }
 
@@ -37,23 +36,34 @@ Sha512Hasher::check_context() const
     }
 }
 
-bool
+void
+Sha512Hasher::cleanup_and_throw(const char* msg)
+{
+    EVP_MD_CTX_free(static_cast<EVP_MD_CTX*>(ctx_));
+    ctx_ = nullptr;
+    throw std::runtime_error(msg);
+}
+
+void
 Sha512Hasher::update(const void* data, size_t len)
 {
     check_context();
-    return EVP_DigestUpdate(static_cast<EVP_MD_CTX*>(ctx_), data, len) == 1;
+    if (EVP_DigestUpdate(static_cast<EVP_MD_CTX*>(ctx_), data, len) != 1)
+    {
+        cleanup_and_throw("Sha512Hasher: EVP_DigestUpdate failed");
+    }
 }
 
-bool
+void
 Sha512Hasher::final(unsigned char* out, unsigned int* out_len)
 {
     check_context();
-    bool result =
-        EVP_DigestFinal_ex(static_cast<EVP_MD_CTX*>(ctx_), out, out_len) == 1;
-    // Invalidate context after final
+    if (EVP_DigestFinal_ex(static_cast<EVP_MD_CTX*>(ctx_), out, out_len) != 1)
+    {
+        cleanup_and_throw("Sha512Hasher: EVP_DigestFinal_ex failed");
+    }
     EVP_MD_CTX_free(static_cast<EVP_MD_CTX*>(ctx_));
     ctx_ = nullptr;
-    return result;
 }
 
 }  // namespace catl::crypto
