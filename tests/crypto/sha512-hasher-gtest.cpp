@@ -1,4 +1,4 @@
-#include "catl/common/sha512-hasher.h"
+#include "catl/crypto/sha512-hasher.h"
 #include "catl/test-utils/test-utils.h"
 #include <boost/json.hpp>
 #include <fstream>
@@ -39,15 +39,14 @@ load_vectors(const std::string& path)
 
 TEST(Sha512Hasher, TestVectors)
 {
-    auto vectors =
-        load_vectors("catalogue-common/fixture/sha512-test-vectors.json");
+    auto vectors = load_vectors("crypto/fixture/sha512-test-vectors.json");
     for (const auto& [input, expected_hex] : vectors)
     {
-        catl::common::Sha512Hasher hasher;
-        ASSERT_TRUE(hasher.update(input.data(), input.size()));
+        catl::crypto::Sha512Hasher hasher;
+        hasher.update(input.data(), input.size());
         unsigned char out[EVP_MAX_MD_SIZE];
         unsigned int out_len = 0;
-        ASSERT_TRUE(hasher.final(out, &out_len));
+        hasher.final(out, &out_len);
         std::string actual_hex = bytes_to_hex(out, out_len);
         // Remove spaces from expected_hex (in case of formatting)
         std::string expected = expected_hex;

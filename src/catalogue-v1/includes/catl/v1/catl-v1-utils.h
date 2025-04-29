@@ -1,12 +1,13 @@
 #pragma once
 
-#include "catl/common/sha512-hasher.h"
+#include "catl/crypto/sha512-hasher.h"
 #include "catl/v1/catl-v1-structs.h"
 #include <string>
 
 namespace catl::v1 {
 
-using Sha512Hasher = catl::common::Sha512Hasher;
+// TODO: move to the catl-v1-utils.cpp
+using Sha512Hasher = crypto::Sha512Hasher;
 
 int
 get_compression_level(uint16_t version_field);

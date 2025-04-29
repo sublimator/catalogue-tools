@@ -474,45 +474,48 @@ public:
             return false;
         }
 
-        // Use the Sha512Hasher class from the catalogue-v1 library
-        Sha512Hasher hasher;
-
-        // Read and process the header with zero hash
-        hashFile.read(reinterpret_cast<char*>(&newHeader), sizeof(CatlHeader));
-        std::fill(newHeader.hash.begin(), newHeader.hash.end(), 0);
-
-        // Add the modified header to the hash
-        if (!hasher.update(&newHeader, sizeof(CatlHeader)))
-        {
-            std::cerr << "Failed to update digest with header" << std::endl;
-            hashFile.close();
-            return false;
-        }
-
-        // Read and hash the rest of the file
-        while (hashFile)
-        {
-            hashFile.read(buffer, sizeof(buffer));
-            std::streamsize bytesRead = hashFile.gcount();
-            if (bytesRead > 0)
-            {
-                if (!hasher.update(buffer, bytesRead))
-                {
-                    std::cerr << "Failed to update digest with file data"
-                              << std::endl;
-                    hashFile.close();
-                    return false;
-                }
-            }
-        }
-
-        // Get the hash result
+        // Declare hash_result outside the try block so it's visible in the
+        // scope where it's used later
         std::array<unsigned char, 64> hash_result;
         unsigned int hashLen = 0;
-        if (!hasher.final(hash_result.data(), &hashLen) ||
-            hashLen != hash_result.size())
+
+        try
         {
-            std::cerr << "Failed to finalize digest" << std::endl;
+            // Use the Sha512Hasher class from the catalogue-v1 library
+            Sha512Hasher hasher;
+
+            // Read and process the header with zero hash
+            hashFile.read(
+                reinterpret_cast<char*>(&newHeader), sizeof(CatlHeader));
+            std::fill(newHeader.hash.begin(), newHeader.hash.end(), 0);
+
+            // Add the modified header to the hash
+            hasher.update(&newHeader, sizeof(CatlHeader));
+
+            // Read and hash the rest of the file
+            while (hashFile)
+            {
+                hashFile.read(buffer, sizeof(buffer));
+                std::streamsize bytesRead = hashFile.gcount();
+                if (bytesRead > 0)
+                {
+                    hasher.update(buffer, bytesRead);
+                }
+            }
+
+            // Get the hash result
+            hasher.final(hash_result.data(), &hashLen);
+
+            if (hashLen != hash_result.size())
+            {
+                std::cerr << "Unexpected hash length" << std::endl;
+                hashFile.close();
+                return false;
+            }
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "Hash computation failed: " << e.what() << std::endl;
             hashFile.close();
             return false;
         }

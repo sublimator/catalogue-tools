@@ -1,16 +1,18 @@
 #include "catl/core/types.h"
+#include "catl/crypto/sha512-half-hasher.h"
 #include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap-options.h"
 #include <array>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstring>
-#include <openssl/evp.h>
 
 #include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-leafnode.h"
 
 #include "catl/shamap/shamap-hashprefix.h"
 #include <utility>
+
+using catl::crypto::Sha512HalfHasher;
 
 //----------------------------------------------------------
 // SHAMapLeafNode Implementation
@@ -57,42 +59,25 @@ SHAMapLeafNode::update_hash(SHAMapOptions const&)
             set(HashPrefix::leafNode);
             break;
     }
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    if (ctx == nullptr)
+
+    try
     {
-        throw HashCalculationException("Failed to create EVP_MD_CTX");
+        Sha512HalfHasher hasher;
+
+        // Update with all hash components in order
+        hasher.update(prefix.data(), prefix.size());
+        hasher.update(item->slice().data(), item->slice().size());
+        hasher.update(item->key().data(), Key::size());
+
+        // Finalize hash and take first 256 bits
+        hash = hasher.finalize();
+        hash_valid_ = true;
     }
-    if (EVP_DigestInit_ex(ctx, EVP_sha512(), nullptr) != 1)
+    catch (const std::exception& e)
     {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to initialize SHA-512 digest");
-    }
-    if (EVP_DigestUpdate(ctx, &prefix, sizeof(prefix)) != 1)
-    {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to update digest with prefix");
-    }
-    if (EVP_DigestUpdate(ctx, item->slice().data(), item->slice().size()) != 1)
-    {
-        EVP_MD_CTX_free(ctx);
         throw HashCalculationException(
-            "Failed to update digest with item data");
+            std::string("Hash calculation failed: ") + e.what());
     }
-    if (EVP_DigestUpdate(ctx, item->key().data(), Key::size()) != 1)
-    {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to update digest with item key");
-    }
-    std::array<unsigned char, 64> fullHash{};
-    unsigned int hashLen = 0;
-    if (EVP_DigestFinal_ex(ctx, fullHash.data(), &hashLen) != 1)
-    {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to finalize digest");
-    }
-    EVP_MD_CTX_free(ctx);
-    hash = Hash256(fullHash.data());
-    hash_valid_ = true;
 }
 
 boost::intrusive_ptr<MmapItem>

@@ -1,4 +1,4 @@
-add_library(catl_catalogue_common src/sha512-hasher.cpp)
+add_library(catl_catalogue_common src/catalogue-common.cpp)
 
 target_include_directories(catl_catalogue_common
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/includes)

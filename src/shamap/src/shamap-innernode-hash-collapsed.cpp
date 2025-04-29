@@ -6,7 +6,7 @@
 
 #include "catl/shamap/shamap-innernode.h"
 
-#include <openssl/evp.h>
+#include "catl/crypto/sha512-half-hasher.h"
 
 #include "catl/core/log-macros.h"
 #include "catl/core/logger.h"
@@ -15,6 +15,8 @@
 #include "catl/shamap/shamap-utils.h"
 #include <string>
 #include <vector>
+
+using catl::crypto::Sha512HalfHasher;
 
 /**
  * Calculate the hash for this inner node using the collapsed tree approach.
@@ -43,126 +45,110 @@ SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
 
     OLOGD("Calculating hash for node with branch mask ", branchMask);
 
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    if (!ctx)
-        throw HashCalculationException("Failed to create EVP_MD_CTX");
-
-    if (EVP_DigestInit_ex(ctx, EVP_sha512(), nullptr) != 1)
+    try
     {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to initialize SHA-512 digest");
-    }
+        Sha512HalfHasher hasher;
 
-    auto prefix = HashPrefix::innerNode;
-    if (EVP_DigestUpdate(ctx, prefix.data(), prefix.size()) != 1)
-    {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to update digest with prefix");
-    }
+        // Add the prefix
+        auto prefix = HashPrefix::innerNode;
+        hasher.update(prefix.data(), prefix.size());
 
-    // Use local variable, not static
-    const Hash256 zeroHash = Hash256::zero();
+        // Use local variable, not static
+        const Hash256 zeroHash = Hash256::zero();
 
-    for (int i = 0; i < 16; i++)
-    {
-        // Create a local Hash256 for each branch
-        Hash256 child_hash = zeroHash;
-
-        if (auto child = children_->get_child(i))
+        for (int i = 0; i < 16; i++)
         {
-            if (child->is_inner())
+            // Create a local Hash256 for each branch
+            Hash256 child_hash = zeroHash;
+
+            if (auto child = children_->get_child(i))
             {
-                auto innerChild =
-                    boost::static_pointer_cast<SHAMapInnerNode>(child);
-                int skips = innerChild->get_depth() - depth_ - 1;
-
-                if (skips > 0)
+                if (child->is_inner())
                 {
-                    OLOGD(
-                        "Branch ",
-                        i,
-                        " has skipped inner nodes: ",
-                        skips,
-                        " levels");
+                    auto innerChild =
+                        boost::static_pointer_cast<SHAMapInnerNode>(child);
+                    int skips = innerChild->get_depth() - depth_ - 1;
 
-                    auto leaf = first_leaf(innerChild);
-                    if (!leaf)
+                    if (skips > 0)
                     {
-                        // No leaf found, use regular hash
                         OLOGD(
-                            "No leaf found in branch ",
+                            "Branch ",
                             i,
-                            ", using regular inner hash");
-                        child_hash = child->get_hash(options);
-                    }
-                    else
-                    {
-                        // Use leaf key for path
-                        auto index = leaf->get_item()->key();
-                        OLOGD_KEY(
-                            "Found leaf for path in branch " +
-                                std::to_string(i) + " with key: ",
-                            index);
+                            " has skipped inner nodes: ",
+                            skips,
+                            " levels");
 
-                        if (options.skipped_inners_hash_impl ==
-                            SkippedInnersHashImpl::recursive_simple)
+                        auto leaf = first_leaf(innerChild);
+                        if (!leaf)
                         {
-                            child_hash = compute_skipped_hash_recursive(
-                                options, innerChild, index, 1, skips);
+                            // No leaf found, use regular hash
+                            OLOGD(
+                                "No leaf found in branch ",
+                                i,
+                                ", using regular inner hash");
+                            child_hash = child->get_hash(options);
                         }
                         else
                         {
-                            child_hash = compute_skipped_hash_stack(
-                                options, innerChild, index, 1, skips);
+                            // Use leaf key for path
+                            auto index = leaf->get_item()->key();
+                            OLOGD_KEY(
+                                "Found leaf for path in branch " +
+                                    std::to_string(i) + " with key: ",
+                                index);
+
+                            if (options.skipped_inners_hash_impl ==
+                                SkippedInnersHashImpl::recursive_simple)
+                            {
+                                child_hash = compute_skipped_hash_recursive(
+                                    options, innerChild, index, 1, skips);
+                            }
+                            else
+                            {
+                                child_hash = compute_skipped_hash_stack(
+                                    options, innerChild, index, 1, skips);
+                            }
                         }
+                    }
+                    else
+                    {
+                        // Normal case, no skips
+                        OLOGD(
+                            "Branch ", i, " has normal inner node (no skips)");
+                        child_hash = child->get_hash(options);
                     }
                 }
                 else
                 {
-                    // Normal case, no skips
-                    OLOGD("Branch ", i, " has normal inner node (no skips)");
+                    // Leaf node
+                    OLOGD("Branch ", i, " has leaf node");
                     child_hash = child->get_hash(options);
                 }
             }
             else
             {
-                // Leaf node
-                OLOGD("Branch ", i, " has leaf node");
-                child_hash = child->get_hash(options);
+                OLOGD("Branch ", i, " is empty, using zero hash");
+                // child_hash already contains zero hash
             }
-        }
-        else
-        {
-            OLOGD("Branch ", i, " is empty, using zero hash");
-            // child_hash already contains zero hash
+
+            // Use this branch's hash for the digest update
+            hasher.update(child_hash.data(), Hash256::size());
         }
 
-        // Use this branch's hash for the digest update
-        if (EVP_DigestUpdate(ctx, child_hash.data(), Hash256::size()) != 1)
-        {
-            EVP_MD_CTX_free(ctx);
-            throw HashCalculationException(
-                "Failed to update digest with child data");
-        }
+        // Finalize hash and take first 256 bits
+        hash = hasher.finalize();
+        hash_valid_ = true;
+
+        OLOGD("Hash calculation complete: ", hash.hex());
+
+        // Once hash is calculated, canonicalize to save memory
+        children_->canonicalize();
     }
-
-    std::array<uint8_t, 64> fullHash{};
-    unsigned int hashLen = 0;
-    if (EVP_DigestFinal_ex(ctx, fullHash.data(), &hashLen) != 1)
+    catch (const std::exception& e)
     {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to finalize digest");
+        throw HashCalculationException(
+            std::string("Hash calculation failed: ") + e.what());
     }
-
-    EVP_MD_CTX_free(ctx);
-
-    hash = Hash256(fullHash.data());
-    hash_valid_ = true;
-
-    OLOGD("Hash calculation complete: ", hash.hex());
-
-    // Once hash is calculated, canonicalize to save memory
-    children_->canonicalize();
 }
 
 // Helper method to find the first leaf in a subtree
@@ -236,107 +222,89 @@ SHAMapInnerNode::compute_skipped_hash_recursive(
     // Static zero hash for non-path branches
     static const Hash256 zeroHash = Hash256::zero();
 
-    // Create digest context with proper prefix
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    if (!ctx)
-        throw HashCalculationException("Failed to create EVP_MD_CTX");
-
-    if (EVP_DigestInit_ex(ctx, EVP_sha512(), nullptr) != 1)
+    try
     {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to initialize SHA-512 digest");
-    }
+        Sha512HalfHasher hasher;
 
-    auto prefix = HashPrefix::innerNode;
-    if (EVP_DigestUpdate(ctx, prefix.data(), prefix.size()) != 1)
-    {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to update digest with prefix");
-    }
+        // Add the prefix
+        auto prefix = HashPrefix::innerNode;
+        hasher.update(prefix.data(), prefix.size());
 
-    // Calculate the path depth - this is the parent depth (this->depth_) plus
-    // the current round
-    int pathDepth = depth_ + round;
+        // Calculate the path depth - this is the parent depth (this->depth_)
+        // plus the current round
+        int pathDepth = depth_ + round;
 
-    // Determine which branch we're on at this depth level
-    int selectedBranch = select_branch(index, pathDepth);
+        // Determine which branch we're on at this depth level
+        int selectedBranch = select_branch(index, pathDepth);
 
-    OLOGD(
-        "Recursive skipped hash - round=",
-        round,
-        ", depth=",
-        pathDepth,
-        ", branch=",
-        selectedBranch,
-        ", terminal=",
-        (round == skips));
+        OLOGD(
+            "Recursive skipped hash - round=",
+            round,
+            ", depth=",
+            pathDepth,
+            ", branch=",
+            selectedBranch,
+            ", terminal=",
+            (round == skips));
 
-    // Process all 16 branches
-    for (int i = 0; i < 16; i++)
-    {
-        const uint8_t* hashData = nullptr;
-
-        if (i == selectedBranch)
+        // Process all 16 branches
+        for (int i = 0; i < 16; i++)
         {
-            // This branch is on our path
-            if (round == skips)
+            const uint8_t* hashData = nullptr;
+
+            if (i == selectedBranch)
             {
-                // We're at the terminal level, use the inner node's hash
-                // directly
-                hashData = inner->get_hash(options).data();
-                OLOGD(
-                    "Terminal branch ",
-                    i,
-                    " using hash: ",
-                    inner->get_hash(options).hex().substr(0, 16));
+                // This branch is on our path
+                if (round == skips)
+                {
+                    // We're at the terminal level, use the inner node's hash
+                    // directly
+                    hashData = inner->get_hash(options).data();
+                    OLOGD(
+                        "Terminal branch ",
+                        i,
+                        " using hash: ",
+                        inner->get_hash(options).hex().substr(0, 16));
+                }
+                else
+                {
+                    // We need to recurse deeper
+                    Hash256 nextHash = compute_skipped_hash_recursive(
+                        options, inner, index, round + 1, skips);
+                    hashData = nextHash.data();
+                    OLOGD(
+                        "Non-terminal branch ",
+                        i,
+                        " using recursive hash: ",
+                        nextHash.hex().substr(0, 16));
+                }
             }
             else
             {
-                // We need to recurse deeper
-                Hash256 nextHash = compute_skipped_hash_recursive(
-                    options, inner, index, round + 1, skips);
-                hashData = nextHash.data();
-                OLOGD(
-                    "Non-terminal branch ",
-                    i,
-                    " using recursive hash: ",
-                    nextHash.hex().substr(0, 16));
+                // Not on our path - use zero hash
+                hashData = zeroHash.data();
+                OLOGD("Branch ", i, " not on path, using zero hash");
             }
-        }
-        else
-        {
-            // Not on our path - use zero hash
-            hashData = zeroHash.data();
-            OLOGD("Branch ", i, " not on path, using zero hash");
+
+            hasher.update(hashData, Hash256::size());
         }
 
-        if (EVP_DigestUpdate(ctx, hashData, Hash256::size()) != 1)
-        {
-            EVP_MD_CTX_free(ctx);
-            throw HashCalculationException(
-                "Failed to update digest in skipped hash");
-        }
+        // Finalize the hash
+        Hash256 result = hasher.finalize();
+
+        OLOGD(
+            "Completed round ",
+            round,
+            " recursive hash: ",
+            result.hex().substr(0, 16));
+
+        return result;
     }
-
-    // Finalize the hash
-    std::array<uint8_t, 64> fullHash{};
-    unsigned int hashLen = 0;
-    if (EVP_DigestFinal_ex(ctx, fullHash.data(), &hashLen) != 1)
+    catch (const std::exception& e)
     {
-        EVP_MD_CTX_free(ctx);
-        throw HashCalculationException("Failed to finalize digest");
+        throw HashCalculationException(
+            std::string("Hash calculation failed: ") + e.what());
     }
-
-    EVP_MD_CTX_free(ctx);
-    Hash256 result = Hash256(fullHash.data());
-
-    OLOGD(
-        "Completed round ",
-        round,
-        " recursive hash: ",
-        result.hex().substr(0, 16));
-
-    return result;
 }
 
 Hash256
@@ -353,74 +321,56 @@ SHAMapInnerNode::compute_skipped_hash_stack(
     // Store computed hashes for each level
     std::vector<Hash256> levelHashes(skips - round + 1);
 
-    // Compute hash for each level, starting from the terminal level
-    for (int currentRound = skips; currentRound >= round; currentRound--)
+    try
     {
-        EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-        if (!ctx)
-            throw HashCalculationException("Failed to create EVP_MD_CTX");
-
-        if (EVP_DigestInit_ex(ctx, EVP_sha512(), nullptr) != 1)
+        // Compute hash for each level, starting from the terminal level
+        for (int currentRound = skips; currentRound >= round; currentRound--)
         {
-            EVP_MD_CTX_free(ctx);
-            throw HashCalculationException(
-                "Failed to initialize SHA-512 digest");
-        }
+            Sha512HalfHasher hasher;
 
-        auto prefix = HashPrefix::innerNode;
-        if (EVP_DigestUpdate(ctx, prefix.data(), prefix.size()) != 1)
-        {
-            EVP_MD_CTX_free(ctx);
-            throw HashCalculationException(
-                "Failed to update digest with prefix");
-        }
+            // Add the prefix
+            auto prefix = HashPrefix::innerNode;
+            hasher.update(prefix.data(), prefix.size());
 
-        int pathDepth = depth_ + currentRound;
-        int selectedBranch = select_branch(index, pathDepth);
+            int pathDepth = depth_ + currentRound;
+            int selectedBranch = select_branch(index, pathDepth);
 
-        for (int i = 0; i < 16; i++)
-        {
-            const uint8_t* hashData;
-
-            if (i == selectedBranch)
+            for (int i = 0; i < 16; i++)
             {
-                if (currentRound == skips)
+                const uint8_t* hashData;
+
+                if (i == selectedBranch)
                 {
-                    // Terminal level - use inner's hash
-                    hashData = inner->get_hash(options).data();
+                    if (currentRound == skips)
+                    {
+                        // Terminal level - use inner's hash
+                        hashData = inner->get_hash(options).data();
+                    }
+                    else
+                    {
+                        // Non-terminal level - use hash from next level
+                        hashData = levelHashes[currentRound - round + 1].data();
+                    }
                 }
                 else
                 {
-                    // Non-terminal level - use hash from next level
-                    hashData = levelHashes[currentRound - round + 1].data();
+                    // Branch not on path - use zero hash
+                    hashData = zeroHash.data();
                 }
-            }
-            else
-            {
-                // Branch not on path - use zero hash
-                hashData = zeroHash.data();
+
+                hasher.update(hashData, Hash256::size());
             }
 
-            if (EVP_DigestUpdate(ctx, hashData, Hash256::size()) != 1)
-            {
-                EVP_MD_CTX_free(ctx);
-                throw HashCalculationException(
-                    "Failed to update digest in skipped hash");
-            }
+            // Finalize the hash
+            levelHashes[currentRound - round] = hasher.finalize();
         }
 
-        std::array<uint8_t, 64> fullHash{};
-        unsigned int hashLen = 0;
-        if (EVP_DigestFinal_ex(ctx, fullHash.data(), &hashLen) != 1)
-        {
-            EVP_MD_CTX_free(ctx);
-            throw HashCalculationException("Failed to finalize digest");
-        }
-
-        EVP_MD_CTX_free(ctx);
-        levelHashes[currentRound - round] = Hash256(fullHash.data());
+        // Return the hash for the initial level
+        return levelHashes[0];
     }
-
-    // Return the hash for the initial level
-    return levelHashes[0];
+    catch (const std::exception& e)
+    {
+        throw HashCalculationException(
+            std::string("Hash calculation failed: ") + e.what());
+    }
 }

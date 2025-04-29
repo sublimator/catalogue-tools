@@ -19,7 +19,10 @@ target_include_directories(
 # Link dependencies
 target_link_libraries(
   catl_catalogue_v1
-  PUBLIC catl_core catl_shamap catl::catalogue_common
+  PUBLIC catl_core
+         catl_shamap
+         catl::crypto
+         catl::catalogue_common
   PRIVATE Boost::filesystem Boost::iostreams OpenSSL::SSL)
 
 # Create alias target for easier reference

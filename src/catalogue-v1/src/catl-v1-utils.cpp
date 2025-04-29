@@ -33,58 +33,57 @@ verify_hash(const CatlHeader& header, const std::string& filename)
         return false;
     }
 
-    Sha512Hasher hasher;
-    if (!hasher.update(nullptr, 0))
-    {  // Just to check ctx_ is valid
-        return false;
-    }
+    try
+    {
+        Sha512Hasher hasher;
+        // Check context is valid
+        hasher.update(nullptr, 0);
 
-    // Hash header up to hash offset
-    std::vector<char> buffer(HASH_OFFSET);
-    file.read(buffer.data(), buffer.size());
-    if (file.gcount() != static_cast<std::streamsize>(buffer.size()))
-    {
-        return false;
-    }
-    if (!hasher.update(buffer.data(), buffer.size()))
-    {
-        return false;
-    }
-
-    // Hash 64 zero bytes (the hash field)
-    std::array<char, HASH_SIZE> zero_hash = {};
-    if (!hasher.update(zero_hash.data(), zero_hash.size()))
-    {
-        return false;
-    }
-
-    // Hash the rest of the file
-    file.seekg(HASH_OFFSET + HASH_SIZE, std::ios::beg);
-    buffer.resize(64 * 1024);
-    while (file)
-    {
+        // Hash header up to hash offset
+        std::vector<char> buffer(HASH_OFFSET);
         file.read(buffer.data(), buffer.size());
-        std::streamsize bytes_read = file.gcount();
-        if (bytes_read > 0)
+        if (file.gcount() != static_cast<std::streamsize>(buffer.size()))
         {
-            if (!hasher.update(buffer.data(), bytes_read))
+            return false;
+        }
+        hasher.update(buffer.data(), buffer.size());
+
+        // Hash 64 zero bytes (the hash field)
+        std::array<char, HASH_SIZE> zero_hash = {};
+        hasher.update(zero_hash.data(), zero_hash.size());
+
+        // Hash the rest of the file
+        file.seekg(HASH_OFFSET + HASH_SIZE, std::ios::beg);
+        buffer.resize(64 * 1024);
+        while (file)
+        {
+            file.read(buffer.data(), buffer.size());
+            std::streamsize bytes_read = file.gcount();
+            if (bytes_read > 0)
             {
-                return false;
+                hasher.update(buffer.data(), bytes_read);
             }
         }
-    }
 
-    // Finalize hash
-    std::array<unsigned char, HASH_SIZE> computed_hash;
-    unsigned int hash_len = 0;
-    if (hasher.final(computed_hash.data(), &hash_len) && hash_len == HASH_SIZE)
-    {
+        // Finalize hash
+        std::array<unsigned char, HASH_SIZE> computed_hash;
+        unsigned int hash_len = 0;
+        hasher.final(computed_hash.data(), &hash_len);
+
+        if (hash_len != HASH_SIZE)
+        {
+            return false;
+        }
+
         // Compare to header.hash
         return (
             std::memcmp(computed_hash.data(), header.hash.data(), HASH_SIZE) ==
             0);
     }
-    return false;
+    catch (const std::exception&)
+    {
+        return false;
+    }
 }
 
 }  // namespace catl::v1

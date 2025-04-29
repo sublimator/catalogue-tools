@@ -6,8 +6,8 @@ file(
   ${CMAKE_CURRENT_SOURCE_DIR}/*-gtest.cpp)
 message(STATUS "Found test files: ${TEST_FILES}")
 
+add_subdirectory(crypto)
 add_subdirectory(test-utils)
-add_subdirectory(catalogue-common)
 add_subdirectory(catalogue-v1)
 add_subdirectory(shamap)
 
