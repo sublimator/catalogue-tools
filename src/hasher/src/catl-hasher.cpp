@@ -408,12 +408,13 @@ private:
         LOGI(
             "  Ledger Hash:      ",
             Hash256(info.hash).hex());  // Using efficient macro
-        LOGI("  Parent Hash:      ", Hash256(info.parentHash).hex());
-        LOGI("  AccountState Hash:", Hash256(info.accountHash).hex());
-        LOGI("  Transaction Hash: ", Hash256(info.txHash).hex());
-        LOGI("  Close Time:       ", utils::format_ripple_time(info.closeTime));
+        LOGI("  Parent Hash:      ", Hash256(info.parent_hash).hex());
+        LOGI("  AccountState Hash:", Hash256(info.account_hash).hex());
+        LOGI("  Transaction Hash: ", Hash256(info.tx_hash).hex());
+        LOGI(
+            "  Close Time:       ", utils::format_ripple_time(info.close_time));
         LOGI("  Drops:            ", info.drops);
-        LOGI("  Close Flags:      ", info.closeFlags);
+        LOGI("  Close Flags:      ", info.close_flags);
         LOGI("  Offset at start:  ", initialOffset);
 
         // Process Account State Map
@@ -491,9 +492,12 @@ private:
         // Verify Hashes
         LOGI("Verifying map hashes for ledger ", info.sequence);
         verifyMapHash(
-            stateMap, Hash256(info.accountHash), "AccountState", info.sequence);
+            stateMap,
+            Hash256(info.account_hash),
+            "AccountState",
+            info.sequence);
         verifyMapHash(
-            txMap, Hash256(info.txHash), "Transaction", info.sequence);
+            txMap, Hash256(info.tx_hash), "Transaction", info.sequence);
 
         stats.ledgersProcessed++;
         // LOG_INFO("--- Completed Ledger ", info.sequence, " ---");

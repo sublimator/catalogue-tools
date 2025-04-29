@@ -158,16 +158,16 @@ Reader::catalogue_version() const
     return catalogue_version_;
 }
 
-std::optional<LedgerHeader>
-Reader::read_ledger_header()
+std::optional<LedgerInfo>
+Reader::read_ledger_info()
 {
-    LedgerHeader ledger_header;  // NOLINT(*-pro-type-member-init)
+    LedgerInfo ledger_header;  // NOLINT(*-pro-type-member-init)
     std::streamsize bytes_read = 0;
 
     if (input_stream_)
     {
         input_stream_->read(
-            reinterpret_cast<char*>(&ledger_header), sizeof(LedgerHeader));
+            reinterpret_cast<char*>(&ledger_header), sizeof(LedgerInfo));
         bytes_read = input_stream_->gcount();
     }
     else
@@ -175,7 +175,7 @@ Reader::read_ledger_header()
         return std::nullopt;
     }
 
-    if (bytes_read != sizeof(LedgerHeader))
+    if (bytes_read != sizeof(LedgerInfo))
     {
         return std::nullopt;
     }

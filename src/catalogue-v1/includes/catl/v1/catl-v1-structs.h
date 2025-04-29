@@ -1,8 +1,10 @@
 #pragma once
 
-#include "catl/common/catalogue-types.h"
 #include <array>
 #include <cstdint>
+
+#include "catl/common/catalogue-types.h"
+#include "catl/common/ledger-types.h"
 
 namespace catl::v1 {
 
@@ -20,21 +22,7 @@ static constexpr uint16_t CATALOGUE_COMPRESS_LEVEL_MASK =
 // Use the common header type
 using CatlHeader = catl::common::CATLHeader;
 
-#pragma pack(push, 1)
-struct LedgerHeader
-{
-    uint32_t sequence;
-    std::array<uint8_t, 32> hash;
-    std::array<uint8_t, 32> parent_hash;
-    std::array<uint8_t, 32> account_hash;
-    std::array<uint8_t, 32> tx_hash;
-    uint64_t drops;
-    int32_t close_flags;
-    uint32_t close_time_resolution;
-    uint64_t close_time;
-    uint64_t parent_close_time;
-};
-#pragma pack(pop)
+using LedgerInfo = catl::common::LedgerInfo;
 
 // SHAMap node types
 enum SHAMapNodeType : uint8_t {

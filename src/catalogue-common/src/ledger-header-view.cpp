@@ -7,13 +7,13 @@
 
 namespace catl::common {
 
-LedgerHeaderView::LedgerHeaderView(const uint8_t* headerData) : data(headerData)
+LedgerInfoView::LedgerInfoView(const uint8_t* headerData) : data(headerData)
 {
     // Just store the pointer, no copying
 }
 
 uint32_t
-LedgerHeaderView::sequence() const
+LedgerInfoView::sequence() const
 {
     uint32_t seq;
     std::memcpy(&seq, data + offsetof(LedgerInfo, sequence), sizeof(uint32_t));
@@ -21,40 +21,40 @@ LedgerHeaderView::sequence() const
 }
 
 Hash256
-LedgerHeaderView::hash() const
+LedgerInfoView::hash() const
 {
     return Hash256(data + offsetof(LedgerInfo, hash));
 }
 
 Hash256
-LedgerHeaderView::parent_hash() const
+LedgerInfoView::parent_hash() const
 {
-    return Hash256(data + offsetof(LedgerInfo, parentHash));
+    return Hash256(data + offsetof(LedgerInfo, parent_hash));
 }
 
 Hash256
-LedgerHeaderView::transaction_hash() const
+LedgerInfoView::transaction_hash() const
 {
-    return Hash256(data + offsetof(LedgerInfo, txHash));
+    return Hash256(data + offsetof(LedgerInfo, tx_hash));
 }
 
 Hash256
-LedgerHeaderView::account_hash() const
+LedgerInfoView::account_hash() const
 {
-    return Hash256(data + offsetof(LedgerInfo, accountHash));
+    return Hash256(data + offsetof(LedgerInfo, account_hash));
 }
 
 uint32_t
-LedgerHeaderView::close_time() const
+LedgerInfoView::close_time() const
 {
     uint32_t time;
     std::memcpy(
-        &time, data + offsetof(LedgerInfo, closeTime), sizeof(uint32_t));
+        &time, data + offsetof(LedgerInfo, close_time), sizeof(uint32_t));
     return time;
 }
 
 uint64_t
-LedgerHeaderView::drops() const
+LedgerInfoView::drops() const
 {
     uint64_t amount;
     std::memcpy(&amount, data + offsetof(LedgerInfo, drops), sizeof(uint64_t));
@@ -62,16 +62,16 @@ LedgerHeaderView::drops() const
 }
 
 uint8_t
-LedgerHeaderView::close_flags() const
+LedgerInfoView::close_flags() const
 {
     uint8_t flags;
     std::memcpy(
-        &flags, data + offsetof(LedgerInfo, closeFlags), sizeof(uint8_t));
+        &flags, data + offsetof(LedgerInfo, close_flags), sizeof(uint8_t));
     return flags;
 }
 
 std::string
-LedgerHeaderView::to_string() const
+LedgerInfoView::to_string() const
 {
     std::ostringstream oss;
     oss << "Ledger " << sequence() << ":\n"
