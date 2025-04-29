@@ -6,7 +6,7 @@
 
 #include "catl/core/types.h"
 #include "catl/shamap/shamap.h"
-#include "catl/v1/ledger-info-v1-view.h"
+#include "catl/v1/catl-v1-ledger-info-view.h"
 
 // Using v1 implementation
 using LedgerHeaderView = catl::v1::LedgerInfoV1View;

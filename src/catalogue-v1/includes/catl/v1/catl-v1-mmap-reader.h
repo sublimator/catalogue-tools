@@ -1,8 +1,8 @@
 #pragma once
 
 #include "catl/v1/catl-v1-errors.h"
+#include "catl/v1/catl-v1-ledger-info-view.h"
 #include "catl/v1/catl-v1-structs.h"
-#include "catl/v1/ledger-info-v1-view.h"
 #include <boost/iostreams/device/mapped_file.hpp>
 #include <memory>
 #include <string>
