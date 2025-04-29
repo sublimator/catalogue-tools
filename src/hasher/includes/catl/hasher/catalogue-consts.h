@@ -2,12 +2,10 @@
 
 #include "catl/common/catalogue-types.h"
 #include "catl/v1/catl-v1-structs.h"
-#include <array>
-#include <string>
 
 // Use the common types
 using CATLHeader = catl::common::CATLHeader;
-using LedgerInfo = catl::v1::LedgerInfoV1;
+using LedgerInfoV1 = catl::v1::LedgerInfoV1;
 
 // Alias the constants for backward compatibility
 static constexpr uint32_t CATL = catl::common::CATL_MAGIC;

@@ -368,26 +368,26 @@ private:
 
     // Process a single ledger
     size_t
-    processLedger(size_t offset, LedgerInfo& info)
+    processLedger(size_t offset, LedgerInfoV1& info)
     {
         stats.currentOffset = offset;
         size_t initialOffset = offset;
 
         // Check bounds for LedgerInfo
-        if (offset + sizeof(LedgerInfo) > fileSize)
+        if (offset + sizeof(LedgerInfoV1) > fileSize)
         {
             LOGE(
                 "Not enough data remaining (",
                 (fileSize > offset ? fileSize - offset : 0),
                 " bytes) for LedgerInfo structure (",
-                sizeof(LedgerInfo),
+                sizeof(LedgerInfoV1),
                 " bytes) at offset ",
                 offset);
             return initialOffset;  // Return original offset on error
         }
 
-        std::memcpy(&info, data + offset, sizeof(LedgerInfo));
-        offset += sizeof(LedgerInfo);
+        std::memcpy(&info, data + offset, sizeof(LedgerInfoV1));
+        offset += sizeof(LedgerInfoV1);
         stats.currentOffset = offset;
 
         // Sanity check ledger sequence
@@ -682,7 +682,7 @@ public:
 
             while (currentFileOffset < fileSize)
             {
-                LedgerInfo info = {};
+                LedgerInfoV1 info = {};
                 size_t nextOffset = processLedger(currentFileOffset, info);
 
 #if STORE_LEDGER_SNAPSHOTS
