@@ -6,8 +6,7 @@
 #include "catl/v1/catl-v1-utils.h"
 
 namespace catl::v1 {
-CatlV1Reader::CatlV1Reader(std::string filename)
-    : filename_(std::move(filename))
+Reader::Reader(std::string filename) : filename_(std::move(filename))
 {
     file_.open(filename_, std::ios::binary);
     if (!file_.is_open())
@@ -72,7 +71,7 @@ CatlV1Reader::CatlV1Reader(std::string filename)
     }
 }
 
-CatlV1Reader::~CatlV1Reader()
+Reader::~Reader()
 {
     if (file_.is_open())
     {
@@ -81,7 +80,7 @@ CatlV1Reader::~CatlV1Reader()
 }
 
 void
-CatlV1Reader::read_header()
+Reader::read_header()
 {
     // --- File size calculation and pointer reset ---
     // Move the file pointer to the end to get the file size
@@ -136,39 +135,39 @@ CatlV1Reader::read_header()
 }
 
 const CatlHeader&
-CatlV1Reader::header() const
+Reader::header() const
 {
     return header_;
 }
 
 bool
-CatlV1Reader::valid() const
+Reader::valid() const
 {
     return valid_;
 }
 
 int
-CatlV1Reader::compression_level() const
+Reader::compression_level() const
 {
     return compression_level_;
 }
 
 int
-CatlV1Reader::catalogue_version() const
+Reader::catalogue_version() const
 {
     return catalogue_version_;
 }
 
-std::optional<LedgerHeader>
-CatlV1Reader::read_ledger_header()
+std::optional<LedgerInfo>
+Reader::read_ledger_info()
 {
-    LedgerHeader ledger_header;  // NOLINT(*-pro-type-member-init)
+    LedgerInfo ledger_header;  // NOLINT(*-pro-type-member-init)
     std::streamsize bytes_read = 0;
 
     if (input_stream_)
     {
         input_stream_->read(
-            reinterpret_cast<char*>(&ledger_header), sizeof(LedgerHeader));
+            reinterpret_cast<char*>(&ledger_header), sizeof(LedgerInfo));
         bytes_read = input_stream_->gcount();
     }
     else
@@ -176,7 +175,7 @@ CatlV1Reader::read_ledger_header()
         return std::nullopt;
     }
 
-    if (bytes_read != sizeof(LedgerHeader))
+    if (bytes_read != sizeof(LedgerInfo))
     {
         return std::nullopt;
     }

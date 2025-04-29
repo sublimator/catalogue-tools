@@ -368,26 +368,26 @@ private:
 
     // Process a single ledger
     size_t
-    processLedger(size_t offset, LedgerInfo& info)
+    processLedger(size_t offset, LedgerInfoV1& info)
     {
         stats.currentOffset = offset;
         size_t initialOffset = offset;
 
         // Check bounds for LedgerInfo
-        if (offset + sizeof(LedgerInfo) > fileSize)
+        if (offset + sizeof(LedgerInfoV1) > fileSize)
         {
             LOGE(
                 "Not enough data remaining (",
                 (fileSize > offset ? fileSize - offset : 0),
                 " bytes) for LedgerInfo structure (",
-                sizeof(LedgerInfo),
+                sizeof(LedgerInfoV1),
                 " bytes) at offset ",
                 offset);
             return initialOffset;  // Return original offset on error
         }
 
-        std::memcpy(&info, data + offset, sizeof(LedgerInfo));
-        offset += sizeof(LedgerInfo);
+        std::memcpy(&info, data + offset, sizeof(LedgerInfoV1));
+        offset += sizeof(LedgerInfoV1);
         stats.currentOffset = offset;
 
         // Sanity check ledger sequence
@@ -408,12 +408,13 @@ private:
         LOGI(
             "  Ledger Hash:      ",
             Hash256(info.hash).hex());  // Using efficient macro
-        LOGI("  Parent Hash:      ", Hash256(info.parentHash).hex());
-        LOGI("  AccountState Hash:", Hash256(info.accountHash).hex());
-        LOGI("  Transaction Hash: ", Hash256(info.txHash).hex());
-        LOGI("  Close Time:       ", utils::format_ripple_time(info.closeTime));
+        LOGI("  Parent Hash:      ", Hash256(info.parent_hash).hex());
+        LOGI("  AccountState Hash:", Hash256(info.account_hash).hex());
+        LOGI("  Transaction Hash: ", Hash256(info.tx_hash).hex());
+        LOGI(
+            "  Close Time:       ", utils::format_ripple_time(info.close_time));
         LOGI("  Drops:            ", info.drops);
-        LOGI("  Close Flags:      ", info.closeFlags);
+        LOGI("  Close Flags:      ", info.close_flags);
         LOGI("  Offset at start:  ", initialOffset);
 
         // Process Account State Map
@@ -491,9 +492,12 @@ private:
         // Verify Hashes
         LOGI("Verifying map hashes for ledger ", info.sequence);
         verifyMapHash(
-            stateMap, Hash256(info.accountHash), "AccountState", info.sequence);
+            stateMap,
+            Hash256(info.account_hash),
+            "AccountState",
+            info.sequence);
         verifyMapHash(
-            txMap, Hash256(info.txHash), "Transaction", info.sequence);
+            txMap, Hash256(info.tx_hash), "Transaction", info.sequence);
 
         stats.ledgersProcessed++;
         // LOG_INFO("--- Completed Ledger ", info.sequence, " ---");
@@ -678,7 +682,7 @@ public:
 
             while (currentFileOffset < fileSize)
             {
-                LedgerInfo info = {};
+                LedgerInfoV1 info = {};
                 size_t nextOffset = processLedger(currentFileOffset, info);
 
 #if STORE_LEDGER_SNAPSHOTS
