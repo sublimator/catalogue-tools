@@ -1,6 +1,7 @@
 #pragma once
 
 #include "catl/common/catalogue-types.h"
+#include "catl/common/ledger-info.h"
 #include "catl/common/utils.h"
 
 namespace catl::common {
