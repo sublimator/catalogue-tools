@@ -2,7 +2,7 @@
 
 #include <cstddef>
 
-namespace catl::common {
+namespace catl::crypto {
 
 // RAII wrapper for OpenSSL SHA-512 EVP API
 class Sha512Hasher
@@ -28,4 +28,4 @@ private:
     void* ctx_;  // opaque pointer to avoid including openssl headers here
 };
 
-}  // namespace catl::common
+}  // namespace catl::crypto

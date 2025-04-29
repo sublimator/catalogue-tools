@@ -44,7 +44,10 @@ add_compile_definitions(PROJECT_ROOT="${PROJECT_ROOT}"
 # Add the core library
 add_subdirectory(src/core)
 
-# Add the catalogue-common library (shared functionality)
+# Add the catalogue-crypto library
+add_subdirectory(src/crypto)
+
+# Add the catalogue common library
 add_subdirectory(src/catalogue-common)
 
 # Add the catalogue v1 library

@@ -1,9 +1,8 @@
+#include "catl/crypto/sha512-hasher.h"
 #include <openssl/evp.h>
-
-#include "catl/v1/catl-v1-utils.h"
 #include <stdexcept>
 
-using namespace catl::v1;
+namespace catl::crypto {
 
 // RAII wrapper for OpenSSL SHA-512 EVP API
 Sha512Hasher::Sha512Hasher() : ctx_(nullptr)
@@ -56,3 +55,5 @@ Sha512Hasher::final(unsigned char* out, unsigned int* out_len)
     ctx_ = nullptr;
     return result;
 }
+
+}  // namespace catl::crypto

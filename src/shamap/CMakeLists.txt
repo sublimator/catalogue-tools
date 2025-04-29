@@ -20,6 +20,7 @@ target_link_libraries(
   catl_shamap
   PUBLIC catl_core # Depend on the core module
          Boost::json
+         catl::crypto # Add dependency for SHA-512 half hasher
   PRIVATE OpenSSL::SSL # Only used in implementation
 )
 
