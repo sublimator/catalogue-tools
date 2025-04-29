@@ -14,14 +14,14 @@ namespace catl::v1 {
  * in CATL files. Note that this layout does not match the canonical network
  * serialization format.
  */
-class LedgerInfoV1View
+class LedgerInfoView
 {
 private:
     const uint8_t* data;  // Raw pointer to header data
 
 public:
     // Constructor with raw data pointer
-    explicit LedgerInfoV1View(const uint8_t* headerData);
+    explicit LedgerInfoView(const uint8_t* headerData);
 
     // Core accessor methods
     uint32_t

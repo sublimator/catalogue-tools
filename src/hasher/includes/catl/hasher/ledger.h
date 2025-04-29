@@ -9,7 +9,7 @@
 #include "catl/v1/catl-v1-ledger-info-view.h"
 
 // Using v1 implementation
-using LedgerHeaderView = catl::v1::LedgerInfoV1View;
+using LedgerHeaderView = catl::v1::LedgerInfoView;
 
 /**
  * Ledger - Simple container for header view and maps

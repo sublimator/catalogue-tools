@@ -5,7 +5,7 @@
 
 // Use the common types
 using CATLHeader = catl::common::CATLHeader;
-using LedgerInfoV1 = catl::v1::LedgerInfoV1;
+using LedgerInfoV1 = catl::v1::LedgerInfo;
 
 // Alias the constants for backward compatibility
 static constexpr uint32_t CATL = catl::common::CATL_MAGIC;

@@ -23,7 +23,7 @@ using CatlHeader = catl::common::CATLHeader;
 
 // The v1-specific structure for ledger information in CATL files
 #pragma pack(push, 1)
-struct LedgerInfoV1
+struct LedgerInfo
 {
     uint32_t sequence;
     uint8_t hash[32];

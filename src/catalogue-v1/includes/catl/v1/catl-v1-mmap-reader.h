@@ -113,7 +113,7 @@ public:
      * @return LedgerHeaderView for the current position
      * @throws CatlV1Error if there's not enough data left
      */
-    LedgerInfoV1View
+    LedgerInfoView
     read_ledger_info();
 
     /**
@@ -123,7 +123,7 @@ public:
      * @return LedgerInfoV1View for the specified position
      * @throws CatlV1Error if position is invalid
      */
-    LedgerInfoV1View
+    LedgerInfoView
     get_ledger_info_view(size_t position) const;
 
     /**
