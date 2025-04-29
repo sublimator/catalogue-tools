@@ -4,43 +4,12 @@
 #include <string>
 #include <unordered_map>
 
+#include "catl/common/ledger-header-view.h"
 #include "catl/core/types.h"
 #include "catl/shamap/shamap.h"
 
-/**
- * LedgerHeaderView - Zero-copy view into ledger headers
- */
-class LedgerHeaderView
-{
-private:
-    const uint8_t* data;  // Raw pointer to header data
-
-public:
-    // Constructor with raw data pointer
-    explicit LedgerHeaderView(const uint8_t* headerData);
-
-    // Core accessor methods
-    uint32_t
-    sequence() const;
-    Hash256
-    hash() const;
-    Hash256
-    parent_hash() const;
-    Hash256
-    transaction_hash() const;
-    Hash256
-    account_hash() const;
-    uint32_t
-    close_time() const;
-    uint64_t
-    drops() const;
-    uint8_t
-    close_flags() const;
-
-    // Utility method for debugging/logging
-    std::string
-    to_string() const;
-};
+// Use the common implementation
+using LedgerHeaderView = catl::common::LedgerHeaderView;
 
 /**
  * Ledger - Simple container for header view and maps

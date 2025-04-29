@@ -11,11 +11,11 @@
 
 namespace catl::v1 {
 
-class CatlV1Reader
+class Reader
 {
 public:
-    explicit CatlV1Reader(std::string filename);
-    ~CatlV1Reader();
+    explicit Reader(std::string filename);
+    ~Reader();
 
     // Returns the parsed header
     const CatlHeader&

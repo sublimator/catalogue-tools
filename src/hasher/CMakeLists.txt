@@ -13,6 +13,7 @@ target_link_libraries(
   catl-hasher
   PRIVATE catl_core
           catl_shamap
+          catl_catalogue_common
           Boost::filesystem
           Boost::iostreams
           Boost::program_options

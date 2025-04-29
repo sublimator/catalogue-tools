@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catl/common/ledger-types.h"
 #include <array>
 #include <string>
 
@@ -27,18 +28,6 @@ struct CATLHeader
     std::array<uint8_t, 64>
         hash;  // Note: This hash is usually unused/zero in practice
 };
-
-struct LedgerInfo
-{
-    uint32_t sequence;
-    uint8_t hash[32];
-    uint8_t txHash[32];
-    uint8_t accountHash[32];
-    uint8_t parentHash[32];
-    uint64_t drops;
-    uint32_t closeFlags;
-    uint32_t closeTimeResolution;
-    uint64_t closeTime;
-    uint64_t parentCloseTime;
-};
 #pragma pack(pop)
+
+using LedgerInfo = catl::common::LedgerInfo;
