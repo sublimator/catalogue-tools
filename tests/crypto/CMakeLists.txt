@@ -15,7 +15,9 @@ target_link_libraries(
   sha512halfhasher_gtest
   PRIVATE catl::crypto
           catl::test_utils
-          GTest::gtest_main)
+          GTest::gtest_main
+          OpenSSL::SSL
+          Boost::json)
 
 gtest_discover_tests(sha512hasher_gtest)
 gtest_discover_tests(sha512halfhasher_gtest)
