@@ -26,13 +26,18 @@ def get_git_root() -> Path:
 
 def get_all_files_by_type(root_dir: Path) -> Dict[str, List[Path]]:
     """Get all files by type under src, tests, and scripts directories."""
-    files: Dict[str, List[Path]] = {"cpp": [], "shell": [], "python": []}
+    files: Dict[str, List[Path]] = {"cpp": [], "shell": [], "python": [], "cmake": []}
 
     # Directories to search
-    search_dirs = ["src", "tests", "scripts"]
+    search_dirs = ["src", "tests", "scripts", "cmake"]
 
     # File patterns by type
-    patterns = {"cpp": [".h", ".cpp"], "shell": [".sh"], "python": [".py"]}
+    patterns = {
+        "cpp": [".h", ".cpp"],
+        "shell": [".sh"],
+        "python": [".py"],
+        "cmake": ["CMakeLists.txt", ".cmake"],
+    }
 
     for subdir in search_dirs:
         dir_path = root_dir / subdir
@@ -81,9 +86,14 @@ def get_git_dirty_files(root_dir: Path) -> Dict[str, List[Path]]:
         files.update(result.stdout.strip().split("\n"))
 
     # Filter files by type
-    filtered_files: Dict[str, List[Path]] = {"cpp": [], "shell": [], "python": []}
+    filtered_files: Dict[str, List[Path]] = {
+        "cpp": [],
+        "shell": [],
+        "python": [],
+        "cmake": [],
+    }
 
-    search_dirs = ["src/", "tests/", "scripts/"]
+    search_dirs = ["src/", "tests/", "scripts/", "cmake/"]
 
     for filename in files:
         file_path = root_dir / filename
@@ -101,6 +111,8 @@ def get_git_dirty_files(root_dir: Path) -> Dict[str, List[Path]]:
             filtered_files["shell"].append(file_path)
         elif filename.endswith(".py"):
             filtered_files["python"].append(file_path)
+        elif filename.endswith("CMakeLists.txt") or filename.endswith(".cmake"):
+            filtered_files["cmake"].append(file_path)
 
     return filtered_files
 
@@ -167,6 +179,36 @@ def format_python_file(file_path: Path, root_dir: Path) -> bool:
         return False
 
 
+def format_cmake_file(file_path: Path, root_dir: Path) -> bool:
+    """Format a CMake file using cmake-format from the virtual environment."""
+    print(f"Formatting CMake file: {file_path}")
+
+    # First check if cmake-format is on PATH
+    cmake_format_path = shutil.which("cmake-format")
+
+    # If not, look for it in the virtual environment
+    if not cmake_format_path:
+        cmake_format_path = str(root_dir / "catenv" / "bin" / "cmake-format")
+        if not os.path.exists(cmake_format_path):
+            print(
+                f"Error: cmake-format not found in PATH or at {cmake_format_path}",
+                file=sys.stderr,
+            )
+            print(
+                "Make sure you've run source scripts/setup-catenv.sh to set up the environment",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    try:
+        # Use cmake-format with default settings
+        subprocess.run([cmake_format_path, "-i", str(file_path)], check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Error formatting {file_path}: {e}", file=sys.stderr)
+        return False
+
+
 def main() -> None:
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description="Format C++, shell, and Python files")
@@ -178,15 +220,21 @@ def main() -> None:
     parser.add_argument(
         "--python-only", action="store_true", help="Format only Python files"
     )
+    parser.add_argument(
+        "--cmake-only", action="store_true", help="Format only CMake files"
+    )
     args = parser.parse_args()
 
     root_dir: Path = get_git_root()
 
     # Determine which file types to format
-    format_only_one_type = args.cpp_only or args.shell_only or args.python_only
+    format_only_one_type = (
+        args.cpp_only or args.shell_only or args.python_only or args.cmake_only
+    )
     format_cpp = args.cpp_only or not format_only_one_type
     format_shell = args.shell_only or not format_only_one_type
     format_python = args.python_only or not format_only_one_type
+    format_cmake = args.cmake_only or not format_only_one_type
 
     if args.all:
         # Explicit request for all files
@@ -198,7 +246,8 @@ def main() -> None:
         cpp_count = len(files_by_type["cpp"]) if format_cpp else 0
         shell_count = len(files_by_type["shell"]) if format_shell else 0
         python_count = len(files_by_type["python"]) if format_python else 0
-        total_count = cpp_count + shell_count + python_count
+        cmake_count = len(files_by_type["cmake"]) if format_cmake else 0
+        total_count = cpp_count + shell_count + python_count + cmake_count
 
         if total_count > 0:
             print(f"Formatting mode: dirty files only ({total_count} files found)")
@@ -207,13 +256,15 @@ def main() -> None:
             return
 
     # Set up formatters by file type
-    # Python formatter needs the root_dir to find the virtual environment
+    # Python and CMake formatters need the root_dir to find the virtual environment
     python_formatter = lambda path: format_python_file(path, root_dir)
+    cmake_formatter = lambda path: format_cmake_file(path, root_dir)
 
     formatters = {
         "cpp": format_cpp_file,
         "shell": format_shell_file,
         "python": python_formatter,
+        "cmake": cmake_formatter,
     }
 
     # Track overall success
@@ -227,6 +278,7 @@ def main() -> None:
             (file_type == "cpp" and not format_cpp)
             or (file_type == "shell" and not format_shell)
             or (file_type == "python" and not format_python)
+            or (file_type == "cmake" and not format_cmake)
         ):
             continue
 
