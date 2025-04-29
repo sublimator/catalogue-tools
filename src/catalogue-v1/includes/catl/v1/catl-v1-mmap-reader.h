@@ -1,8 +1,8 @@
 #pragma once
 
-#include "catl/common/ledger-header-view.h"
 #include "catl/v1/catl-v1-errors.h"
 #include "catl/v1/catl-v1-structs.h"
+#include "catl/v1/ledger-info-v1-view.h"
 #include <boost/iostreams/device/mapped_file.hpp>
 #include <memory>
 #include <string>
@@ -113,17 +113,17 @@ public:
      * @return LedgerHeaderView for the current position
      * @throws CatlV1Error if there's not enough data left
      */
-    catl::common::LedgerInfoV1View
+    LedgerInfoV1View
     read_ledger_info();
 
     /**
      * Get a zero-copy view of a ledger header at the specified position
      *
      * @param position Offset where the ledger header starts
-     * @return LedgerHeaderView for the specified position
+     * @return LedgerInfoV1View for the specified position
      * @throws CatlV1Error if position is invalid
      */
-    catl::common::LedgerInfoV1View
+    LedgerInfoV1View
     get_ledger_info_view(size_t position) const;
 
     /**

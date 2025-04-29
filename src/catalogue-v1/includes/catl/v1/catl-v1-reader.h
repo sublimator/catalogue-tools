@@ -32,7 +32,7 @@ public:
     catalogue_version() const;
 
     // Reads the next LedgerHeader from the file, or std::nullopt on EOF/error
-    std::optional<LedgerInfo>
+    std::optional<LedgerInfoV1>
     read_ledger_info();
 
 private:

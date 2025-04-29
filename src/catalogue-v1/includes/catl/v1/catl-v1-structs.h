@@ -4,7 +4,6 @@
 #include <cstdint>
 
 #include "catl/common/catalogue-types.h"
-#include "catl/common/ledger-types.h"
 
 namespace catl::v1 {
 
@@ -22,7 +21,22 @@ static constexpr uint16_t CATALOGUE_COMPRESS_LEVEL_MASK =
 // Use the common header type
 using CatlHeader = catl::common::CATLHeader;
 
-using LedgerInfo = catl::common::LedgerInfoV1;
+// The v1-specific structure for ledger information in CATL files
+#pragma pack(push, 1)
+struct LedgerInfoV1
+{
+    uint32_t sequence;
+    uint8_t hash[32];
+    uint8_t tx_hash[32];
+    uint8_t account_hash[32];
+    uint8_t parent_hash[32];
+    uint64_t drops;
+    uint32_t close_flags;
+    uint32_t close_time_resolution;
+    uint64_t close_time;
+    uint64_t parent_close_time;
+};
+#pragma pack(pop)
 
 // SHAMap node types
 enum SHAMapNodeType : uint8_t {

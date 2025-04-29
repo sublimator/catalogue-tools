@@ -1,11 +1,11 @@
-#include "catl/common/ledger-header-view.h"
-#include "catl/common/ledger-types.h"
+#include "catl/v1/ledger-info-v1-view.h"
 #include "catl/common/utils.h"
+#include "catl/v1/catl-v1-utils.h"
 
 #include <cstring>
 #include <sstream>
 
-namespace catl::common {
+namespace catl::v1 {
 
 LedgerInfoV1View::LedgerInfoV1View(const uint8_t* headerData) : data(headerData)
 {
@@ -81,10 +81,11 @@ LedgerInfoV1View::to_string() const
         << "  Parent Hash:  " << parent_hash().hex() << "\n"
         << "  Account Hash: " << account_hash().hex() << "\n"
         << "  TX Hash:      " << transaction_hash().hex() << "\n"
-        << "  Close Time:   " << format_ripple_time(close_time()) << "\n"
+        << "  Close Time:   " << catl::common::format_ripple_time(close_time())
+        << "\n"
         << "  Drops:        " << drops() << "\n"
         << "  Close Flags:  " << static_cast<int>(close_flags());
     return oss.str();
 }
 
-}  // namespace catl::common
+}  // namespace catl::v1

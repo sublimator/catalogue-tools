@@ -1,13 +1,18 @@
 #pragma once
 
 #include "catl/core/types.h"
+#include "catl/v1/catl-v1-structs.h"
 #include <cstdint>
 #include <string>
 
-namespace catl::common {
+namespace catl::v1 {
 
 /**
- * LedgerHeaderView - Zero-copy view into ledger headers
+ * LedgerInfoV1View - Zero-copy view into v1 ledger headers
+ *
+ * This provides a view into the v1-specific binary layout of ledger information
+ * in CATL files. Note that this layout does not match the canonical network
+ * serialization format.
  */
 class LedgerInfoV1View
 {
@@ -48,4 +53,4 @@ public:
     to_string() const;
 };
 
-}  // namespace catl::common
+}  // namespace catl::v1
