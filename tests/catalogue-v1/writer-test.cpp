@@ -1,4 +1,5 @@
 #include "catl/core/types.h"
+#include "catl/crypto/sha512-hasher.h"  // For hash verification
 #include "catl/shamap/shamap.h"
 #include "catl/v1/catl-v1-mmap-reader.h"
 #include "catl/v1/catl-v1-utils.h"  // For get_compression_level
@@ -125,6 +126,10 @@ TEST_F(WriterTest, BasicWriteTest)
         size_t uncompressed_size = boost::filesystem::file_size(test_file);
         std::cout << "Uncompressed file size: " << uncompressed_size << " bytes"
                   << std::endl;
+
+        // Verify the file hash using our new method
+        EXPECT_TRUE(reader.verify_file_hash(true))
+            << "File hash verification failed";
     }
 
     // Case 2: Compressed file with Zlib

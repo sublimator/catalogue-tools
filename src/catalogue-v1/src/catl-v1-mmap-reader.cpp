@@ -321,4 +321,83 @@ MmapReader::read_shamap(SHAMap& map, SHAMapNodeType leaf_type)
     return nodes_processed_count;
 }
 
+bool
+MmapReader::verify_file_hash(bool throw_on_failure)
+{
+    // If hash is all zeros, it's not set
+    bool hash_is_zero = true;
+    for (auto b : header_.hash)
+    {
+        if (b != 0)
+        {
+            hash_is_zero = false;
+            break;
+        }
+    }
+
+    if (hash_is_zero)
+    {
+        if (throw_on_failure)
+        {
+            throw CatlV1Error(
+                "Cannot verify file hash: Header hash field is empty");
+        }
+        return false;
+    }
+
+    // Create a hasher
+    catl::crypto::Sha512Hasher hasher;
+
+    // First hash the header with zeroed hash field
+    CatlHeader header_copy = header_;
+    std::fill(header_copy.hash.begin(), header_copy.hash.end(), 0);
+
+    // Update hasher with header
+    hasher.update(
+        reinterpret_cast<const uint8_t*>(&header_copy), sizeof(CatlHeader));
+
+    // Hash the rest of the file in chunks
+    const size_t buffer_size = 64 * 1024;  // 64KB buffer
+    const uint8_t* current_pos = data_ + sizeof(CatlHeader);
+    size_t remaining_bytes = file_size_ - sizeof(CatlHeader);
+
+    while (remaining_bytes > 0)
+    {
+        size_t bytes_to_hash = std::min(remaining_bytes, buffer_size);
+        hasher.update(current_pos, bytes_to_hash);
+
+        current_pos += bytes_to_hash;
+        remaining_bytes -= bytes_to_hash;
+    }
+
+    // Get the final hash
+    unsigned char computed_hash[64];  // SHA-512 produces 64 bytes
+    unsigned int hash_len = 0;
+    hasher.final(computed_hash, &hash_len);
+
+    // Verify hash length
+    if (hash_len != header_.hash.size())
+    {
+        if (throw_on_failure)
+        {
+            throw CatlV1HashVerificationError(
+                "Hash length mismatch: expected " +
+                std::to_string(header_.hash.size()) + " bytes, got " +
+                std::to_string(hash_len) + " bytes");
+        }
+        return false;
+    }
+
+    // Compare computed hash with stored hash
+    bool matches =
+        (std::memcmp(computed_hash, header_.hash.data(), hash_len) == 0);
+
+    if (!matches && throw_on_failure)
+    {
+        throw CatlV1HashVerificationError("File hash verification failed");
+    }
+
+    return matches;
+}
+
 }  // namespace catl::v1
