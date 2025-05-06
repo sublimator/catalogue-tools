@@ -160,6 +160,7 @@ public:
     }
 };
 
+// TODO: make this all const
 /**
  * Combines a key with its associated data from memory-mapped storage
  */
