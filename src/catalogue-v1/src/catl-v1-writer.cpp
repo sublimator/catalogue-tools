@@ -1,6 +1,7 @@
 #include "catl/v1/catl-v1-writer.h"
 #include "catl/core/log-macros.h"
 #include "catl/crypto/sha512-half-hasher.h"
+#include "catl/shamap/shamap-diff.h"
 #include "catl/v1/catl-v1-errors.h"
 #include "catl/v1/catl-v1-utils.h"
 #include <algorithm>
@@ -351,45 +352,37 @@ Writer::writeMapDelta(
         throw CatlV1Error("Cannot write map delta after finalization");
     }
 
-    // Track items and their existence in both maps
-    std::map<Key, bool> previous_items;
-    std::map<Key, const MmapItem*> current_items;
+    // Create shared_ptr wrappers for the maps to use with SHAMapDiff
+    auto prev_ptr = std::make_shared<SHAMap>(previous);
+    auto curr_ptr = std::make_shared<SHAMap>(current);
 
-    // Fill the maps with items
-    previous.visit_items(
-        [&](const MmapItem& item) { previous_items[item.key()] = true; });
-
-    current.visit_items(
-        [&](const MmapItem& item) { current_items[item.key()] = &item; });
+    // Create a diff object and find differences
+    SHAMapDiff diff(prev_ptr, curr_ptr);
+    diff.find();
 
     // Count of changes written
     uint32_t changes = 0;
 
-    // Process removals (items in previous but not in current)
-    for (const auto& [key, _] : previous_items)
+    // Process removals
+    for (const auto& key : diff.deleted())
     {
-        if (current_items.find(key) == current_items.end())
+        if (writeItem(tnREMOVE, key, nullptr, 0))
         {
-            // This key exists in previous but not in current, so it was removed
-            if (writeItem(tnREMOVE, key, nullptr, 0))
-            {
-                changes++;
-            }
-            else
-            {
-                LOGE("Failed to write removal for key: ", key.hex());
-            }
+            changes++;
+        }
+        else
+        {
+            LOGE("Failed to write removal for key: ", key.hex());
         }
     }
 
-    // Process additions and modifications
-    for (const auto& [key, item_ptr] : current_items)
+    // Process modifications
+    for (const auto& key : diff.modified())
     {
-        // For new items or modified items, write them to the file
-        // Note: We don't have a way to detect if an item changed without
-        // comparing the actual data, so we write all items that exist in
-        // current
-        if (writeItem(
+        // Get the item from the current map
+        auto item_ptr = current.get_item(key);
+        if (item_ptr &&
+            writeItem(
                 node_type,
                 item_ptr->key(),
                 item_ptr->slice().data(),
@@ -399,7 +392,27 @@ Writer::writeMapDelta(
         }
         else
         {
-            LOGE("Failed to write item for key: ", key.hex());
+            LOGE("Failed to write modified item for key: ", key.hex());
+        }
+    }
+
+    // Process additions
+    for (const auto& key : diff.added())
+    {
+        // Get the item from the current map
+        auto item_ptr = current.get_item(key);
+        if (item_ptr &&
+            writeItem(
+                node_type,
+                item_ptr->key(),
+                item_ptr->slice().data(),
+                item_ptr->slice().size()))
+        {
+            changes++;
+        }
+        else
+        {
+            LOGE("Failed to write added item for key: ", key.hex());
         }
     }
 
