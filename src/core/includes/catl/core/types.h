@@ -151,6 +151,13 @@ public:
     {
         return !(*this == other);
     }
+
+    // Add comparison operator for use in ordered containers
+    bool
+    operator<(const Key& other) const
+    {
+        return std::memcmp(data_, other.data_, 32) < 0;
+    }
 };
 
 /**
