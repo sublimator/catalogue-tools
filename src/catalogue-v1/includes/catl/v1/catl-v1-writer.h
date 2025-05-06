@@ -4,11 +4,27 @@
 #include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap.h"
 #include "catl/v1/catl-v1-structs.h"
+#include <functional>
 #include <memory>
 #include <ostream>
 #include <string>
 
 namespace catl::v1 {
+
+/**
+ * Types of write operations for callback notifications
+ */
+enum class WriteType {
+    HEADER,         // File header writes
+    LEDGER_HEADER,  // Ledger header writes
+    MAP_ITEM,       // Individual map item writes
+    TERMINAL        // Terminal marker writes
+};
+
+/**
+ * Callback type for write notifications
+ */
+using WriteCallback = std::function<void(WriteType, size_t)>;
 
 /**
  * Configuration options for CATL Writer
@@ -137,6 +153,22 @@ public:
     finalize();
 
     /**
+     * Get the number of bytes written to the body stream
+     *
+     * @return Total bytes written to the body stream (excluding header)
+     */
+    size_t
+    body_bytes_written() const;
+
+    /**
+     * Set a callback to be notified of write operations
+     *
+     * @param callback Function to call with write type and bytes written
+     */
+    void
+    set_write_callback(WriteCallback callback);
+
+    /**
      * Destructor ensures proper cleanup
      */
     ~Writer();
@@ -183,6 +215,21 @@ private:
 
     /** Whether the file has been finalized */
     bool finalized_ = false;
+
+    /** Count of bytes written to body stream */
+    size_t body_bytes_written_ = 0;
+
+    /** Optional callback for write notifications */
+    WriteCallback write_callback_;
+
+    /**
+     * Track bytes written and notify callback if registered
+     *
+     * @param type Type of write operation
+     * @param bytes Number of bytes written
+     */
+    void
+    track_write(WriteType type, size_t bytes);
 };
 
 }  // namespace catl::v1
