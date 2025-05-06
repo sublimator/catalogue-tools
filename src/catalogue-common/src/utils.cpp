@@ -6,16 +6,16 @@
 namespace catl::common {
 
 std::string
-format_ripple_time(uint64_t netClockTime)
+format_ripple_time(uint64_t net_clock_time)
 {
-    static constexpr time_t rippleEpochOffset = 946684800;
-    time_t unixTime = netClockTime + rippleEpochOffset;
-    const std::tm* tm = std::gmtime(&unixTime);
+    static constexpr time_t ripple_epoch_offset = 946684800;
+    time_t unix_time = net_clock_time + ripple_epoch_offset;
+    const std::tm* tm = std::gmtime(&unix_time);
     if (!tm)
         return "Invalid time";
-    char timeStr[30];
-    std::strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S UTC", tm);
-    return timeStr;
+    char time_str[30];
+    std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S UTC", tm);
+    return time_str;
 }
 
 uint32_t

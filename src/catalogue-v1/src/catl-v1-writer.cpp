@@ -212,7 +212,7 @@ Writer::for_file(const std::string& path, const WriterOptions& options)
 }
 
 bool
-Writer::writeHeader(uint32_t min_ledger, uint32_t max_ledger)
+Writer::write_header(uint32_t min_ledger, uint32_t max_ledger)
 {
     if (header_written_)
     {
@@ -263,7 +263,7 @@ Writer::writeHeader(uint32_t min_ledger, uint32_t max_ledger)
 }
 
 bool
-Writer::writeLedgerHeader(const LedgerInfo& header)
+Writer::write_ledger_header(const LedgerInfo& header)
 {
     if (!header_written_)
     {
@@ -288,7 +288,7 @@ Writer::writeLedgerHeader(const LedgerInfo& header)
 }
 
 bool
-Writer::writeMap(const SHAMap& map, SHAMapNodeType node_type)
+Writer::write_map(const SHAMap& map, SHAMapNodeType node_type)
 {
     if (!header_written_)
     {
@@ -305,7 +305,7 @@ Writer::writeMap(const SHAMap& map, SHAMapNodeType node_type)
 
     // Use visitor pattern to write all items
     map.visit_items([&](const MmapItem& item) {
-        if (writeItem(
+        if (write_item(
                 node_type,
                 item.key(),
                 item.slice().data(),
@@ -320,7 +320,7 @@ Writer::writeMap(const SHAMap& map, SHAMapNodeType node_type)
     });
 
     // Write terminal marker
-    if (!writeTerminal())
+    if (!write_terminal())
     {
         LOGE("Failed to write terminal marker");
         return false;
@@ -337,7 +337,7 @@ Writer::writeMap(const SHAMap& map, SHAMapNodeType node_type)
 }
 
 bool
-Writer::writeMapDelta(
+Writer::write_map_delta(
     const SHAMap& previous,
     const SHAMap& current,
     SHAMapNodeType node_type)
@@ -366,7 +366,7 @@ Writer::writeMapDelta(
     // Process removals
     for (const auto& key : diff.deleted())
     {
-        if (writeItem(tnREMOVE, key, nullptr, 0))
+        if (write_item(tnREMOVE, key, nullptr, 0))
         {
             changes++;
         }
@@ -382,7 +382,7 @@ Writer::writeMapDelta(
         // Get the item from the current map
         auto item_ptr = current.get_item(key);
         if (item_ptr &&
-            writeItem(
+            write_item(
                 node_type,
                 item_ptr->key(),
                 item_ptr->slice().data(),
@@ -402,7 +402,7 @@ Writer::writeMapDelta(
         // Get the item from the current map
         auto item_ptr = current.get_item(key);
         if (item_ptr &&
-            writeItem(
+            write_item(
                 node_type,
                 item_ptr->key(),
                 item_ptr->slice().data(),
@@ -417,7 +417,7 @@ Writer::writeMapDelta(
     }
 
     // Write terminal marker
-    if (!writeTerminal())
+    if (!write_terminal())
     {
         LOGE("Failed to write terminal marker");
         return false;
@@ -429,25 +429,25 @@ Writer::writeMapDelta(
 }
 
 bool
-Writer::writeLedger(
+Writer::write_ledger(
     const LedgerInfo& header,
     const SHAMap& state_map,
     const SHAMap& tx_map)
 {
     // Write the ledger header
-    if (!writeLedgerHeader(header))
+    if (!write_ledger_header(header))
     {
         return false;
     }
 
     // Write the state map
-    if (!writeMap(state_map, tnACCOUNT_STATE))
+    if (!write_map(state_map, tnACCOUNT_STATE))
     {
         return false;
     }
 
     // Write the transaction map
-    if (!writeMap(tx_map, tnTRANSACTION_MD))
+    if (!write_map(tx_map, tnTRANSACTION_MD))
     {
         return false;
     }
@@ -488,12 +488,13 @@ Writer::finalize()
         catl::crypto::Sha512Hasher hasher;
 
         // Create a temporary header with zeroed hash field
-        CatlHeader tempHeader = header_;
-        std::fill(tempHeader.hash.begin(), tempHeader.hash.end(), 0);
+        CatlHeader temp_header = header_;
+        std::fill(temp_header.hash.begin(), temp_header.hash.end(), 0);
 
         // Hash the header
         hasher.update(
-            reinterpret_cast<const uint8_t*>(&tempHeader), sizeof(tempHeader));
+            reinterpret_cast<const uint8_t*>(&temp_header),
+            sizeof(temp_header));
 
         // Hash the rest of the file
         file_stream->clear();
@@ -547,7 +548,7 @@ Writer::finalize()
 }
 
 bool
-Writer::writeItem(
+Writer::write_item(
     SHAMapNodeType node_type,
     const Key& key,
     const uint8_t* data,
@@ -612,7 +613,7 @@ Writer::writeItem(
 }
 
 bool
-Writer::writeTerminal()
+Writer::write_terminal()
 {
     // Write the terminal node type
     uint8_t terminal = static_cast<uint8_t>(tnTERMINAL);

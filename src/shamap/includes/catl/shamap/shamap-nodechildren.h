@@ -13,10 +13,10 @@ class NodeChildren
 {
 private:
     boost::intrusive_ptr<SHAMapTreeNode>* children_;  // Dynamic array
-    uint16_t branchMask_ = 0;         // Bit mask of active branches
-    uint8_t capacity_ = 0;            // Actual allocation size
-    bool canonicalized_ = false;      // Has this been optimized?
-    int8_t branchToIndex_[16] = {0};  // Maps branch to array index
+    uint16_t branch_mask_ = 0;          // Bit mask of active branches
+    uint8_t capacity_ = 0;              // Actual allocation size
+    bool canonicalized_ = false;        // Has this been optimized?
+    int8_t branch_to_index_[16] = {0};  // Maps branch to array index
 
 public:
     // Iterator class for iterating through valid children
@@ -24,16 +24,16 @@ public:
     {
     private:
         NodeChildren const* container_;
-        int currentBranch_;
+        int current_branch_;
 
         // Find next valid branch
         void
         findNextValid()
         {
-            while (currentBranch_ < 16 &&
-                   !(container_->branchMask_ & (1 << currentBranch_)))
+            while (current_branch_ < 16 &&
+                   !(container_->branch_mask_ & (1 << current_branch_)))
             {
-                ++currentBranch_;
+                ++current_branch_;
             }
         }
 
@@ -46,7 +46,7 @@ public:
         using reference = const value_type&;
 
         iterator(NodeChildren const* container, int branch)
-            : container_(container), currentBranch_(branch)
+            : container_(container), current_branch_(branch)
         {
             findNextValid();
         }
@@ -57,11 +57,11 @@ public:
             if (container_->canonicalized_)
             {
                 return container_
-                    ->children_[container_->branchToIndex_[currentBranch_]];
+                    ->children_[container_->branch_to_index_[current_branch_]];
             }
             else
             {
-                return container_->children_[currentBranch_];
+                return container_->children_[current_branch_];
             }
         }
 
@@ -71,18 +71,18 @@ public:
             if (container_->canonicalized_)
             {
                 return &container_->children_
-                            [container_->branchToIndex_[currentBranch_]];
+                            [container_->branch_to_index_[current_branch_]];
             }
             else
             {
-                return &container_->children_[currentBranch_];
+                return &container_->children_[current_branch_];
             }
         }
 
         iterator&
         operator++()
         {
-            ++currentBranch_;
+            ++current_branch_;
             findNextValid();
             return *this;
         }
@@ -99,7 +99,7 @@ public:
         operator==(const iterator& other) const
         {
             return container_ == other.container_ &&
-                currentBranch_ == other.currentBranch_;
+                current_branch_ == other.current_branch_;
         }
 
         bool
@@ -112,7 +112,7 @@ public:
         int
         branch() const
         {
-            return currentBranch_;
+            return current_branch_;
         }
     };
 
@@ -128,17 +128,17 @@ public:
     bool
     has_child(int branch) const
     {
-        return (branchMask_ & (1 << branch)) != 0;
+        return (branch_mask_ & (1 << branch)) != 0;
     }
     int
     get_child_count() const
     {
-        return __builtin_popcount(branchMask_);
+        return __builtin_popcount(branch_mask_);
     }
     uint16_t
     get_branch_mask() const
     {
-        return branchMask_;
+        return branch_mask_;
     }
 
     // Memory optimization

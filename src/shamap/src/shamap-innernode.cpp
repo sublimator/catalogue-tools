@@ -195,7 +195,7 @@ boost::intrusive_ptr<SHAMapLeafNode>
 SHAMapInnerNode::get_only_child_leaf() const
 {
     boost::intrusive_ptr<SHAMapLeafNode> resultLeaf = nullptr;
-    int leafCount = 0;
+    int leaf_count = 0;
 
     // Iterate through all branches
     for (int i = 0; i < 16; i++)
@@ -208,8 +208,8 @@ SHAMapInnerNode::get_only_child_leaf() const
                 return nullptr;  // Found inner node, not a leaf-only node
             }
 
-            leafCount++;
-            if (leafCount == 1)
+            leaf_count++;
+            if (leaf_count == 1)
             {
                 resultLeaf = boost::static_pointer_cast<SHAMapLeafNode>(child);
             }
@@ -227,15 +227,15 @@ boost::intrusive_ptr<SHAMapInnerNode>
 SHAMapInnerNode::copy(int newVersion) const
 {
     // Create a new inner node with same depth
-    auto newNode =
+    auto new_node =
         boost::intrusive_ptr(new SHAMapInnerNode(true, depth_, newVersion));
 
     // Copy children - this creates a non-canonicalized copy
-    newNode->children_ = children_->copy();
+    new_node->children_ = children_->copy();
 
     // Copy other properties
-    newNode->hash = hash;
-    newNode->hash_valid_ = hash_valid_;
+    new_node->hash = hash;
+    new_node->hash_valid_ = hash_valid_;
 
     LOGD(
         "Cloned inner node from version ",
@@ -243,7 +243,7 @@ SHAMapInnerNode::copy(int newVersion) const
         " to version ",
         newVersion);
 
-    return newNode;
+    return new_node;
 }
 
 boost::intrusive_ptr<SHAMapInnerNode>

@@ -84,7 +84,7 @@ TEST_F(WriterTest, BasicWriteTest)
         // Write header
         uint32_t min_ledger = 1000;
         uint32_t max_ledger = 1010;
-        ASSERT_TRUE(writer->writeHeader(min_ledger, max_ledger));
+        ASSERT_TRUE(writer->write_header(min_ledger, max_ledger));
 
         // Create test maps
         auto stateMap = createTestMap(tnACCOUNT_STATE);
@@ -102,7 +102,7 @@ TEST_F(WriterTest, BasicWriteTest)
         std::memcpy(header.tx_hash, txHash.data(), Hash256::size());
 
         // Write ledger
-        ASSERT_TRUE(writer->writeLedger(header, *stateMap, *txMap));
+        ASSERT_TRUE(writer->write_ledger(header, *stateMap, *txMap));
 
         // Finalize the file
         ASSERT_TRUE(writer->finalize());
@@ -150,7 +150,7 @@ TEST_F(WriterTest, BasicWriteTest)
         // Write header
         uint32_t min_ledger = 2000;
         uint32_t max_ledger = 2020;
-        ASSERT_TRUE(writer->writeHeader(min_ledger, max_ledger));
+        ASSERT_TRUE(writer->write_header(min_ledger, max_ledger));
 
         // Create test maps with more data to see compression in action
         auto stateMap = createTestMap(tnACCOUNT_STATE, 100);
@@ -171,7 +171,7 @@ TEST_F(WriterTest, BasicWriteTest)
         for (uint32_t i = 0; i < 5; i++)
         {
             header.sequence = min_ledger + i;
-            ASSERT_TRUE(writer->writeLedger(header, *stateMap, *txMap));
+            ASSERT_TRUE(writer->write_ledger(header, *stateMap, *txMap));
         }
 
         // Finalize the file
@@ -214,7 +214,7 @@ TEST_F(WriterTest, SimpleMapReadTest)
     // Write header
     uint32_t min_ledger = 9000;
     uint32_t max_ledger = 9010;
-    ASSERT_TRUE(writer->writeHeader(min_ledger, max_ledger));
+    ASSERT_TRUE(writer->write_header(min_ledger, max_ledger));
 
     // Create a test map with only ONE item for simplicity
     auto stateMap = std::make_shared<SHAMap>(tnACCOUNT_STATE);
@@ -252,7 +252,7 @@ TEST_F(WriterTest, SimpleMapReadTest)
     std::memcpy(header.tx_hash, txHash.data(), Hash256::size());
 
     // Write the ledger
-    ASSERT_TRUE(writer->writeLedger(header, *stateMap, *txMap));
+    ASSERT_TRUE(writer->write_ledger(header, *stateMap, *txMap));
 
     // Finalize file
     ASSERT_TRUE(writer->finalize());
@@ -344,7 +344,7 @@ TEST_F(WriterTest, ReadAndVerifyMapTest)
     // Write header
     uint32_t min_ledger = 5000;
     uint32_t max_ledger = 5010;
-    ASSERT_TRUE(writer->writeHeader(min_ledger, max_ledger));
+    ASSERT_TRUE(writer->write_header(min_ledger, max_ledger));
 
     // Create a test map with some specific data patterns
     auto stateMap = std::make_shared<SHAMap>(tnACCOUNT_STATE);
@@ -421,7 +421,7 @@ TEST_F(WriterTest, ReadAndVerifyMapTest)
     std::memcpy(header.tx_hash, txHash.data(), Hash256::size());
 
     // Write ledger
-    ASSERT_TRUE(writer->writeLedger(header, *stateMap, *txMap));
+    ASSERT_TRUE(writer->write_ledger(header, *stateMap, *txMap));
 
     // Finalize the file
     ASSERT_TRUE(writer->finalize());
@@ -529,7 +529,7 @@ TEST_F(WriterTest, MapDeltaWriteTest)
     // Write header
     uint32_t min_ledger = 3000;
     uint32_t max_ledger = 3010;
-    ASSERT_TRUE(writer->writeHeader(min_ledger, max_ledger));
+    ASSERT_TRUE(writer->write_header(min_ledger, max_ledger));
 
     // Create an initial state map
     auto stateMap1 =
@@ -562,7 +562,7 @@ TEST_F(WriterTest, MapDeltaWriteTest)
     std::memcpy(header1.account_hash, stateHash1.data(), Hash256::size());
     std::memcpy(header1.tx_hash, txHash1.data(), Hash256::size());
 
-    ASSERT_TRUE(writer->writeLedger(header1, *stateMap1, *txMap1));
+    ASSERT_TRUE(writer->write_ledger(header1, *stateMap1, *txMap1));
 
     // Write the second ledger using deltas for state map
     LedgerInfo header2{};
@@ -576,13 +576,14 @@ TEST_F(WriterTest, MapDeltaWriteTest)
         header2.tx_hash, txHash1.data(), Hash256::size());  // Same tx map
 
     // Write ledger header
-    ASSERT_TRUE(writer->writeLedgerHeader(header2));
+    ASSERT_TRUE(writer->write_ledger_header(header2));
 
     // Write state map as delta
-    ASSERT_TRUE(writer->writeMapDelta(*stateMap1, *stateMap2, tnACCOUNT_STATE));
+    ASSERT_TRUE(
+        writer->write_map_delta(*stateMap1, *stateMap2, tnACCOUNT_STATE));
 
     // Write tx map as full map
-    ASSERT_TRUE(writer->writeMap(*txMap1, tnTRANSACTION_MD));
+    ASSERT_TRUE(writer->write_map(*txMap1, tnTRANSACTION_MD));
 
     // Finalize the file
     ASSERT_TRUE(writer->finalize());

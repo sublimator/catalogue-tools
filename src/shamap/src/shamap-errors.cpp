@@ -17,7 +17,7 @@ InvalidDepthException::InvalidDepthException(int depth, size_t maxAllowed)
           ") for key in selectBranch. Max allowed: " +
           std::to_string(maxAllowed))
     , depth_(depth)
-    , maxAllowed_(maxAllowed)
+    , max_allowed_(maxAllowed)
 {
 }
 
@@ -30,7 +30,7 @@ InvalidDepthException::depth() const
 size_t
 InvalidDepthException::max_allowed() const
 {
-    return maxAllowed_;
+    return max_allowed_;
 }
 
 InvalidBranchException::InvalidBranchException(int branch)

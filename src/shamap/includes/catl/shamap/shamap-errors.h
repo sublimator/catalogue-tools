@@ -22,7 +22,7 @@ public:
 
 private:
     int depth_;
-    size_t maxAllowed_;
+    size_t max_allowed_;
 };
 
 class InvalidBranchException : public SHAMapException

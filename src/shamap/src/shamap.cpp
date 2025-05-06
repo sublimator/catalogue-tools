@@ -80,15 +80,15 @@ SHAMap::new_version(bool in_place)
         version_counter_ = std::make_shared<std::atomic<int>>(0);
     }
     // Increment shared counter and update current version
-    int newVer = ++(*version_counter_);
+    int new_ver = ++(*version_counter_);
 
     if (in_place)
     {
-        current_version_ = newVer;
+        current_version_ = new_ver;
     }
 
-    OLOGD("Generated new SHAMap version: ", newVer);
-    return newVer;
+    OLOGD("Generated new SHAMap version: ", new_ver);
+    return new_ver;
 }
 
 std::shared_ptr<SHAMap>
@@ -107,21 +107,21 @@ SHAMap::snapshot()
     }
 
     // Create new version for both original and snapshot
-    const int originalVersion = new_version(true);
-    int snapshotVersion = new_version(false);
+    const int original_version = new_version(true);
+    int snapshot_version = new_version(false);
 
     OLOGD(
         "Creating snapshot: original version ",
-        originalVersion,
+        original_version,
         ", snapshot version ",
-        snapshotVersion);
+        snapshot_version);
 
     // Create a new SHAMap that shares the same root and version counter
     auto copy = std::make_shared<SHAMap>(SHAMap(
         node_type_,
-        root->copy(snapshotVersion),
+        root->copy(snapshot_version),
         version_counter_,
-        snapshotVersion,
+        snapshot_version,
         options_));
 
     return copy;
@@ -321,8 +321,8 @@ SHAMap::handle_path_cow(PathFinder& path_finder)
         }
 
         // Apply CoW to path
-        auto innerNode = path_finder.dirty_or_copy_inners(current_version_);
-        if (!innerNode)
+        auto inner_node = path_finder.dirty_or_copy_inners(current_version_);
+        if (!inner_node)
         {
             throw NullNodeException(
                 "addItem: CoW failed to return valid inner node");

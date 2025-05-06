@@ -53,13 +53,13 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         {
             OLOGD("Updating existing key: ", item->key().hex());
             auto parent = path_finder.get_parent_of_terminal();
-            auto newLeaf =
+            auto new_leaf =
                 boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
             if (cow_enabled_)
             {
-                newLeaf->set_version(current_version_);
+                new_leaf->set_version(current_version_);
             }
-            parent->set_child(path_finder.get_terminal_branch(), newLeaf);
+            parent->set_child(path_finder.get_terminal_branch(), new_leaf);
             path_finder.dirty_path();
             return SetResult::UPDATE;
         }
@@ -73,14 +73,14 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
             int branch = path_finder.get_terminal_branch();
 
             // Create new leaf node
-            auto newLeaf =
+            auto new_leaf =
                 boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
             if (cow_enabled_)
             {
-                newLeaf->set_version(current_version_);
+                new_leaf->set_version(current_version_);
             }
 
-            parent->set_child(branch, newLeaf);
+            parent->set_child(branch, new_leaf);
             path_finder.dirty_path();
             return SetResult::ADD;
         }
