@@ -12,32 +12,41 @@
 #include <string>
 #include <vector>
 
+// For zlib compression
+#include <boost/iostreams/filter/zlib.hpp>
+#include <boost/iostreams/filtering_stream.hpp>
+
 namespace catl::v1 {
 
 /**
- * Stream wrapper that provides zlib compression
- * This is a placeholder implementation - would need a real zlib wrapper
- * for production use.
+ * Stream wrapper that provides zlib compression using Boost.Iostreams
  */
 class CompressedOutputStream : public std::ostream
 {
 private:
+    std::shared_ptr<boost::iostreams::filtering_ostream> filter_stream_;
     std::ostream& underlying_stream_;
+    std::vector<char> buffer_;
 
-    // Custom buffer for compression
+    // Forward declaration of buffer class
+    class CompressionBuffer;
+    std::unique_ptr<CompressionBuffer> buffer_impl_;
+
+    // Custom buffer for handling the data flow
     class CompressionBuffer : public std::streambuf
     {
     private:
-        std::ostream& output_;
-        std::vector<char> buffer_;
+        boost::iostreams::filtering_ostream& filter_;
+        std::vector<char>& buffer_;
 
     public:
         CompressionBuffer(
-            std::ostream& output,
-            uint8_t,  // Unused compression_level parameter
+            boost::iostreams::filtering_ostream& filter,
+            std::vector<char>& buffer,
             size_t buffer_size = 8192)
-            : output_(output), buffer_(buffer_size)
+            : filter_(filter), buffer_(buffer)
         {
+            buffer_.resize(buffer_size);
             // Set buffer pointers
             setp(buffer_.data(), buffer_.data() + buffer_.size());
         }
@@ -69,9 +78,9 @@ private:
             auto size = pptr() - pbase();
             if (size > 0)
             {
-                // In a real implementation, we'd compress the data here
-                // For now, we just pass it through
-                output_.write(pbase(), size);
+                // Write to the filtering stream which compresses to the
+                // underlying stream
+                filter_.write(pbase(), size);
 
                 // Reset buffer pointers
                 pbump(-static_cast<int>(size));
@@ -80,22 +89,56 @@ private:
         }
     };
 
-    // Custom buffer instance
-    CompressionBuffer buffer_;
-
 public:
     CompressedOutputStream(std::ostream& stream, uint8_t compression_level)
-        : std::ostream(&buffer_)
+        : std::ostream(nullptr)  // We'll set the buffer after initialization
+        , filter_stream_(
+              std::make_shared<boost::iostreams::filtering_ostream>())
         , underlying_stream_(stream)
-        , buffer_(stream, compression_level)
+        , buffer_(8192)  // Initialize with 8KB buffer
     {
+        // Configure the zlib compression filter
+        boost::iostreams::zlib_params params;
+        params.level = compression_level;
+        params.method = boost::iostreams::zlib::deflated;
+        params.noheader = false;  // Use zlib header/footer
+
+        // Add the compressor to the filtering stream
+        filter_stream_->push(boost::iostreams::zlib_compressor(params));
+
+        // Add the underlying output stream last in the chain
+        filter_stream_->push(underlying_stream_);
+
+        // Create and set the buffer
+        buffer_impl_ =
+            std::make_unique<CompressionBuffer>(*filter_stream_, buffer_);
+        rdbuf(buffer_impl_.get());
+
+        LOGI(
+            "Created zlib compression stream with level ",
+            static_cast<int>(compression_level));
+    }
+
+    ~CompressedOutputStream()
+    {
+        flush();
+        // Make sure to properly finish the zlib stream
+        if (filter_stream_)
+        {
+            filter_stream_->reset();
+        }
     }
 
     void
     flush()
     {
-        std::ostream::flush();
-        underlying_stream_.flush();
+        std::ostream::flush();  // Flush our buffer to the filtering_ostream
+        if (filter_stream_)
+        {
+            filter_stream_
+                ->flush();  // Flush the compression to the underlying stream
+        }
+        underlying_stream_.flush();  // Flush the underlying stream
     }
 };
 
