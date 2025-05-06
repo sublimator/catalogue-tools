@@ -25,6 +25,12 @@ struct CommandLineOptions
     /** Whether to start the HTTP server */
     bool start_server = false;
 
+    /** First ledger to capture in the snapshot range */
+    std::optional<uint32_t> first_ledger;
+
+    /** Last ledger to process in the file */
+    std::optional<uint32_t> last_ledger;
+
     /** Whether to display help information */
     bool show_help = false;
 

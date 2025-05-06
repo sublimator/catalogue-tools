@@ -257,13 +257,20 @@ private:
         }
     }
 
+private:
+    // Store the command line options
+    catl::hasher::CommandLineOptions options_;
+
 public:
-    // Constructor uses initializer list and handles file opening errors
-    explicit CATLHasher(const std::string& filename)
+    // Constructor accepts options struct for flexibility
+    explicit CATLHasher(
+        const std::string& filename,
+        const catl::hasher::CommandLineOptions& options)
         : reader(filename)  // Initialize MmapReader with filename
         , stateMap(tnACCOUNT_STATE)
         , txMap(tnTRANSACTION_MD)
         , ledgerStore(std::make_shared<LedgerStore>())
+        , options_(options)
     {
         try
         {
@@ -278,6 +285,19 @@ public:
 
             // Copy header from MmapReader (already validated)
             header = reader.header();
+
+            // Log ledger range if specified
+            if (options_.first_ledger)
+            {
+                LOGI(
+                    "Will start processing snapshots from ledger ",
+                    *options_.first_ledger);
+            }
+
+            if (options_.last_ledger)
+            {
+                LOGI("Will stop processing at ledger ", *options_.last_ledger);
+            }
         }
         catch (const catl::v1::CatlV1Error& e)
         {
@@ -336,23 +356,49 @@ public:
                 (header.max_ledger - header.min_ledger + 1);
             LOGI("Expecting ", expectedLedgerCount, " ledgers in this file.");
 
+            // Log if we're using a restricted ledger range
+            uint32_t effective_min_ledger = header.min_ledger;
+            uint32_t effective_max_ledger = header.max_ledger;
+
+            if (options_.first_ledger)
+            {
+                effective_min_ledger =
+                    std::max(effective_min_ledger, *options_.first_ledger);
+                LOGI(
+                    "Will only store snapshots from ledger ",
+                    effective_min_ledger);
+            }
+
+            if (options_.last_ledger)
+            {
+                effective_max_ledger =
+                    std::min(effective_max_ledger, *options_.last_ledger);
+                LOGI("Will stop processing at ledger ", effective_max_ledger);
+            }
+
             while (currentFileOffset < reader.file_size())
             {
                 LedgerInfoV1 info = {};
                 size_t nextOffset = processLedger(currentFileOffset, info);
 
 #if STORE_LEDGER_SNAPSHOTS
+                // Determine if this ledger should be stored based on range
+                // options
+                bool inSnapshotRange = info.sequence >= effective_min_ledger &&
+                    info.sequence <= effective_max_ledger;
                 constexpr int every = STORE_LEDGER_SNAPSHOTS_EVERY;
-                if (every > 0 && info.sequence % every == 0)
+
+                if (every > 0 && info.sequence % every == 0 && inSnapshotRange)
                 {
+                    LOGD(
+                        "Creating snapshot for ledger ",
+                        info.sequence,
+                        " (in requested range)");
                     // Get the ledger data pointer using the reader
                     auto ledger = std::make_shared<Ledger>(
                         reader.data_at(currentFileOffset),
-                        // TODO: configurable snapshots
                         stateMap.snapshot(),
                         std::make_shared<SHAMap>(txMap));
-                    // TODO: track only some ledgers, every 1000th or something
-                    // and then recompute lazily via deltas
                     ledgerStore->add_ledger(ledger);
                 }
 #endif
@@ -360,8 +406,18 @@ public:
                 stateMap.collapse_tree();
 #endif
                 // Stop processing if we've reached the end of the ledger range
-                if (info.sequence == header.max_ledger)
+                // or the max requested ledger
+                if (info.sequence == header.max_ledger ||
+                    (options_.last_ledger &&
+                     info.sequence >= *options_.last_ledger))
                 {
+                    LOGI(
+                        "Reached ",
+                        (info.sequence == header.max_ledger
+                             ? "end of file"
+                             : "requested last ledger"),
+                        " at sequence ",
+                        info.sequence);
                     break;
                 }
 
@@ -569,8 +625,8 @@ main(int argc, char* argv[])
 
     try
     {
-        // Create and process with CATLHasher
-        hasher.emplace(inputFile);
+        // Create and process with CATLHasher, passing the options struct
+        hasher.emplace(inputFile, options);
         bool result = hasher->processFile();
         exitCode = result ? 0 : 1;  // 0 on success, 1 on failure
     }
