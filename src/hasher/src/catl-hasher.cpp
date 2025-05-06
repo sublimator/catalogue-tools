@@ -1,7 +1,8 @@
 #include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap-options.h"
-#include "catl/v1/catl-v1-errors.h"  // Include catalogue error classes
+#include "catl/v1/catl-v1-errors.h"       // Include catalogue error classes
+#include "catl/v1/catl-v1-mmap-reader.h"  // Include MmapReader
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -18,9 +19,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-
-// For memory mapping
-#include <boost/iostreams/device/mapped_file.hpp>
 
 // For command line parsing
 
@@ -46,7 +44,7 @@ namespace po = boost::program_options;
 class CATLHasher
 {
 private:
-    boost::iostreams::mapped_file_source mmapFile;
+    catl::v1::MmapReader reader;
     const uint8_t* data = nullptr;
     size_t fileSize = 0;
     CATLHeader header;
@@ -72,38 +70,13 @@ private:
     void
     validateHeader()
     {
-        stats.currentOffset = 0;
-        if (fileSize < sizeof(CATLHeader))
-        {
-            throw catl::v1::CatlV1InvalidHeaderError(
-                "File too small to contain a valid CATL header");
-        }
-
-        std::memcpy(&header, data, sizeof(CATLHeader));
+        // MmapReader already validates the header, but we'll apply our
+        // additional checks and log header information for consistency
         stats.currentOffset = sizeof(CATLHeader);
+
 #if STOP_AT_LEDGER
         header.max_ledger = STOP_AT_LEDGER;  // TODO: hackery
 #endif
-
-        if (header.magic != CATL)
-        {
-            // Use std::hex manipulator directly in the log call
-            std::ostringstream oss_magic;
-            oss_magic << "Invalid magic value: expected 0x" << std::hex << CATL
-                      << ", got 0x" << header.magic << std::dec;
-            throw catl::v1::CatlV1InvalidHeaderError(oss_magic.str());
-        }
-
-        uint8_t compressionLevel =
-            (header.version & CATALOGUE_COMPRESS_LEVEL_MASK) >> 8;
-        if (compressionLevel != 0)
-        {
-            std::ostringstream oss;
-            oss << "Compressed CATL files are not supported. Compression "
-                   "level: "
-                << static_cast<int>(compressionLevel);
-            throw catl::v1::CatlV1UnsupportedVersionError(oss.str());
-        }
 
         // Log header info at INFO level
         LOGI("CATL Header Validated:");
@@ -549,54 +522,20 @@ private:
 public:
     // Constructor uses initializer list and handles file opening errors
     explicit CATLHasher(const std::string& filename)
-        : header()
+        : reader(filename)  // Initialize MmapReader with filename
         , stateMap(tnACCOUNT_STATE)
-        ,  // Initialize maps here
-        txMap(tnTRANSACTION_MD)
+        , txMap(tnTRANSACTION_MD)
         , ledgerStore(std::make_shared<LedgerStore>())
     {
-        LOGI("Attempting to open and map file: ", filename);
+        LOGI("File opened with MmapReader: ", filename);
         try
         {
-            if (!boost::filesystem::exists(filename))
-            {
-                throw std::runtime_error("File does not exist: " + filename);
-            }
+            // Get data pointer and file size from MmapReader
+            data = reader.data_at(0);  // Get pointer to start of file
+            fileSize = reader.file_size();
 
-            boost::filesystem::path path(filename);
-            boost::uintmax_t actualFileSize =
-                boost::filesystem::file_size(path);
-            if (actualFileSize == 0)
-            {
-                throw std::runtime_error("File is empty: " + filename);
-            }
-
-            mmapFile.open(filename);
-            if (!mmapFile.is_open())
-            {
-                throw std::runtime_error(
-                    "Boost failed to memory map file: " + filename);
-            }
-
-            data = reinterpret_cast<const uint8_t*>(mmapFile.data());
-            fileSize = mmapFile.size();  // Get size from boost map
-
-            if (fileSize != actualFileSize)
-            {
-                LOGW(
-                    "Memory mapped size (",
-                    fileSize,
-                    ") differs from filesystem size (",
-                    actualFileSize,
-                    "). Using mapped size.");
-            }
-
-            if (!data)
-            {
-                // This case should ideally be caught by mmapFile.is_open()
-                throw std::runtime_error(
-                    "Memory mapping succeeded but data pointer is null.");
-            }
+            // Copy header from MmapReader (already validated)
+            header = reader.header();
 
             LOGI(
                 "File mapped successfully: ",
@@ -605,23 +544,10 @@ public:
                 fileSize,
                 " bytes)");
         }
-        catch (const boost::filesystem::filesystem_error& e)
+        catch (const catl::v1::CatlV1Error& e)
         {
-            LOGE(
-                "Boost Filesystem error opening file '",
-                filename,
-                "': ",
-                e.what());
+            LOGE("Error with CATL file: ", e.what());
             throw;  // Re-throw to be caught by main
-        }
-        catch (const std::ios_base::failure& e)
-        {
-            LOGE(
-                "Boost IOStreams error mapping file '",
-                filename,
-                "': ",
-                e.what());
-            throw;  // Re-throw
         }
         catch (const std::exception& e)
         {
@@ -630,14 +556,11 @@ public:
         }
     }
 
-    // Destructor (optional, Boost handles unmapping)
+    // Destructor (MmapReader handles unmapping)
     ~CATLHasher()
     {
-        LOGD("CATLHasher destroyed, Boost will unmap the file.");
-        if (mmapFile.is_open())
-        {
-            mmapFile.close();
-        }
+        LOGD("CATLHasher destroyed, MmapReader will unmap the file.");
+        // MmapReader's destructor handles closing the file
     }
 
     bool
@@ -654,16 +577,8 @@ public:
                 return false;
             }
 
-            // Use try-catch for header validation
-            try
-            {
-                validateHeader();
-            }
-            catch (const catl::v1::CatlV1Error& e)
-            {
-                LOGE("CATL header validation failed: ", e.what());
-                return false;
-            }
+            // Validate header and log information
+            validateHeader();
 
             // Compare actual file size with header filesize
             if (header.filesize != fileSize)
