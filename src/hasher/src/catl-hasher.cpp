@@ -1,3 +1,4 @@
+#include "catl/hasher/arg-options.h"  // Include command-line options
 #include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap-options.h"
@@ -527,61 +528,36 @@ public:
     }
 };
 
-// Main function updated for Logger control
+// Main function updated with type-safe argument parsing
 int
 main(int argc, char* argv[])
 {
-    // Define command line options
-    po::options_description desc("Allowed options");
-    desc.add_options()("help,h", "Display this help message")(
-        "input-file", po::value<std::string>(), "Path to the CATL file")(
-        "level,l",
-        po::value<std::string>()->default_value("info"),
-        "Set log verbosity (error, warn, info, debug)")(
-        "serve,s", po::bool_switch(), "Start HTTP server");
+    // Parse command line arguments with our type-safe function
+    catl::hasher::CommandLineOptions options =
+        catl::hasher::parse_argv(argc, argv);
 
-    // Positional argument for input file
-    po::positional_options_description p;
-    p.add("input-file", 1);
+    // Handle errors or help request
+    if (!options.valid || options.show_help)
+    {
+        if (options.error_message)
+        {
+            std::cerr << "Error: " << *options.error_message << std::endl;
+        }
 
-    // Parse command line arguments
-    po::variables_map vm;
-    try
-    {
-        po::store(
-            po::command_line_parser(argc, argv)
-                .options(desc)
-                .positional(p)
-                .run(),
-            vm);
-        po::notify(vm);
-    }
-    catch (const po::error& e)
-    {
-        std::cerr << "Error: " << e.what() << std::endl;
-        std::cerr << desc << std::endl;
-        return 1;
+        // Display the pre-formatted help text
+        std::cout << options.help_text;
+        return options.show_help ? 0 : 1;
     }
 
-    // Display help if requested or if no input file provided
-    if (vm.count("help") || !vm.count("input-file"))
-    {
-        std::cout << "Usage: " << argv[0] << " [options] <catalogue_file>"
-                  << std::endl;
-        std::cout << desc << std::endl;
-        std::cout << "Processes CATL files, builds SHAMaps, verifies hashes."
-                  << std::endl;
-        return vm.count("help") ? 0 : 1;
-    }
+    // Get input filename from the parsed options
+    std::string inputFile = *options.input_file;  // Safe to dereference here
 
-    // Get input filename and desired log level
-    std::string inputFile = vm["input-file"].as<std::string>();
-    // Parse log level
-    std::string levelStr = vm["level"].as<std::string>();
-
-    if (!Logger::set_level(levelStr))
+    // Set log level based on parsed option
+    std::string logLevelStr =
+        catl::hasher::log_level_to_string(options.log_level);
+    if (!Logger::set_level(logLevelStr))
     {
-        std::cerr << "Warning: Unknown log level '" << levelStr
+        std::cerr << "Warning: Could not set log level to '" << logLevelStr
                   << "'. Using default (info)." << std::endl;
     }
 
@@ -621,7 +597,7 @@ main(int argc, char* argv[])
             << seconds << " seconds (" << duration.count() << " ms)";
     LOGW(timeOSS.str());
 
-    if (hasher && vm["serve"].as<bool>())
+    if (hasher && options.start_server)
     {
         hasher->startHttpServer();
     }
