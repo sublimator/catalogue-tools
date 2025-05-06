@@ -31,6 +31,9 @@ struct CommandLineOptions
     /** Last ledger to process in the file */
     std::optional<uint32_t> last_ledger;
 
+    /** Path to create a slice file (when specified) */
+    std::optional<std::string> slice_file;
+
     /** Whether to display help information */
     bool show_help = false;
 

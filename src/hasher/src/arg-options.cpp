@@ -72,7 +72,10 @@ parse_argv(int argc, char* argv[])
         "First ledger to include in snapshots")(
         "last-ledger,e",
         po::value<uint32_t>(),
-        "Last ledger to process (exit after this ledger)");
+        "Last ledger to process (exit after this ledger)")(
+        "create-slice-file,c",
+        po::value<std::string>(),
+        "Create a new slice file with the specified ledger range");
 
     // Set up positional arguments
     po::positional_options_description pos_desc;
@@ -143,6 +146,12 @@ parse_argv(int argc, char* argv[])
             options.last_ledger = vm["last-ledger"].as<uint32_t>();
         }
 
+        // Parse slice file option
+        if (vm.count("create-slice-file"))
+        {
+            options.slice_file = vm["create-slice-file"].as<std::string>();
+        }
+
         // Validate ledger range if both are specified
         if (options.first_ledger && options.last_ledger &&
             *options.first_ledger > *options.last_ledger)
@@ -150,6 +159,17 @@ parse_argv(int argc, char* argv[])
             options.valid = false;
             options.error_message =
                 "first-ledger cannot be greater than last-ledger";
+            return options;
+        }
+
+        // Validate that slice file requires ledger range
+        if (options.slice_file &&
+            (!options.first_ledger || !options.last_ledger))
+        {
+            options.valid = false;
+            options.error_message =
+                "--create-slice-file requires both --first-ledger and "
+                "--last-ledger";
             return options;
         }
     }
