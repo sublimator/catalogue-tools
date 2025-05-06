@@ -55,11 +55,14 @@ public:
      * @param body_stream Stream for writing the file body (potentially
      * compressed)
      * @param options Configuration options for the writer
+     * @param file_path Optional file path for direct file access during
+     * finalization
      */
     Writer(
         std::shared_ptr<std::ostream> header_stream,
         std::shared_ptr<std::ostream> body_stream,
-        const WriterOptions& options = {});
+        const WriterOptions& options = {},
+        std::string file_path = "");
 
     /**
      * Factory method for creating a file-based writer
@@ -221,6 +224,9 @@ private:
 
     /** Optional callback for write notifications */
     WriteCallback write_callback_;
+
+    /** File path for direct file access (optional) */
+    std::string file_path_;
 
     /**
      * Track bytes written and notify callback if registered

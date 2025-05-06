@@ -593,6 +593,15 @@ public:
         LOGI("Creating slice file: ", output_file);
         LOGI("Ledger range: ", first_ledger, " - ", last_ledger);
 
+        // Check if output file already exists
+        if (boost::filesystem::exists(output_file))
+        {
+            LOGW("Output file already exists: ", output_file);
+            LOGW("This will overwrite the existing file.");
+            // In a CLI tool, we would prompt for confirmation here
+            // For now, just log a warning and proceed
+        }
+
         try
         {
             // Validate ledger range
@@ -609,6 +618,47 @@ public:
                     "-",
                     header.max_ledger,
                     ")");
+                return false;
+            }
+
+            // Check that we have all required ledgers in the store
+            bool missing_ledgers = false;
+            uint32_t missing_count = 0;
+
+            for (uint32_t seq = first_ledger; seq <= last_ledger; seq++)
+            {
+                if (!ledgerStore->get_ledger(seq))
+                {
+                    if (!missing_ledgers)
+                    {
+                        LOGE("Missing ledgers in the store:");
+                        missing_ledgers = true;
+                    }
+
+                    missing_count++;
+                    if (missing_count <= 10)
+                    {  // Only show first 10 missing ledgers
+                        LOGE("  Missing ledger ", seq);
+                    }
+                }
+            }
+
+            if (missing_ledgers)
+            {
+                if (missing_count > 10)
+                {
+                    LOGE(
+                        "  ...and ",
+                        (missing_count - 10),
+                        " more missing ledgers");
+                }
+                LOGE("Cannot create complete slice due to missing ledgers.");
+                LOGW(
+                    "This is likely because STORE_LEDGER_SNAPSHOTS_EVERY > 1 "
+                    "in hasher-impl.h");
+                LOGW(
+                    "Set STORE_LEDGER_SNAPSHOTS_EVERY to 1 and reprocess the "
+                    "file.");
                 return false;
             }
 
