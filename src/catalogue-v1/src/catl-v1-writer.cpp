@@ -562,7 +562,7 @@ Writer::write_item(
     }
 
     // Write node type
-    uint8_t type_byte = static_cast<uint8_t>(node_type);
+    uint8_t type_byte = node_type;
     body_stream_->write(
         reinterpret_cast<const char*>(&type_byte), sizeof(type_byte));
 
@@ -578,7 +578,7 @@ Writer::write_item(
     if (!body_stream_->good())
     {
         LOGE("Failed to write key");
-        return false;
+        return false;  // TODO: why does this not throw exceptions
     }
 
     // For node types other than tnREMOVE, write data size and data
@@ -607,7 +607,8 @@ Writer::write_item(
     }
 
     // Track the write if successful
-    track_write(WriteType::MAP_ITEM, item_size);
+    track_write(
+        WriteType::MAP_ITEM, item_size);  // TODO:: include the node type byte
 
     return true;
 }
