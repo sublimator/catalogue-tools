@@ -385,7 +385,9 @@ public:
 #if STORE_LEDGER_SNAPSHOTS
                 // Determine if this ledger should be stored based on range
                 // options
-                bool inSnapshotRange = info.sequence >= effective_min_ledger &&
+                // TODO: articulate why the -1 is needed here exactly
+                bool inSnapshotRange =
+                    info.sequence >= effective_min_ledger - 1 &&
                     info.sequence <= effective_max_ledger;
                 constexpr int every = STORE_LEDGER_SNAPSHOTS_EVERY;
 
@@ -681,7 +683,8 @@ public:
             // We need to build the ledgers in sequence
             uint32_t ledgers_written = 0;
             uint32_t total_to_write = last_ledger - first_ledger + 1;
-            std::shared_ptr<SHAMap> previous_state_map = nullptr; // Track previous state map for deltas
+            std::shared_ptr<SHAMap> previous_state_map =
+                nullptr;  // Track previous state map for deltas
 
             for (uint32_t seq = first_ledger; seq <= last_ledger; seq++)
             {
@@ -724,15 +727,19 @@ public:
 
                 if (seq == first_ledger)
                 {
-                    // For the first ledger, write the complete ledger with full state
+                    // For the first ledger, write the complete ledger with full
+                    // state
                     LOGI("Writing complete state for first ledger: ", seq);
                     if (!writer->write_ledger(
                             info, *ledger->getStateMap(), *ledger->getTxMap()))
                     {
-                        LOGE("Failed to write first ledger ", seq, " to slice file");
+                        LOGE(
+                            "Failed to write first ledger ",
+                            seq,
+                            " to slice file");
                         return false;
                     }
-                    
+
                     // Save state map for delta calculation in next ledger
                     previous_state_map = ledger->getStateMap();
                 }
@@ -741,29 +748,37 @@ public:
                     // For subsequent ledgers, write header and maps separately
                     // with state map delta from previous ledger
                     LOGI("Writing delta for ledger: ", seq);
-                    
+
                     // Write ledger header
                     if (!writer->write_ledger_header(info))
                     {
-                        LOGE("Failed to write ledger header ", seq, " to slice file");
+                        LOGE(
+                            "Failed to write ledger header ",
+                            seq,
+                            " to slice file");
                         return false;
                     }
-                    
+
                     // Write state map delta
                     if (!writer->write_map_delta(
-                            *previous_state_map, *ledger->getStateMap(), tnACCOUNT_STATE))
+                            *previous_state_map,
+                            *ledger->getStateMap(),
+                            tnACCOUNT_STATE))
                     {
-                        LOGE("Failed to write state map delta for ledger ", seq);
+                        LOGE(
+                            "Failed to write state map delta for ledger ", seq);
                         return false;
                     }
-                    
+
                     // Write full transaction map (always unique per ledger)
-                    if (!writer->write_map(*(ledger->getTxMap()), tnTRANSACTION_MD))
+                    if (!writer->write_map(
+                            *(ledger->getTxMap()), tnTRANSACTION_MD))
                     {
-                        LOGE("Failed to write transaction map for ledger ", seq);
+                        LOGE(
+                            "Failed to write transaction map for ledger ", seq);
                         return false;
                     }
-                    
+
                     // Update reference to previous state map for next ledger
                     previous_state_map = ledger->getStateMap();
                 }
