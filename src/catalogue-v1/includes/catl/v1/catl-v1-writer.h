@@ -1,50 +1,115 @@
 #pragma once
 
 #include "catl/core/types.h"
+#include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap.h"
 #include "catl/v1/catl-v1-structs.h"
-#include <fstream>
 #include <memory>
+#include <ostream>
 #include <string>
-#include <vector>
 
-namespace catl {
-namespace v1 {
+namespace catl::v1 {
+
+/**
+ * Configuration options for CATL Writer
+ */
+struct WriterOptions
+{
+    /** Network ID to include in the file header */
+    uint32_t network_id = 0;
+
+    /** Compression level (0-9, where 0 means uncompressed) */
+    uint8_t compression_level = 0;
+};
 
 /**
  * Writer for CATL v1 files
  *
- * This class creates CATL files from a series of ledgers and their associated
- * state and transaction maps.
+ * This class creates CATL files from ledger headers and their associated
+ * state and transaction maps. It supports both compressed and uncompressed
+ * files.
  */
 class Writer
 {
 public:
     /**
-     * Constructor
+     * Constructor that takes ownership of streams for header and body
      *
-     * @param output_path Path to the output CATL file
-     * @param network_id Network ID to use in the file header
+     * @param header_stream Stream for writing/updating the header section
+     * @param body_stream Stream for writing the file body (potentially
+     * compressed)
+     * @param options Configuration options for the writer
      */
-    Writer(const std::string& output_path, uint32_t network_id);
+    Writer(
+        std::shared_ptr<std::ostream> header_stream,
+        std::shared_ptr<std::ostream> body_stream,
+        const WriterOptions& options = {});
 
     /**
-     * Destructor
+     * Factory method for creating a file-based writer
+     *
+     * @param path Path to the output file
+     * @param options Configuration options for the writer
+     * @return Unique pointer to a Writer instance
+     * @throws CatlV1Error if file cannot be opened
      */
-    ~Writer();
+    static std::unique_ptr<Writer>
+    for_file(const std::string& path, const WriterOptions& options = {});
 
     /**
-     * Write file header
+     * Write the file header
      *
-     * @param min_ledger First ledger sequence to include
-     * @param max_ledger Last ledger sequence to include
+     * @param min_ledger First ledger sequence to be included in the file
+     * @param max_ledger Last ledger sequence to be included in the file
      * @return true if successful
+     * @throws CatlV1Error if ledger range is invalid or header already written
      */
     bool
     writeHeader(uint32_t min_ledger, uint32_t max_ledger);
 
     /**
-     * Write a complete ledger and its maps
+     * Write a ledger header to the file
+     *
+     * @param header Ledger header information
+     * @return true if successful
+     * @throws CatlV1Error if file header not written or already finalized
+     */
+    bool
+    writeLedgerHeader(const LedgerInfo& header);
+
+    /**
+     * Write a complete SHAMap to the file
+     *
+     * @param map SHAMap to write
+     * @param node_type Type of nodes in the map (e.g., tnACCOUNT_STATE)
+     * @return true if successful
+     * @throws CatlV1Error if file header not written or already finalized
+     */
+    bool
+    writeMap(const SHAMap& map, SHAMapNodeType node_type);
+
+    /**
+     * Write the delta between two SHAMaps
+     *
+     * Computes and writes only the differences between previous and current
+     * maps, including item removals and additions/modifications.
+     *
+     * @param previous Previous state of the map
+     * @param current Current state of the map
+     * @param node_type Type of nodes in the map (e.g., tnACCOUNT_STATE)
+     * @return true if successful
+     * @throws CatlV1Error if file header not written or already finalized
+     */
+    bool
+    writeMapDelta(
+        const SHAMap& previous,
+        const SHAMap& current,
+        SHAMapNodeType node_type);
+
+    /**
+     * Convenience method to write a complete ledger
+     *
+     * Writes the ledger header followed by the state and transaction maps.
      *
      * @param header Ledger header information
      * @param state_map State map for the ledger
@@ -58,38 +123,31 @@ public:
         const SHAMap& tx_map);
 
     /**
-     * Write delta between two state maps
-     *
-     * @param base_map Base state map
-     * @param new_map New state map
-     * @return true if successful
-     */
-    bool
-    writeStateDelta(const SHAMap& base_map, const SHAMap& new_map);
-
-    /**
      * Finalize the file
-     * Updates header with final file size and closes file
+     *
+     * Flushes all streams and updates the header with the final file size
+     * and a hash computed over the entire file. Uses the header stream to
+     * determine the final file size by seeking to the end. The file cannot
+     * be modified after this method is called.
      *
      * @return true if successful
+     * @throws CatlV1Error if file header not written or already finalized
      */
     bool
     finalize();
 
-private:
-    std::ofstream file_;
-    std::string filepath_;
-    uint32_t network_id_;
-    uint64_t file_position_ = 0;
-    bool header_written_ = false;
-    bool finalized_ = false;
-
     /**
-     * Write an item to the file
+     * Destructor ensures proper cleanup
+     */
+    ~Writer();
+
+private:
+    /**
+     * Write a single item to the file
      *
-     * @param node_type Type of node
+     * @param node_type Type of the node
      * @param key Key of the item
-     * @param data Data buffer
+     * @param data Pointer to item data (null for removals)
      * @param size Size of the data
      * @return true if successful
      */
@@ -101,13 +159,30 @@ private:
         uint32_t size);
 
     /**
-     * Write a terminal marker for a map
+     * Write a terminal marker to end a map section
      *
      * @return true if successful
      */
     bool
     writeTerminal();
+
+    /** Stream for header operations */
+    std::shared_ptr<std::ostream> header_stream_;
+
+    /** Stream for body content */
+    std::shared_ptr<std::ostream> body_stream_;
+
+    /** Header structure being built */
+    CatlHeader header_;
+
+    /** Configuration options */
+    WriterOptions options_;
+
+    /** Whether the header has been written */
+    bool header_written_ = false;
+
+    /** Whether the file has been finalized */
+    bool finalized_ = false;
 };
 
-}  // namespace v1
-}  // namespace catl
+}  // namespace catl::v1
