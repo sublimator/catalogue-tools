@@ -6,3 +6,4 @@ build-ubuntu
 CMakeUserPresets.json
 .local.cmake
 catenv
+.ai-docs
