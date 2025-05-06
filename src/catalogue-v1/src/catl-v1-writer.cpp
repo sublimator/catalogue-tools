@@ -1,55 +1,174 @@
 #include "catl/v1/catl-v1-writer.h"
 #include "catl/core/log-macros.h"
-#include "catl/core/types.h"
-#include "catl/shamap/shamap-leafnode.h"
-#include "catl/shamap/shamap-nodetype.h"
-#include "catl/shamap/shamap-pathfinder.h"
-#include "catl/shamap/shamap.h"
+#include "catl/crypto/sha512-half-hasher.h"
 #include "catl/v1/catl-v1-errors.h"
-#include "catl/v1/catl-v1-structs.h"
 #include "catl/v1/catl-v1-utils.h"
 #include <algorithm>
-#include <cstring>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <map>
+#include <memory>
+#include <string>
 #include <vector>
 
-namespace catl {
-namespace v1 {
+namespace catl::v1 {
 
-Writer::Writer(const std::string& output_path, uint32_t network_id)
-    : filepath_(output_path), network_id_(network_id)
+/**
+ * Stream wrapper that provides zlib compression
+ * This is a placeholder implementation - would need a real zlib wrapper
+ * for production use.
+ */
+class CompressedOutputStream : public std::ostream
 {
-    // Open file in binary mode
-    file_.open(filepath_, std::ios::binary | std::ios::out | std::ios::trunc);
+private:
+    std::ostream& underlying_stream_;
+    uint8_t compression_level_;
 
-    if (!file_.is_open())
+    // Custom buffer for compression
+    class CompressionBuffer : public std::streambuf
     {
-        throw CatlV1Error("Failed to open output file: " + filepath_);
-    }
+    private:
+        std::ostream& output_;
+        std::vector<char> buffer_;
+        uint8_t compression_level_;
 
-    LOGI("Created CATL writer for file: ", filepath_);
-}
-
-Writer::~Writer()
-{
-    // Ensure the file is properly closed
-    if (file_.is_open())
-    {
-        // If not finalized, try to finalize
-        if (!finalized_ && header_written_)
+    public:
+        CompressionBuffer(
+            std::ostream& output,
+            uint8_t compression_level,
+            size_t buffer_size = 8192)
+            : output_(output)
+            , buffer_(buffer_size)
+            , compression_level_(compression_level)
         {
-            try
-            {
-                finalize();
-            }
-            catch (const std::exception& e)
-            {
-                LOGE("Error finalizing file during destruction: ", e.what());
-            }
+            // Set buffer pointers
+            setp(buffer_.data(), buffer_.data() + buffer_.size());
         }
 
-        file_.close();
+        ~CompressionBuffer()
+        {
+            sync();
+        }
+
+    protected:
+        int_type
+        overflow(int_type ch) override
+        {
+            if (ch != traits_type::eof())
+            {
+                // Buffer is full, compress and write data
+                *pptr() = static_cast<char>(ch);
+                pbump(1);
+                sync();
+                return ch;
+            }
+            return traits_type::eof();
+        }
+
+        int
+        sync() override
+        {
+            // Get size of data in buffer
+            auto size = pptr() - pbase();
+            if (size > 0)
+            {
+                // In a real implementation, we'd compress the data here
+                // For now, we just pass it through
+                output_.write(pbase(), size);
+
+                // Reset buffer pointers
+                pbump(-static_cast<int>(size));
+            }
+            return 0;
+        }
+    };
+
+    // Custom buffer instance
+    CompressionBuffer buffer_;
+
+public:
+    CompressedOutputStream(std::ostream& stream, uint8_t compression_level)
+        : std::ostream(&buffer_)
+        , underlying_stream_(stream)
+        , compression_level_(compression_level)
+        , buffer_(stream, compression_level)
+    {
+    }
+
+    void
+    flush()
+    {
+        std::ostream::flush();
+        underlying_stream_.flush();
+    }
+};
+
+Writer::Writer(
+    std::shared_ptr<std::ostream> header_stream,
+    std::shared_ptr<std::ostream> body_stream,
+    const WriterOptions& options)
+    : header_stream_(std::move(header_stream))
+    , body_stream_(std::move(body_stream))
+    , options_(options)
+    , header_written_(false)
+    , finalized_(false)
+{
+    // Validate options
+    if (options_.compression_level > 9)
+    {
+        throw CatlV1Error(
+            "Invalid compression level: " +
+            std::to_string(options_.compression_level) +
+            ". Must be between 0 and 9.");
+    }
+
+    LOGI(
+        "Created CATL writer with compression level ",
+        options_.compression_level);
+}
+
+std::unique_ptr<Writer>
+Writer::for_file(const std::string& path, const WriterOptions& options)
+{
+    if (options.compression_level == 0)
+    {
+        // For uncompressed files, use the same file stream for both header and
+        // body
+        auto file_stream = std::make_shared<std::fstream>(
+            path,
+            std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+
+        if (!file_stream->good())
+        {
+            throw CatlV1Error("Failed to open output file: " + path);
+        }
+
+        // Use the same stream for both header and body
+        return std::make_unique<Writer>(file_stream, file_stream, options);
+    }
+    else
+    {
+        // For compressed files, we need separate handling
+
+        // First, create and open the file
+        auto file_stream = std::make_shared<std::fstream>(
+            path,
+            std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+
+        if (!file_stream->good())
+        {
+            throw CatlV1Error("Failed to open output file: " + path);
+        }
+
+        // Create a compressed wrapper for the body
+        auto compressed_stream = std::make_shared<CompressedOutputStream>(
+            *file_stream, options.compression_level);
+
+        // Create writer with file_stream for header and compressed_stream for
+        // body
+        return std::make_unique<Writer>(
+            file_stream, compressed_stream, options);
     }
 }
 
@@ -58,39 +177,200 @@ Writer::writeHeader(uint32_t min_ledger, uint32_t max_ledger)
 {
     if (header_written_)
     {
-        LOGE("Header already written");
-        return false;
+        throw CatlV1Error("Header already written");
     }
 
+    // Validate ledger range
     if (min_ledger > max_ledger)
     {
-        LOGE("Invalid ledger range: min > max");
-        return false;
+        throw CatlV1Error("Invalid ledger range: min > max");
     }
 
     // Create header structure
-    CatlHeader header;
-    header.magic = CATL_MAGIC;
-    header.version = BASE_CATALOGUE_VERSION;  // No compression
-    header.network_id = network_id_;
-    header.min_ledger = min_ledger;
-    header.max_ledger = max_ledger;
-    header.filesize = 0;  // Will update this in finalize()
-
-    // Write header to file
-    file_.write(reinterpret_cast<const char*>(&header), sizeof(CatlHeader));
-
-    if (file_.fail())
+    header_.magic = CATL_MAGIC;
+    header_.version = BASE_CATALOGUE_VERSION;
+    if (options_.compression_level > 0)
     {
-        LOGE("Failed to write header");
+        header_.version |= (options_.compression_level << 8);
+    }
+    header_.network_id = options_.network_id;
+    header_.min_ledger = min_ledger;
+    header_.max_ledger = max_ledger;
+    header_.filesize = 0;  // Will update in finalize()
+
+    // Initialize hash field to zeros (hash will be computed during finalize)
+    std::memset(header_.hash, 0, sizeof(header_.hash));
+
+    // Write header to header stream
+    header_stream_->write(
+        reinterpret_cast<const char*>(&header_), sizeof(header_));
+    header_stream_->flush();
+
+    LOGI(
+        "Wrote CATL header: ledger range ",
+        min_ledger,
+        "-",
+        max_ledger,
+        ", network ID ",
+        options_.network_id,
+        ", compression level ",
+        options_.compression_level);
+
+    header_written_ = true;
+    return header_stream_->good();
+}
+
+bool
+Writer::writeLedgerHeader(const LedgerInfo& header)
+{
+    if (!header_written_)
+    {
+        throw CatlV1Error("Cannot write ledger before file header");
+    }
+
+    if (finalized_)
+    {
+        throw CatlV1Error("Cannot write ledger after finalization");
+    }
+
+    // Write ledger header to the body stream
+    body_stream_->write(
+        reinterpret_cast<const char*>(&header), sizeof(LedgerInfo));
+
+    LOGD("Wrote ledger header for sequence ", header.sequence);
+
+    return body_stream_->good();
+}
+
+bool
+Writer::writeMap(const SHAMap& map, SHAMapNodeType node_type)
+{
+    if (!header_written_)
+    {
+        throw CatlV1Error("Cannot write map before file header");
+    }
+
+    if (finalized_)
+    {
+        throw CatlV1Error("Cannot write map after finalization");
+    }
+
+    // Count of items written
+    uint32_t items_count = 0;
+
+    // Use visitor pattern to write all items
+    map.visit_items([&](const MmapItem& item) {
+        if (writeItem(
+                node_type,
+                item.key(),
+                item.slice().data(),
+                item.slice().size()))
+        {
+            items_count++;
+        }
+        else
+        {
+            LOGE("Failed to write item with key: ", item.key().hex());
+        }
+    });
+
+    // Write terminal marker
+    if (!writeTerminal())
+    {
+        LOGE("Failed to write terminal marker");
         return false;
     }
 
-    file_position_ = sizeof(CatlHeader);
-    header_written_ = true;
+    LOGI(
+        "Wrote map of type ",
+        static_cast<int>(node_type),
+        " with ",
+        items_count,
+        " items");
 
-    LOGI("Wrote CATL header: ledger range ", min_ledger, "-", max_ledger);
-    return true;
+    return body_stream_->good();
+}
+
+bool
+Writer::writeMapDelta(
+    const SHAMap& previous,
+    const SHAMap& current,
+    SHAMapNodeType node_type)
+{
+    if (!header_written_)
+    {
+        throw CatlV1Error("Cannot write map delta before file header");
+    }
+
+    if (finalized_)
+    {
+        throw CatlV1Error("Cannot write map delta after finalization");
+    }
+
+    // Track items and their existence in both maps
+    std::map<Key, bool> previous_items;
+    std::map<Key, const MmapItem*> current_items;
+
+    // Fill the maps with items
+    previous.visit_items(
+        [&](const MmapItem& item) { previous_items[item.key()] = true; });
+
+    current.visit_items(
+        [&](const MmapItem& item) { current_items[item.key()] = &item; });
+
+    // Count of changes written
+    uint32_t changes = 0;
+
+    // Process removals (items in previous but not in current)
+    for (const auto& [key, _] : previous_items)
+    {
+        if (current_items.find(key) == current_items.end())
+        {
+            // This key exists in previous but not in current, so it was removed
+            if (writeItem(tnREMOVE, key, nullptr, 0))
+            {
+                changes++;
+            }
+            else
+            {
+                LOGE("Failed to write removal for key: ", key.hex());
+            }
+        }
+    }
+
+    // Process additions and modifications
+    for (const auto& [key, item_ptr] : current_items)
+    {
+        bool is_new = previous_items.find(key) == previous_items.end();
+
+        // For new items or modified items, write them to the file
+        // Note: We don't have a way to detect if an item changed without
+        // comparing the actual data, so we write all items that exist in
+        // current
+        if (writeItem(
+                node_type,
+                item_ptr->key(),
+                item_ptr->slice().data(),
+                item_ptr->slice().size()))
+        {
+            changes++;
+        }
+        else
+        {
+            LOGE("Failed to write item for key: ", key.hex());
+        }
+    }
+
+    // Write terminal marker
+    if (!writeTerminal())
+    {
+        LOGE("Failed to write terminal marker");
+        return false;
+    }
+
+    LOGI("Wrote map delta with ", changes, " changes");
+
+    return body_stream_->good();
 }
 
 bool
@@ -99,193 +379,26 @@ Writer::writeLedger(
     const SHAMap& state_map,
     const SHAMap& tx_map)
 {
-    if (!header_written_)
+    // Write the ledger header
+    if (!writeLedgerHeader(header))
     {
-        LOGE("Cannot write ledger before header");
         return false;
     }
 
-    if (finalized_)
+    // Write the state map
+    if (!writeMap(state_map, tnACCOUNT_STATE))
     {
-        LOGE("Cannot write ledger after finalization");
         return false;
     }
 
-    // Write ledger header
-    file_.write(reinterpret_cast<const char*>(&header), sizeof(LedgerInfo));
-
-    if (file_.fail())
+    // Write the transaction map
+    if (!writeMap(tx_map, tnTRANSACTION_MD))
     {
-        LOGE("Failed to write ledger header");
         return false;
     }
 
-    file_position_ += sizeof(LedgerInfo);
+    LOGI("Successfully wrote complete ledger ", header.sequence);
 
-    // Write state map (full, not delta)
-    LOGI("Writing state map for ledger ", header.sequence);
-
-    // Count of items in the state map
-    uint32_t state_items_count = 0;
-
-    // Use the visitor pattern to write all items
-    state_map.visit_items([&](const MmapItem& item) {
-        // Since we don't have direct access to the node type, use
-        // tnACCOUNT_STATE as default for state map
-        if (!writeItem(
-                tnACCOUNT_STATE,  // State map uses this type
-                item.key(),
-                item.slice().data(),
-                item.slice().size()))
-        {
-            LOGE("Failed to write state map item: ", item.key().hex());
-        }
-        else
-        {
-            state_items_count++;
-        }
-    });
-
-    // Write terminal marker for state map
-    if (!writeTerminal())
-    {
-        LOGE("Failed to write state map terminal marker");
-        return false;
-    }
-
-    // Write transaction map
-    LOGI("Writing transaction map for ledger ", header.sequence);
-
-    // Count of items in the transaction map
-    uint32_t tx_items_count = 0;
-
-    // Use the visitor pattern to write all items
-    tx_map.visit_items([&](const MmapItem& item) {
-        // Since we don't have direct access to the node type, use
-        // tnTRANSACTION_MD as default for tx map
-        if (!writeItem(
-                tnTRANSACTION_MD,  // Transaction map uses this type
-                item.key(),
-                item.slice().data(),
-                item.slice().size()))
-        {
-            LOGE("Failed to write transaction map item: ", item.key().hex());
-        }
-        else
-        {
-            tx_items_count++;
-        }
-    });
-
-    // Write terminal marker for transaction map
-    if (!writeTerminal())
-    {
-        LOGE("Failed to write transaction map terminal marker");
-        return false;
-    }
-
-    LOGI(
-        "Successfully wrote ledger ",
-        header.sequence,
-        " with ",
-        state_items_count,
-        " state items and ",
-        tx_items_count,
-        " transaction items");
-
-    return true;
-}
-
-bool
-Writer::writeStateDelta(const SHAMap& base_map, const SHAMap& new_map)
-{
-    if (!header_written_)
-    {
-        LOGE("Cannot write state delta before header");
-        return false;
-    }
-
-    if (finalized_)
-    {
-        LOGE("Cannot write state delta after finalization");
-        return false;
-    }
-
-    // Track items and their existence in both maps
-    std::map<Key, bool> base_items_map;
-    std::map<Key, const MmapItem*> new_items_map;
-
-    // Fill the maps with items from both trees
-    base_map.visit_items(
-        [&](const MmapItem& item) { base_items_map[item.key()] = true; });
-
-    new_map.visit_items(
-        [&](const MmapItem& item) { new_items_map[item.key()] = &item; });
-
-    // Count of changes written
-    uint32_t changes = 0;
-
-    // Process removals (items in base but not in new)
-    for (const auto& [key, _] : base_items_map)
-    {
-        if (new_items_map.find(key) == new_items_map.end())
-        {
-            // This key exists in base but not in new, so it was removed
-            if (!writeItem(tnREMOVE, key, nullptr, 0))
-            {
-                LOGE("Failed to write removal for key: ", key.hex());
-                return false;
-            }
-            changes++;
-        }
-    }
-
-    // Process additions and modifications (items in new but not in base, or
-    // different)
-    for (const auto& [key, item_ptr] : new_items_map)
-    {
-        bool is_new = base_items_map.find(key) == base_items_map.end();
-
-        if (is_new)
-        {
-            // This is a new item, add it as an account state item
-            if (!writeItem(
-                    tnACCOUNT_STATE,  // Assume state map items
-                    item_ptr->key(),
-                    item_ptr->slice().data(),
-                    item_ptr->slice().size()))
-            {
-                LOGE("Failed to write addition for key: ", key.hex());
-                return false;
-            }
-            changes++;
-        }
-        else
-        {
-            // This item exists in both maps, we need to check if it changed
-            // But we don't have a direct way to compare the items
-            // For now, let's assume it changed and write it
-            if (!writeItem(
-                    tnACCOUNT_STATE,  // Assume state map items
-                    item_ptr->key(),
-                    item_ptr->slice().data(),
-                    item_ptr->slice().size()))
-            {
-                LOGE("Failed to write modification for key: ", key.hex());
-                return false;
-            }
-            changes++;
-        }
-    }
-
-    // Write terminal marker
-    if (!writeTerminal())
-    {
-        LOGE("Failed to write state delta terminal marker");
-        return false;
-    }
-
-    LOGI("Wrote state delta with ", changes, " changes");
     return true;
 }
 
@@ -294,61 +407,82 @@ Writer::finalize()
 {
     if (!header_written_)
     {
-        LOGE("Cannot finalize file before writing header");
-        return false;
+        throw CatlV1Error("Cannot finalize before writing header");
     }
 
     if (finalized_)
     {
-        LOGE("File already finalized");
-        return false;
+        throw CatlV1Error("Already finalized");
     }
 
-    // Update file size in header
-    file_.flush();
+    // Flush the body stream to ensure all data is written
+    body_stream_->flush();
 
-    // Get current file size
-    auto current_pos = file_.tellp();
+    // Flush the header stream
+    header_stream_->flush();
 
-    if (current_pos < 0)
+    // Get file size by seeking to the end of the header stream
+    // This works because the header stream is the direct file stream
+    auto* file_stream = dynamic_cast<std::fstream*>(header_stream_.get());
+    if (file_stream)
     {
-        LOGE("Failed to get current file position");
-        return false;
+        file_stream->seekp(0, std::ios::end);
+        header_.filesize = static_cast<uint64_t>(file_stream->tellp());
+
+        // Calculate hash over entire file
+        file_stream->seekg(0);
+
+        // Create a buffer for reading the file
+        std::vector<char> buffer(1024 * 1024);  // 1MB buffer
+        catl::crypto::SHA512HalfHasher hasher;
+
+        // Zero out the hash field before computing the hash
+        file_stream->seekg(offsetof(CatlHeader, hash));
+        std::vector<char> zeros(32, 0);
+        file_stream->read(zeros.data(), zeros.size());
+
+        // Reset to beginning for hash computation
+        file_stream->seekg(0);
+
+        // Read and hash the file in chunks
+        while (!file_stream->eof())
+        {
+            file_stream->read(buffer.data(), buffer.size());
+            std::streamsize bytes_read = file_stream->gcount();
+            if (bytes_read > 0)
+            {
+                hasher.update(
+                    reinterpret_cast<const uint8_t*>(buffer.data()),
+                    bytes_read);
+            }
+        }
+
+        // Get the final hash
+        Hash256 hash = hasher.finalize();
+
+        // Copy hash to header
+        std::memcpy(header_.hash, hash.data(), hash.size());
+
+        // Update header with final size and hash
+        file_stream->clear();  // Clear EOF flag
+        file_stream->seekp(0);
+        file_stream->write(
+            reinterpret_cast<const char*>(&header_), sizeof(header_));
+        file_stream->flush();
+
+        LOGI(
+            "Finalized CATL file: size=",
+            header_.filesize,
+            " bytes, hash=",
+            hash.hex());
     }
-
-    // Seek to the filesize field in the header
-    file_.seekp(offsetof(CatlHeader, filesize));
-
-    if (file_.fail())
+    else
     {
-        LOGE("Failed to seek to header filesize field");
-        return false;
+        LOGW("Unable to determine file size - not a file stream");
     }
 
-    // Write the file size
-    uint64_t filesize = static_cast<uint64_t>(current_pos);
-    file_.write(reinterpret_cast<const char*>(&filesize), sizeof(filesize));
-
-    if (file_.fail())
-    {
-        LOGE("Failed to update header filesize");
-        return false;
-    }
-
-    // Return to the end of the file
-    file_.seekp(0, std::ios::end);
-
-    if (file_.fail())
-    {
-        LOGE("Failed to return to end of file");
-        return false;
-    }
-
-    file_.flush();
     finalized_ = true;
-
-    LOGI("Finalized CATL file with size ", filesize, " bytes");
-    return true;
+    return header_stream_->good() && body_stream_->good();
 }
 
 bool
@@ -360,53 +494,46 @@ Writer::writeItem(
 {
     // Write node type
     uint8_t type_byte = static_cast<uint8_t>(node_type);
-    file_.write(reinterpret_cast<const char*>(&type_byte), sizeof(type_byte));
+    body_stream_->write(
+        reinterpret_cast<const char*>(&type_byte), sizeof(type_byte));
 
-    if (file_.fail())
+    if (!body_stream_->good())
     {
         LOGE("Failed to write node type");
         return false;
     }
 
-    file_position_ += sizeof(type_byte);
-
     // Write key
-    file_.write(reinterpret_cast<const char*>(key.data()), Key::size());
+    body_stream_->write(reinterpret_cast<const char*>(key.data()), Key::size());
 
-    if (file_.fail())
+    if (!body_stream_->good())
     {
         LOGE("Failed to write key");
         return false;
     }
 
-    file_position_ += Key::size();
-
     // For node types other than tnREMOVE, write data size and data
     if (node_type != tnREMOVE)
     {
         // Write data size
-        file_.write(reinterpret_cast<const char*>(&size), sizeof(size));
+        body_stream_->write(reinterpret_cast<const char*>(&size), sizeof(size));
 
-        if (file_.fail())
+        if (!body_stream_->good())
         {
             LOGE("Failed to write data size");
             return false;
         }
 
-        file_position_ += sizeof(size);
-
         // Write data if present
         if (size > 0 && data != nullptr)
         {
-            file_.write(reinterpret_cast<const char*>(data), size);
+            body_stream_->write(reinterpret_cast<const char*>(data), size);
 
-            if (file_.fail())
+            if (!body_stream_->good())
             {
                 LOGE("Failed to write item data");
                 return false;
             }
-
-            file_position_ += size;
         }
     }
 
@@ -418,17 +545,35 @@ Writer::writeTerminal()
 {
     // Write the terminal node type
     uint8_t terminal = static_cast<uint8_t>(tnTERMINAL);
-    file_.write(reinterpret_cast<const char*>(&terminal), sizeof(terminal));
+    body_stream_->write(
+        reinterpret_cast<const char*>(&terminal), sizeof(terminal));
 
-    if (file_.fail())
+    if (!body_stream_->good())
     {
         LOGE("Failed to write terminal marker");
         return false;
     }
 
-    file_position_ += sizeof(terminal);
     return true;
 }
 
-}  // namespace v1
-}  // namespace catl
+Writer::~Writer()
+{
+    // If not finalized, try to finalize on destruction
+    if (header_written_ && !finalized_)
+    {
+        try
+        {
+            LOGW(
+                "Writer destroyed without explicit finalize - attempting "
+                "automatic finalization");
+            finalize();
+        }
+        catch (const std::exception& e)
+        {
+            LOGE("Error during automatic finalization: ", e.what());
+        }
+    }
+}
+
+}  // namespace catl::v1
