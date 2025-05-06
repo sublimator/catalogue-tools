@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catl/crypto/sha512-hasher.h"
 #include "catl/shamap/shamap.h"
 #include "catl/v1/catl-v1-errors.h"
 #include "catl/v1/catl-v1-ledger-info-view.h"
@@ -143,6 +144,24 @@ public:
      */
     uint32_t
     read_shamap(SHAMap& map, SHAMapNodeType leaf_type);
+
+    /**
+     * Verify that the file hash in the header matches the computed hash of the
+     * file
+     *
+     * This method validates file integrity by:
+     * 1. Creating a copy of the header with hash field zeroed
+     * 2. Computing a SHA-512 hash of the entire file (with zeroed hash field)
+     * 3. Comparing the computed hash with the stored hash
+     *
+     * @param throw_on_failure Whether to throw an exception on failure
+     * (default: false)
+     * @return true if the hash matches, false otherwise
+     * @throws CatlV1HashVerificationError if verification fails and
+     * throw_on_failure is true
+     */
+    bool
+    verify_file_hash(bool throw_on_failure = false);
 
     /**
      * Read arbitrary data structure at the current position and advance
