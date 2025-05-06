@@ -4,6 +4,7 @@
 #include "catl/shamap/shamap-options.h"
 #include "catl/v1/catl-v1-errors.h"       // Include catalogue error classes
 #include "catl/v1/catl-v1-mmap-reader.h"  // Include MmapReader
+#include "catl/v1/catl-v1-writer.h"       // Include Writer for slice creation
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -582,6 +583,142 @@ public:
         HttpServer httpServer(handler);
         httpServer.run(8, true);
     }
+
+    bool
+    createSliceFile(
+        const std::string& output_file,
+        uint32_t first_ledger,
+        uint32_t last_ledger)
+    {
+        LOGI("Creating slice file: ", output_file);
+        LOGI("Ledger range: ", first_ledger, " - ", last_ledger);
+
+        try
+        {
+            // Validate ledger range
+            if (first_ledger < header.min_ledger ||
+                last_ledger > header.max_ledger)
+            {
+                LOGE(
+                    "Requested ledger range (",
+                    first_ledger,
+                    "-",
+                    last_ledger,
+                    ") is outside the available range (",
+                    header.min_ledger,
+                    "-",
+                    header.max_ledger,
+                    ")");
+                return false;
+            }
+
+            // Create writer options
+            catl::v1::WriterOptions writer_options;
+            writer_options.network_id = header.network_id;
+            writer_options.compression_level = 0;  // Create uncompressed files
+
+            // Create the writer
+            auto writer =
+                catl::v1::Writer::for_file(output_file, writer_options);
+
+            // Write the header with the new ledger range
+            if (!writer->writeHeader(first_ledger, last_ledger))
+            {
+                LOGE("Failed to write slice file header");
+                return false;
+            }
+
+            // We need to build the ledgers in sequence
+            uint32_t ledgers_written = 0;
+            uint32_t total_to_write = last_ledger - first_ledger + 1;
+
+            for (uint32_t seq = first_ledger; seq <= last_ledger; seq++)
+            {
+                auto ledger = ledgerStore->get_ledger(seq);
+
+                if (!ledger)
+                {
+                    LOGE(
+                        "Missing ledger ",
+                        seq,
+                        " in store. Cannot create slice.");
+                    return false;
+                }
+
+                // Convert Ledger header to LedgerInfo struct for writer
+                const auto& header_view = ledger->header();
+                catl::v1::LedgerInfo info = {};
+
+                // Copy basic fields
+                info.sequence = header_view.sequence();
+                info.close_time = header_view.close_time();
+                info.drops = header_view.drops();
+                info.close_flags = header_view.close_flags();
+
+                // Copy hash fields
+                std::memcpy(
+                    info.hash, header_view.hash().data(), Hash256::size());
+                std::memcpy(
+                    info.parent_hash,
+                    header_view.parent_hash().data(),
+                    Hash256::size());
+                std::memcpy(
+                    info.account_hash,
+                    header_view.account_hash().data(),
+                    Hash256::size());
+                std::memcpy(
+                    info.tx_hash,
+                    header_view.transaction_hash().data(),
+                    Hash256::size());
+
+                // Write the ledger to the slice file
+                if (!writer->writeLedger(
+                        info, *ledger->getStateMap(), *ledger->getTxMap()))
+                {
+                    LOGE("Failed to write ledger ", seq, " to slice file");
+                    return false;
+                }
+
+                ledgers_written++;
+
+                // Log progress periodically
+                if (ledgers_written % 100 == 0 ||
+                    ledgers_written == total_to_write)
+                {
+                    LOGI(
+                        "Wrote ",
+                        ledgers_written,
+                        "/",
+                        total_to_write,
+                        " ledgers to slice file");
+                }
+            }
+
+            // Finalize the file
+            if (!writer->finalize())
+            {
+                LOGE("Failed to finalize slice file");
+                return false;
+            }
+
+            LOGI(
+                "Successfully created slice file with ",
+                ledgers_written,
+                " ledgers: ",
+                output_file);
+            return true;
+        }
+        catch (const catl::v1::CatlV1Error& e)
+        {
+            LOGE("Error creating slice file: ", e.what());
+            return false;
+        }
+        catch (const std::exception& e)
+        {
+            LOGE("Error creating slice file: ", e.what());
+            return false;
+        }
+    }
 };
 
 // Main function updated with type-safe argument parsing
@@ -653,6 +790,26 @@ main(int argc, char* argv[])
             << seconds << " seconds (" << duration.count() << " ms)";
     LOGW(timeOSS.str());
 
+    // Handle slice file creation if requested
+    if (hasher && options.slice_file && options.first_ledger &&
+        options.last_ledger)
+    {
+        LOGI("Creating slice file as requested");
+        if (hasher->createSliceFile(
+                *options.slice_file,
+                *options.first_ledger,
+                *options.last_ledger))
+        {
+            LOGI("Slice file creation successful");
+        }
+        else
+        {
+            LOGE("Failed to create slice file");
+            exitCode = 1;  // Indicate failure
+        }
+    }
+
+    // Start HTTP server if requested
     if (hasher && options.start_server)
     {
         hasher->startHttpServer();
