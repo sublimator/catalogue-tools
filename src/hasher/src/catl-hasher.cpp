@@ -1,6 +1,7 @@
 #include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap-options.h"
+#include "catl/v1/catl-v1-errors.h"  // Include catalogue error classes
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -68,19 +69,14 @@ private:
         size_t currentOffset = 0;
     } stats;
 
-    bool
+    void
     validateHeader()
     {
         stats.currentOffset = 0;
         if (fileSize < sizeof(CATLHeader))
         {
-            LOGE(
-                "File too small (",
-                fileSize,
-                " bytes) to contain a valid CATL header (",
-                sizeof(CATLHeader),
-                " bytes)");
-            return false;
+            throw catl::v1::CatlV1InvalidHeaderError(
+                "File too small to contain a valid CATL header");
         }
 
         std::memcpy(&header, data, sizeof(CATLHeader));
@@ -95,18 +91,18 @@ private:
             std::ostringstream oss_magic;
             oss_magic << "Invalid magic value: expected 0x" << std::hex << CATL
                       << ", got 0x" << header.magic << std::dec;
-            LOGE(oss_magic.str());
-            return false;
+            throw catl::v1::CatlV1InvalidHeaderError(oss_magic.str());
         }
 
         uint8_t compressionLevel =
             (header.version & CATALOGUE_COMPRESS_LEVEL_MASK) >> 8;
         if (compressionLevel != 0)
         {
-            LOGE(
-                "Compressed CATL files are not supported. Compression level: ",
-                static_cast<int>(compressionLevel));
-            return false;
+            std::ostringstream oss;
+            oss << "Compressed CATL files are not supported. Compression "
+                   "level: "
+                << static_cast<int>(compressionLevel);
+            throw catl::v1::CatlV1UnsupportedVersionError(oss.str());
         }
 
         // Log header info at INFO level
@@ -125,8 +121,6 @@ private:
             "  Header Filesize: ",
             header.filesize,
             " bytes");  // Note: Compare with actual later
-
-        return true;
     }
 
     // Unified map processing function
@@ -532,9 +526,14 @@ private:
             stats.failedHashVerifications++;
             if ((mapType == "Transaction" && THROW_ON_TX_HASH_MISMATCH) ||
                 (mapType == "AccountState" && THROW_ON_AS_HASH_MISMATCH))
-                throw std::runtime_error(
-                    "Hash verification failed for ledger: " +
-                    std::to_string(ledgerSeq));
+            {
+                std::ostringstream oss;
+                oss << "Hash verification failed for " << mapType
+                    << " map in ledger " << ledgerSeq
+                    << ". Expected: " << expectedHash.hex()
+                    << ", got: " << computedHash.hex();
+                throw catl::v1::CatlV1HashVerificationError(oss.str());
+            }
         }
         else
         {
@@ -655,9 +654,14 @@ public:
                 return false;
             }
 
-            if (!validateHeader())
+            // Use try-catch for header validation
+            try
             {
-                LOGE("CATL header validation failed. Aborting processing.");
+                validateHeader();
+            }
+            catch (const catl::v1::CatlV1Error& e)
+            {
+                LOGE("CATL header validation failed: ", e.what());
                 return false;
             }
 
@@ -816,6 +820,24 @@ public:
             // occurred preventing continuation. Consider hash failures fatal?
             // For this tool, maybe not, just report them.
             return true;
+        }
+        catch (const catl::v1::CatlV1HashVerificationError& e)
+        {
+            LOGE(
+                "Aborting due to hash verification error at offset ~",
+                stats.currentOffset,
+                ": ",
+                e.what());
+            return false;
+        }
+        catch (const catl::v1::CatlV1Error& e)
+        {
+            LOGE(
+                "Aborting due to catalogue error at offset ~",
+                stats.currentOffset,
+                ": ",
+                e.what());
+            return false;
         }
         catch (const SHAMapException& e)
         {
