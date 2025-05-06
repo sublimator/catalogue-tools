@@ -17,7 +17,6 @@
 #include <boost/iostreams/filtering_stream.hpp>
 
 namespace catl::v1 {
-
 /**
  * Stream wrapper that provides zlib compression using Boost.Iostreams
  */
@@ -145,15 +144,13 @@ public:
 Writer::Writer(
     std::shared_ptr<std::ostream> header_stream,
     std::shared_ptr<std::ostream> body_stream,
-    const WriterOptions& options,
-    std::string file_path)
+    const WriterOptions& options)
     : header_stream_(std::move(header_stream))
     , body_stream_(std::move(body_stream))
     , options_(options)
     , header_written_(false)
     , finalized_(false)
     , body_bytes_written_(0)
-    , file_path_(std::move(file_path))
 {
     // Validate options
     if (options_.compression_level > 9)
@@ -474,145 +471,58 @@ Writer::finalize()
         file_stream->seekp(0, std::ios::end);
         header_.filesize = static_cast<uint64_t>(file_stream->tellp());
 
-        // Use direct file access if a path was provided
-        if (!file_path_.empty())
+        // Create a hasher
+        catl::crypto::Sha512Hasher hasher;
+
+        // Create a temporary header with zeroed hash field
+        CatlHeader tempHeader = header_;
+        std::fill(tempHeader.hash.begin(), tempHeader.hash.end(), 0);
+
+        // Hash the header
+        hasher.update(
+            reinterpret_cast<const uint8_t*>(&tempHeader), sizeof(tempHeader));
+
+        // Hash the rest of the file
+        file_stream->clear();
+        file_stream->seekg(sizeof(CatlHeader));
+        std::vector<char> buffer(1024 * 1024);  // 1MB buffer
+
+        while (!file_stream->eof())
         {
-            // Ensure existing streams are flushed
-            file_stream->flush();
-            body_stream_->flush();
-
-            // Reopen the file directly for hash calculation
-            std::fstream direct_file(
-                file_path_, std::ios::binary | std::ios::in | std::ios::out);
-            if (!direct_file.good())
+            file_stream->read(buffer.data(), buffer.size());
+            std::streamsize bytes_read = file_stream->gcount();
+            if (bytes_read > 0)
             {
-                LOGE(
-                    "Failed to reopen file for hash calculation: ", file_path_);
-                return false;
+                hasher.update(
+                    reinterpret_cast<const uint8_t*>(buffer.data()),
+                    bytes_read);
             }
-
-            // Read the header
-            CatlHeader temp_header;
-            direct_file.read(
-                reinterpret_cast<char*>(&temp_header), sizeof(CatlHeader));
-
-            // Zero out the hash field in memory
-            std::fill(temp_header.hash.begin(), temp_header.hash.end(), 0);
-
-            // Create hasher for reliable calculation
-            catl::crypto::Sha512Hasher hasher;
-
-            // Start by hashing the header with zeroed hash
-            hasher.update(&temp_header, sizeof(temp_header));
-
-            // Then hash the rest of the file
-            direct_file.seekg(sizeof(CatlHeader));
-
-            // Create a buffer for reading the file
-            std::vector<char> buffer(1024 * 1024);  // 1MB buffer
-
-            // Read and hash the file in chunks
-            while (!direct_file.eof())
-            {
-                direct_file.read(
-                    buffer.data(),
-                    buffer
-                        .size());  // TODO: why does catl-decomp use sizeof here
-                std::streamsize bytes_read = direct_file.gcount();
-                if (bytes_read > 0)
-                {
-                    hasher.update(buffer.data(), bytes_read);
-                }
-            }
-
-            // Get the final hash
-            unsigned int hash_len = 0;
-            hasher.final(header_.hash.begin(), &hash_len);
-
-            // Copy hash to header
-            if (hash_len != header_.hash.size())
-            {
-                LOGE(
-                    "Hash length mismatch: expected ",
-                    header_.hash.size(),
-                    " bytes, got ",
-                    hash_len,
-                    " bytes");
-                return false;
-            }
-
-            // Update the header in the file
-            direct_file.clear();  // Clear EOF flag
-            direct_file.seekp(0);
-            direct_file.write(
-                reinterpret_cast<const char*>(&header_), sizeof(header_));
-            direct_file.flush();
-            direct_file.close();
-
-            LOGI(
-                "Finalized CATL file: size=",
-                header_.filesize,
-                " using direct file access: ",
-                file_path_);
         }
-        else
+
+        // Get the final hash
+        unsigned int hash_len = 0;
+        hasher.final(header_.hash.begin(), &hash_len);
+
+        // Copy hash to header
+        if (hash_len != header_.hash.size())
         {
-            // Fall back to stream-based approach
-
-            // Create a hasher
-            catl::crypto::Sha512Hasher hasher;
-
-            // Create a temporary header with zeroed hash field
-            CatlHeader tempHeader = header_;
-            std::fill(tempHeader.hash.begin(), tempHeader.hash.end(), 0);
-
-            // Hash the header
-            hasher.update(
-                reinterpret_cast<const uint8_t*>(&tempHeader),
-                sizeof(tempHeader));
-
-            // Hash the rest of the file
-            file_stream->clear();
-            file_stream->seekg(sizeof(CatlHeader));
-            std::vector<char> buffer(1024 * 1024);  // 1MB buffer
-
-            while (!file_stream->eof())
-            {
-                file_stream->read(buffer.data(), buffer.size());
-                std::streamsize bytes_read = file_stream->gcount();
-                if (bytes_read > 0)
-                {
-                    hasher.update(
-                        reinterpret_cast<const uint8_t*>(buffer.data()),
-                        bytes_read);
-                }
-            }
-
-            // Get the final hash
-            unsigned int hash_len = 0;
-            hasher.final(header_.hash.begin(), &hash_len);
-
-            // Copy hash to header
-            if (hash_len != header_.hash.size())
-            {
-                LOGE(
-                    "Hash length mismatch: expected ",
-                    header_.hash.size(),
-                    " bytes, got ",
-                    hash_len,
-                    " bytes");
-                return false;
-            }
-
-            // Update the header in the file
-            file_stream->clear();
-            file_stream->seekp(0);
-            file_stream->write(
-                reinterpret_cast<const char*>(&header_), sizeof(header_));
-            file_stream->flush();
-
-            LOGI("Finalized CATL file: size=", header_.filesize, " bytes");
+            LOGE(
+                "Hash length mismatch: expected ",
+                header_.hash.size(),
+                " bytes, got ",
+                hash_len,
+                " bytes");
+            return false;
         }
+
+        // Update the header in the file
+        file_stream->clear();
+        file_stream->seekp(0);
+        file_stream->write(
+            reinterpret_cast<const char*>(&header_), sizeof(header_));
+        file_stream->flush();
+
+        LOGI("Finalized CATL file: size=", header_.filesize, " bytes");
     }
     else
     {
@@ -752,5 +662,4 @@ Writer::~Writer()
         }
     }
 }
-
 }  // namespace catl::v1
