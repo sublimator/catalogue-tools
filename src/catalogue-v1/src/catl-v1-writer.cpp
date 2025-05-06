@@ -23,7 +23,6 @@ class CompressedOutputStream : public std::ostream
 {
 private:
     std::ostream& underlying_stream_;
-    uint8_t compression_level_;
 
     // Custom buffer for compression
     class CompressionBuffer : public std::streambuf
@@ -31,16 +30,13 @@ private:
     private:
         std::ostream& output_;
         std::vector<char> buffer_;
-        uint8_t compression_level_;
 
     public:
         CompressionBuffer(
             std::ostream& output,
-            uint8_t compression_level,
+            uint8_t,  // Unused compression_level parameter
             size_t buffer_size = 8192)
-            : output_(output)
-            , buffer_(buffer_size)
-            , compression_level_(compression_level)
+            : output_(output), buffer_(buffer_size)
         {
             // Set buffer pointers
             setp(buffer_.data(), buffer_.data() + buffer_.size());
@@ -91,7 +87,6 @@ public:
     CompressedOutputStream(std::ostream& stream, uint8_t compression_level)
         : std::ostream(&buffer_)
         , underlying_stream_(stream)
-        , compression_level_(compression_level)
         , buffer_(stream, compression_level)
     {
     }
@@ -113,6 +108,7 @@ Writer::Writer(
     , options_(options)
     , header_written_(false)
     , finalized_(false)
+    , body_bytes_written_(0)
 {
     // Validate options
     if (options_.compression_level > 9)
@@ -199,12 +195,15 @@ Writer::writeHeader(uint32_t min_ledger, uint32_t max_ledger)
     header_.filesize = 0;  // Will update in finalize()
 
     // Initialize hash field to zeros (hash will be computed during finalize)
-    std::memset(header_.hash, 0, sizeof(header_.hash));
+    std::memset(header_.hash.begin(), 0, sizeof(header_.hash));
 
     // Write header to header stream
     header_stream_->write(
         reinterpret_cast<const char*>(&header_), sizeof(header_));
     header_stream_->flush();
+
+    // Track the header write
+    track_write(WriteType::HEADER, sizeof(header_));
 
     LOGI(
         "Wrote CATL header: ledger range ",
@@ -236,6 +235,9 @@ Writer::writeLedgerHeader(const LedgerInfo& header)
     // Write ledger header to the body stream
     body_stream_->write(
         reinterpret_cast<const char*>(&header), sizeof(LedgerInfo));
+
+    // Track the ledger header write
+    track_write(WriteType::LEDGER_HEADER, sizeof(LedgerInfo));
 
     LOGD("Wrote ledger header for sequence ", header.sequence);
 
@@ -341,8 +343,6 @@ Writer::writeMapDelta(
     // Process additions and modifications
     for (const auto& [key, item_ptr] : current_items)
     {
-        bool is_new = previous_items.find(key) == previous_items.end();
-
         // For new items or modified items, write them to the file
         // Note: We don't have a way to detect if an item changed without
         // comparing the actual data, so we write all items that exist in
@@ -434,7 +434,7 @@ Writer::finalize()
 
         // Create a buffer for reading the file
         std::vector<char> buffer(1024 * 1024);  // 1MB buffer
-        catl::crypto::SHA512HalfHasher hasher;
+        catl::crypto::Sha512HalfHasher hasher;
 
         // Zero out the hash field before computing the hash
         file_stream->seekg(offsetof(CatlHeader, hash));
@@ -461,7 +461,7 @@ Writer::finalize()
         Hash256 hash = hasher.finalize();
 
         // Copy hash to header
-        std::memcpy(header_.hash, hash.data(), hash.size());
+        std::memcpy(header_.hash.begin(), hash.data(), Hash256::size());
 
         // Update header with final size and hash
         file_stream->clear();  // Clear EOF flag
@@ -492,6 +492,13 @@ Writer::writeItem(
     const uint8_t* data,
     uint32_t size)
 {
+    // Calculate total bytes for this item
+    size_t item_size = sizeof(uint8_t) + Key::size();
+    if (node_type != tnREMOVE)
+    {
+        item_size += sizeof(uint32_t) + size;
+    }
+
     // Write node type
     uint8_t type_byte = static_cast<uint8_t>(node_type);
     body_stream_->write(
@@ -537,6 +544,9 @@ Writer::writeItem(
         }
     }
 
+    // Track the write if successful
+    track_write(WriteType::MAP_ITEM, item_size);
+
     return true;
 }
 
@@ -554,7 +564,36 @@ Writer::writeTerminal()
         return false;
     }
 
+    // Track the terminal marker write
+    track_write(WriteType::TERMINAL, sizeof(terminal));
+
     return true;
+}
+
+size_t
+Writer::body_bytes_written() const
+{
+    return body_bytes_written_;
+}
+
+void
+Writer::set_write_callback(WriteCallback callback)
+{
+    write_callback_ = std::move(callback);
+}
+
+void
+Writer::track_write(WriteType type, size_t bytes)
+{
+    if (type != WriteType::HEADER)
+    {
+        body_bytes_written_ += bytes;
+    }
+
+    if (write_callback_)
+    {
+        write_callback_(type, bytes);
+    }
 }
 
 Writer::~Writer()
