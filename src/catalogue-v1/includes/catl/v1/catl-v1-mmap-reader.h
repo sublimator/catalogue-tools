@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catl/shamap/shamap.h"
 #include "catl/v1/catl-v1-errors.h"
 #include "catl/v1/catl-v1-ledger-info-view.h"
 #include "catl/v1/catl-v1-structs.h"
@@ -125,6 +126,23 @@ public:
      */
     LedgerInfoView
     get_ledger_info_view(size_t position) const;
+
+    /**
+     * Read a SHAMap from the current position in the file
+     *
+     * This method reads a series of nodes from the current position until a
+     * terminal marker is encountered, adding each node to the provided SHAMap.
+     * The position is advanced to the end of the map data.
+     *
+     * @param map SHAMap to populate with nodes
+     * @param leaf_type Expected leaf node type (used to validate node
+     * operations)
+     * @return Number of nodes processed and added to the map
+     * @throws CatlV1Error if invalid data or unexpected end of file is
+     * encountered
+     */
+    uint32_t
+    read_shamap(SHAMap& map, SHAMapNodeType leaf_type);
 
     /**
      * Read arbitrary data structure at the current position and advance

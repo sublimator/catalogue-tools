@@ -1,4 +1,7 @@
 #include "catl/v1/catl-v1-mmap-reader.h"
+#include "catl/core/types.h"
+#include "catl/shamap/shamap-nodetype.h"
+#include "catl/shamap/shamap.h"
 #include "catl/v1/catl-v1-utils.h"
 #include <boost/filesystem.hpp>
 #include <cstring>
@@ -215,6 +218,108 @@ MmapReader::get_ledger_info_view(size_t position) const
     // Create a view directly into the memory-mapped data at the specified
     // position
     return LedgerInfoView(data_ + position);
+}
+
+uint32_t
+MmapReader::read_shamap(SHAMap& map, SHAMapNodeType leaf_type)
+{
+    uint32_t nodes_processed_count = 0;
+    bool found_terminal = false;
+
+    while (position_ < file_size_ && !found_terminal)
+    {
+        // Read node type
+        uint8_t node_type_val = *(data_ + position_);
+        position_++;
+        auto node_type = static_cast<SHAMapNodeType>(node_type_val);
+
+        if (node_type == tnTERMINAL)
+        {
+            found_terminal = true;
+            break;
+        }
+
+        // Validate node type
+        if (node_type != tnINNER && node_type != tnTRANSACTION_NM &&
+            node_type != tnTRANSACTION_MD && node_type != tnACCOUNT_STATE &&
+            node_type != tnREMOVE)
+        {
+            throw CatlV1Error(
+                "Invalid node type encountered: " +
+                std::to_string(static_cast<int>(node_type_val)));
+        }
+
+        // Read key (32 bytes)
+        if (position_ + Key::size() > file_size_)
+        {
+            throw CatlV1Error("Unexpected EOF reading key");
+        }
+        const uint8_t* key_data = data_ + position_;
+        Key item_key(key_data);
+        position_ += Key::size();
+
+        // Handle REMOVE nodes
+        if (node_type == tnREMOVE)
+        {
+            if (leaf_type ==
+                tnACCOUNT_STATE)  // Only allow removals for state maps
+            {
+                if (map.remove_item(item_key))
+                {
+                    nodes_processed_count++;
+                }
+                else
+                {
+                    throw CatlV1Error(
+                        "Failed to remove state item (may not exist)");
+                }
+            }
+            else
+            {
+                throw CatlV1Error(
+                    "Found unexpected tnREMOVE node in non-state map");
+            }
+            continue;
+        }
+
+        // Read data size (4 bytes)
+        if (position_ + sizeof(uint32_t) > file_size_)
+        {
+            throw CatlV1Error("Unexpected EOF reading data size");
+        }
+        uint32_t data_size = 0;
+        std::memcpy(&data_size, data_ + position_, sizeof(uint32_t));
+        position_ += sizeof(uint32_t);
+
+        // Validate data size
+        constexpr uint32_t MAX_REASONABLE_DATA_SIZE = 5 * 1024 * 1024;  // 5 MiB
+        if (position_ > file_size_ ||
+            (data_size > 0 && position_ + data_size > file_size_) ||
+            data_size > MAX_REASONABLE_DATA_SIZE)
+        {
+            throw CatlV1Error("Invalid data size or EOF reached");
+        }
+
+        // Create MmapItem (zero-copy reference)
+        const uint8_t* item_data_ptr = data_ + position_;
+        auto item = boost::intrusive_ptr(
+            new MmapItem(key_data, item_data_ptr, data_size));
+
+        // Add item to the map
+        if (map.set_item(item) != SetResult::FAILED)
+        {
+            nodes_processed_count++;
+        }
+        else
+        {
+            throw CatlV1Error("Failed to add item to SHAMap");
+        }
+
+        // Advance position past the data
+        position_ += data_size;
+    }
+
+    return nodes_processed_count;
 }
 
 }  // namespace catl::v1
