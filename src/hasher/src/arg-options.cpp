@@ -66,7 +66,13 @@ parse_argv(int argc, char* argv[])
         "level,l",
         po::value<std::string>()->default_value("info"),
         "Set log verbosity (error, warn, info, debug)")(
-        "serve,s", po::bool_switch(), "Start HTTP server");
+        "serve,s", po::bool_switch(), "Start HTTP server")(
+        "first-ledger,f",
+        po::value<uint32_t>(),
+        "First ledger to include in snapshots")(
+        "last-ledger,e",
+        po::value<uint32_t>(),
+        "Last ledger to process (exit after this ledger)");
 
     // Set up positional arguments
     po::positional_options_description pos_desc;
@@ -123,6 +129,28 @@ parse_argv(int argc, char* argv[])
         if (vm.count("serve"))
         {
             options.start_server = vm["serve"].as<bool>();
+        }
+
+        // Parse first ledger option
+        if (vm.count("first-ledger"))
+        {
+            options.first_ledger = vm["first-ledger"].as<uint32_t>();
+        }
+
+        // Parse last ledger option
+        if (vm.count("last-ledger"))
+        {
+            options.last_ledger = vm["last-ledger"].as<uint32_t>();
+        }
+
+        // Validate ledger range if both are specified
+        if (options.first_ledger && options.last_ledger &&
+            *options.first_ledger > *options.last_ledger)
+        {
+            options.valid = false;
+            options.error_message =
+                "first-ledger cannot be greater than last-ledger";
+            return options;
         }
     }
     catch (const po::error& e)
