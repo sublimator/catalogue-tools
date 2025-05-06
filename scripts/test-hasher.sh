@@ -2,8 +2,8 @@ pushd build
 ninja hasher
 popd
 
-FIRST_LEDGER=1000
-SECOND_LEDGER=2000
+FIRST_LEDGER=50000
+SECOND_LEDGER=100000
 OUTPUT_FILE="/Users/nicholasdudfield/projects/xahau-history/cat.$FIRST_LEDGER-$SECOND_LEDGER.catl"
 
 ./build/src/hasher/catl-hasher \
@@ -13,3 +13,5 @@ OUTPUT_FILE="/Users/nicholasdudfield/projects/xahau-history/cat.$FIRST_LEDGER-$S
 
 ./build/src/hasher/catl-hasher \
   $OUTPUT_FILE --level=info
+
+./build/src/utils/catl-validator $OUTPUT_FILE
