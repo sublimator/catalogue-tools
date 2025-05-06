@@ -336,4 +336,30 @@ SHAMap::handle_path_cow(PathFinder& path_finder)
     }
 }
 
+boost::intrusive_ptr<MmapItem>
+SHAMap::get_item(const Key& key) const
+{
+    if (!root)
+    {
+        return nullptr;
+    }
+
+    // Create a PathFinder to locate the item
+    PathFinder path_finder(
+        const_cast<boost::intrusive_ptr<SHAMapInnerNode>&>(root),
+        key,
+        options_);
+    path_finder.find_path();
+
+    // Check if we found a leaf and the keys match
+    if (path_finder.has_leaf() && path_finder.did_leaf_key_match())
+    {
+        auto leaf = path_finder.get_leaf();
+        return leaf->get_item();
+    }
+
+    // Item not found
+    return nullptr;
+}
+
 LogPartition SHAMap::log_partition_{"SHAMap", LogLevel::DEBUG};

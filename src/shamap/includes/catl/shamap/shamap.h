@@ -143,6 +143,37 @@ public:
     boost::json::array
     items_json() const;
 
+    /**
+     * Get an item by its key
+     *
+     * @param key The key to look up
+     * @return The item if found, or nullptr if not found
+     */
+    boost::intrusive_ptr<MmapItem>
+    get_item(const Key& key) const;
+
+    /**
+     * Get the root node of the SHAMap
+     *
+     * @return Root node pointer
+     */
+    boost::intrusive_ptr<SHAMapInnerNode>
+    get_root() const
+    {
+        return root;
+    }
+
+    /**
+     * Get the SHAMap options
+     *
+     * @return Options structure
+     */
+    const SHAMapOptions&
+    get_options() const
+    {
+        return options_;
+    }
+
     static LogPartition&
     get_log_partition()
     {
