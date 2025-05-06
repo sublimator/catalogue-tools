@@ -27,11 +27,11 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         path_finder.find_path();
         handle_path_cow(path_finder);
 
-        bool itemExists =
+        bool item_exists =
             path_finder.has_leaf() && path_finder.did_leaf_key_match();
 
         // Early checks based on mode
-        if (itemExists && mode == SetMode::ADD_ONLY)
+        if (item_exists && mode == SetMode::ADD_ONLY)
         {
             OLOGW(
                 "Item with key ",
@@ -40,7 +40,7 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
             return SetResult::FAILED;
         }
 
-        if (!itemExists && mode == SetMode::UPDATE_ONLY)
+        if (!item_exists && mode == SetMode::UPDATE_ONLY)
         {
             OLOGW(
                 "Item with key ",
@@ -50,7 +50,7 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         }
 
         if (path_finder.ended_at_null_branch() ||
-            (itemExists && mode != SetMode::ADD_ONLY))
+            (item_exists && mode != SetMode::ADD_ONLY))
         {
             auto parent = path_finder.get_parent_of_terminal();
             int branch = path_finder.get_terminal_branch();
@@ -65,16 +65,16 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                 parent->get_depth() + 1,
                 " branch ",
                 branch);
-            auto newLeaf =
+            auto new_leaf =
                 boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
             if (cow_enabled_)
             {
-                newLeaf->set_version(current_version_);
+                new_leaf->set_version(current_version_);
             }
-            parent->set_child(branch, newLeaf);
+            parent->set_child(branch, new_leaf);
             path_finder.dirty_path();
             path_finder.collapse_path();  // Add collapsing logic here
-            return itemExists ? SetResult::UPDATE : SetResult::ADD;
+            return item_exists ? SetResult::UPDATE : SetResult::ADD;
         }
 
         if (path_finder.has_leaf() && !path_finder.did_leaf_key_match())
@@ -87,61 +87,61 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                 throw NullNodeException(
                     "addItem collision: null parent node (should be root)");
             }
-            auto existingLeaf = path_finder.get_leaf_mutable();
-            auto existingItem = existingLeaf->get_item();
-            if (!existingItem)
+            auto existing_leaf = path_finder.get_leaf_mutable();
+            auto existing_item = existing_leaf->get_item();
+            if (!existing_item)
             {
                 throw NullItemException(); /* Should be caught by leaf
                                               constructor */
             }
 
-            boost::intrusive_ptr<SHAMapInnerNode> currentParent = parent;
-            int currentBranch = branch;
-            uint8_t currentDepth =
+            boost::intrusive_ptr<SHAMapInnerNode> current_parent = parent;
+            int current_branch = branch;
+            uint8_t current_depth =
                 parent->get_depth() + 1;  // Start depth below parent
 
             // Create first new inner node to replace the leaf
-            auto newInner =
-                boost::intrusive_ptr(new SHAMapInnerNode(currentDepth));
+            auto new_inner =
+                boost::intrusive_ptr(new SHAMapInnerNode(current_depth));
             if (cow_enabled_)
             {
-                newInner->enable_cow(true);
-                newInner->set_version(current_version_);
+                new_inner->enable_cow(true);
+                new_inner->set_version(current_version_);
             }
-            parent->set_child(currentBranch, newInner);
-            currentParent = newInner;
+            parent->set_child(current_branch, new_inner);
+            current_parent = new_inner;
 
-            while (currentDepth < 64)
+            while (current_depth < 64)
             {
                 // Max depth check
-                int existingBranch =
-                    select_branch(existingItem->key(), currentDepth);
-                int newBranch = select_branch(item->key(), currentDepth);
+                int existing_branch =
+                    select_branch(existing_item->key(), current_depth);
+                int new_branch = select_branch(item->key(), current_depth);
 
-                if (existingBranch != newBranch)
+                if (existing_branch != new_branch)
                 {
                     OLOGD(
                         "Collision resolved at depth ",
-                        currentDepth,
+                        current_depth,
                         ". Placing leaves at branches ",
-                        existingBranch,
+                        existing_branch,
                         " and ",
-                        newBranch);
-                    auto newLeaf = boost::intrusive_ptr(
+                        new_branch);
+                    auto new_leaf = boost::intrusive_ptr(
                         new SHAMapLeafNode(item, node_type_));
                     if (cow_enabled_)
                     {
-                        newLeaf->set_version(current_version_);
+                        new_leaf->set_version(current_version_);
                         // May need to update existing leaf version as well
-                        if (existingLeaf->get_version() != current_version_)
+                        if (existing_leaf->get_version() != current_version_)
                         {
-                            auto copiedLeaf = existingLeaf->copy();
-                            copiedLeaf->set_version(current_version_);
-                            existingLeaf = copiedLeaf;
+                            auto copied_leaf = existing_leaf->copy();
+                            copied_leaf->set_version(current_version_);
+                            existing_leaf = copied_leaf;
                         }
                     }
-                    currentParent->set_child(existingBranch, existingLeaf);
-                    currentParent->set_child(newBranch, newLeaf);
+                    current_parent->set_child(existing_branch, existing_leaf);
+                    current_parent->set_child(new_branch, new_leaf);
                     break;  // Done
                 }
                 else
@@ -149,23 +149,23 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                     // Collision continues, create another inner node
                     OLOGD(
                         "Collision continues at depth ",
-                        currentDepth,
+                        current_depth,
                         ", branch ",
-                        existingBranch,
+                        existing_branch,
                         ". Descending further.");
-                    auto nextInner = boost::intrusive_ptr(
-                        new SHAMapInnerNode(currentDepth + 1));
+                    auto next_inner = boost::intrusive_ptr(
+                        new SHAMapInnerNode(current_depth + 1));
                     if (cow_enabled_)
                     {
-                        nextInner->enable_cow(true);
-                        nextInner->set_version(current_version_);
+                        next_inner->enable_cow(true);
+                        next_inner->set_version(current_version_);
                     }
-                    currentParent->set_child(existingBranch, nextInner);
-                    currentParent = nextInner;
-                    currentDepth++;
+                    current_parent->set_child(existing_branch, next_inner);
+                    current_parent = next_inner;
+                    current_depth++;
                 }
             }
-            if (currentDepth >= 64)
+            if (current_depth >= 64)
             {
                 throw SHAMapException(
                     "Maximum SHAMap depth reached during collision resolution "

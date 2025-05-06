@@ -672,7 +672,7 @@ public:
                 catl::v1::Writer::for_file(output_file, writer_options);
 
             // Write the header with the new ledger range
-            if (!writer->writeHeader(first_ledger, last_ledger))
+            if (!writer->write_header(first_ledger, last_ledger))
             {
                 LOGE("Failed to write slice file header");
                 return false;
@@ -722,7 +722,7 @@ public:
                     Hash256::size());
 
                 // Write the ledger to the slice file
-                if (!writer->writeLedger(
+                if (!writer->write_ledger(
                         info, *ledger->getStateMap(), *ledger->getTxMap()))
                 {
                     LOGE("Failed to write ledger ", seq, " to slice file");

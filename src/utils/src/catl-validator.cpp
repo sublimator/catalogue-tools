@@ -130,12 +130,12 @@ getNodeTypeDescription(uint8_t type)
 
 // Convert NetClock epoch time to human-readable string
 std::string
-timeToString(uint64_t netClockTime)
+timeToString(uint64_t net_clock_time)
 {
     // NetClock uses seconds since January 1st, 2000 (946684800)
-    static const time_t rippleEpochOffset = 946684800;
+    static const time_t ripple_epoch_offset = 946684800;
 
-    time_t unixTime = netClockTime + rippleEpochOffset;
+    time_t unixTime = net_clock_time + ripple_epoch_offset;
     std::tm* tm = std::gmtime(&unixTime);
     if (!tm)
         return "Invalid time";

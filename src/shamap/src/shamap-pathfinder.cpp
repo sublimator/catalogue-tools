@@ -186,19 +186,19 @@ PathFinder::collapse_path_single_leaf_child()
 {
     if (inners_.size() <= 1)
         return true;
-    boost::intrusive_ptr<SHAMapLeafNode> onlyChild = nullptr;
+    boost::intrusive_ptr<SHAMapLeafNode> only_child = nullptr;
     auto innermost = inners_.back();
-    onlyChild = innermost->get_only_child_leaf();
+    only_child = innermost->get_only_child_leaf();
     for (int i = static_cast<int>(inners_.size()) - 2; i >= 0; --i)
     {
         auto inner = inners_[i];
         int branch = branches_[i];
-        if (onlyChild)
+        if (only_child)
         {
-            inner->set_child(branch, onlyChild);
+            inner->set_child(branch, only_child);
         }
-        onlyChild = inner->get_only_child_leaf();
-        if (!onlyChild)
+        only_child = inner->get_only_child_leaf();
+        if (!only_child)
             break;
     }
     return false;

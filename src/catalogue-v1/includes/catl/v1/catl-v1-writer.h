@@ -81,7 +81,7 @@ public:
      * @throws CatlV1Error if ledger range is invalid or header already written
      */
     bool
-    writeHeader(uint32_t min_ledger, uint32_t max_ledger);
+    write_header(uint32_t min_ledger, uint32_t max_ledger);
 
     /**
      * Write a ledger header to the file
@@ -91,7 +91,7 @@ public:
      * @throws CatlV1Error if file header not written or already finalized
      */
     bool
-    writeLedgerHeader(const LedgerInfo& header);
+    write_ledger_header(const LedgerInfo& header);
 
     /**
      * Write a complete SHAMap to the file
@@ -102,7 +102,7 @@ public:
      * @throws CatlV1Error if file header not written or already finalized
      */
     bool
-    writeMap(const SHAMap& map, SHAMapNodeType node_type);
+    write_map(const SHAMap& map, SHAMapNodeType node_type);
 
     /**
      * Write the delta between two SHAMaps
@@ -117,7 +117,7 @@ public:
      * @throws CatlV1Error if file header not written or already finalized
      */
     bool
-    writeMapDelta(
+    write_map_delta(
         const SHAMap& previous,
         const SHAMap& current,
         SHAMapNodeType node_type);
@@ -133,7 +133,7 @@ public:
      * @return true if successful
      */
     bool
-    writeLedger(
+    write_ledger(
         const LedgerInfo& header,
         const SHAMap& state_map,
         const SHAMap& tx_map);
@@ -184,7 +184,7 @@ private:
      * @return true if successful
      */
     bool
-    writeItem(
+    write_item(
         SHAMapNodeType node_type,
         const Key& key,
         const uint8_t* data,
@@ -196,7 +196,7 @@ private:
      * @return true if successful
      */
     bool
-    writeTerminal();
+    write_terminal();
 
     /** Stream for header operations */
     std::shared_ptr<std::ostream> header_stream_;

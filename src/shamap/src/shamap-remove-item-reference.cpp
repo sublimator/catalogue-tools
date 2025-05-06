@@ -12,18 +12,18 @@ SHAMap::remove_item_reference(const Key& key)
     OLOGD_KEY("Attempting to remove item with key: ", key);
     try
     {
-        PathFinder pathFinder(root, key, options_);
-        pathFinder.find_path();
-        handle_path_cow(pathFinder);
+        PathFinder path_finder(root, key, options_);
+        path_finder.find_path();
+        handle_path_cow(path_finder);
 
-        if (!pathFinder.has_leaf() || !pathFinder.did_leaf_key_match())
+        if (!path_finder.has_leaf() || !path_finder.did_leaf_key_match())
         {
             OLOGD_KEY("Item not found for removal, key: ", key);
             return false;  // Item not found
         }
 
-        auto parent = pathFinder.get_parent_of_terminal();
-        int branch = pathFinder.get_terminal_branch();
+        auto parent = path_finder.get_parent_of_terminal();
+        int branch = path_finder.get_terminal_branch();
         if (!parent)
         {
             throw NullNodeException(
@@ -36,8 +36,8 @@ SHAMap::remove_item_reference(const Key& key)
             " branch ",
             branch);
         parent->set_child(branch, nullptr);  // Remove the leaf
-        pathFinder.dirty_path();
-        pathFinder.collapse_path();  // Compress path if possible
+        path_finder.dirty_path();
+        path_finder.collapse_path();  // Compress path if possible
         OLOGD_KEY("Item removed successfully, key: ", key);
         return true;
     }

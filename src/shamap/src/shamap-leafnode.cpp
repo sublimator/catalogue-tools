@@ -52,11 +52,11 @@ SHAMapLeafNode::update_hash(SHAMapOptions const&)
     {
         case tnTRANSACTION_NM:
         case tnTRANSACTION_MD:
-            set(HashPrefix::txNode);
+            set(HashPrefix::tx_node);
             break;
         case tnACCOUNT_STATE:
         default:
-            set(HashPrefix::leafNode);
+            set(HashPrefix::leaf_node);
             break;
     }
 
@@ -95,9 +95,9 @@ SHAMapLeafNode::get_type() const
 boost::intrusive_ptr<SHAMapLeafNode>
 SHAMapLeafNode::copy() const
 {
-    auto newLeaf = boost::intrusive_ptr(new SHAMapLeafNode(item, type));
-    newLeaf->hash = hash;
-    newLeaf->hash_valid_ = hash_valid_;
-    newLeaf->version = version;
-    return newLeaf;
+    auto new_leaf = boost::intrusive_ptr(new SHAMapLeafNode(item, type));
+    new_leaf->hash = hash;
+    new_leaf->hash_valid_ = hash_valid_;
+    new_leaf->version = version;
+    return new_leaf;
 }

@@ -24,10 +24,10 @@ void
 Logger::set_level(LogLevel level)
 {
     // Log level change *before* the lock for potential self-logging
-    LogLevel oldLevel = current_level_;
+    LogLevel old_level = current_level_;
     current_level_ = level;
     if (should_log(LogLevel::INFO) ||
-        (oldLevel != LogLevel::NONE && level > oldLevel))
+        (old_level != LogLevel::NONE && level > old_level))
     {
         // Log if increasing level or level is INFO+
         // Use a temporary string stream to avoid locking issues if logging
@@ -51,10 +51,10 @@ Logger::set_level(const std::string& levelStr)
         {"debug", LogLevel::DEBUG}};
 
     // Convert input to lowercase
-    std::string lowerLevelStr = levelStr;
-    std::ranges::transform(lowerLevelStr, lowerLevelStr.begin(), ::tolower);
+    std::string lower_level_str = levelStr;
+    std::ranges::transform(lower_level_str, lower_level_str.begin(), ::tolower);
 
-    const auto it = levelMap.find(lowerLevelStr);
+    const auto it = levelMap.find(lower_level_str);
     if (it == levelMap.end())
     {
         return false;

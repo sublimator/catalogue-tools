@@ -247,9 +247,9 @@ public:
     bool
     should_log(LogLevel messageLevel) const
     {
-        LogLevel effectiveLevel = level();
-        return effectiveLevel != LogLevel::NONE &&
-            messageLevel <= effectiveLevel;
+        LogLevel effective_level = level();
+        return effective_level != LogLevel::NONE &&
+            messageLevel <= effective_level;
     }
 
     // In LogPartition class, add:

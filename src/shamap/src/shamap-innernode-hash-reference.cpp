@@ -25,7 +25,7 @@ SHAMapInnerNode::update_hash_reference(SHAMapOptions const& options)
         catl::crypto::Sha512HalfHasher hasher;
 
         // Add the prefix
-        auto prefix = HashPrefix::innerNode;
+        auto prefix = HashPrefix::inner_node;
         hasher.update(prefix.data(), prefix.size());
 
         // Add each branch's hash (or zero hash for empty branches)
