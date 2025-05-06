@@ -1,6 +1,5 @@
 #include "catl/v1/catl-v1-mmap-reader.h"
 #include "catl/core/types.h"
-#include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap.h"
 #include "catl/v1/catl-v1-utils.h"
 #include <boost/filesystem.hpp>

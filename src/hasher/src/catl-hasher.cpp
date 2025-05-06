@@ -45,8 +45,6 @@ class CATLHasher
 {
 private:
     catl::v1::MmapReader reader;
-    const uint8_t* data = nullptr;
-    size_t fileSize = 0;
     CATLHeader header;
 
     // Maps for tracking state
@@ -70,8 +68,7 @@ private:
     void
     validateHeader()
     {
-        // MmapReader already validates the header, but we'll apply our
-        // additional checks and log header information for consistency
+        // MmapReader already validates the header
         stats.currentOffset = sizeof(CATLHeader);
 
 #if STOP_AT_LEDGER
@@ -80,257 +77,22 @@ private:
 
         // Log header info at INFO level
         LOGI("CATL Header Validated:");
-        // Use std::hex manipulator for magic value display
         std::ostringstream oss_magic_info;
         oss_magic_info << "  Magic: 0x" << std::hex << header.magic << std::dec;
         LOGI(oss_magic_info.str());
         LOGI("  Ledger range: ", header.min_ledger, " - ", header.max_ledger);
-        LOGI(
-            "  Version: ",
-            (header.version &
-             CATALOGUE_VERSION_MASK));  // Mask out compression bits
+        LOGI("  Version: ", (header.version & CATALOGUE_VERSION_MASK));
         LOGI("  Network ID: ", header.network_id);
-        LOGI(
-            "  Header Filesize: ",
-            header.filesize,
-            " bytes");  // Note: Compare with actual later
+        LOGI("  Header Filesize: ", header.filesize, " bytes");
     }
 
-    // Unified map processing function
-    size_t
-    processMap(
-        size_t offset,
-        SHAMap& map,
-        uint32_t& nodesProcessedCount,
-        bool debugMap,
-        bool isStateMap = false)
+    // Debug helper function to print map contents as JSON
+    void
+    debugMapJson(const SHAMap& map, const std::string& mapTypeName)
     {
-        nodesProcessedCount = 0;
-        bool foundTerminal = false;
-        const std::string mapTypeName = isStateMap ? "state" : "transaction";
-        size_t startOffset = offset;
-
-        LOGD(
-            "Starting processing of ",
-            mapTypeName,
-            " map data at offset ",
-            offset);
-
-        while (offset < fileSize && !foundTerminal)
-        {
-            stats.currentOffset =
-                offset;  // Update global offset for error reporting
-
-            // Read node type - check bounds first
-            if (offset >= fileSize)
-            {
-                LOGE(
-                    "Unexpected EOF reading node type in ",
-                    mapTypeName,
-                    " map at offset ",
-                    offset);
-                return startOffset;  // Return original offset on error
-            }
-            uint8_t nodeTypeVal = data[offset++];
-            auto nodeType = static_cast<SHAMapNodeType>(nodeTypeVal);
-
-            if (nodeType == tnTERMINAL)
-            {
-                LOGD(
-                    "Found terminal marker for ",
-                    mapTypeName,
-                    " map at offset ",
-                    offset - 1);
-                foundTerminal = true;
-                break;  // Exit loop successfully
-            }
-
-            // Validate node type BEFORE reading key/data
-            if (nodeType != tnINNER && nodeType != tnTRANSACTION_NM &&
-                nodeType != tnTRANSACTION_MD && nodeType != tnACCOUNT_STATE &&
-                nodeType != tnREMOVE)
-            {
-                LOGE(
-                    "Invalid node type encountered: ",
-                    static_cast<int>(nodeTypeVal),
-                    " in ",
-                    mapTypeName,
-                    " map at offset ",
-                    offset - 1);
-                return startOffset;  // Indicate error by returning original
-                // offset
-            }
-
-            // Read key (32 bytes) - check bounds
-            if (offset + Key::size() > fileSize)
-            {
-                LOGE(
-                    "Unexpected EOF reading key (",
-                    Key::size(),
-                    " bytes) in ",
-                    mapTypeName,
-                    " map. Current offset: ",
-                    offset,
-                    ", File size: ",
-                    fileSize);
-                return startOffset;
-            }
-            const uint8_t* keyData = data + offset;
-            Key itemKey(keyData);  // Create Key object early for logging
-            offset += Key::size();
-
-            // Handle removal (only expected in state maps)
-            if (nodeType == tnREMOVE)
-            {
-                if (isStateMap)
-                {
-                    LOGD_KEY("Processing tnREMOVE for key: ", itemKey);
-                    stats.stateRemovalsAttempted++;
-                    if (map.remove_item(itemKey))
-                    {
-                        stats.stateRemovalsSucceeded++;
-                        nodesProcessedCount++;
-                    }
-                    else
-                    {
-                        // Log warning if removal failed (item might not have
-                        // existed)
-                        LOGE(
-                            "Failed to remove state item (may not exist), "
-                            "key: ",
-                            itemKey.hex());
-                        return startOffset;  // error
-                    }
-                }
-                else
-                {
-                    LOGW(
-                        "Found unexpected tnREMOVE node in transaction map at "
-                        "offset ",
-                        offset - 1 - Key::size(),
-                        " for key: ",
-                        itemKey.hex());
-                    return startOffset;  // error
-                }
-                continue;  // Move to the next node
-            }
-
-            // Read data size (4 bytes) - check bounds
-            if (offset + sizeof(uint32_t) > fileSize)
-            {
-                LOGE(
-                    "Unexpected EOF reading data size (",
-                    sizeof(uint32_t),
-                    " bytes) in ",
-                    mapTypeName,
-                    " map. Current offset: ",
-                    offset,
-                    ", File size: ",
-                    fileSize);
-                return startOffset;
-            }
-            uint32_t dataSize = 0;
-            std::memcpy(&dataSize, data + offset, sizeof(uint32_t));
-            offset += sizeof(uint32_t);
-
-            // Validate data size (check against remaining file size and sanity
-            // check) Allow zero size data (e.g. some placeholder nodes)
-            constexpr uint32_t MAX_REASONABLE_DATA_SIZE =
-                5 * 1024 * 1024;  // 5 MiB sanity limit
-            if (offset > fileSize ||
-                (dataSize > 0 && offset + dataSize > fileSize) ||
-                dataSize > MAX_REASONABLE_DATA_SIZE)
-            {
-                LOGE(
-                    "Invalid data size (",
-                    dataSize,
-                    " bytes) or EOF reached in ",
-                    mapTypeName,
-                    " map. Offset: ",
-                    offset,
-                    ", Remaining bytes: ",
-                    (fileSize > offset ? fileSize - offset : 0),
-                    ", File size: ",
-                    fileSize);
-                LOGD_KEY("Error occurred processing node with key: ", itemKey);
-                return startOffset;
-            }
-
-            // Create MmapItem (zero-copy reference)
-            const uint8_t* itemDataPtr = data + offset;
-            auto item = boost::intrusive_ptr(
-                new MmapItem(keyData, itemDataPtr, dataSize));
-
-            if (!isStateMap)
-            {
-                LOGD(
-                    "Adding item to transaction map key=",
-                    item->key().hex(),
-                    "data=",
-                    item->hex());
-            }
-
-            // Add item to the appropriate map
-            if (map.set_item(item) != SetResult::FAILED)
-            {
-                // addItem handles logging internally now
-                nodesProcessedCount++;
-            }
-            else
-            {
-                // addItem already logs errors, but we might want a higher level
-                // error here
-                LOGE(
-                    "Failed to add item from ",
-                    mapTypeName,
-                    " map to SHAMap, key: ",
-                    itemKey.hex(),
-                    " at offset ",
-                    stats.currentOffset);
-                // Consider if processing should stop here. Returning
-                // startOffset indicates failure.
-                return startOffset;
-            }
-
-            // Advance offset past the data
-            offset += dataSize;
-        }  // End while loop
-
-        if (!foundTerminal)
-        {
-            LOGW(
-                "Processing ",
-                mapTypeName,
-                " map ended without finding a terminal marker (tnTERMINAL). "
-                "Reached offset ",
-                offset);
-            // This might be okay if it's the end of the file, or an error
-            // otherwise.
-            if (offset < fileSize)
-            {
-                LOGE(
-                    "Map processing stopped prematurely before EOF and without "
-                    "terminal marker. Offset: ",
-                    offset);
-                return startOffset;  // Indicate error
-            }
-        }
-
-        LOGD(
-            "Finished processing ",
-            mapTypeName,
-            " map. Processed ",
-            nodesProcessedCount,
-            " nodes. Final offset: ",
-            offset);
-
-        if (debugMap)
-        {
-            std::ostringstream oss;
-            pretty_print_json(oss, map.items_json());
-            LOGI("MAP JSON: ", oss.str());
-        }
-        return offset;  // Return the new offset after successful processing
+        std::ostringstream oss;
+        pretty_print_json(oss, map.items_json());
+        LOGI(mapTypeName, " MAP JSON: ", oss.str());
     }
 
     // Process a single ledger
@@ -340,135 +102,110 @@ private:
         stats.currentOffset = offset;
         size_t initialOffset = offset;
 
-        // Check bounds for LedgerInfo
-        if (offset + sizeof(LedgerInfoV1) > fileSize)
+        try
         {
-            LOGE(
-                "Not enough data remaining (",
-                (fileSize > offset ? fileSize - offset : 0),
-                " bytes) for LedgerInfo structure (",
-                sizeof(LedgerInfoV1),
-                " bytes) at offset ",
-                offset);
-            return initialOffset;  // Return original offset on error
-        }
+            // Set reader position to the current offset
+            reader.set_position(offset);
 
-        std::memcpy(&info, data + offset, sizeof(LedgerInfoV1));
-        offset += sizeof(LedgerInfoV1);
-        stats.currentOffset = offset;
+            // Read ledger info directly from the reader
+            info = reader.read_structure<LedgerInfoV1>();
+            offset = reader.position();
+            stats.currentOffset = offset;
 
-        // Sanity check ledger sequence
-        if (info.sequence < header.min_ledger ||
-            info.sequence > header.max_ledger)
-        {
-            LOGW(
-                "Ledger sequence ",
-                info.sequence,
-                " is outside the expected range [",
-                header.min_ledger,
-                ", ",
-                header.max_ledger,
-                "] specified in the header.");
-        }
+            // Sanity check ledger sequence
+            if (info.sequence < header.min_ledger ||
+                info.sequence > header.max_ledger)
+            {
+                LOGW(
+                    "Ledger sequence ",
+                    info.sequence,
+                    " is outside the expected range [",
+                    header.min_ledger,
+                    ", ",
+                    header.max_ledger,
+                    "] specified in the header.");
+            }
 
-        LOGI("--- Processing Ledger ", info.sequence, " ---");
-        LOGI(
-            "  Ledger Hash:      ",
-            Hash256(info.hash).hex());  // Using efficient macro
-        LOGI("  Parent Hash:      ", Hash256(info.parent_hash).hex());
-        LOGI("  AccountState Hash:", Hash256(info.account_hash).hex());
-        LOGI("  Transaction Hash: ", Hash256(info.tx_hash).hex());
-        LOGI(
-            "  Close Time:       ", utils::format_ripple_time(info.close_time));
-        LOGI("  Drops:            ", info.drops);
-        LOGI("  Close Flags:      ", info.close_flags);
-        LOGI("  Offset at start:  ", initialOffset);
-
-        // Process Account State Map
-        bool isFirstLedger = (info.sequence == header.min_ledger);
-        if (isFirstLedger)
-        {
+            LOGI("--- Processing Ledger ", info.sequence, " ---");
+            LOGI("  Ledger Hash:      ", Hash256(info.hash).hex());
+            LOGI("  Parent Hash:      ", Hash256(info.parent_hash).hex());
+            LOGI("  AccountState Hash:", Hash256(info.account_hash).hex());
+            LOGI("  Transaction Hash: ", Hash256(info.tx_hash).hex());
             LOGI(
-                "Initializing new State SHAMap for first ledger ",
-                info.sequence);
-            stateMap =
-                SHAMap(tnACCOUNT_STATE);  // Recreate for the first ledger
-        }
-        else
-        {
-            LOGI("Processing State Map delta for ledger ", info.sequence);
-            // stateMap persists from previous ledger
-        }
+                "  Close Time:       ",
+                utils::format_ripple_time(info.close_time));
+            LOGI("  Drops:            ", info.drops);
+            LOGI("  Close Flags:      ", info.close_flags);
+            LOGI("  Offset at start:  ", initialOffset);
 
-        uint32_t stateNodesProcessed = 0;
-        size_t stateMapEndOffset = processMap(
-            offset,
-            stateMap,
-            stateNodesProcessed,
-            false,
-            true);  // true = isStateMap
-        if (stateMapEndOffset == offset && stateNodesProcessed == 0 &&
-            offset != fileSize)
-        {
-            // Check if no progress was made and not EOF
-            LOGE(
-                "Error processing state map data for ledger ",
-                info.sequence,
-                ". No progress made from offset ",
+            // Process Account State Map
+            bool isFirstLedger = (info.sequence == header.min_ledger);
+            if (isFirstLedger)
+            {
+                LOGI(
+                    "Initializing new State SHAMap for first ledger ",
+                    info.sequence);
+                stateMap =
+                    SHAMap(tnACCOUNT_STATE);  // Recreate for the first ledger
+            }
+            else
+            {
+                LOGI("Processing State Map delta for ledger ", info.sequence);
+                // stateMap persists from previous ledger
+            }
+
+            // Process state map using the new read_shamap method
+            LOGI("Processing State Map for ledger ", info.sequence);
+            uint32_t stateNodesProcessed =
+                reader.read_shamap(stateMap, tnACCOUNT_STATE);
+            offset = reader.position();
+            stats.currentOffset = offset;
+            stats.stateNodesAdded += stateNodesProcessed;  // Accumulate stats
+            LOGI(
+                "  State map processing finished. Nodes processed in this "
+                "ledger: ",
+                stateNodesProcessed,
+                ". New offset: ",
                 offset);
+
+            // Process Transaction Map (always created fresh for each ledger)
+            LOGI("Processing Transaction Map for ledger ", info.sequence);
+            txMap = SHAMap(tnTRANSACTION_MD);  // Create fresh transaction map
+
+            // Process transaction map using the new read_shamap method
+            uint32_t txNodesProcessed =
+                reader.read_shamap(txMap, tnTRANSACTION_MD);
+            offset = reader.position();
+            stats.currentOffset = offset;
+            stats.txNodesAdded += txNodesProcessed;  // Accumulate stats
+            LOGI(
+                "  Transaction map processing finished. Nodes processed: ",
+                txNodesProcessed,
+                ". Final offset for ledger: ",
+                offset);
+
+            // Verify Hashes
+            LOGI("Verifying map hashes for ledger ", info.sequence);
+            verifyMapHash(
+                stateMap,
+                Hash256(info.account_hash),
+                "AccountState",
+                info.sequence);
+            verifyMapHash(
+                txMap, Hash256(info.tx_hash), "Transaction", info.sequence);
+
+            stats.ledgersProcessed++;
+            return offset;  // Return the final offset for this ledger
+        }
+        catch (const catl::v1::CatlV1Error& e)
+        {
+            LOGE(
+                "Error processing ledger at offset ",
+                initialOffset,
+                ": ",
+                e.what());
             return initialOffset;  // Return original offset to signal failure
         }
-        offset = stateMapEndOffset;
-        stats.currentOffset = offset;
-        stats.stateNodesAdded += stateNodesProcessed;  // Accumulate stats
-        LOGI(
-            "  State map processing finished. Nodes processed in this ledger: ",
-            stateNodesProcessed,
-            ". New offset: ",
-            offset);
-
-        // Process Transaction Map (always created fresh for each ledger)
-        LOGI("Processing Transaction Map for ledger ", info.sequence);
-        txMap = SHAMap(tnTRANSACTION_MD);  // Create fresh transaction map
-        uint32_t txNodesProcessed = 0;
-        size_t txMapEndOffset = processMap(
-            offset,
-            txMap,
-            txNodesProcessed,
-            info.sequence == DEBUG_LEDGER_TX,
-            false);  // false = not isStateMap
-        if (txMapEndOffset == offset && txNodesProcessed == 0 &&
-            offset != fileSize)
-        {
-            LOGE(
-                "Error processing transaction map data for ledger ",
-                info.sequence,
-                ". No progress made from offset ",
-                offset);
-            return initialOffset;  // Signal failure
-        }
-        offset = txMapEndOffset;
-        stats.currentOffset = offset;
-        stats.txNodesAdded += txNodesProcessed;  // Accumulate stats
-        LOGI(
-            "  Transaction map processing finished. Nodes processed: ",
-            txNodesProcessed,
-            ". Final offset for ledger: ",
-            offset);
-
-        // Verify Hashes
-        LOGI("Verifying map hashes for ledger ", info.sequence);
-        verifyMapHash(
-            stateMap,
-            Hash256(info.account_hash),
-            "AccountState",
-            info.sequence);
-        verifyMapHash(
-            txMap, Hash256(info.tx_hash), "Transaction", info.sequence);
-
-        stats.ledgersProcessed++;
-        // LOG_INFO("--- Completed Ledger ", info.sequence, " ---");
-        return offset;  // Return the final offset for this ledger
     }
 
     // Helper to verify map hashes
@@ -527,22 +264,19 @@ public:
         , txMap(tnTRANSACTION_MD)
         , ledgerStore(std::make_shared<LedgerStore>())
     {
-        LOGI("File opened with MmapReader: ", filename);
         try
         {
-            // Get data pointer and file size from MmapReader
-            data = reader.data_at(0);  // Get pointer to start of file
-            fileSize = reader.file_size();
-
-            // Copy header from MmapReader (already validated)
-            header = reader.header();
-
+            // MmapReader already validates the file and header
+            LOGI("File opened with MmapReader: ", filename);
             LOGI(
                 "File mapped successfully: ",
                 filename,
                 " (",
-                fileSize,
+                reader.file_size(),
                 " bytes)");
+
+            // Copy header from MmapReader (already validated)
+            header = reader.header();
         }
         catch (const catl::v1::CatlV1Error& e)
         {
@@ -570,7 +304,9 @@ public:
 
         try
         {
-            if (!data || fileSize == 0)
+            // MmapReader already validates this, so this check shouldn't be
+            // needed
+            if (reader.file_size() == 0)
             {
                 LOGE(
                     "No data available to process. File not mapped correctly?");
@@ -580,17 +316,17 @@ public:
             // Validate header and log information
             validateHeader();
 
-            // Compare actual file size with header filesize
-            if (header.filesize != fileSize)
+            // Note: MmapReader already validates file size against header value
+            // This is just a double-check
+            if (header.filesize != reader.file_size())
             {
                 LOGW(
                     "File size mismatch: Header reports ",
                     header.filesize,
                     " bytes, actual mapped size is ",
-                    fileSize,
+                    reader.file_size(),
                     " bytes. Processing based on actual size.");
-                // Processing will continue, but this might indicate truncation
-                // or corruption.
+                // This warning shouldn't occur since MmapReader validates this
             }
 
             // Process ledgers starting after the header
@@ -599,7 +335,7 @@ public:
                 (header.max_ledger - header.min_ledger + 1);
             LOGI("Expecting ", expectedLedgerCount, " ledgers in this file.");
 
-            while (currentFileOffset < fileSize)
+            while (currentFileOffset < reader.file_size())
             {
                 LedgerInfoV1 info = {};
                 size_t nextOffset = processLedger(currentFileOffset, info);
@@ -608,8 +344,9 @@ public:
                 constexpr int every = STORE_LEDGER_SNAPSHOTS_EVERY;
                 if (every > 0 && info.sequence % every == 0)
                 {
+                    // Get the ledger data pointer using the reader
                     auto ledger = std::make_shared<Ledger>(
-                        data + currentFileOffset,
+                        reader.data_at(currentFileOffset),
                         // TODO: configurable snapshots
                         stateMap.snapshot(),
                         std::make_shared<SHAMap>(txMap));
@@ -654,13 +391,13 @@ public:
             }
 
             // Check if we processed up to the expected end of the file
-            if (currentFileOffset != fileSize)
+            if (currentFileOffset != reader.file_size())
             {
                 LOGW(
                     "Processing finished at offset ",
                     currentFileOffset,
                     " but file size is ",
-                    fileSize,
+                    reader.file_size(),
                     ". Potential trailing data or incomplete processing.");
             }
             else

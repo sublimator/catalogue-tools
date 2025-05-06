@@ -38,14 +38,17 @@ struct LedgerInfo
 };
 #pragma pack(pop)
 
-// SHAMap node types
-enum SHAMapNodeType : uint8_t {
-    tnINNER = 1,
-    tnTRANSACTION_NM = 2,
-    tnTRANSACTION_MD = 3,
-    tnACCOUNT_STATE = 4,
-    tnREMOVE = 254,
-    tnTERMINAL = 255
-};
+// TODO: do we even want this here?
+// It's kind of v1 specific (tnREMOVE and tnTERMINAL)
+
+// // SHAMap node types
+// enum SHAMapNodeType : uint8_t {
+//     tnINNER = 1,
+//     tnTRANSACTION_NM = 2,
+//     tnTRANSACTION_MD = 3,
+//     tnACCOUNT_STATE = 4,
+//     tnREMOVE = 254,
+//     tnTERMINAL = 255
+// };
 
 }  // namespace catl::v1
