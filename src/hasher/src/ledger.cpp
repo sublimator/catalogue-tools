@@ -17,7 +17,7 @@ Ledger::Ledger(
     const uint8_t* headerData,
     std::shared_ptr<SHAMap> state,
     std::shared_ptr<SHAMap> tx)
-    : headerView(headerData), stateMap(std::move(state)), txMap(std::move(tx))
+    : header_view_(headerData), stateMap(std::move(state)), txMap(std::move(tx))
 {
 }
 
@@ -25,10 +25,10 @@ bool
 Ledger::validate() const
 {
     // Verify that map hashes match header
-    bool stateHashValid = (stateMap->get_hash() == header().account_hash());
-    bool txHashValid = (txMap->get_hash() == header().transaction_hash());
+    bool state_hash_valid = (stateMap->get_hash() == header().account_hash());
+    bool tx_hash_valid = (txMap->get_hash() == header().transaction_hash());
 
-    return stateHashValid && txHashValid;
+    return state_hash_valid && tx_hash_valid;
 }
 
 // ---------- LedgerStore Implementation ----------

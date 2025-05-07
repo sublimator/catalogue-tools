@@ -82,13 +82,13 @@ parse_argv(int argc, char* argv[])
     pos_desc.add("input-file", 1);
 
     // Generate the help text
-    std::ostringstream helpStream;
-    helpStream << "Usage: " << (argc > 0 ? argv[0] : "catl-hasher")
-               << " [options] <catalogue_file>" << std::endl
-               << desc << std::endl
-               << "Processes CATL files, builds SHAMaps, verifies hashes."
-               << std::endl;
-    options.help_text = helpStream.str();
+    std::ostringstream help_stream;
+    help_stream << "Usage: " << (argc > 0 ? argv[0] : "catl-hasher")
+                << " [options] <catalogue_file>" << std::endl
+                << desc << std::endl
+                << "Processes CATL files, builds SHAMaps, verifies hashes."
+                << std::endl;
+    options.help_text = help_stream.str();
 
     try
     {

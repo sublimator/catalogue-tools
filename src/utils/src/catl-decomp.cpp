@@ -37,9 +37,9 @@ isCompressed(uint16_t versionField)
 }
 
 inline uint16_t
-makeCatalogueVersionField(uint8_t version, uint8_t compressionLevel = 0)
+makeCatalogueVersionField(uint8_t version, uint8_t compression_level = 0)
 {
-    return make_catalogue_version_field(version, compressionLevel);
+    return make_catalogue_version_field(version, compression_level);
 }
 
 // Helper function to convert binary hash to hex string
@@ -80,57 +80,58 @@ format_file_size(uint64_t bytes)
 class CATLDecompressor
 {
 private:
-    std::string inputFilePath;
-    std::string outputFilePath;
-    boost::iostreams::mapped_file_source mmapFile;
+    std::string input_file_path_;
+    std::string output_file_path_;
+    boost::iostreams::mapped_file_source mmap_file_;
     const uint8_t* data = nullptr;
-    size_t fileSize = 0;
+    size_t file_size_ = 0;
     CatlHeader header;
 
 public:
     CATLDecompressor(const std::string& inFile, const std::string& outFile)
-        : inputFilePath(inFile), outputFilePath(outFile)
+        : input_file_path_(inFile), output_file_path_(outFile)
     {
-        if (!boost::filesystem::exists(inputFilePath))
+        if (!boost::filesystem::exists(input_file_path_))
         {
             throw std::runtime_error(
-                "Input file does not exist: " + inputFilePath);
+                "Input file does not exist: " + input_file_path_);
         }
 
-        boost::filesystem::path path(inputFilePath);
-        boost::uintmax_t actualFileSize = boost::filesystem::file_size(path);
-        if (actualFileSize == 0)
-        {
-            throw std::runtime_error("Input file is empty: " + inputFilePath);
-        }
-
-        mmapFile.open(inputFilePath);
-        if (!mmapFile.is_open())
+        boost::filesystem::path path(input_file_path_);
+        boost::uintmax_t actual_file_size = boost::filesystem::file_size(path);
+        if (actual_file_size == 0)
         {
             throw std::runtime_error(
-                "Failed to memory map file: " + inputFilePath);
+                "Input file is empty: " + input_file_path_);
         }
 
-        data = reinterpret_cast<const uint8_t*>(mmapFile.data());
-        fileSize = mmapFile.size();
+        mmap_file_.open(input_file_path_);
+        if (!mmap_file_.is_open())
+        {
+            throw std::runtime_error(
+                "Failed to memory map file: " + input_file_path_);
+        }
 
-        std::cout << "Opened file: " << inputFilePath << " (" << fileSize
-                  << " bytes, " << format_file_size(fileSize) << ")"
+        data = reinterpret_cast<const uint8_t*>(mmap_file_.data());
+        file_size_ = mmap_file_.size();
+
+        std::cout << "Opened file: " << input_file_path_ << " (" << file_size_
+                  << " bytes, " << format_file_size(file_size_) << ")"
                   << std::endl;
     }
 
     ~CATLDecompressor()
     {
-        if (mmapFile.is_open())
+        if (mmap_file_.is_open())
         {
-            mmapFile.close();
+            mmap_file_.close();
         }
     }
 
     bool
     validateHeader()
     {
-        if (fileSize < sizeof(CatlHeader))
+        if (file_size_ < sizeof(CatlHeader))
         {
             std::cerr << "File too small to contain a valid CATL header"
                       << std::endl;
@@ -147,10 +148,10 @@ public:
             return false;
         }
 
-        uint8_t compressionLevel = get_compression_level(header.version);
+        uint8_t compression_level = get_compression_level(header.version);
         uint8_t version = get_catalogue_version(header.version);
 
-        if (compressionLevel == 0)
+        if (compression_level == 0)
         {
             std::cerr
                 << "File is not compressed (level 0). No need to decompress."
@@ -195,39 +196,39 @@ public:
                   << std::endl;
         std::cout << "  Version: " << static_cast<int>(version) << std::endl;
         std::cout << "  Compression Level: "
-                  << static_cast<int>(compressionLevel) << std::endl;
+                  << static_cast<int>(compression_level) << std::endl;
         std::cout << "  Network ID: " << header.network_id << std::endl;
         std::cout << "  File size: " << header.filesize << " bytes ("
                   << format_file_size(header.filesize) << ")" << std::endl;
 
         // Output hash if present
-        bool hasNonZeroHash = false;
+        bool non_zero_hash = false;
         for (size_t i = 0; i < header.hash.size(); i++)
         {
             if (header.hash[i] != 0)
             {
-                hasNonZeroHash = true;
+                non_zero_hash = true;
                 break;
             }
         }
 
-        if (hasNonZeroHash)
+        if (non_zero_hash)
         {
-            std::string hashHex =
+            std::string hash_hex =
                 toHexString(header.hash.data(), header.hash.size());
-            std::cout << "  Hash: " << hashHex << std::endl;
+            std::cout << "  Hash: " << hash_hex << std::endl;
         }
         else
         {
             std::cout << "  Hash: Not set (all zeros)" << std::endl;
         }
 
-        if (header.filesize != fileSize)
+        if (header.filesize != file_size_)
         {
             std::cerr << "Warning: Header file size (" << header.filesize
                       << " bytes, " << format_file_size(header.filesize)
-                      << ") doesn't match actual file size (" << fileSize
-                      << " bytes, " << format_file_size(fileSize) << ")"
+                      << ") doesn't match actual file size (" << file_size_
+                      << " bytes, " << format_file_size(file_size_) << ")"
                       << std::endl;
         }
 
@@ -242,166 +243,167 @@ public:
             return false;
         }
 
-        std::cout << "Creating output file: " << outputFilePath << std::endl;
-        std::ofstream outFile(outputFilePath, std::ios::binary);
-        if (!outFile)
+        std::cout << "Creating output file: " << output_file_path_ << std::endl;
+        std::ofstream out_file(output_file_path_, std::ios::binary);
+        if (!out_file)
         {
-            std::cerr << "Failed to create output file: " << outputFilePath
+            std::cerr << "Failed to create output file: " << output_file_path_
                       << std::endl;
             return false;
         }
 
         // Create a new header with compression level set to 0
-        CatlHeader newHeader = header;
+        CatlHeader new_header = header;
         uint8_t version = get_catalogue_version(header.version);
-        newHeader.version =
+        new_header.version =
             makeCatalogueVersionField(version, 0);  // Set compression to 0
-        newHeader.filesize = 0;                     // Will be updated later
-        newHeader.hash.fill(0);  // Clear hash, will be calculated later
+        new_header.filesize = 0;                    // Will be updated later
+        new_header.hash.fill(0);  // Clear hash, will be calculated later
 
         // Write the new header to the output file
-        outFile.write(
-            reinterpret_cast<const char*>(&newHeader), sizeof(CatlHeader));
-        if (!outFile)
+        out_file.write(
+            reinterpret_cast<const char*>(&new_header), sizeof(CatlHeader));
+        if (!out_file)
         {
             std::cerr << "Failed to write header to output file" << std::endl;
             return false;
         }
 
         // Set up decompression
-        uint8_t compressionLevel = get_compression_level(header.version);
+        uint8_t compression_level = get_compression_level(header.version);
 
         std::cout << "Decompressing data with compression level "
-                  << static_cast<int>(compressionLevel) << "..." << std::endl;
+                  << static_cast<int>(compression_level) << "..." << std::endl;
 
         // Open the input file for reading after the header
-        std::ifstream inFile(inputFilePath, std::ios::binary);
-        if (!inFile)
+        std::ifstream in_file(input_file_path_, std::ios::binary);
+        if (!in_file)
         {
             std::cerr << "Failed to open input file for reading" << std::endl;
             return false;
         }
 
         // Skip the header in the input file
-        inFile.seekg(sizeof(CatlHeader));
+        in_file.seekg(sizeof(CatlHeader));
 
         // Set up a zlib decompression stream
-        boost::iostreams::filtering_istream decompStream;
+        boost::iostreams::filtering_istream decomp_stream;
         boost::iostreams::zlib_params params(
-            compressionLevel);  // Use same level as input
+            compression_level);  // Use same level as input
         params.window_bits = 15;
         params.noheader = false;
-        decompStream.push(boost::iostreams::zlib_decompressor(params));
-        decompStream.push(inFile);
+        decomp_stream.push(boost::iostreams::zlib_decompressor(params));
+        decomp_stream.push(in_file);
 
         // Copy data from decompression stream to output file
         char buffer[64 * 1024];  // 64K buffer
-        size_t totalBytesWritten = sizeof(CatlHeader);
+        size_t total_bytes_written = sizeof(CatlHeader);
 
-        auto startTime = std::chrono::high_resolution_clock::now();
-        size_t lastReport = 0;
-        auto lastTimeReport = startTime;
-        size_t bytesProcessedSinceLastTime = 0;
+        auto start_time = std::chrono::high_resolution_clock::now();
+        size_t last_report = 0;
+        auto last_time_report = start_time;
+        size_t bytes_processed_since_last_time = 0;
 
         try
         {
-            while (decompStream)
+            while (decomp_stream)
             {
-                decompStream.read(buffer, sizeof(buffer));
-                std::streamsize bytesRead = decompStream.gcount();
-                if (bytesRead > 0)
+                decomp_stream.read(buffer, sizeof(buffer));
+                std::streamsize bytes_read = decomp_stream.gcount();
+                if (bytes_read > 0)
                 {
                     // Check for corruption (this is a simple integrity check)
-                    if (decompStream.bad())
+                    if (decomp_stream.bad())
                     {
                         throw std::runtime_error(
                             "Decompression stream reported bad state - corrupt "
                             "data detected");
                     }
 
-                    outFile.write(buffer, bytesRead);
-                    if (outFile.bad())
+                    out_file.write(buffer, bytes_read);
+                    if (out_file.bad())
                     {
                         throw std::runtime_error(
                             "Error writing to output file");
                     }
 
-                    totalBytesWritten += bytesRead;
-                    bytesProcessedSinceLastTime += bytesRead;
+                    total_bytes_written += bytes_read;
+                    bytes_processed_since_last_time += bytes_read;
 
                     // Report progress every 10MB or 2 seconds
                     auto now = std::chrono::high_resolution_clock::now();
-                    auto timeSinceLastReport =
+                    auto time_since_last_report =
                         std::chrono::duration_cast<std::chrono::seconds>(
-                            now - lastTimeReport)
+                            now - last_time_report)
                             .count();
 
-                    if (totalBytesWritten - lastReport > 10 * 1024 * 1024 ||
-                        timeSinceLastReport >= 2)
+                    if (total_bytes_written - last_report > 10 * 1024 * 1024 ||
+                        time_since_last_report >= 2)
                     {
-                        double elapsedSeconds =
+                        double elapsed_seconds =
                             std::chrono::duration_cast<
-                                std::chrono::milliseconds>(now - startTime)
+                                std::chrono::milliseconds>(now - start_time)
                                 .count() /
                             1000.0;
 
                         // Calculate speed
-                        double mbPerSec =
-                            (totalBytesWritten / (1024.0 * 1024.0)) /
-                            elapsedSeconds;
+                        double mb_per_sec =
+                            (total_bytes_written / (1024.0 * 1024.0)) /
+                            elapsed_seconds;
 
                         // Estimate remaining time if we have data to make a
                         // guess
-                        std::string etaStr;
-                        if (totalBytesWritten > 0 && header.filesize > 0 &&
-                            header.filesize > totalBytesWritten)
+                        std::string eta_str;
+                        if (total_bytes_written > 0 && header.filesize > 0 &&
+                            header.filesize > total_bytes_written)
                         {
                             // Estimate output size as 3x input size
                             // (conservative decompression ratio)
-                            double estimatedTotalSize = header.filesize * 3;
-                            double remainingBytes =
-                                estimatedTotalSize - totalBytesWritten;
-                            double remainingSeconds = remainingBytes /
-                                (totalBytesWritten / elapsedSeconds);
+                            double estimated_total_size = header.filesize * 3;
+                            double remaining_bytes =
+                                estimated_total_size - total_bytes_written;
+                            double remaining_seconds = remaining_bytes /
+                                (total_bytes_written / elapsed_seconds);
 
-                            if (remainingSeconds < 60)
+                            if (remaining_seconds < 60)
                             {
-                                etaStr = std::to_string(static_cast<int>(
-                                             remainingSeconds)) +
+                                eta_str = std::to_string(static_cast<int>(
+                                              remaining_seconds)) +
                                     " sec";
                             }
-                            else if (remainingSeconds < 3600)
+                            else if (remaining_seconds < 3600)
                             {
-                                etaStr = std::to_string(static_cast<int>(
-                                             remainingSeconds / 60)) +
+                                eta_str = std::to_string(static_cast<int>(
+                                              remaining_seconds / 60)) +
                                     " min";
                             }
                             else
                             {
-                                etaStr = std::to_string(static_cast<int>(
-                                             remainingSeconds / 3600)) +
+                                eta_str = std::to_string(static_cast<int>(
+                                              remaining_seconds / 3600)) +
                                     " hr " +
                                     std::to_string(
-                                             static_cast<int>(
-                                                 (remainingSeconds / 60)) %
-                                             60) +
+                                              static_cast<int>(
+                                                  (remaining_seconds / 60)) %
+                                              60) +
                                     " min";
                             }
                         }
                         else
                         {
-                            etaStr = "unknown";
+                            eta_str = "unknown";
                         }
 
                         std::cout << "  Progress: "
-                                  << format_file_size(totalBytesWritten) << " ("
-                                  << std::fixed << std::setprecision(2)
-                                  << mbPerSec << " MB/s, ETA: " << etaStr << ")"
+                                  << format_file_size(total_bytes_written)
+                                  << " (" << std::fixed << std::setprecision(2)
+                                  << mb_per_sec << " MB/s, ETA: " << eta_str
+                                  << ")"
                                   << "\r" << std::flush;
 
-                        lastReport = totalBytesWritten;
-                        lastTimeReport = now;
-                        bytesProcessedSinceLastTime = 0;
+                        last_report = total_bytes_written;
+                        last_time_report = now;
+                        bytes_processed_since_last_time = 0;
                     }
                 }
             }
@@ -413,40 +415,40 @@ public:
                       << std::endl;
 
             // Close files before removing
-            decompStream.reset();
-            inFile.close();
-            outFile.close();
+            decomp_stream.reset();
+            in_file.close();
+            out_file.close();
 
             // Remove partial output file
-            std::cout << "Removing incomplete output file: " << outputFilePath
-                      << std::endl;
-            boost::filesystem::remove(outputFilePath);
+            std::cout << "Removing incomplete output file: "
+                      << output_file_path_ << std::endl;
+            boost::filesystem::remove(output_file_path_);
 
             return false;
         }
 
         std::cout << std::endl;
-        auto endTime = std::chrono::high_resolution_clock::now();
+        auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-            endTime - startTime);
+            end_time - start_time);
         double seconds = duration.count() / 1000.0;
-        double mbPerSec = (totalBytesWritten / (1024.0 * 1024.0)) / seconds;
+        double mb_per_sec = (total_bytes_written / (1024.0 * 1024.0)) / seconds;
 
         std::cout << "Decompression completed in " << std::fixed
-                  << std::setprecision(2) << seconds << " seconds (" << mbPerSec
-                  << " MB/s)" << std::endl;
-        std::cout << "Total bytes written: " << totalBytesWritten << " ("
-                  << format_file_size(totalBytesWritten) << ")" << std::endl;
+                  << std::setprecision(2) << seconds << " seconds ("
+                  << mb_per_sec << " MB/s)" << std::endl;
+        std::cout << "Total bytes written: " << total_bytes_written << " ("
+                  << format_file_size(total_bytes_written) << ")" << std::endl;
 
         // Close streams
-        decompStream.reset();
-        inFile.close();
-        outFile.close();
+        decomp_stream.reset();
+        in_file.close();
+        out_file.close();
 
         // Update the file size in the header
-        std::fstream updateFile(
-            outputFilePath, std::ios::in | std::ios::out | std::ios::binary);
-        if (!updateFile)
+        std::fstream update_file(
+            output_file_path_, std::ios::in | std::ios::out | std::ios::binary);
+        if (!update_file)
         {
             std::cerr << "Failed to reopen output file for header update"
                       << std::endl;
@@ -454,21 +456,21 @@ public:
         }
 
         // Update the header with the final file size
-        newHeader.filesize = totalBytesWritten;
-        updateFile.write(
-            reinterpret_cast<const char*>(&newHeader), sizeof(CatlHeader));
+        new_header.filesize = total_bytes_written;
+        update_file.write(
+            reinterpret_cast<const char*>(&new_header), sizeof(CatlHeader));
 
-        if (!updateFile)
+        if (!update_file)
         {
             std::cerr << "Failed to update header with file size" << std::endl;
             return false;
         }
-        updateFile.close();
+        update_file.close();
 
         // Now compute the hash over the entire file
         std::cout << "Computing hash for output file..." << std::endl;
-        std::ifstream hashFile(outputFilePath, std::ios::binary);
-        if (!hashFile)
+        std::ifstream hash_file(output_file_path_, std::ios::binary);
+        if (!hash_file)
         {
             std::cerr << "Failed to open output file for hashing" << std::endl;
             return false;
@@ -477,7 +479,7 @@ public:
         // Declare hash_result outside the try block so it's visible in the
         // scope where it's used later
         std::array<unsigned char, 64> hash_result;
-        unsigned int hashLen = 0;
+        unsigned int hash_len = 0;
 
         try
         {
@@ -485,46 +487,46 @@ public:
             Sha512Hasher hasher;
 
             // Read and process the header with zero hash
-            hashFile.read(
-                reinterpret_cast<char*>(&newHeader), sizeof(CatlHeader));
-            std::fill(newHeader.hash.begin(), newHeader.hash.end(), 0);
+            hash_file.read(
+                reinterpret_cast<char*>(&new_header), sizeof(CatlHeader));
+            std::fill(new_header.hash.begin(), new_header.hash.end(), 0);
 
             // Add the modified header to the hash
-            hasher.update(&newHeader, sizeof(CatlHeader));
+            hasher.update(&new_header, sizeof(CatlHeader));
 
             // Read and hash the rest of the file
-            while (hashFile)
+            while (hash_file)
             {
-                hashFile.read(buffer, sizeof(buffer));
-                std::streamsize bytesRead = hashFile.gcount();
-                if (bytesRead > 0)
+                hash_file.read(buffer, sizeof(buffer));
+                std::streamsize bytes_read = hash_file.gcount();
+                if (bytes_read > 0)
                 {
-                    hasher.update(buffer, bytesRead);
+                    hasher.update(buffer, bytes_read);
                 }
             }
 
             // Get the hash result
-            hasher.final(hash_result.data(), &hashLen);
+            hasher.final(hash_result.data(), &hash_len);
 
-            if (hashLen != hash_result.size())
+            if (hash_len != hash_result.size())
             {
                 std::cerr << "Unexpected hash length" << std::endl;
-                hashFile.close();
+                hash_file.close();
                 return false;
             }
         }
         catch (const std::exception& e)
         {
             std::cerr << "Hash computation failed: " << e.what() << std::endl;
-            hashFile.close();
+            hash_file.close();
             return false;
         }
-        hashFile.close();
+        hash_file.close();
 
         // Update the hash in the output file header
-        std::fstream updateHashFile(
-            outputFilePath, std::ios::in | std::ios::out | std::ios::binary);
-        if (!updateHashFile)
+        std::fstream update_hash_file(
+            output_file_path_, std::ios::in | std::ios::out | std::ios::binary);
+        if (!update_hash_file)
         {
             std::cerr << "Failed to reopen output file for hash update"
                       << std::endl;
@@ -532,21 +534,21 @@ public:
         }
 
         // Seek to the hash position in the header
-        updateHashFile.seekp(offsetof(CatlHeader, hash), std::ios::beg);
-        updateHashFile.write(
+        update_hash_file.seekp(offsetof(CatlHeader, hash), std::ios::beg);
+        update_hash_file.write(
             reinterpret_cast<const char*>(hash_result.data()),
             hash_result.size());
 
-        if (!updateHashFile)
+        if (!update_hash_file)
         {
             std::cerr << "Failed to update header with hash" << std::endl;
             return false;
         }
-        updateHashFile.close();
+        update_hash_file.close();
 
-        std::string hashHex =
+        std::string hash_hex =
             toHexString(hash_result.data(), hash_result.size());
-        std::cout << "Hash: " << hashHex << std::endl;
+        std::cout << "Hash: " << hash_hex << std::endl;
 
         return true;
     }
@@ -591,13 +593,13 @@ main(int argc, char* argv[])
 
     try
     {
-        std::string inputFile = argv[1];
-        std::string outputFile = argv[2];
+        std::string input_file = argv[1];
+        std::string output_file = argv[2];
 
         // Check if input and output are the same
         if (boost::filesystem::equivalent(
-                boost::filesystem::path(inputFile),
-                boost::filesystem::path(outputFile)))
+                boost::filesystem::path(input_file),
+                boost::filesystem::path(output_file)))
         {
             std::cerr << "Error: Input and output files must be different"
                       << std::endl;
@@ -605,7 +607,7 @@ main(int argc, char* argv[])
         }
 
         // Check if output file already exists
-        if (boost::filesystem::exists(outputFile))
+        if (boost::filesystem::exists(output_file))
         {
             std::cerr
                 << "Warning: Output file already exists. Overwrite? (y/n): ";
@@ -618,11 +620,11 @@ main(int argc, char* argv[])
             }
         }
 
-        CATLDecompressor decomp(inputFile, outputFile);
+        CATLDecompressor decomp(input_file, output_file);
         if (decomp.decompress())
         {
-            std::cout << "Successfully decompressed " << inputFile << " to "
-                      << outputFile << std::endl;
+            std::cout << "Successfully decompressed " << input_file << " to "
+                      << output_file << std::endl;
             return 0;
         }
         else

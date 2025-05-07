@@ -50,28 +50,28 @@ private:
     CATLHeader header;
 
     // Maps for tracking state
-    SHAMap stateMap;
-    SHAMap txMap;
-    std::shared_ptr<LedgerStore> ledgerStore;
+    SHAMap state_map_;
+    SHAMap tx_map_;
+    std::shared_ptr<LedgerStore> ledger_store_;
 
     // Statistics
     struct Stats
     {
-        uint32_t ledgersProcessed = 0;
-        uint32_t stateNodesAdded = 0;
-        uint32_t txNodesAdded = 0;
-        uint32_t stateRemovalsAttempted = 0;
-        uint32_t stateRemovalsSucceeded = 0;
-        uint32_t successfulHashVerifications = 0;
-        uint32_t failedHashVerifications = 0;
-        size_t currentOffset = 0;
+        uint32_t ledgers_processed = 0;
+        uint32_t state_nodes_added = 0;
+        uint32_t tx_nodes_added = 0;
+        uint32_t state_removals_attempted = 0;
+        uint32_t state_removals_succeeded = 0;
+        uint32_t successful_hash_verifications = 0;
+        uint32_t failed_hash_verifications = 0;
+        size_t current_offset = 0;
     } stats;
 
     void
     validateHeader()
     {
         // MmapReader already validates the header
-        stats.currentOffset = sizeof(CATLHeader);
+        stats.current_offset = sizeof(CATLHeader);
 
 #if STOP_AT_LEDGER
         header.max_ledger = STOP_AT_LEDGER;  // TODO: hackery
@@ -101,8 +101,8 @@ private:
     size_t
     processLedger(size_t offset, LedgerInfoV1& info)
     {
-        stats.currentOffset = offset;
-        size_t initialOffset = offset;
+        stats.current_offset = offset;
+        size_t initial_offset = offset;
 
         try
         {
@@ -112,7 +112,7 @@ private:
             // Read ledger info directly from the reader
             info = reader.read_structure<LedgerInfoV1>();
             offset = reader.position();
-            stats.currentOffset = offset;
+            stats.current_offset = offset;
 
             // Sanity check ledger sequence
             if (info.sequence < header.min_ledger ||
@@ -138,16 +138,16 @@ private:
                 utils::format_ripple_time(info.close_time));
             LOGI("  Drops:            ", info.drops);
             LOGI("  Close Flags:      ", info.close_flags);
-            LOGI("  Offset at start:  ", initialOffset);
+            LOGI("  Offset at start:  ", initial_offset);
 
             // Process Account State Map
-            bool isFirstLedger = (info.sequence == header.min_ledger);
-            if (isFirstLedger)
+            bool is_first_ledger = (info.sequence == header.min_ledger);
+            if (is_first_ledger)
             {
                 LOGI(
                     "Initializing new State SHAMap for first ledger ",
                     info.sequence);
-                stateMap =
+                state_map_ =
                     SHAMap(tnACCOUNT_STATE);  // Recreate for the first ledger
             }
             else
@@ -158,55 +158,56 @@ private:
 
             // Process state map using the new read_shamap method
             LOGI("Processing State Map for ledger ", info.sequence);
-            uint32_t stateNodesProcessed =
-                reader.read_shamap(stateMap, tnACCOUNT_STATE);
+            uint32_t state_nodes_processed =
+                reader.read_shamap(state_map_, tnACCOUNT_STATE);
             offset = reader.position();
-            stats.currentOffset = offset;
-            stats.stateNodesAdded += stateNodesProcessed;  // Accumulate stats
+            stats.current_offset = offset;
+            stats.state_nodes_added +=
+                state_nodes_processed;  // Accumulate stats
             LOGI(
                 "  State map processing finished. Nodes processed in this "
                 "ledger: ",
-                stateNodesProcessed,
+                state_nodes_processed,
                 ". New offset: ",
                 offset);
 
             // Process Transaction Map (always created fresh for each ledger)
             LOGI("Processing Transaction Map for ledger ", info.sequence);
-            txMap = SHAMap(tnTRANSACTION_MD);  // Create fresh transaction map
+            tx_map_ = SHAMap(tnTRANSACTION_MD);  // Create fresh transaction map
 
             // Process transaction map using the new read_shamap method
-            uint32_t txNodesProcessed =
-                reader.read_shamap(txMap, tnTRANSACTION_MD);
+            uint32_t tx_nodes_processed =
+                reader.read_shamap(tx_map_, tnTRANSACTION_MD);
             offset = reader.position();
-            stats.currentOffset = offset;
-            stats.txNodesAdded += txNodesProcessed;  // Accumulate stats
+            stats.current_offset = offset;
+            stats.tx_nodes_added += tx_nodes_processed;  // Accumulate stats
             LOGI(
                 "  Transaction map processing finished. Nodes processed: ",
-                txNodesProcessed,
+                tx_nodes_processed,
                 ". Final offset for ledger: ",
                 offset);
 
             // Verify Hashes
             LOGI("Verifying map hashes for ledger ", info.sequence);
             verifyMapHash(
-                stateMap,
+                state_map_,
                 Hash256(info.account_hash),
                 "AccountState",
                 info.sequence);
             verifyMapHash(
-                txMap, Hash256(info.tx_hash), "Transaction", info.sequence);
+                tx_map_, Hash256(info.tx_hash), "Transaction", info.sequence);
 
-            stats.ledgersProcessed++;
+            stats.ledgers_processed++;
             return offset;  // Return the final offset for this ledger
         }
         catch (const catl::v1::CatlV1Error& e)
         {
             LOGE(
                 "Error processing ledger at offset ",
-                initialOffset,
+                initial_offset,
                 ": ",
                 e.what());
-            return initialOffset;  // Return original offset to signal failure
+            return initial_offset;  // Return original offset to signal failure
         }
     }
 
@@ -218,10 +219,10 @@ private:
         const std::string& mapType,
         uint32_t ledgerSeq)
     {
-        Hash256 computedHash = map.get_hash();  // getHash is const
-        bool hashMatch = (computedHash == expectedHash);
+        Hash256 computed_hash = map.get_hash();  // getHash is const
+        bool hash_match = (computed_hash == expectedHash);
 
-        if (!hashMatch)
+        if (!hash_match)
         {
             LOGW(
                 "HASH MISMATCH for ",
@@ -232,10 +233,10 @@ private:
             // Log details only at DEBUG level for performance
             if (Logger::get_level() >= LogLevel::DEBUG)
             {
-                LOGD("  Computed Hash: ", computedHash.hex());
+                LOGD("  Computed Hash: ", computed_hash.hex());
                 LOGD("  Expected Hash: ", expectedHash.hex());
             }
-            stats.failedHashVerifications++;
+            stats.failed_hash_verifications++;
             if ((mapType == "Transaction" && THROW_ON_TX_HASH_MISMATCH) ||
                 (mapType == "AccountState" && THROW_ON_AS_HASH_MISMATCH))
             {
@@ -243,7 +244,7 @@ private:
                 oss << "Hash verification failed for " << mapType
                     << " map in ledger " << ledgerSeq
                     << ". Expected: " << expectedHash.hex()
-                    << ", got: " << computedHash.hex();
+                    << ", got: " << computed_hash.hex();
                 throw catl::v1::CatlV1HashVerificationError(oss.str());
             }
         }
@@ -254,7 +255,7 @@ private:
                 mapType,
                 " hash verified successfully for ledger ",
                 ledgerSeq);
-            stats.successfulHashVerifications++;
+            stats.successful_hash_verifications++;
         }
     }
 
@@ -268,9 +269,9 @@ public:
         const std::string& filename,
         const catl::hasher::CommandLineOptions& options)
         : reader(filename)  // Initialize MmapReader with filename
-        , stateMap(tnACCOUNT_STATE)
-        , txMap(tnTRANSACTION_MD)
-        , ledgerStore(std::make_shared<LedgerStore>())
+        , state_map_(tnACCOUNT_STATE)
+        , tx_map_(tnTRANSACTION_MD)
+        , ledger_store_(std::make_shared<LedgerStore>())
         , options_(options)
     {
         try
@@ -352,10 +353,10 @@ public:
             }
 
             // Process ledgers starting after the header
-            size_t currentFileOffset = sizeof(CATLHeader);
-            uint32_t expectedLedgerCount =
+            size_t current_file_offset = sizeof(CATLHeader);
+            uint32_t expected_ledger_count =
                 (header.max_ledger - header.min_ledger + 1);
-            LOGI("Expecting ", expectedLedgerCount, " ledgers in this file.");
+            LOGI("Expecting ", expected_ledger_count, " ledgers in this file.");
 
             // Log if we're using a restricted ledger range
             uint32_t effective_min_ledger = header.min_ledger;
@@ -377,21 +378,22 @@ public:
                 LOGI("Will stop processing at ledger ", effective_max_ledger);
             }
 
-            while (currentFileOffset < reader.file_size())
+            while (current_file_offset < reader.file_size())
             {
                 LedgerInfoV1 info = {};
-                size_t nextOffset = processLedger(currentFileOffset, info);
+                size_t next_offset = processLedger(current_file_offset, info);
 
 #if STORE_LEDGER_SNAPSHOTS
                 // Determine if this ledger should be stored based on range
                 // options
                 // TODO: articulate why the -1 is needed here exactly
-                bool inSnapshotRange =
+                bool in_snapshot_range =
                     info.sequence >= effective_min_ledger - 1 &&
                     info.sequence <= effective_max_ledger;
                 constexpr int every = STORE_LEDGER_SNAPSHOTS_EVERY;
 
-                if (every > 0 && info.sequence % every == 0 && inSnapshotRange)
+                if (every > 0 && info.sequence % every == 0 &&
+                    in_snapshot_range)
                 {
                     LOGD(
                         "Creating snapshot for ledger ",
@@ -399,10 +401,10 @@ public:
                         " (in requested range)");
                     // Get the ledger data pointer using the reader
                     auto ledger = std::make_shared<Ledger>(
-                        reader.data_at(currentFileOffset),
-                        stateMap.snapshot(),
-                        std::make_shared<SHAMap>(txMap));
-                    ledgerStore->add_ledger(ledger);
+                        reader.data_at(current_file_offset),
+                        state_map_.snapshot(),
+                        std::make_shared<SHAMap>(tx_map_));
+                    ledger_store_->add_ledger(ledger);
                 }
 #endif
 #if COLLAPSE_STATE_MAP
@@ -424,38 +426,38 @@ public:
                     break;
                 }
 
-                if (nextOffset == currentFileOffset)
+                if (next_offset == current_file_offset)
                 {
                     // No progress was made, indicates an error in processLedger
                     LOGE(
                         "Processing stalled at offset ",
-                        currentFileOffset,
+                        current_file_offset,
                         ". Error likely occurred in ledger ",
-                        (stats.ledgersProcessed > 0
-                             ? header.min_ledger + stats.ledgersProcessed
+                        (stats.ledgers_processed > 0
+                             ? header.min_ledger + stats.ledgers_processed
                              : header.min_ledger));
                     return false;  // Abort processing
                 }
-                if (nextOffset < currentFileOffset)
+                if (next_offset < current_file_offset)
                 {
                     // This should ideally not happen, defensive check
                     LOGE(
                         "Offset went backwards from ",
-                        currentFileOffset,
+                        current_file_offset,
                         " to ",
-                        nextOffset,
+                        next_offset,
                         ". Aborting.");
                     return false;
                 }
-                currentFileOffset = nextOffset;
+                current_file_offset = next_offset;
             }
 
             // Check if we processed up to the expected end of the file
-            if (currentFileOffset != reader.file_size())
+            if (current_file_offset != reader.file_size())
             {
                 LOGW(
                     "Processing finished at offset ",
-                    currentFileOffset,
+                    current_file_offset,
                     " but file size is ",
                     reader.file_size(),
                     ". Potential trailing data or incomplete processing.");
@@ -464,7 +466,7 @@ public:
             {
                 LOGI(
                     "Processing reached the end of the mapped file (offset ",
-                    currentFileOffset,
+                    current_file_offset,
                     ").");
             }
 
@@ -472,33 +474,33 @@ public:
             LOGI("--- Processing Summary ---");
             LOGI(
                 "Ledgers processed:      ",
-                stats.ledgersProcessed,
+                stats.ledgers_processed,
                 " (Expected: ",
-                expectedLedgerCount,
+                expected_ledger_count,
                 ")");
-            if (stats.ledgersProcessed != expectedLedgerCount)
+            if (stats.ledgers_processed != expected_ledger_count)
             {
                 LOGW(
                     "Mismatch between processed ledgers and expected count "
                     "based on header range.");
             }
-            LOGI("State map nodes added:  ", stats.stateNodesAdded);
-            if (stats.stateRemovalsAttempted > 0 ||
-                stats.stateRemovalsSucceeded > 0)
+            LOGI("State map nodes added:  ", stats.state_nodes_added);
+            if (stats.state_removals_attempted > 0 ||
+                stats.state_removals_succeeded > 0)
             {
                 LOGI(
                     "State map removals:   ",
-                    stats.stateRemovalsSucceeded,
+                    stats.state_removals_succeeded,
                     " succeeded out of ",
-                    stats.stateRemovalsAttempted,
+                    stats.state_removals_attempted,
                     " attempts");
             }
-            LOGI("Transaction nodes added:", stats.txNodesAdded);
+            LOGI("Transaction nodes added:", stats.tx_nodes_added);
             LOGI(
                 "Hash Verifications:   ",
-                stats.successfulHashVerifications,
+                stats.successful_hash_verifications,
                 " Succeeded, ",
-                stats.failedHashVerifications,
+                stats.failed_hash_verifications,
                 " Failed");
             LOGI("--- End Summary ---");
 
@@ -507,7 +509,7 @@ public:
                  ledgerSeq <= header.max_ledger;
                  ledgerSeq++)
             {
-                if (const auto ledger = ledgerStore->get_ledger(ledgerSeq))
+                if (const auto ledger = ledger_store_->get_ledger(ledgerSeq))
                 {
                     auto valid_ledger = ledger->validate();
                     if (!valid_ledger)
@@ -537,7 +539,7 @@ public:
         {
             LOGE(
                 "Aborting due to hash verification error at offset ~",
-                stats.currentOffset,
+                stats.current_offset,
                 ": ",
                 e.what());
             return false;
@@ -546,7 +548,7 @@ public:
         {
             LOGE(
                 "Aborting due to catalogue error at offset ~",
-                stats.currentOffset,
+                stats.current_offset,
                 ": ",
                 e.what());
             return false;
@@ -555,7 +557,7 @@ public:
         {
             LOGE(
                 "Aborting due to SHAMap error at offset ~",
-                stats.currentOffset,
+                stats.current_offset,
                 ": ",
                 e.what());
             return false;
@@ -564,7 +566,7 @@ public:
         {
             LOGE(
                 "Aborting due to standard error at offset ~",
-                stats.currentOffset,
+                stats.current_offset,
                 ": ",
                 e.what());
             return false;
@@ -573,7 +575,7 @@ public:
         {
             LOGE(
                 "Aborting due to unknown exception at offset ~",
-                stats.currentOffset);
+                stats.current_offset);
             return false;
         }
     }
@@ -581,9 +583,9 @@ public:
     void
     startHttpServer() const
     {
-        auto handler = std::make_shared<LedgerRequestHandler>(ledgerStore);
-        HttpServer httpServer(handler);
-        httpServer.run(8, true);
+        auto handler = std::make_shared<LedgerRequestHandler>(ledger_store_);
+        HttpServer http_server(handler);
+        http_server.run(8, true);
     }
 
     bool
@@ -629,7 +631,7 @@ public:
 
             for (uint32_t seq = first_ledger; seq <= last_ledger; seq++)
             {
-                if (!ledgerStore->get_ledger(seq))
+                if (!ledger_store_->get_ledger(seq))
                 {
                     if (!missing_ledgers)
                     {
@@ -692,7 +694,7 @@ public:
 
             for (uint32_t seq = first_ledger; seq <= last_ledger; seq++)
             {
-                auto ledger = ledgerStore->get_ledger(seq);
+                auto ledger = ledger_store_->get_ledger(seq);
 
                 if (!ledger)
                 {
@@ -855,52 +857,52 @@ main(int argc, char* argv[])
     }
 
     // Get input filename from the parsed options
-    std::string inputFile = *options.input_file;  // Safe to dereference here
+    std::string input_file = *options.input_file;  // Safe to dereference here
 
     // Set log level based on parsed option
-    std::string logLevelStr =
+    std::string log_level_str =
         catl::hasher::log_level_to_string(options.log_level);
-    if (!Logger::set_level(logLevelStr))
+    if (!Logger::set_level(log_level_str))
     {
-        std::cerr << "Warning: Could not set log level to '" << logLevelStr
+        std::cerr << "Warning: Could not set log level to '" << log_level_str
                   << "'. Using default (info)." << std::endl;
     }
 
     // Start timing
-    auto startTime = std::chrono::high_resolution_clock::now();
-    int exitCode = 1;  // Default to failure
+    auto start_time = std::chrono::high_resolution_clock::now();
+    int exit_code = 1;  // Default to failure
 
     std::optional<CATLHasher> hasher = std::nullopt;
 
     try
     {
         // Create and process with CATLHasher, passing the options struct
-        hasher.emplace(inputFile, options);
+        hasher.emplace(input_file, options);
         bool result = hasher->processFile();
-        exitCode = result ? 0 : 1;  // 0 on success, 1 on failure
+        exit_code = result ? 0 : 1;  // 0 on success, 1 on failure
     }
     catch (const std::exception& e)
     {
         // Catch errors during CATLHasher construction
         LOGE("Fatal error during initialization: ", e.what());
-        exitCode = 1;
+        exit_code = 1;
     }
     catch (...)
     {
         LOGE("Caught unknown fatal error during initialization.");
-        exitCode = 1;
+        exit_code = 1;
     }
 
     // Calculate and display execution time
-    auto endTime = std::chrono::high_resolution_clock::now();
+    auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        endTime - startTime);
+        end_time - start_time);
     double seconds = duration.count() / 1000.0;
 
-    std::ostringstream timeOSS;
-    timeOSS << "Execution completed in " << std::fixed << std::setprecision(3)
-            << seconds << " seconds (" << duration.count() << " ms)";
-    LOGW(timeOSS.str());
+    std::ostringstream time_oss;
+    time_oss << "Execution completed in " << std::fixed << std::setprecision(3)
+             << seconds << " seconds (" << duration.count() << " ms)";
+    LOGW(time_oss.str());
 
     // Handle slice file creation if requested
     if (hasher && options.slice_file && options.first_ledger &&
@@ -917,7 +919,7 @@ main(int argc, char* argv[])
         else
         {
             LOGE("Failed to create slice file");
-            exitCode = 1;  // Indicate failure
+            exit_code = 1;  // Indicate failure
         }
     }
 
@@ -927,5 +929,5 @@ main(int argc, char* argv[])
         hasher->startHttpServer();
     }
 
-    return exitCode;
+    return exit_code;
 }
