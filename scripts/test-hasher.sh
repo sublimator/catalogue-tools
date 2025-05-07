@@ -8,8 +8,8 @@ popd
 
 FIRST_LEDGER=1
 SECOND_LEDGER=100
-COMPRESSION=5
-OUTPUT_FILE="$HOME/projects/xahau-history/cat.$FIRST_LEDGER-$SECOND_LEDGER.catl"
+COMPRESSION=9
+OUTPUT_FILE="$HOME/projects/xahau-history/cat.$FIRST_LEDGER-$SECOND_LEDGER.compression-$COMPRESSION.catl"
 
 ./build/src/hasher/catl-hasher \
   $HOME/projects/xahau-history/cat.1-5000000.dec --level=info \
@@ -28,3 +28,5 @@ fi
 
 echo "Done"
 echo "Output file: $OUTPUT_FILE"
+
+cp $OUTPUT_FILE tests/catalogue-v1/fixture
