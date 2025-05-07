@@ -67,11 +67,11 @@ computeSHA512(const std::string& filename)
     SHA512_Init(&ctx);
 
     unsigned char buffer[8192];
-    size_t bytesRead;
+    size_t bytes_read;
 
-    while ((bytesRead = fread(buffer, 1, sizeof(buffer), file)) > 0)
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0)
     {
-        SHA512_Update(&ctx, buffer, bytesRead);
+        SHA512_Update(&ctx, buffer, bytes_read);
     }
 
     unsigned char hash[SHA512_DIGEST_LENGTH];
@@ -135,8 +135,8 @@ timeToString(uint64_t net_clock_time)
     // NetClock uses seconds since January 1st, 2000 (946684800)
     static const time_t ripple_epoch_offset = 946684800;
 
-    time_t unixTime = net_clock_time + ripple_epoch_offset;
-    std::tm* tm = std::gmtime(&unixTime);
+    time_t unix_time = net_clock_time + ripple_epoch_offset;
+    std::tm* tm = std::gmtime(&unix_time);
     if (!tm)
         return "Invalid time";
 
@@ -165,16 +165,16 @@ hexDump(
     const std::vector<uint8_t>& data,
     size_t offset,
     const std::string& annotation = "",
-    size_t bytesPerLine = 16)
+    size_t bytes_per_line = 16)
 {
-    for (size_t i = 0; i < data.size(); i += bytesPerLine)
+    for (size_t i = 0; i < data.size(); i += bytes_per_line)
     {
         // Print offset
         os << std::setfill('0') << std::setw(8) << std::hex << (offset + i)
            << ": ";
 
         // Print hex values
-        for (size_t j = 0; j < bytesPerLine; j++)
+        for (size_t j = 0; j < bytes_per_line; j++)
         {
             if (i + j < data.size())
             {
@@ -195,7 +195,7 @@ hexDump(
 
         // Print ASCII representation
         os << " | ";
-        for (size_t j = 0; j < bytesPerLine && (i + j) < data.size(); j++)
+        for (size_t j = 0; j < bytes_per_line && (i + j) < data.size(); j++)
         {
             char c = data[i + j];
             os << (std::isprint(c) ? c : '.');
@@ -204,9 +204,9 @@ hexDump(
         // Add annotation on first line only
         if (i == 0 && !annotation.empty())
         {
-            size_t extraSpaces =
-                bytesPerLine - std::min(bytesPerLine, data.size());
-            os << std::string(extraSpaces, ' ');
+            size_t extra_spaces =
+                bytes_per_line - std::min(bytes_per_line, data.size());
+            os << std::string(extra_spaces, ' ');
             os << " | " << annotation;
         }
 
@@ -220,15 +220,15 @@ private:
     std::string filename_;
     std::ifstream file_;
     std::ostream& output_;
-    size_t fileSize_;
+    size_t file_size_;
     bool verbose_;
-    bool verifyHash_;
-    uint8_t compressionLevel_ = 0;
+    bool verify_hash_;
+    uint8_t compression_level_ = 0;
     CATLHeader header_;  // Store the header for access throughout the class
 
     // Result tracking
-    bool hashVerified_ = false;
-    bool fileSizeMatched_ = true;
+    bool hash_verified_ = false;
+    bool file_size_matched_ = true;
     std::vector<uint32_t> processedLedgers_;  // Track which ledgers we've seen
 
     // Read a block of data from the file
@@ -240,8 +240,8 @@ private:
         // Reading directly from file
         file_.seekg(offset, std::ios::beg);
         file_.read(reinterpret_cast<char*>(buffer.data()), size);
-        size_t bytesRead = file_.gcount();
-        buffer.resize(bytesRead);  // Adjust for actual bytes read
+        size_t bytes_read = file_.gcount();
+        buffer.resize(bytes_read);  // Adjust for actual bytes read
 
         return buffer;
     }
@@ -251,26 +251,26 @@ private:
     analyzeHeader(size_t offset)
     {
         output_ << "=== CATALOGUE HEADER ===\n";
-        auto headerBytes = readBytes(offset, sizeof(CATLHeader));
+        auto header_bytes = readBytes(offset, sizeof(CATLHeader));
 
-        if (headerBytes.size() < sizeof(CATLHeader))
+        if (header_bytes.size() < sizeof(CATLHeader))
         {
             output_ << "ERROR: Incomplete header. File is truncated.\n";
-            return offset + headerBytes.size();
+            return offset + header_bytes.size();
         }
 
         // Read the header values
-        std::memcpy(&header_, headerBytes.data(), sizeof(CATLHeader));
+        std::memcpy(&header_, header_bytes.data(), sizeof(CATLHeader));
 
         // Dump the entire header with annotations if verbose
         if (verbose_)
         {
-            hexDump(output_, headerBytes, offset, "CATL Header");
+            hexDump(output_, header_bytes, offset, "CATL Header");
         }
 
         // Extract version and compression info
-        uint8_t catalogueVersion = getCatalogueVersion(header_.version);
-        compressionLevel_ = getCompressionLevel(header_.version);
+        uint8_t catalogue_version = getCatalogueVersion(header_.version);
+        compression_level_ = getCompressionLevel(header_.version);
 
         // Validate header fields
         bool valid = true;
@@ -281,11 +281,11 @@ private:
             valid = false;
         }
 
-        if (catalogueVersion > BASE_CATALOGUE_VERSION)
+        if (catalogue_version > BASE_CATALOGUE_VERSION)
         {
             output_ << "WARNING: Unexpected version. Expected "
                     << BASE_CATALOGUE_VERSION << ", got "
-                    << static_cast<int>(catalogueVersion) << "\n";
+                    << static_cast<int>(catalogue_version) << "\n";
             valid = false;
         }
 
@@ -298,7 +298,7 @@ private:
         }
 
         // Convert hash to hex string
-        std::string hashHex =
+        std::string hash_hex =
             bytesToHexString(header_.hash.data(), header_.hash.size());
 
         // Summary
@@ -307,15 +307,15 @@ private:
                 << (header_.magic == CATL ? " (valid)" : " (INVALID)") << "\n"
                 << "  Min Ledger: " << header_.min_ledger << "\n"
                 << "  Max Ledger: " << header_.max_ledger << "\n"
-                << "  Version: " << static_cast<int>(catalogueVersion) << "\n"
+                << "  Version: " << static_cast<int>(catalogue_version) << "\n"
                 << "  Compression Level: "
-                << static_cast<int>(compressionLevel_) << "\n"
+                << static_cast<int>(compression_level_) << "\n"
                 << "  Network ID: " << header_.network_id << "\n"
                 << "  File Size: " << header_.filesize << " bytes\n"
-                << "  Hash: " << hashHex << "\n\n";
+                << "  Hash: " << hash_hex << "\n\n";
 
         // Verify hash if requested
-        if (verifyHash_)
+        if (verify_hash_)
         {
             verifyFileHash(header_);
         }
@@ -330,17 +330,17 @@ private:
         output_ << "=== HASH VERIFICATION ===\n";
 
         // If hash is all zeros, it's not set
-        bool hashIsZero = true;
+        bool hash_is_zero = true;
         for (auto b : header.hash)
         {
             if (b != 0)
             {
-                hashIsZero = false;
+                hash_is_zero = false;
                 break;
             }
         }
 
-        if (hashIsZero)
+        if (hash_is_zero)
         {
             output_
                 << "Hash verification skipped: Hash is empty (all zeros)\n\n";
@@ -348,21 +348,21 @@ private:
         }
 
         // Check file size
-        if (fileSize_ != header.filesize)
+        if (file_size_ != header.filesize)
         {
             output_ << "ERROR: File size mismatch. Header indicates "
                     << header.filesize << " bytes, but actual file size is "
-                    << fileSize_ << " bytes\n\n";
-            fileSizeMatched_ = false;
+                    << file_size_ << " bytes\n\n";
+            file_size_matched_ = false;
             return;
         }
 
         output_ << "Computing SHA-512 hash for verification...\n";
 
         // Create a temp file with zeroed hash field
-        std::string tempFile = filename_ + ".temp";
-        std::ofstream outFile(tempFile, std::ios::binary);
-        if (!outFile)
+        std::string temp_file = filename_ + ".temp";
+        std::ofstream out_file(temp_file, std::ios::binary);
+        if (!out_file)
         {
             output_ << "ERROR: Could not create temporary file for hash "
                        "verification\n";
@@ -370,10 +370,10 @@ private:
         }
 
         // Copy the original header with zeroed hash field
-        CATLHeader headerCopy = header;
-        std::fill(headerCopy.hash.begin(), headerCopy.hash.end(), 0);
-        outFile.write(
-            reinterpret_cast<const char*>(&headerCopy), sizeof(CATLHeader));
+        CATLHeader header_copy = header;
+        std::fill(header_copy.hash.begin(), header_copy.hash.end(), 0);
+        out_file.write(
+            reinterpret_cast<const char*>(&header_copy), sizeof(CATLHeader));
 
         // Copy the rest of the file
         file_.clear();
@@ -383,43 +383,43 @@ private:
         while (file_)
         {
             file_.read(buffer, sizeof(buffer));
-            std::streamsize bytesRead = file_.gcount();
-            if (bytesRead > 0)
+            std::streamsize bytes_read = file_.gcount();
+            if (bytes_read > 0)
             {
-                outFile.write(buffer, bytesRead);
+                out_file.write(buffer, bytes_read);
             }
             else
             {
                 break;
             }
         }
-        outFile.close();
+        out_file.close();
 
         // Compute hash using sha512sum command
-        std::string computedHashHex = computeSHA512(tempFile);
-        std::string storedHashHex =
+        std::string computed_hash_hex = computeSHA512(temp_file);
+        std::string stored_hash_hex =
             bytesToHexString(header.hash.data(), header.hash.size());
 
-        output_ << "Stored hash:   " << storedHashHex << "\n";
-        output_ << "Computed hash: " << computedHashHex << "\n";
+        output_ << "Stored hash:   " << stored_hash_hex << "\n";
+        output_ << "Computed hash: " << computed_hash_hex << "\n";
 
         // Compare hashes (case insensitive)
-        std::string lowerComputed = computedHashHex;
-        std::string lowerStored = storedHashHex;
+        std::string lower_computed = computed_hash_hex;
+        std::string lower_stored = stored_hash_hex;
         std::transform(
-            lowerComputed.begin(),
-            lowerComputed.end(),
-            lowerComputed.begin(),
+            lower_computed.begin(),
+            lower_computed.end(),
+            lower_computed.begin(),
             ::tolower);
         std::transform(
-            lowerStored.begin(),
-            lowerStored.end(),
-            lowerStored.begin(),
+            lower_stored.begin(),
+            lower_stored.end(),
+            lower_stored.begin(),
             ::tolower);
 
-        hashVerified_ = (lowerComputed == lowerStored);
+        hash_verified_ = (lower_computed == lower_stored);
 
-        if (hashVerified_)
+        if (hash_verified_)
         {
             output_ << "VERIFICATION RESULT: Hash verification successful!\n\n";
         }
@@ -430,7 +430,7 @@ private:
         }
 
         // Clean up
-        std::remove(tempFile.c_str());
+        std::remove(temp_file.c_str());
     }
 
     // Process ledger info from a stream (works for any compression level)
@@ -456,7 +456,7 @@ private:
         }
 
         // Helper function to read and display data from stream
-        auto readAndDump =
+        auto read_and_dump =
             [&](size_t size, const std::string& label) -> std::vector<uint8_t> {
             std::vector<uint8_t> buffer(size);
             stream.read(reinterpret_cast<char*>(buffer.data()), size);
@@ -481,92 +481,96 @@ private:
         };
 
         // Read all fields sequentially
-        auto hashBytes = readAndDump(32, "");
-        if (hashBytes.size() < 32)
+        auto hash_bytes = read_and_dump(32, "");
+        if (hash_bytes.size() < 32)
             return;
-        std::string hashHex = bytesToHexString(hashBytes.data(), 32);
-        hexDump(output_, hashBytes, 0, "Hash: " + hashHex);
+        std::string hash_hex = bytesToHexString(hash_bytes.data(), 32);
+        hexDump(output_, hash_bytes, 0, "Hash: " + hash_hex);
 
-        auto txHashBytes = readAndDump(32, "");
-        if (txHashBytes.size() < 32)
+        auto tx_hash_bytes = read_and_dump(32, "");
+        if (tx_hash_bytes.size() < 32)
             return;
-        std::string txHashHex = bytesToHexString(txHashBytes.data(), 32);
-        hexDump(output_, txHashBytes, 0, "Tx Hash: " + txHashHex);
+        std::string tx_hash_hex = bytesToHexString(tx_hash_bytes.data(), 32);
+        hexDump(output_, tx_hash_bytes, 0, "Tx Hash: " + tx_hash_hex);
 
-        auto accountHashBytes = readAndDump(32, "");
-        if (accountHashBytes.size() < 32)
+        auto account_hash_bytes = read_and_dump(32, "");
+        if (account_hash_bytes.size() < 32)
             return;
-        std::string accountHashHex =
-            bytesToHexString(accountHashBytes.data(), 32);
+        std::string account_hash_hex =
+            bytesToHexString(account_hash_bytes.data(), 32);
         hexDump(
-            output_, accountHashBytes, 0, "Account Hash: " + accountHashHex);
+            output_,
+            account_hash_bytes,
+            0,
+            "Account Hash: " + account_hash_hex);
 
-        auto parentHashBytes = readAndDump(32, "");
-        if (parentHashBytes.size() < 32)
+        auto parent_hash_bytes = read_and_dump(32, "");
+        if (parent_hash_bytes.size() < 32)
             return;
-        std::string parentHashHex =
-            bytesToHexString(parentHashBytes.data(), 32);
-        hexDump(output_, parentHashBytes, 0, "Parent Hash: " + parentHashHex);
+        std::string parent_hash_hex =
+            bytesToHexString(parent_hash_bytes.data(), 32);
+        hexDump(
+            output_, parent_hash_bytes, 0, "Parent Hash: " + parent_hash_hex);
 
         // Read drops (8 bytes)
-        auto dropsBytes = readAndDump(8, "");
-        if (dropsBytes.size() < 8)
+        auto drops_bytes = read_and_dump(8, "");
+        if (drops_bytes.size() < 8)
             return;
         uint64_t drops = 0;
-        std::memcpy(&drops, dropsBytes.data(), 8);
-        hexDump(output_, dropsBytes, 0, "Drops: " + std::to_string(drops));
+        std::memcpy(&drops, drops_bytes.data(), 8);
+        hexDump(output_, drops_bytes, 0, "Drops: " + std::to_string(drops));
 
-        // Read closeFlags (4 bytes)
-        auto closeFlagsBytes = readAndDump(4, "");
-        if (closeFlagsBytes.size() < 4)
+        // Read close_flags (4 bytes)
+        auto close_flags_bytes = read_and_dump(4, "");
+        if (close_flags_bytes.size() < 4)
             return;
-        int32_t closeFlags = 0;
-        std::memcpy(&closeFlags, closeFlagsBytes.data(), 4);
+        int32_t close_flags = 0;
+        std::memcpy(&close_flags, close_flags_bytes.data(), 4);
         hexDump(
             output_,
-            closeFlagsBytes,
+            close_flags_bytes,
             0,
-            "Close Flags: " + std::to_string(closeFlags));
+            "Close Flags: " + std::to_string(close_flags));
 
-        // Read closeTimeResolution (4 bytes)
-        auto ctrBytes = readAndDump(4, "");
-        if (ctrBytes.size() < 4)
+        // Read close_time_resolution (4 bytes)
+        auto ctr_bytes = read_and_dump(4, "");
+        if (ctr_bytes.size() < 4)
             return;
-        uint32_t closeTimeResolution = 0;
-        std::memcpy(&closeTimeResolution, ctrBytes.data(), 4);
+        uint32_t close_time_resolution = 0;
+        std::memcpy(&close_time_resolution, ctr_bytes.data(), 4);
         hexDump(
             output_,
-            ctrBytes,
+            ctr_bytes,
             0,
-            "Close Time Resolution: " + std::to_string(closeTimeResolution));
+            "Close Time Resolution: " + std::to_string(close_time_resolution));
 
-        // Read closeTime (8 bytes)
-        auto ctBytes = readAndDump(8, "");
-        if (ctBytes.size() < 8)
+        // Read close_time (8 bytes)
+        auto ct_bytes = read_and_dump(8, "");
+        if (ct_bytes.size() < 8)
             return;
-        uint64_t closeTime = 0;
-        std::memcpy(&closeTime, ctBytes.data(), 8);
-        std::string closeTimeStr = timeToString(closeTime);
+        uint64_t clock_time = 0;
+        std::memcpy(&clock_time, ct_bytes.data(), 8);
+        std::string close_time_str = timeToString(clock_time);
         hexDump(
             output_,
-            ctBytes,
+            ct_bytes,
             0,
-            "Close Time: " + std::to_string(closeTime) + " (" + closeTimeStr +
-                ")");
+            "Close Time: " + std::to_string(clock_time) + " (" +
+                close_time_str + ")");
 
-        // Read parentCloseTime (8 bytes)
-        auto pctBytes = readAndDump(8, "");
-        if (pctBytes.size() < 8)
+        // Read parent_close_time (8 bytes)
+        auto pct_bytes = read_and_dump(8, "");
+        if (pct_bytes.size() < 8)
             return;
-        uint64_t parentCloseTime = 0;
-        std::memcpy(&parentCloseTime, pctBytes.data(), 8);
-        std::string timeStr = timeToString(parentCloseTime);
+        uint64_t parent_close_time = 0;
+        std::memcpy(&parent_close_time, pct_bytes.data(), 8);
+        std::string time_str = timeToString(parent_close_time);
         hexDump(
             output_,
-            pctBytes,
+            pct_bytes,
             0,
-            "Parent Close Time: " + std::to_string(parentCloseTime) + " (" +
-                timeStr + ")");
+            "Parent Close Time: " + std::to_string(parent_close_time) + " (" +
+                time_str + ")");
 
         output_ << "Ledger " << sequence << " Info - Total bytes read: "
                 << (4 + 32 + 32 + 32 + 32 + 8 + 4 + 4 + 8 + 8) << "\n\n";
@@ -578,17 +582,17 @@ private:
         std::istream& stream,
         const std::string& mapType,
         uint32_t ledgerSeq,
-        bool isDelta = false)
+        bool is_delta = false)
     {
         output_ << "=== " << mapType << " for Ledger " << ledgerSeq << " ===\n";
-        if (isDelta)
+        if (is_delta)
         {
             output_
                 << "Note: This is a DELTA map (changes from previous ledger)\n";
         }
 
-        size_t nodeCount = 0;
-        bool foundTerminal = false;
+        size_t node_count = 0;
+        bool found_terminal = false;
 
         // For non-verbose mode, we'll just keep track of the counts of each
         // node type
@@ -597,8 +601,8 @@ private:
         while (!stream.eof())
         {
             // Check for terminal marker
-            uint8_t nodeType = 0;
-            stream.read(reinterpret_cast<char*>(&nodeType), 1);
+            uint8_t node_type = 0;
+            stream.read(reinterpret_cast<char*>(&node_type), 1);
 
             if (stream.gcount() < 1 || stream.fail())
             {
@@ -606,9 +610,9 @@ private:
                 return;
             }
 
-            std::vector<uint8_t> nodeTypeBytes = {nodeType};
+            std::vector<uint8_t> nodeTypeBytes = {node_type};
 
-            if (nodeType == static_cast<uint8_t>(SHAMapNodeType::tnTERMINAL))
+            if (node_type == static_cast<uint8_t>(SHAMapNodeType::tnTERMINAL))
             {
                 if (verbose_)
                 {
@@ -619,26 +623,26 @@ private:
                         "Terminal Marker - End of " + mapType);
                 }
                 output_ << "Found terminal marker. " << mapType
-                        << " complete with " << nodeCount << " nodes.\n\n";
-                foundTerminal = true;
+                        << " complete with " << node_count << " nodes.\n\n";
+                found_terminal = true;
                 return;
             }
 
             // Not a terminal marker, parse as a node
-            nodeCount++;
-            nodeTypeCounts[nodeType]++;
+            node_count++;
+            nodeTypeCounts[node_type]++;
 
             // In verbose mode, display detailed node info
             if (verbose_)
             {
-                output_ << "--- Node " << nodeCount << " ---\n";
+                output_ << "--- Node " << node_count << " ---\n";
 
                 // Node type
                 hexDump(
                     output_,
                     nodeTypeBytes,
                     0,
-                    "Node Type: " + getNodeTypeDescription(nodeType));
+                    "Node Type: " + getNodeTypeDescription(node_type));
             }
 
             // Key (32 bytes)
@@ -651,14 +655,14 @@ private:
                 return;
             }
 
-            std::string keyHex =
+            std::string key_hex =
                 bytesToHexString(keyBytes.data(), keyBytes.size());
             if (verbose_)
             {
-                hexDump(output_, keyBytes, 0, "Key: " + keyHex);
+                hexDump(output_, keyBytes, 0, "Key: " + key_hex);
             }
 
-            if (nodeType == SHAMapNodeType::tnREMOVE)
+            if (node_type == SHAMapNodeType::tnREMOVE)
             {
                 if (verbose_)
                 {
@@ -668,8 +672,8 @@ private:
             }
 
             // Data size (4 bytes)
-            uint32_t dataSize = 0;
-            stream.read(reinterpret_cast<char*>(&dataSize), 4);
+            uint32_t data_size = 0;
+            stream.read(reinterpret_cast<char*>(&data_size), 4);
 
             if (stream.gcount() < 4 || stream.fail())
             {
@@ -678,28 +682,28 @@ private:
             }
 
             std::vector<uint8_t> dataSizeBytes(4);
-            std::memcpy(dataSizeBytes.data(), &dataSize, 4);
+            std::memcpy(dataSizeBytes.data(), &data_size, 4);
 
             // Suspiciously large value check
-            std::string sizeNote = "Data Size: " + std::to_string(dataSize);
-            if (dataSize > 10 * 1024 * 1024)
+            std::string size_note = "Data Size: " + std::to_string(data_size);
+            if (data_size > 10 * 1024 * 1024)
             {
-                sizeNote += " (SUSPICIOUS!)";
+                size_note += " (SUSPICIOUS!)";
             }
 
             if (verbose_)
             {
-                hexDump(output_, dataSizeBytes, 0, sizeNote);
+                hexDump(output_, dataSizeBytes, 0, size_note);
             }
 
-            if (dataSize == 0)
+            if (data_size == 0)
             {
                 if (verbose_)
                 {
                     output_ << "  (This is a error = zero sized object)\n";
                 }
             }
-            else if (dataSize > 10 * 1024 * 1024)
+            else if (data_size > 10 * 1024 * 1024)
             {
                 output_ << "WARNING: Data size is suspiciously large!\n";
                 output_ << "  Possible file corruption detected.\n";
@@ -710,15 +714,15 @@ private:
             {
                 // Show a preview of the data (up to 64 bytes) in verbose mode
                 // only
-                size_t previewSize = std::min(
-                    static_cast<size_t>(dataSize), static_cast<size_t>(64));
-                std::vector<uint8_t> dataPreview(previewSize);
+                size_t preview_size = std::min(
+                    static_cast<size_t>(data_size), static_cast<size_t>(64));
+                std::vector<uint8_t> dataPreview(preview_size);
 
                 stream.read(
-                    reinterpret_cast<char*>(dataPreview.data()), previewSize);
+                    reinterpret_cast<char*>(dataPreview.data()), preview_size);
 
                 if (stream.gcount() <
-                        static_cast<std::streamsize>(previewSize) ||
+                        static_cast<std::streamsize>(preview_size) ||
                     stream.fail())
                 {
                     output_ << "ERROR: Unexpected EOF reading data preview\n";
@@ -731,33 +735,33 @@ private:
                         output_,
                         dataPreview,
                         0,
-                        "Data Preview (" + std::to_string(previewSize) +
-                            " bytes of " + std::to_string(dataSize) +
+                        "Data Preview (" + std::to_string(preview_size) +
+                            " bytes of " + std::to_string(data_size) +
                             " total)");
                 }
 
                 // Skip remaining data
-                if (dataSize > previewSize)
+                if (data_size > preview_size)
                 {
                     // Need to consume the remaining bytes from the stream
-                    size_t remainingBytes = dataSize - previewSize;
+                    size_t remaining_bytes = data_size - preview_size;
                     std::vector<char> dummyBuffer(
-                        std::min(remainingBytes, static_cast<size_t>(4096)));
+                        std::min(remaining_bytes, static_cast<size_t>(4096)));
 
-                    while (remainingBytes > 0)
+                    while (remaining_bytes > 0)
                     {
-                        size_t bytesToRead =
-                            std::min(remainingBytes, dummyBuffer.size());
-                        stream.read(dummyBuffer.data(), bytesToRead);
-                        size_t bytesRead = stream.gcount();
+                        size_t bytes_to_read =
+                            std::min(remaining_bytes, dummyBuffer.size());
+                        stream.read(dummyBuffer.data(), bytes_to_read);
+                        size_t bytes_read = stream.gcount();
 
-                        if (bytesRead == 0)
+                        if (bytes_read == 0)
                             break;  // EOF or error
 
-                        remainingBytes -= bytesRead;
+                        remaining_bytes -= bytes_read;
                     }
 
-                    if (remainingBytes > 0)
+                    if (remaining_bytes > 0)
                     {
                         output_ << "WARNING: Could not consume all remaining "
                                    "data bytes\n";
@@ -767,11 +771,11 @@ private:
 
             if (verbose_)
             {
-                output_ << "  Node " << nodeCount << " Complete\n";
+                output_ << "  Node " << node_count << " Complete\n";
             }
         }
 
-        if (!foundTerminal)
+        if (!found_terminal)
         {
             output_ << "WARNING: No terminal marker found for " << mapType
                     << "\n";
@@ -781,7 +785,7 @@ private:
         // mode
         if (!verbose_)
         {
-            output_ << "Processed " << nodeCount << " nodes in " << mapType
+            output_ << "Processed " << node_count << " nodes in " << mapType
                     << ".\n";
 
             // Show counts of each node type
@@ -806,11 +810,11 @@ public:
         const std::string& filename,
         std::ostream& output,
         bool verbose = false,
-        bool verifyHash = true)
+        bool verify_hash = true)
         : filename_(filename)
         , output_(output)
         , verbose_(verbose)
-        , verifyHash_(verifyHash)
+        , verify_hash_(verify_hash)
     {
         file_.open(filename, std::ios::binary);
         if (!file_.is_open())
@@ -820,11 +824,11 @@ public:
 
         // Get file size
         file_.seekg(0, std::ios::end);
-        fileSize_ = file_.tellg();
+        file_size_ = file_.tellg();
         file_.seekg(0, std::ios::beg);
 
         output_ << "Analyzing file: " << filename << "\n";
-        output_ << "File size: " << fileSize_ << " bytes\n\n";
+        output_ << "File size: " << file_size_ << " bytes\n\n";
     }
 
     ~CatalogueAnalyzer()
@@ -844,7 +848,7 @@ public:
 
             // Analyze header
             offset = analyzeHeader(offset);
-            if (offset >= fileSize_)
+            if (offset >= file_size_)
                 return;
 
             // Set up a stream for reading based on compression level
@@ -857,10 +861,10 @@ public:
 
             try
             {
-                if (compressionLevel_ > 0)
+                if (compression_level_ > 0)
                 {
                     output_ << "Processing catalogue with compression level "
-                            << static_cast<int>(compressionLevel_) << "\n\n";
+                            << static_cast<int>(compression_level_) << "\n\n";
 
                     // Configure decompressor with options to handle potential
                     // issues
@@ -873,8 +877,8 @@ public:
                     dataStream->push(boost::ref(file_));
 
                     // Test read to verify decompression is working
-                    char testByte;
-                    if (!dataStream->get(testByte))
+                    char test_byte;
+                    if (!dataStream->get(test_byte))
                     {
                         output_ << "WARNING: Failed to read initial compressed "
                                    "data. The file may be corrupted or use a "
@@ -918,19 +922,19 @@ public:
             }
 
             // Process each ledger
-            int ledgerCount = 0;
-            uint32_t lastLedgerSeq = 0;
+            int ledger_count = 0;
+            uint32_t last_ledger_seq = 0;
 
             while (!dataStream->eof())
             {
                 try
                 {
                     // Read ledger sequence first to identify
-                    uint32_t ledgerSeq = 0;
+                    uint32_t ledger_seq = 0;
 
                     // Read the sequence once and don't attempt to seek back
                     if (!dataStream->read(
-                            reinterpret_cast<char*>(&ledgerSeq), 4) ||
+                            reinterpret_cast<char*>(&ledger_seq), 4) ||
                         dataStream->gcount() < 4)
                     {
                         // EOF or error
@@ -952,44 +956,44 @@ public:
                     }
 
                     // Sanity check the ledger sequence number
-                    if (ledgerSeq < header_.min_ledger ||
-                        ledgerSeq > header_.max_ledger)
+                    if (ledger_seq < header_.min_ledger ||
+                        ledger_seq > header_.max_ledger)
                     {
                         output_ << "WARNING: Suspicious ledger sequence "
-                                << ledgerSeq << " outside expected range ("
+                                << ledger_seq << " outside expected range ("
                                 << header_.min_ledger << "-"
                                 << header_.max_ledger << ")\n";
                         // Continue anyway, might be corrupt data or a format
                         // issue
                     }
 
-                    output_ << "Processing Ledger " << ledgerSeq << "\n";
+                    output_ << "Processing Ledger " << ledger_seq << "\n";
 
                     // Add to our record of processed ledgers
-                    processedLedgers_.push_back(ledgerSeq);
+                    processedLedgers_.push_back(ledger_seq);
 
                     // Process ledger info - pass the already read sequence
-                    processStreamedLedgerInfo(*dataStream, ledgerSeq);
+                    processStreamedLedgerInfo(*dataStream, ledger_seq);
 
                     // Analyze state map - if not the first ledger, it's a delta
                     // from previous
-                    bool isStateDelta = (ledgerCount > 0);
+                    bool is_state_delta = (ledger_count > 0);
                     output_ << "Analyzing STATE MAP"
-                            << (isStateDelta ? " (DELTA)" : "") << "...\n";
+                            << (is_state_delta ? " (DELTA)" : "") << "...\n";
                     analyzeStreamSHAMap(
-                        *dataStream, "STATE MAP", ledgerSeq, isStateDelta);
+                        *dataStream, "STATE MAP", ledger_seq, is_state_delta);
 
                     // Analyze transaction map
                     output_ << "Analyzing TRANSACTION MAP...\n";
                     analyzeStreamSHAMap(
-                        *dataStream, "TRANSACTION MAP", ledgerSeq);
+                        *dataStream, "TRANSACTION MAP", ledger_seq);
 
-                    ledgerCount++;
-                    lastLedgerSeq = ledgerSeq;
+                    ledger_count++;
+                    last_ledger_seq = ledger_seq;
 
                     if (verbose_)
                     {
-                        output_ << "Ledger " << ledgerSeq
+                        output_ << "Ledger " << ledger_seq
                                 << " processing complete.\n";
                         output_ << "-------------------------------------------"
                                    "---\n\n";
@@ -1004,7 +1008,7 @@ public:
                     }
 
                     // Add a maximum ledger count check to avoid infinite loops
-                    if (ledgerCount >=
+                    if (ledger_count >=
                         (header_.max_ledger - header_.min_ledger + 10))
                     {
                         output_ << "WARNING: Processed more ledgers than "
@@ -1027,7 +1031,7 @@ public:
                 }
             }
 
-            if (ledgerCount == 0)
+            if (ledger_count == 0)
             {
                 output_
                     << "WARNING: No ledgers were processed. The file may use a "
@@ -1037,24 +1041,24 @@ public:
             }
             else
             {
-                output_ << "Analysis complete. Processed " << ledgerCount
+                output_ << "Analysis complete. Processed " << ledger_count
                         << " ledgers.\n";
-                output_ << "Last ledger processed: " << lastLedgerSeq << "\n";
+                output_ << "Last ledger processed: " << last_ledger_seq << "\n";
 
                 // Add summary of expected vs actual ledger count
-                int expectedLedgers =
+                int expected_ledgers =
                     header_.max_ledger - header_.min_ledger + 1;
-                bool allLedgersFound = (ledgerCount == expectedLedgers);
+                bool all_ledgers_found = (ledger_count == expected_ledgers);
 
-                if (ledgerCount < expectedLedgers)
+                if (ledger_count < expected_ledgers)
                 {
-                    output_ << "NOTE: Expected " << expectedLedgers
+                    output_ << "NOTE: Expected " << expected_ledgers
                             << " ledgers based on header, but processed "
-                            << ledgerCount << " ledgers.\n";
+                            << ledger_count << " ledgers.\n";
                 }
 
                 // Check if ledgers are in sequence
-                bool ledgersInSequence = true;
+                bool ledgers_in_sequence = true;
                 std::vector<uint32_t> missingLedgers;
 
                 if (!processedLedgers_.empty())
@@ -1063,15 +1067,15 @@ public:
                         processedLedgers_.begin(), processedLedgers_.end());
 
                     // Check first and last match expected range
-                    uint32_t firstLedger = processedLedgers_.front();
-                    uint32_t lastLedger = processedLedgers_.back();
+                    uint32_t first_ledger = processedLedgers_.front();
+                    uint32_t last_ledger = processedLedgers_.back();
 
-                    if (firstLedger != header_.min_ledger ||
-                        lastLedger != header_.max_ledger)
+                    if (first_ledger != header_.min_ledger ||
+                        last_ledger != header_.max_ledger)
                     {
-                        ledgersInSequence = false;
-                        output_ << "NOTE: Ledger range in file (" << firstLedger
-                                << "-" << lastLedger
+                        ledgers_in_sequence = false;
+                        output_ << "NOTE: Ledger range in file ("
+                                << first_ledger << "-" << last_ledger
                                 << ") doesn't match expected range ("
                                 << header_.min_ledger << "-"
                                 << header_.max_ledger << ")\n";
@@ -1083,7 +1087,7 @@ public:
                         if (processedLedgers_[i] !=
                             processedLedgers_[i - 1] + 1)
                         {
-                            ledgersInSequence = false;
+                            ledgers_in_sequence = false;
                             // Identify missing ledgers
                             for (uint32_t missing =
                                      processedLedgers_[i - 1] + 1;
@@ -1122,16 +1126,16 @@ public:
                 // Print final integrity summary
                 output_ << "\n=== INTEGRITY SUMMARY ===\n";
                 output_ << "File size check: "
-                        << (fileSizeMatched_ ? "PASSED" : "FAILED") << "\n";
+                        << (file_size_matched_ ? "PASSED" : "FAILED") << "\n";
                 output_ << "SHA-512 hash check: "
-                        << (hashVerified_ ? "PASSED" : "FAILED") << "\n";
+                        << (hash_verified_ ? "PASSED" : "FAILED") << "\n";
                 output_ << "Ledger count check: "
-                        << (allLedgersFound ? "PASSED" : "FAILED") << "\n";
+                        << (all_ledgers_found ? "PASSED" : "FAILED") << "\n";
                 output_ << "Ledger sequence check: "
-                        << (ledgersInSequence ? "PASSED" : "FAILED") << "\n";
+                        << (ledgers_in_sequence ? "PASSED" : "FAILED") << "\n";
 
-                if (fileSizeMatched_ && hashVerified_ && allLedgersFound &&
-                    ledgersInSequence)
+                if (file_size_matched_ && hash_verified_ && all_ledgers_found &&
+                    ledgers_in_sequence)
                 {
                     output_ << "\nOVERALL RESULT: PASSED - All integrity "
                                "checks successful\n";
@@ -1142,22 +1146,22 @@ public:
                 {
                     output_ << "\nOVERALL RESULT: FAILED - One or more "
                                "integrity checks failed\n";
-                    if (!fileSizeMatched_)
+                    if (!file_size_matched_)
                     {
                         output_ << "- The file size doesn't match the value in "
                                    "the header\n";
                     }
-                    if (!hashVerified_)
+                    if (!hash_verified_)
                     {
                         output_ << "- The file hash doesn't match the stored "
                                    "hash\n";
                     }
-                    if (!allLedgersFound)
+                    if (!all_ledgers_found)
                     {
                         output_ << "- Not all expected ledgers were found in "
                                    "the file\n";
                     }
-                    if (!ledgersInSequence)
+                    if (!ledgers_in_sequence)
                     {
                         output_ << "- The ledgers are not in proper sequence\n";
                     }
@@ -1190,11 +1194,11 @@ main(int argc, char* argv[])
         return 1;
     }
 
-    std::string inputFile = argv[1];
-    std::ofstream outputFile;
+    std::string input_file = argv[1];
+    std::ofstream output_file;
     std::ostream* output = &std::cout;
     bool verbose = false;
-    bool verifyHash = true;  // Default to verifying hash
+    bool verify_hash = true;  // Default to verifying hash
 
     // Check for flags
     for (int i = 2; i < argc; i++)
@@ -1205,18 +1209,18 @@ main(int argc, char* argv[])
         }
         else if (std::string(argv[i]) == "--skip-hash-verification")
         {
-            verifyHash = false;
+            verify_hash = false;
         }
         else if (i == 2)
         {
             // Assume it's the output file name
-            outputFile.open(argv[2]);
-            if (!outputFile.is_open())
+            output_file.open(argv[2]);
+            if (!output_file.is_open())
             {
                 std::cerr << "Failed to open output file: " << argv[2] << "\n";
                 return 1;
             }
-            output = &outputFile;
+            output = &output_file;
         }
     }
 
@@ -1228,7 +1232,7 @@ main(int argc, char* argv[])
         *output << "XRPL Catalogue File Analyzer v2.0\n";
         *output
             << "Supports compressed (zlib) and uncompressed catalogue files\n";
-        if (verifyHash)
+        if (verify_hash)
         {
             *output << "SHA-512 hash verification enabled (default)\n";
         }
@@ -1239,7 +1243,7 @@ main(int argc, char* argv[])
         *output << "==========================================================="
                    "========\n\n";
 
-        CatalogueAnalyzer analyzer(inputFile, *output, verbose, verifyHash);
+        CatalogueAnalyzer analyzer(input_file, *output, verbose, verify_hash);
         analyzer.analyze();
     }
     catch (const std::exception& e)
@@ -1248,9 +1252,9 @@ main(int argc, char* argv[])
         return 1;
     }
 
-    if (outputFile.is_open())
+    if (output_file.is_open())
     {
-        outputFile.close();
+        output_file.close();
     }
 
     return 0;
