@@ -621,6 +621,29 @@ Writer::track_write(WriteType type, size_t bytes)
     }
 }
 
+bool
+Writer::write_raw_data(const uint8_t* data, size_t size)
+{
+    if (!header_written_ || finalized_)
+    {
+        throw CatlV1Error(
+            "Cannot write data: file not initialized or already finalized");
+    }
+
+    // Write to the body stream
+    body_stream_->write(reinterpret_cast<const char*>(data), size);
+
+    if (!body_stream_->good())
+    {
+        throw CatlV1Error("Failed to write raw data to body stream");
+    }
+
+    // Track bytes written
+    track_write(WriteType::MAP_ITEM, size);
+
+    return true;
+}
+
 Writer::~Writer()
 {
     // If not finalized, try to finalize on destruction

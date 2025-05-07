@@ -2,10 +2,137 @@
 #include <cstring>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "catl/v1/catl-v1-utils.h"
+#include "catl/v1/catl-v1-writer.h"
 
 namespace catl::v1 {
+
+void
+Reader::reset_to_body_start()
+{
+    // Set file position to beginning of body (after header)
+    if (decompressed_stream_)
+    {
+        // For compressed files, need to recreate the decompression stream
+        // since it's not seekable
+        decompressed_stream_.reset();
+
+        // Close and reopen the file
+        if (file_.is_open())
+        {
+            file_.close();
+        }
+
+        file_.open(filename_, std::ios::binary);
+        if (!file_.is_open())
+        {
+            throw CatlV1Error(
+                "Failed to reopen file for body reading: " + filename_);
+        }
+
+        // Seek to position after header
+        if (!file_.seekg(sizeof(CatlHeader), std::ios::beg))
+        {
+            throw CatlV1Error("Failed to seek past header for body reading");
+        }
+
+        // Recreate decompression stream
+        auto temp_decompressed_stream =
+            std::make_unique<boost::iostreams::filtering_istream>();
+        boost::iostreams::zlib_params params;
+        params.noheader = false;
+        params.window_bits = 15;
+        params.level = compression_level_;
+
+        try
+        {
+            temp_decompressed_stream->push(
+                boost::iostreams::zlib_decompressor(params));
+            temp_decompressed_stream->push(file_);
+        }
+        catch (const std::exception& e)
+        {
+            throw CatlV1Error(
+                "Failed to reset decompression stream: " +
+                std::string(e.what()));
+        }
+
+        decompressed_stream_ = std::move(temp_decompressed_stream);
+        input_stream_ = decompressed_stream_.get();
+    }
+    else
+    {
+        // For uncompressed files, just seek in the file stream
+        if (!file_.seekg(sizeof(CatlHeader), std::ios::beg))
+        {
+            throw CatlV1Error("Failed to seek past header for body reading");
+        }
+        input_stream_ = &file_;
+    }
+}
+
+size_t
+Reader::read_raw_data(uint8_t* buffer, size_t size)
+{
+    if (!input_stream_)
+    {
+        throw CatlV1Error("Input stream is not available for raw reading");
+    }
+
+    input_stream_->read(reinterpret_cast<char*>(buffer), size);
+    return static_cast<size_t>(input_stream_->gcount());
+}
+
+bool
+Reader::decompress(const std::string& output_path)
+{
+    // Check if file is already uncompressed
+    if (compression_level_ == 0)
+    {
+        throw CatlV1Error("File is not compressed (level 0)");
+    }
+
+    // Create writer with uncompressed option
+    WriterOptions options;
+    options.network_id = header_.network_id;
+    options.compression_level = 0;
+
+    auto writer = Writer::for_file(output_path, options);
+
+    // Copy header information (min/max ledger)
+    writer->write_header(header_.min_ledger, header_.max_ledger);
+
+    // Reset file position to beginning of body (after header)
+    reset_to_body_start();
+
+    // Set up a buffer for copying
+    constexpr size_t BUFFER_SIZE = 64 * 1024;  // 64KB buffer
+    std::vector<uint8_t> buffer(BUFFER_SIZE);
+
+    // Read and copy data in chunks until EOF
+    while (!input_stream_->eof())
+    {
+        size_t bytes_read = read_raw_data(buffer.data(), buffer.size());
+        if (bytes_read > 0)
+        {
+            writer->write_raw_data(buffer.data(), bytes_read);
+        }
+
+        // Check for errors other than EOF
+        if (input_stream_->bad())
+        {
+            throw CatlV1Error(
+                "Error reading from input file during decompression");
+        }
+    }
+
+    // Finalize the output file
+    writer->finalize();
+
+    return true;
+}
 Reader::Reader(std::string filename) : filename_(std::move(filename))
 {
     file_.open(filename_, std::ios::binary);

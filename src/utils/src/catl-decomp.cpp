@@ -31,6 +31,31 @@ format_file_size(uint64_t bytes)
     return oss.str();
 }
 
+/**
+ * CATLDecompressor - A simple CATL file decompression utility
+ *
+ * This tool has a single focused responsibility: take a compressed CATL file
+ * and create an uncompressed version that can be processed by other tools.
+ *
+ * The decompression process:
+ * 1. Read the header information from the compressed file
+ * 2. Create a new file with identical header information, but with compression
+ * level set to 0
+ * 3. Simply decompress the body to the new file's uncompressed body without
+ * examining the contents
+ * 4. Let the Reader and Writer classes handle the actual data decompression and
+ * copying
+ * 5. Update the output file's size and hash values during finalization
+ *
+ * Note: This tool doesn't need to understand the internal structure of the CATL
+ * file data. It simply relies on the Reader class to handle decompression of
+ * the input stream and the Writer class to create the proper uncompressed
+ * output stream. Conceptually, it's equivalent to:
+ * compressed_reader.stream_pipe(uncompressed_writer.body_stream())
+ *
+ * After decompression, use catl-validator or other tools to verify file
+ * integrity.
+ */
 class CATLDecompressor
 {
 private:
@@ -91,125 +116,22 @@ public:
                       << static_cast<int>(compression_level) << std::endl;
             std::cout << "  Network ID: " << header.network_id << std::endl;
 
-            // Create writer options for decompressed file
-            WriterOptions writer_options;
-            writer_options.network_id = header.network_id;
-            writer_options.compression_level = 0;  // Uncompressed output
-
-            // Create writer for output file
-            std::cout << "Creating output file: " << output_file_path_
-                      << std::endl;
-            auto writer = Writer::for_file(output_file_path_, writer_options);
-
-            // Write the header with the same ledger range
-            try
-            {
-                writer->write_header(header.min_ledger, header.max_ledger);
-            }
-            catch (const CatlV1Error& e)
-            {
-                std::cerr << "Failed to write header to output file: "
-                          << e.what() << std::endl;
-                return false;
-            }
-
-            // Process all ledgers from input file
-            std::cout << "Starting decompression process..." << std::endl;
+            // Start decompression
+            std::cout << "Starting decompression..." << std::endl;
             auto start_time = std::chrono::high_resolution_clock::now();
-            uint32_t ledger_count = 0;
 
-            // For progress reporting
-            auto last_update_time = start_time;
-            bool first_status = true;
-
+            // Use the new Reader::decompress method
             try
             {
-                while (true)
+                if (!reader.decompress(output_file_path_))
                 {
-                    // Read ledger header (this now throws instead of returning
-                    // nullopt)
-                    LedgerInfo ledger_info;
-                    try
-                    {
-                        ledger_info = reader.read_ledger_info();
-                    }
-                    catch (const CatlV1Error& e)
-                    {
-                        // End of file reached
-                        break;
-                    }
-
-                    // Write ledger header to output file
-                    try
-                    {
-                        writer->write_ledger_header(ledger_info);
-                    }
-                    catch (const CatlV1Error& e)
-                    {
-                        std::cerr
-                            << "Failed to write ledger header: " << e.what()
-                            << std::endl;
-                        return false;
-                    }
-
-                    // TODO: Add shamap reading/writing code in a future version
-                    // For now, we don't have access to the full ledger
-                    // structure through the Reader interface. The focus here is
-                    // to demonstrate using the Reader for decompression.
-
-                    ledger_count++;
-
-                    // Show progress every 2 seconds
-                    auto now = std::chrono::high_resolution_clock::now();
-                    auto elapsed =
-                        std::chrono::duration_cast<std::chrono::seconds>(
-                            now - last_update_time)
-                            .count();
-
-                    if (first_status || elapsed >= 2)
-                    {
-                        double total_seconds =
-                            std::chrono::duration_cast<
-                                std::chrono::milliseconds>(now - start_time)
-                                .count() /
-                            1000.0;
-
-                        if (total_seconds > 0)
-                        {
-                            double ledgers_per_sec =
-                                ledger_count / total_seconds;
-                            std::cout << "Processed " << ledger_count
-                                      << " ledgers (" << std::fixed
-                                      << std::setprecision(2) << ledgers_per_sec
-                                      << " ledgers/sec)" << std::endl;
-                        }
-                        else
-                        {
-                            std::cout << "Processed " << ledger_count
-                                      << " ledgers" << std::endl;
-                        }
-
-                        last_update_time = now;
-                        first_status = false;
-                    }
+                    std::cerr << "Decompression failed" << std::endl;
+                    return false;
                 }
             }
-            catch (const std::exception& e)
-            {
-                std::cerr << "Error during decompression: " << e.what()
-                          << std::endl;
-                return false;
-            }
-
-            // Finalize the output file
-            try
-            {
-                writer->finalize();
-            }
             catch (const CatlV1Error& e)
             {
-                std::cerr << "Failed to finalize output file: " << e.what()
-                          << std::endl;
+                std::cerr << "Decompression failed: " << e.what() << std::endl;
                 return false;
             }
 
@@ -225,11 +147,10 @@ public:
             std::cout << "Decompression completed successfully:" << std::endl;
             std::cout << "  Time taken: " << std::fixed << std::setprecision(2)
                       << seconds << " seconds" << std::endl;
-            std::cout << "  Ledgers processed: " << ledger_count << std::endl;
             std::cout << "  Output file size: " << output_file_size << " ("
                       << format_file_size(output_file_size) << ")" << std::endl;
 
-            // Calculate compression ratio
+            // Calculate expansion ratio
             if (input_file_size > 0)
             {
                 double ratio =
