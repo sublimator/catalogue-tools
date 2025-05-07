@@ -43,14 +43,6 @@ public:
     header() const;
 
     /**
-     * Check if the header is valid
-     *
-     * @return true if the header was successfully validated
-     */
-    bool
-    valid() const;
-
-    /**
      * Get the compression level from the header
      *
      * @return Compression level (0-9, where 0 means uncompressed)
@@ -188,6 +180,14 @@ private:
      */
     void
     read_header();
+
+    /**
+     * Check if the header is valid
+     *
+     * @return true if the header was successfully validated
+     */
+    bool
+    valid() const;
 
     boost::iostreams::mapped_file_source mmap_file_;
     const uint8_t* data_ = nullptr;

@@ -21,23 +21,24 @@ public:
     const CatlHeader&
     header() const;
 
-    // Returns true if the header is valid
-    bool
-    valid() const;
-
     int
     compression_level() const;
 
     int
     catalogue_version() const;
 
-    // Reads the next LedgerHeader from the file, or std::nullopt on EOF/error
-    std::optional<LedgerInfo>
+    // Reads the next LedgerHeader from the file
+    // @throws CatlV1Error if EOF is reached or an error occurs
+    LedgerInfo
     read_ledger_info();
 
 private:
     void
     read_header();
+
+    // Returns true if the header is valid
+    bool
+    valid() const;
 
     std::ifstream file_;
     // For compressed reading, this wraps file_ if needed

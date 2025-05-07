@@ -158,27 +158,32 @@ Reader::catalogue_version() const
     return catalogue_version_;
 }
 
-std::optional<LedgerInfo>
+LedgerInfo
 Reader::read_ledger_info()
 {
     LedgerInfo ledger_header;  // NOLINT(*-pro-type-member-init)
     std::streamsize bytes_read = 0;
 
-    if (input_stream_)
+    if (!input_stream_)
     {
-        input_stream_->read(
-            reinterpret_cast<char*>(&ledger_header), sizeof(LedgerInfo));
-        bytes_read = input_stream_->gcount();
-    }
-    else
-    {
-        return std::nullopt;
+        throw CatlV1Error("Input stream is not available");
     }
 
-    if (bytes_read != sizeof(LedgerInfo))
+    input_stream_->read(
+        reinterpret_cast<char*>(&ledger_header), sizeof(LedgerInfo));
+    bytes_read = input_stream_->gcount();
+
+    if (bytes_read == 0)
     {
-        return std::nullopt;
+        throw CatlV1Error("EOF reached: no more ledger headers available");
     }
+    else if (bytes_read != sizeof(LedgerInfo))
+    {
+        throw CatlV1Error(
+            "Failed to read complete ledger header: only read " +
+            std::to_string(bytes_read) + " bytes");
+    }
+
     return ledger_header;
 }
 }  // namespace catl::v1
