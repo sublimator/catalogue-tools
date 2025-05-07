@@ -7,6 +7,14 @@
     "**/.mypy_cache/**"
   ],
   "files_patterns": {
+    "entry" :{
+      "include": [
+        ".ai-docs/entry-point.md",
+        ".ai-docs/three-insights.md",
+        ".ai-docs/tool-use.md",
+        ".ai-docs/build-and-test-commands.md"
+      ]
+    },
     "cmake" : {
       "include": [
           "**/*/CMakeLists.txt"

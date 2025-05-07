@@ -621,7 +621,7 @@ Writer::track_write(WriteType type, size_t bytes)
     }
 }
 
-bool
+void
 Writer::write_raw_data(const uint8_t* data, size_t size)
 {
     if (!header_written_ || finalized_)
@@ -640,8 +640,6 @@ Writer::write_raw_data(const uint8_t* data, size_t size)
 
     // Track bytes written
     track_write(WriteType::MAP_ITEM, size);
-
-    return true;
 }
 
 Writer::~Writer()

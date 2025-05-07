@@ -127,11 +127,9 @@ public:
             // Use the Reader::decompress method
             try
             {
-                if (!reader.decompress(output_file_path_))
-                {
-                    std::cerr << "Decompression failed" << std::endl;
-                    return false;
-                }
+                // The decompress method now throws exceptions instead of
+                // returning a bool
+                reader.decompress(output_file_path_);
             }
             catch (const CatlV1Error& e)
             {

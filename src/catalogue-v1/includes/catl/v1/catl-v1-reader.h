@@ -26,10 +26,9 @@ public:
      * contents.
      *
      * @param output_path Path where the uncompressed file should be written
-     * @return true if decompression was successful
      * @throws CatlV1Error if file cannot be decompressed
      */
-    bool
+    void
     decompress(const std::string& output_path);
 
     /**

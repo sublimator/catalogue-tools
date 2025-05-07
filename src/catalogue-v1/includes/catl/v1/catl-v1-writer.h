@@ -165,10 +165,9 @@ public:
      *
      * @param data Pointer to the data
      * @param size Number of bytes to write
-     * @return true if successful
-     * @throws CatlV1Error if writing fails
+     * @throws CatlV1Error if writing fails or file not properly initialized
      */
-    bool
+    void
     write_raw_data(const uint8_t* data, size_t size);
 
     /**

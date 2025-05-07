@@ -21,7 +21,7 @@ Reader::read_raw_data(uint8_t* buffer, size_t size)
     return static_cast<size_t>(input_stream_->gcount());
 }
 
-bool
+void
 Reader::decompress(const std::string& output_path)
 {
     // Check if file is already uncompressed
@@ -63,9 +63,8 @@ Reader::decompress(const std::string& output_path)
 
     // Finalize the output file
     writer->finalize();
-
-    return true;
 }
+
 Reader::Reader(std::string filename) : filename_(std::move(filename))
 {
     file_.open(filename_, std::ios::binary);
