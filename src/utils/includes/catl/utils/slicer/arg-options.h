@@ -70,21 +70,31 @@ CommandLineOptions
 parse_argv(int argc, char* argv[]);
 
 /**
- * Convert string to LogLevel enum
+ * Convert string to SlicerLogLevel enum
  *
  * @param level_str String representation of log level
- * @return Corresponding LogLevel value, or LogLevel::INFO if invalid
+ * @return Corresponding SlicerLogLevel value, or SlicerLogLevel::INFO if
+ * invalid
  */
-LogLevel
+SlicerLogLevel
 string_to_log_level(const std::string& level_str);
 
 /**
- * Convert LogLevel enum to string
+ * Convert SlicerLogLevel enum to string
  *
- * @param level LogLevel enum value
+ * @param level SlicerLogLevel enum value
  * @return String representation of the log level
  */
 std::string
-log_level_to_string(LogLevel level);
+log_level_to_string(SlicerLogLevel level);
+
+/**
+ * Convert SlicerLogLevel to core LogLevel
+ *
+ * @param level SlicerLogLevel enum value
+ * @return Corresponding core LogLevel value
+ */
+LogLevel
+convert_to_core_log_level(SlicerLogLevel level);
 
 }  // namespace catl::utils::slicer
