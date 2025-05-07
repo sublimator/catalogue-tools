@@ -18,129 +18,6 @@
 #include <boost/iostreams/filtering_stream.hpp>
 
 namespace catl::v1 {
-/**
- * Stream wrapper that provides zlib compression using Boost.Iostreams
- */
-class CompressedOutputStream : public std::ostream
-{
-private:
-    std::shared_ptr<boost::iostreams::filtering_ostream> filter_stream_;
-    std::ostream& underlying_stream_;
-    std::vector<char> buffer_;
-
-    // Forward declaration of buffer class
-    class CompressionBuffer;
-    std::unique_ptr<CompressionBuffer> buffer_impl_;
-
-    // Custom buffer for handling the data flow
-    class CompressionBuffer : public std::streambuf
-    {
-    private:
-        boost::iostreams::filtering_ostream& filter_;
-        std::vector<char>& buffer_;
-
-    public:
-        CompressionBuffer(
-            boost::iostreams::filtering_ostream& filter,
-            std::vector<char>& buffer,
-            size_t buffer_size = 8192)
-            : filter_(filter), buffer_(buffer)
-        {
-            buffer_.resize(buffer_size);
-            // Set buffer pointers
-            setp(buffer_.data(), buffer_.data() + buffer_.size());
-        }
-
-        ~CompressionBuffer()
-        {
-            sync();
-        }
-
-    protected:
-        int_type
-        overflow(int_type ch) override
-        {
-            if (ch != traits_type::eof())
-            {
-                // Buffer is full, compress and write data
-                *pptr() = static_cast<char>(ch);
-                pbump(1);
-                sync();
-                return ch;
-            }
-            return traits_type::eof();
-        }
-
-        int
-        sync() override
-        {
-            // Get size of data in buffer
-            auto size = pptr() - pbase();
-            if (size > 0)
-            {
-                // Write to the filtering stream which compresses to the
-                // underlying stream
-                filter_.write(pbase(), size);
-
-                // Reset buffer pointers
-                pbump(-static_cast<int>(size));
-            }
-            return 0;
-        }
-    };
-
-public:
-    CompressedOutputStream(std::ostream& stream, uint8_t compression_level)
-        : std::ostream(nullptr)  // We'll set the buffer after initialization
-        , filter_stream_(
-              std::make_shared<boost::iostreams::filtering_ostream>())
-        , underlying_stream_(stream)
-        , buffer_(8192)  // Initialize with 8KB buffer
-    {
-        // Configure the zlib compression filter
-        boost::iostreams::zlib_params params;
-        params.level = compression_level;
-        params.method = boost::iostreams::zlib::deflated;
-        params.noheader = false;  // Use zlib header/footer
-
-        // Add the compressor to the filtering stream
-        filter_stream_->push(boost::iostreams::zlib_compressor(params));
-
-        // Add the underlying output stream last in the chain
-        filter_stream_->push(underlying_stream_);
-
-        // Create and set the buffer
-        buffer_impl_ =
-            std::make_unique<CompressionBuffer>(*filter_stream_, buffer_);
-        rdbuf(buffer_impl_.get());
-
-        LOGI(
-            "Created zlib compression stream with level ",
-            static_cast<int>(compression_level));
-    }
-
-    ~CompressedOutputStream()
-    {
-        flush();
-        // Make sure to properly finish the zlib stream
-        if (filter_stream_)
-        {
-            filter_stream_->reset();
-        }
-    }
-
-    void
-    flush()
-    {
-        std::ostream::flush();  // Flush our buffer to the filtering_ostream
-        if (filter_stream_)
-        {
-            filter_stream_
-                ->flush();  // Flush the compression to the underlying stream
-        }
-        underlying_stream_.flush();  // Flush the underlying stream
-    }
-};
 
 Writer::Writer(
     std::shared_ptr<std::ostream> header_stream,
@@ -170,44 +47,47 @@ Writer::Writer(
 std::unique_ptr<Writer>
 Writer::for_file(const std::string& path, const WriterOptions& options)
 {
+    // Create and open the file
+    auto file_stream = std::make_shared<std::fstream>(
+        path,
+        std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+
+    if (!file_stream->good())
+    {
+        throw CatlV1Error("Failed to open output file: " + path);
+    }
+
     if (options.compression_level == 0)
     {
         // For uncompressed files, use the same file stream for both header and
         // body
-        auto file_stream = std::make_shared<std::fstream>(
-            path,
-            std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
-
-        if (!file_stream->good())
-        {
-            throw CatlV1Error("Failed to open output file: " + path);
-        }
-
-        // Use the same stream for both header and body
         return std::make_unique<Writer>(file_stream, file_stream, options);
     }
     else
     {
-        // For compressed files, we need separate handling
+        // For compressed files, create a filtering_ostream with zlib
+        // compression
+        auto filter_stream =
+            std::make_shared<boost::iostreams::filtering_ostream>();
 
-        // First, create and open the file
-        auto file_stream = std::make_shared<std::fstream>(
-            path,
-            std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+        // Configure zlib compression
+        boost::iostreams::zlib_params params;
+        params.level = options.compression_level;
+        params.method = boost::iostreams::zlib::deflated;
+        params.noheader = false;  // Use zlib header/footer
 
-        if (!file_stream->good())
-        {
-            throw CatlV1Error("Failed to open output file: " + path);
-        }
+        // Add the compressor to the stream chain
+        filter_stream->push(boost::iostreams::zlib_compressor(params));
 
-        // Create a compressed wrapper for the body
-        auto compressed_stream = std::make_shared<CompressedOutputStream>(
-            *file_stream, options.compression_level);
+        // Add the file stream as the sink
+        filter_stream->push(*file_stream);
 
-        // Create writer with file_stream for header and compressed_stream for
-        // body
-        return std::make_unique<Writer>(
-            file_stream, compressed_stream, options);
+        LOGI(
+            "Created zlib compression stream with level ",
+            static_cast<int>(options.compression_level));
+
+        // Create writer with file_stream for header and filter_stream for body
+        return std::make_unique<Writer>(file_stream, filter_stream, options);
     }
 }
 
@@ -506,6 +386,37 @@ Writer::finalize()
     // Flush the body stream to ensure all data is written
     body_stream_->flush();
 
+    // If using compression, we need to ensure all compressed data is written to
+    // disk
+    if (options_.compression_level > 0)
+    {
+        // For compressed streams, we need to reset the filtering_ostream to
+        // ensure all buffered data is flushed and the zlib stream is properly
+        // finalized
+        if (auto* filter_stream =
+                dynamic_cast<boost::iostreams::filtering_ostream*>(
+                    body_stream_.get()))
+        {
+            try
+            {
+                LOGI("Finalizing compressed stream");
+                filter_stream
+                    ->reset();  // This properly closes all filters in the chain
+            }
+            catch (const boost::iostreams::zlib_error& e)
+            {
+                throw CatlV1Error(
+                    "Error finalizing zlib stream: " + std::string(e.what()));
+            }
+            catch (const std::exception& e)
+            {
+                throw CatlV1Error(
+                    "Error finalizing compression stream: " +
+                    std::string(e.what()));
+            }
+        }
+    }
+
     // Flush the header stream
     header_stream_->flush();
 
@@ -728,5 +639,35 @@ Writer::~Writer()
             // We don't rethrow here as destructors should not throw
         }
     }
+    else if (options_.compression_level > 0 && !finalized_)
+    {
+        // If we have a compression stream but weren't able to finalize
+        // properly, at least try to reset the filtering_ostream to flush any
+        // buffered data
+        try
+        {
+            if (auto* filter_stream =
+                    dynamic_cast<boost::iostreams::filtering_ostream*>(
+                        body_stream_.get()))
+            {
+                LOGW(
+                    "Flushing compressed stream on destruction without "
+                    "finalization");
+                filter_stream->flush();
+                filter_stream->reset();
+            }
+        }
+        catch (const std::exception& e)
+        {
+            LOGE(
+                "Error flushing compression stream during destruction: ",
+                e.what());
+            // Destructors should not throw
+        }
+    }
+
+    // Clear smart pointers to ensure proper order of destruction
+    body_stream_.reset();
+    header_stream_.reset();
 }
 }  // namespace catl::v1

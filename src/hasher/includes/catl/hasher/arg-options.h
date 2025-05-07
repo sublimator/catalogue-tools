@@ -35,6 +35,9 @@ struct CommandLineOptions
     /** Path to create a slice file (when specified) */
     std::optional<std::string> slice_file;
 
+    /** Compression level for slice file (0-9, where 0 means uncompressed) */
+    uint8_t compression_level = 0;
+
     /** Whether to display help information */
     bool show_help = false;
 

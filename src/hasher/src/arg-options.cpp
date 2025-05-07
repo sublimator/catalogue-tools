@@ -75,7 +75,10 @@ parse_argv(int argc, char* argv[])
         "Last ledger to process (exit after this ledger)")(
         "create-slice-file,c",
         po::value<std::string>(),
-        "Create a new slice file with the specified ledger range");
+        "Create a new slice file with the specified ledger range")(
+        "compression",
+        po::value<int>()->default_value(0),
+        "Compression level for slice file (0-9, where 0 means uncompressed)");
 
     // Set up positional arguments
     po::positional_options_description pos_desc;
@@ -150,6 +153,23 @@ parse_argv(int argc, char* argv[])
         if (vm.count("create-slice-file"))
         {
             options.slice_file = vm["create-slice-file"].as<std::string>();
+        }
+
+        // Parse compression level option
+        if (vm.count("compression"))
+        {
+            int compression_value = vm["compression"].as<int>();
+
+            // Validate compression level (0-9)
+            if (compression_value < 0 || compression_value > 9)
+            {
+                options.valid = false;
+                options.error_message =
+                    "Compression level must be between 0 and 9";
+                return options;
+            }
+
+            options.compression_level = static_cast<uint8_t>(compression_value);
         }
 
         // Validate ledger range if both are specified

@@ -669,7 +669,11 @@ public:
             // Create writer options
             catl::v1::WriterOptions writer_options;
             writer_options.network_id = header.network_id;
-            writer_options.compression_level = 0;  // Create uncompressed files
+            writer_options.compression_level = options_.compression_level;
+
+            LOGI(
+                "Creating slice file with compression level ",
+                static_cast<int>(options_.compression_level));
 
             // Create the writer
             auto writer =

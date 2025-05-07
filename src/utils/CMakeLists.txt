@@ -1,5 +1,5 @@
 # Create a list of executables
-set(UTILS_EXECUTABLES catl-validator catl-decomp)
+set(UTILS_EXECUTABLES catl-validator catl-decomp catl-decomp-reference)
 
 # Create the executables
 foreach(EXECUTABLE ${UTILS_EXECUTABLES})
