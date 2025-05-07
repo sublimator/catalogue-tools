@@ -674,9 +674,13 @@ public:
                 catl::v1::Writer::for_file(output_file, writer_options);
 
             // Write the header with the new ledger range
-            if (!writer->write_header(first_ledger, last_ledger))
+            try
             {
-                LOGE("Failed to write slice file header");
+                writer->write_header(first_ledger, last_ledger);
+            }
+            catch (const catl::v1::CatlV1Error& e)
+            {
+                LOGE("Failed to write slice file header: ", e.what());
                 return false;
             }
 
@@ -730,13 +734,18 @@ public:
                     // For the first ledger, write the complete ledger with full
                     // state
                     LOGI("Writing complete state for first ledger: ", seq);
-                    if (!writer->write_ledger(
-                            info, *ledger->getStateMap(), *ledger->getTxMap()))
+                    try
+                    {
+                        writer->write_ledger(
+                            info, *ledger->getStateMap(), *ledger->getTxMap());
+                    }
+                    catch (const catl::v1::CatlV1Error& e)
                     {
                         LOGE(
                             "Failed to write first ledger ",
                             seq,
-                            " to slice file");
+                            " to slice file: ",
+                            e.what());
                         return false;
                     }
 
@@ -749,33 +758,28 @@ public:
                     // with state map delta from previous ledger
                     LOGI("Writing delta for ledger: ", seq);
 
-                    // Write ledger header
-                    if (!writer->write_ledger_header(info))
+                    try
                     {
-                        LOGE(
-                            "Failed to write ledger header ",
-                            seq,
-                            " to slice file");
-                        return false;
-                    }
+                        // Write ledger header
+                        writer->write_ledger_header(info);
 
-                    // Write state map delta
-                    if (!writer->write_map_delta(
+                        // Write state map delta
+                        writer->write_map_delta(
                             *previous_state_map,
                             *ledger->getStateMap(),
-                            tnACCOUNT_STATE))
-                    {
-                        LOGE(
-                            "Failed to write state map delta for ledger ", seq);
-                        return false;
-                    }
+                            tnACCOUNT_STATE);
 
-                    // Write full transaction map (always unique per ledger)
-                    if (!writer->write_map(
-                            *(ledger->getTxMap()), tnTRANSACTION_MD))
+                        // Write full transaction map (always unique per ledger)
+                        writer->write_map(
+                            *(ledger->getTxMap()), tnTRANSACTION_MD);
+                    }
+                    catch (const catl::v1::CatlV1Error& e)
                     {
                         LOGE(
-                            "Failed to write transaction map for ledger ", seq);
+                            "Failed to write ledger ",
+                            seq,
+                            " to slice file: ",
+                            e.what());
                         return false;
                     }
 
@@ -799,9 +803,13 @@ public:
             }
 
             // Finalize the file
-            if (!writer->finalize())
+            try
             {
-                LOGE("Failed to finalize slice file");
+                writer->finalize();
+            }
+            catch (const catl::v1::CatlV1Error& e)
+            {
+                LOGE("Failed to finalize slice file: ", e.what());
                 return false;
             }
 
