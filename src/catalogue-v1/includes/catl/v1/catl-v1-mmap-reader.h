@@ -43,14 +43,6 @@ public:
     header() const;
 
     /**
-     * Check if the header is valid
-     *
-     * @return true if the header was successfully validated
-     */
-    bool
-    valid() const;
-
-    /**
      * Get the compression level from the header
      *
      * @return Compression level (0-9, where 0 means uncompressed)
@@ -154,14 +146,11 @@ public:
      * 2. Computing a SHA-512 hash of the entire file (with zeroed hash field)
      * 3. Comparing the computed hash with the stored hash
      *
-     * @param throw_on_failure Whether to throw an exception on failure
-     * (default: false)
-     * @return true if the hash matches, false otherwise
-     * @throws CatlV1HashVerificationError if verification fails and
-     * throw_on_failure is true
+     * @throws CatlV1Error if the header hash field is empty
+     * @throws CatlV1HashVerificationError if the hash verification fails
      */
-    bool
-    verify_file_hash(bool throw_on_failure = false);
+    void
+    verify_file_hash();
 
     /**
      * Read arbitrary data structure at the current position and advance
@@ -191,6 +180,14 @@ private:
      */
     void
     read_header();
+
+    /**
+     * Check if the header is valid
+     *
+     * @return true if the header was successfully validated
+     */
+    bool
+    valid() const;
 
     boost::iostreams::mapped_file_source mmap_file_;
     const uint8_t* data_ = nullptr;

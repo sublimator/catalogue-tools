@@ -127,8 +127,8 @@ TEST_F(WriterTest, BasicWriteTest)
         std::cout << "Uncompressed file size: " << uncompressed_size << " bytes"
                   << std::endl;
 
-        // Verify the file hash using our new method
-        EXPECT_TRUE(reader.verify_file_hash(true))
+        // Verify the file hash using our exception-based method
+        EXPECT_NO_THROW(reader.verify_file_hash())
             << "File hash verification failed";
     }
 
