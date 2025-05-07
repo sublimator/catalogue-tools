@@ -17,7 +17,7 @@ using LedgerHeaderView = catl::v1::LedgerInfoView;
 class Ledger
 {
 private:
-    LedgerHeaderView headerView;
+    LedgerHeaderView header_view_;
     std::shared_ptr<SHAMap> stateMap;
     std::shared_ptr<SHAMap> txMap;
 
@@ -32,7 +32,7 @@ public:
     const LedgerHeaderView&
     header() const
     {
-        return headerView;
+        return header_view_;
     }
     std::shared_ptr<SHAMap>
     getStateMap() const

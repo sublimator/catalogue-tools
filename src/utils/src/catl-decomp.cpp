@@ -37,9 +37,9 @@ isCompressed(uint16_t versionField)
 }
 
 inline uint16_t
-makeCatalogueVersionField(uint8_t version, uint8_t compressionLevel = 0)
+makeCatalogueVersionField(uint8_t version, uint8_t compression_level = 0)
 {
-    return make_catalogue_version_field(version, compressionLevel);
+    return make_catalogue_version_field(version, compression_level);
 }
 
 // Helper function to convert binary hash to hex string
@@ -80,57 +80,58 @@ format_file_size(uint64_t bytes)
 class CATLDecompressor
 {
 private:
-    std::string inputFilePath;
-    std::string outputFilePath;
-    boost::iostreams::mapped_file_source mmapFile;
+    std::string input_file_path_;
+    std::string output_file_path_;
+    boost::iostreams::mapped_file_source mmap_file_;
     const uint8_t* data = nullptr;
-    size_t fileSize = 0;
+    size_t file_size_ = 0;
     CatlHeader header;
 
 public:
     CATLDecompressor(const std::string& inFile, const std::string& outFile)
-        : inputFilePath(inFile), outputFilePath(outFile)
+        : input_file_path_(inFile), output_file_path_(outFile)
     {
-        if (!boost::filesystem::exists(inputFilePath))
+        if (!boost::filesystem::exists(input_file_path_))
         {
             throw std::runtime_error(
-                "Input file does not exist: " + inputFilePath);
+                "Input file does not exist: " + input_file_path_);
         }
 
-        boost::filesystem::path path(inputFilePath);
-        boost::uintmax_t actualFileSize = boost::filesystem::file_size(path);
-        if (actualFileSize == 0)
-        {
-            throw std::runtime_error("Input file is empty: " + inputFilePath);
-        }
-
-        mmapFile.open(inputFilePath);
-        if (!mmapFile.is_open())
+        boost::filesystem::path path(input_file_path_);
+        boost::uintmax_t actual_file_size = boost::filesystem::file_size(path);
+        if (actual_file_size == 0)
         {
             throw std::runtime_error(
-                "Failed to memory map file: " + inputFilePath);
+                "Input file is empty: " + input_file_path_);
         }
 
-        data = reinterpret_cast<const uint8_t*>(mmapFile.data());
-        fileSize = mmapFile.size();
+        mmap_file_.open(input_file_path_);
+        if (!mmap_file_.is_open())
+        {
+            throw std::runtime_error(
+                "Failed to memory map file: " + input_file_path_);
+        }
 
-        std::cout << "Opened file: " << inputFilePath << " (" << fileSize
-                  << " bytes, " << format_file_size(fileSize) << ")"
+        data = reinterpret_cast<const uint8_t*>(mmap_file_.data());
+        file_size_ = mmap_file_.size();
+
+        std::cout << "Opened file: " << input_file_path_ << " (" << file_size_
+                  << " bytes, " << format_file_size(file_size_) << ")"
                   << std::endl;
     }
 
     ~CATLDecompressor()
     {
-        if (mmapFile.is_open())
+        if (mmap_file_.is_open())
         {
-            mmapFile.close();
+            mmap_file_.close();
         }
     }
 
     bool
     validateHeader()
     {
-        if (fileSize < sizeof(CatlHeader))
+        if (file_size_ < sizeof(CatlHeader))
         {
             std::cerr << "File too small to contain a valid CATL header"
                       << std::endl;
@@ -147,10 +148,10 @@ public:
             return false;
         }
 
-        uint8_t compressionLevel = get_compression_level(header.version);
+        uint8_t compression_level = get_compression_level(header.version);
         uint8_t version = get_catalogue_version(header.version);
 
-        if (compressionLevel == 0)
+        if (compression_level == 0)
         {
             std::cerr
                 << "File is not compressed (level 0). No need to decompress."
@@ -195,39 +196,39 @@ public:
                   << std::endl;
         std::cout << "  Version: " << static_cast<int>(version) << std::endl;
         std::cout << "  Compression Level: "
-                  << static_cast<int>(compressionLevel) << std::endl;
+                  << static_cast<int>(compression_level) << std::endl;
         std::cout << "  Network ID: " << header.network_id << std::endl;
         std::cout << "  File size: " << header.filesize << " bytes ("
                   << format_file_size(header.filesize) << ")" << std::endl;
 
         // Output hash if present
-        bool hasNonZeroHash = false;
+        bool non_zero_hash = false;
         for (size_t i = 0; i < header.hash.size(); i++)
         {
             if (header.hash[i] != 0)
             {
-                hasNonZeroHash = true;
+                non_zero_hash = true;
                 break;
             }
         }
 
-        if (hasNonZeroHash)
+        if (non_zero_hash)
         {
-            std::string hashHex =
+            std::string hash_hex =
                 toHexString(header.hash.data(), header.hash.size());
-            std::cout << "  Hash: " << hashHex << std::endl;
+            std::cout << "  Hash: " << hash_hex << std::endl;
         }
         else
         {
             std::cout << "  Hash: Not set (all zeros)" << std::endl;
         }
 
-        if (header.filesize != fileSize)
+        if (header.filesize != file_size_)
         {
             std::cerr << "Warning: Header file size (" << header.filesize
                       << " bytes, " << format_file_size(header.filesize)
-                      << ") doesn't match actual file size (" << fileSize
-                      << " bytes, " << format_file_size(fileSize) << ")"
+                      << ") doesn't match actual file size (" << file_size_
+                      << " bytes, " << format_file_size(file_size_) << ")"
                       << std::endl;
         }
 
@@ -242,11 +243,11 @@ public:
             return false;
         }
 
-        std::cout << "Creating output file: " << outputFilePath << std::endl;
-        std::ofstream outFile(outputFilePath, std::ios::binary);
-        if (!outFile)
+        std::cout << "Creating output file: " << output_file_path_ << std::endl;
+        std::ofstream out_file(output_file_path_, std::ios::binary);
+        if (!out_file)
         {
-            std::cerr << "Failed to create output file: " << outputFilePath
+            std::cerr << "Failed to create output file: " << output_file_path_
                       << std::endl;
             return false;
         }
@@ -260,9 +261,9 @@ public:
         newHeader.hash.fill(0);  // Clear hash, will be calculated later
 
         // Write the new header to the output file
-        outFile.write(
+        out_file.write(
             reinterpret_cast<const char*>(&newHeader), sizeof(CatlHeader));
-        if (!outFile)
+        if (!out_file)
         {
             std::cerr << "Failed to write header to output file" << std::endl;
             return false;
@@ -275,7 +276,7 @@ public:
                   << static_cast<int>(compressionLevel) << "..." << std::endl;
 
         // Open the input file for reading after the header
-        std::ifstream inFile(inputFilePath, std::ios::binary);
+        std::ifstream inFile(input_file_path_, std::ios::binary);
         if (!inFile)
         {
             std::cerr << "Failed to open input file for reading" << std::endl;
@@ -319,8 +320,8 @@ public:
                             "data detected");
                     }
 
-                    outFile.write(buffer, bytesRead);
-                    if (outFile.bad())
+                    out_file.write(buffer, bytesRead);
+                    if (out_file.bad())
                     {
                         throw std::runtime_error(
                             "Error writing to output file");
@@ -415,12 +416,12 @@ public:
             // Close files before removing
             decompStream.reset();
             inFile.close();
-            outFile.close();
+            out_file.close();
 
             // Remove partial output file
-            std::cout << "Removing incomplete output file: " << outputFilePath
-                      << std::endl;
-            boost::filesystem::remove(outputFilePath);
+            std::cout << "Removing incomplete output file: "
+                      << output_file_path_ << std::endl;
+            boost::filesystem::remove(output_file_path_);
 
             return false;
         }
@@ -441,11 +442,11 @@ public:
         // Close streams
         decompStream.reset();
         inFile.close();
-        outFile.close();
+        out_file.close();
 
         // Update the file size in the header
         std::fstream updateFile(
-            outputFilePath, std::ios::in | std::ios::out | std::ios::binary);
+            output_file_path_, std::ios::in | std::ios::out | std::ios::binary);
         if (!updateFile)
         {
             std::cerr << "Failed to reopen output file for header update"
@@ -467,7 +468,7 @@ public:
 
         // Now compute the hash over the entire file
         std::cout << "Computing hash for output file..." << std::endl;
-        std::ifstream hashFile(outputFilePath, std::ios::binary);
+        std::ifstream hashFile(output_file_path_, std::ios::binary);
         if (!hashFile)
         {
             std::cerr << "Failed to open output file for hashing" << std::endl;
@@ -523,7 +524,7 @@ public:
 
         // Update the hash in the output file header
         std::fstream updateHashFile(
-            outputFilePath, std::ios::in | std::ios::out | std::ios::binary);
+            output_file_path_, std::ios::in | std::ios::out | std::ios::binary);
         if (!updateHashFile)
         {
             std::cerr << "Failed to reopen output file for hash update"
