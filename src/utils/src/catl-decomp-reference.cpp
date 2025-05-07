@@ -88,8 +88,8 @@ private:
     CatlHeader header;
 
 public:
-    CATLDecompressor(const std::string& inFile, const std::string& outFile)
-        : input_file_path_(inFile), output_file_path_(outFile)
+    CATLDecompressor(const std::string& in_file, const std::string& out_file)
+        : input_file_path_(in_file), output_file_path_(out_file)
     {
         if (!boost::filesystem::exists(input_file_path_))
         {

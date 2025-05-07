@@ -32,6 +32,7 @@ if [ "$DECOMPRESSED_SIZE" -eq "$UNCOMPRESSED_FIXTURE_SIZE" ]; then
   echo "✅ Success: Decompressed file size matches original uncompressed fixture size"
 else
   echo "⚠️ Warning: Size mismatch between decompressed file ($DECOMPRESSED_SIZE) and uncompressed fixture ($UNCOMPRESSED_FIXTURE_SIZE)"
+  exit 1
 fi
 
 echo "Test completed successfully!"

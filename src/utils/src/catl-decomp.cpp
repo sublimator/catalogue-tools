@@ -8,6 +8,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 using namespace catl::v1;
 
@@ -17,7 +18,7 @@ format_file_size(uint64_t bytes)
 {
     static const char* units[] = {"B", "KB", "MB", "GB", "TB", "PB"};
     int unit_index = 0;
-    double size = static_cast<double>(bytes);
+    auto size = static_cast<double>(bytes);
 
     while (size >= 1024.0 && unit_index < 5)
     {
@@ -63,8 +64,9 @@ private:
     std::string output_file_path_;
 
 public:
-    CATLDecompressor(const std::string& inFile, const std::string& outFile)
-        : input_file_path_(inFile), output_file_path_(outFile)
+    CATLDecompressor(std::string in_file, std::string out_file)
+        : input_file_path_(std::move(in_file))
+        , output_file_path_(std::move(out_file))
     {
         if (!boost::filesystem::exists(input_file_path_))
         {
@@ -153,7 +155,7 @@ public:
             // Calculate expansion ratio
             if (input_file_size > 0)
             {
-                double ratio =
+                const double ratio =
                     static_cast<double>(output_file_size) / input_file_size;
                 std::cout << "  Expansion ratio: " << std::fixed
                           << std::setprecision(2) << ratio << "x" << std::endl;
