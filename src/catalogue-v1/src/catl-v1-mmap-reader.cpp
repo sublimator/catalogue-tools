@@ -321,8 +321,8 @@ MmapReader::read_shamap(SHAMap& map, SHAMapNodeType leaf_type)
     return nodes_processed_count;
 }
 
-bool
-MmapReader::verify_file_hash(bool throw_on_failure)
+void
+MmapReader::verify_file_hash()
 {
     // If hash is all zeros, it's not set
     bool hash_is_zero = true;
@@ -337,12 +337,8 @@ MmapReader::verify_file_hash(bool throw_on_failure)
 
     if (hash_is_zero)
     {
-        if (throw_on_failure)
-        {
-            throw CatlV1Error(
-                "Cannot verify file hash: Header hash field is empty");
-        }
-        return false;
+        throw CatlV1Error(
+            "Cannot verify file hash: Header hash field is empty");
     }
 
     // Create a hasher
@@ -378,26 +374,20 @@ MmapReader::verify_file_hash(bool throw_on_failure)
     // Verify hash length
     if (hash_len != header_.hash.size())
     {
-        if (throw_on_failure)
-        {
-            throw CatlV1HashVerificationError(
-                "Hash length mismatch: expected " +
-                std::to_string(header_.hash.size()) + " bytes, got " +
-                std::to_string(hash_len) + " bytes");
-        }
-        return false;
+        throw CatlV1HashVerificationError(
+            "Hash length mismatch: expected " +
+            std::to_string(header_.hash.size()) + " bytes, got " +
+            std::to_string(hash_len) + " bytes");
     }
 
     // Compare computed hash with stored hash
     bool matches =
         (std::memcmp(computed_hash, header_.hash.data(), hash_len) == 0);
 
-    if (!matches && throw_on_failure)
+    if (!matches)
     {
         throw CatlV1HashVerificationError("File hash verification failed");
     }
-
-    return matches;
 }
 
 }  // namespace catl::v1
