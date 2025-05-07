@@ -19,3 +19,5 @@ OUTPUT_FILE="/Users/nicholasdudfield/projects/xahau-history/cat.$FIRST_LEDGER-$S
   $OUTPUT_FILE --level=info
 
 ./build/src/utils/catl-validator $OUTPUT_FILE
+
+echo "Done"
