@@ -17,6 +17,30 @@ public:
     explicit Reader(std::string filename);
     ~Reader();
 
+    /**
+     * Decompress the file to an uncompressed version
+     *
+     * Creates an uncompressed copy of this file at the specified output path.
+     * The method simply transfers the header (with compression level set to 0)
+     * and pipes the decompressed body to the output without parsing its
+     * contents.
+     *
+     * @param output_path Path where the uncompressed file should be written
+     * @throws CatlV1Error if file cannot be decompressed
+     */
+    void
+    decompress(const std::string& output_path);
+
+    /**
+     * Read raw data from the file without parsing
+     *
+     * @param buffer Buffer to receive the data
+     * @param size Maximum number of bytes to read
+     * @return Actual number of bytes read
+     */
+    size_t
+    read_raw_data(uint8_t* buffer, size_t size);
+
     // Returns the parsed header
     const CatlHeader&
     header() const;

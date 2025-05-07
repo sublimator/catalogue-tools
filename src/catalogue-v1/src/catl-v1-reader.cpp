@@ -2,10 +2,69 @@
 #include <cstring>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "catl/v1/catl-v1-utils.h"
+#include "catl/v1/catl-v1-writer.h"
 
 namespace catl::v1 {
+
+size_t
+Reader::read_raw_data(uint8_t* buffer, size_t size)
+{
+    if (!input_stream_)
+    {
+        throw CatlV1Error("Input stream is not available for raw reading");
+    }
+
+    input_stream_->read(reinterpret_cast<char*>(buffer), size);
+    return static_cast<size_t>(input_stream_->gcount());
+}
+
+void
+Reader::decompress(const std::string& output_path)
+{
+    // Check if file is already uncompressed
+    if (compression_level_ == 0)
+    {
+        throw CatlV1Error("File is not compressed (level 0)");
+    }
+
+    // Create writer with uncompressed option
+    WriterOptions options;
+    options.network_id = header_.network_id;
+    options.compression_level = 0;
+
+    auto writer = Writer::for_file(output_path, options);
+
+    // Copy header information (min/max ledger)
+    writer->write_header(header_.min_ledger, header_.max_ledger);
+
+    // Set up a buffer for copying
+    constexpr size_t BUFFER_SIZE = 64 * 1024;  // 64KB buffer
+    std::vector<uint8_t> buffer(BUFFER_SIZE);
+
+    // Read and copy data in chunks until EOF
+    while (!input_stream_->eof())
+    {
+        size_t bytes_read = read_raw_data(buffer.data(), buffer.size());
+        if (bytes_read > 0)
+        {
+            writer->write_raw_data(buffer.data(), bytes_read);
+        }
+
+        // Check for errors other than EOF
+        if (input_stream_->bad())
+        {
+            throw CatlV1Error(
+                "Error reading from input file during decompression");
+        }
+    }
+
+    // Finalize the output file
+    writer->finalize();
+}
+
 Reader::Reader(std::string filename) : filename_(std::move(filename))
 {
     file_.open(filename_, std::ios::binary);

@@ -161,6 +161,16 @@ public:
     body_bytes_written() const;
 
     /**
+     * Write raw data to the body stream
+     *
+     * @param data Pointer to the data
+     * @param size Number of bytes to write
+     * @throws CatlV1Error if writing fails or file not properly initialized
+     */
+    void
+    write_raw_data(const uint8_t* data, size_t size);
+
+    /**
      * Set a callback to be notified of write operations
      *
      * @param callback Function to call with write type and bytes written
