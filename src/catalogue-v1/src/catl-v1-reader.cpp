@@ -9,70 +9,6 @@
 
 namespace catl::v1 {
 
-void
-Reader::reset_to_body_start()
-{
-    // Set file position to beginning of body (after header)
-    if (decompressed_stream_)
-    {
-        // For compressed files, need to recreate the decompression stream
-        // since it's not seekable
-        decompressed_stream_.reset();
-
-        // Close and reopen the file
-        if (file_.is_open())
-        {
-            file_.close();
-        }
-
-        file_.open(filename_, std::ios::binary);
-        if (!file_.is_open())
-        {
-            throw CatlV1Error(
-                "Failed to reopen file for body reading: " + filename_);
-        }
-
-        // Seek to position after header
-        if (!file_.seekg(sizeof(CatlHeader), std::ios::beg))
-        {
-            throw CatlV1Error("Failed to seek past header for body reading");
-        }
-
-        // Recreate decompression stream
-        auto temp_decompressed_stream =
-            std::make_unique<boost::iostreams::filtering_istream>();
-        boost::iostreams::zlib_params params;
-        params.noheader = false;
-        params.window_bits = 15;
-        params.level = compression_level_;
-
-        try
-        {
-            temp_decompressed_stream->push(
-                boost::iostreams::zlib_decompressor(params));
-            temp_decompressed_stream->push(file_);
-        }
-        catch (const std::exception& e)
-        {
-            throw CatlV1Error(
-                "Failed to reset decompression stream: " +
-                std::string(e.what()));
-        }
-
-        decompressed_stream_ = std::move(temp_decompressed_stream);
-        input_stream_ = decompressed_stream_.get();
-    }
-    else
-    {
-        // For uncompressed files, just seek in the file stream
-        if (!file_.seekg(sizeof(CatlHeader), std::ios::beg))
-        {
-            throw CatlV1Error("Failed to seek past header for body reading");
-        }
-        input_stream_ = &file_;
-    }
-}
-
 size_t
 Reader::read_raw_data(uint8_t* buffer, size_t size)
 {
@@ -103,9 +39,6 @@ Reader::decompress(const std::string& output_path)
 
     // Copy header information (min/max ledger)
     writer->write_header(header_.min_ledger, header_.max_ledger);
-
-    // Reset file position to beginning of body (after header)
-    reset_to_body_start();
 
     // Set up a buffer for copying
     constexpr size_t BUFFER_SIZE = 64 * 1024;  // 64KB buffer

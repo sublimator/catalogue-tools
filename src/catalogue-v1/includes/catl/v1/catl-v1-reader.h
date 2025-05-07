@@ -33,12 +33,6 @@ public:
     decompress(const std::string& output_path);
 
     /**
-     * Reset the file position to the start of the body (after the header)
-     */
-    void
-    reset_to_body_start();
-
-    /**
      * Read raw data from the file without parsing
      *
      * @param buffer Buffer to receive the data

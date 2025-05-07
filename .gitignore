@@ -7,4 +7,4 @@ CMakeUserPresets.json
 .local.cmake
 catenv
 .ai-docs
-test-decompressed.catl 
+test-decompressed.catl
