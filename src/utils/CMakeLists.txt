@@ -11,6 +11,12 @@ set(EXECUTABLE_CATL_DECOMP catl-decomp)
 set(SOURCES_CATL_DECOMP ${UTILS_SRC_DIR}/decomp/catl-decomp.cpp
                         ${UTILS_SRC_DIR}/decomp/arg-options.cpp)
 
+# Define the catl-slice executable and its sources
+set(EXECUTABLE_CATL_SLICE catl-slice)
+set(SOURCES_CATL_SLICE ${UTILS_SRC_DIR}/slicer/catl-slice.cpp
+                       ${UTILS_SRC_DIR}/slicer/slicer.cpp
+                       ${UTILS_SRC_DIR}/slicer/arg-options.cpp)
+
 # Create the executables
 
 # catl-validator
@@ -40,6 +46,20 @@ target_link_libraries(
           Boost::iostreams
           OpenSSL::SSL)
 
+# catl-slice
+add_executable(${EXECUTABLE_CATL_SLICE} ${SOURCES_CATL_SLICE})
+target_include_directories(${EXECUTABLE_CATL_SLICE}
+                           PRIVATE ${UTILS_INCLUDE_DIR} ${CATL_INCLUDE_DIR})
+target_link_libraries(
+  ${EXECUTABLE_CATL_SLICE}
+  PRIVATE catl_core
+          catl_shamap
+          catl_catalogue_v1
+          Boost::filesystem
+          Boost::program_options
+          Boost::iostreams
+          OpenSSL::SSL)
+
 # Install all executables
-install(TARGETS ${EXECUTABLE_CATL_VALIDATOR} ${EXECUTABLE_CATL_DECOMP}
+install(TARGETS ${EXECUTABLE_CATL_VALIDATOR} ${EXECUTABLE_CATL_DECOMP} ${EXECUTABLE_CATL_SLICE}
         RUNTIME DESTINATION bin)
