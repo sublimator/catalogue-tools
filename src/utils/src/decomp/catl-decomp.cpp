@@ -1,3 +1,4 @@
+#include "catl/utils/decomp/arg-options.h"
 #include "catl/v1/catl-v1-reader.h"
 #include "catl/v1/catl-v1-utils.h"
 #include "catl/v1/catl-v1-writer.h"
@@ -6,11 +7,12 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
-#include <utility>
 
 using namespace catl::v1;
+using namespace catl::utils::decomp;
 
 // Format file size in human-readable format
 std::string
@@ -122,7 +124,7 @@ public:
             std::cout << "Starting decompression..." << std::endl;
             auto start_time = std::chrono::high_resolution_clock::now();
 
-            // Use the new Reader::decompress method
+            // Use the Reader::decompress method
             try
             {
                 if (!reader.decompress(output_file_path_))
@@ -179,51 +181,29 @@ public:
 int
 main(int argc, char* argv[])
 {
-    // Check for help flag
-    if (argc > 1 &&
-        (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help"))
-    {
-        std::cout << "CATL Decompressor Tool (Library-based Version)"
-                  << std::endl;
-        std::cout << "------------------------------------------" << std::endl;
-        std::cout
-            << "Converts a compressed CATL file to an uncompressed version"
-            << std::endl;
-        std::cout << "using the CatlV1 Reader and Writer classes." << std::endl;
-        std::cout << std::endl;
-        std::cout << "Usage: " << argv[0]
-                  << " <input_catl_file> <output_catl_file>" << std::endl;
-        std::cout << std::endl;
-        std::cout << "The tool will:" << std::endl;
-        std::cout << "  1. Read the compressed CATL file using Reader class"
-                  << std::endl;
-        std::cout << "  2. Create a new uncompressed file with Writer class"
-                  << std::endl;
-        std::cout << "  3. Process ledger headers (note: SHAMap data is not "
-                     "currently processed)"
-                  << std::endl;
-        std::cout << std::endl;
-        std::cout
-            << "For a full-featured implementation, see catl-decomp-reference"
-            << std::endl;
-        return 0;
-    }
+    // Parse command line arguments
+    CommandLineOptions options = parse_argv(argc, argv);
 
-    if (argc != 3)
+    // Display help if requested or if there was a parsing error
+    if (options.show_help || !options.valid)
     {
-        std::cerr << "Usage: " << argv[0]
-                  << " <input_catl_file> <output_catl_file>" << std::endl;
-        std::cerr << "Run with --help for more information." << std::endl;
-        return 1;
+        if (!options.valid && options.error_message)
+        {
+            std::cerr << "Error: " << *options.error_message << std::endl
+                      << std::endl;
+        }
+        std::cout << options.help_text << std::endl;
+        return options.valid ? 0 : 1;
     }
 
     try
     {
-        std::string input_file = argv[1];
-        std::string output_file = argv[2];
+        // At this point we know input_file and output_file are present
+        std::string input_file = *options.input_file;
+        std::string output_file = *options.output_file;
 
         // Check if output file already exists
-        if (boost::filesystem::exists(output_file))
+        if (boost::filesystem::exists(output_file) && !options.force_overwrite)
         {
             std::cout
                 << "Warning: Output file already exists. Overwrite? (y/n): ";
