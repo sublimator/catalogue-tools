@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catl/core/logger.h"
 #include <cstdint>
 #include <optional>
 #include <string>

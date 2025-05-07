@@ -1,4 +1,5 @@
 #include "catl/utils/slicer/arg-options.h"
+#include "catl/core/logger.h"
 #include <boost/program_options.hpp>
 #include <filesystem>
 #include <iostream>
