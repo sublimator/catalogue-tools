@@ -6,9 +6,6 @@ set(UTILS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/includes)
 set(EXECUTABLE_CATL_VALIDATOR catl-validator)
 set(SOURCE_CATL_VALIDATOR ${UTILS_SRC_DIR}/catl-validator.cpp)
 
-set(EXECUTABLE_CATL_DECOMP_REF catl-decomp-reference)
-set(SOURCE_CATL_DECOMP_REF ${UTILS_SRC_DIR}/catl-decomp-reference.cpp)
-
 # Define the catl-decomp executable and its sources
 set(EXECUTABLE_CATL_DECOMP catl-decomp)
 set(SOURCES_CATL_DECOMP ${UTILS_SRC_DIR}/decomp/catl-decomp.cpp
@@ -22,19 +19,6 @@ target_include_directories(${EXECUTABLE_CATL_VALIDATOR}
                            PRIVATE ${UTILS_INCLUDE_DIR} ${CATL_INCLUDE_DIR})
 target_link_libraries(
   ${EXECUTABLE_CATL_VALIDATOR}
-  PRIVATE catl_core
-          catl_shamap
-          catl_catalogue_v1
-          Boost::filesystem
-          Boost::iostreams
-          OpenSSL::SSL)
-
-# catl-decomp-reference
-add_executable(${EXECUTABLE_CATL_DECOMP_REF} ${SOURCE_CATL_DECOMP_REF})
-target_include_directories(${EXECUTABLE_CATL_DECOMP_REF}
-                           PRIVATE ${UTILS_INCLUDE_DIR} ${CATL_INCLUDE_DIR})
-target_link_libraries(
-  ${EXECUTABLE_CATL_DECOMP_REF}
   PRIVATE catl_core
           catl_shamap
           catl_catalogue_v1
@@ -58,4 +42,4 @@ target_link_libraries(
 
 # Install all executables
 install(TARGETS ${EXECUTABLE_CATL_VALIDATOR} ${EXECUTABLE_CATL_DECOMP}
-                ${EXECUTABLE_CATL_DECOMP_REF} RUNTIME DESTINATION bin)
+        RUNTIME DESTINATION bin)
