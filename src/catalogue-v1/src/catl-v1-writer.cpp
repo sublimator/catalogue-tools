@@ -211,7 +211,7 @@ Writer::for_file(const std::string& path, const WriterOptions& options)
     }
 }
 
-bool
+void
 Writer::write_header(uint32_t min_ledger, uint32_t max_ledger)
 {
     if (header_written_)
@@ -245,6 +245,12 @@ Writer::write_header(uint32_t min_ledger, uint32_t max_ledger)
         reinterpret_cast<const char*>(&header_), sizeof(header_));
     header_stream_->flush();
 
+    // Check stream state after write
+    if (!header_stream_->good())
+    {
+        throw CatlV1Error("Failed to write file header to stream");
+    }
+
     // Track the header write
     track_write(WriteType::HEADER, sizeof(header_));
 
@@ -259,10 +265,9 @@ Writer::write_header(uint32_t min_ledger, uint32_t max_ledger)
         options_.compression_level);
 
     header_written_ = true;
-    return header_stream_->good();
 }
 
-bool
+void
 Writer::write_ledger_header(const LedgerInfo& header)
 {
     if (!header_written_)
@@ -279,15 +284,19 @@ Writer::write_ledger_header(const LedgerInfo& header)
     body_stream_->write(
         reinterpret_cast<const char*>(&header), sizeof(LedgerInfo));
 
+    // Check stream state after write
+    if (!body_stream_->good())
+    {
+        throw CatlV1Error("Failed to write ledger header to stream");
+    }
+
     // Track the ledger header write
     track_write(WriteType::LEDGER_HEADER, sizeof(LedgerInfo));
 
     LOGD("Wrote ledger header for sequence ", header.sequence);
-
-    return body_stream_->good();
 }
 
-bool
+void
 Writer::write_map(const SHAMap& map, SHAMapNodeType node_type)
 {
     if (!header_written_)
@@ -305,25 +314,33 @@ Writer::write_map(const SHAMap& map, SHAMapNodeType node_type)
 
     // Use visitor pattern to write all items
     map.visit_items([&](const MmapItem& item) {
-        if (write_item(
+        try
+        {
+            write_item(
                 node_type,
                 item.key(),
                 item.slice().data(),
-                item.slice().size()))
-        {
+                item.slice().size());
             items_count++;
         }
-        else
+        catch (const CatlV1Error& e)
         {
-            LOGE("Failed to write item with key: ", item.key().hex());
+            LOGE(
+                "Failed to write item with key: ",
+                item.key().hex(),
+                ": ",
+                e.what());
+            throw;  // Re-throw to abort the whole operation
         }
     });
 
     // Write terminal marker
-    if (!write_terminal())
+    write_terminal();
+
+    // Check final stream state
+    if (!body_stream_->good())
     {
-        LOGE("Failed to write terminal marker");
-        return false;
+        throw CatlV1Error("Stream error after writing map");
     }
 
     LOGI(
@@ -332,11 +349,9 @@ Writer::write_map(const SHAMap& map, SHAMapNodeType node_type)
         " with ",
         items_count,
         " items");
-
-    return body_stream_->good();
 }
 
-bool
+void
 Writer::write_map_delta(
     const SHAMap& previous,
     const SHAMap& current,
@@ -366,13 +381,16 @@ Writer::write_map_delta(
     // Process removals
     for (const auto& key : diff.deleted())
     {
-        if (write_item(tnREMOVE, key, nullptr, 0))
+        try
         {
+            write_item(tnREMOVE, key, nullptr, 0);
             changes++;
         }
-        else
+        catch (const CatlV1Error& e)
         {
-            LOGE("Failed to write removal for key: ", key.hex());
+            LOGE(
+                "Failed to write removal for key: ", key.hex(), ": ", e.what());
+            throw;  // Re-throw to abort the whole operation
         }
     }
 
@@ -381,18 +399,31 @@ Writer::write_map_delta(
     {
         // Get the item from the current map
         auto item_ptr = current.get_item(key);
-        if (item_ptr &&
-            write_item(
-                node_type,
-                item_ptr->key(),
-                item_ptr->slice().data(),
-                item_ptr->slice().size()))
+        if (item_ptr)
         {
-            changes++;
+            try
+            {
+                write_item(
+                    node_type,
+                    item_ptr->key(),
+                    item_ptr->slice().data(),
+                    item_ptr->slice().size());
+                changes++;
+            }
+            catch (const CatlV1Error& e)
+            {
+                LOGE(
+                    "Failed to write modified item for key: ",
+                    key.hex(),
+                    ": ",
+                    e.what());
+                throw;  // Re-throw to abort the whole operation
+            }
         }
         else
         {
-            LOGE("Failed to write modified item for key: ", key.hex());
+            throw CatlV1Error(
+                "Modified item not found in current map: " + key.hex());
         }
     }
 
@@ -401,63 +432,65 @@ Writer::write_map_delta(
     {
         // Get the item from the current map
         auto item_ptr = current.get_item(key);
-        if (item_ptr &&
-            write_item(
-                node_type,
-                item_ptr->key(),
-                item_ptr->slice().data(),
-                item_ptr->slice().size()))
+        if (item_ptr)
         {
-            changes++;
+            try
+            {
+                write_item(
+                    node_type,
+                    item_ptr->key(),
+                    item_ptr->slice().data(),
+                    item_ptr->slice().size());
+                changes++;
+            }
+            catch (const CatlV1Error& e)
+            {
+                LOGE(
+                    "Failed to write added item for key: ",
+                    key.hex(),
+                    ": ",
+                    e.what());
+                throw;  // Re-throw to abort the whole operation
+            }
         }
         else
         {
-            LOGE("Failed to write added item for key: ", key.hex());
+            throw CatlV1Error(
+                "Added item not found in current map: " + key.hex());
         }
     }
 
     // Write terminal marker
-    if (!write_terminal())
+    write_terminal();
+
+    // Check final stream state
+    if (!body_stream_->good())
     {
-        LOGE("Failed to write terminal marker");
-        return false;
+        throw CatlV1Error("Stream error after writing map delta");
     }
 
     LOGI("Wrote map delta with ", changes, " changes");
-
-    return body_stream_->good();
 }
 
-bool
+void
 Writer::write_ledger(
     const LedgerInfo& header,
     const SHAMap& state_map,
     const SHAMap& tx_map)
 {
     // Write the ledger header
-    if (!write_ledger_header(header))
-    {
-        return false;
-    }
+    write_ledger_header(header);
 
     // Write the state map
-    if (!write_map(state_map, tnACCOUNT_STATE))
-    {
-        return false;
-    }
+    write_map(state_map, tnACCOUNT_STATE);
 
     // Write the transaction map
-    if (!write_map(tx_map, tnTRANSACTION_MD))
-    {
-        return false;
-    }
+    write_map(tx_map, tnTRANSACTION_MD);
 
     LOGI("Successfully wrote complete ledger ", header.sequence);
-
-    return true;
 }
 
-bool
+void
 Writer::finalize()
 {
     if (!header_written_)
@@ -482,6 +515,13 @@ Writer::finalize()
     if (file_stream)
     {
         file_stream->seekp(0, std::ios::end);
+
+        if (!file_stream->good())
+        {
+            throw CatlV1Error(
+                "Failed to seek to end of file for size calculation");
+        }
+
         header_.filesize = static_cast<uint64_t>(file_stream->tellp());
 
         // Create a hasher
@@ -499,6 +539,13 @@ Writer::finalize()
         // Hash the rest of the file
         file_stream->clear();
         file_stream->seekg(sizeof(CatlHeader));
+
+        if (!file_stream->good())
+        {
+            throw CatlV1Error(
+                "Failed to seek to start of file content for hashing");
+        }
+
         std::vector<char> buffer(1024 * 1024);  // 1MB buffer
 
         while (!file_stream->eof())
@@ -511,6 +558,12 @@ Writer::finalize()
                     reinterpret_cast<const uint8_t*>(buffer.data()),
                     bytes_read);
             }
+
+            if (file_stream->bad())
+            {
+                throw CatlV1Error(
+                    "Error occurred while reading file content for hashing");
+            }
         }
 
         // Get the final hash
@@ -520,13 +573,10 @@ Writer::finalize()
         // Copy hash to header
         if (hash_len != header_.hash.size())
         {
-            LOGE(
-                "Hash length mismatch: expected ",
-                header_.hash.size(),
-                " bytes, got ",
-                hash_len,
-                " bytes");
-            return false;
+            throw CatlV1Error(
+                "Hash length mismatch: expected " +
+                std::to_string(header_.hash.size()) + " bytes, got " +
+                std::to_string(hash_len) + " bytes");
         }
 
         // Update the header in the file
@@ -536,18 +586,27 @@ Writer::finalize()
             reinterpret_cast<const char*>(&header_), sizeof(header_));
         file_stream->flush();
 
+        if (!file_stream->good())
+        {
+            throw CatlV1Error(
+                "Failed to update header with hash and file size");
+        }
+
         LOGI("Finalized CATL file: size=", header_.filesize, " bytes");
     }
     else
     {
         LOGW("Unable to determine file size - not a file stream");
+        if (!header_stream_->good() || !body_stream_->good())
+        {
+            throw CatlV1Error("Stream error occurred during finalization");
+        }
     }
 
     finalized_ = true;
-    return header_stream_->good() && body_stream_->good();
 }
 
-bool
+void
 Writer::write_item(
     SHAMapNodeType node_type,
     const Key& key,
@@ -568,8 +627,7 @@ Writer::write_item(
 
     if (!body_stream_->good())
     {
-        LOGE("Failed to write node type");
-        return false;
+        throw CatlV1Error("Failed to write node type");
     }
 
     // Write key
@@ -577,8 +635,7 @@ Writer::write_item(
 
     if (!body_stream_->good())
     {
-        LOGE("Failed to write key");
-        return false;  // TODO: why does this not throw exceptions
+        throw CatlV1Error("Failed to write key: " + key.hex());
     }
 
     // For node types other than tnREMOVE, write data size and data
@@ -589,8 +646,8 @@ Writer::write_item(
 
         if (!body_stream_->good())
         {
-            LOGE("Failed to write data size");
-            return false;
+            throw CatlV1Error(
+                "Failed to write data size for key: " + key.hex());
         }
 
         // Write data if present
@@ -600,20 +657,17 @@ Writer::write_item(
 
             if (!body_stream_->good())
             {
-                LOGE("Failed to write item data");
-                return false;
+                throw CatlV1Error(
+                    "Failed to write item data for key: " + key.hex());
             }
         }
     }
 
-    // Track the write if successful
-    track_write(
-        WriteType::MAP_ITEM, item_size);  // TODO:: include the node type byte
-
-    return true;
+    // Track the write
+    track_write(WriteType::MAP_ITEM, item_size);
 }
 
-bool
+void
 Writer::write_terminal()
 {
     // Write the terminal node type
@@ -623,14 +677,11 @@ Writer::write_terminal()
 
     if (!body_stream_->good())
     {
-        LOGE("Failed to write terminal marker");
-        return false;
+        throw CatlV1Error("Failed to write terminal marker");
     }
 
     // Track the terminal marker write
     track_write(WriteType::TERMINAL, sizeof(terminal));
-
-    return true;
 }
 
 size_t
@@ -674,6 +725,7 @@ Writer::~Writer()
         catch (const std::exception& e)
         {
             LOGE("Error during automatic finalization: ", e.what());
+            // We don't rethrow here as destructors should not throw
         }
     }
 }
