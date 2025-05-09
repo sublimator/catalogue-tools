@@ -277,10 +277,10 @@ public:
     size_t
     copy_map_to_stream(
         std::ostream& output,
-        std::function<void(
+        const std::function<void(
             SHAMapNodeType,
             const std::vector<uint8_t>&,
-            const std::vector<uint8_t>&)> process_nodes = nullptr);
+            const std::vector<uint8_t>&)>& process_nodes = nullptr);
 
 private:
     void

@@ -349,10 +349,10 @@ Reader::read_map_node(
 size_t
 Reader::copy_map_to_stream(
     std::ostream& output,
-    std::function<void(
+    const std::function<void(
         SHAMapNodeType,
         const std::vector<uint8_t>&,
-        const std::vector<uint8_t>&)> process_nodes)
+        const std::vector<uint8_t>&)>& process_nodes)
 {
     size_t bytes_copied = 0;
     std::vector<uint8_t> key_data;
@@ -412,6 +412,7 @@ Reader::copy_map_to_stream(
                 sizeof(data_length));
             bytes_copied += sizeof(data_length);
 
+            // TODO: this seem overly complicated
             // Read and copy data in chunks if large
             if (data_length > 0)
             {
