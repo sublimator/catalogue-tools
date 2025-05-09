@@ -196,66 +196,6 @@ TEST_F(ReaderShaMapTest, NodeTypeReadingMethods)
     EXPECT_GT(item_data.size(), 0) << "Item data should not be empty";
 }
 
-// Test copy_map_to_stream functionality - FIXED
-TEST_F(ReaderShaMapTest, CopyMapToStream)
-{
-    Reader reader(uncompressed_fixture_path);
-
-    // Skip to first ledger's state map
-    readFirstLedgerInfo(reader);
-
-    // Create output stream
-    std::stringstream output_stream;
-
-    // Counters for callback verification
-    int node_count = 0;
-    int remove_count = 0;
-
-    try
-    {
-        // Copy state map to stream with tracking callback
-        size_t bytes_copied = reader.copy_map_to_stream(
-            output_stream,
-            [&](SHAMapNodeType type,
-                const std::vector<uint8_t>& key,
-                const std::vector<uint8_t>& data) {
-                node_count++;
-                EXPECT_EQ(key.size(), 32) << "Key should be 32 bytes";
-
-                if (type == tnACCOUNT_STATE)
-                {
-                    EXPECT_GT(data.size(), 0)
-                        << "Data should not be empty for account state";
-                }
-                else if (type == tnREMOVE)
-                {
-                    remove_count++;
-                    EXPECT_EQ(data.size(), 0)
-                        << "Data should be empty for removal nodes";
-                }
-            });
-
-        // Verify copying worked
-        EXPECT_GT(bytes_copied, 0) << "Should have copied some bytes";
-        EXPECT_GT(node_count, 0) << "Should have processed some nodes";
-
-        // Get output size
-        std::string output_str = output_stream.str();
-        EXPECT_EQ(output_str.size(), bytes_copied)
-            << "Output size should match bytes copied";
-
-        // Verify terminal marker at end - check last byte
-        EXPECT_EQ(
-            static_cast<uint8_t>(output_str.back()),
-            static_cast<uint8_t>(tnTERMINAL))
-            << "Output should end with terminal marker";
-    }
-    catch (const std::exception& e)
-    {
-        FAIL() << "Exception during copy_map_to_stream: " << e.what();
-    }
-}
-
 // Test reading keys and data directly
 TEST_F(ReaderShaMapTest, ReadKeysAndData)
 {

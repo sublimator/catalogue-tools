@@ -177,6 +177,19 @@ public:
         bool allow_updates = false);
 
     /**
+     * Read a node type and skip the rest of the node
+     *
+     * This method reads the node type and then skips over the remaining
+     * data for the node (key and value data if present). It returns the
+     * node type so the caller can decide how to proceed.
+     *
+     * @return The SHAMapNodeType that was read
+     * @throws CatlV1Error if EOF or I/O error occurs
+     */
+    SHAMapNodeType
+    read_and_skip_node();
+
+    /**
      * Skip over an entire map section (state or transaction) without processing
      *
      * This method efficiently advances the stream position without allocating
@@ -199,19 +212,6 @@ public:
      */
     SHAMapNodeType
     read_node_type();
-
-    /**
-     * Skip a single node of the specified type
-     *
-     * This method efficiently advances the stream position without allocating
-     * memory or copying data. It only reads the minimal information needed
-     * to determine the node's size.
-     *
-     * @param node_type Expected type of the node to skip
-     * @throws CatlV1Error if type doesn't match or I/O error occurs
-     */
-    void
-    skip_node(SHAMapNodeType node_type);
 
     /**
      * Read a map node key into the provided vector

@@ -99,6 +99,36 @@ Reader::read_shamap(
 }
 
 /**
+ * Implementation of read_and_skip_node
+ */
+SHAMapNodeType
+Reader::read_and_skip_node()
+{
+    // Read the node type
+    SHAMapNodeType node_type = read_node_type();
+
+    // All node types except TERMINAL have a key
+    if (node_type != tnTERMINAL)
+    {
+        // Skip key data
+        input_stream_->seekg(Key::size(), std::ios::cur);
+
+        // For nodes with data, skip the data too
+        if (node_type != tnREMOVE)
+        {
+            // Read data length
+            uint32_t data_length;
+            read_value(data_length, "data length");
+
+            // Skip data
+            input_stream_->seekg(data_length, std::ios::cur);
+        }
+    }
+
+    return node_type;
+}
+
+/**
  * Efficient implementation of skip_map that minimizes allocations
  */
 void
@@ -106,8 +136,8 @@ Reader::skip_map(SHAMapNodeType node_type)
 {
     while (true)
     {
-        // Read node type without vector allocations
-        SHAMapNodeType current_type = read_node_type();
+        // Read node type and skip the rest of the node
+        SHAMapNodeType current_type = read_and_skip_node();
 
         // Terminal marker reached
         if (current_type == tnTERMINAL)
@@ -115,23 +145,8 @@ Reader::skip_map(SHAMapNodeType node_type)
             break;
         }
 
-        // Skip the appropriate number of bytes based on node type
-        if (current_type == node_type || current_type == tnREMOVE)
-        {
-            // Skip key (always present for both node types)
-            input_stream_->seekg(Key::size(), std::ios::cur);
-
-            // For state/transaction nodes, also skip data length and data
-            if (current_type != tnREMOVE)
-            {
-                uint32_t data_length;
-                read_value(data_length, "data length while skipping");
-
-                // Skip data bytes
-                input_stream_->seekg(data_length, std::ios::cur);
-            }
-        }
-        else
+        // Verify node type matches expected type
+        if (current_type != node_type && current_type != tnREMOVE)
         {
             throw CatlV1Error("Unexpected node type in map");
         }
@@ -147,38 +162,6 @@ Reader::read_node_type()
     uint8_t type_byte;
     read_bytes(&type_byte, 1, "node type");
     return static_cast<SHAMapNodeType>(type_byte);
-}
-
-/**
- * Implementation of skip_node
- */
-void
-Reader::skip_node(SHAMapNodeType expected_type)
-{
-    // Read and verify type
-    SHAMapNodeType actual_type = read_node_type();
-    if (actual_type != expected_type)
-    {
-        throw CatlV1Error("Node type mismatch while skipping");
-    }
-
-    // All node types except TERMINAL have a key
-    if (actual_type != tnTERMINAL)
-    {
-        // Skip key data
-        input_stream_->seekg(Key::size(), std::ios::cur);
-
-        // For items with data, skip the data too
-        if (actual_type != tnREMOVE)
-        {
-            // Read data length
-            uint32_t data_length;
-            read_value(data_length, "data length while skipping node");
-
-            // Skip data
-            input_stream_->seekg(data_length, std::ios::cur);
-        }
-    }
 }
 
 /**
@@ -257,10 +240,7 @@ Reader::read_map_node(
     std::vector<uint8_t>& data_out)
 {
     // Read type byte
-    uint8_t type_byte;
-    read_bytes(&type_byte, 1, "node type");
-
-    type_out = static_cast<SHAMapNodeType>(type_byte);
+    type_out = read_node_type();
 
     // Check for terminal marker
     if (type_out == tnTERMINAL)
@@ -283,150 +263,6 @@ Reader::read_map_node(
     }
 
     return true;
-}
-
-size_t
-Reader::copy_map_to_stream(
-    std::ostream& output,
-    const std::function<void(
-        SHAMapNodeType,
-        const std::vector<uint8_t>&,
-        const std::vector<uint8_t>&)>& process_nodes)
-{
-    size_t bytes_copied = 0;
-    std::vector<uint8_t> key_data;
-    std::vector<uint8_t> item_data;
-
-    // Single-pass approach without seeking backward (which is problematic for
-    // compressed streams)
-    while (true)
-    {
-        // Read the node type
-        uint8_t type_byte;
-        read_bytes(&type_byte, 1, "node type");
-
-        // Copy the type byte immediately
-        output.write(reinterpret_cast<const char*>(&type_byte), 1);
-        bytes_copied += 1;
-
-        auto current_type = static_cast<SHAMapNodeType>(type_byte);
-
-        // Terminal marker handling - we've already written it
-        if (current_type == tnTERMINAL)
-        {
-            break;
-        }
-
-        // Read and copy the key
-        key_data.resize(Key::size());
-        read_bytes(key_data.data(), Key::size(), "key");
-
-        // Copy key to output
-        output.write(
-            reinterpret_cast<const char*>(key_data.data()), Key::size());
-        bytes_copied += Key::size();
-
-        // For non-removal nodes, handle data
-        if (current_type != tnREMOVE)
-        {
-            // Read data length
-            uint32_t data_length;
-            read_value(data_length, "data length");
-
-            // Copy data length to output
-            output.write(
-                reinterpret_cast<const char*>(&data_length),
-                sizeof(data_length));
-            bytes_copied += sizeof(data_length);
-
-            // Read and copy data in chunks if large
-            if (data_length > 0)
-            {
-                // For large data, use a buffer to avoid excessive memory usage
-                if (data_length > 64 * 1024)
-                {                                          // 64KB threshold
-                    const size_t buffer_size = 16 * 1024;  // 16KB buffer
-                    std::vector<uint8_t> buffer(buffer_size);
-
-                    // If we need the callback, read all data first
-                    if (process_nodes)
-                    {
-                        item_data.resize(data_length);
-                        size_t bytes_read = 0;
-
-                        while (bytes_read < data_length)
-                        {
-                            size_t chunk_size =
-                                std::min(buffer_size, data_length - bytes_read);
-                            read_bytes(buffer.data(), chunk_size, "data chunk");
-
-                            // Copy to item_data for callback
-                            std::memcpy(
-                                &item_data[bytes_read],
-                                buffer.data(),
-                                chunk_size);
-
-                            // Write directly to output
-                            output.write(
-                                reinterpret_cast<const char*>(buffer.data()),
-                                chunk_size);
-                            bytes_copied += chunk_size;
-                            bytes_read += chunk_size;
-                        }
-                    }
-                    else
-                    {
-                        // No callback - just copy through without keeping data
-                        size_t bytes_read = 0;
-
-                        while (bytes_read < data_length)
-                        {
-                            size_t chunk_size =
-                                std::min(buffer_size, data_length - bytes_read);
-                            read_bytes(buffer.data(), chunk_size, "data chunk");
-
-                            // Write directly to output
-                            output.write(
-                                reinterpret_cast<const char*>(buffer.data()),
-                                chunk_size);
-                            bytes_copied += chunk_size;
-                            bytes_read += chunk_size;
-                        }
-                    }
-                }
-                else
-                {
-                    // For small data, read it all at once
-                    item_data.resize(data_length);
-                    read_bytes(item_data.data(), data_length, "data");
-
-                    // Copy to output
-                    output.write(
-                        reinterpret_cast<const char*>(item_data.data()),
-                        data_length);
-                    bytes_copied += data_length;
-                }
-            }
-            else
-            {
-                // Empty data (length=0) - clear data vector
-                item_data.clear();
-            }
-        }
-        else
-        {
-            // Removal nodes have no data
-            item_data.clear();
-        }
-
-        // Call the callback if provided
-        if (process_nodes)
-        {
-            process_nodes(current_type, key_data, item_data);
-        }
-    }
-
-    return bytes_copied;
 }
 
 }  // namespace catl::v1
