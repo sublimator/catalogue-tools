@@ -192,19 +192,6 @@ public:
     skip_map(SHAMapNodeType node_type);
 
     /**
-     * Peek at the next node type without advancing the reader position
-     *
-     * IMPORTANT: This method may not work correctly with compressed streams as
-     * they don't generally support seeking backward. Only use with uncompressed
-     * streams or when you're certain the stream supports seeking.
-     *
-     * @return The SHAMapNodeType of the next node
-     * @throws CatlV1Error if EOF or I/O error
-     */
-    SHAMapNodeType
-    peek_node_type();
-
-    /**
      * Read the next node type and advance reader position
      *
      * @return The SHAMapNodeType that was read

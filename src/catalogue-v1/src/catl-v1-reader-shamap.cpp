@@ -186,37 +186,6 @@ Reader::skip_map(SHAMapNodeType node_type)
 }
 
 /**
- * Implementation of peek_node_type
- *
- * WARNING: This may not work correctly with compressed streams as they
- * don't generally support seeking backward.
- */
-SHAMapNodeType
-Reader::peek_node_type()
-{
-    // Save current position
-    std::streampos current_pos = input_stream_->tellg();
-
-    if (current_pos == std::streampos(-1))
-    {
-        throw CatlV1Error("Cannot determine current stream position");
-    }
-
-    // Read type byte
-    uint8_t type_byte;
-    read_bytes(&type_byte, 1, "peek node type");
-
-    // Attempt to restore position (may fail with compressed streams)
-    std::streampos restore_result = input_stream_->seekg(current_pos);
-    if (restore_result != current_pos)
-    {
-        throw CatlV1Error("Failed to restore stream position after peek");
-    }
-
-    return static_cast<SHAMapNodeType>(type_byte);
-}
-
-/**
  * Implementation of read_node_type
  */
 SHAMapNodeType
@@ -515,14 +484,3 @@ Reader::copy_map_to_stream(
 }
 
 }  // namespace catl::v1
-*Implementation of read_bytes* /
-    void
-    Reader::read_bytes(uint8_t* buffer, size_t size, const std::string& context)
-{
-    if (read_raw_data(buffer, size, context) != size)
-    {
-        throw CatlV1Error(
-            "Unexpected EOF while reading " +
-            (context.empty() ? "bytes" : context));
-    }
-}
