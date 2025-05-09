@@ -166,13 +166,7 @@ Reader::skip_map(SHAMapNodeType node_type)
             if (current_type != tnREMOVE)
             {
                 uint32_t data_length;
-                if (read_raw_data(
-                        reinterpret_cast<uint8_t*>(&data_length),
-                        sizeof(data_length)) != sizeof(data_length))
-                {
-                    throw CatlV1Error(
-                        "Unexpected EOF while reading data length");
-                }
+                read_value(data_length, "data length while skipping");
 
                 // Skip data bytes
                 input_stream_->seekg(data_length, std::ios::cur);
@@ -220,12 +214,7 @@ Reader::skip_node(SHAMapNodeType expected_type)
         {
             // Read data length
             uint32_t data_length;
-            if (read_raw_data(
-                    reinterpret_cast<uint8_t*>(&data_length),
-                    sizeof(data_length)) != sizeof(data_length))
-            {
-                throw CatlV1Error("Unexpected EOF while reading data length");
-            }
+            read_value(data_length, "data length while skipping node");
 
             // Skip data
             input_stream_->seekg(data_length, std::ios::cur);
@@ -316,10 +305,7 @@ Reader::read_map_node(
 {
     // Read type byte
     uint8_t type_byte;
-    if (read_raw_data(&type_byte, 1) != 1)
-    {
-        throw CatlV1Error("Unexpected EOF while reading node type");
-    }
+    read_bytes(&type_byte, 1, "node type");
 
     type_out = static_cast<SHAMapNodeType>(type_byte);
 
@@ -364,10 +350,7 @@ Reader::copy_map_to_stream(
     {
         // Read the node type
         uint8_t type_byte;
-        if (read_raw_data(&type_byte, 1, "node type") != 1)
-        {
-            throw CatlV1Error("Unexpected EOF while copying map");
-        }
+        read_bytes(&type_byte, 1, "node type");
 
         // Copy the type byte immediately
         output.write(reinterpret_cast<const char*>(&type_byte), 1);
@@ -383,10 +366,7 @@ Reader::copy_map_to_stream(
 
         // Read and copy the key
         key_data.resize(Key::size());
-        if (read_raw_data(key_data.data(), Key::size(), "key") != Key::size())
-        {
-            throw CatlV1Error("Unexpected EOF while reading key");
-        }
+        read_bytes(key_data.data(), Key::size(), "key");
 
         // Copy key to output
         output.write(
@@ -398,13 +378,7 @@ Reader::copy_map_to_stream(
         {
             // Read data length
             uint32_t data_length;
-            if (read_raw_data(
-                    reinterpret_cast<uint8_t*>(&data_length),
-                    sizeof(data_length),
-                    "data length") != sizeof(data_length))
-            {
-                throw CatlV1Error("Unexpected EOF while reading data length");
-            }
+            read_value(data_length, "data length");
 
             // Copy data length to output
             output.write(
@@ -412,7 +386,6 @@ Reader::copy_map_to_stream(
                 sizeof(data_length));
             bytes_copied += sizeof(data_length);
 
-            // TODO: this seem overly complicated
             // Read and copy data in chunks if large
             if (data_length > 0)
             {
@@ -432,13 +405,7 @@ Reader::copy_map_to_stream(
                         {
                             size_t chunk_size =
                                 std::min(buffer_size, data_length - bytes_read);
-                            if (read_raw_data(
-                                    buffer.data(), chunk_size, "data chunk") !=
-                                chunk_size)
-                            {
-                                throw CatlV1Error(
-                                    "Unexpected EOF while reading data chunk");
-                            }
+                            read_bytes(buffer.data(), chunk_size, "data chunk");
 
                             // Copy to item_data for callback
                             std::memcpy(
@@ -463,13 +430,7 @@ Reader::copy_map_to_stream(
                         {
                             size_t chunk_size =
                                 std::min(buffer_size, data_length - bytes_read);
-                            if (read_raw_data(
-                                    buffer.data(), chunk_size, "data chunk") !=
-                                chunk_size)
-                            {
-                                throw CatlV1Error(
-                                    "Unexpected EOF while reading data chunk");
-                            }
+                            read_bytes(buffer.data(), chunk_size, "data chunk");
 
                             // Write directly to output
                             output.write(
@@ -484,11 +445,7 @@ Reader::copy_map_to_stream(
                 {
                     // For small data, read it all at once
                     item_data.resize(data_length);
-                    if (read_raw_data(item_data.data(), data_length, "data") !=
-                        data_length)
-                    {
-                        throw CatlV1Error("Unexpected EOF while reading data");
-                    }
+                    read_bytes(item_data.data(), data_length, "data");
 
                     // Copy to output
                     output.write(
