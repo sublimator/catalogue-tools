@@ -346,12 +346,6 @@ Reader::read_map_node(
     return true;
 }
 
-/**
- * Implementation of copy_map_to_stream optimized for slicing
- *
- * This implementation uses efficient buffer copy operations rather than
- * allocating vectors for node data when possible.
- */
 size_t
 Reader::copy_map_to_stream(
     std::ostream& output,
@@ -364,120 +358,161 @@ Reader::copy_map_to_stream(
     std::vector<uint8_t> key_data;
     std::vector<uint8_t> item_data;
 
-    // Buffer for direct copying
-    std::vector<uint8_t> buffer(1024);  // Initial size, will grow if needed
-
+    // Single-pass approach without seeking backward (which is problematic for
+    // compressed streams)
     while (true)
     {
-        // Mark current position
-        std::streampos start_pos = input_stream_->tellg();
-
-        if (start_pos == std::streampos(-1))
-        {
-            throw CatlV1Error("Cannot determine current stream position");
-        }
-
-        // Read node type
+        // Read the node type
         uint8_t type_byte;
-        if (read_raw_data(&type_byte, 1) != 1)
+        if (read_raw_data(&type_byte, 1, "node type") != 1)
         {
             throw CatlV1Error("Unexpected EOF while copying map");
         }
 
-        SHAMapNodeType current_type = static_cast<SHAMapNodeType>(type_byte);
+        // Copy the type byte immediately
+        output.write(reinterpret_cast<const char*>(&type_byte), 1);
+        bytes_copied += 1;
 
-        // Terminal marker handling
+        auto current_type = static_cast<SHAMapNodeType>(type_byte);
+
+        // Terminal marker handling - we've already written it
         if (current_type == tnTERMINAL)
         {
-            // Write terminal marker
-            output.write(reinterpret_cast<const char*>(&type_byte), 1);
-            bytes_copied += 1;
             break;
         }
 
-        // Determine size of the entire node
-        size_t node_size = 1;  // Type byte
+        // Read and copy the key
+        key_data.resize(Key::size());
+        if (read_raw_data(key_data.data(), Key::size(), "key") != Key::size())
+        {
+            throw CatlV1Error("Unexpected EOF while reading key");
+        }
 
-        // All non-terminal nodes have a key
-        node_size += Key::size();
+        // Copy key to output
+        output.write(
+            reinterpret_cast<const char*>(key_data.data()), Key::size());
+        bytes_copied += Key::size();
 
-        // Data part only for regular nodes (not removal)
-        uint32_t data_length = 0;
+        // For non-removal nodes, handle data
         if (current_type != tnREMOVE)
         {
-            // Peek at data length without permanently advancing
-            std::streampos before_length = input_stream_->tellg();
+            // Read data length
+            uint32_t data_length;
             if (read_raw_data(
                     reinterpret_cast<uint8_t*>(&data_length),
-                    sizeof(data_length)) != sizeof(data_length))
+                    sizeof(data_length),
+                    "data length") != sizeof(data_length))
             {
                 throw CatlV1Error("Unexpected EOF while reading data length");
             }
-            // Go back to position before data length
-            input_stream_->seekg(before_length);
 
-            // Add size of length field + actual data
-            node_size += sizeof(data_length) + data_length;
-        }
+            // Copy data length to output
+            output.write(
+                reinterpret_cast<const char*>(&data_length),
+                sizeof(data_length));
+            bytes_copied += sizeof(data_length);
 
-        // If callback is provided, we need to actually parse the node
-        if (process_nodes)
-        {
-            // Read the key
-            input_stream_->seekg(
-                start_pos + std::streampos(1));  // Skip type byte
-            key_data.resize(Key::size());
-            if (read_raw_data(key_data.data(), Key::size()) != Key::size())
+            // Read and copy data in chunks if large
+            if (data_length > 0)
             {
-                throw CatlV1Error("Unexpected EOF while reading key");
-            }
+                // For large data, use a buffer to avoid excessive memory usage
+                if (data_length > 64 * 1024)
+                {                                          // 64KB threshold
+                    const size_t buffer_size = 16 * 1024;  // 16KB buffer
+                    std::vector<uint8_t> buffer(buffer_size);
 
-            // For non-removal nodes, read the data too
-            if (current_type != tnREMOVE)
-            {
-                // Read length field
-                if (read_raw_data(
-                        reinterpret_cast<uint8_t*>(&data_length),
-                        sizeof(data_length)) != sizeof(data_length))
-                {
-                    throw CatlV1Error(
-                        "Unexpected EOF while reading data length");
+                    // If we need the callback, read all data first
+                    if (process_nodes)
+                    {
+                        item_data.resize(data_length);
+                        size_t bytes_read = 0;
+
+                        while (bytes_read < data_length)
+                        {
+                            size_t chunk_size =
+                                std::min(buffer_size, data_length - bytes_read);
+                            if (read_raw_data(
+                                    buffer.data(), chunk_size, "data chunk") !=
+                                chunk_size)
+                            {
+                                throw CatlV1Error(
+                                    "Unexpected EOF while reading data chunk");
+                            }
+
+                            // Copy to item_data for callback
+                            std::memcpy(
+                                &item_data[bytes_read],
+                                buffer.data(),
+                                chunk_size);
+
+                            // Write directly to output
+                            output.write(
+                                reinterpret_cast<const char*>(buffer.data()),
+                                chunk_size);
+                            bytes_copied += chunk_size;
+                            bytes_read += chunk_size;
+                        }
+                    }
+                    else
+                    {
+                        // No callback - just copy through without keeping data
+                        size_t bytes_read = 0;
+
+                        while (bytes_read < data_length)
+                        {
+                            size_t chunk_size =
+                                std::min(buffer_size, data_length - bytes_read);
+                            if (read_raw_data(
+                                    buffer.data(), chunk_size, "data chunk") !=
+                                chunk_size)
+                            {
+                                throw CatlV1Error(
+                                    "Unexpected EOF while reading data chunk");
+                            }
+
+                            // Write directly to output
+                            output.write(
+                                reinterpret_cast<const char*>(buffer.data()),
+                                chunk_size);
+                            bytes_copied += chunk_size;
+                            bytes_read += chunk_size;
+                        }
+                    }
                 }
-
-                // Read data
-                item_data.resize(data_length);
-                if (read_raw_data(item_data.data(), data_length) != data_length)
+                else
                 {
-                    throw CatlV1Error("Unexpected EOF while reading data");
+                    // For small data, read it all at once
+                    item_data.resize(data_length);
+                    if (read_raw_data(item_data.data(), data_length, "data") !=
+                        data_length)
+                    {
+                        throw CatlV1Error("Unexpected EOF while reading data");
+                    }
+
+                    // Copy to output
+                    output.write(
+                        reinterpret_cast<const char*>(item_data.data()),
+                        data_length);
+                    bytes_copied += data_length;
                 }
             }
             else
             {
+                // Empty data (length=0) - clear data vector
                 item_data.clear();
             }
+        }
+        else
+        {
+            // Removal nodes have no data
+            item_data.clear();
+        }
 
-            // Call the callback
+        // Call the callback if provided
+        if (process_nodes)
+        {
             process_nodes(current_type, key_data, item_data);
         }
-
-        // Reset position to beginning of node
-        input_stream_->seekg(start_pos);
-
-        // Ensure buffer is large enough
-        if (buffer.size() < node_size)
-        {
-            buffer.resize(node_size);
-        }
-
-        // Read the entire node into buffer
-        if (read_raw_data(buffer.data(), node_size) != node_size)
-        {
-            throw CatlV1Error("Failed to read node data");
-        }
-
-        // Write to output
-        output.write(reinterpret_cast<const char*>(buffer.data()), node_size);
-        bytes_copied += node_size;
     }
 
     return bytes_copied;
