@@ -131,6 +131,8 @@ TEST_F(ReaderShaMapTest, ReadShaMapWithStorage)
 
     // Clear storage and record initial size
     storage.clear();
+    const size_t arena = 1024 * 1024;
+    storage.reserve(arena);  // 1MB initial reservation
 
     // Read state map into our map with storage
     uint32_t nodes_processed =
@@ -363,6 +365,8 @@ TEST_F(ReaderShaMapTest, CompressedFileSpecificTests)
 
     // Clear storage and record initial size
     storage.clear();
+    const size_t arena = 1024 * 1024;
+    storage.reserve(arena);  // 1MB initial reservation
 
     // Read state map with storage
     uint32_t nodes_processed =

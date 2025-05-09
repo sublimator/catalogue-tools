@@ -3,44 +3,6 @@
 #include "catl/v1/catl-v1-errors.h"
 #include "catl/v1/catl-v1-reader.h"
 
-namespace {  // Anonymous namespace for utility functions
-
-/**
- * Ensure the vector has enough capacity for additional data without
- * reallocation
- *
- * @param vec Vector to check and potentially resize
- * @param additional_size Number of additional bytes needed
- * @param growth_factor How much extra to allocate beyond what's needed
- * (default: 2x)
- */
-void
-ensure_capacity(
-    std::vector<uint8_t>& vec,
-    size_t additional_size,
-    float growth_factor = 2.0f)
-{
-    if (vec.size() + additional_size > vec.capacity())
-    {
-        // Need to grow the vector - reserve more than we need to reduce future
-        // reallocations
-        size_t new_capacity = vec.size() + additional_size * growth_factor;
-        // If we already have a large vector, be more conservative with growth
-        if (vec.capacity() > 1024 * 1024)
-        {
-            auto comp = static_cast<size_t>(vec.capacity() * growth_factor);
-            new_capacity = std::max(new_capacity, comp);
-        }
-        else
-        {
-            new_capacity = std::max(new_capacity, vec.capacity() * 2);
-        }
-        vec.reserve(new_capacity);
-    }
-}
-
-}  // Anonymous namespace
-
 namespace catl::v1 {
 
 /**
@@ -61,9 +23,6 @@ Reader::read_shamap(
 
     // Record starting position in storage
     size_t storage_start_pos = storage.size();
-
-    // Pre-reserve some space to reduce reallocations
-    ensure_capacity(storage, 1024 * 1024);  // 1MB initial reservation
 
     while (true)
     {
@@ -238,9 +197,6 @@ Reader::read_node_key(std::vector<uint8_t>& key_out, bool trim)
     }
     else
     {
-        // Ensure there's enough space without reallocation
-        ensure_capacity(key_out, Key::size());
-
         // Get position to read into
         size_t pos = key_out.size();
 
@@ -275,9 +231,6 @@ Reader::read_node_data(std::vector<uint8_t>& data_out, bool trim)
     }
     else
     {
-        // Ensure there's enough space without reallocation
-        ensure_capacity(data_out, data_length);
-
         // Get position to read into
         size_t pos = data_out.size();
 
