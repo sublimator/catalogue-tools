@@ -10,7 +10,7 @@
 namespace catl::v1 {
 
 size_t
-Reader::read_raw_data(uint8_t* buffer, size_t size)
+Reader::read_raw_data(uint8_t* buffer, size_t size, const std::string& context)
 {
     if (!input_stream_)
     {
