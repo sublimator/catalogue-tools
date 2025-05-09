@@ -282,6 +282,44 @@ public:
             const std::vector<uint8_t>&,
             const std::vector<uint8_t>&)>& process_nodes = nullptr);
 
+    /**
+     * Enable "tee" mode to copy all read data to an output stream
+     *
+     * When enabled, all data read through the Reader will also be written
+     * to the specified output stream. This is useful for creating slices
+     * while processing the input file.
+     *
+     * @param output Stream to copy read data to
+     */
+    void
+    enable_tee(std::ostream& output)
+    {
+        tee_stream_ = &output;
+        tee_enabled_ = true;
+    }
+
+    /**
+     * Disable "tee" mode
+     *
+     * Stops copying read data to the output stream.
+     */
+    void
+    disable_tee()
+    {
+        tee_stream_ = nullptr;
+        tee_enabled_ = false;
+    }
+
+    /**
+     * Skip bytes while copying them to the tee stream if enabled
+     *
+     * @param bytes Number of bytes to skip
+     * @param context Optional context for error messages
+     * @return Actual number of bytes skipped
+     */
+    size_t
+    skip_with_tee(size_t bytes, const std::string& context = "");
+
 private:
     void
     read_header();
@@ -301,6 +339,10 @@ private:
     int compression_level_{0};
     int catalogue_version_{0};
     bool valid_{false};
+
+    // Tee functionality - for simultaneously reading and writing
+    std::ostream* tee_stream_ = nullptr;
+    bool tee_enabled_ = false;
 };
 
 }  // namespace catl::v1

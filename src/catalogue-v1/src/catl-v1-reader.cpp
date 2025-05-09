@@ -18,7 +18,15 @@ Reader::read_raw_data(uint8_t* buffer, size_t size, const std::string& context)
     }
 
     input_stream_->read(reinterpret_cast<char*>(buffer), size);
-    return static_cast<size_t>(input_stream_->gcount());
+    size_t bytes_read = input_stream_->gcount();
+
+    // If tee is enabled, also write the data to the tee stream
+    if (tee_enabled_ && tee_stream_ && bytes_read > 0)
+    {
+        tee_stream_->write(reinterpret_cast<const char*>(buffer), bytes_read);
+    }
+
+    return bytes_read;
 }
 
 void
