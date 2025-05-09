@@ -111,7 +111,7 @@ Reader::read_and_skip_node()
     if (node_type != tnTERMINAL)
     {
         // Skip key data
-        input_stream_->seekg(Key::size(), std::ios::cur);
+        skip_with_tee(Key::size(), "key");
 
         // For nodes with data, skip the data too
         if (node_type != tnREMOVE)
@@ -121,7 +121,7 @@ Reader::read_and_skip_node()
             read_value(data_length, "data length");
 
             // Skip data
-            input_stream_->seekg(data_length, std::ios::cur);
+            skip_with_tee(data_length, "data");
         }
     }
 

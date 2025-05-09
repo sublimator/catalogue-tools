@@ -236,4 +236,32 @@ Reader::read_ledger_info()
         "ledger header");
     return ledger_header;
 }
+
+size_t
+Reader::skip_with_tee(size_t bytes, const std::string& context)
+{
+    // If tee is not enabled, just do a normal seek
+    if (!tee_enabled_ || !tee_stream_)
+    {
+        input_stream_->seekg(bytes, std::ios::cur);
+        return bytes;
+    }
+
+    // Copy the data we're skipping using a buffer
+    const size_t BUFFER_SIZE = 64 * 1024;  // 64KB buffer
+    std::vector<uint8_t> buffer(std::min(BUFFER_SIZE, bytes));
+
+    size_t remaining = bytes;
+    while (remaining > 0)
+    {
+        size_t to_read = std::min(buffer.size(), remaining);
+        size_t read = read_raw_data(buffer.data(), to_read, context);
+        if (read == 0)
+            break;  // EOF
+        remaining -= read;
+    }
+
+    return bytes - remaining;
+}
+
 }  // namespace catl::v1
