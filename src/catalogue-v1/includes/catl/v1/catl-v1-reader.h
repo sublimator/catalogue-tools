@@ -21,7 +21,7 @@ struct MapOperations
     size_t nodes_added = 0;
     size_t nodes_updated = 0;
     size_t nodes_deleted = 0;
-    size_t total_nodes = 0;
+    size_t nodes_processed = 0;
 };
 
 /**
@@ -194,7 +194,7 @@ public:
         SHAMap& map,
         SHAMapNodeType node_type,
         std::vector<uint8_t>& storage,
-        bool allow_delta = false);
+        bool allow_delta = true);
 
     /**
      * Read a node type and skip the rest of the node

@@ -16,7 +16,7 @@ Reader::read_map(
     std::vector<uint8_t>& storage,
     bool allow_delta)
 {
-    uint32_t nodes_processed = 0;
+    MapOperations ops;
 
     // Temporary vectors for reading when not storing directly
     std::vector<uint8_t> temp_key(Key::size());
@@ -27,7 +27,16 @@ Reader::read_map(
     while (true)
     {
         // Read node type directly
-        SHAMapNodeType current_type = read_node_type();
+        SHAMapNodeType current_type;
+        try
+        {
+            current_type = read_node_type();
+        }
+        catch (const CatlV1Error& e)
+        {
+            LOGE("Error reading node type: ", e.what());
+            break;
+        }
 
         // Terminal marker reached
         if (current_type == tnTERMINAL)
@@ -69,7 +78,15 @@ Reader::read_map(
                     "Attempted to update existing with allow_delta=false");
             }
 
-            nodes_processed++;
+            // Track the appropriate operation type
+            if (result == SetResult::ADD)
+            {
+                ops.nodes_added++;
+            }
+            else if (result == SetResult::UPDATE)
+            {
+                ops.nodes_updated++;
+            }
         }
         else if (current_type == tnREMOVE)
         {
@@ -86,8 +103,13 @@ Reader::read_map(
             read_node_key(temp_key);
             // Allow_delta is true, so we can remove the item
             Key key(temp_key.data());
-            map.remove_item(key);
-            nodes_processed++;
+            bool removed = map.remove_item(key);
+
+            // Track removal
+            if (removed)
+            {
+                ops.nodes_deleted++;
+            }
         }
         else
         {
@@ -95,14 +117,24 @@ Reader::read_map(
         }
     }
 
+    // Calculate total nodes processed
+    ops.nodes_processed =
+        ops.nodes_added + ops.nodes_updated + ops.nodes_deleted;
+
     LOGI(
-        "Added ",
-        nodes_processed,
-        " nodes to SHAMap, storage increased by ",
+        "Processed ",
+        ops.nodes_processed,
+        " nodes in SHAMap (",
+        ops.nodes_added,
+        " added, ",
+        ops.nodes_updated,
+        " updated, ",
+        ops.nodes_deleted,
+        " deleted), storage increased by ",
         (storage.size() - storage_start_pos),
         " bytes");
 
-    return nodes_processed;
+    return ops;
 }
 
 /**
@@ -345,7 +377,8 @@ Reader::read_map(
     }
 
     // Calculate total nodes processed
-    ops.total_nodes = ops.nodes_added + ops.nodes_updated + ops.nodes_deleted;
+    ops.nodes_processed =
+        ops.nodes_added + ops.nodes_updated + ops.nodes_deleted;
 
     return ops;
 }
