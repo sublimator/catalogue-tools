@@ -194,7 +194,7 @@ public:
         SHAMap& map,
         SHAMapNodeType node_type,
         std::vector<uint8_t>& storage,
-        bool allow_delta = true);
+        bool allow_delta = false);
 
     /**
      * Read a node type and skip the rest of the node
