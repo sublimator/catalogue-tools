@@ -325,3 +325,176 @@ TEST_F(ReaderShaMapTest, CompressedFileSpecificTests)
     LedgerInfo second_info = reader.read_ledger_info();
     EXPECT_EQ(second_info.sequence, 2) << "Should be at second ledger";
 }
+
+// Test read_map with callbacks
+TEST_F(ReaderShaMapTest, ReadMapWithCallbacks)
+{
+    Reader reader(uncompressed_fixture_path);
+
+    // Skip to first ledger's state map
+    readFirstLedgerInfo(reader);
+
+    // Counters for tracking callback invocations
+    size_t nodes_seen = 0;
+    size_t deletions_seen = 0;
+    std::vector<std::vector<uint8_t>> keys_seen;
+    std::vector<size_t> data_sizes_seen;
+
+    // Callback for regular nodes
+    auto on_node = [&](const std::vector<uint8_t>& key,
+                       const std::vector<uint8_t>& data) {
+        nodes_seen++;
+        keys_seen.push_back(key);
+        data_sizes_seen.push_back(data.size());
+    };
+
+    // Callback for deletions
+    auto on_delete = [&](const std::vector<uint8_t>& key) {
+        deletions_seen++;
+        keys_seen.push_back(key);
+    };
+
+    // Read state map with callbacks
+    size_t nodes_processed =
+        reader.read_map(tnACCOUNT_STATE, on_node, on_delete);
+
+    // Verify results
+    EXPECT_GT(nodes_processed, 0) << "Should have processed nodes";
+    EXPECT_EQ(nodes_seen + deletions_seen, nodes_processed)
+        << "Number of callback invocations should match nodes processed";
+    EXPECT_EQ(keys_seen.size(), nodes_processed)
+        << "Number of keys seen should match nodes processed";
+
+    // Verify that all keys have the correct size
+    for (const auto& key : keys_seen)
+    {
+        EXPECT_EQ(key.size(), 32) << "All keys should be 32 bytes";
+    }
+
+    // Skip transaction map
+    reader.skip_map(tnTRANSACTION_MD);
+
+    // Verify we can advance to next ledger
+    LedgerInfo second_info = reader.read_ledger_info();
+    EXPECT_EQ(second_info.sequence, 2) << "Should be at second ledger";
+
+    // Test with only on_node callback (no on_delete callback)
+    // Reset counters
+    nodes_seen = 0;
+    keys_seen.clear();
+    data_sizes_seen.clear();
+
+    // Position at second ledger's state map
+    // Read state map with only on_node callback
+    nodes_processed = reader.read_map(tnACCOUNT_STATE, on_node);
+
+    // Verify results
+    EXPECT_GT(nodes_processed, 0)
+        << "Should have processed nodes with just on_node callback";
+    EXPECT_EQ(nodes_seen, nodes_processed)
+        << "All nodes should be processed through on_node when no on_delete "
+           "provided";
+}
+
+// Test tee functionality with read_map
+TEST_F(ReaderShaMapTest, TeeWithReadMap)
+{
+    Reader reader(uncompressed_fixture_path);
+
+    // Skip to first ledger's state map
+    readFirstLedgerInfo(reader);
+
+    // Create an output stream to capture the tee output
+    std::stringstream output_stream;
+
+    // Note bytes read before the operation
+    size_t bytes_before = reader.body_bytes_read();
+
+    // Enable tee mode
+    reader.enable_tee(output_stream);
+
+    // Counters for tracking callback invocations
+    size_t nodes_seen = 0;
+    size_t deletions_seen = 0;
+
+    // Callback for regular nodes
+    auto on_node = [&](const std::vector<uint8_t>& key,
+                       const std::vector<uint8_t>& data) { nodes_seen++; };
+
+    // Callback for deletions
+    auto on_delete = [&](const std::vector<uint8_t>& key) { deletions_seen++; };
+
+    // Read state map with callbacks while tee is enabled
+    size_t nodes_processed =
+        reader.read_map(tnACCOUNT_STATE, on_node, on_delete);
+
+    // Calculate bytes read during tee operation
+    size_t bytes_during_tee = reader.body_bytes_read() - bytes_before;
+
+    // Disable tee mode
+    reader.disable_tee();
+
+    // Verify results
+    EXPECT_GT(nodes_processed, 0) << "Should have processed nodes";
+    EXPECT_GT(bytes_during_tee, 0) << "Should have read some bytes during tee";
+    EXPECT_EQ(output_stream.str().size(), bytes_during_tee)
+        << "Output stream size should match bytes read during tee";
+    EXPECT_EQ(nodes_seen + deletions_seen, nodes_processed)
+        << "Callback invocations should match nodes processed";
+
+    // Skip transaction map without tee (for positioning to next ledger)
+    reader.skip_map(tnTRANSACTION_MD);
+
+    // Verify we can advance to next ledger
+    LedgerInfo second_info = reader.read_ledger_info();
+    EXPECT_EQ(second_info.sequence, 2) << "Should be at second ledger";
+}
+
+// Test tee functionality with skip_map
+TEST_F(ReaderShaMapTest, TeeWithSkipMap)
+{
+    Reader reader(uncompressed_fixture_path);
+
+    // Skip to first ledger's state map
+    readFirstLedgerInfo(reader);
+
+    // Create an output stream to capture the tee output
+    std::stringstream output_stream;
+
+    // Note bytes read before the operation
+    size_t bytes_before = reader.body_bytes_read();
+
+    // Enable tee mode
+    reader.enable_tee(output_stream);
+
+    // Skip the state map - this should copy it to the output stream
+    reader.skip_map(tnACCOUNT_STATE);
+
+    // Disable tee mode
+    reader.disable_tee();
+
+    // Calculate bytes read during tee operation
+    size_t bytes_during_tee = reader.body_bytes_read() - bytes_before;
+
+    // Verify output stream size matches bytes read during tee
+    EXPECT_GT(bytes_during_tee, 0) << "Should have read some bytes during tee";
+    EXPECT_EQ(output_stream.str().size(), bytes_during_tee)
+        << "Output stream size should match bytes read during tee";
+
+    // Note bytes before skipping transaction map
+    bytes_before = reader.body_bytes_read();
+
+    // Skip transaction map without tee - this should not add to the output
+    // stream
+    reader.skip_map(tnTRANSACTION_MD);
+
+    // Verify tee stream size hasn't changed even though we read more bytes
+    EXPECT_GT(reader.body_bytes_read() - bytes_before, 0)
+        << "Should have read bytes during transaction map skip";
+    EXPECT_EQ(output_stream.str().size(), bytes_during_tee)
+        << "Stream size should not change when tee is disabled";
+
+    // Verify we can advance to next ledger
+    LedgerInfo second_info = reader.read_ledger_info();
+    EXPECT_EQ(second_info.sequence, 2) << "Should be at second ledger";
+}

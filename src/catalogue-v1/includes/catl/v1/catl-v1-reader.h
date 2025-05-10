@@ -75,6 +75,16 @@ public:
         const std::string& context = "");
 
     /**
+     *
+     * @return Number of bytes read from the body of the file
+     */
+    size_t
+    body_bytes_read() const
+    {
+        return body_bytes_read_;
+    };
+
+    /**
      * Read exactly the specified number of bytes, throwing if not possible
      *
      * @param buffer Buffer to receive the data
@@ -346,6 +356,7 @@ private:
     // Tee functionality - for simultaneously reading and writing
     std::ostream* tee_stream_ = nullptr;
     bool tee_enabled_ = false;
+    size_t body_bytes_read_ = 0;
 };
 
 }  // namespace catl::v1
