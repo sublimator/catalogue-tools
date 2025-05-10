@@ -259,30 +259,6 @@ public:
         std::vector<uint8_t>& data_out);
 
     /**
-     * Copy raw map data to an output stream until terminal marker
-     *
-     * This method performs efficient byte-level copying of map data from the
-     * input stream to the output stream without unnecessary parsing. If a
-     * callback is provided, it will also parse the nodes to provide information
-     * about each node being copied.
-     *
-     * Note: This is the most efficient way to copy map data for slicing
-     * operations.
-     *
-     * @param output Stream to write the map data to
-     * @param process_nodes Optional callback to process nodes while copying
-     * @return Number of bytes copied
-     * @throws CatlV1Error if file format is invalid or an I/O error
-     */
-    size_t
-    copy_map_to_stream(
-        std::ostream& output,
-        const std::function<void(
-            SHAMapNodeType,
-            const std::vector<uint8_t>&,
-            const std::vector<uint8_t>&)>& process_nodes = nullptr);
-
-    /**
      * Enable "tee" mode to copy all read data to an output stream
      *
      * When enabled, all data read through the Reader will also be written
@@ -319,6 +295,33 @@ public:
      */
     size_t
     skip_with_tee(size_t bytes, const std::string& context = "");
+
+    /**
+     * Read a map with separate callbacks for nodes and deletions
+     *
+     * Processes all nodes in a map section until a terminal marker is found.
+     * For each regular node, the on_node callback is invoked with the node's
+     * key and data. For each deletion node, the on_delete callback is invoked
+     * with just the key. This allows processing the map data without building a
+     * full SHAMap.
+     *
+     * @param type Expected node type for the map (tnACCOUNT_STATE or
+     * tnTRANSACTION_*)
+     * @param on_node Callback function receiving key and data vectors for
+     * regular nodes
+     * @param on_delete Callback function receiving key vector for deletion
+     * nodes (optional)
+     * @return Number of nodes processed
+     * @throws CatlV1Error if file format is invalid or an I/O error occurs
+     */
+    size_t
+    read_map(
+        SHAMapNodeType type,
+        const std::function<
+            void(const std::vector<uint8_t>&, const std::vector<uint8_t>&)>&
+            on_node,
+        const std::function<void(const std::vector<uint8_t>&)>& on_delete =
+            nullptr);
 
 private:
     void

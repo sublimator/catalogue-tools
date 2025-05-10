@@ -265,4 +265,75 @@ Reader::read_map_node(
     return true;
 }
 
+/**
+ * Implementation of read_map with separate callbacks for nodes and deletions
+ */
+size_t
+Reader::read_map(
+    SHAMapNodeType type,
+    const std::function<
+        void(const std::vector<uint8_t>&, const std::vector<uint8_t>&)>&
+        on_node,
+    const std::function<void(const std::vector<uint8_t>&)>& on_delete)
+{
+    size_t nodes_processed = 0;
+    std::vector<uint8_t> key_buffer(Key::size());
+    std::vector<uint8_t> data_buffer;
+
+    while (true)
+    {
+        // Read node type
+        SHAMapNodeType current_type = read_node_type();
+
+        // Terminal marker reached
+        if (current_type == tnTERMINAL)
+        {
+            break;
+        }
+
+        // Process based on node type
+        if (current_type == type)
+        {
+            // Read key
+            read_node_key(key_buffer);
+
+            // Read data
+            read_node_data(data_buffer);
+
+            // Call callback with key and data if provided
+            if (on_node)
+            {
+                on_node(key_buffer, data_buffer);
+            }
+
+            nodes_processed++;
+        }
+        else if (current_type == tnREMOVE)
+        {
+            // Read key
+            read_node_key(key_buffer);
+
+            // Call on_delete callback if provided
+            if (on_delete)
+            {
+                on_delete(key_buffer);
+            }
+            // Otherwise fall back to on_node with empty data if provided
+            else if (on_node)
+            {
+                data_buffer.clear();
+                on_node(key_buffer, data_buffer);
+            }
+
+            nodes_processed++;
+        }
+        else
+        {
+            throw CatlV1Error("Unexpected node type in map");
+        }
+    }
+
+    return nodes_processed;
+}
+
 }  // namespace catl::v1
