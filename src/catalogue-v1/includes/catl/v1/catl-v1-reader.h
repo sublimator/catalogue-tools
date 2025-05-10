@@ -190,7 +190,7 @@ public:
      * allow_delta is false
      */
     MapOperations
-    read_map(
+    read_map_to_shamap(
         SHAMap& map,
         SHAMapNodeType node_type,
         std::vector<uint8_t>& storage,
@@ -335,7 +335,7 @@ public:
      * @throws CatlV1Error if file format is invalid or an I/O error occurs
      */
     MapOperations
-    read_map(
+    read_map_with_callbacks(
         SHAMapNodeType type,
         const std::function<
             void(const std::vector<uint8_t>&, const std::vector<uint8_t>&)>&

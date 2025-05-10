@@ -136,7 +136,8 @@ TEST_F(ReaderShaMapTest, ReadShaMapWithStorage)
 
     // Read state map into our map with storage
     uint32_t nodes_processed =
-        reader.read_map(map, tnACCOUNT_STATE, storage).nodes_processed;
+        reader.read_map_to_shamap(map, tnACCOUNT_STATE, storage)
+            .nodes_processed;
 
     // Verify data was read
     EXPECT_GT(nodes_processed, 0) << "Should have processed some nodes";
@@ -310,7 +311,8 @@ TEST_F(ReaderShaMapTest, CompressedFileSpecificTests)
 
     // Read state map with storage
     uint32_t nodes_processed =
-        reader.read_map(map, tnACCOUNT_STATE, storage).nodes_processed;
+        reader.read_map_to_shamap(map, tnACCOUNT_STATE, storage)
+            .nodes_processed;
 
     // Verify results
     EXPECT_GT(nodes_processed, 0)
@@ -356,7 +358,8 @@ TEST_F(ReaderShaMapTest, ReadMapWithCallbacks)
 
     // Read state map with callbacks
     size_t nodes_processed =
-        reader.read_map(tnACCOUNT_STATE, on_node, on_delete).nodes_processed;
+        reader.read_map_with_callbacks(tnACCOUNT_STATE, on_node, on_delete)
+            .nodes_processed;
 
     // Verify results
     EXPECT_GT(nodes_processed, 0) << "Should have processed nodes";
@@ -386,7 +389,8 @@ TEST_F(ReaderShaMapTest, ReadMapWithCallbacks)
 
     // Position at second ledger's state map
     // Read state map with only on_node callback
-    nodes_processed = reader.read_map(tnACCOUNT_STATE, on_node).nodes_processed;
+    nodes_processed = reader.read_map_with_callbacks(tnACCOUNT_STATE, on_node)
+                          .nodes_processed;
 
     // Verify results
     EXPECT_GT(nodes_processed, 0)
@@ -426,7 +430,8 @@ TEST_F(ReaderShaMapTest, TeeWithReadMap)
 
     // Read state map with callbacks while tee is enabled
     size_t nodes_processed =
-        reader.read_map(tnACCOUNT_STATE, on_node, on_delete).nodes_processed;
+        reader.read_map_with_callbacks(tnACCOUNT_STATE, on_node, on_delete)
+            .nodes_processed;
 
     // Calculate bytes read during tee operation
     size_t bytes_during_tee = reader.body_bytes_read() - bytes_before;

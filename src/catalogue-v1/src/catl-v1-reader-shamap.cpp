@@ -10,7 +10,7 @@ namespace catl::v1 {
  * to ensure memory persistence for SHAMap items.
  */
 MapOperations
-Reader::read_map(
+Reader::read_map_to_shamap(
     SHAMap& map,
     SHAMapNodeType node_type,
     std::vector<uint8_t>& storage,
@@ -309,7 +309,7 @@ Reader::read_map_node(
  * Implementation of read_map with separate callbacks for nodes and deletions
  */
 MapOperations
-Reader::read_map(
+Reader::read_map_with_callbacks(
     SHAMapNodeType type,
     const std::function<
         void(const std::vector<uint8_t>&, const std::vector<uint8_t>&)>&
