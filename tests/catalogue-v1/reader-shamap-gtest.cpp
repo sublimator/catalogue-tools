@@ -135,8 +135,7 @@ TEST_F(ReaderShaMapTest, ReadShaMapWithStorage)
     storage.reserve(arena);  // 1MB initial reservation
 
     // Read state map into our map with storage
-    uint32_t nodes_processed =
-        reader.read_shamap(map, tnACCOUNT_STATE, storage);
+    uint32_t nodes_processed = reader.read_map(map, tnACCOUNT_STATE, storage);
 
     // Verify data was read
     EXPECT_GT(nodes_processed, 0) << "Should have processed some nodes";
@@ -309,8 +308,7 @@ TEST_F(ReaderShaMapTest, CompressedFileSpecificTests)
     storage.reserve(arena);  // 1MB initial reservation
 
     // Read state map with storage
-    uint32_t nodes_processed =
-        reader.read_shamap(map, tnACCOUNT_STATE, storage);
+    uint32_t nodes_processed = reader.read_map(map, tnACCOUNT_STATE, storage);
 
     // Verify results
     EXPECT_GT(nodes_processed, 0)

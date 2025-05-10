@@ -121,6 +121,9 @@ public:
     bool
     remove_item(const Key& key);
 
+    [[nodiscard]] bool
+    has_item(const Key& key) const;
+
     Hash256
     get_hash() const;
 

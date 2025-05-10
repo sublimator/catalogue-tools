@@ -9,12 +9,12 @@ namespace catl::v1 {
  * Implementation of read_shamap that uses an external storage vector
  * to ensure memory persistence for SHAMap items.
  */
-uint32_t
-Reader::read_shamap(
+MapOperations
+Reader::read_map(
     SHAMap& map,
     SHAMapNodeType node_type,
     std::vector<uint8_t>& storage,
-    bool allow_updates)
+    bool allow_delta)
 {
     uint32_t nodes_processed = 0;
 
@@ -27,16 +27,7 @@ Reader::read_shamap(
     while (true)
     {
         // Read node type directly
-        SHAMapNodeType current_type;
-        try
-        {
-            current_type = read_node_type();
-        }
-        catch (const CatlV1Error& e)
-        {
-            LOGE("Error reading node type: ", e.what());
-            break;
-        }
+        SHAMapNodeType current_type = read_node_type();
 
         // Terminal marker reached
         if (current_type == tnTERMINAL)
@@ -67,17 +58,33 @@ Reader::read_shamap(
             auto item = boost::intrusive_ptr(
                 new MmapItem(&storage[key_pos], &storage[data_pos], data_size));
 
-            // Add to map
-            map.set_item(item);
+            SetMode mode =
+                allow_delta ? SetMode::ADD_OR_UPDATE : SetMode::ADD_ONLY;
+            SetResult result = map.set_item(item, mode);
+
+            // If the operation failed, throw an appropriate error
+            if (!allow_delta && result == SetResult::FAILED)
+            {
+                throw CatlV1Error(
+                    "Attempted to update existing with allow_delta=false");
+            }
+
             nodes_processed++;
         }
         else if (current_type == tnREMOVE)
         {
+            // Check if we're allowed to perform a delete
+            if (!allow_delta)
+            {
+                throw CatlV1DeltaError(
+                    "Deletion operation attempted when allow_delta is "
+                    "false");
+            }
+
             // For removal nodes, we don't need to add to storage
             // Just read into our temporary vector
             read_node_key(temp_key);
-
-            // Remove from map
+            // Allow_delta is true, so we can remove the item
             Key key(temp_key.data());
             map.remove_item(key);
             nodes_processed++;
@@ -203,6 +210,7 @@ Reader::read_node_data(std::vector<uint8_t>& data_out, bool trim)
 
     if (trim)
     {
+        // TODO: why would you bother here?
         // Resize vector to hold exactly the data
         data_out.resize(data_length);
 
@@ -268,7 +276,7 @@ Reader::read_map_node(
 /**
  * Implementation of read_map with separate callbacks for nodes and deletions
  */
-size_t
+MapOperations
 Reader::read_map(
     SHAMapNodeType type,
     const std::function<
@@ -276,7 +284,7 @@ Reader::read_map(
         on_node,
     const std::function<void(const std::vector<uint8_t>&)>& on_delete)
 {
-    size_t nodes_processed = 0;
+    MapOperations ops;
     std::vector<uint8_t> key_buffer(Key::size());
     std::vector<uint8_t> data_buffer;
 
@@ -306,7 +314,9 @@ Reader::read_map(
                 on_node(key_buffer, data_buffer);
             }
 
-            nodes_processed++;
+            // Track as node added - note we don't know if it's an update
+            // without additional context, so we count it as an addition
+            ops.nodes_added++;
         }
         else if (current_type == tnREMOVE)
         {
@@ -325,7 +335,8 @@ Reader::read_map(
                 on_node(key_buffer, data_buffer);
             }
 
-            nodes_processed++;
+            // Track as node deleted
+            ops.nodes_deleted++;
         }
         else
         {
@@ -333,7 +344,10 @@ Reader::read_map(
         }
     }
 
-    return nodes_processed;
+    // Calculate total nodes processed
+    ops.total_nodes = ops.nodes_added + ops.nodes_updated + ops.nodes_deleted;
+
+    return ops;
 }
 
 }  // namespace catl::v1

@@ -16,6 +16,14 @@
 
 namespace catl::v1 {
 
+struct MapOperations
+{
+    size_t nodes_added = 0;
+    size_t nodes_updated = 0;
+    size_t nodes_deleted = 0;
+    size_t total_nodes = 0;
+};
+
 /**
  * Reader for CATL files with support for both compressed and uncompressed
  * formats
@@ -175,16 +183,18 @@ public:
      * @param map SHAMap to populate with nodes
      * @param node_type Expected type of nodes in the map
      * @param storage Vector to store item data (must outlive the SHAMap!)
-     * @param allow_updates Whether to allow updates to existing keys
-     * @return Number of nodes processed
+     * @param allow_delta Whether to allow updates and deletes to existing keys
+     * @return MapOperations struct with counts of nodes processed
      * @throws CatlV1Error if file format is invalid or an I/O error occurs
+     * @throws CatlV1DeltaError if a delta operation is attempted when
+     * allow_delta is false
      */
-    uint32_t
-    read_shamap(
+    MapOperations
+    read_map(
         SHAMap& map,
         SHAMapNodeType node_type,
         std::vector<uint8_t>& storage,
-        bool allow_updates = false);
+        bool allow_delta = false);
 
     /**
      * Read a node type and skip the rest of the node
@@ -321,10 +331,10 @@ public:
      * regular nodes
      * @param on_delete Callback function receiving key vector for deletion
      * nodes (optional)
-     * @return Number of nodes processed
+     * @return MapOperations struct with counts of nodes processed
      * @throws CatlV1Error if file format is invalid or an I/O error occurs
      */
-    size_t
+    MapOperations
     read_map(
         SHAMapNodeType type,
         const std::function<
