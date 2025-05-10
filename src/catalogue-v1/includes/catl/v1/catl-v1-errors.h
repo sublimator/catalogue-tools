@@ -53,4 +53,13 @@ public:
     }
 };
 
+// Exception for delta operation when not allowed
+class CatlV1DeltaError : public CatlV1Error
+{
+public:
+    explicit CatlV1DeltaError(const std::string& msg) : CatlV1Error(msg)
+    {
+    }
+};
+
 }  // namespace catl::v1

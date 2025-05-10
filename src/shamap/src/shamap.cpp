@@ -298,6 +298,12 @@ SHAMap::remove_item(const Key& key)
     return remove_item_reference(key);
 }
 
+bool
+SHAMap::has_item(const Key& key) const
+{
+    return get_item(key) != nullptr;
+}
+
 Hash256
 SHAMap::get_hash() const
 {
