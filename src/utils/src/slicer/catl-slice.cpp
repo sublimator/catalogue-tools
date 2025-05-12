@@ -56,7 +56,12 @@ public:
         }
     }
 
-    // Helper to validate the requested ledger range against file header
+    /**
+     * Validate the requested ledger range against file header
+     *
+     * @param header The CATL file header to validate against
+     * @throws CatlV1Error if requested range is outside file's range
+     */
     void
     validate_ledger_range(const CatlHeader& header)
     {
@@ -71,7 +76,11 @@ public:
         }
     }
 
-    // Helper to log file and operation information
+    /**
+     * Log file details and operation parameters
+     *
+     * @param header The CATL file header containing file information
+     */
     void
     log_operation_details(const CatlHeader& header)
     {
@@ -109,7 +118,12 @@ public:
         }
     }
 
-    // Helper to create output file writer and prepare for writing
+    /**
+     * Create output file writer and prepare for writing
+     *
+     * @param header The source CATL file header to get network ID from
+     * @return Initialized Writer for the output file
+     */
     std::unique_ptr<Writer>
     create_writer(const CatlHeader& header)
     {
@@ -124,25 +138,49 @@ public:
         return writer;
     }
 
-    // Attempt to load state from snapshot if available
+    /**
+     * Attempt to load state from snapshot if available
+     *
+     * @param snapshot_file Path to the snapshot file to load
+     * @param writer Writer to which the snapshot should be copied
+     * @return true if snapshot was loaded successfully, false otherwise
+     */
     bool
-    try_load_state_snapshot(const std::string& snapshot_file)
+    try_load_state_snapshot(const std::string& snapshot_file, Writer& writer)
+        const
     {
-        if (fs::exists(snapshot_file))
-        {
-            LOGI("Loading state snapshot: ", snapshot_file);
-            // In a full implementation, load the state snapshot here
-            // For now, just pretend we loaded it
-            return true;
-        }
-        else
+        if (!fs::exists(snapshot_file))
         {
             LOGI("No start snapshot found, will process all ledgers");
             return false;
         }
+        try
+        {
+            LOGI("Loading state snapshot: ", snapshot_file);
+            // Copy the snapshot data directly to the writer's body stream
+            size_t bytes_copied =
+                copy_snapshot_to_stream(snapshot_file, writer.body_stream());
+            LOGI("  Successfully loaded snapshot (", bytes_copied, " bytes)");
+            return true;
+        }
+        catch (const SnapshotError& e)
+        {
+            LOGE("Failed to load snapshot: ", e.what());
+            return false;
+        }
+        catch (const std::exception& e)
+        {
+            LOGE("Failed to load snapshot: ", e.what());
+            return false;
+        }
     }
 
-    // Helper to convert vector key to Hash256
+    /**
+     * Convert vector key to Hash256 for state map operations
+     *
+     * @param vec_key Vector containing the key bytes
+     * @return Hash256 representation of the key
+     */
     Hash256
     vector_to_hash256(const std::vector<uint8_t>& vec_key)
     {
@@ -154,11 +192,24 @@ public:
         return hash_key;
     }
 
-    // Process state map from min_ledger up to (but NOT including) the requested
-    // start_ledger.
-    // This should NEVER ever read the ledger header of the start ledger.
+    /**
+     * Process state map from min_ledger up to (but NOT including) the requested
+     * start_ledger
+     *
+     * This method builds the initial state by processing all ledgers prior to
+     * the start of the requested slice. It should NEVER read the ledger header
+     * of the start ledger - it will stop just before it.
+     *
+     * @param reader The CATL reader to read from
+     * @param min_ledger The minimum ledger in the file
+     * @param using_snapshot Whether we're using a snapshot for the initial
+     * state
+     */
     void
-    process_pre_slice_ledgers(Reader& reader, uint32_t min_ledger)
+    process_pre_slice_ledgers(
+        Reader& reader,
+        uint32_t min_ledger,
+        bool using_snapshot)
     {
         LOGI(
             "Processing ledgers from ",
@@ -178,17 +229,18 @@ public:
         {
             // Read ledger info
             LedgerInfo ledger_info = reader.read_ledger_info();
+            LOGI("Read ledger info for ledger: ", ledger_info.sequence);
             LOGD(
                 "process_pre_slice_ledgers: Body bytes read after header: ",
                 reader.body_bytes_consumed());
             current_ledger = ledger_info.sequence;
 
-            LOGI("process_pre_slice_ledgers: current_ledger: ", current_ledger);
+            LOGD("process_pre_slice_ledgers: current_ledger: ", current_ledger);
 
             // Process state map if we haven't reached the start ledger yet
             if (current_ledger < *options_.start_ledger)
             {
-                LOGI(
+                LOGD(
                     "process_pre_slice_ledgers:  Processing state map for "
                     "ledger ",
                     current_ledger);
@@ -196,18 +248,16 @@ public:
                 // initial ledgers
 
                 // Process state map using callbacks to update SimpleStateMap
-                reader.read_map_with_callbacks(
-                    SHAMapNodeType::tnACCOUNT_STATE,
-                    [this](
-                        const std::vector<uint8_t>& key,
-                        const std::vector<uint8_t>& data) {
-                        state_map_->set_item(vector_to_hash256(key), data);
-                    },
-                    [this](const std::vector<uint8_t>& key) {
-                        state_map_->remove_item(vector_to_hash256(key));
-                    });
+                if (!using_snapshot)
+                {
+                    read_into_account_state_map(reader, current_ledger);
+                }
+                else
+                {
+                    reader.skip_map(SHAMapNodeType::tnACCOUNT_STATE);
+                }
 
-                LOGI(
+                LOGD(
                     "process_pre_slice_ledgers: Body bytes read after state "
                     "map: ",
                     reader.body_bytes_consumed());
@@ -216,40 +266,82 @@ public:
                 // tracking
                 reader.skip_map(SHAMapNodeType::tnTRANSACTION_MD);
 
-                LOGI(
+                LOGD(
                     "process_pre_slice_ledgers: Body bytes read after tx map: ",
                     reader.body_bytes_consumed());
             }
 
+            LOGI(
+                "Finished processing initial state for ledger ",
+                current_ledger);
             current_ledger =
                 ledger_info.sequence + 1;  // increment so loop guard works
         }
 
-        // At this point we've read the header for start_ledger but haven't
-        // processed it Perfect position to enable tee and start processing the
-        // slice
         LOGI("  Completed building initial state, ready for slice");
+        LOGI(
+            "  State map contains ",
+            state_map_ ? state_map_->size() : 0,
+            " items");
     }
 
-    // Process ledgers from start_ledger to end_ledger
-    // Important: this assumes the reader is positioned to read the first ledger
-    // in the slice
+    /**
+     * Read account state map and update the in-memory state map
+     *
+     * @param reader The CATL reader to read from
+     * @param current_ledger The current ledger sequence number
+     */
+    void
+    read_into_account_state_map(Reader& reader, uint32_t current_ledger)
+    {
+        auto stats = reader.read_map_with_callbacks(
+            SHAMapNodeType::tnACCOUNT_STATE,
+            [this](
+                const std::vector<uint8_t>& key,
+                const std::vector<uint8_t>& data) {
+                state_map_->set_item(vector_to_hash256(key), data);
+            },
+            [this](const std::vector<uint8_t>& key) {
+                state_map_->remove_item(vector_to_hash256(key));
+            });
+        LOGI("Finished processing state map for ledger: ", current_ledger);
+        LOGD("  Sets: ", stats.nodes_added);
+        LOGD("  Deletes: ", stats.nodes_deleted);
+        LOGD("  Total operations: ", stats.nodes_processed);
+        LOGD("  Current state map size: ", state_map_->size());
+    }
+
+    /**
+     * Process ledgers from start_ledger to end_ledger
+     *
+     * Important: this assumes the reader is positioned to read the first ledger
+     * in the slice. The method handles both state and transaction maps,
+     * with special logic for the first ledger in the slice.
+     *
+     * @param reader The CATL reader to read from
+     * @param writer The Writer to write the slice to
+     * @param snapshot_file Optional snapshot file for the first ledger's state
+     * @return Number of ledgers processed
+     */
     size_t
-    process_slice_ledgers(Reader& reader, Writer& /* writer */)
+    process_slice_ledgers(
+        Reader& reader,
+        Writer& writer,
+        const std::optional<std::string>& snapshot_file)
     {
         LOGI("Beginning slice creation from ledger ", *options_.start_ledger);
-        LOGI("Writing full state map for ledger ", *options_.start_ledger);
 
-        uint32_t current_ledger = *options_.start_ledger;
         size_t ledgers_processed = 0;
+        uint32_t current_ledger = *options_.start_ledger;
 
+        // We always do the start ledger in case of start_ledger == end_ledger
+        // It's a unlikely edge case but we want to handle it anyway
         while (current_ledger == *options_.start_ledger ||
                current_ledger < *options_.end_ledger)
         {
             // Read ledger info (will be tee'd to the output)
-            LOGI("Body bytes read: ", reader.body_bytes_consumed());
+            LOGD("Body bytes read: ", reader.body_bytes_consumed());
             LedgerInfo ledger_info = reader.read_ledger_info();
-            LOGI("  Processing ledger ", Hash256(ledger_info.hash).hex());
 
             if (ledgers_processed == 0 &&
                 ledger_info.sequence != *options_.start_ledger)
@@ -261,24 +353,49 @@ public:
             }
 
             current_ledger = ledger_info.sequence;
-            LOGI("  Processing ledger ", current_ledger);
+            LOGI(
+                "  Processing ledger ",
+                current_ledger,
+                " (",
+                ledgers_processed,
+                " of ",
+                (*options_.end_ledger - *options_.start_ledger + 1),
+                " total)");
             ledgers_processed++;
+
+            // Special handling for the first ledger when using a snapshot
+            if (ledgers_processed == 1 &&
+                *options_.start_ledger > reader.header().min_ledger)
+            {
+                reader.disable_tee();
+
+                if (snapshot_file)
+                {
+                    LOGI("  Using snapshot for state map of first ledger");
+                    // Skip the state map in the source file since we are using
+                    // the snapshot.Need to temporarily disable tee to avoid
+                    // copying the skipped map to the output.
+                    reader.skip_map(SHAMapNodeType::tnACCOUNT_STATE);
+                    try_load_state_snapshot(*snapshot_file, writer);
+                }
+                else
+                {
+                    // we need to copy the state map to the output
+                    read_into_account_state_map(reader, current_ledger);
+                    write_map_to_stream(*state_map_, writer.body_stream());
+                }
+                reader.enable_tee(writer.body_stream());
+                // Process transaction map (just tee it)
+                reader.skip_map(SHAMapNodeType::tnTRANSACTION_MD);
+                continue;
+            }
 
             // Process state map - with tee enabled, all data is copied to
             // output
             if (options_.create_next_slice_state_snapshot)
             {
                 // Track state changes for snapshot creation
-                reader.read_map_with_callbacks(
-                    SHAMapNodeType::tnACCOUNT_STATE,
-                    [this](
-                        const std::vector<uint8_t>& key,
-                        const std::vector<uint8_t>& data) {
-                        state_map_->set_item(vector_to_hash256(key), data);
-                    },
-                    [this](const std::vector<uint8_t>& key) {
-                        state_map_->remove_item(vector_to_hash256(key));
-                    });
+                read_into_account_state_map(reader, current_ledger);
             }
             else
             {
@@ -287,15 +404,24 @@ public:
             }
 
             // Process transaction map (just tee it, no need to track)
+            LOGD("  Processing transaction map for ledger ", current_ledger);
             reader.skip_map(SHAMapNodeType::tnTRANSACTION_MD);
         }
 
         return ledgers_processed;
     }
 
-    // Create a state snapshot for the next slice if requested
+    /**
+     * Create a state snapshot for the next slice if requested
+     *
+     * This method creates a snapshot of the state at the end of the slice,
+     * which can be used as the starting point for the next slice operation.
+     * It reads and applies the state for the ledger after the end of the slice.
+     *
+     * @param reader The CATL reader to read additional state if needed
+     */
     void
-    create_end_snapshot()
+    create_end_snapshot(Reader& reader)
     {
         if (!options_.create_next_slice_state_snapshot ||
             !options_.snapshots_path)
@@ -303,25 +429,77 @@ public:
             return;
         }
 
+        const uint32_t next_ledger = *options_.end_ledger + 1;
         fs::path snapshot_path(*options_.snapshots_path);
-        std::string next_snapshot_file =
-            (snapshot_path /
-             ("state_snapshot_for_ledger_" +
-              std::to_string(*options_.end_ledger + 1) + ".dat.zst"))
-                .string();
+        fs::path next_snapshot_file = snapshot_path /
+            ("state_snapshot_for_ledger_" + std::to_string(next_ledger) +
+             ".dat.zst");
 
         LOGI(
             "Creating state snapshot for ledger ",
-            *options_.end_ledger + 1,
+            next_ledger,
             ": ",
-            next_snapshot_file);
+            next_snapshot_file.string());
 
-        // In a full implementation, write the state map to the snapshot file
-        LOGI("  State map contains ", state_map_->size(), " items");
-        // For now, just log that we would create the snapshot
+        try
+        {
+            // Check if the next ledger exists in the input file
+            if (next_ledger > reader.header().max_ledger)
+            {
+                throw SnapshotError(
+                    "Cannot create snapshot for ledger " +
+                    std::to_string(next_ledger) +
+                    " because it exceeds the max ledger in the input file (" +
+                    std::to_string(reader.header().max_ledger) + ")");
+            }
+
+            // We need to read the state delta for the next ledger to create
+            // the snapshot for that ledger
+            LOGI("  Reading state delta for ledger ", next_ledger);
+
+            // Fetch and apply the next ledger's state delta to our state map
+            LedgerInfo next_ledger_info = reader.read_ledger_info();
+            if (next_ledger_info.sequence != next_ledger)
+            {
+                throw SnapshotError(
+                    "Expected ledger " + std::to_string(next_ledger) +
+                    " but found ledger " +
+                    std::to_string(next_ledger_info.sequence));
+            }
+
+            // Process state map (apply changes to our state map)
+            read_into_account_state_map(reader, next_ledger);
+
+            // Skip the transaction map - we don't need it for the snapshot
+            reader.skip_map(SHAMapNodeType::tnTRANSACTION_MD);
+
+            LOGI("  State map now contains ", state_map_->size(), " items");
+
+            // Use the new utility function to create the snapshot
+            create_state_snapshot(
+                *state_map_,
+                next_snapshot_file,
+                options_.compression_level,
+                options_.force_overwrite);
+
+            LOGI("  Snapshot created successfully");
+        }
+        catch (const SnapshotError& e)
+        {
+            LOGE("  Failed to create snapshot: ", e.what());
+        }
+        catch (const std::exception& e)
+        {
+            LOGE("  Failed to create snapshot: ", e.what());
+        }
     }
 
-    // Log completion details
+    /**
+     * Log completion details and statistics
+     *
+     * @param seconds Time taken to complete the slice operation
+     * @param ledgers_processed Number of ledgers processed
+     */
     void
     log_completion(double seconds, size_t ledgers_processed)
     {
@@ -342,6 +520,41 @@ public:
         }
     }
 
+    /**
+     * Check if a snapshot file exists for the start ledger
+     *
+     * @return Optional path to the snapshot file if it exists
+     */
+    std::optional<std::string>
+    check_snapshot_path() const
+    {
+        std::optional<std::string> snapshot_file = std::nullopt;
+        if (options_.use_start_snapshot && options_.snapshots_path)
+        {
+            fs::path snapshot_path(*options_.snapshots_path);
+            std::string path =
+                (snapshot_path /
+                 ("state_snapshot_for_ledger_" +
+                  std::to_string(*options_.start_ledger) + ".dat.zst"))
+                    .string();
+
+            if (boost::filesystem::exists(path))
+            {
+                snapshot_file = path;
+            }
+        }
+        return snapshot_file;
+    }
+
+    /**
+     * Execute the main slicing operation
+     *
+     * This is the main entry point for the slicer which orchestrates the entire
+     * process from reading input, building state, creating the slice file,
+     * and generating snapshots as requested.
+     *
+     * @return true if slicing completed successfully, false otherwise
+     */
     bool
     slice()
     {
@@ -362,26 +575,16 @@ public:
             // Create writer but don't enable tee yet - we don't want to copy
             // data until we reach start_ledger
             auto writer = create_writer(header);
-
             // Try to load a state snapshot if needed
-            bool snapshot_loaded = false;
-            if (options_.use_start_snapshot && options_.snapshots_path)
-            {
-                fs::path snapshot_path(*options_.snapshots_path);
-                std::string snapshot_file =
-                    (snapshot_path /
-                     ("state_snapshot_for_ledger_" +
-                      std::to_string(*options_.start_ledger) + ".dat.zst"))
-                        .string();
+            auto snapshot_file = check_snapshot_path();
+            LOGI(
+                "Snapshot file: ",
+                snapshot_file ? snapshot_file.value() : "None");
 
-                snapshot_loaded = try_load_state_snapshot(snapshot_file);
-            }
-
-            // Process initial ledgers if no snapshot was loaded
-            if (!snapshot_loaded)
-            {
-                process_pre_slice_ledgers(reader, header.min_ledger);
-            }
+            // Process initial ledgers (even if snapshot was loaded, to skip to
+            // the first ledger)
+            process_pre_slice_ledgers(
+                reader, header.min_ledger, snapshot_file != std::nullopt);
 
             // NOW enable tee since we've reached the start ledger
             // and want to begin copying data to the output
@@ -391,13 +594,16 @@ public:
             reader.enable_tee(writer->body_stream());
 
             // Process ledgers in the requested slice range
-            size_t ledgers_processed = process_slice_ledgers(reader, *writer);
+            size_t ledgers_processed =
+                process_slice_ledgers(reader, *writer, snapshot_file);
+
+            // We need to disable this before creating the end snapshot which
+            // will read more
+            reader.disable_tee();
 
             // Create end snapshot if requested
-            create_end_snapshot();
+            create_end_snapshot(reader);
 
-            // Finish up and finalize the output file
-            reader.disable_tee();
             writer->finalize();
 
             // Calculate and log timing information

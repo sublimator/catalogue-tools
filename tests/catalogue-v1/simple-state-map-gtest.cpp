@@ -147,3 +147,32 @@ TEST_F(SimpleStateMapTest, ClearMap)
     EXPECT_TRUE(map.empty());
     EXPECT_EQ(map.size(), 0);
 }
+
+TEST_F(SimpleStateMapTest, WriteToStream)
+{
+    // Add several items to the map
+    for (int i = 0; i < 5; i++)
+    {
+        std::array<uint8_t, 32> keyData{};
+        keyData[0] = static_cast<uint8_t>(i);
+        Hash256 key(keyData);
+
+        std::vector<uint8_t> data;
+        data.push_back(static_cast<uint8_t>(i * 10));
+        map.set_item(key, data);
+    }
+
+    EXPECT_EQ(map.size(), 5);
+
+    // Write to a memory stream
+    std::stringstream stream;
+    size_t bytes_written = catl::v1::write_map_to_stream(map, stream);
+
+    // Expected size calculation:
+    // 5 items × (1 byte for node type + 32 bytes for key + 4 bytes for length +
+    // 1 byte for data)
+    // + 1 byte for terminal marker
+    // = 5 × 38 + 1 = 191 bytes
+    EXPECT_EQ(bytes_written, 191);
+    EXPECT_EQ(stream.str().size(), 191);
+}

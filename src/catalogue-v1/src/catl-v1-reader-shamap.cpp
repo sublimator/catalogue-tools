@@ -364,12 +364,6 @@ Reader::read_map_with_callbacks(
             {
                 on_delete(key_buffer);
             }
-            // Otherwise fall back to on_node with empty data if provided
-            else if (on_node)
-            {
-                data_buffer.clear();
-                on_node(key_buffer, data_buffer);
-            }
 
             // Track as node deleted
             ops.nodes_deleted++;
