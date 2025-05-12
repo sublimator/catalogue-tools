@@ -258,7 +258,7 @@ Reader::skip_with_tee(size_t bytes, const std::string& context)
     }
 
     // Copy the data we're skipping using a buffer
-    const size_t BUFFER_SIZE = 64 * 1024;  // 64KB buffer
+    constexpr size_t BUFFER_SIZE = 64 * 1024;  // 64KB buffer
     std::vector<uint8_t> buffer(std::min(BUFFER_SIZE, bytes));
 
     size_t remaining = bytes;
