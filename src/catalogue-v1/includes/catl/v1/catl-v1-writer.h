@@ -161,6 +161,20 @@ public:
     body_bytes_written() const;
 
     /**
+     * Get access to the underlying body stream
+     *
+     * This method is primarily intended for use with the Reader's tee
+     * functionality, allowing data to be efficiently copied from a Reader to a
+     * Writer without intermediate processing.
+     *
+     * @return Reference to the body output stream
+     * @throws CatlV1Error if the file is not properly initialized or already
+     * finalized
+     */
+    std::ostream&
+    body_stream();
+
+    /**
      * Write raw data to the body stream
      *
      * @param data Pointer to the data

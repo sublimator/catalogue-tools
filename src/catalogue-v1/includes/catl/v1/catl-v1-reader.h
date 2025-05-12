@@ -86,16 +86,16 @@ public:
     /**
      * Get the total number of bytes read from the body of the file
      *
-     * This method returns the count of bytes read from the file body (the part
-     * after the header). This is useful for tracking progress, especially when
-     * using the tee functionality to copy data while reading.
+     * This method returns the count of bytes read or skipped from the file body
+     * (the part after the header). This is useful for tracking progress,
+     * especially when using the tee functionality to copy data while reading.
      *
      * @return Number of bytes read from the body of the file since construction
      */
     size_t
-    body_bytes_read() const
+    body_bytes_consumed() const
     {
-        return body_bytes_read_;
+        return body_bytes_consumed_;
     };
 
     /**
@@ -109,11 +109,13 @@ public:
     void
     read_bytes(uint8_t* buffer, size_t size, const std::string& context = "")
     {
-        if (read_raw_data(buffer, size, context) != size)
+        size_t bytes_read = read_raw_data(buffer, size, context);
+        if (bytes_read != size)
         {
             throw CatlV1Error(
-                "Unexpected EOF while reading " +
-                (context.empty() ? "bytes" : context));
+                "Unexpected EOF while reading " + std::to_string(size) +
+                " bytes " + (context.empty() ? "bytes" : context) +
+                " read only " + std::to_string(bytes_read) + " bytes");
         }
     }
 
@@ -426,7 +428,7 @@ private:
     // Tee functionality - for simultaneously reading and writing
     std::ostream* tee_stream_ = nullptr;
     bool tee_enabled_ = false;
-    size_t body_bytes_read_ = 0;
+    size_t body_bytes_consumed_ = 0;
 };
 
 }  // namespace catl::v1

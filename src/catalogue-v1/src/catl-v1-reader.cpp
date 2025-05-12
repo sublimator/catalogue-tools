@@ -19,7 +19,7 @@ Reader::read_raw_data(uint8_t* buffer, size_t size, const std::string& context)
 
     input_stream_->read(reinterpret_cast<char*>(buffer), size);
     size_t bytes_read = input_stream_->gcount();
-    body_bytes_read_ += bytes_read;
+    body_bytes_consumed_ += bytes_read;
 
     // If tee is enabled, also write the data to the tee stream
     if (tee_enabled_ && tee_stream_ && bytes_read > 0)
@@ -250,18 +250,14 @@ Reader::read_ledger_info()
 size_t
 Reader::skip_with_tee(size_t bytes, const std::string& context)
 {
-    // If tee is not enabled, just do a normal seek
-    if (!tee_enabled_ || !tee_stream_)
-    {
-        input_stream_->seekg(bytes, std::ios::cur);
-        return bytes;
-    }
+    // TODO: We could potentially just use seekg when uncompressed stream is available
+    // Though generally MmapReader is better for uncompressed files
 
-    // Copy the data we're skipping using a buffer
+    // Just consume it using read_raw_data
     constexpr size_t BUFFER_SIZE = 64 * 1024;  // 64KB buffer
     std::vector<uint8_t> buffer(std::min(BUFFER_SIZE, bytes));
-
     size_t remaining = bytes;
+
     while (remaining > 0)
     {
         size_t to_read = std::min(buffer.size(), remaining);

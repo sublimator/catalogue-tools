@@ -601,6 +601,22 @@ Writer::body_bytes_written() const
     return body_bytes_written_;
 }
 
+std::ostream&
+Writer::body_stream()
+{
+    if (!header_written_)
+    {
+        throw CatlV1Error("Cannot access body stream before writing header");
+    }
+
+    if (finalized_)
+    {
+        throw CatlV1Error("Cannot access body stream after finalization");
+    }
+
+    return *body_stream_;
+}
+
 void
 Writer::set_write_callback(WriteCallback callback)
 {
