@@ -1,6 +1,8 @@
 #pragma once
 
 #include "catl/core/types.h"
+#include "catl/shamap/shamap-nodetype.h"
+#include <iostream>
 #include <map>
 #include <vector>
 
@@ -144,5 +146,61 @@ private:
     // Using std::map for ordered iteration
     std::map<Hash256, std::vector<uint8_t>, HashCompare> items_;
 };
+
+/**
+ * Write a SimpleStateMap to an output stream in snapshot format
+ *
+ * This function serializes the state map in the format:
+ * - tnACCOUNT_STATE (1 byte)
+ * - Key (32 bytes)
+ * - Value Length (4 bytes)
+ * - Value Data (Value Length bytes)
+ * - ... repeat for all items ...
+ * - tnTERMINAL (1 byte)
+ *
+ * This format is compatible with the state snapshot format described in the
+ * catl-slice specification, and can be directly used for generating snapshot
+ * files.
+ *
+ * @param map The SimpleStateMap to serialize
+ * @param out The output stream to write to
+ * @return Number of bytes written
+ * @throws std::ios_base::failure if writing to the stream fails
+ */
+inline size_t
+write_map_to_stream(const SimpleStateMap& map, std::ostream& out)
+{
+    size_t bytes_written = 0;
+
+    // Write each item in the map
+    map.visit_items([&](const Hash256& key, const std::vector<uint8_t>& data) {
+        // Write node type
+        uint8_t node_type =
+            static_cast<uint8_t>(SHAMapNodeType::tnACCOUNT_STATE);
+        out.write(reinterpret_cast<const char*>(&node_type), sizeof(node_type));
+        bytes_written += sizeof(node_type);
+
+        // Write key (32 bytes)
+        out.write(reinterpret_cast<const char*>(key.data()), key.size());
+        bytes_written += key.size();
+
+        // Write value length (uint32_t)
+        uint32_t value_length = static_cast<uint32_t>(data.size());
+        out.write(
+            reinterpret_cast<const char*>(&value_length), sizeof(value_length));
+        bytes_written += sizeof(value_length);
+
+        // Write value data
+        out.write(reinterpret_cast<const char*>(data.data()), data.size());
+        bytes_written += data.size();
+    });
+
+    // Write terminal marker
+    uint8_t terminal = static_cast<uint8_t>(SHAMapNodeType::tnTERMINAL);
+    out.write(reinterpret_cast<const char*>(&terminal), sizeof(terminal));
+    bytes_written += sizeof(terminal);
+
+    return bytes_written;
+}
 
 }  // namespace catl::v1

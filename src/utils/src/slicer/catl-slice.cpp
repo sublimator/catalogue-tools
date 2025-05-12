@@ -126,18 +126,46 @@ public:
 
     // Attempt to load state from snapshot if available
     bool
-    try_load_state_snapshot(const std::string& snapshot_file)
+    try_load_state_snapshot(const std::string& snapshot_file, Writer& writer)
     {
-        if (fs::exists(snapshot_file))
-        {
-            LOGI("Loading state snapshot: ", snapshot_file);
-            // In a full implementation, load the state snapshot here
-            // For now, just pretend we loaded it
-            return true;
-        }
-        else
+        if (!fs::exists(snapshot_file))
         {
             LOGI("No start snapshot found, will process all ledgers");
+            return false;
+        }
+
+        try
+        {
+            LOGI("Loading state snapshot: ", snapshot_file);
+
+            // Copy the snapshot data directly to the writer's body stream
+            size_t bytes_copied =
+                copy_snapshot_to_stream(snapshot_file, writer.body_stream());
+
+            LOGI("  Successfully loaded snapshot (", bytes_copied, " bytes)");
+
+            // If we're creating a new snapshot at the end, we need to also
+            // load the state map into memory
+            if (options_.create_next_slice_state_snapshot &&
+                !state_map_->empty())
+            {
+                LOGI(
+                    "  Note: Also need to populate state map for end snapshot");
+                // TODO: In a full implementation, we would also populate the
+                // state map However, this would require a second pass through
+                // the snapshot file
+            }
+
+            return true;
+        }
+        catch (const SnapshotError& e)
+        {
+            LOGE("Failed to load snapshot: ", e.what());
+            return false;
+        }
+        catch (const std::exception& e)
+        {
+            LOGE("Failed to load snapshot: ", e.what());
             return false;
         }
     }
@@ -295,7 +323,7 @@ public:
 
     // Create a state snapshot for the next slice if requested
     void
-    create_end_snapshot()
+    create_end_snapshot(Reader& reader)
     {
         if (!options_.create_next_slice_state_snapshot ||
             !options_.snapshots_path)
@@ -303,22 +331,78 @@ public:
             return;
         }
 
+        const uint32_t next_ledger = *options_.end_ledger + 1;
         fs::path snapshot_path(*options_.snapshots_path);
-        std::string next_snapshot_file =
-            (snapshot_path /
-             ("state_snapshot_for_ledger_" +
-              std::to_string(*options_.end_ledger + 1) + ".dat.zst"))
-                .string();
+        fs::path next_snapshot_file = snapshot_path /
+            ("state_snapshot_for_ledger_" + std::to_string(next_ledger) +
+             ".dat.zst");
 
         LOGI(
             "Creating state snapshot for ledger ",
-            *options_.end_ledger + 1,
+            next_ledger,
             ": ",
-            next_snapshot_file);
+            next_snapshot_file.string());
 
-        // In a full implementation, write the state map to the snapshot file
-        LOGI("  State map contains ", state_map_->size(), " items");
-        // For now, just log that we would create the snapshot
+        try
+        {
+            // Check if the next ledger exists in the input file
+            if (next_ledger > reader.header().max_ledger)
+            {
+                throw SnapshotError(
+                    "Cannot create snapshot for ledger " +
+                    std::to_string(next_ledger) +
+                    " because it exceeds the max ledger in the input file (" +
+                    std::to_string(reader.header().max_ledger) + ")");
+            }
+
+            // We need to read the state delta for the next ledger to create
+            // the snapshot for that ledger
+            LOGI("  Reading state delta for ledger ", next_ledger);
+
+            // Fetch and apply the next ledger's state delta to our state map
+            LedgerInfo next_ledger_info = reader.read_ledger_info();
+            if (next_ledger_info.sequence != next_ledger)
+            {
+                throw SnapshotError(
+                    "Expected ledger " + std::to_string(next_ledger) +
+                    " but found ledger " +
+                    std::to_string(next_ledger_info.sequence));
+            }
+
+            // Process state map (apply changes to our state map)
+            reader.read_map_with_callbacks(
+                SHAMapNodeType::tnACCOUNT_STATE,
+                [this](
+                    const std::vector<uint8_t>& key,
+                    const std::vector<uint8_t>& data) {
+                    state_map_->set_item(vector_to_hash256(key), data);
+                },
+                [this](const std::vector<uint8_t>& key) {
+                    state_map_->remove_item(vector_to_hash256(key));
+                });
+
+            // Skip the transaction map - we don't need it for the snapshot
+            reader.skip_map(SHAMapNodeType::tnTRANSACTION_MD);
+
+            LOGI("  State map now contains ", state_map_->size(), " items");
+
+            // Use the new utility function to create the snapshot
+            create_state_snapshot(
+                *state_map_,
+                next_snapshot_file,
+                options_.compression_level,
+                options_.force_overwrite);
+
+            LOGI("  Snapshot created successfully");
+        }
+        catch (const SnapshotError& e)
+        {
+            LOGE("  Failed to create snapshot: ", e.what());
+        }
+        catch (const std::exception& e)
+        {
+            LOGE("  Failed to create snapshot: ", e.what());
+        }
     }
 
     // Log completion details
@@ -374,7 +458,8 @@ public:
                       std::to_string(*options_.start_ledger) + ".dat.zst"))
                         .string();
 
-                snapshot_loaded = try_load_state_snapshot(snapshot_file);
+                snapshot_loaded =
+                    try_load_state_snapshot(snapshot_file, *writer);
             }
 
             // Process initial ledgers if no snapshot was loaded
@@ -394,7 +479,7 @@ public:
             size_t ledgers_processed = process_slice_ledgers(reader, *writer);
 
             // Create end snapshot if requested
-            create_end_snapshot();
+            create_end_snapshot(reader);
 
             // Finish up and finalize the output file
             reader.disable_tee();
