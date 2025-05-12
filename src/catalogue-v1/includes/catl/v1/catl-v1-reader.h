@@ -224,23 +224,35 @@ public:
      * memory mapping is possible, consider using MmapReader instead for better
      * performance.
      *
+     * IMPORTANT: The storage vector will continue to grow as more items are
+     * added. For large files, this can lead to significant memory usage.
+     * Consider using the on_storage_growth callback to monitor and manage
+     * memory consumption if needed.
+     *
      * @see MmapReader::read_shamap()
      *
      * @param map SHAMap to populate with nodes
      * @param node_type Expected type of nodes in the map
      * @param storage Vector to store item data (must outlive the SHAMap!)
      * @param allow_delta Whether to allow updates and deletes to existing keys
+     * @param on_storage_growth Optional callback invoked after each item is
+     * added to storage, allowing the caller to monitor or manage memory usage
      * @return MapOperations struct with counts of nodes processed
      * @throws CatlV1Error if file format is invalid or an I/O error occurs
      * @throws CatlV1DeltaError if a delta operation is attempted when
      * allow_delta is false
+     *
+     * @note In a future v2 format, size hints for maps should be included in
+     * the file format to allow for better pre-allocation of storage vectors.
      */
     MapOperations
     read_map_to_shamap(
         SHAMap& map,
         SHAMapNodeType node_type,
         std::vector<uint8_t>& storage,
-        bool allow_delta = false);
+        bool allow_delta = false,
+        const std::function<void(size_t current_size, size_t growth)>&
+            on_storage_growth = nullptr);
 
     /**
      * Read a node type and skip the rest of the node

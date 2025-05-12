@@ -14,7 +14,9 @@ Reader::read_map_to_shamap(
     SHAMap& map,
     SHAMapNodeType node_type,
     std::vector<uint8_t>& storage,
-    bool allow_delta)
+    bool allow_delta,
+    const std::function<void(size_t current_size, size_t growth)>&
+        on_storage_growth)
 {
     MapOperations ops;
 
@@ -53,12 +55,19 @@ Reader::read_map_to_shamap(
             // Read key directly into storage (without trimming to avoid
             // reallocations)
             read_node_key(storage, false);
-
             // Remember position in storage where this item's data begins
             size_t data_pos = storage.size();
-
             // Read data directly into storage (without trimming)
             uint32_t data_size = read_node_data(storage, false);
+
+            // Call storage growth callback if provided
+            if (on_storage_growth)
+            {
+                size_t key_growth = data_pos - key_pos;
+                size_t data_growth = storage.size() - data_pos;
+                size_t total_growth = key_growth + data_growth;
+                on_storage_growth(storage.size(), total_growth);
+            }
 
             // Create MmapItem with pointers to our persistent storage
             // The key is at storage[key_pos] through storage[key_pos +
@@ -133,6 +142,12 @@ Reader::read_map_to_shamap(
         " deleted), storage increased by ",
         (storage.size() - storage_start_pos),
         " bytes");
+
+    // Note: In a future v2 format implementation, providing a storage estimate
+    // in the file header would allow for better pre-allocation and memory
+    // management. For now, the caller should either monitor storage growth via
+    // the callback or ensure sufficient pre-allocation to avoid reallocation
+    // overhead.
 
     return ops;
 }
