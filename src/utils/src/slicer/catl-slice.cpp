@@ -342,7 +342,6 @@ public:
             // Read ledger info (will be tee'd to the output)
             LOGD("Body bytes read: ", reader.body_bytes_consumed());
             LedgerInfo ledger_info = reader.read_ledger_info();
-            LOGI("  Processing ledger ", Hash256(ledger_info.hash).hex());
 
             if (ledgers_processed == 0 &&
                 ledger_info.sequence != *options_.start_ledger)
