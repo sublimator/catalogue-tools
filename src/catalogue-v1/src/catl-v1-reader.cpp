@@ -250,6 +250,9 @@ Reader::read_ledger_info()
 size_t
 Reader::skip_with_tee(size_t bytes, const std::string& context)
 {
+    // TODO: We could potentially just use seekg when uncompressed stream is available
+    // Though generally MmapReader is better for uncompressed files
+
     // Just consume it using read_raw_data
     constexpr size_t BUFFER_SIZE = 64 * 1024;  // 64KB buffer
     std::vector<uint8_t> buffer(std::min(BUFFER_SIZE, bytes));
