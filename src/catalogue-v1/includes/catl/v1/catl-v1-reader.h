@@ -32,20 +32,21 @@ struct MapOperations
  * consideration for the streaming nature of the data. Important implementation
  * notes:
  *
- * 1. Memory Management: When reading into a SHAMap, care must be taken with
- * memory lifetime as SHAMap items reference memory that must remain valid.
+ * 1. Memory Management: When reading into a SHAMap using read_map_to_shamap(),
+ * care must be taken with memory lifetime as SHAMap items reference memory that
+ * must remain valid.
  *
  * 2. Stream Limitations: When working with compressed streams (through zlib),
- *    backward seeking operations are generally not supported. Methods like
- * peek_node_type() may not work correctly with compressed streams.
+ * backward seeking operations are generally not supported.
  *
  * 3. Efficiency: For high-performance operations like slicing, prefer using
- * methods that perform direct byte copying (copy_map_to_stream) rather than
- * parsing and reconstructing the data.
+ * the tee functionality (enable_tee(), disable_tee()) combined with methods
+ * that perform minimal processing like read_raw_data() or skip_map() rather
+ * than parsing and reconstructing the data.
  *
- * 4. State Tracking: When tracking state for tools like the slicer, consider
- * using the process_nodes callback in copy_map_to_stream rather than building a
- * full SHAMap.
+ * 4. State Tracking: When tracking state for tools like a slicer, consider
+ * using read_map_with_callbacks() with appropriate callbacks rather than
+ * building a full SHAMap.
  */
 class Reader
 {
@@ -137,6 +138,10 @@ public:
     /**
      * Read bytes into a vector at specified position
      *
+     * This method reads bytes into a vector at a specific position. The
+     * position must be within the current vector size (the vector must already
+     * be sized appropriately).
+     *
      * @param vec Vector to read into
      * @param pos Position in vector to start writing
      * @param size Number of bytes to read
@@ -155,6 +160,40 @@ public:
             throw CatlV1Error("Vector too small for read operation");
         }
         read_bytes(&vec[pos], size, context);
+    }
+
+    /**
+     * Read bytes directly into a vector's existing capacity and update its size
+     *
+     * This method assumes the vector has already been reserved with sufficient
+     * capacity but has not been resized. It writes directly to the unused
+     * capacity and updates the vector's size afterward.
+     *
+     * @param vec Vector with sufficient capacity (but not necessarily resized)
+     * @param size Number of bytes to read
+     * @param context Optional context for error messages
+     * @throws CatlV1Error if insufficient capacity or I/O error
+     */
+    void
+    read_bytes_into_capacity(
+        std::vector<uint8_t>& vec,
+        size_t size,
+        const std::string& context = "")
+    {
+        size_t current_size = vec.size();
+        if (vec.capacity() < current_size + size)
+        {
+            throw CatlV1Error(
+                "Vector capacity insufficient for data - call reserve() before "
+                "reading");
+        }
+
+        // Resize to have access to the memory (will not reallocate)
+        // This is safe because we've already checked capacity
+        vec.resize(current_size + size);
+
+        // Read directly into the new area
+        read_bytes(&vec[current_size], size, context);
     }
 
     // Returns the parsed header
@@ -237,26 +276,28 @@ public:
      * Read a map node key into the provided vector
      *
      * @param key_out Vector to store the key data
-     * @param trim Whether to resize the vector to exactly fit the key (default:
-     * true) Set to false when appending to a storage vector to avoid
-     * reallocations
-     * @throws CatlV1Error if EOF or I/O error
+     * @param resize_to_fit Whether to resize the vector to exactly fit the key
+     * (default: true). When false, vector must have sufficient capacity
+     * pre-allocated via reserve() or an exception will be thrown.
+     * @throws CatlV1Error if EOF, I/O error, or insufficient vector capacity
+     * when resize_to_fit is false
      */
     void
-    read_node_key(std::vector<uint8_t>& key_out, bool trim = true);
+    read_node_key(std::vector<uint8_t>& key_out, bool resize_to_fit = true);
 
     /**
      * Read map node data into the provided vector
      *
      * @param data_out Vector to store the data
-     * @param trim Whether to resize the vector to exactly fit the data
-     * (default: true) Set to false when appending to a storage vector to avoid
-     * reallocations
+     * @param resize_to_fit Whether to resize the vector to exactly fit the data
+     * (default: true). When false, vector must have sufficient capacity
+     * pre-allocated via reserve() or an exception will be thrown.
      * @return The size of the data read
-     * @throws CatlV1Error if EOF or I/O error
+     * @throws CatlV1Error if EOF, I/O error, or insufficient vector capacity
+     * when resize_to_fit is false
      */
     uint32_t
-    read_node_data(std::vector<uint8_t>& data_out, bool trim = true);
+    read_node_data(std::vector<uint8_t>& data_out, bool resize_to_fit = true);
 
     /**
      * Read a complete map node (type, key, and data)

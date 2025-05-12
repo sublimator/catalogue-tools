@@ -207,9 +207,9 @@ Reader::read_node_type()
  * Implementation of read_node_key
  */
 void
-Reader::read_node_key(std::vector<uint8_t>& key_out, bool trim)
+Reader::read_node_key(std::vector<uint8_t>& key_out, bool resize_to_fit)
 {
-    if (trim)
+    if (resize_to_fit)
     {
         // Resize vector to hold exactly the key data
         key_out.resize(Key::size());
@@ -219,14 +219,8 @@ Reader::read_node_key(std::vector<uint8_t>& key_out, bool trim)
     }
     else
     {
-        // Get position to read into
-        size_t pos = key_out.size();
-
-        // Expand vector (no reallocation thanks to ensure_capacity)
-        key_out.resize(pos + Key::size());
-
-        // Read key data directly into the expanded area
-        read_bytes_into_vector(key_out, pos, Key::size(), "key");
+        // Read directly into vector's unused capacity and update size
+        read_bytes_into_capacity(key_out, Key::size(), "key");
     }
 }
 
@@ -234,16 +228,17 @@ Reader::read_node_key(std::vector<uint8_t>& key_out, bool trim)
  * Implementation of read_node_data
  */
 uint32_t
-Reader::read_node_data(std::vector<uint8_t>& data_out, bool trim)
+Reader::read_node_data(std::vector<uint8_t>& data_out, bool resize_to_fit)
 {
     // Read data length
     uint32_t data_length;
     read_value(data_length, "data length");
 
-    if (trim)
+    if (resize_to_fit)
     {
-        // TODO: why would you bother here?
-        // Resize vector to hold exactly the data
+        // Resize vector to hold exactly the data - this ensures the vector size
+        // matches the exact data length and allows the caller to rely on this
+        // size
         data_out.resize(data_length);
 
         // Read data
@@ -254,16 +249,10 @@ Reader::read_node_data(std::vector<uint8_t>& data_out, bool trim)
     }
     else
     {
-        // Get position to read into
-        size_t pos = data_out.size();
-
-        // Expand vector (no reallocation thanks to ensure_capacity)
-        data_out.resize(pos + data_length);
-
-        // Read data directly into the expanded area
+        // Read directly into vector's unused capacity if data exists
         if (data_length > 0)
         {
-            read_bytes_into_vector(data_out, pos, data_length, "data");
+            read_bytes_into_capacity(data_out, data_length, "data");
         }
     }
 
