@@ -56,7 +56,12 @@ public:
         }
     }
 
-    // Helper to validate the requested ledger range against file header
+    /**
+     * Validate the requested ledger range against file header
+     *
+     * @param header The CATL file header to validate against
+     * @throws CatlV1Error if requested range is outside file's range
+     */
     void
     validate_ledger_range(const CatlHeader& header)
     {
@@ -71,7 +76,11 @@ public:
         }
     }
 
-    // Helper to log file and operation information
+    /**
+     * Log file details and operation parameters
+     *
+     * @param header The CATL file header containing file information
+     */
     void
     log_operation_details(const CatlHeader& header)
     {
@@ -109,7 +118,12 @@ public:
         }
     }
 
-    // Helper to create output file writer and prepare for writing
+    /**
+     * Create output file writer and prepare for writing
+     *
+     * @param header The source CATL file header to get network ID from
+     * @return Initialized Writer for the output file
+     */
     std::unique_ptr<Writer>
     create_writer(const CatlHeader& header)
     {
@@ -124,7 +138,13 @@ public:
         return writer;
     }
 
-    // Attempt to load state from snapshot if available
+    /**
+     * Attempt to load state from snapshot if available
+     *
+     * @param snapshot_file Path to the snapshot file to load
+     * @param writer Writer to which the snapshot should be copied
+     * @return true if snapshot was loaded successfully, false otherwise
+     */
     bool
     try_load_state_snapshot(const std::string& snapshot_file, Writer& writer)
         const
@@ -171,7 +191,12 @@ public:
         }
     }
 
-    // Helper to convert vector key to Hash256
+    /**
+     * Convert vector key to Hash256 for state map operations
+     *
+     * @param vec_key Vector containing the key bytes
+     * @return Hash256 representation of the key
+     */
     Hash256
     vector_to_hash256(const std::vector<uint8_t>& vec_key)
     {
@@ -183,9 +208,19 @@ public:
         return hash_key;
     }
 
-    // Process state map from min_ledger up to (but NOT including) the requested
-    // start_ledger.
-    // This should NEVER ever read the ledger header of the start ledger.
+    /**
+     * Process state map from min_ledger up to (but NOT including) the requested
+     * start_ledger
+     *
+     * This method builds the initial state by processing all ledgers prior to
+     * the start of the requested slice. It should NEVER read the ledger header
+     * of the start ledger - it will stop just before it.
+     *
+     * @param reader The CATL reader to read from
+     * @param min_ledger The minimum ledger in the file
+     * @param using_snapshot Whether we're using a snapshot for the initial
+     * state
+     */
     void
     process_pre_slice_ledgers(
         Reader& reader,
@@ -282,8 +317,18 @@ public:
         // processed it Perfect position to enable tee and start processing the
         // slice
         LOGI("  Completed building initial state, ready for slice");
+        LOGI(
+            "  State map contains ",
+            state_map_ ? state_map_->size() : 0,
+            " items");
     }
 
+    /**
+     * Read account state map and update the in-memory state map
+     *
+     * @param reader The CATL reader to read from
+     * @return Map operation statistics
+     */
     MapOperations
     read_into_account_state_map(Reader& reader)
     {
@@ -299,9 +344,18 @@ public:
             });
     }
 
-    // Process ledgers from start_ledger to end_ledger
-    // Important: this assumes the reader is positioned to read the first ledger
-    // in the slice
+    /**
+     * Process ledgers from start_ledger to end_ledger
+     *
+     * Important: this assumes the reader is positioned to read the first ledger
+     * in the slice. The method handles both state and transaction maps,
+     * with special logic for the first ledger in the slice.
+     *
+     * @param reader The CATL reader to read from
+     * @param writer The Writer to write the slice to
+     * @param snapshot_file Optional snapshot file for the first ledger's state
+     * @return Number of ledgers processed
+     */
     size_t
     process_slice_ledgers(
         Reader& reader,
@@ -331,7 +385,14 @@ public:
             }
 
             current_ledger = ledger_info.sequence;
-            LOGI("  Processing ledger ", current_ledger);
+            LOGI(
+                "  Processing ledger ",
+                current_ledger,
+                " (",
+                ledgers_processed,
+                " of ",
+                (*options_.end_ledger - *options_.start_ledger + 1),
+                " total)");
             ledgers_processed++;
 
             // Special handling for the first ledger when using a snapshot
@@ -372,6 +433,8 @@ public:
                     current_ledger);
                 LOGI("  Sets: ", stats.nodes_added);
                 LOGI("  Deletes: ", stats.nodes_deleted);
+                LOGI("  Total operations: ", stats.nodes_processed);
+                LOGI("  Current state map size: ", state_map_->size());
             }
             else
             {
@@ -380,13 +443,22 @@ public:
             }
 
             // Process transaction map (just tee it, no need to track)
+            LOGD("  Processing transaction map for ledger ", current_ledger);
             reader.skip_map(SHAMapNodeType::tnTRANSACTION_MD);
         }
 
         return ledgers_processed;
     }
 
-    // Create a state snapshot for the next slice if requested
+    /**
+     * Create a state snapshot for the next slice if requested
+     *
+     * This method creates a snapshot of the state at the end of the slice,
+     * which can be used as the starting point for the next slice operation.
+     * It reads and applies the state for the ledger after the end of the slice.
+     *
+     * @param reader The CATL reader to read additional state if needed
+     */
     void
     create_end_snapshot(Reader& reader)
     {
@@ -470,7 +542,12 @@ public:
         }
     }
 
-    // Log completion details
+    /**
+     * Log completion details and statistics
+     *
+     * @param seconds Time taken to complete the slice operation
+     * @param ledgers_processed Number of ledgers processed
+     */
     void
     log_completion(double seconds, size_t ledgers_processed)
     {
@@ -491,6 +568,11 @@ public:
         }
     }
 
+    /**
+     * Check if a snapshot file exists for the start ledger
+     *
+     * @return Optional path to the snapshot file if it exists
+     */
     std::optional<std::string>
     check_snapshot_path() const
     {
@@ -512,6 +594,15 @@ public:
         return snapshot_file;
     }
 
+    /**
+     * Execute the main slicing operation
+     *
+     * This is the main entry point for the slicer which orchestrates the entire
+     * process from reading input, building state, creating the slice file,
+     * and generating snapshots as requested.
+     *
+     * @return true if slicing completed successfully, false otherwise
+     */
     bool
     slice()
     {
