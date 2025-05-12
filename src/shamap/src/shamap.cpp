@@ -69,7 +69,7 @@ SHAMap::enable_cow()
         }
     }
 
-    OLOGD("Copy-on-Writ enabled for SHAMap with version ", current_version_);
+    OLOGD("Copy-on-Write enabled for SHAMap with version ", current_version_);
 }
 
 int
@@ -96,7 +96,7 @@ SHAMap::snapshot()
 {
     if (!root)
     {
-        OLOGW("Attempted to snapshot a SHAMap with null root");
+        OLOGW("Attempted to snapshot a SHAMap with null root.");
         return nullptr;
     }
 

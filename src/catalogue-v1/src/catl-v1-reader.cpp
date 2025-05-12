@@ -59,7 +59,16 @@ Reader::decompress(const std::string& output_path)
         size_t bytes_read = read_raw_data(buffer.data(), buffer.size());
         if (bytes_read > 0)
         {
-            writer->write_raw_data(buffer.data(), bytes_read);
+            try
+            {
+                writer->write_raw_data(buffer.data(), bytes_read);
+            }
+            catch (const CatlV1Error& e)
+            {
+                throw CatlV1Error(
+                    "Error writing to output file during decompression: " +
+                    std::string(e.what()));
+            }
         }
 
         // Check for errors other than EOF

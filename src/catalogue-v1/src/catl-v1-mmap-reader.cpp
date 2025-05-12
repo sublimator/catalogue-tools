@@ -337,7 +337,7 @@ MmapReader::verify_file_hash()
 
     if (hash_is_zero)
     {
-        throw CatlV1Error(
+        throw CatlV1HashVerificationError(
             "Cannot verify file hash: Header hash field is empty");
     }
 

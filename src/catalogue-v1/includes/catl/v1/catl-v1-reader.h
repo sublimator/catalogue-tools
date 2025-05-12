@@ -84,8 +84,13 @@ public:
         const std::string& context = "");
 
     /**
+     * Get the total number of bytes read from the body of the file
      *
-     * @return Number of bytes read from the body of the file
+     * This method returns the count of bytes read from the file body (the part
+     * after the header). This is useful for tracking progress, especially when
+     * using the tee functionality to copy data while reading.
+     *
+     * @return Number of bytes read from the body of the file since construction
      */
     size_t
     body_bytes_read() const
@@ -176,8 +181,10 @@ public:
         if (vec.capacity() < current_size + size)
         {
             throw CatlV1Error(
-                "Vector capacity insufficient for data - call reserve() before "
-                "reading");
+                "Vector capacity insufficient for data - required capacity: " +
+                std::to_string(current_size + size) +
+                ", available: " + std::to_string(vec.capacity()) +
+                ". Call reserve() before reading");
         }
 
         // Resize to have access to the memory (will not reallocate)
