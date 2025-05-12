@@ -6,7 +6,7 @@
 namespace catl::v1 {
 
 /**
- * Implementation of read_shamap that uses an external storage vector
+ * Implementation of reading a SHAMap that uses an external storage vector
  * to ensure memory persistence for SHAMap items.
  */
 MapOperations

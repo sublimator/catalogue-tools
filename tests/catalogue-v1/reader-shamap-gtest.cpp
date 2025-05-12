@@ -223,24 +223,24 @@ TEST_F(ReaderShaMapTest, ReadKeysAndData)
 
     // Test append functionality
     std::vector<uint8_t> storage_vector;
+    storage_vector.reserve(1024);  // Reserve space for key
 
     // Read another node's type
     type = reader.read_node_type();
     EXPECT_EQ(type, tnACCOUNT_STATE);
 
-    // Append key to storage without trimming
+    // Append key to storage
     reader.read_node_key(storage_vector, false);
     EXPECT_EQ(storage_vector.size(), 32)
         << "Storage vector should contain 32 bytes after key read";
 
-    // Append data to storage without trimming
+    // Append data to storage
     size_t storage_before_data = storage_vector.size();
     data_size = reader.read_node_data(storage_vector, false);
     EXPECT_EQ(storage_vector.size(), storage_before_data + data_size)
         << "Storage vector should grow by exact data size";
 }
 
-// Test reader's error handling - FIXED
 TEST_F(ReaderShaMapTest, ErrorHandling)
 {
     // Test with invalid file
@@ -259,7 +259,6 @@ TEST_F(ReaderShaMapTest, ErrorHandling)
         boost::filesystem::remove(temp_file);
     }
 
-    // Test with valid file but invalid operations - FIXED VERSION
     {
         Reader reader(uncompressed_fixture_path);
 

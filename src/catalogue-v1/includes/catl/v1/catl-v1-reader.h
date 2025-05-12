@@ -120,14 +120,6 @@ public:
      * @param context Optional context for error messages
      * @throws CatlV1Error if EOF is reached or an I/O error occurs
      */
-    /**
-     * Read a fixed-size value from the file
-     *
-     * @tparam T Type of value to read
-     * @param value Reference to variable that will receive the value
-     * @param context Optional context for error messages
-     * @throws CatlV1Error if EOF is reached or an I/O error occurs
-     */
     template <typename T>
     void
     read_value(T& value, const std::string& context = "")
@@ -218,6 +210,14 @@ public:
      * marker and add them to the provided SHAMap. This method stores item data
      * in the provided storage vector to ensure data referenced by MmapItems
      * remains valid.
+     *
+     * Note: This method differs from MmapReader::read_shamap() in that it
+     * requires an external storage vector because it cannot rely on
+     * memory-mapped file data persisting. For non-compressed files where direct
+     * memory mapping is possible, consider using MmapReader instead for better
+     * performance.
+     *
+     * @see MmapReader::read_shamap()
      *
      * @param map SHAMap to populate with nodes
      * @param node_type Expected type of nodes in the map
