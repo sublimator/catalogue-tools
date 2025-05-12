@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "catl/core/logger.h"
+
 namespace po = boost::program_options;
 namespace catl::utils::slicer {
 
@@ -33,7 +35,7 @@ parse_argv(int argc, char* argv[])
         po::value<std::string>(),
         "Directory where state snapshots are stored and looked for")(
         "compression-level",
-        po::value<uint8_t>()->default_value(0),
+        po::value<int>()->default_value(0),
         "Compression level for output (0-9)")(
         "force-overwrite,f",
         po::bool_switch(),
@@ -153,15 +155,19 @@ parse_argv(int argc, char* argv[])
         // Get compression level
         if (vm.count("compression-level"))
         {
-            uint8_t level = vm["compression-level"].as<uint8_t>();
-            if (level > 9)
+            LOGI(
+                "Parsing compression level: ",
+                vm["compression-level"].as<int>());
+            int level = vm["compression-level"].as<int>();
+            if (level < 0 || level > 9)
             {
                 options.valid = false;
                 options.error_message =
-                    "Compression level must be between 0 and 9";
+                    "Compression level must be between 0 and 9, got: " +
+                    std::to_string(level);
                 return options;
             }
-            options.compression_level = level;
+            options.compression_level = static_cast<uint8_t>(level);
         }
 
         // Check force overwrite flag

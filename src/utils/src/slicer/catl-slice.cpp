@@ -186,7 +186,10 @@ public:
     // start_ledger.
     // This should NEVER ever read the ledger header of the start ledger.
     void
-    process_pre_slice_ledgers(Reader& reader, uint32_t min_ledger)
+    process_pre_slice_ledgers(
+        Reader& reader,
+        uint32_t min_ledger,
+        bool snapshot_loaded)
     {
         LOGI(
             "Processing ledgers from ",
@@ -224,16 +227,23 @@ public:
                 // initial ledgers
 
                 // Process state map using callbacks to update SimpleStateMap
-                reader.read_map_with_callbacks(
-                    SHAMapNodeType::tnACCOUNT_STATE,
-                    [this](
-                        const std::vector<uint8_t>& key,
-                        const std::vector<uint8_t>& data) {
-                        state_map_->set_item(vector_to_hash256(key), data);
-                    },
-                    [this](const std::vector<uint8_t>& key) {
-                        state_map_->remove_item(vector_to_hash256(key));
-                    });
+                if (!snapshot_loaded)
+                {
+                    reader.read_map_with_callbacks(
+                        SHAMapNodeType::tnACCOUNT_STATE,
+                        [this](
+                            const std::vector<uint8_t>& key,
+                            const std::vector<uint8_t>& data) {
+                            state_map_->set_item(vector_to_hash256(key), data);
+                        },
+                        [this](const std::vector<uint8_t>& key) {
+                            state_map_->remove_item(vector_to_hash256(key));
+                        });
+                }
+                else
+                {
+                    reader.skip_map(SHAMapNodeType::tnACCOUNT_STATE);
+                }
 
                 LOGI(
                     "process_pre_slice_ledgers: Body bytes read after state "
@@ -263,7 +273,10 @@ public:
     // Important: this assumes the reader is positioned to read the first ledger
     // in the slice
     size_t
-    process_slice_ledgers(Reader& reader, Writer& /* writer */)
+    process_slice_ledgers(
+        Reader& reader,
+        Writer& /* writer */,
+        bool snapshot_loaded)
     {
         LOGI("Beginning slice creation from ledger ", *options_.start_ledger);
         LOGI("Writing full state map for ledger ", *options_.start_ledger);
@@ -462,11 +475,10 @@ public:
                     try_load_state_snapshot(snapshot_file, *writer);
             }
 
-            // Process initial ledgers if no snapshot was loaded
-            if (!snapshot_loaded)
-            {
-                process_pre_slice_ledgers(reader, header.min_ledger);
-            }
+            // Process initial ledgers (even if snapshot was loaded, to skip to
+            // the first ledger)
+            process_pre_slice_ledgers(
+                reader, header.min_ledger, snapshot_loaded);
 
             // NOW enable tee since we've reached the start ledger
             // and want to begin copying data to the output
@@ -476,7 +488,8 @@ public:
             reader.enable_tee(writer->body_stream());
 
             // Process ledgers in the requested slice range
-            size_t ledgers_processed = process_slice_ledgers(reader, *writer);
+            size_t ledgers_processed =
+                process_slice_ledgers(reader, *writer, snapshot_loaded);
 
             // Create end snapshot if requested
             create_end_snapshot(reader);

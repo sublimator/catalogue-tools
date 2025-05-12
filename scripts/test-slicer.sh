@@ -29,7 +29,14 @@ START_LEDGER=1000
 END_LEDGER=2000
 SLICE_FILE="./test-slice-$START_LEDGER-$END_LEDGER.catl"
 SNAPSHOT_DIR="./catl_snapshots"
-OUTPUT_COMPRESSION=0 # Uncompressed for testing
+OUTPUT_COMPRESSION="0" # Uncompressed for testing
+
+# Check if input file exists
+if [ ! -f "$INPUT_FILE" ]; then
+  echo "❌ Error: Input file does not exist: $INPUT_FILE"
+  echo "Please check the file path and try again."
+  exit 1
+fi
 
 # Create a temporary directory for snapshots
 mkdir -p "$SNAPSHOT_DIR"
@@ -41,7 +48,7 @@ echo "Testing slice creation from $START_LEDGER to $END_LEDGER"
   --start-ledger "$START_LEDGER" \
   --end-ledger "$END_LEDGER" \
   --snapshots-path "$SNAPSHOT_DIR" \
-  --compression-level "$OUTPUT_COMPRESSION" \
+  --compression-level 0 \
   --force-overwrite \
   --log-level info
 

@@ -10,3 +10,5 @@ catenv
 test-decompressed.catl
 
 **/.claude/settings.local.json
+catl_snapshots
+*.catl
