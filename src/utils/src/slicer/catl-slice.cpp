@@ -154,29 +154,13 @@ public:
             LOGI("No start snapshot found, will process all ledgers");
             return false;
         }
-
         try
         {
             LOGI("Loading state snapshot: ", snapshot_file);
-
             // Copy the snapshot data directly to the writer's body stream
             size_t bytes_copied =
                 copy_snapshot_to_stream(snapshot_file, writer.body_stream());
-
             LOGI("  Successfully loaded snapshot (", bytes_copied, " bytes)");
-
-            // If we're creating a new snapshot at the end, we need to also
-            // load the state map into memory
-            if (options_.create_next_slice_state_snapshot &&
-                !state_map_->empty())
-            {
-                LOGI(
-                    "  Note: Also need to populate state map for end snapshot");
-                // TODO: In a full implementation, we would also populate the
-                // state map However, this would require a second pass through
-                // the snapshot file
-            }
-
             return true;
         }
         catch (const SnapshotError& e)
@@ -266,13 +250,7 @@ public:
                 // Process state map using callbacks to update SimpleStateMap
                 if (!using_snapshot)
                 {
-                    LOGI("Processing state map for ledger: ", current_ledger);
-                    auto stats = read_into_account_state_map(reader);
-                    LOGI(
-                        "Finished processing state map for ledger: ",
-                        current_ledger);
-                    LOGI("  Sets: ", stats.nodes_added);
-                    LOGI("  Deletes: ", stats.nodes_deleted);
+                    read_into_account_state_map(reader, current_ledger);
                 }
                 else
                 {
@@ -300,9 +278,6 @@ public:
                 ledger_info.sequence + 1;  // increment so loop guard works
         }
 
-        // At this point we've read the header for start_ledger but haven't
-        // processed it Perfect position to enable tee and start processing the
-        // slice
         LOGI("  Completed building initial state, ready for slice");
         LOGI(
             "  State map contains ",
@@ -314,12 +289,12 @@ public:
      * Read account state map and update the in-memory state map
      *
      * @param reader The CATL reader to read from
-     * @return Map operation statistics
+     * @param current_ledger The current ledger sequence number
      */
-    MapOperations
-    read_into_account_state_map(Reader& reader)
+    void
+    read_into_account_state_map(Reader& reader, uint32_t current_ledger)
     {
-        return reader.read_map_with_callbacks(
+        auto stats = reader.read_map_with_callbacks(
             SHAMapNodeType::tnACCOUNT_STATE,
             [this](
                 const std::vector<uint8_t>& key,
@@ -329,6 +304,11 @@ public:
             [this](const std::vector<uint8_t>& key) {
                 state_map_->remove_item(vector_to_hash256(key));
             });
+        LOGI("Finished processing state map for ledger: ", current_ledger);
+        LOGD("  Sets: ", stats.nodes_added);
+        LOGD("  Deletes: ", stats.nodes_deleted);
+        LOGD("  Total operations: ", stats.nodes_processed);
+        LOGD("  Current state map size: ", state_map_->size());
     }
 
     /**
@@ -351,14 +331,16 @@ public:
     {
         LOGI("Beginning slice creation from ledger ", *options_.start_ledger);
 
-        uint32_t current_ledger = *options_.start_ledger;
         size_t ledgers_processed = 0;
+        uint32_t current_ledger = *options_.start_ledger;
 
+        // We always do the start ledger in case of start_ledger == end_ledger
+        // It's a unlikely edge case but we want to handle it anyway
         while (current_ledger == *options_.start_ledger ||
                current_ledger < *options_.end_ledger)
         {
             // Read ledger info (will be tee'd to the output)
-            LOGI("Body bytes read: ", reader.body_bytes_consumed());
+            LOGD("Body bytes read: ", reader.body_bytes_consumed());
             LedgerInfo ledger_info = reader.read_ledger_info();
             LOGI("  Processing ledger ", Hash256(ledger_info.hash).hex());
 
@@ -400,7 +382,7 @@ public:
                 else
                 {
                     // we need to copy the state map to the output
-                    read_into_account_state_map(reader);
+                    read_into_account_state_map(reader, current_ledger);
                     write_map_to_stream(*state_map_, writer.body_stream());
                 }
                 reader.enable_tee(writer.body_stream());
@@ -414,14 +396,7 @@ public:
             if (options_.create_next_slice_state_snapshot)
             {
                 // Track state changes for snapshot creation
-                auto stats = read_into_account_state_map(reader);
-                LOGI(
-                    "Finished processing state map for ledger: ",
-                    current_ledger);
-                LOGI("  Sets: ", stats.nodes_added);
-                LOGI("  Deletes: ", stats.nodes_deleted);
-                LOGI("  Total operations: ", stats.nodes_processed);
-                LOGI("  Current state map size: ", state_map_->size());
+                read_into_account_state_map(reader, current_ledger);
             }
             else
             {
@@ -494,7 +469,7 @@ public:
             }
 
             // Process state map (apply changes to our state map)
-            read_into_account_state_map(reader);
+            read_into_account_state_map(reader, next_ledger);
 
             // Skip the transaction map - we don't need it for the snapshot
             reader.skip_map(SHAMapNodeType::tnTRANSACTION_MD);
