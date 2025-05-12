@@ -411,7 +411,7 @@ TEST_F(ReaderShaMapTest, TeeWithReadMap)
     std::stringstream output_stream;
 
     // Note bytes read before the operation
-    size_t bytes_before = reader.body_bytes_read();
+    size_t bytes_before = reader.body_bytes_consumed();
 
     // Enable tee mode
     reader.enable_tee(output_stream);
@@ -433,7 +433,7 @@ TEST_F(ReaderShaMapTest, TeeWithReadMap)
             .nodes_processed;
 
     // Calculate bytes read during tee operation
-    size_t bytes_during_tee = reader.body_bytes_read() - bytes_before;
+    size_t bytes_during_tee = reader.body_bytes_consumed() - bytes_before;
 
     // Disable tee mode
     reader.disable_tee();
@@ -466,7 +466,7 @@ TEST_F(ReaderShaMapTest, TeeWithSkipMap)
     std::stringstream output_stream;
 
     // Note bytes read before the operation
-    size_t bytes_before = reader.body_bytes_read();
+    size_t bytes_before = reader.body_bytes_consumed();
 
     // Enable tee mode
     reader.enable_tee(output_stream);
@@ -478,7 +478,7 @@ TEST_F(ReaderShaMapTest, TeeWithSkipMap)
     reader.disable_tee();
 
     // Calculate bytes read during tee operation
-    size_t bytes_during_tee = reader.body_bytes_read() - bytes_before;
+    size_t bytes_during_tee = reader.body_bytes_consumed() - bytes_before;
 
     // Verify output stream size matches bytes read during tee
     EXPECT_GT(bytes_during_tee, 0) << "Should have read some bytes during tee";
@@ -486,14 +486,14 @@ TEST_F(ReaderShaMapTest, TeeWithSkipMap)
         << "Output stream size should match bytes read during tee";
 
     // Note bytes before skipping transaction map
-    bytes_before = reader.body_bytes_read();
+    bytes_before = reader.body_bytes_consumed();
 
     // Skip transaction map without tee - this should not add to the output
     // stream
     reader.skip_map(tnTRANSACTION_MD);
 
     // Verify tee stream size hasn't changed even though we read more bytes
-    EXPECT_GT(reader.body_bytes_read() - bytes_before, 0)
+    EXPECT_GT(reader.body_bytes_consumed() - bytes_before, 0)
         << "Should have read bytes during transaction map skip";
     EXPECT_EQ(output_stream.str().size(), bytes_during_tee)
         << "Stream size should not change when tee is disabled";

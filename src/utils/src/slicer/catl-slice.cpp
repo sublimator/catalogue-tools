@@ -154,9 +154,11 @@ public:
         return hash_key;
     }
 
-    // Process state map from start to the requested start ledger
+    // Process state map from min_ledger up to (but NOT including) the requested
+    // start_ledger.
+    // This should NEVER ever read the ledger header of the start ledger.
     void
-    process_initial_ledgers(Reader& reader, uint32_t min_ledger)
+    process_pre_slice_ledgers(Reader& reader, uint32_t min_ledger)
     {
         LOGI(
             "Processing ledgers from ",
@@ -167,18 +169,31 @@ public:
 
         uint32_t current_ledger = min_ledger;
 
+        LOGD(
+            "process_pre_slice_ledgers: Body bytes read before loop:",
+            reader.body_bytes_consumed());
+
         // Skip forward to the start ledger, building state as we go
         while (current_ledger < *options_.start_ledger)
         {
             // Read ledger info
             LedgerInfo ledger_info = reader.read_ledger_info();
+            LOGD(
+                "process_pre_slice_ledgers: Body bytes read after header: ",
+                reader.body_bytes_consumed());
             current_ledger = ledger_info.sequence;
+
+            LOGI("process_pre_slice_ledgers: current_ledger: ", current_ledger);
 
             // Process state map if we haven't reached the start ledger yet
             if (current_ledger < *options_.start_ledger)
             {
-                LOGI("  Processing state map for ledger ", current_ledger);
-                reader.disable_tee();  // Disable tee for ledgers we're skipping
+                LOGI(
+                    "process_pre_slice_ledgers:  Processing state map for "
+                    "ledger ",
+                    current_ledger);
+                // No need to disable tee since we haven't enabled it yet for
+                // initial ledgers
 
                 // Process state map using callbacks to update SimpleStateMap
                 reader.read_map_with_callbacks(
@@ -192,14 +207,33 @@ public:
                         state_map_->remove_item(vector_to_hash256(key));
                     });
 
+                LOGI(
+                    "process_pre_slice_ledgers: Body bytes read after state "
+                    "map: ",
+                    reader.body_bytes_consumed());
+
                 // Skip the transaction map since we don't need it for state
                 // tracking
-                reader.skip_map(SHAMapNodeType::tnTRANSACTION_NM);
+                reader.skip_map(SHAMapNodeType::tnTRANSACTION_MD);
+
+                LOGI(
+                    "process_pre_slice_ledgers: Body bytes read after tx map: ",
+                    reader.body_bytes_consumed());
             }
+
+            current_ledger =
+                ledger_info.sequence + 1;  // increment so loop guard works
         }
+
+        // At this point we've read the header for start_ledger but haven't
+        // processed it Perfect position to enable tee and start processing the
+        // slice
+        LOGI("  Completed building initial state, ready for slice");
     }
 
     // Process ledgers from start_ledger to end_ledger
+    // Important: this assumes the reader is positioned to read the first ledger
+    // in the slice
     size_t
     process_slice_ledgers(Reader& reader, Writer& /* writer */)
     {
@@ -209,18 +243,24 @@ public:
         uint32_t current_ledger = *options_.start_ledger;
         size_t ledgers_processed = 0;
 
-        while (current_ledger <= *options_.end_ledger)
+        while (current_ledger == *options_.start_ledger ||
+               current_ledger < *options_.end_ledger)
         {
             // Read ledger info (will be tee'd to the output)
+            LOGI("Body bytes read: ", reader.body_bytes_consumed());
             LedgerInfo ledger_info = reader.read_ledger_info();
-            current_ledger = ledger_info.sequence;
+            LOGI("  Processing ledger ", Hash256(ledger_info.hash).hex());
 
-            if (current_ledger > *options_.end_ledger)
+            if (ledgers_processed == 0 &&
+                ledger_info.sequence != *options_.start_ledger)
             {
-                // We've reached past our end ledger
-                break;
+                throw std::runtime_error(
+                    "Expected first ledger to be " +
+                    std::to_string(*options_.start_ledger) + ", got " +
+                    std::to_string(ledger_info.sequence));
             }
 
+            current_ledger = ledger_info.sequence;
             LOGI("  Processing ledger ", current_ledger);
             ledgers_processed++;
 
@@ -247,7 +287,7 @@ public:
             }
 
             // Process transaction map (just tee it, no need to track)
-            reader.skip_map(SHAMapNodeType::tnTRANSACTION_NM);
+            reader.skip_map(SHAMapNodeType::tnTRANSACTION_MD);
         }
 
         return ledgers_processed;
@@ -319,9 +359,9 @@ public:
             // Start timing
             auto start_time = std::chrono::high_resolution_clock::now();
 
-            // Create writer and set up tee functionality
+            // Create writer but don't enable tee yet - we don't want to copy
+            // data until we reach start_ledger
             auto writer = create_writer(header);
-            reader.enable_tee(writer->body_stream());
 
             // Try to load a state snapshot if needed
             bool snapshot_loaded = false;
@@ -340,9 +380,15 @@ public:
             // Process initial ledgers if no snapshot was loaded
             if (!snapshot_loaded)
             {
-                process_initial_ledgers(reader, header.min_ledger);
-                reader.enable_tee(writer->body_stream());  // Re-enable tee
+                process_pre_slice_ledgers(reader, header.min_ledger);
             }
+
+            // NOW enable tee since we've reached the start ledger
+            // and want to begin copying data to the output
+            LOGI(
+                "Enabling tee functionality for ledger ",
+                *options_.start_ledger);
+            reader.enable_tee(writer->body_stream());
 
             // Process ledgers in the requested slice range
             size_t ledgers_processed = process_slice_ledgers(reader, *writer);
