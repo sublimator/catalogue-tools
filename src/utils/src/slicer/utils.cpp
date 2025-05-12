@@ -142,7 +142,7 @@ copy_snapshot_to_stream(
             // Add zlib decompression filter
             decompressed_in.push(
                 boost::iostreams::zlib_decompressor(zlib_params));
-            decompressed_in.push(file);
+            decompressed_in.push(boost::ref(file));
         }
         catch (const std::exception& e)
         {

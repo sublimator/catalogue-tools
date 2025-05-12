@@ -1,4 +1,5 @@
 #!/bin/bash -u
+set -ex
 
 # Parse command line arguments
 CLEANUP=false
@@ -25,8 +26,8 @@ popd
 
 # Parameters for testing
 INPUT_FILE="/Users/nicholasdudfield/projects/xahau-history/cat.1-5000000"
-START_LEDGER=1000
-END_LEDGER=2000
+START_LEDGER=1
+END_LEDGER=100
 SLICE_FILE="./test-slice-$START_LEDGER-$END_LEDGER.catl"
 SNAPSHOT_DIR="./catl_snapshots"
 OUTPUT_COMPRESSION="0" # Uncompressed for testing
@@ -48,13 +49,15 @@ echo "Testing slice creation from $START_LEDGER to $END_LEDGER"
   --start-ledger "$START_LEDGER" \
   --end-ledger "$END_LEDGER" \
   --snapshots-path "$SNAPSHOT_DIR" \
-  --compression-level 0 \
+  --compression-level "$OUTPUT_COMPRESSION" \
   --force-overwrite \
   --log-level info
 
-# Validate the slice file
+## Validate the slice file
 echo "Validating slice file"
 ./build/src/utils/catl-validator "$SLICE_FILE"
+./build/src/hasher/catl-hasher \
+  $SLICE_FILE --level=info
 
 # Check if the snapshot was created
 NEXT_LEDGER=$((END_LEDGER + 1))
@@ -68,11 +71,11 @@ else
   exit 1
 fi
 
-# Create a second slice using the snapshot
+## Create a second slice using the snapshot
 SECOND_START=$NEXT_LEDGER
 SECOND_END=$((SECOND_START + 1000))
 SECOND_SLICE="./test-slice-$SECOND_START-$SECOND_END.catl"
-
+#
 echo "Testing second slice creation from $SECOND_START to $SECOND_END using snapshot"
 ./build/src/utils/catl-slice \
   --input "$INPUT_FILE" \
@@ -88,40 +91,5 @@ echo "Testing second slice creation from $SECOND_START to $SECOND_END using snap
 echo "Validating second slice file"
 ./build/src/utils/catl-validator "$SECOND_SLICE"
 
-# Compare slices with direct hasher output for validation
-echo "Creating validation slice with hasher"
-HASHER_SLICE="./test-hasher-slice-$START_LEDGER-$END_LEDGER.catl"
 ./build/src/hasher/catl-hasher \
-  "$INPUT_FILE" --level=info \
-  --first-ledger "$START_LEDGER" --last-ledger "$END_LEDGER" \
-  --compression="$OUTPUT_COMPRESSION" \
-  --create-slice-file "$HASHER_SLICE"
-
-# Use the validator to compare hash consistency
-echo "Validating first slice against hasher output"
-./build/src/utils/catl-validator "$SLICE_FILE"
-./build/src/utils/catl-validator "$HASHER_SLICE"
-
-# For binary comparison, check file sizes (they should be comparable)
-SLICE_SIZE=$(stat -f "%z" "$SLICE_FILE")
-HASHER_SIZE=$(stat -f "%z" "$HASHER_SLICE")
-echo "Slice file size: $SLICE_SIZE bytes"
-echo "Hasher file size: $HASHER_SIZE bytes"
-
-# Display results
-echo "Tests completed successfully!"
-echo "Output files:"
-echo "First slice: $SLICE_FILE"
-echo "Second slice: $SECOND_SLICE"
-echo "Hasher slice: $HASHER_SLICE"
-echo "Snapshot: $SNAPSHOT_FILE"
-
-# Clean up if requested
-if [ "$CLEANUP" = true ]; then
-  echo "Cleaning up output files..."
-  rm -f "$SLICE_FILE" "$SECOND_SLICE" "$HASHER_SLICE"
-  rm -rf "$SNAPSHOT_DIR"
-  echo "Cleanup complete."
-else
-  echo "Files retained for inspection. Use --cleanup to remove output files."
-fi
+  $SECOND_SLICE --level=info
