@@ -121,6 +121,9 @@ public:
     bool
     remove_item(const Key& key);
 
+    [[nodiscard]] bool
+    has_item(const Key& key) const;
+
     Hash256
     get_hash() const;
 
@@ -183,6 +186,15 @@ public:
     /**
      * Collapses the entire tree by removing single-child inner nodes
      * where possible to optimize the tree structure
+     *
+     * This method optimizes the in-memory representation of the SHAMap by
+     * collapsing long chains of inner nodes that have only a single child.
+     * The optimization preserves the logical structure and hash computation
+     * while reducing memory consumption and improving traversal efficiency.
+     *
+     * Note: When using a collapsed tree, the hash computation process must
+     * account for the skipped nodes to maintain the same hash outcome as
+     * a non-collapsed tree. This is handled internally by the hash algorithms.
      */
     void
     collapse_tree();

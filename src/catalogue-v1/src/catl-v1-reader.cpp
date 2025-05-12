@@ -10,7 +10,7 @@
 namespace catl::v1 {
 
 size_t
-Reader::read_raw_data(uint8_t* buffer, size_t size)
+Reader::read_raw_data(uint8_t* buffer, size_t size, const std::string& context)
 {
     if (!input_stream_)
     {
@@ -18,7 +18,16 @@ Reader::read_raw_data(uint8_t* buffer, size_t size)
     }
 
     input_stream_->read(reinterpret_cast<char*>(buffer), size);
-    return static_cast<size_t>(input_stream_->gcount());
+    size_t bytes_read = input_stream_->gcount();
+    body_bytes_read_ += bytes_read;
+
+    // If tee is enabled, also write the data to the tee stream
+    if (tee_enabled_ && tee_stream_ && bytes_read > 0)
+    {
+        tee_stream_->write(reinterpret_cast<const char*>(buffer), bytes_read);
+    }
+
+    return bytes_read;
 }
 
 void
@@ -50,7 +59,16 @@ Reader::decompress(const std::string& output_path)
         size_t bytes_read = read_raw_data(buffer.data(), buffer.size());
         if (bytes_read > 0)
         {
-            writer->write_raw_data(buffer.data(), bytes_read);
+            try
+            {
+                writer->write_raw_data(buffer.data(), bytes_read);
+            }
+            catch (const CatlV1Error& e)
+            {
+                throw CatlV1Error(
+                    "Error writing to output file during decompression: " +
+                    std::string(e.what()));
+            }
         }
 
         // Check for errors other than EOF
@@ -221,28 +239,39 @@ LedgerInfo
 Reader::read_ledger_info()
 {
     LedgerInfo ledger_header;  // NOLINT(*-pro-type-member-init)
-    std::streamsize bytes_read = 0;
-
-    if (!input_stream_)
-    {
-        throw CatlV1Error("Input stream is not available");
-    }
-
-    input_stream_->read(
-        reinterpret_cast<char*>(&ledger_header), sizeof(LedgerInfo));
-    bytes_read = input_stream_->gcount();
-
-    if (bytes_read == 0)
-    {
-        throw CatlV1Error("EOF reached: no more ledger headers available");
-    }
-    else if (bytes_read != sizeof(LedgerInfo))
-    {
-        throw CatlV1Error(
-            "Failed to read complete ledger header: only read " +
-            std::to_string(bytes_read) + " bytes");
-    }
-
+    // Use read_bytes which calls read_raw_data internally (with tee support)
+    read_bytes(
+        reinterpret_cast<uint8_t*>(&ledger_header),
+        sizeof(LedgerInfo),
+        "ledger header");
     return ledger_header;
 }
+
+size_t
+Reader::skip_with_tee(size_t bytes, const std::string& context)
+{
+    // If tee is not enabled, just do a normal seek
+    if (!tee_enabled_ || !tee_stream_)
+    {
+        input_stream_->seekg(bytes, std::ios::cur);
+        return bytes;
+    }
+
+    // Copy the data we're skipping using a buffer
+    constexpr size_t BUFFER_SIZE = 64 * 1024;  // 64KB buffer
+    std::vector<uint8_t> buffer(std::min(BUFFER_SIZE, bytes));
+
+    size_t remaining = bytes;
+    while (remaining > 0)
+    {
+        size_t to_read = std::min(buffer.size(), remaining);
+        size_t read = read_raw_data(buffer.data(), to_read, context);
+        if (read == 0)
+            break;  // EOF
+        remaining -= read;
+    }
+
+    return bytes - remaining;
+}
+
 }  // namespace catl::v1

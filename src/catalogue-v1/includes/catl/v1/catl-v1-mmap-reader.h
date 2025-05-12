@@ -127,6 +127,17 @@ public:
      * terminal marker is encountered, adding each node to the provided SHAMap.
      * The position is advanced to the end of the map data.
      *
+     * Note: This method differs from Reader::read_map_to_shamap() in that it
+     * uses memory-mapped file access and doesn't require an external storage
+     * vector. Items created by this method directly reference the memory-mapped
+     * file data.
+     *
+     * Important: The MmapReader class itself only works with uncompressed
+     * files. For compressed CATL files, use Reader::read_map_to_shamap()
+     * instead.
+     *
+     * @see Reader::read_map_to_shamap()
+     *
      * @param map SHAMap to populate with nodes
      * @param leaf_type Expected leaf node type (used to validate node
      * operations)

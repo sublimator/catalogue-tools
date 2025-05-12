@@ -9,7 +9,7 @@ target_link_libraries(
           Boost::json)
 
 # Add the writer test executable
-add_executable(writer_v1_gtest writer-test.cpp)
+add_executable(writer_v1_gtest writer-gtest.cpp)
 
 target_link_libraries(
   writer_v1_gtest
@@ -21,6 +21,20 @@ target_link_libraries(
           Boost::filesystem
           Boost::iostreams)
 
+# Add the reader shamap test executable
+add_executable(reader_shamap_v1_gtest reader-shamap-gtest.cpp)
+
+target_link_libraries(
+  reader_shamap_v1_gtest
+  PRIVATE catl::catalogue_v1
+          catl::test_utils
+          GTest::gtest_main
+          OpenSSL::SSL
+          Boost::json
+          Boost::filesystem
+          Boost::iostreams)
+
 include(GoogleTest)
 gtest_discover_tests(sha512hasher_v1_gtest)
 gtest_discover_tests(writer_v1_gtest)
+gtest_discover_tests(reader_shamap_v1_gtest)

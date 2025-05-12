@@ -6,6 +6,16 @@ A C++ toolkit for working with Xahaud catalogue files and SHAMap data structures
 
 This project provides libraries and utilities for processing, validating, and analyzing CATL (Catalogue) files from Xahau. These files contain ledger data in a compact format, allowing for efficient storage and retrieval of blockchain state.
 
+This project aims to explore three key approaches to blockchain data handling:
+
+1. **Immutability as an optimization opportunity**: Since blockchain history never changes, we can design specialized data structures that take advantage of this property. Our implementation uses copy-on-write techniques that allow multiple ledger versions to share unchanged data, drastically reducing memory usage.
+
+2. **Direct memory access by design**: Rippled/Xahaud in practice ends up loading the entirety of the latest ledger state into memory anyway, despite theoretical lazy-loading capabilities. Rather than fighting this reality, we embrace it with memory-mapped files and compact binary formats that are efficient both on disk and in RAM.
+
+3. **Smart tree compaction**: We optimize storage by collapsing chains of inner nodes with single children, while maintaining compatibility with standard hash verification. This technique significantly reduces both storage requirements and traversal costs.
+
+These approaches together enable rapid data access, reduced memory footprint, and efficient blockchain state verification.
+
 ## Core Components
 
 - **SHAMap**: Binary prefix tree implementation with copy-on-write for efficient snapshots
