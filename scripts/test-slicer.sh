@@ -27,7 +27,8 @@ popd
 # Parameters for testing
 INPUT_FILE="/Users/nicholasdudfield/projects/xahau-history/cat.1-5000000"
 START_LEDGER=1
-END_LEDGER=100
+SLICE_SIZE=10000
+END_LEDGER=$SLICE_SIZE
 SLICE_FILE="./test-slice-$START_LEDGER-$END_LEDGER.catl"
 SNAPSHOT_DIR="./catl_snapshots"
 OUTPUT_COMPRESSION="0" # Uncompressed for testing
@@ -73,7 +74,7 @@ fi
 
 ## Create a second slice using the snapshot
 SECOND_START=$NEXT_LEDGER
-SECOND_END=$((SECOND_START + 1000))
+SECOND_END=$((SECOND_START + $SLICE_SIZE - 1))
 SECOND_SLICE="./test-slice-$SECOND_START-$SECOND_END.catl"
 #
 echo "Testing second slice creation from $SECOND_START to $SECOND_END using snapshot"

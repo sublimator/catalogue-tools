@@ -267,25 +267,12 @@ public:
                 if (!using_snapshot)
                 {
                     LOGI("Processing state map for ledger: ", current_ledger);
-                    auto deletes = 0;
-                    auto sets = 0;
-                    reader.read_map_with_callbacks(
-                        SHAMapNodeType::tnACCOUNT_STATE,
-                        [this, &sets](
-                            const std::vector<uint8_t>& key,
-                            const std::vector<uint8_t>& data) {
-                            state_map_->set_item(vector_to_hash256(key), data);
-                            sets++;
-                        },
-                        [this, &deletes](const std::vector<uint8_t>& key) {
-                            state_map_->remove_item(vector_to_hash256(key));
-                            deletes++;
-                        });
+                    auto stats = read_into_account_state_map(reader);
                     LOGI(
                         "Finished processing state map for ledger: ",
                         current_ledger);
-                    LOGI("  Sets: ", sets);
-                    LOGI("  Deletes: ", deletes);
+                    LOGI("  Sets: ", stats.nodes_added);
+                    LOGI("  Deletes: ", stats.nodes_deleted);
                 }
                 else
                 {
@@ -507,16 +494,7 @@ public:
             }
 
             // Process state map (apply changes to our state map)
-            reader.read_map_with_callbacks(
-                SHAMapNodeType::tnACCOUNT_STATE,
-                [this](
-                    const std::vector<uint8_t>& key,
-                    const std::vector<uint8_t>& data) {
-                    state_map_->set_item(vector_to_hash256(key), data);
-                },
-                [this](const std::vector<uint8_t>& key) {
-                    state_map_->remove_item(vector_to_hash256(key));
-                });
+            read_into_account_state_map(reader);
 
             // Skip the transaction map - we don't need it for the snapshot
             reader.skip_map(SHAMapNodeType::tnTRANSACTION_MD);
