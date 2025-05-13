@@ -44,7 +44,7 @@ fi
 mkdir -p "$SNAPSHOT_DIR"
 
 echo "Testing slice creation from $START_LEDGER to $END_LEDGER"
-./build/src/utils/catl-slice \
+./build/src/utils-v1/catl1-slice \
   --input "$INPUT_FILE" \
   --output "$SLICE_FILE" \
   --start-ledger "$START_LEDGER" \
@@ -56,7 +56,7 @@ echo "Testing slice creation from $START_LEDGER to $END_LEDGER"
 
 ## Validate the slice file
 echo "Validating slice file"
-./build/src/utils/catl-validator "$SLICE_FILE"
+./build/src/utils-v1/catl1-validator "$SLICE_FILE"
 ./build/src/hasher/catl-hasher \
   $SLICE_FILE --level=info
 
@@ -78,7 +78,7 @@ SECOND_END=$((SECOND_START + $SLICE_SIZE - 1))
 SECOND_SLICE="./test-slice-$SECOND_START-$SECOND_END.catl"
 #
 echo "Testing second slice creation from $SECOND_START to $SECOND_END using snapshot"
-./build/src/utils/catl-slice \
+./build/src/utils-v1/catl1-slice \
   --input "$INPUT_FILE" \
   --output "$SECOND_SLICE" \
   --start-ledger "$SECOND_START" \
@@ -90,7 +90,7 @@ echo "Testing second slice creation from $SECOND_START to $SECOND_END using snap
 
 # Validate the second slice file
 echo "Validating second slice file"
-./build/src/utils/catl-validator "$SECOND_SLICE"
+./build/src/utils-v1/catl1-validator "$SECOND_SLICE"
 
 ./build/src/hasher/catl-hasher \
   $SECOND_SLICE --level=info

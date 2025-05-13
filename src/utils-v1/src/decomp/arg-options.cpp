@@ -1,4 +1,4 @@
-#include "catl/utils/decomp/arg-options.h"
+#include "catl/utils-v1/decomp/arg-options.h"
 
 #include <boost/program_options.hpp>
 #include <iostream>
@@ -40,7 +40,7 @@ parse_argv(int argc, char* argv[])
         << "Converts a compressed CATL file to an uncompressed version"
         << std::endl
         << std::endl
-        << "Usage: " << (argc > 0 ? argv[0] : "catl-decomp")
+        << "Usage: " << (argc > 0 ? argv[0] : "catl1-decomp")
         << " [options] <input_catl_file> <output_catl_file>" << std::endl
         << desc << std::endl
         << "The tool simply decompresses the contents without examining them, "
@@ -49,7 +49,7 @@ parse_argv(int argc, char* argv[])
         << "the Reader and Writer classes to handle the actual data transfer."
         << std::endl
         << std::endl
-        << "For a full-featured implementation, see catl-decomp-reference."
+        << "For a full-featured implementation, see catl1-decomp-reference."
         << std::endl;
     options.help_text = help_stream.str();
 

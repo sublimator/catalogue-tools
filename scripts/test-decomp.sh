@@ -8,11 +8,11 @@ popd
 
 # Test decompression from compressed fixture to uncompressed output
 echo "Testing decompression from compressed fixture"
-./build/src/utils/catl-decomp tests/catalogue-v1/fixture/cat.1-100.compression-9.catl ./test-decompressed.catl --force
+./build/src/utils-v1/catl1-decomp tests/catalogue-v1/fixture/cat.1-100.compression-9.catl ./test-decompressed.catl --force
 
 # Validate the decompressed file
 echo "Validating decompressed file"
-./build/src/utils/catl-validator ./test-decompressed.catl
+./build/src/utils-v1/catl1-validator ./test-decompressed.catl
 
 # Compare file sizes
 COMPRESSED_SIZE=$(stat -f "%z" tests/catalogue-v1/fixture/cat.1-100.compression-9.catl)

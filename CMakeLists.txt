@@ -60,7 +60,7 @@ add_subdirectory(src/shamap)
 add_subdirectory(src/hasher)
 
 # Add the utils library
-add_subdirectory(src/utils)
+add_subdirectory(src/utils-v1)
 
 # Add tests if testing is enabled
 option(BUILD_TESTING "Build the testing tree" ON)

@@ -159,7 +159,7 @@ private:
  * - tnTERMINAL (1 byte)
  *
  * This format is compatible with the state snapshot format described in the
- * catl-slice specification, and can be directly used for generating snapshot
+ * catl1-slice specification, and can be directly used for generating snapshot
  * files.
  *
  * @param map The SimpleStateMap to serialize

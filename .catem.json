@@ -77,12 +77,12 @@
     },
     "slicer": {
       "include": [
-        "src/utils/src/slicer",
-        "src/utils/includes/catl/utils/slicer/arg-options.h",
-        "src/utils/includes/catl/utils/slicer/utils.h",
-        "src/utils/src/slicer/arg-options.cpp",
-        "src/utils/src/slicer/catl-slice.cpp",
-        "src/utils/src/slicer/utils.cpp",
+        "src/utils-v1/src/slicer",
+        "src/utils-v1/includes/catl/utils/slicer/arg-options.h",
+        "src/utils-v1/includes/catl/utils/slicer/utils.h",
+        "src/utils-v1/src/slicer/arg-options.cpp",
+        "src/utils-v1/src/slicer/catl1-slice.cpp",
+        "src/utils-v1/src/slicer/utils.cpp",
         "src/catalogue-v1/src/catl-v1-reader.cpp",
         "src/catalogue-v1/src/catl-v1-simple-state-map.cpp",
         "src/catalogue-v1/src/catl-v1-reader-shamap.cpp",

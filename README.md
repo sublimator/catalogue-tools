@@ -25,8 +25,8 @@ These approaches together enable rapid data access, reduced memory footprint, an
 ## Executables
 
 - **catl-hasher**: Verify ledger state map hashes in CATL files
-- **catl-validator**: Validate the integrity of CATL files
-- **catl-decomp**: Convert compressed CATL files to uncompressed format
+- **catl1-validator**: Validate the integrity of CATL files
+- **catl1-decomp**: Convert compressed CATL files to uncompressed format
 
 ## Building the Project
 

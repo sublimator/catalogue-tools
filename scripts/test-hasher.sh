@@ -24,7 +24,7 @@ else
     $OUTPUT_FILE --level=info
 fi
 
-./build/src/utils/catl-validator $OUTPUT_FILE
+./build/src/utils-v1/catl1-validator $OUTPUT_FILE
 
 echo "Done"
 echo "Output file: $OUTPUT_FILE"
