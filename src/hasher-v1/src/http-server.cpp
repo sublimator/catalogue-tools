@@ -1,5 +1,5 @@
-#include "catl/hasher/http/http-server.h"
-#include "catl/hasher/http/http-concepts.h"
+#include "catl/hasher-v1/http/http-server.h"
+#include "catl/hasher-v1/http/http-concepts.h"
 
 #include <boost/asio.hpp>
 #include <boost/asio/signal_set.hpp>

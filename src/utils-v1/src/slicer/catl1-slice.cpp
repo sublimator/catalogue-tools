@@ -1,6 +1,6 @@
 #include "catl/core/log-macros.h"
-#include "catl/utils/slicer/arg-options.h"
-#include "catl/utils/slicer/utils.h"
+#include "catl/utils-v1/slicer/arg-options.h"
+#include "catl/utils-v1/slicer/utils.h"
 #include "catl/v1/catl-v1-reader.h"
 #include "catl/v1/catl-v1-simple-state-map.h"
 #include "catl/v1/catl-v1-utils.h"

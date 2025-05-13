@@ -41,7 +41,7 @@ format_file_size(uint64_t bytes);
  * Create a state snapshot file from a SimpleStateMap
  *
  * This function creates a state snapshot file in the format described in the
- * catl-slice specification. The file contains a zlib-compressed stream of
+ * catl1-slice specification. The file contains a zlib-compressed stream of
  * serialized state map entries.
  *
  * @param state_map The SimpleStateMap to serialize

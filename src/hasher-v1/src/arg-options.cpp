@@ -1,4 +1,4 @@
-#include "catl/hasher/arg-options.h"
+#include "catl/hasher-v1/arg-options.h"
 #include "catl/core/logger.h"
 
 #include <algorithm>
@@ -86,7 +86,7 @@ parse_argv(int argc, char* argv[])
 
     // Generate the help text
     std::ostringstream help_stream;
-    help_stream << "Usage: " << (argc > 0 ? argv[0] : "catl-hasher")
+    help_stream << "Usage: " << (argc > 0 ? argv[0] : "catl1-hasher")
                 << " [options] <catalogue_file>" << std::endl
                 << desc << std::endl
                 << "Processes CATL files, builds SHAMaps, verifies hashes."

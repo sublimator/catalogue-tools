@@ -1,4 +1,4 @@
-#include "catl/utils/decomp/arg-options.h"
+#include "catl/utils-v1/decomp/arg-options.h"
 #include "catl/v1/catl-v1-reader.h"
 #include "catl/v1/catl-v1-utils.h"
 #include "catl/v1/catl-v1-writer.h"
@@ -56,7 +56,7 @@ format_file_size(uint64_t bytes)
  * output stream. Conceptually, it's equivalent to:
  * compressed_reader.stream_pipe(uncompressed_writer.body_stream())
  *
- * After decompression, use catl-validator or other tools to verify file
+ * After decompression, use catl1-validator or other tools to verify file
  * integrity.
  */
 class CATLDecompressor

@@ -1,6 +1,6 @@
-#include "catl/hasher/ledger.h"
-#include "catl/hasher/catalogue-consts.h"
-#include "catl/hasher/utils.h"
+#include "catl/hasher-v1/ledger.h"
+#include "catl/hasher-v1/catalogue-consts.h"
+#include "catl/hasher-v1/utils.h"
 
 #include <cstddef>
 #include <cstdint>

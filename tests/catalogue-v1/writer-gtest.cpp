@@ -193,7 +193,7 @@ TEST_F(WriterTest, BasicWriteTest)
         // the filesize in the header is the uncompressed size while the actual
         // file on disk is smaller due to compression.
         //
-        // We could use catl-decomp tool to decompress and then verify,
+        // We could use catl1-decomp tool to decompress and then verify,
         // but that's beyond the scope of a unit test.
     }
 }

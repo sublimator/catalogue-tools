@@ -1,6 +1,6 @@
 #pragma once
 
-#include "catl/hasher/http/http-concepts.h"
+#include "catl/hasher-v1/http/http-concepts.h"
 
 #include <memory>
 #include <string>

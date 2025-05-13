@@ -1,4 +1,4 @@
-#include "catl/utils/slicer/arg-options.h"
+#include "catl/utils-v1/slicer/arg-options.h"
 
 #include <boost/program_options.hpp>
 #include <iostream>
@@ -58,7 +58,7 @@ parse_argv(int argc, char* argv[])
                    "larger CATL file"
                 << std::endl
                 << std::endl
-                << "Usage: " << (argc > 0 ? argv[0] : "catl-slice")
+                << "Usage: " << (argc > 0 ? argv[0] : "catl1-slice")
                 << " --input <input_file> --output <output_file> "
                    "--start-ledger <seq> --end-ledger <seq> [options]"
                 << std::endl

@@ -1,8 +1,8 @@
-# `catl-slice`: High-Performance CATL v1 File Slicing Tool
+# `catl1-slice`: High-Performance CATL v1 File Slicing Tool
 
-**`catl-slice` is a command-line utility designed to efficiently extract a contiguous range of ledgers (a "slice") from a larger CATL (Catalogue) v1 file. It supports both compressed (zlib) and uncompressed input and output CATL files.**
+**`catl1-slice` is a command-line utility designed to efficiently extract a contiguous range of ledgers (a "slice") from a larger CATL (Catalogue) v1 file. It supports both compressed (zlib) and uncompressed input and output CATL files.**
 
-While `catl-slice` capably fulfills its primary objective of creating individual ledger slices, its development and usage have also proven highly instructive in understanding the inherent characteristics and limitations of the CATL v1 file format, particularly concerning random access and bulk data processing.
+While `catl1-slice` capably fulfills its primary objective of creating individual ledger slices, its development and usage have also proven highly instructive in understanding the inherent characteristics and limitations of the CATL v1 file format, particularly concerning random access and bulk data processing.
 
 ## Core Features
 
@@ -20,7 +20,7 @@ While `catl-slice` capably fulfills its primary objective of creating individual
 ## Command-Line Interface (CLI)
 
 ```
-catl-slice --input <input_catl_file> \
+catl1-slice --input <input_catl_file> \
            --output <output_slice_file> \
            --start-ledger <start_sequence_number> \
            --end-ledger <end_sequence_number> \
@@ -49,7 +49,7 @@ catl-slice --input <input_catl_file> \
 ## Usage Example
 
 ```bash
-./catl-slice --input large_archive.catl \
+./catl1-slice --input large_archive.catl \
              --output week1_slice.catl \
              --start-ledger 1000 \
              --end-ledger 1700 \
@@ -159,7 +159,7 @@ The complexity of this algorithm scales linearly with the number of ledgers to p
 
 ## Future Work
 
-`catl-slice` will likely remain in the repository as a frozen artifact of curiosity—a testament to the exploration of the CATL v1 format's limitations and the valuable lessons learned from its implementation.
+`catl1-slice` will likely remain in the repository as a frozen artifact of curiosity—a testament to the exploration of the CATL v1 format's limitations and the valuable lessons learned from its implementation.
 
 Any future development efforts on v1 would be better directed toward creating an entirely new tool, perhaps a `catl-bulk-slicer` but that should be done "as needed":
 * Process the input file only once to create multiple slice outputs in a single pass
@@ -171,12 +171,12 @@ Alternatively, and perhaps more sensibly, efforts could focus on defining a CATL
 
 ## An Instructive Tool: Exposing CATL v1 Format Limitations
 
-The development of `catl-slice`, particularly its focus on efficient data extraction and state management through snapshots, has been instrumental in highlighting several characteristics of the CATL v1 format:
+The development of `catl1-slice`, particularly its focus on efficient data extraction and state management through snapshots, has been instrumental in highlighting several characteristics of the CATL v1 format:
 
 1. **Sequential Nature:** CATL v1 is inherently a stream-oriented format. When compressed (a common scenario), accessing data for a specific ledger (`N`) necessitates decompressing the entire file body from the beginning up to that point. Even when uncompressed, true random access isn't possible; the tool must still sequentially read and skip preceding ledger data. This fundamental limitation means that performance degrades catastrophically with larger files, regardless of optimization attempts like snapshotting, since the underlying stream must still be processed sequentially.
 
 2. **Challenges with Bulk Operations:**
-   * `catl-slice` is designed for single-slice extraction per invocation. While effective for this, it's not optimized for "bulk splitting" a single large file into numerous smaller slices in one pass. Such an operation would involve redundant processing of the input file's initial segments for each slice generated.
+   * `catl1-slice` is designed for single-slice extraction per invocation. While effective for this, it's not optimized for "bulk splitting" a single large file into numerous smaller slices in one pass. Such an operation would involve redundant processing of the input file's initial segments for each slice generated.
    * This underscores a limitation of the CATL v1 format itself: without an internal index or block structure, efficiently partitioning the file requires re-processing or more complex tooling.
 
 3. **Snapshotting as a Workaround for Sequential Access:** The snapshot feature, which was intended to dramatically speed up the creation of *consecutive* slices, is itself a testament to the underlying need to mitigate the cost of "fast-forwarding" through the sequential CATL v1 data. In practice, however, this approach proved largely ineffective for very large files since the underlying requirement to decompress the entire stream sequentially still creates a performance bottleneck that snapshots cannot overcome. It essentially attempts to create an external index for ledger states, but cannot escape the fundamental sequential nature of the format.
@@ -185,7 +185,7 @@ The development of `catl-slice`, particularly its focus on efficient data extrac
 
 **Conclusion on Design and Learning:**
 
-`catl-slice` appears to meet its design goal of extracting specific ledger ranges from CATL v1 files, employing techniques like direct data copying ("teeing") and state snapshotting. However, the tool's design was ultimately ill-considered when evaluated against performance requirements for large files. For very large CATL archives, the tool's performance becomes impractical because even with snapshotting, it must still decompress the entire stream sequentially up to the point of extraction.
+`catl1-slice` appears to meet its design goal of extracting specific ledger ranges from CATL v1 files, employing techniques like direct data copying ("teeing") and state snapshotting. However, the tool's design was ultimately ill-considered when evaluated against performance requirements for large files. For very large CATL archives, the tool's performance becomes impractical because even with snapshotting, it must still decompress the entire stream sequentially up to the point of extraction.
 
 The process of building this tool, however, served as a valuable exercise in practical systems design, revealing how a file format's fundamental architecture (like CATL v1's sequential, stream-based nature) profoundly influences the capabilities and optimal design of tools that interact with it. The main value derived has been the instructive experience in understanding these system-level interactions and file format limitations.
 
