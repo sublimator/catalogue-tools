@@ -55,9 +55,9 @@
     },
     "hasher": {
       "include": [
-        "src/hasher/**/*.cpp",
-        "src/hasher/**/*.h",
-        "src/hasher/**/CMakeLists.txt"
+        "src/hasher-v1/**/*.cpp",
+        "src/hasher-v1/**/*.h",
+        "src/hasher-v1/**/CMakeLists.txt"
       ]
     },
     "shamap": {
@@ -96,9 +96,9 @@
     },
     "hasher-http": {
       "include": [
-        "src/hasher/src/http-server.cpp",
-        "src/hasher/src/http-handler.cpp",
-        "src/hasher/includes/catl/hasher/http/*.h"
+        "src/hasher-v1/src/http-server.cpp",
+        "src/hasher-v1/src/http-handler.cpp",
+        "src/hasher-v1/includes/catl/hasher/http/*.h"
       ]
     }
   }

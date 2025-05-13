@@ -57,7 +57,7 @@ echo "Testing slice creation from $START_LEDGER to $END_LEDGER"
 ## Validate the slice file
 echo "Validating slice file"
 ./build/src/utils-v1/catl1-validator "$SLICE_FILE"
-./build/src/hasher/catl-hasher \
+./build/src/hasher-v1/catl1-hasher \
   $SLICE_FILE --level=info
 
 # Check if the snapshot was created
@@ -92,5 +92,5 @@ echo "Testing second slice creation from $SECOND_START to $SECOND_END using snap
 echo "Validating second slice file"
 ./build/src/utils-v1/catl1-validator "$SECOND_SLICE"
 
-./build/src/hasher/catl-hasher \
+./build/src/hasher-v1/catl1-hasher \
   $SECOND_SLICE --level=info

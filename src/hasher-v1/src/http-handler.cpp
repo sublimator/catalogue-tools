@@ -1,6 +1,6 @@
-#include "catl/hasher/http/http-handler.h"
-#include "catl/hasher/http/http-concepts.h"
-#include "catl/hasher/utils.h"
+#include "catl/hasher-v1/http/http-handler.h"
+#include "catl/hasher-v1/http/http-concepts.h"
+#include "catl/hasher-v1/utils.h"
 
 #include <cstdint>
 #include <regex>

@@ -1,4 +1,4 @@
-#include "catl/hasher/arg-options.h"  // Include command-line options
+#include "catl/hasher-v1/arg-options.h"  // Include command-line options
 #include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap-options.h"
@@ -29,11 +29,11 @@
 #include "catl/core/log-macros.h"
 #include "catl/core/logger.h"
 #include "catl/core/types.h"
-#include "catl/hasher/catalogue-consts.h"
-#include "catl/hasher/http/http-handler.h"
-#include "catl/hasher/http/http-server.h"
-#include "catl/hasher/ledger.h"
-#include "catl/hasher/utils.h"
+#include "catl/hasher-v1/catalogue-consts.h"
+#include "catl/hasher-v1/http/http-handler.h"
+#include "catl/hasher-v1/http/http-server.h"
+#include "catl/hasher-v1/ledger.h"
+#include "catl/hasher-v1/utils.h"
 #include "catl/shamap/shamap.h"
 
 #include "hasher-impl.h"
