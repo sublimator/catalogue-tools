@@ -25,7 +25,7 @@ ninja
 popd
 
 # Parameters for testing
-INPUT_FILE="/Users/nicholasdudfield/projects/xahau-history/cat.1-5000000"
+INPUT_FILE=${INPUT_FILE:-"$HOME/projects/xahau-history/cat.1-5000000"}
 START_LEDGER=1
 SLICE_SIZE=10000
 END_LEDGER=$SLICE_SIZE
