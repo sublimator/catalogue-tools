@@ -90,6 +90,6 @@ ninja all_tests
 - **src/shamap**: SHAMap implementation
 - **src/catalogue-common**: Common types for catalogue formats
 - **src/catalogue-v1**: CATL v1 format implementation
-- **src/hasher**: State map hash verification tools
-- **src/utils**: Additional utilities
+- **src/hasher-v1**: State map hash verification tools
+- **src/utils-v1**: Additional utilities
 - **tests**: Test suite
