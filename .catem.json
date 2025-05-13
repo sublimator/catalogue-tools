@@ -75,6 +75,25 @@
         "tests/**/*.h"
       ]
     },
+    "slicer": {
+      "include": [
+        "src/utils/src/slicer",
+        "src/utils/includes/catl/utils/slicer/arg-options.h",
+        "src/utils/includes/catl/utils/slicer/utils.h",
+        "src/utils/src/slicer/arg-options.cpp",
+        "src/utils/src/slicer/catl-slice.cpp",
+        "src/utils/src/slicer/utils.cpp",
+        "src/catalogue-v1/src/catl-v1-reader.cpp",
+        "src/catalogue-v1/src/catl-v1-simple-state-map.cpp",
+        "src/catalogue-v1/src/catl-v1-reader-shamap.cpp",
+        "src/catalogue-v1/src/catl-v1-writer.cpp",
+        "src/catalogue-v1/includes/catl/v1/catl-v1-reader.h",
+        "src/catalogue-v1/includes/catl/v1/catl-v1-simple-state-map.h",
+        "src/catalogue-v1/includes/catl/v1/catl-v1-writer.h",
+        "src/catalogue-v1/includes/catl/v1/catl-v1-structs.h",
+        "src/catalogue-v1/includes/catl/v1/catl-v1-utils.h"
+      ]
+    },
     "hasher-http": {
       "include": [
         "src/hasher/src/http-server.cpp",
