@@ -24,22 +24,26 @@
 
 namespace catl::shamap {
 //----------------------------------------------------------
-// SHAMap Implementation
+// SHAMapT Implementation
 //----------------------------------------------------------
-SHAMap::SHAMap(SHAMapNodeType type, SHAMapOptions options)
+
+template <typename Traits>
+SHAMapT<Traits>::SHAMapT(SHAMapNodeType type, SHAMapOptions options)
     : node_type_(type)
     , options_(options)
     , version_counter_(std::make_shared<std::atomic<int>>(0))
     , current_version_(0)
     , cow_enabled_(false)
 {
-    root = boost::intrusive_ptr(new SHAMapInnerNode(0));  // Root has depth 0
+    root = boost::intrusive_ptr(
+        new SHAMapInnerNodeT<Traits>(0));  // Root has depth 0
     OLOGD("SHAMap created with type: ", static_cast<int>(type));
 }
 
-SHAMap::SHAMap(
+template <typename Traits>
+SHAMapT<Traits>::SHAMapT(
     const SHAMapNodeType type,
-    boost::intrusive_ptr<SHAMapInnerNode> rootNode,
+    boost::intrusive_ptr<SHAMapInnerNodeT<Traits>> rootNode,
     std::shared_ptr<std::atomic<int>> vCounter,
     const int version,
     SHAMapOptions options)
@@ -53,8 +57,9 @@ SHAMap::SHAMap(
     OLOGD("Created SHAMap snapshot with version ", version);
 }
 
+template <typename Traits>
 void
-SHAMap::enable_cow()
+SHAMapT<Traits>::enable_cow()
 {
     cow_enabled_ = true;
 
@@ -73,8 +78,9 @@ SHAMap::enable_cow()
     OLOGD("Copy-on-Write enabled for SHAMap with version ", current_version_);
 }
 
+template <typename Traits>
 int
-SHAMap::new_version(bool in_place)
+SHAMapT<Traits>::new_version(bool in_place)
 {
     if (!version_counter_)
     {
@@ -92,8 +98,9 @@ SHAMap::new_version(bool in_place)
     return new_ver;
 }
 
-std::shared_ptr<SHAMap>
-SHAMap::snapshot()
+template <typename Traits>
+std::shared_ptr<SHAMapT<Traits>>
+SHAMapT<Traits>::snapshot()
 {
     if (!root)
     {
@@ -118,7 +125,7 @@ SHAMap::snapshot()
         snapshot_version);
 
     // Create a new SHAMap that shares the same root and version counter
-    auto copy = std::make_shared<SHAMap>(SHAMap(
+    auto copy = std::make_shared<SHAMapT<Traits>>(SHAMapT<Traits>(
         node_type_,
         root->copy(snapshot_version),
         version_counter_,
@@ -130,8 +137,9 @@ SHAMap::snapshot()
 
 namespace json = boost::json;
 
+template <typename Traits>
 void
-SHAMap::trie_json(std::ostream& os, TrieJsonOptions options) const
+SHAMapT<Traits>::trie_json(std::ostream& os, TrieJsonOptions options) const
 {
     auto trie = root->trie_json(options, options_);
     if (options.pretty)
@@ -142,16 +150,19 @@ SHAMap::trie_json(std::ostream& os, TrieJsonOptions options) const
     }
 }
 
+template <typename Traits>
 std::string
-SHAMap::trie_json_string(TrieJsonOptions options) const
+SHAMapT<Traits>::trie_json_string(TrieJsonOptions options) const
 {
     std::ostringstream oss;
     trie_json(oss, options);
     return oss.str();
 }
 
+template <typename Traits>
 void
-SHAMap::visit_items(const std::function<void(const MmapItem&)>& visitor) const
+SHAMapT<Traits>::visit_items(
+    const std::function<void(const MmapItem&)>& visitor) const
 {
     if (!visitor)
     {
@@ -165,15 +176,16 @@ SHAMap::visit_items(const std::function<void(const MmapItem&)>& visitor) const
     }
 
     // Stack holds const pointers to nodes yet to be processed
-    std::stack<boost::intrusive_ptr<const SHAMapTreeNode>> node_stack;
+    std::stack<boost::intrusive_ptr<const SHAMapTreeNodeT<Traits>>> node_stack;
 
     // Start traversal from the root node
-    node_stack.push(boost::static_pointer_cast<const SHAMapTreeNode>(root));
+    node_stack.push(
+        boost::static_pointer_cast<const SHAMapTreeNodeT<Traits>>(root));
 
     while (!node_stack.empty())
     {
         // Get the next node from the stack (LIFO -> depth-first)
-        boost::intrusive_ptr<const SHAMapTreeNode> current_node =
+        boost::intrusive_ptr<const SHAMapTreeNodeT<Traits>> current_node =
             node_stack.top();
         node_stack.pop();
 
@@ -185,7 +197,8 @@ SHAMap::visit_items(const std::function<void(const MmapItem&)>& visitor) const
         if (current_node->is_leaf())
         {
             auto leaf =
-                boost::dynamic_pointer_cast<const SHAMapLeafNode>(current_node);
+                boost::dynamic_pointer_cast<const SHAMapLeafNodeT<Traits>>(
+                    current_node);
             if (leaf)
             {
                 auto item_ptr = leaf->get_item();
@@ -203,21 +216,22 @@ SHAMap::visit_items(const std::function<void(const MmapItem&)>& visitor) const
             else
             {
                 OLOGE(
-                    "Failed to cast node to const SHAMapLeafNode despite "
+                    "Failed to cast node to const SHAMapLeafNodeT despite "
                     "is_leaf() being true.");
             }
         }
         else if (current_node->is_inner())
         {
-            auto inner = boost::dynamic_pointer_cast<const SHAMapInnerNode>(
-                current_node);
+            auto inner =
+                boost::dynamic_pointer_cast<const SHAMapInnerNodeT<Traits>>(
+                    current_node);
             if (inner)
             {
                 // Push children onto the stack to visit them next.
                 // Pushing 0..15 results in processing 15..0 (right-to-left DFS)
                 for (int i = 0; i < 16; ++i)
                 {
-                    boost::intrusive_ptr<const SHAMapTreeNode> child =
+                    boost::intrusive_ptr<const SHAMapTreeNodeT<Traits>> child =
                         inner->get_child(i);
                     if (child)
                     {
@@ -229,7 +243,7 @@ SHAMap::visit_items(const std::function<void(const MmapItem&)>& visitor) const
             else
             {
                 OLOGE(
-                    "Failed to cast node to const SHAMapInnerNode despite "
+                    "Failed to cast node to const SHAMapInnerNodeT despite "
                     "is_inner() being true.");
             }
         }
@@ -237,14 +251,16 @@ SHAMap::visit_items(const std::function<void(const MmapItem&)>& visitor) const
     }  // End while stack not empty
 }
 
+template <typename Traits>
 void
-SHAMap::invalidate_hash_recursive()
+SHAMapT<Traits>::invalidate_hash_recursive()
 {
     root->invalidate_hash_recursive();
 }
 
+template <typename Traits>
 boost::json::array
-SHAMap::items_json() const
+SHAMapT<Traits>::items_json() const
 {
     boost::json::array items_array;  // Create the array to be populated
 
@@ -268,20 +284,23 @@ SHAMap::items_json() const
     return items_array;  // Return the populated array
 }
 
+template <typename Traits>
 SetResult
-SHAMap::add_item(boost::intrusive_ptr<MmapItem>& item)
+SHAMapT<Traits>::add_item(boost::intrusive_ptr<MmapItem>& item)
 {
     return set_item(item, SetMode::ADD_ONLY);
 }
 
+template <typename Traits>
 SetResult
-SHAMap::update_item(boost::intrusive_ptr<MmapItem>& item)
+SHAMapT<Traits>::update_item(boost::intrusive_ptr<MmapItem>& item)
 {
     return set_item(item, SetMode::UPDATE_ONLY);
 }
 
+template <typename Traits>
 SetResult
-SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
+SHAMapT<Traits>::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 {
     if (options_.tree_collapse_impl == TreeCollapseImpl::leafs_and_inners)
     {
@@ -293,20 +312,23 @@ SHAMap::set_item(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
     }
 }
 
+template <typename Traits>
 bool
-SHAMap::remove_item(const Key& key)
+SHAMapT<Traits>::remove_item(const Key& key)
 {
     return remove_item_reference(key);
 }
 
+template <typename Traits>
 bool
-SHAMap::has_item(const Key& key) const
+SHAMapT<Traits>::has_item(const Key& key) const
 {
     return get_item(key) != nullptr;
 }
 
+template <typename Traits>
 Hash256
-SHAMap::get_hash() const
+SHAMapT<Traits>::get_hash() const
 {
     if (!root)
     {
@@ -316,8 +338,9 @@ SHAMap::get_hash() const
     return root->get_hash(options_);
 }
 
+template <typename Traits>
 void
-SHAMap::handle_path_cow(PathFinder& path_finder)
+SHAMapT<Traits>::handle_path_cow(PathFinderT<Traits>& path_finder)
 {
     // If CoW is enabled, handle versioning
     if (cow_enabled_)
@@ -343,8 +366,9 @@ SHAMap::handle_path_cow(PathFinder& path_finder)
     }
 }
 
+template <typename Traits>
 boost::intrusive_ptr<MmapItem>
-SHAMap::get_item(const Key& key) const
+SHAMapT<Traits>::get_item(const Key& key) const
 {
     if (!root)
     {
@@ -352,8 +376,8 @@ SHAMap::get_item(const Key& key) const
     }
 
     // Create a PathFinder to locate the item
-    PathFinder path_finder(
-        const_cast<boost::intrusive_ptr<SHAMapInnerNode>&>(root),
+    PathFinderT<Traits> path_finder(
+        const_cast<boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>&>(root),
         key,
         options_);
     path_finder.find_path();
@@ -369,5 +393,7 @@ SHAMap::get_item(const Key& key) const
     return nullptr;
 }
 
-LogPartition SHAMap::log_partition_{"SHAMap", LogLevel::DEBUG};
+// Explicit template instantiations for default traits
+template class SHAMapT<DefaultNodeTraits>;
+
 }  // namespace catl::shamap

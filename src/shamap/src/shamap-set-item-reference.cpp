@@ -12,8 +12,11 @@
 #include <exception>
 
 namespace catl::shamap {
+template <typename Traits>
 SetResult
-SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
+SHAMapT<Traits>::set_item_reference(
+    boost::intrusive_ptr<MmapItem>& item,
+    SetMode mode)
 {
     if (!item)
     {
@@ -24,9 +27,10 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 
     try
     {
-        PathFinder path_finder(root, item->key(), options_);
+        PathFinderT<Traits> path_finder(
+            this->root, item->key(), this->options_);
         path_finder.find_path();
-        handle_path_cow(path_finder);
+        this->handle_path_cow(path_finder);
 
         bool item_exists =
             path_finder.has_leaf() && path_finder.did_leaf_key_match();
@@ -66,11 +70,11 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                 parent->get_depth() + 1,
                 " branch ",
                 branch);
-            auto new_leaf =
-                boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
-            if (cow_enabled_)
+            auto new_leaf = boost::intrusive_ptr(
+                new SHAMapLeafNodeT<Traits>(item, this->node_type_));
+            if (this->cow_enabled_)
             {
-                new_leaf->set_version(current_version_);
+                new_leaf->set_version(this->current_version_);
             }
             parent->set_child(branch, new_leaf);
             path_finder.dirty_path();
@@ -96,18 +100,19 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                                               constructor */
             }
 
-            boost::intrusive_ptr<SHAMapInnerNode> current_parent = parent;
+            boost::intrusive_ptr<SHAMapInnerNodeT<Traits>> current_parent =
+                parent;
             int current_branch = branch;
             uint8_t current_depth =
                 parent->get_depth() + 1;  // Start depth below parent
 
             // Create first new inner node to replace the leaf
-            auto new_inner =
-                boost::intrusive_ptr(new SHAMapInnerNode(current_depth));
-            if (cow_enabled_)
+            auto new_inner = boost::intrusive_ptr(
+                new SHAMapInnerNodeT<Traits>(current_depth));
+            if (this->cow_enabled_)
             {
                 new_inner->enable_cow(true);
-                new_inner->set_version(current_version_);
+                new_inner->set_version(this->current_version_);
             }
             parent->set_child(current_branch, new_inner);
             current_parent = new_inner;
@@ -129,15 +134,16 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                         " and ",
                         new_branch);
                     auto new_leaf = boost::intrusive_ptr(
-                        new SHAMapLeafNode(item, node_type_));
-                    if (cow_enabled_)
+                        new SHAMapLeafNodeT<Traits>(item, this->node_type_));
+                    if (this->cow_enabled_)
                     {
-                        new_leaf->set_version(current_version_);
+                        new_leaf->set_version(this->current_version_);
                         // May need to update existing leaf version as well
-                        if (existing_leaf->get_version() != current_version_)
+                        if (existing_leaf->get_version() !=
+                            this->current_version_)
                         {
                             auto copied_leaf = existing_leaf->copy();
-                            copied_leaf->set_version(current_version_);
+                            copied_leaf->set_version(this->current_version_);
                             existing_leaf = copied_leaf;
                         }
                     }
@@ -155,11 +161,11 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
                         existing_branch,
                         ". Descending further.");
                     auto next_inner = boost::intrusive_ptr(
-                        new SHAMapInnerNode(current_depth + 1));
-                    if (cow_enabled_)
+                        new SHAMapInnerNodeT<Traits>(current_depth + 1));
+                    if (this->cow_enabled_)
                     {
                         next_inner->enable_cow(true);
-                        next_inner->set_version(current_version_);
+                        next_inner->set_version(this->current_version_);
                     }
                     current_parent->set_child(existing_branch, next_inner);
                     current_parent = next_inner;
@@ -202,4 +208,10 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         return SetResult::FAILED;
     }
 }
+// Explicit template instantiation for default traits
+template SetResult
+SHAMapT<DefaultNodeTraits>::set_item_reference(
+    boost::intrusive_ptr<MmapItem>& item,
+    SetMode mode);
+
 }  // namespace catl::shamap

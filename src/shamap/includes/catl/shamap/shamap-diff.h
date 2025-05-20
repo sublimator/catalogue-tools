@@ -99,6 +99,7 @@ public:
     }
 
     // Make SHAMap a friend so it can use this class
-    friend class SHAMap;
+    template <typename T>
+    friend class SHAMapT;
 };
 }  // namespace catl::shamap

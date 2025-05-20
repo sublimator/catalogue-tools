@@ -15,20 +15,14 @@
 
 namespace catl::shamap {
 //----------------------------------------------------------
-// PathFinder Implementation
+// PathFinderT Implementation
 //----------------------------------------------------------
-PathFinder::PathFinder(
-    boost::intrusive_ptr<SHAMapInnerNode>& root,
-    const Key& key,
-    SHAMapOptions options)
-    : target_key_(key), options_(options)
-{
-    search_root_ = root;
-}
 
+// Helper function template declaration
+template <typename Traits>
 std::pair<bool, int>
 key_belongs_in_inner(
-    const boost::intrusive_ptr<SHAMapInnerNode>& inner,
+    const boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>& inner,
     const Key& key,
     int start_depth)
 {
@@ -46,8 +40,19 @@ key_belongs_in_inner(
     return {true, -1};  // Key belongs in inner, no divergence found
 }
 
+template <typename Traits>
+PathFinderT<Traits>::PathFinderT(
+    boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>& root,
+    const Key& key,
+    SHAMapOptions options)
+    : target_key_(key), options_(options)
+{
+    search_root_ = root;
+}
+
+template <typename Traits>
 void
-PathFinder::find_path()
+PathFinderT<Traits>::find_path()
 {
     auto root = search_root_;
     if (!root)
@@ -61,11 +66,11 @@ PathFinder::find_path()
     found_leaf_ = nullptr;
     leaf_key_matches_ = false;
     terminal_branch_ = -1;
-    boost::intrusive_ptr<SHAMapInnerNode> current_inner = root;
+    boost::intrusive_ptr<SHAMapInnerNodeT<Traits>> current_inner = root;
     while (true)
     {
         int branch = select_branch(target_key_, current_inner->get_depth());
-        boost::intrusive_ptr<SHAMapTreeNode> child =
+        boost::intrusive_ptr<SHAMapTreeNodeT<Traits>> child =
             current_inner->get_child(branch);
         if (!child)
         {
@@ -77,7 +82,8 @@ PathFinder::find_path()
         {
             terminal_branch_ = branch;
             inners_.push_back(current_inner);
-            found_leaf_ = boost::static_pointer_cast<SHAMapLeafNode>(child);
+            found_leaf_ =
+                boost::static_pointer_cast<SHAMapLeafNodeT<Traits>>(child);
             if (found_leaf_->get_item())
             {
                 leaf_key_matches_ =
@@ -97,10 +103,10 @@ PathFinder::find_path()
             options_.tree_collapse_impl == TreeCollapseImpl::leafs_and_inners)
         {
             auto inner_child =
-                boost::static_pointer_cast<SHAMapInnerNode>(child);
+                boost::static_pointer_cast<SHAMapInnerNodeT<Traits>>(child);
             if (inner_child->get_depth() > current_inner->get_depth() + 1)
             {
-                auto [belongs, divergence_depth] = key_belongs_in_inner(
+                auto [belongs, divergence_depth] = key_belongs_in_inner<Traits>(
                     inner_child, target_key_, current_inner->get_depth());
                 if (divergence_depth != inner_child->get_depth())
                 {
@@ -121,60 +127,70 @@ PathFinder::find_path()
                 }
             }
         }
-        current_inner = boost::static_pointer_cast<SHAMapInnerNode>(child);
+        current_inner =
+            boost::static_pointer_cast<SHAMapInnerNodeT<Traits>>(child);
     }
 }
 
+template <typename Traits>
 bool
-PathFinder::has_leaf() const
+PathFinderT<Traits>::has_leaf() const
 {
     return found_leaf_ != nullptr;
 }
 
+template <typename Traits>
 bool
-PathFinder::did_leaf_key_match() const
+PathFinderT<Traits>::did_leaf_key_match() const
 {
     return leaf_key_matches_;
 }
 
+template <typename Traits>
 bool
-PathFinder::ended_at_null_branch() const
+PathFinderT<Traits>::ended_at_null_branch() const
 {
     return found_leaf_ == nullptr && terminal_branch_ != -1;
 }
 
-boost::intrusive_ptr<const SHAMapLeafNode>
-PathFinder::get_leaf() const
+template <typename Traits>
+boost::intrusive_ptr<const SHAMapLeafNodeT<Traits>>
+PathFinderT<Traits>::get_leaf() const
 {
     return found_leaf_;
 }
 
-boost::intrusive_ptr<SHAMapLeafNode>
-PathFinder::get_leaf_mutable()
+template <typename Traits>
+boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
+PathFinderT<Traits>::get_leaf_mutable()
 {
     return found_leaf_;
 }
 
-boost::intrusive_ptr<SHAMapInnerNode>
-PathFinder::get_parent_of_terminal()
+template <typename Traits>
+boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>
+PathFinderT<Traits>::get_parent_of_terminal()
 {
     return inners_.empty() ? nullptr : inners_.back();
 }
 
-boost::intrusive_ptr<const SHAMapInnerNode>
-PathFinder::get_parent_of_terminal() const
+template <typename Traits>
+boost::intrusive_ptr<const SHAMapInnerNodeT<Traits>>
+PathFinderT<Traits>::get_parent_of_terminal() const
 {
     return inners_.empty() ? nullptr : inners_.back();
 }
 
+template <typename Traits>
 int
-PathFinder::get_terminal_branch() const
+PathFinderT<Traits>::get_terminal_branch() const
 {
     return terminal_branch_;
 }
 
+template <typename Traits>
 void
-PathFinder::dirty_path() const
+PathFinderT<Traits>::dirty_path() const
 {
     for (auto& inner : inners_)
     {
@@ -182,12 +198,13 @@ PathFinder::dirty_path() const
     }
 }
 
+template <typename Traits>
 bool
-PathFinder::collapse_path_single_leaf_child()
+PathFinderT<Traits>::collapse_path_single_leaf_child()
 {
     if (inners_.size() <= 1)
         return true;
-    boost::intrusive_ptr<SHAMapLeafNode> only_child = nullptr;
+    boost::intrusive_ptr<SHAMapLeafNodeT<Traits>> only_child = nullptr;
     auto innermost = inners_.back();
     only_child = innermost->get_only_child_leaf();
     for (int i = static_cast<int>(inners_.size()) - 2; i >= 0; --i)
@@ -205,14 +222,16 @@ PathFinder::collapse_path_single_leaf_child()
     return false;
 }
 
+template <typename Traits>
 void
-PathFinder::collapse_path()
+PathFinderT<Traits>::collapse_path()
 {
     collapse_path_single_leaf_child();
 }
 
-boost::intrusive_ptr<SHAMapInnerNode>
-PathFinder::dirty_or_copy_inners(int target_version)
+template <typename Traits>
+boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>
+PathFinderT<Traits>::dirty_or_copy_inners(int target_version)
 {
     if (inners_.empty())
     {
@@ -291,8 +310,10 @@ PathFinder::dirty_or_copy_inners(int target_version)
     return inners_.back();
 }
 
-boost::intrusive_ptr<SHAMapLeafNode>
-PathFinder::invalidated_possibly_copied_leaf_for_updating(int targetVersion)
+template <typename Traits>
+boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
+PathFinderT<Traits>::invalidated_possibly_copied_leaf_for_updating(
+    int targetVersion)
 {
     if (!leaf_key_matches_)
     {
@@ -306,7 +327,7 @@ PathFinder::invalidated_possibly_copied_leaf_for_updating(int targetVersion)
         throw SHAMapException("Failed to prepare path for leaf update");
     }
 
-    boost::intrusive_ptr<SHAMapLeafNode> theLeaf = found_leaf_;
+    boost::intrusive_ptr<SHAMapLeafNodeT<Traits>> theLeaf = found_leaf_;
 
     // Check if we need to copy the leaf
     if (found_leaf_->get_version() != targetVersion)
@@ -321,8 +342,9 @@ PathFinder::invalidated_possibly_copied_leaf_for_updating(int targetVersion)
     return theLeaf;
 }
 
+template <typename Traits>
 void
-PathFinder::add_node_at_divergence()
+PathFinderT<Traits>::add_node_at_divergence()
 {
     if (divergence_depth_ == -1)
     {
@@ -362,5 +384,7 @@ PathFinder::add_node_at_divergence()
     inners_.push_back(new_inner);
 }
 
-LogPartition PathFinder::log_partition_{"PathFinder", LogLevel::DEBUG};
+// Explicit template instantiations for default traits
+template class PathFinderT<DefaultNodeTraits>;
+
 }  // namespace catl::shamap

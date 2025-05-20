@@ -14,58 +14,66 @@
 
 namespace catl::shamap {
 //----------------------------------------------------------
-// SHAMapInnerNode Implementation
+// SHAMapInnerNodeT Implementation
 //----------------------------------------------------------
 
-SHAMapInnerNode::SHAMapInnerNode(uint8_t nodeDepth)
+template <typename Traits>
+SHAMapInnerNodeT<Traits>::SHAMapInnerNodeT(uint8_t nodeDepth)
     : depth_(nodeDepth), version_(0), do_cow_(false)
 {
-    children_ = std::make_unique<NodeChildren>();
+    children_ = std::make_unique<NodeChildrenT<Traits>>();
 }
 
-SHAMapInnerNode::SHAMapInnerNode(
+template <typename Traits>
+SHAMapInnerNodeT<Traits>::SHAMapInnerNodeT(
     bool isCopy,
     uint8_t nodeDepth,
     int initialVersion)
     : depth_(nodeDepth), version_(initialVersion), do_cow_(isCopy)
 {
-    children_ = std::make_unique<NodeChildren>();
+    children_ = std::make_unique<NodeChildrenT<Traits>>();
 }
 
+template <typename Traits>
 bool
-SHAMapInnerNode::is_leaf() const
+SHAMapInnerNodeT<Traits>::is_leaf() const
 {
     return false;
 }
 
+template <typename Traits>
 bool
-SHAMapInnerNode::is_inner() const
+SHAMapInnerNodeT<Traits>::is_inner() const
 {
     return true;
 }
 
 // TODO: replace this with an int or something? or add get_depth_int() method
 // for debugging
+template <typename Traits>
 uint8_t
-SHAMapInnerNode::get_depth() const
+SHAMapInnerNodeT<Traits>::get_depth() const
 {
     return depth_;
 }
 
+template <typename Traits>
 void
-SHAMapInnerNode::set_depth(uint8_t depth)
+SHAMapInnerNodeT<Traits>::set_depth(uint8_t depth)
 {
     depth_ = depth;
 }
 
+template <typename Traits>
 int
-SHAMapInnerNode::get_depth_int() const
+SHAMapInnerNodeT<Traits>::get_depth_int() const
 {
     return depth_;
 }
 
+template <typename Traits>
 boost::json::object
-SHAMapInnerNode::trie_json(
+SHAMapInnerNodeT<Traits>::trie_json(
     TrieJsonOptions options,
     SHAMapOptions const& shamap_options) const
 {
@@ -86,7 +94,8 @@ SHAMapInnerNode::trie_json(
                 if (child->is_leaf())
                 {
                     auto leaf =
-                        boost::static_pointer_cast<SHAMapLeafNode>(child);
+                        boost::static_pointer_cast<SHAMapLeafNodeT<Traits>>(
+                            child);
                     if (options.key_as_hash)
                     {
                         auto key_hex = leaf->get_item()->key().hex();
@@ -105,7 +114,8 @@ SHAMapInnerNode::trie_json(
                 else
                 {
                     auto inner =
-                        boost::static_pointer_cast<SHAMapInnerNode>(child);
+                        boost::static_pointer_cast<SHAMapInnerNodeT<Traits>>(
+                            child);
                     result[nibble] = inner->trie_json(options, shamap_options);
                 }
             }
@@ -115,8 +125,9 @@ SHAMapInnerNode::trie_json(
     return result;
 }
 
+template <typename Traits>
 void
-SHAMapInnerNode::invalidate_hash_recursive()
+SHAMapInnerNodeT<Traits>::invalidate_hash_recursive()
 {
     for (int i = 0; i < 16; i++)
     {
@@ -125,18 +136,20 @@ SHAMapInnerNode::invalidate_hash_recursive()
             child->invalidate_hash();
             if (child->is_inner())
             {
-                auto inner = boost::static_pointer_cast<SHAMapInnerNode>(child);
+                auto inner =
+                    boost::static_pointer_cast<SHAMapInnerNodeT<Traits>>(child);
                 inner->invalidate_hash_recursive();
             }
         }
     }
-    invalidate_hash();
+    this->invalidate_hash();
 }
 
+template <typename Traits>
 bool
-SHAMapInnerNode::set_child(
+SHAMapInnerNodeT<Traits>::set_child(
     int branch,
-    boost::intrusive_ptr<SHAMapTreeNode> const& child)
+    boost::intrusive_ptr<SHAMapTreeNodeT<Traits>> const& child)
 {
     if (branch < 0 || branch >= 16)
     {
@@ -154,12 +167,13 @@ SHAMapInnerNode::set_child(
 
     // Now safe to modify
     children_->set_child(branch, child);
-    invalidate_hash();  // Mark hash as invalid
+    this->invalidate_hash();  // Mark hash as invalid
     return true;
 }
 
-boost::intrusive_ptr<SHAMapTreeNode>
-SHAMapInnerNode::get_child(int branch) const
+template <typename Traits>
+boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>
+SHAMapInnerNodeT<Traits>::get_child(int branch) const
 {
     if (branch < 0 || branch >= 16)
     {
@@ -169,8 +183,9 @@ SHAMapInnerNode::get_child(int branch) const
     return children_->get_child(branch);
 }
 
+template <typename Traits>
 bool
-SHAMapInnerNode::has_child(int branch) const
+SHAMapInnerNodeT<Traits>::has_child(int branch) const
 {
     if (branch < 0 || branch >= 16)
     {
@@ -180,22 +195,25 @@ SHAMapInnerNode::has_child(int branch) const
     return children_->has_child(branch);
 }
 
+template <typename Traits>
 int
-SHAMapInnerNode::get_branch_count() const
+SHAMapInnerNodeT<Traits>::get_branch_count() const
 {
     return children_->get_child_count();
 }
 
+template <typename Traits>
 uint16_t
-SHAMapInnerNode::get_branch_mask() const
+SHAMapInnerNodeT<Traits>::get_branch_mask() const
 {
     return children_->get_branch_mask();
 }
 
-boost::intrusive_ptr<SHAMapLeafNode>
-SHAMapInnerNode::get_only_child_leaf() const
+template <typename Traits>
+boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
+SHAMapInnerNodeT<Traits>::get_only_child_leaf() const
 {
-    boost::intrusive_ptr<SHAMapLeafNode> resultLeaf = nullptr;
+    boost::intrusive_ptr<SHAMapLeafNodeT<Traits>> resultLeaf = nullptr;
     int leaf_count = 0;
 
     // Iterate through all branches
@@ -212,7 +230,8 @@ SHAMapInnerNode::get_only_child_leaf() const
             leaf_count++;
             if (leaf_count == 1)
             {
-                resultLeaf = boost::static_pointer_cast<SHAMapLeafNode>(child);
+                resultLeaf =
+                    boost::static_pointer_cast<SHAMapLeafNodeT<Traits>>(child);
             }
             else
             {
@@ -224,19 +243,20 @@ SHAMapInnerNode::get_only_child_leaf() const
     return resultLeaf;  // Returns leaf if exactly one found, else nullptr
 }
 
-boost::intrusive_ptr<SHAMapInnerNode>
-SHAMapInnerNode::copy(int newVersion) const
+template <typename Traits>
+boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>
+SHAMapInnerNodeT<Traits>::copy(int newVersion) const
 {
     // Create a new inner node with same depth
-    auto new_node =
-        boost::intrusive_ptr(new SHAMapInnerNode(true, depth_, newVersion));
+    auto new_node = boost::intrusive_ptr(
+        new SHAMapInnerNodeT<Traits>(true, depth_, newVersion));
 
     // Copy children - this creates a non-canonicalized copy
     new_node->children_ = children_->copy();
 
     // Copy other properties
-    new_node->hash = hash;
-    new_node->hash_valid_ = hash_valid_;
+    new_node->hash = this->hash;
+    new_node->hash_valid_ = this->hash_valid_;
 
     LOGD(
         "Cloned inner node from version ",
@@ -247,18 +267,20 @@ SHAMapInnerNode::copy(int newVersion) const
     return new_node;
 }
 
-boost::intrusive_ptr<SHAMapInnerNode>
-SHAMapInnerNode::make_child(int depth) const
+template <typename Traits>
+boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>
+SHAMapInnerNodeT<Traits>::make_child(int depth) const
 {
     // Should at least be one level deeper
     if (depth <= depth_)
     {
         throw InvalidDepthException(depth, 63);
     }
-    return boost::intrusive_ptr(new SHAMapInnerNode(do_cow_, depth, version_));
+    return boost::intrusive_ptr(
+        new SHAMapInnerNodeT<Traits>(do_cow_, depth, version_));
 }
 
-LogPartition SHAMapInnerNode::log_partition_{
-    "SHAMapInnerNode",
-    LogLevel::DEBUG};
+// Explicit template instantiation for default traits
+template class SHAMapInnerNodeT<DefaultNodeTraits>;
+
 }  // namespace catl::shamap

@@ -13,13 +13,25 @@
 #include "shamap-utils.h"
 
 namespace catl::shamap {
+
+template <typename Traits>
+class SHAMapT;
+
+template <typename Traits>
+class PathFinderT;
+
+// Forward declaration for the NodeChildrenT
+template <typename Traits>
+class NodeChildrenT;
+
 /**
  * Inner (branch) node in the SHAMap tree
  */
-class SHAMapInnerNode : public SHAMapTreeNode
+template <typename Traits = DefaultNodeTraits>
+class SHAMapInnerNodeT : public SHAMapTreeNodeT<Traits>
 {
 private:
-    std::unique_ptr<NodeChildren> children_;
+    std::unique_ptr<NodeChildrenT<Traits>> children_;
     uint8_t depth_ = 0;
     static LogPartition log_partition_;
     // CoW support
@@ -27,9 +39,9 @@ private:
     bool do_cow_ = false;
 
 public:
-    explicit SHAMapInnerNode(uint8_t nodeDepth = 0);
+    explicit SHAMapInnerNodeT(uint8_t nodeDepth = 0);
 
-    SHAMapInnerNode(bool isCopy, uint8_t nodeDepth, int initialVersion);
+    SHAMapInnerNodeT(bool isCopy, uint8_t nodeDepth, int initialVersion);
 
     bool
     is_leaf() const override;
@@ -48,10 +60,11 @@ public:
     get_depth_int() const;
 
     bool
-    set_child(int branch, boost::intrusive_ptr<SHAMapTreeNode> const& child);
+    set_child(
+        int branch,
+        boost::intrusive_ptr<SHAMapTreeNodeT<Traits>> const& child);
 
-    boost::intrusive_ptr<SHAMapTreeNode>
-
+    boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>
     get_child(int branch) const;
 
     bool
@@ -63,11 +76,12 @@ public:
     uint16_t
     get_branch_mask() const;
 
-    boost::intrusive_ptr<SHAMapLeafNode>
+    boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
     get_only_child_leaf() const;
 
-    boost::intrusive_ptr<SHAMapLeafNode>
-    first_leaf(const boost::intrusive_ptr<SHAMapInnerNode>& inner) const;
+    boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
+    first_leaf(
+        const boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>& inner) const;
 
     boost::json::object
     trie_json(TrieJsonOptions options, SHAMapOptions const& shamap_options)
@@ -95,8 +109,11 @@ public:
     }
 
 protected:
-    friend class PathFinder;
-    friend class SHAMap;
+    template <typename T>
+    friend class PathFinderT;
+
+    template <typename T>
+    friend class SHAMapT;
 
     void
     update_hash_reference(const SHAMapOptions& options);
@@ -122,7 +139,7 @@ protected:
     Hash256
     compute_skipped_hash_stack(
         const SHAMapOptions& options,
-        const boost::intrusive_ptr<SHAMapInnerNode>& inner,
+        const boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>& inner,
         const Key& index,
         int round,
         int skips) const;
@@ -130,7 +147,7 @@ protected:
     Hash256
     compute_skipped_hash_recursive(
         const SHAMapOptions& options,
-        const boost::intrusive_ptr<SHAMapInnerNode>& inner,
+        const boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>& inner,
         const Key& index,
         int round,
         int skips) const;
@@ -148,10 +165,10 @@ protected:
         return do_cow_;
     }
 
-    boost::intrusive_ptr<SHAMapInnerNode>
+    boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>
     copy(int newVersion) const;
 
-    boost::intrusive_ptr<SHAMapInnerNode>
+    boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>
     make_child(int depth) const;
 
     int
@@ -160,4 +177,12 @@ protected:
         return select_branch(key, depth_);
     }
 };
+
+// Type alias for backward compatibility
+using SHAMapInnerNode = SHAMapInnerNodeT<DefaultNodeTraits>;
+
+// Define the static log partition declaration for all template instantiations
+template <typename Traits>
+LogPartition SHAMapInnerNodeT<Traits>::log_partition_("SHAMapInnerNode");
+
 }  // namespace catl::shamap

@@ -10,10 +10,11 @@ namespace catl::shamap {
  * Memory-optimized container for SHAMapInnerNode children with iteration
  * support
  */
-class NodeChildren
+template <typename Traits = DefaultNodeTraits>
+class NodeChildrenT
 {
 private:
-    boost::intrusive_ptr<SHAMapTreeNode>* children_;  // Dynamic array
+    boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>* children_;  // Dynamic array
     uint16_t branch_mask_ = 0;          // Bit mask of active branches
     uint8_t capacity_ = 0;              // Actual allocation size
     bool canonicalized_ = false;        // Has this been optimized?
@@ -24,7 +25,7 @@ public:
     class iterator
     {
     private:
-        NodeChildren const* container_;
+        NodeChildrenT const* container_;
         int current_branch_;
 
         // Find next valid branch
@@ -41,12 +42,12 @@ public:
     public:
         // Standard iterator type definitions
         using iterator_category = std::forward_iterator_tag;
-        using value_type = boost::intrusive_ptr<SHAMapTreeNode>;
+        using value_type = boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>;
         using difference_type = std::ptrdiff_t;
         using pointer = const value_type*;
         using reference = const value_type&;
 
-        iterator(NodeChildren const* container, int branch)
+        iterator(NodeChildrenT const* container, int branch)
             : container_(container), current_branch_(branch)
         {
             findNextValid();
@@ -118,14 +119,14 @@ public:
     };
 
     // Constructor - always starts with full 16 slots
-    NodeChildren();
-    ~NodeChildren();
+    NodeChildrenT();
+    ~NodeChildrenT();
 
     // Core operations
-    boost::intrusive_ptr<SHAMapTreeNode>
+    boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>
     get_child(int branch) const;
     void
-    set_child(int branch, boost::intrusive_ptr<SHAMapTreeNode> child);
+    set_child(int branch, boost::intrusive_ptr<SHAMapTreeNodeT<Traits>> child);
     bool
     has_child(int branch) const
     {
@@ -152,13 +153,13 @@ public:
     }
 
     // For Copy-on-Write
-    std::unique_ptr<NodeChildren>
+    std::unique_ptr<NodeChildrenT<Traits>>
     copy() const;
 
     // No copying
-    NodeChildren(const NodeChildren&) = delete;
-    NodeChildren&
-    operator=(const NodeChildren&) = delete;
+    NodeChildrenT(const NodeChildrenT&) = delete;
+    NodeChildrenT&
+    operator=(const NodeChildrenT&) = delete;
 
     // Iteration support - iterates only through non-empty children
     iterator
@@ -172,7 +173,11 @@ public:
         return iterator(this, 16);
     }
 
-    const boost::intrusive_ptr<SHAMapTreeNode>&
+    const boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>&
     operator[](int branch) const;
 };
+
+// Type alias for backward compatibility
+using NodeChildren = NodeChildrenT<DefaultNodeTraits>;
+
 }  // namespace catl::shamap

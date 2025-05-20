@@ -16,10 +16,11 @@ using catl::crypto::Sha512HalfHasher;
 
 namespace catl::shamap {
 //----------------------------------------------------------
-// SHAMapLeafNode Implementation
+// SHAMapLeafNodeT Implementation
 //----------------------------------------------------------
 
-SHAMapLeafNode::SHAMapLeafNode(
+template <typename Traits>
+SHAMapLeafNodeT<Traits>::SHAMapLeafNodeT(
     boost::intrusive_ptr<MmapItem> i,
     SHAMapNodeType t)
     : item(std::move(i)), type(t)
@@ -30,20 +31,23 @@ SHAMapLeafNode::SHAMapLeafNode(
     }
 }
 
+template <typename Traits>
 bool
-SHAMapLeafNode::is_leaf() const
+SHAMapLeafNodeT<Traits>::is_leaf() const
 {
     return true;
 }
 
+template <typename Traits>
 bool
-SHAMapLeafNode::is_inner() const
+SHAMapLeafNodeT<Traits>::is_inner() const
 {
     return false;
 }
 
+template <typename Traits>
 void
-SHAMapLeafNode::update_hash(SHAMapOptions const&)
+SHAMapLeafNodeT<Traits>::update_hash(SHAMapOptions const&)
 {
     std::array<unsigned char, 4> prefix = {0, 0, 0, 0};
     auto set = [&prefix](auto& from) {
@@ -71,8 +75,8 @@ SHAMapLeafNode::update_hash(SHAMapOptions const&)
         hasher.update(item->key().data(), Key::size());
 
         // Finalize hash and take first 256 bits
-        hash = hasher.finalize();
-        hash_valid_ = true;
+        this->hash = hasher.finalize();
+        this->hash_valid_ = true;
     }
     catch (const std::exception& e)
     {
@@ -81,25 +85,33 @@ SHAMapLeafNode::update_hash(SHAMapOptions const&)
     }
 }
 
+template <typename Traits>
 boost::intrusive_ptr<MmapItem>
-SHAMapLeafNode::get_item() const
+SHAMapLeafNodeT<Traits>::get_item() const
 {
     return item;
 }
 
+template <typename Traits>
 SHAMapNodeType
-SHAMapLeafNode::get_type() const
+SHAMapLeafNodeT<Traits>::get_type() const
 {
     return type;
 }
 
-boost::intrusive_ptr<SHAMapLeafNode>
-SHAMapLeafNode::copy() const
+template <typename Traits>
+boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
+SHAMapLeafNodeT<Traits>::copy() const
 {
-    auto new_leaf = boost::intrusive_ptr(new SHAMapLeafNode(item, type));
-    new_leaf->hash = hash;
-    new_leaf->hash_valid_ = hash_valid_;
+    auto new_leaf =
+        boost::intrusive_ptr(new SHAMapLeafNodeT<Traits>(item, type));
+    new_leaf->hash = this->hash;
+    new_leaf->hash_valid_ = this->hash_valid_;
     new_leaf->version = version;
     return new_leaf;
 }
+
+// Explicit template instantiations for default traits
+template class SHAMapLeafNodeT<DefaultNodeTraits>;
+
 }  // namespace catl::shamap
