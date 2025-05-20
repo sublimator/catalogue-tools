@@ -11,13 +11,15 @@
 
 namespace catl::shamap {
 // TODO: restore the old update hash function
+template <typename Traits>
 void
-SHAMapInnerNode::update_hash_reference(SHAMapOptions const& options)
+SHAMapInnerNodeT<Traits>::update_hash_reference(SHAMapOptions const& options)
 {
-    if (uint16_t branchMask = children_->get_branch_mask(); branchMask == 0)
+    if (uint16_t branchMask = this->children_->get_branch_mask();
+        branchMask == 0)
     {
-        hash = Hash256::zero();
-        hash_valid_ = true;
+        this->hash = Hash256::zero();
+        this->hash_valid_ = true;
         return;
     }
 
@@ -33,7 +35,7 @@ SHAMapInnerNode::update_hash_reference(SHAMapOptions const& options)
         for (int i = 0; i < 16; i++)
         {
             const uint8_t* hashData = Hash256::zero().data();
-            if (const auto child = children_->get_child(i))
+            if (const auto child = this->children_->get_child(i))
             {
                 hashData = child->get_hash(options).data();
             }
@@ -42,12 +44,12 @@ SHAMapInnerNode::update_hash_reference(SHAMapOptions const& options)
         }
 
         // Finalize hash and take first 256 bits
-        hash = hasher.finalize();
-        hash_valid_ = true;
+        this->hash = hasher.finalize();
+        this->hash_valid_ = true;
 
         // Once hash is calculated, canonicalize to save memory
         // After this, the node becomes immutable until explicitly copied
-        children_->canonicalize();
+        this->children_->canonicalize();
     }
     catch (const std::exception& e)
     {
@@ -55,4 +57,9 @@ SHAMapInnerNode::update_hash_reference(SHAMapOptions const& options)
             std::string("Hash calculation failed: ") + e.what());
     }
 }
+// Explicit template instantiation for default traits
+template void
+SHAMapInnerNodeT<DefaultNodeTraits>::update_hash_reference(
+    SHAMapOptions const& options);
+
 }  // namespace catl::shamap

@@ -31,15 +31,16 @@ namespace catl::shamap {
  * objects and only getting .data() at the point of use, we ensure memory
  * remains valid regardless of compiler optimization.
  */
+template <typename Traits>
 void
-SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
+SHAMapInnerNodeT<Traits>::update_hash_collapsed(SHAMapOptions const& options)
 {
-    uint16_t branch_mask = children_->get_branch_mask();
+    uint16_t branch_mask = this->children_->get_branch_mask();
 
     if (branch_mask == 0)
     {
-        hash = Hash256::zero();
-        hash_valid_ = true;
+        this->hash = Hash256::zero();
+        this->hash_valid_ = true;
         OLOGD("Empty node (no branches), using zero hash");
         return;
     }
@@ -62,13 +63,14 @@ SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
             // Create a local Hash256 for each branch
             Hash256 child_hash = zero_hash;
 
-            if (auto child = children_->get_child(i))
+            if (auto child = this->children_->get_child(i))
             {
                 if (child->is_inner())
                 {
                     auto inner_child =
-                        boost::static_pointer_cast<SHAMapInnerNode>(child);
-                    int skips = inner_child->get_depth() - depth_ - 1;
+                        boost::static_pointer_cast<SHAMapInnerNodeT<Traits>>(
+                            child);
+                    int skips = inner_child->get_depth() - this->depth_ - 1;
 
                     if (skips > 0)
                     {
@@ -137,13 +139,13 @@ SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
         }
 
         // Finalize hash and take first 256 bits
-        hash = hasher.finalize();
-        hash_valid_ = true;
+        this->hash = hasher.finalize();
+        this->hash_valid_ = true;
 
-        OLOGD("Hash calculation complete: ", hash.hex());
+        OLOGD("Hash calculation complete: ", this->hash.hex());
 
         // Once hash is calculated, canonicalize to save memory
-        children_->canonicalize();
+        this->children_->canonicalize();
     }
     catch (const std::exception& e)
     {
@@ -153,16 +155,17 @@ SHAMapInnerNode::update_hash_collapsed(SHAMapOptions const& options)
 }
 
 // Helper method to find the first leaf in a subtree
-boost::intrusive_ptr<SHAMapLeafNode>
-SHAMapInnerNode::first_leaf(
-    const boost::intrusive_ptr<SHAMapInnerNode>& inner) const
+template <typename Traits>
+boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
+SHAMapInnerNodeT<Traits>::first_leaf(
+    const boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>& inner) const
 {
     OLOGD(
         "Searching for first leaf in inner node at depth ",
         static_cast<int>(inner->get_depth()));
 
     // Create a stack to hold inner nodes to process
-    std::stack<boost::intrusive_ptr<SHAMapInnerNode>> node_stack;
+    std::stack<boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>> node_stack;
     node_stack.push(inner);
 
     while (!node_stack.empty())
@@ -191,7 +194,8 @@ SHAMapInnerNode::first_leaf(
             {
                 // Found a leaf - return it immediately
                 OLOGD("Found leaf node at branch ", i);
-                return boost::static_pointer_cast<SHAMapLeafNode>(child);
+                return boost::static_pointer_cast<SHAMapLeafNodeT<Traits>>(
+                    child);
             }
 
             if (child->is_inner())
@@ -202,7 +206,8 @@ SHAMapInnerNode::first_leaf(
                     i,
                     ", adding to processing stack");
                 node_stack.push(
-                    boost::static_pointer_cast<SHAMapInnerNode>(child));
+                    boost::static_pointer_cast<SHAMapInnerNodeT<Traits>>(
+                        child));
             }
         }
     }
@@ -212,10 +217,11 @@ SHAMapInnerNode::first_leaf(
     return nullptr;
 }
 
+template <typename Traits>
 Hash256
-SHAMapInnerNode::compute_skipped_hash_recursive(
+SHAMapInnerNodeT<Traits>::compute_skipped_hash_recursive(
     const SHAMapOptions& options,
-    const boost::intrusive_ptr<SHAMapInnerNode>& inner,
+    const boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>& inner,
     const Key& index,
     int round,
     int skips) const
@@ -233,7 +239,7 @@ SHAMapInnerNode::compute_skipped_hash_recursive(
 
         // Calculate the path depth - this is the parent depth (this->depth_)
         // plus the current round
-        int path_depth = depth_ + round;
+        int path_depth = this->depth_ + round;
 
         // Determine which branch we're on at this depth level
         int selected_branch = select_branch(index, path_depth);
@@ -308,10 +314,11 @@ SHAMapInnerNode::compute_skipped_hash_recursive(
     }
 }
 
+template <typename Traits>
 Hash256
-SHAMapInnerNode::compute_skipped_hash_stack(
+SHAMapInnerNodeT<Traits>::compute_skipped_hash_stack(
     const SHAMapOptions& options,
-    const boost::intrusive_ptr<SHAMapInnerNode>& inner,
+    const boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>& inner,
     const Key& index,
     int round,
     int skips) const
@@ -333,7 +340,7 @@ SHAMapInnerNode::compute_skipped_hash_stack(
             auto prefix = HashPrefix::inner_node;
             hasher.update(prefix.data(), prefix.size());
 
-            int path_depth = depth_ + current_round;
+            int path_depth = this->depth_ + current_round;
             int selected_branch = select_branch(index, path_depth);
 
             for (int i = 0; i < 16; i++)
@@ -376,4 +383,27 @@ SHAMapInnerNode::compute_skipped_hash_stack(
             std::string("Hash calculation failed: ") + e.what());
     }
 }
+// Explicit template instantiation for default traits
+template void
+SHAMapInnerNodeT<DefaultNodeTraits>::update_hash_collapsed(
+    SHAMapOptions const& options);
+template boost::intrusive_ptr<SHAMapLeafNodeT<DefaultNodeTraits>>
+SHAMapInnerNodeT<DefaultNodeTraits>::first_leaf(
+    const boost::intrusive_ptr<SHAMapInnerNodeT<DefaultNodeTraits>>& inner)
+    const;
+template Hash256
+SHAMapInnerNodeT<DefaultNodeTraits>::compute_skipped_hash_recursive(
+    const SHAMapOptions& options,
+    const boost::intrusive_ptr<SHAMapInnerNodeT<DefaultNodeTraits>>& inner,
+    const Key& index,
+    int round,
+    int skips) const;
+template Hash256
+SHAMapInnerNodeT<DefaultNodeTraits>::compute_skipped_hash_stack(
+    const SHAMapOptions& options,
+    const boost::intrusive_ptr<SHAMapInnerNodeT<DefaultNodeTraits>>& inner,
+    const Key& index,
+    int round,
+    int skips) const;
+
 }  // namespace catl::shamap

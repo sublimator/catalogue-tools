@@ -18,6 +18,7 @@
 #include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap-options.h"
 #include "catl/shamap/shamap-pathfinder.h"
+#include "catl/shamap/shamap-traits.h"
 #include "catl/shamap/shamap-treenode.h"
 
 namespace catl::shamap {
@@ -25,11 +26,12 @@ namespace catl::shamap {
  * Main SHAMap class implementing a pruned, binary prefix tree
  * with Copy-on-Write support for efficient snapshots
  */
-class SHAMap
+template <typename Traits = DefaultNodeTraits>
+class SHAMapT
 {
 private:
     static LogPartition log_partition_;
-    boost::intrusive_ptr<SHAMapInnerNode> root;
+    boost::intrusive_ptr<SHAMapInnerNodeT<Traits>> root;
     SHAMapNodeType node_type_;
     SHAMapOptions options_;
 
@@ -64,7 +66,7 @@ private:
      * @param node The inner node to process
      */
     void
-    collapse_inner_node(boost::intrusive_ptr<SHAMapInnerNode>& node);
+    collapse_inner_node(boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>& node);
 
     /**
      * Finds a single inner child if this node has exactly one inner child
@@ -74,22 +76,24 @@ private:
      * @return A pointer to the single inner child, or nullptr if condition not
      * met
      */
-    boost::intrusive_ptr<SHAMapInnerNode>
-    find_only_single_inner_child(boost::intrusive_ptr<SHAMapInnerNode>& node);
+    boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>
+    find_only_single_inner_child(
+        boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>& node);
 
     // Private constructor for creating snapshots
-    SHAMap(
+    SHAMapT(
         SHAMapNodeType type,
-        boost::intrusive_ptr<SHAMapInnerNode> rootNode,
+        boost::intrusive_ptr<SHAMapInnerNodeT<Traits>> rootNode,
         std::shared_ptr<std::atomic<int>> vCounter,
         int version,
         SHAMapOptions options);
 
 protected:
-    friend class PathFinder;
+    template <typename T>
+    friend class PathFinderT;
 
     void
-    handle_path_cow(PathFinder& path_finder);
+    handle_path_cow(PathFinderT<Traits>& path_finder);
 
     SetResult
     set_item_reference(
@@ -104,7 +108,7 @@ protected:
     remove_item_reference(const Key& key);
 
 public:
-    explicit SHAMap(
+    explicit SHAMapT(
         SHAMapNodeType type = tnACCOUNT_STATE,
         SHAMapOptions options = SHAMapOptions());
 
@@ -129,7 +133,7 @@ public:
     get_hash() const;
 
     // Only public CoW method - creates a snapshot
-    std::shared_ptr<SHAMap>
+    std::shared_ptr<SHAMapT<Traits>>
     snapshot();
 
     void
@@ -161,7 +165,7 @@ public:
      *
      * @return Root node pointer
      */
-    boost::intrusive_ptr<SHAMapInnerNode>
+    boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>
     get_root() const
     {
         return root;
@@ -200,4 +204,12 @@ public:
     void
     collapse_tree();
 };
+
+// Define the static log partition declaration for all template instantiations
+template <typename Traits>
+LogPartition SHAMapT<Traits>::log_partition_("SHAMap");
+
+// Type alias for backward compatibility
+using SHAMap = SHAMapT<DefaultNodeTraits>;
+
 }  // namespace catl::shamap

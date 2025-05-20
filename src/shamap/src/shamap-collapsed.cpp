@@ -5,8 +5,9 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace catl::shamap {
+template <typename Traits>
 void
-SHAMap::collapse_tree()
+SHAMapT<Traits>::collapse_tree()
 {
     if (root)
     {
@@ -14,8 +15,10 @@ SHAMap::collapse_tree()
     }
 }
 
+template <typename Traits>
 void
-SHAMap::collapse_inner_node(boost::intrusive_ptr<SHAMapInnerNode>& node)
+SHAMapT<Traits>::collapse_inner_node(
+    boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>& node)
 {
     if (!node)
     {
@@ -26,11 +29,11 @@ SHAMap::collapse_inner_node(boost::intrusive_ptr<SHAMapInnerNode>& node)
     bool is_root = (node->get_depth() == 0);
 
     // Check if we need to make a CoW copy before modification
-    if (cow_enabled_ && node->is_cow_enabled() &&
-        node->get_version() != current_version_)
+    if (this->cow_enabled_ && node->is_cow_enabled() &&
+        node->get_version() != this->current_version_)
     {
         // Create a copy with the current version
-        auto node_copy = node->copy(current_version_);
+        auto node_copy = node->copy(this->current_version_);
         // Important: update the reference passed to this function
         node = node_copy;
         // No need to rechain as the caller will update its reference to node
@@ -45,7 +48,7 @@ SHAMap::collapse_inner_node(boost::intrusive_ptr<SHAMapInnerNode>& node)
             if (child && child->is_inner())
             {
                 auto inner_child =
-                    boost::static_pointer_cast<SHAMapInnerNode>(child);
+                    boost::static_pointer_cast<SHAMapInnerNodeT<Traits>>(child);
 
                 // Recursively process the child
                 collapse_inner_node(inner_child);
@@ -64,7 +67,7 @@ SHAMap::collapse_inner_node(boost::intrusive_ptr<SHAMapInnerNode>& node)
     }
 
     // After processing all children, look for a single inner child
-    if (boost::intrusive_ptr<SHAMapInnerNode> single_inner_child =
+    if (boost::intrusive_ptr<SHAMapInnerNodeT<Traits>> single_inner_child =
             find_only_single_inner_child(node))
     {
         OLOGD(
@@ -74,13 +77,14 @@ SHAMap::collapse_inner_node(boost::intrusive_ptr<SHAMapInnerNode>& node)
             static_cast<int>(single_inner_child->get_depth()));
 
         // If using CoW support, handle versioning before modifications
-        if (cow_enabled_)
+        if (this->cow_enabled_)
         {
             // If the single inner child needs to be copied for versioning
             if (single_inner_child->is_cow_enabled() &&
-                single_inner_child->get_version() != current_version_)
+                single_inner_child->get_version() != this->current_version_)
             {
-                auto child_copy = single_inner_child->copy(current_version_);
+                auto child_copy =
+                    single_inner_child->copy(this->current_version_);
                 // Update our reference to this child
                 single_inner_child = child_copy;
                 // Note: We don't need to rechain this reference since we're
@@ -88,7 +92,7 @@ SHAMap::collapse_inner_node(boost::intrusive_ptr<SHAMapInnerNode>& node)
             }
 
             // Set version before structural modifications
-            node->set_version(current_version_);
+            node->set_version(this->current_version_);
             node->enable_cow(true);
         }
 
@@ -104,18 +108,19 @@ SHAMap::collapse_inner_node(boost::intrusive_ptr<SHAMapInnerNode>& node)
                 auto child = single_inner_child->get_child(i);
 
                 // If using CoW, ensure child versions are compatible
-                if (cow_enabled_ && child)
+                if (this->cow_enabled_ && child)
                 {
                     if (child->is_inner())
                     {
-                        auto inner_child =
-                            boost::static_pointer_cast<SHAMapInnerNode>(child);
+                        auto inner_child = boost::static_pointer_cast<
+                            SHAMapInnerNodeT<Traits>>(child);
                         if (inner_child->is_cow_enabled() &&
-                            inner_child->get_version() != current_version_)
+                            inner_child->get_version() !=
+                                this->current_version_)
                         {
                             // Create a version-compatible copy
                             auto child_copy =
-                                inner_child->copy(current_version_);
+                                inner_child->copy(this->current_version_);
                             // Update this node to point to the new copy
                             node->set_child(i, child_copy);
                             // No additional rechaining needed since we just
@@ -126,12 +131,13 @@ SHAMap::collapse_inner_node(boost::intrusive_ptr<SHAMapInnerNode>& node)
                     else if (child->is_leaf())
                     {
                         auto leaf_child =
-                            boost::static_pointer_cast<SHAMapLeafNode>(child);
-                        if (leaf_child->get_version() != current_version_)
+                            boost::static_pointer_cast<SHAMapLeafNodeT<Traits>>(
+                                child);
+                        if (leaf_child->get_version() != this->current_version_)
                         {
                             // Copy leaf nodes too if needed
                             auto leaf_copy = leaf_child->copy();
-                            leaf_copy->set_version(current_version_);
+                            leaf_copy->set_version(this->current_version_);
                             node->set_child(i, leaf_copy);
                             continue;
                         }
@@ -152,11 +158,12 @@ SHAMap::collapse_inner_node(boost::intrusive_ptr<SHAMapInnerNode>& node)
     }
 }
 
-boost::intrusive_ptr<SHAMapInnerNode>
-SHAMap::find_only_single_inner_child(
-    boost::intrusive_ptr<SHAMapInnerNode>& node)
+template <typename Traits>
+boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>
+SHAMapT<Traits>::find_only_single_inner_child(
+    boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>& node)
 {
-    boost::intrusive_ptr<SHAMapInnerNode> single_inner_child = nullptr;
+    boost::intrusive_ptr<SHAMapInnerNodeT<Traits>> single_inner_child = nullptr;
     int inner_count = 0;
 
     for (int i = 0; i < 16; i++)
@@ -170,8 +177,8 @@ SHAMap::find_only_single_inner_child(
                     inner_count++;
                     if (inner_count == 1)
                     {
-                        single_inner_child =
-                            boost::static_pointer_cast<SHAMapInnerNode>(child);
+                        single_inner_child = boost::static_pointer_cast<
+                            SHAMapInnerNodeT<Traits>>(child);
                     }
                     else
                     {
@@ -189,4 +196,14 @@ SHAMap::find_only_single_inner_child(
 
     return single_inner_child;
 }
+// Explicit template instantiation for default traits
+template void
+SHAMapT<DefaultNodeTraits>::collapse_tree();
+template void
+SHAMapT<DefaultNodeTraits>::collapse_inner_node(
+    boost::intrusive_ptr<SHAMapInnerNodeT<DefaultNodeTraits>>& node);
+template boost::intrusive_ptr<SHAMapInnerNodeT<DefaultNodeTraits>>
+SHAMapT<DefaultNodeTraits>::find_only_single_inner_child(
+    boost::intrusive_ptr<SHAMapInnerNodeT<DefaultNodeTraits>>& node);
+
 }  // namespace catl::shamap

@@ -8,31 +8,20 @@ namespace catl::shamap {
 // SHAMapTreeNode Implementation
 //----------------------------------------------------------
 
-void
-intrusive_ptr_add_ref(const SHAMapTreeNode* p)
-{
-    p->ref_count_.fetch_add(1, std::memory_order_relaxed);
-}
+// Template implementations are now in the header file,
+// but we need to implement the methods defined outside the class
 
+template <typename Traits>
 void
-intrusive_ptr_release(const SHAMapTreeNode* p)
-{
-    if (p->ref_count_.fetch_sub(1, std::memory_order_release) == 1)
-    {
-        std::atomic_thread_fence(std::memory_order_acquire);
-        delete p;
-    }
-}
-
-void
-SHAMapTreeNode::invalidate_hash()
+SHAMapTreeNodeT<Traits>::invalidate_hash()
 {
     hash_valid_ = false;
     hash = Hash256::zero();
 }
 
+template <typename Traits>
 const Hash256&
-SHAMapTreeNode::get_hash(SHAMapOptions const& options)
+SHAMapTreeNodeT<Traits>::get_hash(SHAMapOptions const& options)
 {
     if (!hash_valid_)
     {
@@ -41,4 +30,8 @@ SHAMapTreeNode::get_hash(SHAMapOptions const& options)
     }
     return hash;
 }
+
+// Explicit template instantiations for default traits
+template class SHAMapTreeNodeT<DefaultNodeTraits>;
+
 }  // namespace catl::shamap

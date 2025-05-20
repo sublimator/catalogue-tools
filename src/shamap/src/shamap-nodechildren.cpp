@@ -7,13 +7,14 @@
 
 namespace catl::shamap {
 //----------------------------------------------------------
-// NodeChildren Implementation
+// NodeChildrenT Implementation
 //----------------------------------------------------------
 
-NodeChildren::NodeChildren() : capacity_(16), canonicalized_(false)
+template <typename Traits>
+NodeChildrenT<Traits>::NodeChildrenT() : capacity_(16), canonicalized_(false)
 {
     // Allocate full array of 16 slots
-    children_ = new boost::intrusive_ptr<SHAMapTreeNode>[16]();
+    children_ = new boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>[16]();
 
     // Initialize branch mapping for direct indexing
     for (int i = 0; i < 16; i++)
@@ -22,13 +23,15 @@ NodeChildren::NodeChildren() : capacity_(16), canonicalized_(false)
     }
 }
 
-NodeChildren::~NodeChildren()
+template <typename Traits>
+NodeChildrenT<Traits>::~NodeChildrenT()
 {
     delete[] children_;
 }
 
-boost::intrusive_ptr<SHAMapTreeNode>
-NodeChildren::get_child(int branch) const
+template <typename Traits>
+boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>
+NodeChildrenT<Traits>::get_child(int branch) const
 {
     if (branch < 0 || branch >= 16)
         return nullptr;
@@ -39,8 +42,11 @@ NodeChildren::get_child(int branch) const
     return children_[canonicalized_ ? branch_to_index_[branch] : branch];
 }
 
+template <typename Traits>
 void
-NodeChildren::set_child(int branch, boost::intrusive_ptr<SHAMapTreeNode> child)
+NodeChildrenT<Traits>::set_child(
+    int branch,
+    boost::intrusive_ptr<SHAMapTreeNodeT<Traits>> child)
 {
     if (branch < 0 || branch >= 16)
         return;
@@ -65,8 +71,9 @@ NodeChildren::set_child(int branch, boost::intrusive_ptr<SHAMapTreeNode> child)
     }
 }
 
+template <typename Traits>
 void
-NodeChildren::canonicalize()
+NodeChildrenT<Traits>::canonicalize()
 {
     if (canonicalized_ || branch_mask_ == 0)
         return;
@@ -78,7 +85,8 @@ NodeChildren::canonicalize()
         return;
 
     // Create optimally sized array
-    auto new_children = new boost::intrusive_ptr<SHAMapTreeNode>[child_count];
+    auto new_children =
+        new boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>[child_count];
 
     // Initialize lookup table (all -1)
     for (int i = 0; i < 16; i++)
@@ -104,10 +112,11 @@ NodeChildren::canonicalize()
     canonicalized_ = true;
 }
 
-std::unique_ptr<NodeChildren>
-NodeChildren::copy() const
+template <typename Traits>
+std::unique_ptr<NodeChildrenT<Traits>>
+NodeChildrenT<Traits>::copy() const
 {
-    auto new_children = std::make_unique<NodeChildren>();
+    auto new_children = std::make_unique<NodeChildrenT<Traits>>();
 
     // Copy branch mask
     new_children->branch_mask_ = branch_mask_;
@@ -134,14 +143,19 @@ NodeChildren::copy() const
     return new_children;
 }
 
-const boost::intrusive_ptr<SHAMapTreeNode>&
-NodeChildren::operator[](int branch) const
+template <typename Traits>
+const boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>&
+NodeChildrenT<Traits>::operator[](int branch) const
 {
-    static boost::intrusive_ptr<SHAMapTreeNode> nullPtr;
+    static boost::intrusive_ptr<SHAMapTreeNodeT<Traits>> nullPtr;
 
     if (branch < 0 || branch >= 16 || !(branch_mask_ & (1 << branch)))
         return nullPtr;
 
     return children_[canonicalized_ ? branch_to_index_[branch] : branch];
 }
+
+// Explicit template instantiations for default traits
+template class NodeChildrenT<DefaultNodeTraits>;
+
 }  // namespace catl::shamap

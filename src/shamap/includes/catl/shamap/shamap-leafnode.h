@@ -6,10 +6,18 @@
 #include <boost/intrusive_ptr.hpp>
 
 namespace catl::shamap {
+
+template <typename Traits>
+class SHAMapT;
+
+template <typename Traits>
+class PathFinderT;
+
 /**
  * Leaf node in the SHAMap tree
  */
-class SHAMapLeafNode : public SHAMapTreeNode
+template <typename Traits = DefaultNodeTraits>
+class SHAMapLeafNodeT : public SHAMapTreeNodeT<Traits>
 {
 private:
     boost::intrusive_ptr<MmapItem> item;
@@ -17,7 +25,7 @@ private:
     int version = -1;  // Version for CoW tracking
 
 public:
-    SHAMapLeafNode(boost::intrusive_ptr<MmapItem> i, SHAMapNodeType t);
+    SHAMapLeafNodeT(boost::intrusive_ptr<MmapItem> i, SHAMapNodeType t);
 
     bool
     is_leaf() const override;
@@ -41,11 +49,14 @@ public:
     }
 
 protected:
-    friend class PathFinder;
-    friend class SHAMap;
+    template <typename T>
+    friend class PathFinderT;
+
+    template <typename T>
+    friend class SHAMapT;
 
     // CoW support - only accessible to friends
-    boost::intrusive_ptr<SHAMapLeafNode>
+    boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
     copy() const;
 
     int
@@ -54,4 +65,8 @@ protected:
         return version;
     }
 };
+
+// Type alias for backward compatibility
+using SHAMapLeafNode = SHAMapLeafNodeT<DefaultNodeTraits>;
+
 }  // namespace catl::shamap

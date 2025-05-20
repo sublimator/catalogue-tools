@@ -12,8 +12,11 @@
 #include "catl/shamap/shamap.h"
 
 namespace catl::shamap {
+template <typename Traits>
 SetResult
-SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
+SHAMapT<Traits>::set_item_collapsed(
+    boost::intrusive_ptr<MmapItem>& item,
+    SetMode mode)
 {
     if (!item)
     {
@@ -24,9 +27,10 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 
     try
     {
-        PathFinder path_finder(root, item->key(), options_);
+        PathFinderT<Traits> path_finder(
+            this->root, item->key(), this->options_);
         path_finder.find_path();
-        handle_path_cow(path_finder);
+        this->handle_path_cow(path_finder);
         path_finder.add_node_at_divergence();
 
         // Check mode constraints
@@ -54,11 +58,11 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         {
             OLOGD("Updating existing key: ", item->key().hex());
             auto parent = path_finder.get_parent_of_terminal();
-            auto new_leaf =
-                boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
-            if (cow_enabled_)
+            auto new_leaf = boost::intrusive_ptr(
+                new SHAMapLeafNodeT<Traits>(item, this->node_type_));
+            if (this->cow_enabled_)
             {
-                new_leaf->set_version(current_version_);
+                new_leaf->set_version(this->current_version_);
             }
             parent->set_child(path_finder.get_terminal_branch(), new_leaf);
             path_finder.dirty_path();
@@ -74,11 +78,11 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
             int branch = path_finder.get_terminal_branch();
 
             // Create new leaf node
-            auto new_leaf =
-                boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
-            if (cow_enabled_)
+            auto new_leaf = boost::intrusive_ptr(
+                new SHAMapLeafNodeT<Traits>(item, this->node_type_));
+            if (this->cow_enabled_)
             {
-                new_leaf->set_version(current_version_);
+                new_leaf->set_version(this->current_version_);
             }
 
             parent->set_child(branch, new_leaf);
@@ -99,19 +103,19 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
             auto new_inner = parent->make_child(divergence_depth);
             parent->set_child(
                 parent->select_branch_for_depth(item->key()), new_inner);
-            auto new_leaf =
-                boost::intrusive_ptr(new SHAMapLeafNode(item, node_type_));
-            if (cow_enabled_)
+            auto new_leaf = boost::intrusive_ptr(
+                new SHAMapLeafNodeT<Traits>(item, this->node_type_));
+            if (this->cow_enabled_)
             {
-                new_leaf->set_version(current_version_);
+                new_leaf->set_version(this->current_version_);
             }
             new_inner->set_child(
                 new_inner->select_branch_for_depth(item->key()), new_leaf);
             auto existing_leaf = path_finder.get_leaf_mutable();
-            if (cow_enabled_)
+            if (this->cow_enabled_)
             {
                 existing_leaf = existing_leaf->copy();
-                existing_leaf->set_version(current_version_);
+                existing_leaf->set_version(this->current_version_);
             }
             // TODO: leaf cow ?
             new_inner->set_child(
@@ -141,4 +145,10 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         return SetResult::FAILED;
     }
 }
+// Explicit template instantiation for default traits
+template SetResult
+SHAMapT<DefaultNodeTraits>::set_item_collapsed(
+    boost::intrusive_ptr<MmapItem>& item,
+    SetMode mode);
+
 }  // namespace catl::shamap

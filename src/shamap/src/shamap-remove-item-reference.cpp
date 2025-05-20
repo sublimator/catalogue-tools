@@ -7,15 +7,16 @@
 #include <exception>
 
 namespace catl::shamap {
+template <typename Traits>
 bool
-SHAMap::remove_item_reference(const Key& key)
+SHAMapT<Traits>::remove_item_reference(const Key& key)
 {
     OLOGD_KEY("Attempting to remove item with key: ", key);
     try
     {
-        PathFinder path_finder(root, key, options_);
+        PathFinderT<Traits> path_finder(this->root, key, this->options_);
         path_finder.find_path();
-        handle_path_cow(path_finder);
+        this->handle_path_cow(path_finder);
 
         if (!path_finder.has_leaf() || !path_finder.did_leaf_key_match())
         {
@@ -57,4 +58,8 @@ SHAMap::remove_item_reference(const Key& key)
         return false;
     }
 }
+// Explicit template instantiation for default traits
+template bool
+SHAMapT<DefaultNodeTraits>::remove_item_reference(const Key& key);
+
 }  // namespace catl::shamap
