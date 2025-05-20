@@ -249,8 +249,8 @@ public:
      */
     MapOperations
     read_map_to_shamap(
-        SHAMap& map,
-        SHAMapNodeType node_type,
+        shamap::SHAMap& map,
+        shamap::SHAMapNodeType node_type,
         std::vector<uint8_t>& storage,
         bool allow_delta = false,
         const std::function<void(size_t current_size, size_t growth)>&
@@ -266,7 +266,7 @@ public:
      * @return The SHAMapNodeType that was read
      * @throws CatlV1Error if EOF or I/O error occurs
      */
-    SHAMapNodeType
+    shamap::SHAMapNodeType
     read_and_skip_node();
 
     /**
@@ -282,7 +282,7 @@ public:
      * @throws CatlV1Error if file format is invalid or an I/O error occurs
      */
     void
-    skip_map(SHAMapNodeType node_type);
+    skip_map(shamap::SHAMapNodeType node_type);
 
     /**
      * Read the next node type and advance reader position
@@ -290,7 +290,7 @@ public:
      * @return The SHAMapNodeType that was read
      * @throws CatlV1Error if EOF or I/O error
      */
-    SHAMapNodeType
+    shamap::SHAMapNodeType
     read_node_type();
 
     /**
@@ -336,7 +336,7 @@ public:
      */
     bool
     read_map_node(
-        SHAMapNodeType& type_out,
+        shamap::SHAMapNodeType& type_out,
         std::vector<uint8_t>& key_out,
         std::vector<uint8_t>& data_out);
 
@@ -398,7 +398,7 @@ public:
      */
     MapOperations
     read_map_with_callbacks(
-        SHAMapNodeType type,
+        shamap::SHAMapNodeType type,
         const std::function<
             void(const std::vector<uint8_t>&, const std::vector<uint8_t>&)>&
             on_node,

@@ -12,6 +12,7 @@
 #include "catl/shamap/shamap-errors.h"
 #include <string>
 
+namespace catl::shamap {
 //----------------------------------------------------------
 // SHAMapInnerNode Implementation
 //----------------------------------------------------------
@@ -260,3 +261,4 @@ SHAMapInnerNode::make_child(int depth) const
 LogPartition SHAMapInnerNode::log_partition_{
     "SHAMapInnerNode",
     LogLevel::DEBUG};
+}  // namespace catl::shamap

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 
+namespace catl::shamap {
 /**
  * Memory-optimized container for SHAMapInnerNode children with iteration
  * support
@@ -174,3 +175,4 @@ public:
     const boost::intrusive_ptr<SHAMapTreeNode>&
     operator[](int branch) const;
 };
+}  // namespace catl::shamap

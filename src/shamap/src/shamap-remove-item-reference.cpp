@@ -6,6 +6,7 @@
 #include "catl/shamap/shamap.h"
 #include <exception>
 
+namespace catl::shamap {
 bool
 SHAMap::remove_item_reference(const Key& key)
 {
@@ -56,3 +57,4 @@ SHAMap::remove_item_reference(const Key& key)
         return false;
     }
 }
+}  // namespace catl::shamap

@@ -18,6 +18,7 @@
 
 using catl::crypto::Sha512HalfHasher;
 
+namespace catl::shamap {
 /**
  * Calculate the hash for this inner node using the collapsed tree approach.
  *
@@ -375,3 +376,4 @@ SHAMapInnerNode::compute_skipped_hash_stack(
             std::string("Hash calculation failed: ") + e.what());
     }
 }
+}  // namespace catl::shamap

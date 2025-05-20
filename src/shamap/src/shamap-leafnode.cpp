@@ -14,6 +14,7 @@
 
 using catl::crypto::Sha512HalfHasher;
 
+namespace catl::shamap {
 //----------------------------------------------------------
 // SHAMapLeafNode Implementation
 //----------------------------------------------------------
@@ -101,3 +102,4 @@ SHAMapLeafNode::copy() const
     new_leaf->version = version;
     return new_leaf;
 }
+}  // namespace catl::shamap

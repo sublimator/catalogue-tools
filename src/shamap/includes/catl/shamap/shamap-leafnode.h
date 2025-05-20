@@ -5,6 +5,7 @@
 #include "catl/shamap/shamap-treenode.h"
 #include <boost/intrusive_ptr.hpp>
 
+namespace catl::shamap {
 /**
  * Leaf node in the SHAMap tree
  */
@@ -17,14 +18,19 @@ private:
 
 public:
     SHAMapLeafNode(boost::intrusive_ptr<MmapItem> i, SHAMapNodeType t);
+
     bool
     is_leaf() const override;
+
     bool
     is_inner() const override;
+
     void
     update_hash(SHAMapOptions const& options) override;
+
     boost::intrusive_ptr<MmapItem>
     get_item() const;
+
     SHAMapNodeType
     get_type() const;
 
@@ -41,9 +47,11 @@ protected:
     // CoW support - only accessible to friends
     boost::intrusive_ptr<SHAMapLeafNode>
     copy() const;
+
     int
     get_version() const
     {
         return version;
     }
 };
+}  // namespace catl::shamap

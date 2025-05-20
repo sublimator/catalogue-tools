@@ -146,7 +146,7 @@ public:
      * encountered
      */
     uint32_t
-    read_shamap(SHAMap& map, SHAMapNodeType leaf_type);
+    read_shamap(shamap::SHAMap& map, shamap::SHAMapNodeType leaf_type);
 
     /**
      * Verify that the file hash in the header matches the computed hash of the

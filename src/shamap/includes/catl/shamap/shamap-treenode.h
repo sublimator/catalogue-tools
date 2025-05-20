@@ -5,6 +5,7 @@
 
 #include "catl/shamap/shamap-options.h"  // NO LOGGING INSIDE IMPLEMENTATIONS
 
+namespace catl::shamap {
 /**
  * Abstract base class for SHAMap tree nodes
  */
@@ -35,3 +36,4 @@ public:
     friend void
     intrusive_ptr_release(const SHAMapTreeNode* p);
 };
+}  // namespace catl::shamap

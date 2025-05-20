@@ -5,6 +5,7 @@
 #include <memory>
 #include <set>
 
+namespace catl::shamap {
 /**
  * Utility class for comparing two SHAMaps and finding their differences
  */
@@ -100,3 +101,4 @@ public:
     // Make SHAMap a friend so it can use this class
     friend class SHAMap;
 };
+}  // namespace catl::shamap

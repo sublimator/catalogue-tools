@@ -1,7 +1,7 @@
 #pragma once
-#include "shamap-impl.h"
 #include <optional>
 
+namespace catl::shamap {
 enum class SetResult {
     FAILED = 0,  // Operation failed
     ADD = 1,     // New item was added
@@ -52,3 +52,4 @@ struct SHAMapOptions
  */
 void
 validate_options(const SHAMapOptions& options);
+}  // namespace catl::shamap

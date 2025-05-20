@@ -43,6 +43,8 @@
 // Command line parsing
 namespace po = boost::program_options;
 
+using namespace catl::shamap;
+
 class CATLHasher
 {
 private:

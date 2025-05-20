@@ -31,9 +31,9 @@ protected:
     SetUp() override;
 
     // Virtual methods for customization
-    virtual SHAMapNodeType
+    virtual catl::shamap::SHAMapNodeType
     get_node_type();
-    virtual std::optional<SHAMapOptions>
+    virtual std::optional<catl::shamap::SHAMapOptions>
     get_map_options();
     virtual std::string
     get_fixture_directory();
@@ -41,7 +41,7 @@ protected:
     std::string
     get_fixture_path(const std::string& filename) const;
 
-    SetResult
+    catl::shamap::SetResult
     add_item_from_hex(
         const std::string& hex_string,
         std::optional<std::string> hex_data = std::nullopt);
@@ -49,7 +49,7 @@ protected:
     remove_item_from_hex(const std::string& hex_string);
 
     // Member variables
-    SHAMap map;
+    catl::shamap::SHAMap map;
     TestItems items;
     std::string fixture_dir;
 };
@@ -57,19 +57,19 @@ protected:
 class TransactionFixture : public ShaMapFixture
 {
 protected:
-    SHAMapNodeType
+    catl::shamap::SHAMapNodeType
     get_node_type() override
     {
-        return tnTRANSACTION_MD;
+        return catl::shamap::tnTRANSACTION_MD;
     }
 };
 
 class AccountStateFixture : public ShaMapFixture
 {
 protected:
-    SHAMapNodeType
+    catl::shamap::SHAMapNodeType
     get_node_type() override
     {
-        return tnACCOUNT_STATE;
+        return catl::shamap::tnACCOUNT_STATE;
     }
 };

@@ -22,6 +22,7 @@
 #include <string>
 #include <utility>
 
+namespace catl::shamap {
 //----------------------------------------------------------
 // SHAMap Implementation
 //----------------------------------------------------------
@@ -369,3 +370,4 @@ SHAMap::get_item(const Key& key) const
 }
 
 LogPartition SHAMap::log_partition_{"SHAMap", LogLevel::DEBUG};
+}  // namespace catl::shamap

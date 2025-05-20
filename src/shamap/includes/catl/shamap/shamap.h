@@ -20,6 +20,7 @@
 #include "catl/shamap/shamap-pathfinder.h"
 #include "catl/shamap/shamap-treenode.h"
 
+namespace catl::shamap {
 /**
  * Main SHAMap class implementing a pruned, binary prefix tree
  * with Copy-on-Write support for efficient snapshots
@@ -199,3 +200,4 @@ public:
     void
     collapse_tree();
 };
+}  // namespace catl::shamap

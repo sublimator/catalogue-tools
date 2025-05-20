@@ -5,6 +5,7 @@
 #include <memory>
 #include <stdexcept>
 
+namespace catl::shamap {
 //----------------------------------------------------------
 // NodeChildren Implementation
 //----------------------------------------------------------
@@ -143,3 +144,4 @@ NodeChildren::operator[](int branch) const
 
     return children_[canonicalized_ ? branch_to_index_[branch] : branch];
 }
+}  // namespace catl::shamap

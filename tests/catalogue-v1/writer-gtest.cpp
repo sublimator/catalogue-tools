@@ -12,6 +12,7 @@
 #include <vector>
 
 using namespace catl::v1;
+using namespace catl::shamap;
 
 class WriterTest : public ::testing::Test
 {

@@ -5,6 +5,8 @@
 
 #include "shamap-test-utils.h"
 
+using namespace catl::shamap;
+
 // Basic test for SHAMapDiff functionality
 TEST(SHAMapDiffTest, BasicDiff)
 {

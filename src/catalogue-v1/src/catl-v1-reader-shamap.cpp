@@ -11,8 +11,8 @@ namespace catl::v1 {
  */
 MapOperations
 Reader::read_map_to_shamap(
-    SHAMap& map,
-    SHAMapNodeType node_type,
+    shamap::SHAMap& map,
+    shamap::SHAMapNodeType node_type,
     std::vector<uint8_t>& storage,
     bool allow_delta,
     const std::function<void(size_t current_size, size_t growth)>&
@@ -29,7 +29,7 @@ Reader::read_map_to_shamap(
     while (true)
     {
         // Read node type directly
-        SHAMapNodeType current_type;
+        shamap::SHAMapNodeType current_type;
         try
         {
             current_type = read_node_type();
@@ -41,7 +41,7 @@ Reader::read_map_to_shamap(
         }
 
         // Terminal marker reached
-        if (current_type == tnTERMINAL)
+        if (current_type == shamap::tnTERMINAL)
         {
             break;
         }
@@ -76,28 +76,28 @@ Reader::read_map_to_shamap(
             auto item = boost::intrusive_ptr(
                 new MmapItem(&storage[key_pos], &storage[data_pos], data_size));
 
-            SetMode mode =
-                allow_delta ? SetMode::ADD_OR_UPDATE : SetMode::ADD_ONLY;
-            SetResult result = map.set_item(item, mode);
+            shamap::SetMode mode = allow_delta ? shamap::SetMode::ADD_OR_UPDATE
+                                               : shamap::SetMode::ADD_ONLY;
+            shamap::SetResult result = map.set_item(item, mode);
 
             // If the operation failed, throw an appropriate error
-            if (!allow_delta && result == SetResult::FAILED)
+            if (!allow_delta && result == shamap::SetResult::FAILED)
             {
                 throw CatlV1Error(
                     "Attempted to update existing with allow_delta=false");
             }
 
             // Track the appropriate operation type
-            if (result == SetResult::ADD)
+            if (result == shamap::SetResult::ADD)
             {
                 ops.nodes_added++;
             }
-            else if (result == SetResult::UPDATE)
+            else if (result == shamap::SetResult::UPDATE)
             {
                 ops.nodes_updated++;
             }
         }
-        else if (current_type == tnREMOVE)
+        else if (current_type == shamap::tnREMOVE)
         {
             // Check if we're allowed to perform a delete
             if (!allow_delta)
@@ -155,20 +155,20 @@ Reader::read_map_to_shamap(
 /**
  * Implementation of read_and_skip_node
  */
-SHAMapNodeType
+shamap::SHAMapNodeType
 Reader::read_and_skip_node()
 {
     // Read the node type
-    SHAMapNodeType node_type = read_node_type();
+    shamap::SHAMapNodeType node_type = read_node_type();
 
     // All node types except TERMINAL have a key
-    if (node_type != tnTERMINAL)
+    if (node_type != shamap::tnTERMINAL)
     {
         // Skip key data
         skip_with_tee(Key::size(), "key");
 
         // For nodes with data, skip the data too
-        if (node_type != tnREMOVE)
+        if (node_type != shamap::tnREMOVE)
         {
             // Read data length
             uint32_t data_length;
@@ -186,21 +186,21 @@ Reader::read_and_skip_node()
  * Efficient implementation of skip_map that minimizes allocations
  */
 void
-Reader::skip_map(SHAMapNodeType node_type)
+Reader::skip_map(shamap::SHAMapNodeType node_type)
 {
     while (true)
     {
         // Read node type and skip the rest of the node
-        SHAMapNodeType current_type = read_and_skip_node();
+        shamap::SHAMapNodeType current_type = read_and_skip_node();
 
         // Terminal marker reached
-        if (current_type == tnTERMINAL)
+        if (current_type == shamap::tnTERMINAL)
         {
             break;
         }
 
         // Verify node type matches expected type
-        if (current_type != node_type && current_type != tnREMOVE)
+        if (current_type != node_type && current_type != shamap::tnREMOVE)
         {
             throw CatlV1Error("Unexpected node type in map");
         }
@@ -210,12 +210,12 @@ Reader::skip_map(SHAMapNodeType node_type)
 /**
  * Implementation of read_node_type
  */
-SHAMapNodeType
+shamap::SHAMapNodeType
 Reader::read_node_type()
 {
     uint8_t type_byte;
     read_bytes(&type_byte, 1, "node type");
-    return static_cast<SHAMapNodeType>(type_byte);
+    return static_cast<shamap::SHAMapNodeType>(type_byte);
 }
 
 /**
@@ -279,7 +279,7 @@ Reader::read_node_data(std::vector<uint8_t>& data_out, bool resize_to_fit)
  */
 bool
 Reader::read_map_node(
-    SHAMapNodeType& type_out,
+    shamap::SHAMapNodeType& type_out,
     std::vector<uint8_t>& key_out,
     std::vector<uint8_t>& data_out)
 {
@@ -287,7 +287,7 @@ Reader::read_map_node(
     type_out = read_node_type();
 
     // Check for terminal marker
-    if (type_out == tnTERMINAL)
+    if (type_out == shamap::tnTERMINAL)
     {
         return false;
     }
@@ -296,7 +296,7 @@ Reader::read_map_node(
     read_node_key(key_out);
 
     // For non-remove nodes, read data
-    if (type_out != tnREMOVE)
+    if (type_out != shamap::tnREMOVE)
     {
         read_node_data(data_out);
     }
@@ -314,7 +314,7 @@ Reader::read_map_node(
  */
 MapOperations
 Reader::read_map_with_callbacks(
-    SHAMapNodeType type,
+    shamap::SHAMapNodeType type,
     const std::function<
         void(const std::vector<uint8_t>&, const std::vector<uint8_t>&)>&
         on_node,
@@ -327,10 +327,10 @@ Reader::read_map_with_callbacks(
     while (true)
     {
         // Read node type
-        SHAMapNodeType current_type = read_node_type();
+        shamap::SHAMapNodeType current_type = read_node_type();
 
         // Terminal marker reached
-        if (current_type == tnTERMINAL)
+        if (current_type == shamap::tnTERMINAL)
         {
             break;
         }
@@ -354,7 +354,7 @@ Reader::read_map_with_callbacks(
             // without additional context, so we count it as an addition
             ops.nodes_added++;
         }
-        else if (current_type == tnREMOVE)
+        else if (current_type == shamap::tnREMOVE)
         {
             // Read key
             read_node_key(key_buffer);

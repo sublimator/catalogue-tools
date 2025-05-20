@@ -16,6 +16,7 @@
 #include "catl/test-utils/test-utils.h"
 
 using namespace catl::v1;
+using namespace catl::shamap;
 
 class ReaderShaMapTest : public ::testing::Test
 {

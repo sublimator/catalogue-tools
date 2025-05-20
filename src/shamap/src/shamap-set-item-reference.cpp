@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <exception>
 
+namespace catl::shamap {
 SetResult
 SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 {
@@ -201,3 +202,4 @@ SHAMap::set_item_reference(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         return SetResult::FAILED;
     }
 }
+}  // namespace catl::shamap
