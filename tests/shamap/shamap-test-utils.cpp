@@ -1,5 +1,7 @@
 #include "./shamap-test-utils.h"
 
+using namespace catl::shamap;
+
 // Implementation of the TestItems methods
 boost::intrusive_ptr<MmapItem>
 TestItems::make(

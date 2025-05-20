@@ -5,6 +5,8 @@
 #include "catl/shamap/shamap-innernode.h"
 #include "catl/shamap/shamap-leafnode.h"
 #include "shamap-options.h"
+
+namespace catl::shamap {
 /**
  * Helper class to find paths in the tree with CoW support
  */
@@ -80,3 +82,4 @@ public:
         return log_partition_;
     }
 };
+}  // namespace catl::shamap

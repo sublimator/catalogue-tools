@@ -11,6 +11,8 @@
 #include "catl/core/types.h"
 #include "catl/shamap/shamap.h"
 
+using namespace catl::shamap;
+
 // ---------- Ledger Implementation ----------
 
 Ledger::Ledger(

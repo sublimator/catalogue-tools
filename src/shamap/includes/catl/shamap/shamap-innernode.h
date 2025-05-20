@@ -12,6 +12,7 @@
 #include "catl/core/logger.h"
 #include "shamap-utils.h"
 
+namespace catl::shamap {
 /**
  * Inner (branch) node in the SHAMap tree
  */
@@ -159,3 +160,4 @@ protected:
         return select_branch(key, depth_);
     }
 };
+}  // namespace catl::shamap

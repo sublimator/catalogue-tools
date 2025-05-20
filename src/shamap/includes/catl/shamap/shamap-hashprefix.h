@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 
+namespace catl::shamap {
 /**
  * Hash prefixes from rippled
  */
@@ -11,3 +12,4 @@ constexpr std::array<unsigned char, 4> tx_node = {'S', 'N', 'D', 0x00};
 constexpr std::array<unsigned char, 4> leaf_node = {'M', 'L', 'N', 0x00};
 constexpr std::array<unsigned char, 4> inner_node = {'M', 'I', 'N', 0x00};
 }  // namespace HashPrefix
+}  // namespace catl::shamap

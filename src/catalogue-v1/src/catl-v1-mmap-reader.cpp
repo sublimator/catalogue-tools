@@ -220,7 +220,7 @@ MmapReader::get_ledger_info_view(size_t position) const
 }
 
 uint32_t
-MmapReader::read_shamap(SHAMap& map, SHAMapNodeType leaf_type)
+MmapReader::read_shamap(shamap::SHAMap& map, shamap::SHAMapNodeType leaf_type)
 {
     uint32_t nodes_processed_count = 0;
     bool found_terminal = false;
@@ -230,18 +230,20 @@ MmapReader::read_shamap(SHAMap& map, SHAMapNodeType leaf_type)
         // Read node type
         uint8_t node_type_val = *(data_ + position_);
         position_++;
-        auto node_type = static_cast<SHAMapNodeType>(node_type_val);
+        auto node_type = static_cast<shamap::SHAMapNodeType>(node_type_val);
 
-        if (node_type == tnTERMINAL)
+        if (node_type == shamap::tnTERMINAL)
         {
             found_terminal = true;
             break;
         }
 
         // Validate node type
-        if (node_type != tnINNER && node_type != tnTRANSACTION_NM &&
-            node_type != tnTRANSACTION_MD && node_type != tnACCOUNT_STATE &&
-            node_type != tnREMOVE)
+        if (node_type != shamap::tnINNER &&
+            node_type != shamap::tnTRANSACTION_NM &&
+            node_type != shamap::tnTRANSACTION_MD &&
+            node_type != shamap::tnACCOUNT_STATE &&
+            node_type != shamap::tnREMOVE)
         {
             throw CatlV1Error(
                 "Invalid node type encountered: " +
@@ -258,10 +260,10 @@ MmapReader::read_shamap(SHAMap& map, SHAMapNodeType leaf_type)
         position_ += Key::size();
 
         // Handle REMOVE nodes
-        if (node_type == tnREMOVE)
+        if (node_type == shamap::tnREMOVE)
         {
             if (leaf_type ==
-                tnACCOUNT_STATE)  // Only allow removals for state maps
+                shamap::tnACCOUNT_STATE)  // Only allow removals for state maps
             {
                 if (map.remove_item(item_key))
                 {
@@ -305,7 +307,7 @@ MmapReader::read_shamap(SHAMap& map, SHAMapNodeType leaf_type)
             new MmapItem(key_data, item_data_ptr, data_size));
 
         // Add item to the map
-        if (map.set_item(item) != SetResult::FAILED)
+        if (map.set_item(item) != shamap::SetResult::FAILED)
         {
             nodes_processed_count++;
         }

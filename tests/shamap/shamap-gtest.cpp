@@ -13,6 +13,8 @@
 
 #include "shamap-test-utils.h"
 
+using namespace catl::shamap;
+
 // Test using the fixture with source-relative paths
 TEST_F(AccountStateFixture, JsonFileOperations)
 {

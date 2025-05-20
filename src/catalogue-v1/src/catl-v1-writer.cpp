@@ -177,7 +177,7 @@ Writer::write_ledger_header(const LedgerInfo& header)
 }
 
 void
-Writer::write_map(const SHAMap& map, SHAMapNodeType node_type)
+Writer::write_map(const shamap::SHAMap& map, shamap::SHAMapNodeType node_type)
 {
     if (!header_written_)
     {
@@ -233,9 +233,9 @@ Writer::write_map(const SHAMap& map, SHAMapNodeType node_type)
 
 void
 Writer::write_map_delta(
-    const SHAMap& previous,
-    const SHAMap& current,
-    SHAMapNodeType node_type)
+    const shamap::SHAMap& previous,
+    const shamap::SHAMap& current,
+    shamap::SHAMapNodeType node_type)
 {
     if (!header_written_)
     {
@@ -248,11 +248,11 @@ Writer::write_map_delta(
     }
 
     // Create shared_ptr wrappers for the maps to use with SHAMapDiff
-    auto prev_ptr = std::make_shared<SHAMap>(previous);
-    auto curr_ptr = std::make_shared<SHAMap>(current);
+    auto prev_ptr = std::make_shared<shamap::SHAMap>(previous);
+    auto curr_ptr = std::make_shared<shamap::SHAMap>(current);
 
     // Create a diff object and find differences
-    SHAMapDiff diff(prev_ptr, curr_ptr);
+    shamap::SHAMapDiff diff(prev_ptr, curr_ptr);
     diff.find();
 
     // Count of changes written
@@ -263,7 +263,7 @@ Writer::write_map_delta(
     {
         try
         {
-            write_item(tnREMOVE, key, nullptr, 0);
+            write_item(shamap::tnREMOVE, key, nullptr, 0);
             changes++;
         }
         catch (const CatlV1Error& e)
@@ -355,17 +355,17 @@ Writer::write_map_delta(
 void
 Writer::write_ledger(
     const LedgerInfo& header,
-    const SHAMap& state_map,
-    const SHAMap& tx_map)
+    const shamap::SHAMap& state_map,
+    const shamap::SHAMap& tx_map)
 {
     // Write the ledger header
     write_ledger_header(header);
 
     // Write the state map
-    write_map(state_map, tnACCOUNT_STATE);
+    write_map(state_map, shamap::tnACCOUNT_STATE);
 
     // Write the transaction map
-    write_map(tx_map, tnTRANSACTION_MD);
+    write_map(tx_map, shamap::tnTRANSACTION_MD);
 
     LOGI("Successfully wrote complete ledger ", header.sequence);
 }
@@ -519,14 +519,14 @@ Writer::finalize()
 
 void
 Writer::write_item(
-    SHAMapNodeType node_type,
+    shamap::SHAMapNodeType node_type,
     const Key& key,
     const uint8_t* data,
     uint32_t size)
 {
     // Calculate total bytes for this item
     size_t item_size = sizeof(uint8_t) + Key::size();
-    if (node_type != tnREMOVE)
+    if (node_type != shamap::tnREMOVE)
     {
         item_size += sizeof(uint32_t) + size;
     }
@@ -550,7 +550,7 @@ Writer::write_item(
     }
 
     // For node types other than tnREMOVE, write data size and data
-    if (node_type != tnREMOVE)
+    if (node_type != shamap::tnREMOVE)
     {
         // Write data size
         body_stream_->write(reinterpret_cast<const char*>(&size), sizeof(size));
@@ -582,7 +582,7 @@ void
 Writer::write_terminal()
 {
     // Write the terminal node type
-    uint8_t terminal = static_cast<uint8_t>(tnTERMINAL);
+    uint8_t terminal = static_cast<uint8_t>(shamap::tnTERMINAL);
     body_stream_->write(
         reinterpret_cast<const char*>(&terminal), sizeof(terminal));
 

@@ -6,6 +6,7 @@
 #include <memory>
 #include <stdexcept>
 
+namespace catl::shamap {
 SHAMapDiff::SHAMapDiff(std::shared_ptr<SHAMap> one, std::shared_ptr<SHAMap> two)
     : map_one(std::move(one)), map_two(std::move(two))
 {
@@ -309,3 +310,4 @@ SHAMapDiff::track_added(const boost::intrusive_ptr<SHAMapTreeNode>& node)
         }
     }
 }
+}  // namespace catl::shamap

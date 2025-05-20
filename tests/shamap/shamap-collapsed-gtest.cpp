@@ -8,6 +8,8 @@
 
 #include "shamap-test-utils.h"
 
+using namespace catl::shamap;
+
 // Test for node collapsing behavior, particularly with shallow trees
 TEST(CollapseTest, WithSkips)
 {

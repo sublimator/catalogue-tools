@@ -18,15 +18,15 @@ class Ledger
 {
 private:
     LedgerHeaderView header_view_;
-    std::shared_ptr<SHAMap> stateMap;
-    std::shared_ptr<SHAMap> txMap;
+    std::shared_ptr<catl::shamap::SHAMap> stateMap;
+    std::shared_ptr<catl::shamap::SHAMap> txMap;
 
 public:
     // Constructor
     Ledger(
         const uint8_t* headerData,
-        std::shared_ptr<SHAMap> state,
-        std::shared_ptr<SHAMap> tx);
+        std::shared_ptr<catl::shamap::SHAMap> state,
+        std::shared_ptr<catl::shamap::SHAMap> tx);
 
     // Core accessor methods
     const LedgerHeaderView&
@@ -34,12 +34,12 @@ public:
     {
         return header_view_;
     }
-    std::shared_ptr<SHAMap>
+    std::shared_ptr<catl::shamap::SHAMap>
     getStateMap() const
     {
         return stateMap;
     }
-    std::shared_ptr<SHAMap>
+    std::shared_ptr<catl::shamap::SHAMap>
     getTxMap() const
     {
         return txMap;

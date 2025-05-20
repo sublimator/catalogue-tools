@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <utility>
 
+namespace catl::shamap {
 //----------------------------------------------------------
 // PathFinder Implementation
 //----------------------------------------------------------
@@ -362,3 +363,4 @@ PathFinder::add_node_at_divergence()
 }
 
 LogPartition PathFinder::log_partition_{"PathFinder", LogLevel::DEBUG};
+}  // namespace catl::shamap

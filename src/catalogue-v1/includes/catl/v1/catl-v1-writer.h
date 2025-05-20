@@ -102,7 +102,7 @@ public:
      * IO error
      */
     void
-    write_map(const SHAMap& map, SHAMapNodeType node_type);
+    write_map(const shamap::SHAMap& map, shamap::SHAMapNodeType node_type);
 
     /**
      * Write the delta between two SHAMaps
@@ -118,9 +118,9 @@ public:
      */
     void
     write_map_delta(
-        const SHAMap& previous,
-        const SHAMap& current,
-        SHAMapNodeType node_type);
+        const shamap::SHAMap& previous,
+        const shamap::SHAMap& current,
+        shamap::SHAMapNodeType node_type);
 
     /**
      * Convenience method to write a complete ledger
@@ -135,8 +135,8 @@ public:
     void
     write_ledger(
         const LedgerInfo& header,
-        const SHAMap& state_map,
-        const SHAMap& tx_map);
+        const shamap::SHAMap& state_map,
+        const shamap::SHAMap& tx_map);
 
     /**
      * Finalize the file
@@ -209,7 +209,7 @@ private:
      */
     void
     write_item(
-        SHAMapNodeType node_type,
+        shamap::SHAMapNodeType node_type,
         const Key& key,
         const uint8_t* data,
         uint32_t size);

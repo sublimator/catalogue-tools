@@ -4,6 +4,7 @@
 #include "catl/shamap/shamap.h"
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
+namespace catl::shamap {
 void
 SHAMap::collapse_tree()
 {
@@ -188,3 +189,4 @@ SHAMap::find_only_single_inner_child(
 
     return single_inner_child;
 }
+}  // namespace catl::shamap

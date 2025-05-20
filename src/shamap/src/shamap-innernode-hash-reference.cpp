@@ -9,6 +9,7 @@
 #include "catl/shamap/shamap-hashprefix.h"
 #include <string>
 
+namespace catl::shamap {
 // TODO: restore the old update hash function
 void
 SHAMapInnerNode::update_hash_reference(SHAMapOptions const& options)
@@ -54,3 +55,4 @@ SHAMapInnerNode::update_hash_reference(SHAMapOptions const& options)
             std::string("Hash calculation failed: ") + e.what());
     }
 }
+}  // namespace catl::shamap

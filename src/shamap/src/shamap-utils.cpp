@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <stdexcept>
 
+namespace catl::shamap {
 //----------------------------------------------------------
 // Helper Functions Implementation
 //----------------------------------------------------------
@@ -34,3 +35,4 @@ find_divergence_depth(const Key& k1, const Key& k2, int start_depth)
     }
     throw std::runtime_error("Failed to find divergence depth");
 }
+}  // namespace catl::shamap

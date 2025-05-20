@@ -3,6 +3,7 @@
 #include "catl/shamap/shamap-options.h"
 #include <atomic>
 
+namespace catl::shamap {
 //----------------------------------------------------------
 // SHAMapTreeNode Implementation
 //----------------------------------------------------------
@@ -40,3 +41,4 @@ SHAMapTreeNode::get_hash(SHAMapOptions const& options)
     }
     return hash;
 }
+}  // namespace catl::shamap

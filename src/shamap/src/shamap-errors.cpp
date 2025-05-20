@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <string>
 
+namespace catl::shamap {
 //----------------------------------------------------------
 // Exception Classes Implementation
 //----------------------------------------------------------
@@ -59,3 +60,4 @@ HashCalculationException::HashCalculationException(const std::string& reason)
     : SHAMapException("Hash calculation error: " + reason)
 {
 }
+}  // namespace catl::shamap

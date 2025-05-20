@@ -176,7 +176,7 @@ write_map_to_stream(const SimpleStateMap& map, std::ostream& out)
     map.visit_items([&](const Hash256& key, const std::vector<uint8_t>& data) {
         // Write node type
         uint8_t node_type =
-            static_cast<uint8_t>(SHAMapNodeType::tnACCOUNT_STATE);
+            static_cast<uint8_t>(shamap::SHAMapNodeType::tnACCOUNT_STATE);
         out.write(reinterpret_cast<const char*>(&node_type), sizeof(node_type));
         bytes_written += sizeof(node_type);
 
@@ -196,7 +196,7 @@ write_map_to_stream(const SimpleStateMap& map, std::ostream& out)
     });
 
     // Write terminal marker
-    uint8_t terminal = static_cast<uint8_t>(SHAMapNodeType::tnTERMINAL);
+    uint8_t terminal = static_cast<uint8_t>(shamap::SHAMapNodeType::tnTERMINAL);
     out.write(reinterpret_cast<const char*>(&terminal), sizeof(terminal));
     bytes_written += sizeof(terminal);
 

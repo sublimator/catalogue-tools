@@ -2,6 +2,8 @@
 
 #include <stdexcept>
 
+namespace catl::shamap {
+
 //----------------------------------------------------------
 // Custom Exception Classes
 //----------------------------------------------------------
@@ -53,3 +55,5 @@ class HashCalculationException : public SHAMapException
 public:
     explicit HashCalculationException(const std::string& reason);
 };
+
+}  // namespace catl::shamap

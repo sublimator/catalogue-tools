@@ -11,6 +11,7 @@
 #include "catl/shamap/shamap-options.h"
 #include "catl/shamap/shamap.h"
 
+namespace catl::shamap {
 SetResult
 SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
 {
@@ -140,3 +141,4 @@ SHAMap::set_item_collapsed(boost::intrusive_ptr<MmapItem>& item, SetMode mode)
         return SetResult::FAILED;
     }
 }
+}  // namespace catl::shamap
