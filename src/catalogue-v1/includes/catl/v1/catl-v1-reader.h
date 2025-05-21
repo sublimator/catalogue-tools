@@ -247,9 +247,10 @@ public:
      * @note In a future v2 format, size hints for maps should be included in
      * the file format to allow for better pre-allocation of storage vectors.
      */
+    template <typename Traits = shamap::DefaultNodeTraits>
     MapOperations
     read_map_to_shamap(
-        shamap::SHAMap& map,
+        shamap::SHAMapT<Traits>& map,
         shamap::SHAMapNodeType node_type,
         std::vector<uint8_t>& storage,
         bool allow_delta = false,
@@ -430,5 +431,15 @@ private:
     bool tee_enabled_ = false;
     size_t body_bytes_consumed_ = 0;
 };
+
+#define INSTANTIATE_READER_SHAMAP_NODE_TRAITS(TRAITS_ARG)               \
+    template catl::v1::MapOperations                                   \
+    catl::v1::Reader::read_map_to_shamap<TRAITS_ARG>(                   \
+        catl::shamap::SHAMapT<TRAITS_ARG> & map,                        \
+        catl::shamap::SHAMapNodeType node_type,                        \
+        std::vector<uint8_t> & storage,                                \
+        bool allow_delta,                                              \
+        const std::function<void(size_t current_size, size_t growth)>& \
+            on_storage_growth);
 
 }  // namespace catl::v1
