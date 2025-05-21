@@ -1,0 +1,29 @@
+#pragma once
+
+// clang-format off
+#include "../src/shamap.cpp"
+#include "../src/shamap-collapsed.cpp"
+#include "../src/shamap-diff.cpp"
+#include "../src/shamap-errors.cpp"
+#include "../src/shamap-innernode.cpp"
+#include "../src/shamap-innernode-hash-collapsed.cpp"
+#include "../src/shamap-innernode-hash-reference.cpp"
+#include "../src/shamap-leafnode.cpp"
+#include "../src/shamap-nodechildren.cpp"
+#include "../src/shamap-pathfinder.cpp"
+#include "../src/shamap-remove-item-reference.cpp"
+#include "../src/shamap-set-item-collapsed.cpp"
+#include "../src/shamap-set-item-reference.cpp"
+#include "../src/shamap-treenode.cpp"
+#include "../src/shamap-utils.cpp"
+// clang-format on
+
+// Macro to instantiate all templates for a custom trait
+// Used by header-only implementation clients
+#define INSTANTIATE_CUSTOM_TRAIT(TRAIT_ARG)                   \
+    template class catl::shamap::SHAMapInnerNodeT<TRAIT_ARG>; \
+    template class catl::shamap::SHAMapLeafNodeT<TRAIT_ARG>;  \
+    template class catl::shamap::NodeChildrenT<TRAIT_ARG>;    \
+    template class catl::shamap::PathFinderT<TRAIT_ARG>;      \
+    template class catl::shamap::SHAMapTreeNodeT<TRAIT_ARG>;  \
+    template class catl::shamap::SHAMapT<TRAIT_ARG>;
