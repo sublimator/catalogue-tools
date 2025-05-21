@@ -10,7 +10,7 @@ struct CustomTestTraits
 };
 
 // Instantiate all templates with custom traits
-INSTANTIATE_CUSTOM_TRAIT(CustomTestTraits);
+INSTANTIATE_SHAMAP_NODE_TRAITS(CustomTestTraits);
 
 // Define aliases for easier typing
 using CustomSHAMap = catl::shamap::SHAMapT<CustomTestTraits>;

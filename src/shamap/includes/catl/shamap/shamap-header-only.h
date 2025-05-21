@@ -20,10 +20,10 @@
 
 // Macro to instantiate all templates for a custom trait
 // Used by header-only implementation clients
-#define INSTANTIATE_CUSTOM_TRAIT(TRAIT_ARG)                   \
-    template class catl::shamap::SHAMapInnerNodeT<TRAIT_ARG>; \
-    template class catl::shamap::SHAMapLeafNodeT<TRAIT_ARG>;  \
-    template class catl::shamap::NodeChildrenT<TRAIT_ARG>;    \
-    template class catl::shamap::PathFinderT<TRAIT_ARG>;      \
-    template class catl::shamap::SHAMapTreeNodeT<TRAIT_ARG>;  \
-    template class catl::shamap::SHAMapT<TRAIT_ARG>;
+#define INSTANTIATE_SHAMAP_NODE_TRAITS(TRAITS_ARG)             \
+    template class catl::shamap::SHAMapInnerNodeT<TRAITS_ARG>; \
+    template class catl::shamap::SHAMapLeafNodeT<TRAITS_ARG>;  \
+    template class catl::shamap::NodeChildrenT<TRAITS_ARG>;    \
+    template class catl::shamap::PathFinderT<TRAITS_ARG>;      \
+    template class catl::shamap::SHAMapTreeNodeT<TRAITS_ARG>;  \
+    template class catl::shamap::SHAMapT<TRAITS_ARG>;

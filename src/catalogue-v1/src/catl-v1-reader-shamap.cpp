@@ -4,14 +4,14 @@
 #include "catl/v1/catl-v1-reader.h"
 
 namespace catl::v1 {
-
 /**
  * Implementation of reading a SHAMap that uses an external storage vector
  * to ensure memory persistence for SHAMap items.
  */
+template <typename Traits>
 MapOperations
 Reader::read_map_to_shamap(
-    shamap::SHAMap& map,
+    shamap::SHAMapT<Traits>& map,
     shamap::SHAMapNodeType node_type,
     std::vector<uint8_t>& storage,
     bool allow_delta,
@@ -381,4 +381,5 @@ Reader::read_map_with_callbacks(
     return ops;
 }
 
+INSTANTIATE_READER_SHAMAP_NODE_TRAITS(shamap::DefaultNodeTraits)
 }  // namespace catl::v1

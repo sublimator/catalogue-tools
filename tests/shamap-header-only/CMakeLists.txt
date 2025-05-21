@@ -1,7 +1,7 @@
 # Add header-only shamap test executable that doesn't use the compiled shamap
 # library
 
-add_executable(shamap_header_only_test shamap-header-only-test.cpp)
+add_executable(shamap_header_only_test shamap-header-only-gtest.cpp)
 
 # Add the precompiled header for custom traits
 target_precompile_headers(shamap_header_only_test PRIVATE
