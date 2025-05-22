@@ -393,6 +393,34 @@ SHAMapT<Traits>::get_item(const Key& key) const
     return nullptr;
 }
 
+template <typename Traits>
+void
+SHAMapT<Traits>::set_new_copied_root()
+{
+    if (!root)
+    {
+        OLOGW("Cannot copy null root node");
+        return;
+    }
+
+    // Create a shallow copy of the root node without CoW machinery
+    auto new_root =
+        boost::intrusive_ptr(new SHAMapInnerNodeT<Traits>(root->get_depth()));
+
+    // Copy children - this creates a non-canonicalized copy that shares child
+    // pointers
+    new_root->children_ = root->children_->copy();
+
+    // Copy hash properties
+    new_root->hash = root->hash;
+    new_root->hash_valid_ = root->hash_valid_;
+
+    // Replace the root
+    root = new_root;
+
+    OLOGD("Created shallow copy of root node without CoW");
+}
+
 // Explicit template instantiations for default traits
 template class SHAMapT<DefaultNodeTraits>;
 

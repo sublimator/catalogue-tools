@@ -20,6 +20,28 @@ Logger::should_log(LogLevel level)
     return current_level_ != LogLevel::NONE && level <= current_level_;
 }
 
+namespace {
+std::string
+get_level_string(const LogLevel& level)
+{
+    switch (level)
+    {
+        case LogLevel::ERROR:
+            return "ERROR";
+        case LogLevel::WARNING:
+            return "WARNING";
+        case LogLevel::INFO:
+            return "INFO";
+        case LogLevel::DEBUG:
+            return "DEBUG";
+        case LogLevel::NONE:
+            return "NONE";
+        default:
+            throw std::runtime_error("Invalid log level");
+    }
+}
+}  // namespace
+
 void
 Logger::set_level(LogLevel level)
 {
@@ -33,7 +55,7 @@ Logger::set_level(LogLevel level)
         // Use a temporary string stream to avoid locking issues if logging
         // itself fails
         std::ostringstream oss;
-        oss << "[INFO]  Log level set to " << static_cast<int>(level);
+        oss << "[INFO] Log level set to " << get_level_string(level);
         // Now lock and print
         std::lock_guard<std::mutex> lock(log_mutex_);
         std::cout << oss.str() << std::endl;
