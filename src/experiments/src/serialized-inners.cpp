@@ -70,27 +70,7 @@ struct ChildSlot
     // need the full 64 bits.
     std::uint64_t offset;  // Offset of child node in body
 };
-
-class MapNodeSerializer
-{
-    // If you were processing thousands of trees and calculating deltas, then
-    // this should only ever have offsets to the tree nodes that are actually
-    // currently in the tree for the position in the stream. So you would need
-    // to clear_offset(p) when you delete a node from the tree or when an inner
-    // node is not reused (essentially deleted) - different words for the same
-    // thing
-private:
-    std::map<void*, std::uint64_t> offsets;
-
-public:
-    std::uint64_t
-    get_offset(void* node);
-    void
-    set_offset(void* node, std::uint64_t offset);
-    void
-    clear_offset(void* node);  // clear when we see a deleted node in the tree
-};
-
+;
 struct Ledger
 {
     LedgerInfo ledger_info;
@@ -148,48 +128,80 @@ struct LedgerLookupEntry
 // subtrees. It matches the natural recursive structure of tree algorithms and
 // provides the best overall performance for tree-based operations.
 
+// Actually, if we put all the leaves first we aren't going to be able to make
+// easy use of parallelism
+
 /**
- * Serialize nodes that haven't been processed yet
- * Returns the number of nodes serialized
+ * Stack-based depth-first serialization: serialize inner node + its direct
+ * leaves, then recurse Returns the total number of nodes serialized (inners +
+ * leaves)
  */
 size_t
-serialize_changed_nodes(
-    const boost::intrusive_ptr<SHAMapInnerNodeS>& node,
-    std::vector<uint8_t>& output,
+serialize_depth_first_stack(
+    const boost::intrusive_ptr<SHAMapInnerNodeS>& root,
+    std::vector<uint8_t>& output
+    [[maybe_unused]],  // Reserved for actual serialization
     std::uint64_t& current_offset)
 {
-    if (!node)
+    if (!root)
     {
         return 0;
     }
 
     size_t nodes_serialized = 0;
+    std::stack<boost::intrusive_ptr<SHAMapInnerNodeS>> node_stack;
 
-    // Check if this node has been processed
-    if (!node->processed)
+    // Start with the root node
+    node_stack.push(root);
+
+    while (!node_stack.empty())
     {
-        // Mark as processed and set offset
-        node->processed = true;
-        node->node_offset = current_offset;
+        auto current_node = node_stack.top();
+        node_stack.pop();
 
-        // Serialize this node (placeholder - just increment for now)
+        // Skip if already processed or null
+        if (!current_node || current_node->processed)
+        {
+            continue;
+        }
+
+        // Serialize this inner node first
+        current_node->processed = true;
+        current_node->node_offset = current_offset;
         current_offset += sizeof(InnerNode);
         nodes_serialized++;
+        LOGI("Serializing inner node at offset: ", current_node->node_offset);
 
-        // TODO: Actually serialize the node structure to output
-        LOGI("Serializing inner node at offset: ", node->node_offset);
-    }
-
-    // Recursively process children
-    for (int i = 0; i < 16; i++)
-    {
-        auto child = node->get_child(i);
-        if (child && child->is_inner())
+        // Serialize all direct leaf children immediately after this inner
+        for (int i = 0; i < 16; i++)
         {
-            auto inner_child =
-                boost::static_pointer_cast<SHAMapInnerNodeS>(child);
-            nodes_serialized +=
-                serialize_changed_nodes(inner_child, output, current_offset);
+            auto child = current_node->get_child(i);
+            if (child && child->is_leaf())
+            {
+                LOGI("Serializing leaf child at offset: ", current_offset);
+
+                auto item = boost::static_pointer_cast<SHAMapLeafNodeS>(child)
+                                ->get_item();
+                // auto key = item->key();  // Reserved for future use
+                auto size = item->slice().size();
+
+                // Serialize leaf: 32-byte key + data
+                current_offset += 32 + size;
+                nodes_serialized++;
+            }
+        }
+
+        // Push inner children onto stack for processing (in reverse order for
+        // consistent traversal)
+        for (int i = 15; i >= 0; i--)
+        {
+            auto child = current_node->get_child(i);
+            if (child && child->is_inner())
+            {
+                auto inner_child =
+                    boost::static_pointer_cast<SHAMapInnerNodeS>(child);
+                node_stack.push(inner_child);
+            }
         }
     }
 
@@ -212,39 +224,45 @@ process_all_ledgers(const std::string& filename)
         header.max_ledger);
 
     auto map = SHAMapS(catl::shamap::tnACCOUNT_STATE);
-    auto storage = std::vector<uint8_t>();
-    storage.reserve(header.filesize);
+    map.snapshot();
 
     std::vector<uint8_t> serialized_output;
     std::uint64_t current_offset = 0;
 
+    auto n_ledgers = header.min_ledger + 15000;
+    auto max_ledger =
+        std::min(static_cast<uint32_t>(n_ledgers), header.max_ledger);
     // Process each ledger in sequence
-    for (uint32_t ledger_seq = header.min_ledger;
-         ledger_seq <= header.max_ledger;
+    for (uint32_t ledger_seq = header.min_ledger; ledger_seq <= max_ledger;
          ledger_seq++)
     {
         LOGI("Processing ledger: ", ledger_seq);
 
         // Read ledger info
-        auto info = reader.read_ledger_info();
+        reader.read_ledger_info();  // Skip the ledger info for now
 
         // Read the account state map (allow delta updates)
-        // We need to make a shallow copy of the root node before processing it
-        map.set_new_copied_root();
-        reader.read_map_to_shamap(
-            map, catl::shamap::tnACCOUNT_STATE, storage, true);
+        // Using the new owned items approach - much better for CoW!
+        // Each item owns its memory, so CoW can properly garbage collect
+        // when references are dropped. No more storage vector issues!
+        map.snapshot();
+        reader.read_map_with_shamap_owned_items(
+            map, catl::shamap::tnACCOUNT_STATE, true);
 
-        // Get root and serialize only changed nodes
+        // Get root and serialize depth-first: inner + direct leaves, then
+        // recurse
         auto root = map.get_root();
         if (root)
         {
             LOGI("Root node has been processed? ", root->processed);
-            size_t nodes_serialized = serialize_changed_nodes(
+
+            // Single depth-first pass: inner nodes with their direct leaves
+            size_t total_serialized = serialize_depth_first_stack(
                 root, serialized_output, current_offset);
             LOGI(
-                "Serialized ",
-                nodes_serialized,
-                " changed nodes for ledger ",
+                "Depth-first: Serialized ",
+                total_serialized,
+                " nodes total for ledger ",
                 ledger_seq);
         }
 
@@ -259,13 +277,13 @@ process_all_ledgers(const std::string& filename)
  * Main entry point
  */
 int
-main(int argc, char* argv[])
+main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[])
 {
     Logger::set_level(LogLevel::INFO);
     LOGI("Experiment COMPLETELY set up now bruh!");
 
     // Process all ledgers in the file
     process_all_ledgers(
-        "/Users/nicholasdudfield/projects/catalogue-tools/"
-        "test-slice-10001-20000.catl");
+        "/Users/nicholasdudfield/projects/xahau-history/"
+        "cat.2000000-2010000.compression-0.catl");
 }

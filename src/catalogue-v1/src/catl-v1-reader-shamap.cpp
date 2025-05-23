@@ -4,6 +4,50 @@
 #include "catl/v1/catl-v1-reader.h"
 
 namespace catl::v1 {
+
+class OwnedMmapItem : public MmapItem
+{
+private:
+    // ReSharper disable once CppDFANotInitializedField
+    std::unique_ptr<uint8_t[]> owned_memory_;  // One allocation for everything
+
+    OwnedMmapItem(
+        const uint8_t* key_ptr,
+        const uint8_t* data_ptr,
+        std::size_t data_size,
+        std::unique_ptr<uint8_t[]> owned_memory)
+        : MmapItem(key_ptr, data_ptr, data_size)
+        , owned_memory_(std::move(owned_memory))
+    {
+    }
+
+public:
+    static boost::intrusive_ptr<MmapItem>
+    create(const Key& key, std::vector<uint8_t>&& data)
+    {
+        // One allocation: [32-byte key][variable data]
+        std::size_t total_size = 32 + data.size();
+        auto owned_memory = std::make_unique<uint8_t[]>(total_size);
+
+        // Copy key to start of buffer
+        std::memcpy(owned_memory.get(), key.data(), 32);
+
+        // Copy data after key
+        std::memcpy(owned_memory.get() + 32, data.data(), data.size());
+
+        // Create slices into the single buffer
+        const uint8_t* key_ptr = owned_memory.get();        // First 32 bytes
+        const uint8_t* data_ptr = owned_memory.get() + 32;  // Rest of buffer
+
+        boost::intrusive_ptr<MmapItem> owned_item(new OwnedMmapItem(
+            key_ptr, data_ptr, data.size(), std::move(owned_memory)));
+        // Return as base class pointer
+        return owned_item;
+    }
+
+    ~OwnedMmapItem() = default;
+};
+
 /**
  * Implementation of reading a SHAMap that uses an external storage vector
  * to ensure memory persistence for SHAMap items.
@@ -377,6 +421,127 @@ Reader::read_map_with_callbacks(
     // Calculate total nodes processed
     ops.nodes_processed =
         ops.nodes_added + ops.nodes_updated + ops.nodes_deleted;
+
+    return ops;
+}
+
+/**
+ * Implementation of reading a SHAMap using OwnedMmapItem instances
+ * that own their memory rather than referencing external storage.
+ */
+template <typename Traits>
+MapOperations
+Reader::read_map_with_shamap_owned_items(
+    shamap::SHAMapT<Traits>& map,
+    shamap::SHAMapNodeType node_type,
+    bool allow_delta)
+{
+    MapOperations ops;
+
+    // Temporary vector for removal keys only
+    std::vector<uint8_t> temp_key(Key::size());
+
+    while (true)
+    {
+        // Read node type directly
+        shamap::SHAMapNodeType current_type;
+        try
+        {
+            current_type = read_node_type();
+        }
+        catch (const CatlV1Error& e)
+        {
+            LOGE("Error reading node type: ", e.what());
+            break;
+        }
+
+        // Terminal marker reached
+        if (current_type == shamap::tnTERMINAL)
+        {
+            break;
+        }
+
+        // Process based on type
+        if (current_type == node_type)
+        {
+            // Read key into temporary buffer
+            std::vector<uint8_t> key_data;
+            read_node_key(key_data);
+
+            // Read data into temporary buffer
+            std::vector<uint8_t> item_data;
+            read_node_data(item_data);
+
+            // Create Key from the read data
+            Key key(key_data.data());
+
+            // Create OwnedMmapItem with the data
+            auto item = OwnedMmapItem::create(key, std::move(item_data));
+
+            shamap::SetMode mode = allow_delta ? shamap::SetMode::ADD_OR_UPDATE
+                                               : shamap::SetMode::ADD_ONLY;
+            shamap::SetResult result = map.set_item(item, mode);
+
+            // If the operation failed, throw an appropriate error
+            if (!allow_delta && result == shamap::SetResult::FAILED)
+            {
+                throw CatlV1Error(
+                    "Attempted to update existing with allow_delta=false");
+            }
+
+            // Track the appropriate operation type
+            if (result == shamap::SetResult::ADD)
+            {
+                ops.nodes_added++;
+            }
+            else if (result == shamap::SetResult::UPDATE)
+            {
+                ops.nodes_updated++;
+            }
+        }
+        else if (current_type == shamap::tnREMOVE)
+        {
+            // Check if we're allowed to perform a delete
+            if (!allow_delta)
+            {
+                throw CatlV1DeltaError(
+                    "Deletion operation attempted when allow_delta is "
+                    "false");
+            }
+
+            // For removal nodes, read key into temporary buffer
+            read_node_key(temp_key);
+
+            // Allow_delta is true, so we can remove the item
+            Key key(temp_key.data());
+            bool removed = map.remove_item(key);
+
+            // Track removal
+            if (removed)
+            {
+                ops.nodes_deleted++;
+            }
+        }
+        else
+        {
+            throw CatlV1Error("Unexpected node type in map");
+        }
+    }
+
+    // Calculate total nodes processed
+    ops.nodes_processed =
+        ops.nodes_added + ops.nodes_updated + ops.nodes_deleted;
+
+    LOGI(
+        "Processed ",
+        ops.nodes_processed,
+        " nodes in SHAMap with owned items (",
+        ops.nodes_added,
+        " added, ",
+        ops.nodes_updated,
+        " updated, ",
+        ops.nodes_deleted,
+        " deleted)");
 
     return ops;
 }

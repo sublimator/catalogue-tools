@@ -51,12 +51,6 @@ private:
     }
 
     int
-    get_version() const
-    {
-        return current_version_;
-    }
-
-    int
     new_version(bool in_place = false);
 
     /**
@@ -212,6 +206,12 @@ public:
      */
     void
     set_new_copied_root();
+
+    int
+    get_version() const
+    {
+        return current_version_;
+    }
 };
 
 // Define the static log partition declaration for all template instantiations

@@ -48,6 +48,12 @@ public:
         version = v;
     }
 
+    int
+    get_version() const
+    {
+        return version;
+    }
+
 protected:
     template <typename T>
     friend class PathFinderT;
@@ -58,12 +64,6 @@ protected:
     // CoW support - only accessible to friends
     boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
     copy() const;
-
-    int
-    get_version() const
-    {
-        return version;
-    }
 };
 
 // Type alias for backward compatibility
