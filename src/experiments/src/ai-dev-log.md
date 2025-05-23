@@ -166,3 +166,19 @@ Added comprehensive docs to SerializedNode explaining the CoW relationship:
 - The traits are the bridge between in-memory CoW and on-disk structural sharing
 
 Good documentation isn't just for humans anymore! 🤖📚
+
+### Implemented Incremental Serialization
+
+Fixed `serialize_tree()` to respect the processed flag:
+
+**For leaf nodes:**
+- If processed=true: reuse existing node_offset
+- If processed=false: write node, set processed=true, save offset
+
+**For inner nodes:**
+- Same logic, but happens on first visit
+- Still need to collect child offsets even for skipped nodes
+
+**Trade-off accepted:** If 1 of 16 children changes, we still write a new inner node with 15 old pointers + 1 new pointer. That's the price of KISS. Could do "overlays" later but not now.
+
+The offsets are essentially file-relative pointers - this gives us git-like structural sharing for SHAMaps!

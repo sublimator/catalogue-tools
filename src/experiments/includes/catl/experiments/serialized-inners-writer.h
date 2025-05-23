@@ -286,11 +286,10 @@ private:
     /**
      * Main serialization logic - depth first traversal using explicit stack
      *
-     * TODO: This method needs to check the 'processed' flag!
-     * - Skip nodes with processed=true (already written)
-     * - Use their existing node_offset
-     * - Only write nodes with processed=false
-     * This is essential for incremental serialization and structural sharing.
+     * This method respects the 'processed' flag for incremental serialization:
+     * - Nodes with processed=true are skipped (already written to disk)
+     * - Their existing node_offset is used in parent references
+     * - Only nodes with processed=false are written (new/modified nodes)
      */
     std::uint64_t
     serialize_tree(const boost::intrusive_ptr<SHAMapTreeNodeS>& root)
@@ -323,30 +322,57 @@ private:
 
             if (entry.node->is_leaf())
             {
-                // Process leaf node
-                auto leaf =
-                    boost::static_pointer_cast<SHAMapLeafNodeS>(entry.node);
-                auto item = leaf->get_item();
-                if (!item)
+                // Check if already processed
+                if (entry.node->processed)
                 {
-                    throw std::runtime_error("Leaf node has null item");
+                    // Already written - use existing offset
+                    std::uint64_t leaf_offset = entry.node->node_offset;
+
+                    if (stack.size() == 1)
+                    {
+                        root_offset = leaf_offset;
+                    }
+
+                    stack.pop();
+
+                    // Update parent's child offset if needed
+                    if (!stack.empty() && stack.top().inner)
+                    {
+                        auto& parent = stack.top();
+                        parent.child_offsets.push_back(leaf_offset);
+                    }
                 }
-
-                std::uint64_t leaf_offset =
-                    write_leaf_node(item->key(), item->slice(), false);
-
-                if (stack.size() == 1)
+                else
                 {
-                    root_offset = leaf_offset;
-                }
+                    // Process leaf node
+                    auto leaf =
+                        boost::static_pointer_cast<SHAMapLeafNodeS>(entry.node);
+                    auto item = leaf->get_item();
+                    if (!item)
+                    {
+                        throw std::runtime_error("Leaf node has null item");
+                    }
 
-                stack.pop();
+                    std::uint64_t leaf_offset =
+                        write_leaf_node(item->key(), item->slice(), false);
 
-                // Update parent's child offset if needed
-                if (!stack.empty() && stack.top().inner)
-                {
-                    auto& parent = stack.top();
-                    parent.child_offsets.push_back(leaf_offset);
+                    // Mark as processed and save offset
+                    entry.node->processed = true;
+                    entry.node->node_offset = leaf_offset;
+
+                    if (stack.size() == 1)
+                    {
+                        root_offset = leaf_offset;
+                    }
+
+                    stack.pop();
+
+                    // Update parent's child offset if needed
+                    if (!stack.empty() && stack.top().inner)
+                    {
+                        auto& parent = stack.top();
+                        parent.child_offsets.push_back(leaf_offset);
+                    }
                 }
             }
             else
@@ -354,47 +380,75 @@ private:
                 // Process inner node
                 if (entry.is_first_visit)
                 {
-                    // First visit: write header and prepare for children
-                    entry.inner = boost::static_pointer_cast<SHAMapInnerNodeS>(
-                        entry.node);
-
-                    // Create bookmark for depth=1 nodes
-                    if (entry.inner->get_depth() == 1 &&
-                        entry.parent_depth == 0)
+                    // Check if already processed
+                    if (entry.node->processed)
                     {
-                        BookmarkEntry bookmark;
-                        bookmark.offset = current_offset();
-                        bookmarks_.push_back(bookmark);
-                    }
+                        // Already written - use existing offset
+                        std::uint64_t inner_offset = entry.node->node_offset;
 
-                    // Write inner node header with placeholder offsets
-                    entry.inner_offset =
-                        write_inner_node(entry.inner, entry.child_offsets);
-
-                    if (stack.size() == 1)
-                    {
-                        root_offset = entry.inner_offset;
-                    }
-
-                    entry.is_first_visit = false;
-                    entry.next_child_index = 0;
-
-                    // Find and push first child
-                    for (int i = 0; i < 16; ++i)
-                    {
-                        auto child = entry.inner->get_child(i);
-                        if (child)
+                        if (stack.size() == 1)
                         {
-                            entry.next_child_index = i + 1;
-                            stack.push(
-                                {child,
-                                 entry.inner->get_depth(),
-                                 true,
-                                 nullptr,
-                                 {},
-                                 0,
-                                 0});
-                            break;
+                            root_offset = inner_offset;
+                        }
+
+                        stack.pop();
+
+                        // Update parent's child offset if needed
+                        if (!stack.empty() && stack.top().inner)
+                        {
+                            auto& parent = stack.top();
+                            parent.child_offsets.push_back(inner_offset);
+                        }
+                    }
+                    else
+                    {
+                        // First visit: write header and prepare for children
+                        entry.inner =
+                            boost::static_pointer_cast<SHAMapInnerNodeS>(
+                                entry.node);
+
+                        // Create bookmark for depth=1 nodes
+                        if (entry.inner->get_depth() == 1 &&
+                            entry.parent_depth == 0)
+                        {
+                            BookmarkEntry bookmark;
+                            bookmark.offset = current_offset();
+                            bookmarks_.push_back(bookmark);
+                        }
+
+                        // Write inner node header with placeholder offsets
+                        entry.inner_offset =
+                            write_inner_node(entry.inner, entry.child_offsets);
+
+                        // Mark as processed and save offset
+                        entry.node->processed = true;
+                        entry.node->node_offset = entry.inner_offset;
+
+                        if (stack.size() == 1)
+                        {
+                            root_offset = entry.inner_offset;
+                        }
+
+                        entry.is_first_visit = false;
+                        entry.next_child_index = 0;
+
+                        // Find and push first child
+                        for (int i = 0; i < 16; ++i)
+                        {
+                            auto child = entry.inner->get_child(i);
+                            if (child)
+                            {
+                                entry.next_child_index = i + 1;
+                                stack.push(
+                                    {child,
+                                     entry.inner->get_depth(),
+                                     true,
+                                     nullptr,
+                                     {},
+                                     0,
+                                     0});
+                                break;
+                            }
                         }
                     }
                 }
