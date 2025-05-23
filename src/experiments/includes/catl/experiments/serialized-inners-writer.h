@@ -30,9 +30,10 @@ namespace catl::experiments {
  * - **Copy-on-Write aware**: Only writes nodes with processed=false
  * (new/modified)
  * - **Incremental serialization**: Each snapshot only adds its delta to the
- * file
- * - **Bookmark support**: Reserves space for depth=1 node offsets to enable
- *   parallel loading where each thread can process a subtree independently
+ *   file
+ * - **Parallel loading**: The root inner node provides natural parallelization
+ *   points - its child_types bitmap shows which children exist, and the child
+ *   offsets array points to each subtree that can be processed independently
  *
  * Workflow:
  * 1. First map: All nodes have processed=false, write everything
@@ -85,14 +86,8 @@ public:
                 return false;
             }
 
-            // Clear bookmarks for this serialization
-            bookmarks_.clear();
-
             // Serialize the tree
             serialize_tree(root);
-
-            // Write bookmarks at end
-            write_bookmarks();
 
             // Update header with final values
             finalize_header(map.get_hash());
@@ -124,7 +119,6 @@ public:
         std::uint64_t inner_nodes_written = 0;
         std::uint64_t leaf_nodes_written = 0;
         std::uint64_t total_bytes_written = 0;
-        std::uint64_t bookmark_count = 0;
     };
 
     const Stats&
@@ -136,7 +130,6 @@ public:
 private:
     std::ofstream output_;
     Stats stats_;
-    std::vector<BookmarkEntry> bookmarks_;
 
     /**
      * Write file header (placeholder - updated at end)
@@ -160,7 +153,6 @@ private:
             sizeof(SerializedTreeHeader);  // Root starts after header
         header.total_inners = stats_.inner_nodes_written;
         header.total_leaves = stats_.leaf_nodes_written;
-        header.bookmark_offset = stats_.total_bytes_written;
         std::memcpy(header.root_hash.data(), root_hash.data(), 32);
 
         // Seek to beginning and rewrite header
@@ -171,7 +163,7 @@ private:
     }
 
     /**
-     * Write data at specific offset (for updating headers/bookmarks)
+     * Write data at specific offset (for updating headers)
      */
     void
     write_at(std::uint64_t offset, const void* data, size_t size)
@@ -220,33 +212,6 @@ private:
 
         stats_.leaf_nodes_written++;
         return offset;
-    }
-
-    /**
-     * Write bookmark table at end of file
-     */
-    void
-    write_bookmarks()
-    {
-        if (bookmarks_.empty())
-        {
-            return;
-        }
-
-        // Write bookmark count
-        std::uint32_t count = bookmarks_.size();
-        output_.write(reinterpret_cast<const char*>(&count), sizeof(count));
-
-        // Write bookmark entries
-        for (const auto& bookmark : bookmarks_)
-        {
-            output_.write(
-                reinterpret_cast<const char*>(&bookmark), sizeof(bookmark));
-        }
-
-        stats_.total_bytes_written +=
-            sizeof(count) + bookmarks_.size() * sizeof(BookmarkEntry);
-        stats_.bookmark_count = bookmarks_.size();
     }
 
     /**
@@ -406,15 +371,6 @@ private:
                         entry.inner =
                             boost::static_pointer_cast<SHAMapInnerNodeS>(
                                 entry.node);
-
-                        // Create bookmark for depth=1 nodes
-                        if (entry.inner->get_depth() == 1 &&
-                            entry.parent_depth == 0)
-                        {
-                            BookmarkEntry bookmark;
-                            bookmark.offset = current_offset();
-                            bookmarks_.push_back(bookmark);
-                        }
 
                         // Write inner node header with placeholder offsets
                         entry.inner_offset =

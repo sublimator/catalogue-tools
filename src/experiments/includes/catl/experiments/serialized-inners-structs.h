@@ -89,19 +89,7 @@ struct SerializedTreeHeader
     std::uint64_t root_offset = 0;           // Offset to root inner node
     std::uint64_t total_inners = 0;          // Total inner nodes
     std::uint64_t total_leaves = 0;          // Total leaf nodes
-    std::uint64_t bookmark_offset = 0;       // Offset to bookmark table
     std::array<std::uint8_t, 32> root_hash;  // Root hash for verification
-};
-
-/**
- * Bookmark entry for parallel loading
- * Marks the start of each depth=1 subtree
- */
-struct BookmarkEntry
-{
-    std::uint8_t branch;         // Which branch at depth 0 (0-15)
-    std::uint64_t offset;        // File offset to this subtree
-    std::uint64_t subtree_size;  // Size of serialized subtree
 };
 
 /**
