@@ -61,11 +61,31 @@ template <typename Traits>
 void
 SHAMapT<Traits>::enable_cow()
 {
+    if (cow_enabled_)
+    {
+        OLOGD("Copy-on-Write already enabled");
+        return;
+    }
+
     cow_enabled_ = true;
+
+    // Generate a new version if we don't have one
+    if (current_version_ == 0)
+    {
+        new_version(true);
+    }
 
     // Update root node if it exists
     if (root)
     {
+        // IMPORTANT: If the root was created without CoW, we need to copy it
+        // to avoid shared state corruption
+        if (!root->is_cow_enabled())
+        {
+            OLOGD("Root node created without CoW, creating a copy");
+            root = root->copy(current_version_);
+        }
+
         root->enable_cow(true);
 
         // Set version if it's 0
@@ -391,6 +411,36 @@ SHAMapT<Traits>::get_item(const Key& key) const
 
     // Item not found
     return nullptr;
+}
+
+template <typename Traits>
+void
+SHAMapT<Traits>::set_new_copied_root()
+{
+    if (!root)
+    {
+        OLOGW("Cannot copy null root node");
+        return;
+    }
+
+    // Create a shallow copy of the root node without CoW machinery
+    auto new_root =
+        boost::intrusive_ptr(new SHAMapInnerNodeT<Traits>(root->get_depth()));
+
+    // Copy children - this creates a non-canonicalized copy that shares child
+    // pointers
+    new_root->children_ = root->children_->copy();
+
+    // Copy hash properties
+    new_root->hash = root->hash;
+    new_root->hash_valid_ = root->hash_valid_;
+    new_root->set_version(root->get_version());
+    new_root->enable_cow(root->is_cow_enabled());
+
+    // Replace the root
+    root = new_root;
+
+    OLOGD("Created shallow copy of root node without CoW");
 }
 
 // Explicit template instantiations for default traits

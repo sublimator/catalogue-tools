@@ -51,12 +51,6 @@ private:
     }
 
     int
-    get_version() const
-    {
-        return current_version_;
-    }
-
-    int
     new_version(bool in_place = false);
 
     /**
@@ -203,6 +197,21 @@ public:
      */
     void
     collapse_tree();
+
+    /**
+     * Creates a shallow copy of the root node and replaces the current root
+     * without engaging CoW machinery. This is useful for serialization
+     * scenarios where you need to modify node traits without affecting the
+     * original tree.
+     */
+    void
+    set_new_copied_root();
+
+    int
+    get_version() const
+    {
+        return current_version_;
+    }
 };
 
 // Define the static log partition declaration for all template instantiations

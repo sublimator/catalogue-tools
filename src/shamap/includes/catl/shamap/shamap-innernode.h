@@ -108,6 +108,12 @@ public:
         do_cow_ = enable;
     }
 
+    int
+    get_version() const
+    {
+        return version_;  // .load(std::memory_order_acquire);
+    }
+
 protected:
     template <typename T>
     friend class PathFinderT;
@@ -153,11 +159,6 @@ protected:
         int skips) const;
 
     // CoW support - only accessible to friends
-    int
-    get_version() const
-    {
-        return version_;  // .load(std::memory_order_acquire);
-    }
 
     bool
     is_cow_enabled() const

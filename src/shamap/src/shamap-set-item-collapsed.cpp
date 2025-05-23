@@ -94,7 +94,7 @@ SHAMapT<Traits>::set_item_collapsed(
         // consideration
         if (path_finder.has_leaf() && !path_finder.did_leaf_key_match())
         {
-            OLOGI("Handling collision for key: ", item->key().hex());
+            OLOGD("Handling collision for key: ", item->key().hex());
             auto parent = path_finder.get_parent_of_terminal();
             int parent_depth = parent->get_depth();
             auto other_key = path_finder.get_leaf()->get_item()->key();

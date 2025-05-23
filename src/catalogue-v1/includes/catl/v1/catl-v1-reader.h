@@ -406,6 +406,33 @@ public:
         const std::function<void(const std::vector<uint8_t>&)>& on_delete =
             nullptr);
 
+    /**
+     * Read a SHAMap using owned item instances
+     *
+     * Process items from the current position in the file until a terminal
+     * marker and add them to the provided SHAMap. Unlike read_map_to_shamap(),
+     * this method creates self-contained item instances that own their memory,
+     * eliminating the need for an external storage vector.
+     *
+     * This approach simplifies memory management as each item manages its own
+     * lifetime, but may result in more memory allocations compared to the
+     * bulk storage approach.
+     *
+     * @param map SHAMap to populate with nodes
+     * @param node_type Expected type of nodes in the map
+     * @param allow_delta Whether to allow updates and deletes to existing keys
+     * @return MapOperations struct with counts of nodes processed
+     * @throws CatlV1Error if file format is invalid or an I/O error occurs
+     * @throws CatlV1DeltaError if a delta operation is attempted when
+     * allow_delta is false
+     */
+    template <typename Traits = shamap::DefaultNodeTraits>
+    MapOperations
+    read_map_with_shamap_owned_items(
+        shamap::SHAMapT<Traits>& map,
+        shamap::SHAMapNodeType node_type,
+        bool allow_delta = false);
+
 private:
     void
     read_header();
@@ -432,14 +459,19 @@ private:
     size_t body_bytes_consumed_ = 0;
 };
 
-#define INSTANTIATE_READER_SHAMAP_NODE_TRAITS(TRAITS_ARG)               \
+#define INSTANTIATE_READER_SHAMAP_NODE_TRAITS(TRAITS_ARG)              \
     template catl::v1::MapOperations                                   \
-    catl::v1::Reader::read_map_to_shamap<TRAITS_ARG>(                   \
-        catl::shamap::SHAMapT<TRAITS_ARG> & map,                        \
+    catl::v1::Reader::read_map_to_shamap<TRAITS_ARG>(                  \
+        catl::shamap::SHAMapT<TRAITS_ARG> & map,                       \
         catl::shamap::SHAMapNodeType node_type,                        \
         std::vector<uint8_t> & storage,                                \
         bool allow_delta,                                              \
         const std::function<void(size_t current_size, size_t growth)>& \
-            on_storage_growth);
+            on_storage_growth);                                        \
+    template catl::v1::MapOperations                                   \
+    catl::v1::Reader::read_map_with_shamap_owned_items<TRAITS_ARG>(    \
+        catl::shamap::SHAMapT<TRAITS_ARG> & map,                       \
+        catl::shamap::SHAMapNodeType node_type,                        \
+        bool allow_delta);
 
 }  // namespace catl::v1
