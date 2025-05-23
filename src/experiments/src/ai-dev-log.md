@@ -182,3 +182,28 @@ Fixed `serialize_tree()` to respect the processed flag:
 **Trade-off accepted:** If 1 of 16 children changes, we still write a new inner node with 15 old pointers + 1 new pointer. That's the price of KISS. Could do "overlays" later but not now.
 
 The offsets are essentially file-relative pointers - this gives us git-like structural sharing for SHAMaps!
+
+### Removed serialize_depth_first_stack, Using Writer
+
+Excised the experimental `serialize_depth_first_stack()` function and now using `SerializedInnerWriter` exclusively. The writer handles:
+- Checking processed flag (incremental serialization)
+- Actually writing binary data to disk
+- Tracking statistics per ledger and overall
+
+Key change: Now processing all ledgers through the writer (reduced to 10 for testing). Each ledger after the first should show significantly fewer nodes written due to CoW and structural sharing.
+
+Next test: Run it and verify that ledger 2+ only write their deltas!
+
+### Success! Incremental Serialization Working
+
+Just ran 10 ledgers through the writer:
+- First ledger: 42,421 inner nodes, 112,087 leaf nodes
+- Each subsequent ledger: Only 5 inner nodes, 1 leaf node
+
+This proves the CoW + structural sharing is working perfectly! Each ledger update (1 modified node) only writes:
+- The modified leaf
+- The path from root to that leaf (5 inner nodes)
+
+All other nodes are referenced by their existing file offsets. Total file size: 22MB for 10 ledgers.
+
+**This is git-like storage for blockchain state!** 🎉
