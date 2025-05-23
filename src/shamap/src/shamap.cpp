@@ -61,11 +61,31 @@ template <typename Traits>
 void
 SHAMapT<Traits>::enable_cow()
 {
+    if (cow_enabled_)
+    {
+        OLOGD("Copy-on-Write already enabled");
+        return;
+    }
+
     cow_enabled_ = true;
+
+    // Generate a new version if we don't have one
+    if (current_version_ == 0)
+    {
+        new_version(true);
+    }
 
     // Update root node if it exists
     if (root)
     {
+        // IMPORTANT: If the root was created without CoW, we need to copy it
+        // to avoid shared state corruption
+        if (!root->is_cow_enabled())
+        {
+            OLOGD("Root node created without CoW, creating a copy");
+            root = root->copy(current_version_);
+        }
+
         root->enable_cow(true);
 
         // Set version if it's 0

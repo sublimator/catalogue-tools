@@ -255,18 +255,46 @@ PathFinderT<Traits>::dirty_or_copy_inners(int target_version)
             continue;
         }
 
-        // Skip nodes that don't have CoW enabled
+        // Handle nodes that don't have CoW enabled
         if (!current_inner->is_cow_enabled())
         {
-            // Just update version
+            // CRITICAL FIX: We must copy nodes that were created without CoW
+            // to avoid shared state corruption between snapshots
             LOGD(
                 "Node at index ",
                 i,
-                " has CoW disabled, updating version from ",
+                " has CoW disabled, creating copy from version ",
                 current_inner->get_version(),
-                " to ",
+                " to version ",
                 target_version);
-            current_inner->set_version(target_version);
+
+            // Create a copy and enable CoW on it
+            auto copy = current_inner->copy(target_version);
+            copy->enable_cow(true);
+
+            // If this is the root, update the search root
+            if (i == 0)
+            {
+                search_root_ = copy;
+            }
+
+            // If not the root, update parent's child pointer to point to this
+            // copy
+            if (i > 0)
+            {
+                const auto& parent = inners_[i - 1];
+                int branch = branches_[i - 1];
+                LOGD(
+                    "Updating parent at depth ",
+                    parent->get_depth(),
+                    " branch ",
+                    branch,
+                    " to point to new copy (non-CoW node)");
+                parent->set_child(branch, copy);
+            }
+
+            // Replace in our path vector
+            inners_[i] = copy;
             continue;
         }
 
