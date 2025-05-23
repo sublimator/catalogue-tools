@@ -93,14 +93,51 @@ struct SerializedTreeHeader
 };
 
 /**
- * Compressed leaf header
- * Used when leaf data is compressed with zstd
+ * Unified leaf header for all leaf nodes
+ * Total size: 36 bytes (good alignment)
  */
-struct CompressedLeafHeader
+struct LeafHeader
 {
-    std::uint32_t uncompressed_size;
-    std::uint32_t compressed_size;
-    // Followed by compressed data
+    std::array<std::uint8_t, 32> key;  // 32 bytes
+    std::uint32_t size_and_flags;      // 4 bytes packed:
+                                       // Bits 0-23: data size (up to 16MB)
+                                   // Bits 24-31: flags (bit 24 = is_compressed)
+
+    // Helper methods
+    bool
+    is_compressed() const
+    {
+        return (size_and_flags & 0x01000000) != 0;  // bit 24
+    }
+
+    std::uint32_t
+    data_size() const
+    {
+        return size_and_flags & 0x00FFFFFF;  // lower 24 bits
+    }
+
+    void
+    set_compressed(bool compressed)
+    {
+        if (compressed)
+        {
+            size_and_flags |= 0x01000000;
+        }
+        else
+        {
+            size_and_flags &= ~0x01000000;
+        }
+    }
+
+    void
+    set_data_size(std::uint32_t size)
+    {
+        if (size > 0x00FFFFFF)
+        {
+            throw std::overflow_error("Leaf data size exceeds 16MB");
+        }
+        size_and_flags = (size_and_flags & 0xFF000000) | size;
+    }
 };
 
 /**

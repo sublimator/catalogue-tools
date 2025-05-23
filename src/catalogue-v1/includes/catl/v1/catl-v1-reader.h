@@ -428,6 +428,7 @@ public:
      */
     template <typename Traits = shamap::DefaultNodeTraits>
     MapOperations
+    // ReSharper disable once CppFunctionIsNotImplemented
     read_map_with_shamap_owned_items(
         shamap::SHAMapT<Traits>& map,
         shamap::SHAMapNodeType node_type,
