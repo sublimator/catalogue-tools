@@ -21,8 +21,9 @@ target_include_directories(
           ${CMAKE_SOURCE_DIR}/src/shamap/src)
 
 # Add the precompiled header for custom shamap traits
-target_precompile_headers(${EXECUTABLE_SERIALIZED_INNERS} PRIVATE
-                          includes/shamap-custom-traits.h)
+target_precompile_headers(
+  ${EXECUTABLE_SERIALIZED_INNERS} PRIVATE
+  ${EXPERIMENTS_INCLUDE_DIR}/catl/experiments/shamap-custom-traits.h)
 
 # Link with required dependencies (removed catl_shamap to use header-only)
 target_link_libraries(
