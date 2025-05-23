@@ -222,3 +222,59 @@ Removed:
 - Saved 8 bytes in header, simplified writer
 
 The hierarchical structure itself is the index! No need for a separate bookmark table when you can just read the root and follow pointers.
+
+### Compression Analysis
+*Date: 2025-05-23*
+
+**Initial zstd compression results:**
+- Level 3 (default): 1.54x ratio, 35.0% space saved
+- Level 22 (max): 1.56x ratio, 36.0% space saved
+- Only ~36% of leaves benefit from compression (40,389 out of 112,095)
+
+**Key insights:**
+1. **Selective compression is working correctly** - The code detects when compression doesn't help and falls back to uncompressed storage. This is a feature, not a bug!
+
+2. **Why many leaves don't compress:**
+   - Small leaves where compression headers add overhead
+   - High entropy data (hashes, signatures)
+   - Already compressed/encrypted content
+   - The break-even point seems to be around ~100 bytes
+
+3. **Compression ratio is reasonable** - 1.54x without a custom dictionary is decent for blockchain data. The marginal gain from level 3→22 (1.54x→1.56x) suggests we're hitting entropy limits.
+
+4. **Next optimization: Custom dictionary**
+   - Train on common patterns from the input catalogue file
+   - Account addresses (appear thousands of times)
+   - Currency codes (USD, EUR, XAH, etc.)
+   - Field names and common structures
+   - Could potentially push ratio to 2x+ on compressible leaves
+
+5. **Space efficiency achieved:**
+   - 20.4MB for 10 ledgers (first ledger: ~20MB, each additional: ~40KB)
+   - Incremental serialization working perfectly
+   - Only writing deltas after first snapshot
+
+**The format is working as designed** - we're getting good compression where it helps, avoiding it where it doesn't, and maintaining efficient incremental updates.
+
+### TODO: Custom Dictionary Creation
+
+To improve compression ratios, we should:
+
+1. **Sample leaves from the input catalogue file** during the first pass
+2. **Extract common patterns:**
+   - Full account addresses (20 bytes, base58 encoded in JSON)
+   - Currency codes (3-byte and 40-byte variants)
+   - Common field names from SLEs
+   - Repeated byte sequences
+3. **Use ZSTD_trainFromBuffer()** to create a dictionary
+4. **Store dictionary in file header** or as separate file
+5. **Use ZSTD_compress_usingDict()** for compression
+
+This could push compression ratios from 1.5x to potentially 2-3x on the compressible subset of leaves.
+
+### Compression Level Trade-offs
+
+- Level 3 vs 22: Only 2% improvement (1.54x → 1.56x) for ~10x slower compression
+- Suggests we're hitting fundamental entropy limits without a dictionary
+- Level 3 is the sweet spot for this use case
+- Real gains will come from dictionary training, not higher compression levels

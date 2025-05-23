@@ -172,6 +172,31 @@ process_all_ledgers(const std::string& filename)
     LOGI("  Total inner nodes written: ", final_stats.inner_nodes_written);
     LOGI("  Total leaf nodes written: ", final_stats.leaf_nodes_written);
     LOGI("  Total bytes written: ", final_stats.total_bytes_written);
+
+    if (final_stats.compressed_leaves > 0)
+    {
+        double compression_ratio =
+            static_cast<double>(final_stats.uncompressed_size) /
+            static_cast<double>(final_stats.compressed_size);
+        LOGI("\nCompression statistics:");
+        LOGI("  Compressed leaves: ", final_stats.compressed_leaves);
+        LOGI("  Uncompressed size: ", final_stats.uncompressed_size, " bytes");
+        LOGI("  Compressed size: ", final_stats.compressed_size, " bytes");
+        LOGI(
+            "  Compression ratio: ",
+            std::fixed,
+            std::setprecision(2),
+            compression_ratio,
+            "x");
+        LOGI(
+            "  Space saved: ",
+            final_stats.uncompressed_size - final_stats.compressed_size,
+            " bytes (",
+            std::fixed,
+            std::setprecision(1),
+            (1.0 - 1.0 / compression_ratio) * 100,
+            "%)");
+    }
 }
 
 /**

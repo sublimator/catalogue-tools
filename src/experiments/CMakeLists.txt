@@ -1,6 +1,8 @@
 # CMake configuration for experimental tools and utilities These are exploratory
 # implementations not intended for production use
 
+find_package(zstd REQUIRED)
+
 # Define source directories
 set(EXPERIMENTS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(EXPERIMENTS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/includes)
@@ -36,7 +38,8 @@ target_link_libraries(
           Boost::iostreams
           Boost::program_options
           Boost::json
-          OpenSSL::SSL)
+          OpenSSL::SSL
+          zstd::libzstd_static)
 
 # Output a message during build
 message(STATUS "Configured experimental tool: ${EXECUTABLE_SERIALIZED_INNERS}")

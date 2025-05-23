@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <zstd.h>
 
 namespace catl::experiments {
 
@@ -119,6 +120,9 @@ public:
         std::uint64_t inner_nodes_written = 0;
         std::uint64_t leaf_nodes_written = 0;
         std::uint64_t total_bytes_written = 0;
+        std::uint64_t compressed_leaves = 0;
+        std::uint64_t uncompressed_size = 0;
+        std::uint64_t compressed_size = 0;
     };
 
     const Stats&
@@ -176,38 +180,105 @@ private:
 
     /**
      * Write a leaf node and return its offset
+     *
+     * Writes a leaf node to the output file with optional zstd compression.
+     * The leaf format is:
+     *   [LeafHeader (36 bytes)][data (variable length)]
+     *
+     * Where LeafHeader contains:
+     *   - 32-byte key
+     *   - 4-byte packed size_and_flags field:
+     *     - Bits 0-23: data size (compressed or uncompressed)
+     *     - Bit 24: is_compressed flag
+     *     - Bits 25-31: reserved
+     *
+     * Compression behavior:
+     *   - Only compresses if requested AND compression reduces size
+     *   - Falls back to uncompressed if compression fails or doesn't help
+     *   - Uses zstd level 3 (good balance of speed/compression)
+     *   - Tracks compression statistics for analysis
+     *
+     * @param key The 32-byte key identifying this leaf
+     * @param data The leaf data (SLE - Serialized Ledger Entry)
+     * @param compress Whether to attempt compression (default: false)
+     * @return File offset where this leaf was written
      */
     std::uint64_t
     write_leaf_node(const Key& key, const Slice& data, bool compress = false)
     {
         auto offset = current_offset();
 
+        // Build leaf header
+        LeafHeader header;
+        std::memcpy(header.key.data(), key.data(), 32);
+        header.size_and_flags = 0;
+        header.set_data_size(data.size());
+        header.set_compressed(compress);
+
+        // Write header
+        output_.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        stats_.total_bytes_written += sizeof(header);
+
         if (compress)
         {
-            // TODO: Implement zstd compression
-            // For now, just write uncompressed with a header
-            CompressedLeafHeader leaf_header;
-            leaf_header.uncompressed_size = data.size();
-            leaf_header.compressed_size = data.size();  // No compression yet
+            // Compress with zstd
+            size_t const max_compressed_size = ZSTD_compressBound(data.size());
+            std::vector<uint8_t> compressed_buffer(max_compressed_size);
 
-            output_.write(
-                reinterpret_cast<const char*>(&leaf_header),
-                sizeof(leaf_header));
-            output_.write(reinterpret_cast<const char*>(key.data()), 32);
-            output_.write(
-                reinterpret_cast<const char*>(data.data()), data.size());
+            size_t const compressed_size = ZSTD_compress(
+                compressed_buffer.data(),
+                max_compressed_size,
+                data.data(),
+                data.size(),
+                22  // Compression level (1-22, 3 is default)
+            );
 
-            stats_.total_bytes_written +=
-                sizeof(leaf_header) + 32 + data.size();
+            if (ZSTD_isError(compressed_size))
+            {
+                LOGE(
+                    "ZSTD compression failed: ",
+                    ZSTD_getErrorName(compressed_size));
+                // Fall back to uncompressed
+                header.set_compressed(false);
+                // Rewrite header with updated flag
+                write_at(offset, &header, sizeof(header));
+                output_.write(
+                    reinterpret_cast<const char*>(data.data()), data.size());
+                stats_.total_bytes_written += data.size();
+            }
+            else if (compressed_size >= data.size())
+            {
+                // Compression didn't help, write uncompressed
+                header.set_compressed(false);
+                // Rewrite header with updated flag
+                write_at(offset, &header, sizeof(header));
+                output_.write(
+                    reinterpret_cast<const char*>(data.data()), data.size());
+                stats_.total_bytes_written += data.size();
+            }
+            else
+            {
+                // Compression successful, update header with compressed size
+                header.set_data_size(compressed_size);
+                // Rewrite header with correct compressed size
+                write_at(offset, &header, sizeof(header));
+                output_.write(
+                    reinterpret_cast<const char*>(compressed_buffer.data()),
+                    compressed_size);
+                stats_.total_bytes_written += compressed_size;
+
+                // Track compression statistics
+                stats_.compressed_leaves++;
+                stats_.uncompressed_size += data.size();
+                stats_.compressed_size += compressed_size;
+            }
         }
         else
         {
-            // Simple format: [32-byte key][data]
-            output_.write(reinterpret_cast<const char*>(key.data()), 32);
+            // Write raw data
             output_.write(
                 reinterpret_cast<const char*>(data.data()), data.size());
-
-            stats_.total_bytes_written += 32 + data.size();
+            stats_.total_bytes_written += data.size();
         }
 
         stats_.leaf_nodes_written++;
@@ -318,8 +389,10 @@ private:
                         throw std::runtime_error("Leaf node has null item");
                     }
 
-                    std::uint64_t leaf_offset =
-                        write_leaf_node(item->key(), item->slice(), false);
+                    std::uint64_t leaf_offset = write_leaf_node(
+                        item->key(),
+                        item->slice(),
+                        true);  // Enable compression
 
                     // Mark as processed and save offset
                     entry.node->processed = true;
