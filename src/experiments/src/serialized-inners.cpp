@@ -18,7 +18,6 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
-#include <stack>
 #include <string>
 #include <vector>
 
@@ -90,99 +89,6 @@ struct LedgerLookupEntry
  */
 
 //----------------------------------------------------------
-// Serialization Implementation
-//----------------------------------------------------------
-
-/**
- * Serialize a tree in depth-first order, maintaining locality of reference
- *
- * Strategy:
- * 1. Process inner nodes depth-first
- * 2. Serialize each inner node followed by its direct leaf children
- * 3. Maintain offset bookkeeping for structural sharing
- *
- * @param root The root of the tree to serialize
- * @param output Buffer to write serialized data (future implementation)
- * @param current_offset Tracks position in serialized output
- * @return Number of nodes serialized (inners + leaves)
- */
-size_t
-serialize_depth_first_stack(
-    const boost::intrusive_ptr<SHAMapInnerNodeS>& root,
-    std::vector<uint8_t>& output
-    [[maybe_unused]],  // Reserved for actual serialization
-    std::uint64_t& current_offset)
-{
-    if (!root)
-    {
-        return 0;
-    }
-
-    size_t nodes_serialized = 0;
-    std::stack<boost::intrusive_ptr<SHAMapInnerNodeS>> node_stack;
-
-    // Start with the root node
-    node_stack.push(root);
-
-    while (!node_stack.empty())
-    {
-        auto current_node = node_stack.top();
-        node_stack.pop();
-
-        // Skip already processed nodes (for DAG support)
-        if (!current_node || current_node->processed)
-        {
-            continue;
-        }
-
-        // Mark as processed and record offset
-        current_node->processed = true;
-        current_node->node_offset = current_offset;
-
-        // Reserve space for InnerNodeHeader structure
-        current_offset += sizeof(InnerNodeHeader);
-        nodes_serialized++;
-
-        LOGI("Serializing inner node at offset: ", current_node->node_offset);
-
-        // Serialize all direct leaf children immediately after this inner
-        // This maintains locality of reference for tree traversal
-        for (int i = 0; i < 16; i++)
-        {
-            auto child = current_node->get_child(i);
-            if (child && child->is_leaf())
-            {
-                LOGI("Serializing leaf child at offset: ", current_offset);
-
-                auto item =
-                    static_cast<SHAMapLeafNodeS*>(child.get())->get_item();
-                // auto key = item->key();  // Reserved for future use
-                auto size = item->slice().size();
-
-                // Leaf format: [32-byte key][variable data]
-                current_offset += 32 + size;
-                nodes_serialized++;
-            }
-        }
-
-        // Queue inner children for processing (reverse order for consistent
-        // DFS)
-        for (int i = 15; i >= 0; i--)
-        {
-            auto child = current_node->get_child(i);
-            if (child && child->is_inner())
-            {
-                auto inner_child = boost::intrusive_ptr<SHAMapInnerNodeS>(
-                    static_cast<SHAMapInnerNodeS*>(child.get()));
-                node_stack.push(inner_child);
-            }
-        }
-    }
-
-    return nodes_serialized;
-}
-
-//----------------------------------------------------------
 // Main Processing Logic
 //----------------------------------------------------------
 
@@ -205,14 +111,11 @@ process_all_ledgers(const std::string& filename)
     SHAMapS map(catl::shamap::tnACCOUNT_STATE);
     map.snapshot();  // Enable CoW
 
-    std::vector<uint8_t> serialized_output;
-    std::uint64_t current_offset = 0;
-
     // Create a writer for actual binary output
     SerializedInnerWriter writer("test-serialized.bin");
 
     // Process subset for experimentation
-    auto n_ledgers = header.min_ledger + 15000;
+    auto n_ledgers = header.min_ledger + 10;  // Just do 10 ledgers for testing
     auto max_ledger =
         std::min(static_cast<uint32_t>(n_ledgers), header.max_ledger);
 
@@ -229,41 +132,45 @@ process_all_ledgers(const std::string& filename)
         reader.read_map_with_shamap_owned_items(
             map, catl::shamap::tnACCOUNT_STATE, true);
 
-        // Demonstrate serialization concept
-        auto root = map.get_root();
-        if (root)
+        // Write the map to disk using the writer
+        auto stats_before = writer.stats();
+        if (writer.serialize_map(map))
         {
-            LOGI("Root node processed status: ", root->processed);
-
-            // Serialize the tree structure (old method for comparison)
-            size_t total_serialized = serialize_depth_first_stack(
-                root, serialized_output, current_offset);
+            auto stats_after = writer.stats();
+            auto delta_inners = stats_after.inner_nodes_written -
+                stats_before.inner_nodes_written;
+            auto delta_leaves = stats_after.leaf_nodes_written -
+                stats_before.leaf_nodes_written;
 
             LOGI(
-                "Serialized ",
-                total_serialized,
-                " nodes for ledger ",
-                ledger_seq);
-
-            // Now actually write it to disk!
-            if (ledger_seq == header.min_ledger)
-            {  // Just do the first one for now
-                LOGI("Writing ledger ", ledger_seq, " to binary file");
-                if (writer.serialize_map(map))
-                {
-                    auto stats = writer.stats();
-                    LOGI("Wrote ", stats.inner_nodes_written, " inner nodes");
-                    LOGI("Wrote ", stats.leaf_nodes_written, " leaf nodes");
-                    LOGI("Total bytes written: ", stats.total_bytes_written);
-                }
-            }
+                "Ledger ",
+                ledger_seq,
+                " - Wrote ",
+                delta_inners,
+                " new inners, ",
+                delta_leaves,
+                " new leaves (cumulative: ",
+                stats_after.inner_nodes_written,
+                "/",
+                stats_after.leaf_nodes_written,
+                ")");
+        }
+        else
+        {
+            LOGE("Failed to serialize ledger ", ledger_seq);
         }
 
         // Skip transaction map
         reader.skip_map(catl::shamap::tnTRANSACTION_MD);
     }
 
-    LOGI("Total serialized size would be: ", current_offset, " bytes");
+    // Print final statistics
+    auto final_stats = writer.stats();
+    LOGI("\nFinal serialization statistics:");
+    LOGI("  Total inner nodes written: ", final_stats.inner_nodes_written);
+    LOGI("  Total leaf nodes written: ", final_stats.leaf_nodes_written);
+    LOGI("  Total bytes written: ", final_stats.total_bytes_written);
+    LOGI("  Bookmark count: ", final_stats.bookmark_count);
 }
 
 /**
