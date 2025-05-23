@@ -85,7 +85,9 @@ struct LedgerLookupEntry
  * - Depth-first order maximizes cache efficiency
  * - Leaves stored near their parent inner nodes
  * - Structural sharing via offset references
- * - Parallel deserialization possible with bookmark offsets
+ * - Parallel deserialization enabled by inner node structure:
+ *   The root inner node contains a bitmap of which children exist
+ *   and their offsets, allowing threads to process subtrees independently
  */
 
 //----------------------------------------------------------
@@ -170,7 +172,6 @@ process_all_ledgers(const std::string& filename)
     LOGI("  Total inner nodes written: ", final_stats.inner_nodes_written);
     LOGI("  Total leaf nodes written: ", final_stats.leaf_nodes_written);
     LOGI("  Total bytes written: ", final_stats.total_bytes_written);
-    LOGI("  Bookmark count: ", final_stats.bookmark_count);
 }
 
 /**

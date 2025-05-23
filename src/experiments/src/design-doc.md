@@ -58,6 +58,8 @@ Despite the "640K ought to be enough" temptation to use 32-bit offsets:
 1. **Leaves First vs. Inners First**: We chose to interleave leaves with their parent inner nodes rather than separate sections. This maintains locality but sacrifices some parallelism potential.
 
 2. **Parallel Loading**: To enable parallel deserialization, we need bookmarks at key boundaries (e.g., depth=1 nodes) so threads can independently process subtrees.
+  Niq: actually, we can just use the root node as the parallelization point, as it contains offsets to all the child nodes, no?
+
 
 3. **Structural Sharing**: Nodes can reference data from previous ledgers via offsets, enabling efficient incremental storage.
 

@@ -207,3 +207,18 @@ This proves the CoW + structural sharing is working perfectly! Each ledger updat
 All other nodes are referenced by their existing file offsets. Total file size: 22MB for 10 ledgers.
 
 **This is git-like storage for blockchain state!** 🎉
+
+### Removed Bookmark System - Root Node IS the Index!
+
+Realized bookmarks were redundant complexity. The root inner node already contains everything needed for parallel loading:
+- `child_types` bitmap shows which of 16 children exist 
+- Child offsets array points to each subtree
+- Any inner node at any depth can serve as a parallelization point
+
+Removed:
+- `BookmarkEntry` struct
+- `bookmark_offset` from file header  
+- All bookmark writing/tracking code
+- Saved 8 bytes in header, simplified writer
+
+The hierarchical structure itself is the index! No need for a separate bookmark table when you can just read the root and follow pointers.
