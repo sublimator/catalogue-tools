@@ -384,7 +384,7 @@ public:
             }
 
             // This is a smell, need to fix the AI slop code here
-            state_map_.snapshot();
+            // state_map_.snapshot();
             LOGD("state_map version: ", state_map_.get_version());
             LedgerInfoV1 info = {};
             while (current_file_offset < reader.file_size())
