@@ -55,6 +55,7 @@ private:
     SHAMap state_map_;
     SHAMap tx_map_;
     std::shared_ptr<LedgerStore> ledger_store_;
+    std::shared_ptr<SHAMap> prior_ledger_snapshot_;
 
     // Statistics
     struct Stats
@@ -149,8 +150,10 @@ private:
                 LOGI(
                     "Initializing new State SHAMap for first ledger ",
                     info.sequence);
-                state_map_ =
-                    SHAMap(tnACCOUNT_STATE);  // Recreate for the first ledger
+                // state_map_ =
+                //     SHAMap(tnACCOUNT_STATE);  // Recreate for the first
+                //     ledger
+                // state_map_.snapshot();
             }
             else
             {
@@ -380,22 +383,20 @@ public:
                 LOGI("Will stop processing at ledger ", effective_max_ledger);
             }
 
+            // This is a smell, need to fix the AI slop code here
+            state_map_.snapshot();
+            LOGD("state_map version: ", state_map_.get_version());
+            LedgerInfoV1 info = {};
             while (current_file_offset < reader.file_size())
             {
-                LedgerInfoV1 info = {};
                 size_t next_offset = processLedger(current_file_offset, info);
+                LOGD("state_map version: ", state_map_.get_version());
 
 #if STORE_LEDGER_SNAPSHOTS
-                // Determine if this ledger should be stored based on range
-                // options
-                // TODO: articulate why the -1 is needed here exactly
                 bool in_snapshot_range =
-                    info.sequence >= effective_min_ledger - 1 &&
+                    info.sequence >= effective_min_ledger &&
                     info.sequence <= effective_max_ledger;
-                constexpr int every = STORE_LEDGER_SNAPSHOTS_EVERY;
-
-                if (every > 0 && info.sequence % every == 0 &&
-                    in_snapshot_range)
+                if (in_snapshot_range)
                 {
                     LOGD(
                         "Creating snapshot for ledger ",
@@ -407,6 +408,9 @@ public:
                         state_map_.snapshot(),
                         std::make_shared<SHAMap>(tx_map_));
                     ledger_store_->add_ledger(ledger);
+                    LOGI(
+                        "Correct ledger: ",
+                        ledger->header().sequence() == info.sequence);
                 }
 #endif
 #if COLLAPSE_STATE_MAP

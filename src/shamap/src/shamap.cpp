@@ -414,6 +414,8 @@ SHAMapT<Traits>::set_new_copied_root()
     // Copy hash properties
     new_root->hash = root->hash;
     new_root->hash_valid_ = root->hash_valid_;
+    new_root->set_version(root->get_version());
+    new_root->enable_cow(root->is_cow_enabled());
 
     // Replace the root
     root = new_root;
