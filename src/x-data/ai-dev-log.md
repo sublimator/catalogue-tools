@@ -185,3 +185,196 @@ This is the right balance - flexible for fields, correct for types, safe for unk
 ---
 
 *"Sometimes you have to parse a few billion ledger entries to realize the answer was domain-specific compression all along."* - The journey continues...
+
+# X-Data Network-Aware Type System Design Sketch
+
+## Core Architecture
+
+### Type Identity
+The true identity of a type is the **`(network_ids, type_code)` composite**, NOT the string name.
+- Type code 25 might mean "XChainBridge" on XRPL but "HookDefinition" on another network
+- The same type code could have different meanings on different networks
+- A type's network scope (universal vs network-specific) is part of its identity
+
+### Network IDs
+```cpp
+namespace Networks {
+    constexpr uint32_t XRPL = 0;
+    constexpr uint32_t XAHAU = 21337;
+    // Add more networks as needed
+}
+```
+- **std::nullopt**: Universal types that work on all networks
+- Fields can belong to multiple networks via vector
+
+## Implementation
+
+### Type Definition
+```cpp
+// types.h
+struct FieldType {
+    std::string_view name;
+    uint16_t code;
+    std::optional<std::vector<uint32_t>> network_ids = std::nullopt;  // Default: universal
+    
+    bool matches_network(uint32_t net_id) const {
+        if (!network_ids.has_value()) return true;  // Universal type
+        const auto& ids = network_ids.value();
+        return std::find(ids.begin(), ids.end(), net_id) != ids.end();
+    }
+};
+
+namespace FieldTypes {
+    // Universal types (nullopt by default - no need to specify)
+    constexpr FieldType UInt32{"UInt32", 2};
+    constexpr FieldType Hash256{"Hash256", 5};
+    constexpr FieldType Amount{"Amount", 6};
+    
+    // Single network types
+    constexpr FieldType XChainBridge{"XChainBridge", 25, {{Networks::XRPL}}};
+    constexpr FieldType HookData{"HookData", 27, {{Networks::XAHAU}}};
+    
+    // Multi-network types (belongs to multiple networks)
+    constexpr FieldType SomeField{"SomeField", 30, {{Networks::XRPL, Networks::XAHAU}}};
+    
+    // Registry of all parseable types
+    constexpr std::array ALL = { /* all types we know how to parse */ };
+}
+```
+
+### Protocol Loading Options
+```cpp
+// protocol.h - Clean and simple
+struct ProtocolOptions {
+    std::optional<uint32_t> network_id;  // Which network we're parsing for
+    bool allow_vl_inference = true;      // Safe unknown type handling
+};
+
+class Protocol {
+public:
+    static Protocol load_from_file(const std::string& path, 
+                                   ProtocolOptions opts = {});
+};
+```
+
+## The Two-Layer Architecture
+
+### Layer 1: Parseable Types (types.h)
+- Types your parser **knows how to parse**
+- Hardcoded with their parsing logic
+- Each can belong to all networks (nullopt) or specific networks (vector)
+- The `ALL` array is the registry of parseable types
+
+### Layer 2: Declared Types (protocol.json)
+- Types that **exist in the protocol**
+- Loaded dynamically at runtime
+- Safe VL inference for unknown types (if all instances are VL-encoded)
+- Strict validation against Layer 1 types
+
+## Validation Implementation
+
+```cpp
+class Protocol {
+private:
+    void validate_type(uint16_t type_code, const ProtocolOptions& opts) {
+        auto known_type = find_known_type(type_code);
+        
+        if (!known_type) {
+            // Unknown type - check if we can safely infer VL encoding
+            if (opts.allow_vl_inference && can_infer_vl_type(type_code)) {
+                log_info("Inferred type {} as VL-encoded", type_code);
+                add_inferred_vl_type(type_code);
+            } else {
+                throw std::runtime_error("Unknown type " + std::to_string(type_code) + 
+                    " - cannot parse safely");
+            }
+        } else if (opts.network_id.has_value()) {
+            // Known type - verify network compatibility
+            if (!known_type->matches_network(opts.network_id.value())) {
+                throw std::runtime_error("Type " + std::string(known_type->name) + 
+                    " not valid for network " + std::to_string(opts.network_id.value()));
+            }
+        }
+    }
+    
+    bool can_infer_vl_type(uint16_t type_code) {
+        // Check ALL fields with this type
+        size_t vl_count = 0, total_count = 0;
+        for (const auto& field : fields_) {
+            if (field.meta.type.code == type_code) {
+                total_count++;
+                if (field.meta.is_vl_encoded) vl_count++;
+            }
+        }
+        // Safe ONLY if ALL fields of this type are VL-encoded
+        return total_count > 0 && vl_count == total_count;
+    }
+};
+```
+
+## Critical Limitation: Unknown Types
+
+**YOU CANNOT SKIP UNKNOWN TYPES** in the XRPL binary format because:
+- No length prefixes on fields
+- No unique delimiter sequences
+- End markers are just more fields (which you need to parse to find)
+- Size depends on type (fixed, VL-encoded, Amount-special, PathSet-special)
+
+Once you hit an unknown type, parsing is IMPOSSIBLE. Your only options:
+
+1. **Know the type** (it's in the ALL array)
+2. **Safely infer VL-encoding** (if ALL fields of that type have `is_vl_encoded=true`)
+3. **Crash** (the safe default)
+
+There is no "skip and continue" option. This is a fundamental limitation of the binary format.
+
+## Usage Examples
+
+```cpp
+// Default - strict with safe VL inference
+auto protocol = Protocol::load_from_file("xrpl.json", {.network_id = Networks::XRPL});
+
+// Disable VL inference for maximum strictness
+auto protocol = Protocol::load_from_file("xrpl.json", {
+    .network_id = Networks::XRPL,
+    .allow_vl_inference = false  // Crash on ANY unknown type
+});
+
+// Load all networks (for analysis tools)
+auto protocol = Protocol::load_from_file("definitions.json");
+// network_id is nullopt - accepts all networks
+```
+
+## Validation Flow
+
+1. Load protocol.json with specific options
+2. For each type in JSON:
+   - Check if it exists in `FieldTypes::ALL`
+   - If found: verify network compatibility
+   - If not found and `allow_vl_inference`: check if safely inferable
+   - Otherwise: crash (strict by default)
+3. For unknown types with VL inference enabled:
+   - Check if ALL fields with that type have `is_vl_encoded=true`
+   - If yes: add to runtime VL type registry
+   - If no: crash (unsafe to parse)
+4. Build fast lookup tables for known types
+
+## Key Design Decisions
+
+1. **Strict by default**: Unknown types crash unless safely VL-inferable
+2. **Network scoping**: Types can belong to one, many, or all networks
+3. **Simple options**: Just network_id and allow_vl_inference flag
+4. **No unsafe modes**: Removed YOLO/adult mode - either it's safe or it crashes
+5. **Clean syntax**: Implicit defaults, network names not numbers
+6. **Multi-network support**: Fields can belong to multiple networks via vector
+
+## The Bottom Line
+
+This design provides:
+- Type safety (parser knows exactly what it can handle)
+- Network awareness (proper multi-network support)
+- Future-proofing (safe VL inference for new fields)
+- Clear failure modes (no silent corruption)
+- Clean, professional API (no joke fields)
+
+But remember: **once you hit an unknown type during parsing, you're stuck unless it's VL-encoded**. This isn't a limitation of our design - it's a fundamental property of the XRPL binary format. The only safe escape hatch is VL inference, and we use it by default.
