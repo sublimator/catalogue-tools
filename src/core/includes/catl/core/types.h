@@ -39,6 +39,12 @@ public:
     {
         return size_ == 0;
     }
+
+    Slice
+    subslice(size_t pos) const
+    {
+        return {data_ + pos, size_ - pos};
+    }
 };
 
 /**
