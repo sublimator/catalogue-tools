@@ -53,11 +53,17 @@ skip_object(ParserContext& ctx, const Protocol& protocol)
     {
         auto [header_slice, field_code] = read_field_header(ctx.cursor);
         if (field_code == 0)
-            break;  // Error or end
+        {
+            // Ugh
+            throw ParserError("Error or end");
+        }
 
         const FieldDef* field = protocol.get_field_by_code(field_code);
         if (!field)
-            break;  // Unknown field
+        {
+            throw ParserError(
+                "Unknown field code: " + std::to_string(field_code));
+        }
 
         // Check for end marker
         if (is_object_end_marker(field))
@@ -125,8 +131,18 @@ skip_array(ParserContext& ctx, const Protocol& protocol)
             break;  // ArrayEndMarker
         }
 
-        // Arrays contain objects
-        skip_object(ctx, protocol);
+        // Array elements are: Field header + STObject content + ObjectEndMarker
+        // We already read the field header, now skip the object content
+        if (field->meta.type == FieldTypes::STObject)
+        {
+            // skip_object will consume everything up to and including the
+            // ObjectEndMarker
+            skip_object(ctx, protocol);
+        }
+        else
+        {
+            throw ParserError("Array elements must be STObject type");
+        }
     }
 }
 
@@ -160,8 +176,8 @@ parse_with_visitor_impl(
         const FieldDef* field = protocol.get_field_by_code(field_code);
         if (!field)
         {
-            // Unknown field - skip if possible
-            continue;
+            throw ParserError(
+                "Unknown field code: " + std::to_string(field_code));
         }
 
         // Check for end markers
@@ -181,15 +197,8 @@ parse_with_visitor_impl(
                 parse_with_visitor_impl(ctx, protocol, visitor, path);
                 path.pop_back();
 
-                // Read end marker
-                auto [end_header, end_code] = read_field_header(ctx.cursor);
-                const FieldDef* end_field =
-                    protocol.get_field_by_code(end_code);
-                if (!is_object_end_marker(end_field))
-                {
-                    throw ParserError(
-                        "Expected ObjectEndMarker but got something else");
-                }
+                // parse_with_visitor_impl consumes the ObjectEndMarker when it
+                // sees it
             }
             else
             {
@@ -209,36 +218,75 @@ parse_with_visitor_impl(
                 size_t element_index = 0;
                 while (!ctx.cursor.empty())
                 {
-                    // Peek for end marker
-                    size_t saved_pos = ctx.cursor.pos;
-                    auto [peek_header, peek_code] =
+                    // Read the field header for this array element
+                    auto [elem_header, elem_code] =
                         read_field_header(ctx.cursor);
-                    ctx.cursor.pos = saved_pos;  // Rewind
+                    if (elem_code == 0)
+                        break;
 
-                    const FieldDef* peek_field =
-                        protocol.get_field_by_code(peek_code);
-                    if (is_array_end_marker(peek_field))
+                    const FieldDef* elem_field =
+                        protocol.get_field_by_code(elem_code);
+                    if (is_array_end_marker(elem_field))
                     {
+                        // Rewind since we'll read it again outside the loop
+                        ctx.cursor.pos -= elem_header.size();
                         break;  // Found ArrayEndMarker
                     }
 
                     // Update array index in path
                     path.back().array_index = element_index;
 
-                    if (visitor.visit_array_element(path, element_index))
+                    // Array elements in XRPL:
+                    // - Field header (like CreatedNode) indicates element type
+                    // - Followed by object contents (fields)
+                    // - Terminated by ObjectEndMarker
+
+                    if (elem_field->meta.type == FieldTypes::STObject)
                     {
-                        parse_with_visitor_impl(ctx, protocol, visitor, path);
+                        if (visitor.visit_array_element(path, element_index))
+                        {
+                            // Add the element type field to path
+                            path.push_back({elem_field, -1});
+
+                            // Notify about the wrapper field
+                            visitor.visit_field(
+                                path,
+                                FieldSlice{elem_field, elem_header, Slice{}});
+
+                            // Parse the STObject content
+                            if (visitor.visit_object_start(path, *elem_field))
+                            {
+                                // Parse the object's fields (NOT recursively -
+                                // same level)
+                                parse_with_visitor_impl(
+                                    ctx, protocol, visitor, path);
+                            }
+                            else
+                            {
+                                skip_object(ctx, protocol);
+                            }
+                            visitor.visit_object_end(path, *elem_field);
+
+                            path.pop_back();
+                        }
+                        else
+                        {
+                            // Skip the object including its end marker
+                            skip_object(ctx, protocol);
+                        }
                     }
                     else
                     {
-                        skip_object(ctx, protocol);
+                        throw ParserError(
+                            "Array elements must be STObject type, got: " +
+                            std::string(elem_field->meta.type.name));
                     }
                     element_index++;
                 }
 
                 path.pop_back();
 
-                // Read end marker
+                // Read the ArrayEndMarker (we rewound when we saw it)
                 auto [end_header2, end_code2] = read_field_header(ctx.cursor);
                 const FieldDef* end_field2 =
                     protocol.get_field_by_code(end_code2);

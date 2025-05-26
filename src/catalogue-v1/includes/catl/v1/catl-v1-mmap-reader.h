@@ -100,6 +100,7 @@ public:
      */
     bool
     eof() const;
+    // TODO: add eof() to Reader class too
 
     /**
      * Read a ledger header at the current position and advance the position
@@ -147,6 +148,9 @@ public:
      */
     uint32_t
     read_shamap(shamap::SHAMap& map, shamap::SHAMapNodeType leaf_type);
+
+    // TODO: add something like Reader::read_map_with_callbacks but use
+    // Slice(mmap_data) instead of vector
 
     /**
      * Verify that the file hash in the header matches the computed hash of the
