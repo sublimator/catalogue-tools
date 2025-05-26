@@ -9,6 +9,8 @@
 
 namespace catl::v1 {
 
+// TODO: consider buffering the reads to improve performance, ideally just
+// ussing an input_stream_ related option
 size_t
 Reader::read_raw_data(uint8_t* buffer, size_t size, const std::string& context)
 {
@@ -30,6 +32,8 @@ Reader::read_raw_data(uint8_t* buffer, size_t size, const std::string& context)
     return bytes_read;
 }
 
+// TODO: add a compress() method as well to recompress at a new compression
+// level
 void
 Reader::decompress(const std::string& output_path)
 {
@@ -250,8 +254,8 @@ Reader::read_ledger_info()
 size_t
 Reader::skip_with_tee(size_t bytes, const std::string& context)
 {
-    // TODO: We could potentially just use seekg when uncompressed stream is available
-    // Though generally MmapReader is better for uncompressed files
+    // TODO: We could potentially just use seekg when uncompressed stream is
+    // available Though generally MmapReader is better for uncompressed files
 
     // Just consume it using read_raw_data
     constexpr size_t BUFFER_SIZE = 64 * 1024;  // 64KB buffer

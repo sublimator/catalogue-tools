@@ -83,6 +83,7 @@ struct SliceCursor
 // Read field header and return field code with the header bytes
 // Returns: pair of (field header slice, field code)
 // The field code is 0 on error/end
+// TODO: this should throw, wtf
 inline std::pair<Slice, uint32_t>
 read_field_header(SliceCursor& cursor)
 {

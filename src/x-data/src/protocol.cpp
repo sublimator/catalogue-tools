@@ -33,6 +33,12 @@ Protocol::load_from_file(const std::string& path, ProtocolOptions opts)
         throw std::runtime_error("Failed to parse JSON: " + ec.message());
     }
 
+    // Handle wrapped result format
+    if (jv.is_object() && jv.as_object().contains("result"))
+    {
+        jv = jv.at("result");
+    }
+
     if (!jv.is_object())
     {
         throw std::runtime_error("Protocol JSON must be an object");
@@ -55,71 +61,73 @@ Protocol::load_from_file(const std::string& path, ProtocolOptions opts)
         }
     }
 
-    // Parse FIELDS array
-    if (obj.contains("FIELDS"))
+    // Parse FIELDS array (required)
+    if (!obj.contains("FIELDS"))
     {
-        const auto& fields = obj.at("FIELDS").as_array();
+        throw std::runtime_error("Protocol JSON must contain FIELDS array");
+    }
 
-        for (const auto& field : fields)
+    const auto& fields = obj.at("FIELDS").as_array();
+
+    for (const auto& field : fields)
+    {
+        const auto& fieldArray = field.as_array();
+        if (fieldArray.size() != 2)
         {
-            const auto& fieldArray = field.as_array();
-            if (fieldArray.size() != 2)
+            throw std::runtime_error(
+                "Field definition must be a 2-element array");
+        }
+
+        FieldDef def;
+        def.name = fieldArray[0].as_string().c_str();
+
+        const auto& metadata = fieldArray[1].as_object();
+        def.meta.is_serialized = metadata.at("isSerialized").as_bool();
+        def.meta.is_signing_field = metadata.at("isSigningField").as_bool();
+        def.meta.is_vl_encoded = metadata.at("isVLEncoded").as_bool();
+        def.meta.nth = static_cast<uint16_t>(metadata.at("nth").as_int64());
+
+        // Look up the FieldType from the type name
+        auto typeName = metadata.at("type").as_string();
+        if (auto ft = FieldTypes::from_name(typeName))
+        {
+            def.meta.type = *ft;
+        }
+        else
+        {
+            // Unknown type - get its code from TYPES mapping
+            auto typeCode = protocol.get_type_code(std::string(typeName));
+            if (typeCode)
             {
-                throw std::runtime_error(
-                    "Field definition must be a 2-element array");
-            }
-
-            FieldDef def;
-            def.name = fieldArray[0].as_string().c_str();
-
-            const auto& metadata = fieldArray[1].as_object();
-            def.meta.is_serialized = metadata.at("isSerialized").as_bool();
-            def.meta.is_signing_field = metadata.at("isSigningField").as_bool();
-            def.meta.is_vl_encoded = metadata.at("isVLEncoded").as_bool();
-            def.meta.nth = static_cast<uint16_t>(metadata.at("nth").as_int64());
-
-            // Look up the FieldType from the type name
-            auto typeName = metadata.at("type").as_string();
-            if (auto ft = FieldTypes::from_name(typeName))
-            {
-                def.meta.type = *ft;
+                // Create a temporary FieldType for unknown types
+                // We'll validate it later after all fields are loaded
+                def.meta.type = FieldType{typeName, *typeCode};
             }
             else
             {
-                // Unknown type - get its code from TYPES mapping
-                auto typeCode = protocol.get_type_code(std::string(typeName));
-                if (typeCode)
-                {
-                    // Create a temporary FieldType for unknown types
-                    // We'll validate it later after all fields are loaded
-                    def.meta.type = FieldType{typeName, *typeCode};
-                }
-                else
-                {
-                    throw std::runtime_error(
-                        "Field references unknown type: " +
-                        std::string(typeName) + " (not in TYPES mapping)");
-                }
+                throw std::runtime_error(
+                    "Field references unknown type: " + std::string(typeName) +
+                    " (not in TYPES mapping)");
             }
-
-            // Add to protocol
-            protocol.fieldNameIndex_[def.name] = protocol.fields_.size();
-
-            // Set the field code
-            def.code = make_field_code(def.meta.type.code, def.meta.nth);
-            protocol.fieldCodeIndex_[def.code] = protocol.fields_.size();
-
-            protocol.fields_.push_back(std::move(def));
         }
 
-        // Build the fast lookup table
-        protocol.build_fast_lookup();
+        // Add to protocol
+        protocol.fieldNameIndex_[def.name] = protocol.fields_.size();
 
-        // Now validate all types after fields are loaded
-        for (const auto& [code, name] : protocol.typeCodeToName_)
-        {
-            protocol.validate_type(code, opts);
-        }
+        // Set the field code
+        def.code = make_field_code(def.meta.type.code, def.meta.nth);
+        protocol.fieldCodeIndex_[def.code] = protocol.fields_.size();
+
+        protocol.fields_.push_back(std::move(def));
+    }
+
+    // Build the fast lookup table
+    protocol.build_fast_lookup();
+
+    // Now validate all types after fields are loaded
+    for (const auto& [code, name] : protocol.typeCodeToName_)
+    {
+        protocol.validate_type(code, opts);
     }
 
     // Parse LEDGER_ENTRY_TYPES mapping
