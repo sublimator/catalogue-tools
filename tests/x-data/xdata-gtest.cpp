@@ -198,6 +198,25 @@ TEST(XData, LoadXahauDefinitions)
     EXPECT_GT(protocol.fields().size(), 100);  // XRPL has many fields
 }
 
+// Null stream that discards all output
+class NullStream : public std::ostream
+{
+    class NullBuf : public std::streambuf
+    {
+    public:
+        int
+        overflow(int c) override
+        {
+            return c;
+        }
+    } null_buf;
+
+public:
+    NullStream() : std::ostream(&null_buf)
+    {
+    }
+};
+
 // Parameterizable function to process a map type
 void
 process_map_type(
@@ -213,6 +232,7 @@ process_map_type(
     std::vector<ParseError>& errors,
     uint32_t current_ledger,
     size_t debug_n_items,
+    bool debug_dev_null = true,
     size_t max_errors = 100)
 {
     reader.read_map_with_callbacks(
@@ -221,53 +241,106 @@ process_map_type(
             total_count++;
             total_bytes_processed += data.size();
 
-            // Debug output for first N items
-            if (total_count <= debug_n_items)
-            {
-                std::cerr << "\n=== " << type_name << " #" << total_count
-                          << " ===\n";
-                std::cerr << "Ledger: " << current_ledger << "\n";
-                std::cerr << "Data size: " << std::dec << data.size()
-                          << " bytes\n";
-                std::cerr << std::uppercase;
-                std::cerr << "Key: ";
-                for (size_t i = 0; i < key.size(); ++i)
-                {
-                    std::cerr << std::hex << std::setw(2) << std::setfill('0')
-                              << static_cast<int>(key.data()[i]);
-                }
-                std::cerr << "\n";
-                std::cerr << "Data: ";
-                for (size_t i = 0; i < std::min(data.size(), size_t(128)); ++i)
-                {
-                    std::cerr << std::hex << std::setw(2) << std::setfill('0')
-                              << static_cast<int>(data.data()[i]);
-                }
-                if (data.size() > 128)
-                    std::cerr << "... (" << std::dec << data.size() - 128
-                              << " more bytes)";
-                std::cerr << "\n";
-                std::cerr << std::dec << "Parsing with debug visitor:\n";
+            // Debug output for first N items (or all if debug_dev_null is true)
+            static NullStream null_stream;
+            bool should_debug =
+                debug_dev_null ? true : (total_count <= debug_n_items);
+            std::ostream& debug_out = debug_dev_null ? null_stream : std::cerr;
 
+            // TEST: Use CountingVisitor instead to see raw performance
+            bool use_counting_visitor = true;
+
+            if (should_debug && use_counting_visitor)
+            {
                 ParserContext debug_ctx(data);
-                DebugTreeVisitor debug_visitor(std::cerr);
+                CountingVisitor counting_visitor;
                 try
                 {
                     if (map_type == shamap::tnTRANSACTION_MD)
                     {
-                        std::cerr << "=== Transaction ===\n";
+                        // First: Parse VL-encoded transaction
                         size_t tx_vl_length = read_vl_length(debug_ctx.cursor);
-                        std::cerr << "Transaction VL length: " << tx_vl_length
+                        Slice tx_data =
+                            debug_ctx.cursor.read_slice(tx_vl_length);
+                        ParserContext tx_ctx(tx_data);
+                        parse_with_visitor(tx_ctx, protocol, counting_visitor);
+
+                        // Second: Parse VL-encoded metadata
+                        size_t meta_vl_length =
+                            read_vl_length(debug_ctx.cursor);
+                        Slice meta_data =
+                            debug_ctx.cursor.read_slice(meta_vl_length);
+                        ParserContext meta_ctx(meta_data);
+                        parse_with_visitor(
+                            meta_ctx, protocol, counting_visitor);
+                    }
+                    else
+                    {
+                        parse_with_visitor(
+                            debug_ctx, protocol, counting_visitor);
+                    }
+
+                    // Log stats occasionally
+                    if (total_count % 10000 == 0)
+                    {
+                        std::cerr << "CountingVisitor: "
+                                  << counting_visitor.get_field_count()
+                                  << " fields, "
+                                  << counting_visitor.get_byte_count()
+                                  << " bytes would be output\n";
+                    }
+                }
+                catch (const std::exception& e)
+                {
+                    // Ignore for counting test
+                }
+            }
+            else if (should_debug)
+            {
+                debug_out << "\n=== " << type_name << " #" << total_count
+                          << " ===\n";
+                debug_out << "Ledger: " << current_ledger << "\n";
+                debug_out << "Data size: " << std::dec << data.size()
+                          << " bytes\n";
+                debug_out << std::uppercase;
+                debug_out << "Key: ";
+                for (size_t i = 0; i < key.size(); ++i)
+                {
+                    debug_out << std::hex << std::setw(2) << std::setfill('0')
+                              << static_cast<int>(key.data()[i]);
+                }
+                debug_out << "\n";
+                debug_out << "Data: ";
+                for (size_t i = 0; i < std::min(data.size(), size_t(128)); ++i)
+                {
+                    debug_out << std::hex << std::setw(2) << std::setfill('0')
+                              << static_cast<int>(data.data()[i]);
+                }
+                if (data.size() > 128)
+                    debug_out << "... (" << std::dec << data.size() - 128
+                              << " more bytes)";
+                debug_out << "\n";
+                debug_out << std::dec << "Parsing with debug visitor:\n";
+
+                ParserContext debug_ctx(data);
+                DebugTreeVisitor debug_visitor(debug_out);
+                try
+                {
+                    if (map_type == shamap::tnTRANSACTION_MD)
+                    {
+                        debug_out << "=== Transaction ===\n";
+                        size_t tx_vl_length = read_vl_length(debug_ctx.cursor);
+                        debug_out << "Transaction VL length: " << tx_vl_length
                                   << "\n";
                         Slice tx_data =
                             debug_ctx.cursor.read_slice(tx_vl_length);
                         ParserContext tx_ctx(tx_data);
                         parse_with_visitor(tx_ctx, protocol, debug_visitor);
 
-                        std::cerr << "\n=== Metadata ===\n";
+                        debug_out << "\n=== Metadata ===\n";
                         size_t meta_vl_length =
                             read_vl_length(debug_ctx.cursor);
-                        std::cerr << "Metadata VL length: " << meta_vl_length
+                        debug_out << "Metadata VL length: " << meta_vl_length
                                   << "\n";
                         Slice meta_data =
                             debug_ctx.cursor.read_slice(meta_vl_length);
@@ -278,13 +351,13 @@ process_map_type(
                     {
                         parse_with_visitor(debug_ctx, protocol, debug_visitor);
                     }
-                    std::cerr << "Parse successful!\n";
+                    debug_out << "Parse successful!\n";
                 }
                 catch (const std::exception& e)
                 {
-                    std::cerr << "Parse failed: " << e.what() << "\n";
+                    debug_out << "Parse failed: " << e.what() << "\n";
                 }
-                std::cerr << std::dec << "=================\n";
+                debug_out << std::dec << "=================\n";
             }
 
             // Regular parsing for statistics
@@ -323,9 +396,9 @@ process_map_type(
             catch (const std::exception& e)
             {
                 error_count++;
-                if (total_count <= debug_n_items)
+                if (should_debug)
                 {
-                    std::cerr << "Exception details: " << e.what() << "\n";
+                    debug_out << "Exception details: " << e.what() << "\n";
                 }
 
                 // Collect error information (limit to max_errors to avoid
@@ -368,7 +441,9 @@ TEST(XData, ParseCatlFile)
     size_t tx_error_count = 0;
     size_t tx_total_count = 0;
     size_t total_bytes_processed = 0;
-    const size_t debug_n_items = 5;  // Debug first N items
+    const size_t debug_n_items = 5;    // Debug first N items
+    const bool debug_dev_null = true;  // Set to true to debug ALL items to
+                                       // /dev/null for performance testing
     std::set<std::string> field_names_seen;
     std::vector<ParseError> parse_errors;
 
@@ -410,7 +485,8 @@ TEST(XData, ParseCatlFile)
             field_names_seen,
             parse_errors,
             current_ledger,
-            debug_n_items);
+            debug_n_items,
+            debug_dev_null);
 
         // Process transaction metadata
         process_map_type(
@@ -425,7 +501,8 @@ TEST(XData, ParseCatlFile)
             field_names_seen,
             parse_errors,
             current_ledger,
-            debug_n_items);
+            debug_n_items,
+            debug_dev_null);
 
         if (info.sequence() >= end)
         {
