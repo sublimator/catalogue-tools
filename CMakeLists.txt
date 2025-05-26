@@ -61,7 +61,11 @@ add_subdirectory(src/hasher-v1)
 
 # Add the utils library
 add_subdirectory(src/utils-v1)
+
 add_subdirectory(src/experiments)
+add_subdirectory(src/x-data)
+
+
 # Add tests if testing is enabled
 option(BUILD_TESTING "Build the testing tree" ON)
 if(BUILD_TESTING)
