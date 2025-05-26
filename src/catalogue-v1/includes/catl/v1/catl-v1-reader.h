@@ -2,6 +2,7 @@
 
 #include "catl/v1/catl-v1-errors.h"
 #include "catl/v1/catl-v1-structs.h"
+#include "catl/v1/catl-v1-types.h"
 #include <boost/iostreams/filter/zlib.hpp>
 #include <boost/iostreams/filtering_stream.hpp>
 #include <fstream>
@@ -15,14 +16,6 @@
 #include "catl/shamap/shamap.h"
 
 namespace catl::v1 {
-
-struct MapOperations
-{
-    size_t nodes_added = 0;
-    size_t nodes_updated = 0;
-    size_t nodes_deleted = 0;
-    size_t nodes_processed = 0;
-};
 
 /**
  * Reader for CATL files with support for both compressed and uncompressed

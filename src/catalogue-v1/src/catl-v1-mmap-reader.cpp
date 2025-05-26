@@ -228,9 +228,7 @@ MmapReader::read_shamap(shamap::SHAMap& map, shamap::SHAMapNodeType leaf_type)
     while (position_ < file_size_ && !found_terminal)
     {
         // Read node type
-        uint8_t node_type_val = *(data_ + position_);
-        position_++;
-        auto node_type = static_cast<shamap::SHAMapNodeType>(node_type_val);
+        auto node_type = static_cast<shamap::SHAMapNodeType>(read_uint8());
 
         if (node_type == shamap::tnTERMINAL)
         {
@@ -247,7 +245,7 @@ MmapReader::read_shamap(shamap::SHAMap& map, shamap::SHAMapNodeType leaf_type)
         {
             throw CatlV1Error(
                 "Invalid node type encountered: " +
-                std::to_string(static_cast<int>(node_type_val)));
+                std::to_string(static_cast<int>(node_type)));
         }
 
         // Read key (32 bytes)
@@ -283,23 +281,12 @@ MmapReader::read_shamap(shamap::SHAMap& map, shamap::SHAMapNodeType leaf_type)
             continue;
         }
 
-        // Read data size (4 bytes)
-        if (position_ + sizeof(uint32_t) > file_size_)
-        {
-            throw CatlV1Error("Unexpected EOF reading data size");
-        }
-        uint32_t data_size = 0;
-        std::memcpy(&data_size, data_ + position_, sizeof(uint32_t));
-        position_ += sizeof(uint32_t);
+        // Read data size
+        uint32_t data_size;
+        read_uint32(data_size);
 
         // Validate data size
-        constexpr uint32_t MAX_REASONABLE_DATA_SIZE = 5 * 1024 * 1024;  // 5 MiB
-        if (position_ > file_size_ ||
-            (data_size > 0 && position_ + data_size > file_size_) ||
-            data_size > MAX_REASONABLE_DATA_SIZE)
-        {
-            throw CatlV1Error("Invalid data size or EOF reached");
-        }
+        validate_data_size(data_size);
 
         // Create MmapItem (zero-copy reference)
         const uint8_t* item_data_ptr = data_ + position_;
@@ -390,6 +377,112 @@ MmapReader::verify_file_hash()
     {
         throw CatlV1HashVerificationError("File hash verification failed");
     }
+}
+
+uint8_t
+MmapReader::read_uint8()
+{
+    if (position_ >= file_size_)
+    {
+        throw CatlV1Error("Unexpected EOF reading byte");
+    }
+    return data_[position_++];
+}
+
+void
+MmapReader::read_uint32(uint32_t& value)
+{
+    if (position_ + sizeof(uint32_t) > file_size_)
+    {
+        throw CatlV1Error("Unexpected EOF reading uint32");
+    }
+    std::memcpy(&value, data_ + position_, sizeof(uint32_t));
+    position_ += sizeof(uint32_t);
+}
+
+void
+MmapReader::validate_data_size(uint32_t size) const
+{
+    if (size > 0 && position_ + size > file_size_)
+    {
+        throw CatlV1Error("Invalid data size or EOF reached");
+    }
+}
+
+MapOperations
+MmapReader::read_map_with_callbacks(
+    shamap::SHAMapNodeType type,
+    const std::function<void(const Slice&, const Slice&)>& on_node,
+    const std::function<void(const Slice&)>& on_delete)
+{
+    MapOperations ops;
+
+    while (position_ < file_size_)
+    {
+        // Read node type
+        auto current_type = static_cast<shamap::SHAMapNodeType>(read_uint8());
+
+        // Terminal marker reached
+        if (current_type == shamap::tnTERMINAL)
+        {
+            break;
+        }
+
+        // All nodes have a key
+        if (position_ + Key::size() > file_size_)
+        {
+            throw CatlV1Error("Unexpected EOF reading key");
+        }
+
+        // Create key slice directly from mmap data
+        Slice key_slice(data_ + position_, Key::size());
+        position_ += Key::size();
+
+        // Process based on node type
+        if (current_type == type)
+        {
+            // Read data size
+            uint32_t data_size;
+            read_uint32(data_size);
+
+            // Validate we have enough data
+            validate_data_size(data_size);
+
+            // Create data slice directly from mmap data
+            Slice data_slice(data_ + position_, data_size);
+            position_ += data_size;
+
+            // Call callback with zero-copy slices
+            if (on_node)
+            {
+                on_node(key_slice, data_slice);
+            }
+
+            ops.nodes_added++;
+        }
+        else if (current_type == shamap::tnREMOVE)
+        {
+            // Call on_delete callback if provided
+            if (on_delete)
+            {
+                on_delete(key_slice);
+            }
+
+            ops.nodes_deleted++;
+        }
+        else
+        {
+            throw CatlV1Error(
+                "Unexpected node type in map: " +
+                std::to_string(static_cast<int>(current_type)));
+        }
+    }
+
+    // Calculate total nodes processed
+    ops.nodes_processed =
+        ops.nodes_added + ops.nodes_updated + ops.nodes_deleted;
+
+    return ops;
 }
 
 }  // namespace catl::v1
