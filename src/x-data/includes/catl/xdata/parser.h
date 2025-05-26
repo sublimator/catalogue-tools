@@ -2,6 +2,7 @@
 
 #include "catl/core/types.h"  // For Slice, Hash256, etc.
 #include "catl/xdata/fields.h"
+#include "catl/xdata/parser-context.h"
 #include "catl/xdata/parser-error.h"
 #include "catl/xdata/protocol.h"
 #include "catl/xdata/slice-cursor.h"
@@ -34,7 +35,7 @@ is_array_end_marker(const FieldDef* field)
 
 // Forward declarations
 inline void
-skip_array(SliceCursor& cursor, const Protocol& protocol);
+skip_array(ParserContext& ctx, const Protocol& protocol);
 
 // Get fixed size for a type (returns 0 for variable/special types)
 inline size_t
@@ -46,11 +47,11 @@ get_fixed_size(FieldType type)
 // Skip an entire object (find end marker) - only used when visitor returns
 // false
 inline void
-skip_object(SliceCursor& cursor, const Protocol& protocol)
+skip_object(ParserContext& ctx, const Protocol& protocol)
 {
-    while (!cursor.empty())
+    while (!ctx.cursor.empty())
     {
-        auto [header_slice, field_code] = read_field_header(cursor);
+        auto [header_slice, field_code] = read_field_header(ctx.cursor);
         if (field_code == 0)
             break;  // Error or end
 
@@ -67,27 +68,27 @@ skip_object(SliceCursor& cursor, const Protocol& protocol)
         // Skip field data
         if (field->meta.type == FieldTypes::STObject)
         {
-            skip_object(cursor, protocol);
+            skip_object(ctx, protocol);
         }
         else if (field->meta.type == FieldTypes::STArray)
         {
-            skip_array(cursor, protocol);
+            skip_array(ctx, protocol);
         }
         else if (field->meta.type == FieldTypes::PathSet)
         {
             // PathSet has its own termination protocol
-            skip_pathset(cursor);
+            skip_pathset(ctx);
         }
         else if (field->meta.is_vl_encoded)
         {
-            size_t length = read_vl_length(cursor);
-            cursor.advance(length);
+            size_t length = read_vl_length(ctx.cursor);
+            ctx.cursor.advance(length);
         }
         else if (field->meta.type == FieldTypes::Amount)
         {
             // Amount is special - size depends on first byte
-            size_t amount_size = get_amount_size(cursor.peek_u8());
-            cursor.advance(amount_size);
+            size_t amount_size = get_amount_size(ctx.cursor.peek_u8());
+            ctx.cursor.advance(amount_size);
         }
         else
         {
@@ -99,18 +100,18 @@ skip_object(SliceCursor& cursor, const Protocol& protocol)
                     "Unknown field type size: " +
                     std::string(field->meta.type.name));
             }
-            cursor.advance(fixed_size);
+            ctx.cursor.advance(fixed_size);
         }
     }
 }
 
 // Skip an entire array - only used when visitor returns false
 inline void
-skip_array(SliceCursor& cursor, const Protocol& protocol)
+skip_array(ParserContext& ctx, const Protocol& protocol)
 {
-    while (!cursor.empty())
+    while (!ctx.cursor.empty())
     {
-        auto [header_slice, field_code] = read_field_header(cursor);
+        auto [header_slice, field_code] = read_field_header(ctx.cursor);
         if (field_code == 0)
             break;
 
@@ -125,7 +126,7 @@ skip_array(SliceCursor& cursor, const Protocol& protocol)
         }
 
         // Arrays contain objects
-        skip_object(cursor, protocol);
+        skip_object(ctx, protocol);
     }
 }
 
@@ -133,26 +134,26 @@ skip_array(SliceCursor& cursor, const Protocol& protocol)
 template <SliceVisitor Visitor>
 void
 parse_with_visitor(
-    SliceCursor& cursor,
+    ParserContext& ctx,
     const Protocol& protocol,
     Visitor&& visitor)
 {
     FieldPath path;
-    parse_with_visitor_impl(cursor, protocol, visitor, path);
+    parse_with_visitor_impl(ctx, protocol, visitor, path);
 }
 
 // Implementation that maintains the path
 template <SliceVisitor Visitor>
 void
 parse_with_visitor_impl(
-    SliceCursor& cursor,
+    ParserContext& ctx,
     const Protocol& protocol,
     Visitor&& visitor,
     FieldPath& path)
 {
-    while (!cursor.empty())
+    while (!ctx.cursor.empty())
     {
-        auto [header_slice, field_code] = read_field_header(cursor);
+        auto [header_slice, field_code] = read_field_header(ctx.cursor);
         if (field_code == 0)
             break;
 
@@ -177,11 +178,11 @@ parse_with_visitor_impl(
             {
                 // Add to path and recurse
                 path.push_back({field, -1});
-                parse_with_visitor_impl(cursor, protocol, visitor, path);
+                parse_with_visitor_impl(ctx, protocol, visitor, path);
                 path.pop_back();
 
                 // Read end marker
-                auto [end_header, end_code] = read_field_header(cursor);
+                auto [end_header, end_code] = read_field_header(ctx.cursor);
                 const FieldDef* end_field =
                     protocol.get_field_by_code(end_code);
                 if (!is_object_end_marker(end_field))
@@ -193,7 +194,7 @@ parse_with_visitor_impl(
             else
             {
                 // Skip the object
-                skip_object(cursor, protocol);
+                skip_object(ctx, protocol);
             }
             visitor.visit_object_end(path, *field);
         }
@@ -206,12 +207,13 @@ parse_with_visitor_impl(
                 path.push_back({field, -1});
 
                 size_t element_index = 0;
-                while (!cursor.empty())
+                while (!ctx.cursor.empty())
                 {
                     // Peek for end marker
-                    size_t saved_pos = cursor.pos;
-                    auto [peek_header, peek_code] = read_field_header(cursor);
-                    cursor.pos = saved_pos;  // Rewind
+                    size_t saved_pos = ctx.cursor.pos;
+                    auto [peek_header, peek_code] =
+                        read_field_header(ctx.cursor);
+                    ctx.cursor.pos = saved_pos;  // Rewind
 
                     const FieldDef* peek_field =
                         protocol.get_field_by_code(peek_code);
@@ -225,12 +227,11 @@ parse_with_visitor_impl(
 
                     if (visitor.visit_array_element(path, element_index))
                     {
-                        parse_with_visitor_impl(
-                            cursor, protocol, visitor, path);
+                        parse_with_visitor_impl(ctx, protocol, visitor, path);
                     }
                     else
                     {
-                        skip_object(cursor, protocol);
+                        skip_object(ctx, protocol);
                     }
                     element_index++;
                 }
@@ -238,7 +239,7 @@ parse_with_visitor_impl(
                 path.pop_back();
 
                 // Read end marker
-                auto [end_header2, end_code2] = read_field_header(cursor);
+                auto [end_header2, end_code2] = read_field_header(ctx.cursor);
                 const FieldDef* end_field2 =
                     protocol.get_field_by_code(end_code2);
                 if (!is_array_end_marker(end_field2))
@@ -250,7 +251,7 @@ parse_with_visitor_impl(
             else
             {
                 // Skip the array
-                skip_array(cursor, protocol);
+                skip_array(ctx, protocol);
             }
             visitor.visit_array_end(path, *field);
         }
@@ -261,25 +262,25 @@ parse_with_visitor_impl(
 
             if (field->meta.is_vl_encoded)
             {
-                size_t length_start = cursor.pos;
-                field_size = read_vl_length(cursor);
-                size_t vl_prefix_size = cursor.pos - length_start;
+                size_t length_start = ctx.cursor.pos;
+                field_size = read_vl_length(ctx.cursor);
+                size_t vl_prefix_size = ctx.cursor.pos - length_start;
                 // Reset to include VL prefix in the slice
-                cursor.pos = length_start;
+                ctx.cursor.pos = length_start;
                 field_size += vl_prefix_size;  // Total size including prefix
             }
             else if (field->meta.type == FieldTypes::Amount)
             {
                 // Amount is special - peek at first byte to determine size
-                field_size = get_amount_size(cursor.peek_u8());
+                field_size = get_amount_size(ctx.cursor.peek_u8());
             }
             else if (field->meta.type == FieldTypes::PathSet)
             {
                 // PathSet - find the end byte to get size
-                size_t start_pos = cursor.pos;
-                skip_pathset(cursor);
-                field_size = cursor.pos - start_pos;
-                cursor.pos = start_pos;  // Reset to read the data
+                size_t start_pos = ctx.cursor.pos;
+                skip_pathset(ctx);
+                field_size = ctx.cursor.pos - start_pos;
+                ctx.cursor.pos = start_pos;  // Reset to read the data
             }
             else
             {
@@ -292,8 +293,11 @@ parse_with_visitor_impl(
                 }
             }
 
-            Slice field_data = cursor.read_slice(field_size);
-            visitor.visit_field(path, *field, field_data);
+            Slice field_data = ctx.cursor.read_slice(field_size);
+            path.push_back({field, -1});
+            visitor.visit_field(
+                path, FieldSlice{field, header_slice, field_data});
+            path.pop_back();
         }
     }
 }

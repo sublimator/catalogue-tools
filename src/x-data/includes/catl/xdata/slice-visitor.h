@@ -28,13 +28,24 @@ using FieldPath = std::vector<PathElement>;
 struct FieldSlice
 {
     const FieldDef* field;
-    Slice data;
+    Slice header;  // The field header bytes (type/field encoding)
+    Slice data;    // The field data bytes
+
+    const FieldDef&
+    get_field() const
+    {
+        return *field;
+    }
 };
 
 // Visitor concept for compile-time interface checking
 template <typename T>
-concept SliceVisitor =
-    requires(T v, const FieldPath& path, const FieldDef& f, Slice s, size_t idx)
+concept SliceVisitor = requires(
+    T v,
+    const FieldPath& path,
+    const FieldDef& f,
+    const FieldSlice& fs,
+    size_t idx)
 {
     {
         v.visit_object_start(path, f)
@@ -57,7 +68,7 @@ concept SliceVisitor =
     }
     ->std::convertible_to<bool>;
     {
-        v.visit_field(path, f, s)
+        v.visit_field(path, fs)
     }
     ->std::same_as<void>;
 };
@@ -100,9 +111,9 @@ public:
     }
 
     void
-    visit_field(const FieldPath&, const FieldDef& field, Slice data)
+    visit_field(const FieldPath&, const FieldSlice& fs)
     {
-        emit_({&field, data});
+        emit_(fs);
     }
 };
 
@@ -144,11 +155,11 @@ public:
     }
 
     void
-    visit_field(const FieldPath& path, const FieldDef& field, Slice data)
+    visit_field(const FieldPath& path, const FieldSlice& fs)
     {
         if (path.size() == 1)
         {  // Top-level field
-            process_({&field, data});
+            process_(fs);
         }
     }
 };
