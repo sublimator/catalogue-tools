@@ -47,7 +47,7 @@ main(int argc, char* argv[])
         po::value<size_t>()->default_value(5 * 1024 * 1024),
         "Dictionary size in bytes (default: 5MB)")(
         "max-samples,m",
-        po::value<size_t>()->default_value(10'000'000),
+        po::value<size_t>()->default_value(1000000),
         "Maximum number of samples to use (default: 1M)")(
         "max-sample-size",
         po::value<size_t>()->default_value(10000),
@@ -67,6 +67,9 @@ main(int argc, char* argv[])
         "test-keys",
         po::bool_switch()->default_value(false),
         "Test key compression: concatenate all keys and compress as one block")(
+        "test-custom-key-dict",
+        po::bool_switch()->default_value(false),
+        "Test custom key dictionary: build dictionary from most frequent keys")(
         "verbose,v", "Enable verbose logging");
 
     po::variables_map vm;
@@ -109,6 +112,7 @@ main(int argc, char* argv[])
     const bool sample_txns = vm["sample-txns"].as<bool>();
     const bool test_bulk = vm["test-bulk"].as<bool>();
     const bool test_keys = vm["test-keys"].as<bool>();
+    const bool test_custom_key_dict = vm["test-custom-key-dict"].as<bool>();
 
     try
     {
@@ -140,8 +144,6 @@ main(int argc, char* argv[])
         std::set<size_t> unique_sizes;
 
         auto start_time = std::chrono::steady_clock::now();
-
-        ZDICT_finalizeDictionary
 
         // Determine number of ledgers to process
         size_t ledgers_to_process = header.max_ledger - header.min_ledger + 1;
@@ -182,8 +184,8 @@ main(int argc, char* argv[])
             total_bytes += data.size();
             unique_sizes.insert(data.size());
 
-            // Also collect keys if testing key compression
-            if (test_keys) {
+            // Also collect keys if testing key compression or custom dictionary
+            if (test_keys || test_custom_key_dict) {
                 keys.push_back(key);
                 key_sizes.push_back(key.size());
                 key_counts[key]++;
@@ -255,7 +257,7 @@ main(int argc, char* argv[])
 
         // Concatenate all samples into a single buffer for ZDICT/testing (only if needed)
         std::vector<char> samples_buffer;
-        if (test_bulk || (!test_keys && !test_bulk)) {
+        if (test_bulk || (!test_keys && !test_custom_key_dict)) {
             samples_buffer.reserve(total_bytes);
 
             for (const auto& sample : samples)
@@ -459,6 +461,212 @@ main(int argc, char* argv[])
             }
 
             LOGI("\nSkipping dictionary training in test-keys mode.");
+            return 0;
+        }
+
+        // TEST CUSTOM KEY DICTIONARY MODE
+        if (test_custom_key_dict)
+        {
+            LOGI("\n=== CUSTOM KEY DICTIONARY TEST ===");
+            LOGI("Building custom dictionary from most frequent keys...");
+            LOGI("NOTE: Testing compression on 32KB blocks (1000 keys each), not individual keys");
+
+            // Sort keys by frequency (we should already have this from key test)
+            std::vector<std::pair<std::vector<uint8_t>, size_t>> sorted_keys;
+            for (const auto& [key, count] : key_counts) {
+                sorted_keys.emplace_back(key, count);
+            }
+            std::sort(sorted_keys.begin(), sorted_keys.end(),
+                     [](const auto& a, const auto& b) { return a.second > b.second; });
+
+            // Build custom dictionary from top keys
+            const size_t max_dict_entries = 10000;  // Top 10K keys
+            const size_t max_dict_size = 1024 * 1024;  // 1MB max
+            std::vector<uint8_t> custom_dict;
+            custom_dict.reserve(max_dict_size);
+
+            size_t keys_added = 0;
+            size_t total_frequency = 0;
+
+            for (const auto& [key, freq] : sorted_keys) {
+                if (keys_added >= max_dict_entries ||
+                    custom_dict.size() + key.size() > max_dict_size) {
+                    break;
+                }
+                custom_dict.insert(custom_dict.end(), key.begin(), key.end());
+                keys_added++;
+                total_frequency += freq;
+            }
+
+            LOGI("Custom dictionary built:");
+            LOGI("  Keys in dictionary: ", keys_added);
+            LOGI("  Dictionary size: ", custom_dict.size() / (1024.0 * 1024.0), " MB");
+            LOGI("  Total frequency covered: ", total_frequency, "/", keys.size(),
+                 " (", 100.0 * total_frequency / keys.size(), "%)");
+
+            // Prepare training samples (concatenated buffer for ZDICT analysis)
+            size_t training_count = std::min(size_t(10000), keys.size());
+            std::vector<size_t> training_sizes;
+            std::vector<uint8_t> training_buffer;
+
+            training_sizes.reserve(training_count);
+            size_t total_training_size = training_count * 32;  // All keys are 32 bytes
+            training_buffer.reserve(total_training_size);
+
+            // Concatenate training samples into single buffer
+            for (size_t i = 0; i < training_count; i++) {
+                training_buffer.insert(training_buffer.end(), keys[i].begin(), keys[i].end());
+                training_sizes.push_back(keys[i].size());
+            }
+
+            // Create proper ZSTD dictionary using ZDICT_finalizeDictionary
+            std::vector<uint8_t> final_dict(custom_dict.size() + 1024 * 1024);  // Extra space for headers
+
+            ZDICT_params_t dict_params = {};  // Zero-initialize for defaults
+            dict_params.compressionLevel = COMPRESSION_LEVEL;
+            dict_params.notificationLevel = 1;  // Show errors
+            dict_params.dictID = 0;  // Auto-generate ID
+
+            size_t actual_dict_size = ZDICT_finalizeDictionary(
+                final_dict.data(),
+                final_dict.size(),
+                custom_dict.data(),      // Our custom content (frequent keys)
+                custom_dict.size(),
+                training_buffer.data(),  // Concatenated training samples
+                training_sizes.data(),   // Array of sample sizes
+                training_count,
+                dict_params);
+
+            if (ZDICT_isError(actual_dict_size)) {
+                LOGE("Failed to create proper ZSTD dictionary: ", ZDICT_getErrorName(actual_dict_size));
+                return 1;
+            }
+
+            final_dict.resize(actual_dict_size);
+
+            LOGI("Proper ZSTD dictionary created:");
+            LOGI("  Raw content size: ", custom_dict.size() / (1024.0 * 1024.0), " MB");
+            LOGI("  Final dictionary size: ", actual_dict_size / (1024.0 * 1024.0), " MB");
+
+            // Create ZSTD custom dictionary from properly formatted dict
+            ZSTD_CDict* custom_cdict = ZSTD_createCDict(
+                final_dict.data(), actual_dict_size, COMPRESSION_LEVEL);
+
+            if (!custom_cdict) {
+                LOGE("Failed to create custom ZSTD dictionary");
+                return 1;
+            }
+
+            // Test compression on blocks of keys (not individual keys!)
+            ZSTD_CCtx* cctx = ZSTD_createCCtx();
+            const size_t keys_per_block = 1000;  // 32KB blocks
+            const size_t bytes_per_block = keys_per_block * 32;
+            size_t max_blocks = std::min(size_t(100), keys.size() / keys_per_block);
+
+            size_t total_original = 0;
+            size_t total_no_dict = 0;
+            size_t total_custom_dict = 0;
+            size_t custom_wins = 0;
+
+            auto test_start = std::chrono::steady_clock::now();
+
+            for (size_t block = 0; block < max_blocks; block++) {
+                // Create a block of 1000 keys (32KB)
+                std::vector<uint8_t> key_block;
+                key_block.reserve(bytes_per_block);
+
+                for (size_t i = 0; i < keys_per_block; i++) {
+                    size_t key_idx = block * keys_per_block + i;
+                    if (key_idx >= keys.size()) break;
+
+                    const auto& key = keys[key_idx];
+                    key_block.insert(key_block.end(), key.begin(), key.end());
+                }
+
+                if (key_block.empty()) break;
+
+                size_t comp_bound = ZSTD_compressBound(key_block.size());
+                std::vector<char> compressed(comp_bound);
+
+                // Compress without dictionary
+                size_t comp_size_no_dict = ZSTD_compress(
+                    compressed.data(), comp_bound,
+                    key_block.data(), key_block.size(), COMPRESSION_LEVEL);
+
+                // Compress with custom dictionary
+                size_t comp_size_custom_dict = ZSTD_compress_usingCDict(
+                    cctx, compressed.data(), comp_bound,
+                    key_block.data(), key_block.size(), custom_cdict);
+
+                if (!ZSTD_isError(comp_size_no_dict) && !ZSTD_isError(comp_size_custom_dict)) {
+                    total_original += key_block.size();
+                    total_no_dict += comp_size_no_dict;
+                    total_custom_dict += comp_size_custom_dict;
+
+                    if (comp_size_custom_dict < comp_size_no_dict) {
+                        custom_wins++;
+                    }
+                }
+            }
+
+            auto test_end = std::chrono::steady_clock::now();
+            auto test_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                test_end - test_start).count();
+
+            // Calculate compression ratios
+            double no_dict_ratio = (double)total_original / total_no_dict;
+            double custom_dict_ratio = (double)total_original / total_custom_dict;
+
+            LOGI("\n=== CUSTOM DICTIONARY RESULTS ===");
+            LOGI("Tested on ", max_blocks, " key blocks (", keys_per_block, " keys each, ",
+                 bytes_per_block / 1024, "KB blocks):");
+            LOGI("  Original size: ", total_original / (1024.0 * 1024.0), " MB");
+            LOGI("  No dictionary compression: ", total_no_dict / (1024.0 * 1024.0),
+                 " MB (ratio: ", std::fixed, std::setprecision(2), no_dict_ratio, "x)");
+            LOGI("  Custom dictionary compression: ", total_custom_dict / (1024.0 * 1024.0),
+                 " MB (ratio: ", std::fixed, std::setprecision(2), custom_dict_ratio, "x)");
+            LOGI("  Custom dictionary wins: ", custom_wins, "/", max_blocks,
+                 " (", 100.0 * custom_wins / max_blocks, "%)");
+            LOGI("  Improvement vs no-dict: ", std::fixed, std::setprecision(2),
+                 custom_dict_ratio / no_dict_ratio, "x better");
+            LOGI("  Test duration: ", test_duration, " ms");
+
+            // Compare to theoretical maximum (for blocks, not individual keys)
+            size_t total_keys_tested = max_blocks * keys_per_block;
+            std::set<std::vector<uint8_t>> unique_keys_in_test;
+            for (size_t i = 0; i < total_keys_tested && i < keys.size(); i++) {
+                unique_keys_in_test.insert(keys[i]);
+            }
+            size_t unique_keys_tested = unique_keys_in_test.size();
+
+            // Theoretical: unique keys storage + references for all keys in test
+            size_t theoretical_dict_storage = unique_keys_tested * 32;
+            size_t theoretical_ref_storage = total_keys_tested * 4;  // 4 bytes per reference
+            size_t theoretical_total = theoretical_dict_storage + theoretical_ref_storage;
+            double theoretical_ratio = (double)total_original / theoretical_total;
+
+            LOGI("\n=== VS THEORETICAL OPTIMUM ===");
+            LOGI("  Theoretical optimum: ", std::fixed, std::setprecision(2), theoretical_ratio, "x");
+            LOGI("  Custom dictionary achieved: ", std::fixed, std::setprecision(2), custom_dict_ratio, "x");
+            LOGI("  Efficiency: ", std::fixed, std::setprecision(1),
+                 100.0 * custom_dict_ratio / theoretical_ratio, "% of theoretical maximum");
+
+            if (custom_dict_ratio > no_dict_ratio) {
+                LOGI("\n🚀 CUSTOM DICTIONARY BEATS NO-DICT BY ",
+                     std::fixed, std::setprecision(2),
+                     custom_dict_ratio / no_dict_ratio, "x! 🚀");
+            }
+
+            if (custom_dict_ratio > 1.18) {  // Beat ZDICT's key compression
+                LOGI("🎯 CUSTOM DICTIONARY BEATS ZDICT (1.18x) BY ",
+                     std::fixed, std::setprecision(2),
+                     custom_dict_ratio / 1.18, "x! 🎯");
+            }
+
+            ZSTD_freeCCtx(cctx);
+            ZSTD_freeCDict(custom_cdict);
+
+            LOGI("\nSkipping standard dictionary training in custom-key-dict mode.");
             return 0;
         }
 
