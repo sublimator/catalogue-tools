@@ -94,13 +94,18 @@ read_field_header(SliceCursor& cursor)
         return {Slice{}, 0};
     }
 
+    // Read the tag byte
     uint8_t byte1 = cursor.read_u8();
+
+    // Extract type bits from upper 4 bits
     uint32_t type = byte1 >> 4;
+
+    // Extract field bits from lower 4 bits
     uint32_t field = byte1 & 0x0F;
 
+    // If type bits are 0, type code is in next byte
     if (type == 0)
     {
-        // Type in next byte
         if (cursor.empty())
         {
             return {Slice{}, 0};
@@ -111,9 +116,10 @@ read_field_header(SliceCursor& cursor)
             return {Slice{}, 0};
         }
     }
-    else if (field == 0)
+
+    // If field bits are 0, field code is in next byte
+    if (field == 0)
     {
-        // Field in next byte
         if (cursor.empty())
         {
             return {Slice{}, 0};
@@ -125,9 +131,11 @@ read_field_header(SliceCursor& cursor)
         }
     }
 
+    // Create slice containing the entire field header
     size_t header_size = cursor.pos - start_pos;
     Slice header_slice(cursor.data.data() + start_pos, header_size);
 
+    // Return header slice and combined field code
     return {header_slice, (type << 16) | field};
 }
 

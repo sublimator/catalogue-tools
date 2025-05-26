@@ -1,11 +1,14 @@
 #pragma once
 
+#include "catl/core/types.h"  // For Slice
 #include "catl/crypto/sha512-hasher.h"
 #include "catl/shamap/shamap.h"
 #include "catl/v1/catl-v1-errors.h"
 #include "catl/v1/catl-v1-ledger-info-view.h"
 #include "catl/v1/catl-v1-structs.h"
+#include "catl/v1/catl-v1-types.h"  // For MapOperations
 #include <boost/iostreams/device/mapped_file.hpp>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -149,8 +152,24 @@ public:
     uint32_t
     read_shamap(shamap::SHAMap& map, shamap::SHAMapNodeType leaf_type);
 
-    // TODO: add something like Reader::read_map_with_callbacks but use
-    // Slice(mmap_data) instead of vector
+    /**
+     * Read a map with callbacks using zero-copy Slice objects
+     *
+     * This method provides a zero-copy interface for reading map data,
+     * where callbacks receive Slice objects that directly reference the
+     * memory-mapped file data instead of copying into vectors.
+     *
+     * @param type Expected node type for the map
+     * @param on_node Callback for regular nodes, receives key and data slices
+     * @param on_delete Callback for deletion nodes, receives key slice
+     * @return MapOperations struct with counts of nodes processed
+     * @throws CatlV1Error if file format is invalid or an I/O error occurs
+     */
+    MapOperations
+    read_map_with_callbacks(
+        shamap::SHAMapNodeType type,
+        const std::function<void(const Slice&, const Slice&)>& on_node,
+        const std::function<void(const Slice&)>& on_delete = nullptr);
 
     /**
      * Verify that the file hash in the header matches the computed hash of the
@@ -203,6 +222,30 @@ private:
      */
     bool
     valid() const;
+
+    /**
+     * Read a uint8_t from current position and advance
+     * @return The byte value
+     * @throws CatlV1Error if EOF
+     */
+    uint8_t
+    read_uint8();
+
+    /**
+     * Read a uint32_t from current position and advance
+     * @param value Reference to store the value
+     * @throws CatlV1Error if insufficient data
+     */
+    void
+    read_uint32(uint32_t& value);
+
+    /**
+     * Validate that we have enough data for the given size
+     * @param size Size to validate
+     * @throws CatlV1Error if insufficient data
+     */
+    void
+    validate_data_size(uint32_t size) const;
 
     boost::iostreams::mapped_file_source mmap_file_;
     const uint8_t* data_ = nullptr;
