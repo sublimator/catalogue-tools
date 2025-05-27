@@ -5,6 +5,7 @@
 #include "catl/xdata/protocol.h"
 #include "catl/xdata/slice-visitor.h"
 #include <algorithm>
+#include <boost/filesystem.hpp>
 #include <boost/json.hpp>
 #include <chrono>
 #include <fstream>
@@ -361,8 +362,35 @@ TEST(XData, ParseCatlFile)
 
     auto protocol = Protocol::load_from_file(definitions);
 
-    auto catl_file = TestDataPath::get_path(
+    auto compressed_file = TestDataPath::get_path(
+        "catalogue-v1/fixture/cat.2000000-2010000.compression-9.catl");
+    
+    // Check if we need to decompress for MmapReader
+    std::string catl_file = compressed_file;
+    std::string decompressed_file = TestDataPath::get_path(
         "catalogue-v1/fixture/cat.2000000-2010000.compression-0.catl");
+    
+    // First check if compressed file exists and if decompressed doesn't
+    if (boost::filesystem::exists(compressed_file) && 
+        !boost::filesystem::exists(decompressed_file))
+    {
+        std::cerr << "Decompressing test fixture for MmapReader...\n";
+        v1::Reader compressed_reader(compressed_file);
+        
+        // Check if it's actually compressed
+        if (compressed_reader.compression_level() > 0)
+        {
+            compressed_reader.decompress(decompressed_file);
+            std::cerr << "Decompression complete.\n";
+        }
+        
+        catl_file = decompressed_file;
+    }
+    else if (boost::filesystem::exists(decompressed_file))
+    {
+        // Use existing decompressed file
+        catl_file = decompressed_file;
+    }
 
     // Use MmapReader for better performance on uncompressed files
     v1::MmapReader reader(catl_file);
