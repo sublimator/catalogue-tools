@@ -60,6 +60,50 @@ struct SliceCursor
         return data.data()[pos++];
     }
 
+    uint16_t
+    read_uint16_be()
+    {
+        if (pos + 2 > data.size())
+        {
+            throw SliceCursorError("read_uint16_be past end of data");
+        }
+        uint16_t result = (static_cast<uint16_t>(data.data()[pos]) << 8) |
+            data.data()[pos + 1];
+        pos += 2;
+        return result;
+    }
+
+    uint32_t
+    read_uint32_be()
+    {
+        if (pos + 4 > data.size())
+        {
+            throw SliceCursorError("read_uint32_be past end of data");
+        }
+        uint32_t result = (static_cast<uint32_t>(data.data()[pos]) << 24) |
+            (static_cast<uint32_t>(data.data()[pos + 1]) << 16) |
+            (static_cast<uint32_t>(data.data()[pos + 2]) << 8) |
+            data.data()[pos + 3];
+        pos += 4;
+        return result;
+    }
+
+    uint64_t
+    read_uint64_be()
+    {
+        if (pos + 8 > data.size())
+        {
+            throw SliceCursorError("read_uint64_be past end of data");
+        }
+        uint64_t result = 0;
+        for (int i = 0; i < 8; ++i)
+        {
+            result = (result << 8) | data.data()[pos + i];
+        }
+        pos += 8;
+        return result;
+    }
+
     void
     advance(size_t n)
     {

@@ -320,6 +320,20 @@ Protocol::get_type_name(uint16_t typeCode) const
     return std::nullopt;
 }
 
+std::optional<std::string>
+Protocol::get_transaction_type_name(uint16_t txTypeCode) const
+{
+    // Reverse lookup in transactionTypes_
+    for (const auto& [name, code] : transactionTypes_)
+    {
+        if (code == txTypeCode)
+        {
+            return name;
+        }
+    }
+    return std::nullopt;
+}
+
 void
 Protocol::build_fast_lookup()
 {

@@ -82,6 +82,10 @@ public:
     std::optional<std::string>
     get_type_name(uint16_t typeCode) const;
 
+    // Get transaction type name for transaction type code
+    std::optional<std::string>
+    get_transaction_type_name(uint16_t txTypeCode) const;
+
     // Check if a type was inferred as VL-encoded
     bool
     is_inferred_vl_type(uint16_t type_code) const
