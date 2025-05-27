@@ -17,12 +17,14 @@ parse_argv(int argc, char* argv[])
     // Define command line options with Boost
     po::options_description desc("Allowed options");
     desc.add_options()("help,h", "Display this help message")(
-        "input-file",
-        po::value<std::string>(),
-        "Path to the compressed CATL file")(
+        "input-file", po::value<std::string>(), "Path to the input CATL file")(
         "output-file",
         po::value<std::string>(),
-        "Path to the output uncompressed CATL file")(
+        "Path to the output CATL file")(
+        "compression-level,c",
+        po::value<int>(),
+        "Target compression level (0-9, where 0 is uncompressed). "
+        "If not specified, level 0 (decompression) is used")(
         "force,f",
         po::bool_switch(),
         "Force overwrite of existing output file without prompting");
@@ -35,21 +37,25 @@ parse_argv(int argc, char* argv[])
     // Generate the help text
     std::ostringstream help_stream;
     help_stream
-        << "CATL Decompressor Tool" << std::endl
-        << "--------------------" << std::endl
-        << "Converts a compressed CATL file to an uncompressed version"
+        << "CATL Copy Tool" << std::endl
+        << "--------------" << std::endl
+        << "Copies a CATL file with optional compression level change"
         << std::endl
         << std::endl
-        << "Usage: " << (argc > 0 ? argv[0] : "catl1-decomp")
+        << "Usage: " << (argc > 0 ? argv[0] : "catl1-copy")
         << " [options] <input_catl_file> <output_catl_file>" << std::endl
         << desc << std::endl
-        << "The tool simply decompresses the contents without examining them, "
-           "using"
+        << "Examples:" << std::endl
+        << "  Decompress a file (level 0):" << std::endl
+        << "    catl1-copy compressed.catl uncompressed.catl" << std::endl
+        << "  Compress with maximum compression (level 9):" << std::endl
+        << "    catl1-copy uncompressed.catl compressed.catl -c 9" << std::endl
+        << "  Recompress at different level:" << std::endl
+        << "    catl1-copy level5.catl level9.catl -c 9" << std::endl
         << std::endl
-        << "the Reader and Writer classes to handle the actual data transfer."
+        << "The tool copies the file contents without examining them, using"
         << std::endl
-        << std::endl
-        << "For a full-featured implementation, see catl1-decomp-reference."
+        << "the Reader and Writer classes to handle compression/decompression."
         << std::endl;
     options.help_text = help_stream.str();
 
@@ -100,6 +106,25 @@ parse_argv(int argc, char* argv[])
         if (vm.count("force"))
         {
             options.force_overwrite = vm["force"].as<bool>();
+        }
+
+        // Check compression level
+        if (vm.count("compression-level"))
+        {
+            int level = vm["compression-level"].as<int>();
+            if (level < 0 || level > 9)
+            {
+                options.valid = false;
+                options.error_message =
+                    "Compression level must be between 0 and 9";
+                return options;
+            }
+            options.compression_level = level;
+        }
+        else
+        {
+            // Default to decompression (level 0) if not specified
+            options.compression_level = 0;
         }
     }
     catch (const po::error& e)

@@ -6,10 +6,10 @@ set(UTILS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/includes)
 set(EXECUTABLE_CATL_VALIDATOR catl1-validator)
 set(SOURCE_CATL_VALIDATOR ${UTILS_SRC_DIR}/catl1-validator.cpp)
 
-# Define the catl1-decomp executable and its sources
-set(EXECUTABLE_CATL_DECOMP catl1-decomp)
-set(SOURCES_CATL_DECOMP ${UTILS_SRC_DIR}/decomp/catl1-decomp.cpp
-                        ${UTILS_SRC_DIR}/decomp/arg-options.cpp)
+# Define the catl1-copy executable and its sources
+set(EXECUTABLE_CATL_COPY catl1-copy)
+set(SOURCES_CATL_COPY ${UTILS_SRC_DIR}/decomp/catl1-copy.cpp
+                      ${UTILS_SRC_DIR}/decomp/arg-options.cpp)
 
 # Define the catl1-slice executable and its sources
 set(EXECUTABLE_CATL_SLICE catl1-slice)
@@ -32,12 +32,12 @@ target_link_libraries(
           Boost::iostreams
           OpenSSL::SSL)
 
-# catl1-decomp (with new structure)
-add_executable(${EXECUTABLE_CATL_DECOMP} ${SOURCES_CATL_DECOMP})
-target_include_directories(${EXECUTABLE_CATL_DECOMP}
-                           PRIVATE ${UTILS_INCLUDE_DIR} ${CATL_INCLUDE_DIR})
+# catl1-copy (with compression level support)
+add_executable(${EXECUTABLE_CATL_COPY} ${SOURCES_CATL_COPY})
+target_include_directories(${EXECUTABLE_CATL_COPY} PRIVATE ${UTILS_INCLUDE_DIR}
+                                                           ${CATL_INCLUDE_DIR})
 target_link_libraries(
-  ${EXECUTABLE_CATL_DECOMP}
+  ${EXECUTABLE_CATL_COPY}
   PRIVATE catl_core
           catl_shamap
           catl_catalogue_v1
@@ -61,5 +61,5 @@ target_link_libraries(
           OpenSSL::SSL)
 
 # Install all executables
-install(TARGETS ${EXECUTABLE_CATL_VALIDATOR} ${EXECUTABLE_CATL_DECOMP}
+install(TARGETS ${EXECUTABLE_CATL_VALIDATOR} ${EXECUTABLE_CATL_COPY}
                 ${EXECUTABLE_CATL_SLICE} RUNTIME DESTINATION bin)

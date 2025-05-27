@@ -62,6 +62,41 @@ public:
     decompress(const std::string& output_path);
 
     /**
+     * Compress the file to a compressed version
+     *
+     * Creates a compressed copy of this file at the specified output path
+     * with the given compression level. The method transfers the header
+     * (with the new compression level) and pipes the body through compression
+     * to the output without parsing its contents.
+     *
+     * @param output_path Path where the compressed file should be written
+     * @param compression_level Compression level (1-9, where 9 is maximum)
+     * @throws CatlV1Error if file cannot be compressed or if compression level
+     *         is invalid
+     */
+    void
+    compress(const std::string& output_path, int compression_level = 9);
+
+private:
+    /**
+     * Copy the file with a different compression level
+     *
+     * Internal method that handles both compression and decompression by
+     * copying the file with a new compression level.
+     *
+     * @param output_path Path where the output file should be written
+     * @param new_compression_level Target compression level (0-9)
+     * @param operation_name Name of operation for error messages
+     * @throws CatlV1Error if the operation fails
+     */
+    void
+    copy_with_compression(
+        const std::string& output_path,
+        int new_compression_level,
+        const std::string& operation_name);
+
+public:
+    /**
      * Read raw data from the file without parsing
      *
      * @param buffer Buffer to receive the data
