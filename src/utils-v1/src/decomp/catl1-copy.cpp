@@ -35,40 +35,38 @@ format_file_size(uint64_t bytes)
 }
 
 /**
- * CATLDecompressor - A simple CATL file decompression utility
+ * CATLCopier - A CATL file copy utility with compression level control
  *
- * This tool has a single focused responsibility: take a compressed CATL file
- * and create an uncompressed version that can be processed by other tools.
+ * This tool copies CATL files while optionally changing the compression level.
+ * It can be used to:
+ * - Decompress files (compression level 0)
+ * - Compress uncompressed files (compression levels 1-9)
+ * - Recompress files at different levels
  *
- * The decompression process:
- * 1. Read the header information from the compressed file
- * 2. Create a new file with identical header information, but with compression
- * level set to 0
- * 3. Simply decompress the body to the new file's uncompressed body without
- * examining the contents
- * 4. Let the Reader and Writer classes handle the actual data decompression and
- * copying
+ * The copy process:
+ * 1. Read the header information from the input file
+ * 2. Create a new file with identical header information, but with the
+ *    specified compression level
+ * 3. Copy the body data through the appropriate compression/decompression
+ * 4. Let the Reader and Writer classes handle the actual data transformation
  * 5. Update the output file's size and hash values during finalization
  *
  * Note: This tool doesn't need to understand the internal structure of the CATL
- * file data. It simply relies on the Reader class to handle decompression of
- * the input stream and the Writer class to create the proper uncompressed
- * output stream. Conceptually, it's equivalent to:
- * compressed_reader.stream_pipe(uncompressed_writer.body_stream())
- *
- * After decompression, use catl1-validator or other tools to verify file
- * integrity.
+ * file data. It simply relies on the Reader class methods to handle the
+ * data transformation.
  */
-class CATLDecompressor
+class CATLCopier
 {
 private:
     std::string input_file_path_;
     std::string output_file_path_;
+    int target_compression_level_;
 
 public:
-    CATLDecompressor(std::string in_file, std::string out_file)
+    CATLCopier(std::string in_file, std::string out_file, int compression_level)
         : input_file_path_(std::move(in_file))
         , output_file_path_(std::move(out_file))
+        , target_compression_level_(compression_level)
     {
         if (!boost::filesystem::exists(input_file_path_))
         {
@@ -82,14 +80,22 @@ public:
         {
             throw CatlV1Error("Input and output files must be different");
         }
+
+        // Validate compression level
+        if (target_compression_level_ < 0 || target_compression_level_ > 9)
+        {
+            throw CatlV1Error(
+                "Invalid compression level: " +
+                std::to_string(target_compression_level_) + " (must be 0-9)");
+        }
     }
 
     bool
-    decompress()
+    copy()
     {
         try
         {
-            // Open the input file with Reader class which handles decompression
+            // Open the input file with Reader class
             std::cout << "Opening input file: " << input_file_path_
                       << std::endl;
             Reader reader(input_file_path_);
@@ -101,39 +107,64 @@ public:
 
             // Get header and compression information
             const CatlHeader& header = reader.header();
-            uint8_t compression_level = get_compression_level(header.version);
-
-            if (compression_level == 0)
-            {
-                std::cerr << "File is not compressed (level 0). No need to "
-                             "decompress."
-                          << std::endl;
-                return false;
-            }
+            uint8_t current_compression_level =
+                get_compression_level(header.version);
 
             std::cout << "File information:" << std::endl;
             std::cout << "  Ledger range: " << header.min_ledger << " - "
                       << header.max_ledger << " ("
                       << (header.max_ledger - header.min_ledger + 1)
                       << " ledgers)" << std::endl;
-            std::cout << "  Compression level: "
-                      << static_cast<int>(compression_level) << std::endl;
+            std::cout << "  Current compression level: "
+                      << static_cast<int>(current_compression_level)
+                      << std::endl;
+            std::cout << "  Target compression level: "
+                      << target_compression_level_ << std::endl;
             std::cout << "  Network ID: " << header.network_id << std::endl;
 
-            // Start decompression
-            std::cout << "Starting decompression..." << std::endl;
+            if (current_compression_level == target_compression_level_)
+            {
+                std::cerr << "File is already at compression level "
+                          << target_compression_level_ << ". No need to copy."
+                          << std::endl;
+                return false;
+            }
+
+            // Determine operation type for messaging
+            std::string operation;
+            if (target_compression_level_ == 0)
+            {
+                operation = "decompression";
+            }
+            else if (current_compression_level == 0)
+            {
+                operation = "compression";
+            }
+            else
+            {
+                operation = "recompression";
+            }
+
+            // Start copy operation
+            std::cout << "Starting " << operation << "..." << std::endl;
             auto start_time = std::chrono::high_resolution_clock::now();
 
-            // Use the Reader::decompress method
+            // Use the appropriate Reader method
             try
             {
-                // The decompress method now throws exceptions instead of
-                // returning a bool
-                reader.decompress(output_file_path_);
+                if (target_compression_level_ == 0)
+                {
+                    reader.decompress(output_file_path_);
+                }
+                else
+                {
+                    reader.compress(
+                        output_file_path_, target_compression_level_);
+                }
             }
             catch (const CatlV1Error& e)
             {
-                std::cerr << "Decompression failed: " << e.what() << std::endl;
+                std::cerr << "Copy failed: " << e.what() << std::endl;
                 return false;
             }
 
@@ -146,19 +177,33 @@ public:
             boost::uintmax_t output_file_size =
                 boost::filesystem::file_size(output_file_path_);
 
-            std::cout << "Decompression completed successfully:" << std::endl;
+            std::cout << "Copy completed successfully:" << std::endl;
             std::cout << "  Time taken: " << std::fixed << std::setprecision(2)
                       << seconds << " seconds" << std::endl;
             std::cout << "  Output file size: " << output_file_size << " ("
                       << format_file_size(output_file_size) << ")" << std::endl;
 
-            // Calculate expansion ratio
+            // Calculate size change ratio
             if (input_file_size > 0)
             {
                 const double ratio =
                     static_cast<double>(output_file_size) / input_file_size;
-                std::cout << "  Expansion ratio: " << std::fixed
-                          << std::setprecision(2) << ratio << "x" << std::endl;
+                const double percent_change = (ratio - 1.0) * 100.0;
+
+                if (ratio > 1.0)
+                {
+                    std::cout << "  Expansion ratio: " << std::fixed
+                              << std::setprecision(2) << ratio << "x (+"
+                              << std::setprecision(1) << percent_change << "%)"
+                              << std::endl;
+                }
+                else
+                {
+                    std::cout << "  Compression ratio: " << std::fixed
+                              << std::setprecision(2) << ratio << "x ("
+                              << std::setprecision(1) << percent_change << "%)"
+                              << std::endl;
+                }
             }
 
             return true;
@@ -196,9 +241,11 @@ main(int argc, char* argv[])
 
     try
     {
-        // At this point we know input_file and output_file are present
+        // At this point we know input_file, output_file and compression_level
+        // are present
         std::string input_file = *options.input_file;
         std::string output_file = *options.output_file;
+        int compression_level = *options.compression_level;
 
         // Check if output file already exists
         if (boost::filesystem::exists(output_file) && !options.force_overwrite)
@@ -214,18 +261,19 @@ main(int argc, char* argv[])
             }
         }
 
-        std::cout << "Starting decompression: " << input_file << " -> "
-                  << output_file << std::endl;
+        std::cout << "Starting copy: " << input_file << " -> " << output_file
+                  << " (compression level " << compression_level << ")"
+                  << std::endl;
 
-        CATLDecompressor decomp(input_file, output_file);
-        if (decomp.decompress())
+        CATLCopier copier(input_file, output_file, compression_level);
+        if (copier.copy())
         {
-            std::cout << "Successfully decompressed file" << std::endl;
+            std::cout << "Successfully copied file" << std::endl;
             return 0;
         }
         else
         {
-            std::cerr << "Failed to decompress the file" << std::endl;
+            std::cerr << "Failed to copy the file" << std::endl;
             return 1;
         }
     }

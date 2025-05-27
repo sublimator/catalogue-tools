@@ -32,21 +32,16 @@ Reader::read_raw_data(uint8_t* buffer, size_t size, const std::string& context)
     return bytes_read;
 }
 
-// TODO: add a compress() method as well to recompress at a new compression
-// level
 void
-Reader::decompress(const std::string& output_path)
+Reader::copy_with_compression(
+    const std::string& output_path,
+    int new_compression_level,
+    const std::string& operation_name)
 {
-    // Check if file is already uncompressed
-    if (compression_level_ == 0)
-    {
-        throw CatlV1Error("File is not compressed (level 0)");
-    }
-
-    // Create writer with uncompressed option
+    // Create writer with specified compression level
     WriterOptions options;
     options.network_id = header_.network_id;
-    options.compression_level = 0;
+    options.compression_level = new_compression_level;
 
     auto writer = Writer::for_file(output_path, options);
 
@@ -70,8 +65,8 @@ Reader::decompress(const std::string& output_path)
             catch (const CatlV1Error& e)
             {
                 throw CatlV1Error(
-                    "Error writing to output file during decompression: " +
-                    std::string(e.what()));
+                    "Error writing to output file during " + operation_name +
+                    ": " + std::string(e.what()));
             }
         }
 
@@ -79,12 +74,38 @@ Reader::decompress(const std::string& output_path)
         if (input_stream_->bad())
         {
             throw CatlV1Error(
-                "Error reading from input file during decompression");
+                "Error reading from input file during " + operation_name);
         }
     }
 
     // Finalize the output file
     writer->finalize();
+}
+
+void
+Reader::decompress(const std::string& output_path)
+{
+    // Check if file is already uncompressed
+    if (compression_level_ == 0)
+    {
+        throw CatlV1Error("File is not compressed (level 0)");
+    }
+
+    copy_with_compression(output_path, 0, "decompression");
+}
+
+void
+Reader::compress(const std::string& output_path, int compression_level)
+{
+    // Validate compression level
+    if (compression_level < 1 || compression_level > 9)
+    {
+        throw CatlV1Error(
+            "Invalid compression level: " + std::to_string(compression_level) +
+            " (must be 1-9)");
+    }
+
+    copy_with_compression(output_path, compression_level, "compression");
 }
 
 Reader::Reader(std::string filename) : filename_(std::move(filename))
