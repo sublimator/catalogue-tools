@@ -295,70 +295,6 @@ process_map_type(
                     // Ignore for counting test
                 }
             }
-            else if (should_debug)
-            {
-                debug_out << "\n=== " << type_name << " #" << total_count
-                          << " ===\n";
-                debug_out << "Ledger: " << current_ledger << "\n";
-                debug_out << "Data size: " << std::dec << data.size()
-                          << " bytes\n";
-                debug_out << std::uppercase;
-                debug_out << "Key: ";
-                for (size_t i = 0; i < key.size(); ++i)
-                {
-                    debug_out << std::hex << std::setw(2) << std::setfill('0')
-                              << static_cast<int>(key.data()[i]);
-                }
-                debug_out << "\n";
-                debug_out << "Data: ";
-                for (size_t i = 0; i < std::min(data.size(), size_t(128)); ++i)
-                {
-                    debug_out << std::hex << std::setw(2) << std::setfill('0')
-                              << static_cast<int>(data.data()[i]);
-                }
-                if (data.size() > 128)
-                    debug_out << "... (" << std::dec << data.size() - 128
-                              << " more bytes)";
-                debug_out << "\n";
-                debug_out << std::dec << "Parsing with debug visitor:\n";
-
-                ParserContext debug_ctx(data);
-                DebugTreeVisitor debug_visitor(debug_out);
-                try
-                {
-                    if (map_type == shamap::tnTRANSACTION_MD)
-                    {
-                        debug_out << "=== Transaction ===\n";
-                        size_t tx_vl_length = read_vl_length(debug_ctx.cursor);
-                        debug_out << "Transaction VL length: " << tx_vl_length
-                                  << "\n";
-                        Slice tx_data =
-                            debug_ctx.cursor.read_slice(tx_vl_length);
-                        ParserContext tx_ctx(tx_data);
-                        parse_with_visitor(tx_ctx, protocol, debug_visitor);
-
-                        debug_out << "\n=== Metadata ===\n";
-                        size_t meta_vl_length =
-                            read_vl_length(debug_ctx.cursor);
-                        debug_out << "Metadata VL length: " << meta_vl_length
-                                  << "\n";
-                        Slice meta_data =
-                            debug_ctx.cursor.read_slice(meta_vl_length);
-                        ParserContext meta_ctx(meta_data);
-                        parse_with_visitor(meta_ctx, protocol, debug_visitor);
-                    }
-                    else
-                    {
-                        parse_with_visitor(debug_ctx, protocol, debug_visitor);
-                    }
-                    debug_out << "Parse successful!\n";
-                }
-                catch (const std::exception& e)
-                {
-                    debug_out << "Parse failed: " << e.what() << "\n";
-                }
-                debug_out << std::dec << "=================\n";
-            }
 
             // Regular parsing for statistics
             ParserContext ctx(data);
@@ -425,10 +361,11 @@ TEST(XData, ParseCatlFile)
 
     auto protocol = Protocol::load_from_file(definitions);
 
+    auto catl_file = TestDataPath::get_path(
+        "catalogue-v1/fixture/cat.2000000-2010000.compression-0.catl");
+
     // Use MmapReader for better performance on uncompressed files
-    v1::MmapReader reader(
-        "/Users/nicholasdudfield/projects/catalogue-tools/"
-        "test-slice-4500000-5000000.catl");
+    v1::MmapReader reader(catl_file);
     auto header = reader.header();
     auto end = header.max_ledger;
 
