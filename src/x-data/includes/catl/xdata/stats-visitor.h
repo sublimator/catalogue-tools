@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catl/base58/base58.h"
 #include "catl/core/types.h"  // For Slice, Hash256
 #include "catl/xdata/fields.h"
 #include "catl/xdata/protocol.h"
@@ -567,8 +568,18 @@ private:
 
             // Convert bytes to hex string
             std::string hex_str = to_hex(Slice(bytes.data(), N));
-            ss << indent << "{\"value\": \"" << hex_str
-               << "\", \"count\": " << freq << "}";
+            ss << indent << "{\"hex\": \"" << hex_str
+               << "\", \"count\": " << freq;
+
+            // For 20-byte arrays (accounts), also add base58
+            if constexpr (N == 20)
+            {
+                std::string base58_str =
+                    base58::encode_account_id(bytes.data(), N);
+                ss << ", \"base58\": \"" << base58_str << "\"";
+            }
+
+            ss << "}";
             count++;
         }
         ss << nl << "  ]";

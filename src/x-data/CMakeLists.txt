@@ -26,7 +26,10 @@ target_link_libraries(
 # Link libraries for the stats utility
 target_link_libraries(
   catl_xdata_stats
-  PRIVATE catl_xdata catl::catalogue_v1 OpenSSL::Crypto
+  PRIVATE catl_xdata
+          catl::catalogue_v1
+          catl::base58
+          OpenSSL::Crypto
   PUBLIC Boost::program_options)
 
 add_library(catl::xdata ALIAS catl_xdata)
