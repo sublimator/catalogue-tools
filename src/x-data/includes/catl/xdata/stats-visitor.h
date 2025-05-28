@@ -432,6 +432,17 @@ private:
         else if (field.meta.type == FieldTypes::Amount && fs.data.size() >= 8)
         {
             analyze_amount(fs.data);
+
+            // Also track the currency from Amount fields!
+            if (!is_xrp_amount(fs.data))
+            {
+                Slice currency = get_currency_raw(fs.data);
+                std::array<uint8_t, 20> currency_bytes;
+                std::memcpy(currency_bytes.data(), currency.data(), 20);
+                currency_frequency_[currency_bytes]++;
+            }
+            // For XRP amounts, we could optionally track XRP_CURRENCY
+            // but it's probably not useful for compression analysis
         }
 
         // Hash fields - check for common patterns (e.g., zero hashes)

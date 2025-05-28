@@ -10,10 +10,10 @@ struct ParserContext
     SliceCursor cursor;
     // Future: could add error tracking, options, etc.
 
-    explicit ParserContext(Slice data) : cursor{data, 0}
+    explicit ParserContext(const Slice& data) : cursor{data, 0}
     {
     }
-    explicit ParserContext(SliceCursor cursor) : cursor(cursor)
+    explicit ParserContext(const SliceCursor& cursor) : cursor(cursor)
     {
     }
 };
