@@ -310,12 +310,9 @@ parse_with_visitor_impl(
 
             if (field->meta.is_vl_encoded)
             {
-                size_t length_start = ctx.cursor.pos;
                 field_size = read_vl_length(ctx.cursor);
-                size_t vl_prefix_size = ctx.cursor.pos - length_start;
-                // Reset to include VL prefix in the slice
-                ctx.cursor.pos = length_start;
-                field_size += vl_prefix_size;  // Total size including prefix
+                // field_size is now the actual data size, cursor is positioned
+                // after VL prefix
             }
             else if (field->meta.type == FieldTypes::Amount)
             {

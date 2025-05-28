@@ -44,6 +44,9 @@ add_compile_definitions(PROJECT_ROOT="${PROJECT_ROOT}"
 # Add the core library
 add_subdirectory(src/core)
 
+# Add the base58 library
+add_subdirectory(src/base58)
+
 # Add the catalogue-crypto library
 add_subdirectory(src/crypto)
 
@@ -62,10 +65,11 @@ add_subdirectory(src/hasher-v1)
 # Add the utils library
 add_subdirectory(src/utils-v1)
 
-add_subdirectory(src/experiments)
+# Add the x-data module
 add_subdirectory(src/x-data)
-add_subdirectory(src/base58)
 
+# Add the experiments module
+add_subdirectory(src/experiments)
 
 # Add tests if testing is enabled
 option(BUILD_TESTING "Build the testing tree" ON)
