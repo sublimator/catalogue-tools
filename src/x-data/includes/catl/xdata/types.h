@@ -109,7 +109,10 @@ inline const FieldType XChainBridge{
     25,
     {{Networks::XRPL}},
     40};  // 20 + 20 account IDs
-inline const FieldType Currency{"Currency", 26, {{Networks::XRPL}}, 20};
+
+// TODO: we don't actually know this type yet, it might not be the 160-bit
+// encoding per the Amount
+inline const FieldType Currency{"Currency", 26, {{Networks::XRPL}}, 0};
 
 // High level types (cannot be serialized inside other types)
 inline const FieldType Transaction{"Transaction", 10001, std::nullopt, 0};

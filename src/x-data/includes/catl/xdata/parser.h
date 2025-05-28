@@ -39,7 +39,7 @@ skip_array(ParserContext& ctx, const Protocol& protocol);
 
 // Get fixed size for a type (returns 0 for variable/special types)
 inline size_t
-get_fixed_size(FieldType type)
+get_fixed_size(const FieldType& type)
 {
     return type.fixed_size;
 }
