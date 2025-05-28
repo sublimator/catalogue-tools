@@ -64,6 +64,7 @@ add_subdirectory(src/utils-v1)
 
 add_subdirectory(src/experiments)
 add_subdirectory(src/x-data)
+add_subdirectory(src/base58)
 
 
 # Add tests if testing is enabled
