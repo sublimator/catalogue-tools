@@ -9,6 +9,7 @@ namespace catl::xdata {
 inline void
 skip_pathset(ParserContext& ctx)
 {
+    // TODO: Is inline const better here?
     constexpr uint8_t PATHSET_END_BYTE = 0x00;
     constexpr uint8_t PATH_SEPARATOR_BYTE = 0xFF;
     constexpr uint8_t TYPE_ACCOUNT = 0x01;

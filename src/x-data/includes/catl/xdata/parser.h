@@ -189,8 +189,14 @@ parse_with_visitor_impl(
 
         if (field->meta.type == FieldTypes::STObject)
         {
+            // Track start position for size calculation
+            size_t start_pos = ctx.cursor.pos - header_slice.size();
+
+            // Create FieldSlice with empty data (not parsed yet)
+            FieldSlice start_slice{field, header_slice, Slice{}};
+
             // Ask visitor if they want to descend
-            if (visitor.visit_object_start(path, *field))
+            if (visitor.visit_object_start(path, start_slice))
             {
                 // Add to path and recurse
                 path.push_back({field, -1});
@@ -205,12 +211,26 @@ parse_with_visitor_impl(
                 // Skip the object
                 skip_object(ctx, protocol);
             }
-            visitor.visit_object_end(path, *field);
+            // Create FieldSlice with complete object data
+            size_t end_pos = ctx.cursor.pos;
+            size_t object_size = end_pos - start_pos - header_slice.size();
+            Slice object_data{
+                ctx.cursor.data.data() + start_pos + header_slice.size(),
+                object_size};
+            FieldSlice end_slice{field, header_slice, object_data};
+
+            visitor.visit_object_end(path, end_slice);
         }
         else if (field->meta.type == FieldTypes::STArray)
         {
+            // Track start position for size calculation
+            size_t start_pos = ctx.cursor.pos - header_slice.size();
+
+            // Create FieldSlice with empty data (not parsed yet)
+            FieldSlice start_slice{field, header_slice, Slice{}};
+
             // Ask visitor if they want to descend
-            if (visitor.visit_array_start(path, *field))
+            if (visitor.visit_array_start(path, start_slice))
             {
                 // Add to path
                 path.push_back({field, -1});
@@ -243,37 +263,43 @@ parse_with_visitor_impl(
 
                     if (elem_field->meta.type == FieldTypes::STObject)
                     {
-                        if (visitor.visit_array_element(path, element_index))
+                        // Add the element type field to path
+                        path.push_back({elem_field, -1});
+
+                        // Track start position for size calculation
+                        size_t elem_start_pos =
+                            ctx.cursor.pos - elem_header.size();
+
+                        // Create FieldSlice with empty data (not parsed yet)
+                        FieldSlice elem_start_slice{
+                            elem_field, elem_header, Slice{}};
+
+                        // Parse the STObject content
+                        if (visitor.visit_object_start(path, elem_start_slice))
                         {
-                            // Add the element type field to path
-                            path.push_back({elem_field, -1});
-
-                            // Notify about the wrapper field
-                            visitor.visit_field(
-                                path,
-                                FieldSlice{elem_field, elem_header, Slice{}});
-
-                            // Parse the STObject content
-                            if (visitor.visit_object_start(path, *elem_field))
-                            {
-                                // Parse the object's fields (NOT recursively -
-                                // same level)
-                                parse_with_visitor_impl(
-                                    ctx, protocol, visitor, path);
-                            }
-                            else
-                            {
-                                skip_object(ctx, protocol);
-                            }
-                            visitor.visit_object_end(path, *elem_field);
-
-                            path.pop_back();
+                            // Parse the object's fields
+                            parse_with_visitor_impl(
+                                ctx, protocol, visitor, path);
                         }
                         else
                         {
-                            // Skip the object including its end marker
                             skip_object(ctx, protocol);
                         }
+
+                        // Create FieldSlice with complete object data
+                        size_t elem_end_pos = ctx.cursor.pos;
+                        size_t elem_size =
+                            elem_end_pos - elem_start_pos - elem_header.size();
+                        Slice elem_data{
+                            ctx.cursor.data.data() + elem_start_pos +
+                                elem_header.size(),
+                            elem_size};
+                        FieldSlice elem_end_slice{
+                            elem_field, elem_header, elem_data};
+
+                        visitor.visit_object_end(path, elem_end_slice);
+
+                        path.pop_back();
                     }
                     else
                     {
@@ -301,7 +327,15 @@ parse_with_visitor_impl(
                 // Skip the array
                 skip_array(ctx, protocol);
             }
-            visitor.visit_array_end(path, *field);
+            // Create FieldSlice with complete array data
+            size_t end_pos = ctx.cursor.pos;
+            size_t array_size = end_pos - start_pos - header_slice.size();
+            Slice array_data{
+                ctx.cursor.data.data() + start_pos + header_slice.size(),
+                array_size};
+            FieldSlice end_slice{field, header_slice, array_data};
+
+            visitor.visit_array_end(path, end_slice);
         }
         else
         {

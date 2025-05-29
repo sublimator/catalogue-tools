@@ -7,27 +7,25 @@
 
 namespace catl::xdata {
 
-// XRP currency is represented as 20 zero bytes
-static constexpr uint8_t XRP_CURRENCY[20] = {0};
+// XRP/XAH currency is represented as 20 zero bytes
+static constexpr uint8_t NATIVE_CURRENCY[20] = {0};
 
 // Get size for Amount type by peeking at first byte
 inline size_t
 get_amount_size(uint8_t first_byte)
 {
     bool is_iou = (first_byte & 0x80) != 0;
-    return is_iou ? 48 : 8;  // IOU: 8 + 20 + 20, XRP: just 8
+    return is_iou ? 48 : 8;  // IOU: 8 + 20 + 20, NATIVE(XRP/XAH): just 8
 }
 
-// Check if an amount is XRP (native) or IOU
+// Check if an amount is native (XRP/XAH) or IOU
 inline bool
-is_xrp_amount(const Slice& amount)
+is_native_amount(const Slice& amount)
 {
-    if (amount.empty())
-        return false;
-    return (amount.data()[0] & 0x80) == 0;
+    return amount.size() == 8 && (amount.data()[0] & 0x80) == 0;
 }
 
-// Get issuer for IOU amounts (returns empty slice for XRP)
+// Get issuer for IOU amounts (returns empty slice for native (XRP/XAH))
 // IOU format: [8 bytes amount][20 bytes currency][20 bytes issuer]
 inline Slice
 get_issuer(const Slice& amount)
@@ -42,12 +40,15 @@ get_issuer(const Slice& amount)
     return {amount.data() + 28, 20};
 }
 
-// Get currency code for amounts (XRP or standard 3-char format)
+// Get currency code for amounts (XRP/XAH or standard 3-char format)
 // out_code must have at least 3 bytes available
-// Returns true if it's a standard currency (XRP or 3-char code)
+// Returns true if it's a standard currency (XRP/XAH or 3-char code)
 // Returns false for non-standard currencies
 inline bool
-get_currency_code(const Slice& amount, char* out_code)
+get_currency_code(
+    const Slice& amount,
+    char* out_code,
+    const char* native_code = "XRP")
 {
     // Check if we have valid amount data
     if (amount.size() < 8)
@@ -55,10 +56,10 @@ get_currency_code(const Slice& amount, char* out_code)
         return false;  // Invalid amount
     }
 
-    // Check if it's XRP
+    // Check if it's native XRP/XAH
     if ((amount.data()[0] & 0x80) == 0)
     {
-        std::memcpy(out_code, "XRP", 3);
+        std::memcpy(out_code, native_code, 3);
         return true;
     }
 
@@ -100,15 +101,15 @@ get_currency_code(const Slice& amount, char* out_code)
 }
 
 // Get the raw 20-byte currency field (for all currency types)
-// Returns XRP_CURRENCY (20 zeros) for XRP amounts
+// Returns NATIVE_CURRENCY (20 zeros) for XRP/XAH amounts
 inline Slice
 get_currency_raw(const Slice& amount)
 {
     // Check if it's an IOU
     if (amount.size() < 48 || (amount.data()[0] & 0x80) == 0)
     {
-        // Return XRP currency (20 zeros)
-        return {XRP_CURRENCY, 20};
+        // Return Native (XRP/XAH) currency (20 zeros)
+        return {NATIVE_CURRENCY, 20};
     }
 
     // Currency is 20 bytes starting at offset 8

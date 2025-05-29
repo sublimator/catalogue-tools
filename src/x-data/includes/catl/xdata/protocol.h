@@ -86,6 +86,10 @@ public:
     std::optional<std::string>
     get_transaction_type_name(uint16_t txTypeCode) const;
 
+    // Get ledger entry type name for ledger entry type code
+    std::optional<std::string>
+    get_ledger_entry_type_name(uint16_t leTypeCode) const;
+
     // Check if a type was inferred as VL-encoded
     bool
     is_inferred_vl_type(uint16_t type_code) const
