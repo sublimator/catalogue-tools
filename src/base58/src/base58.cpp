@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstring>
 #include <openssl/sha.h>
+#include <stdexcept>
 
 namespace catl::base58 {
 
