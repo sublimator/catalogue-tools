@@ -334,6 +334,20 @@ Protocol::get_transaction_type_name(uint16_t txTypeCode) const
     return std::nullopt;
 }
 
+std::optional<std::string>
+Protocol::get_ledger_entry_type_name(uint16_t leTypeCode) const
+{
+    // Reverse lookup in ledgerEntryTypes_
+    for (const auto& [name, code] : ledgerEntryTypes_)
+    {
+        if (code == leTypeCode)
+        {
+            return name;
+        }
+    }
+    return std::nullopt;
+}
+
 void
 Protocol::build_fast_lookup()
 {

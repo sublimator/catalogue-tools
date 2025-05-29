@@ -117,6 +117,7 @@ main(int argc, char* argv[])
         stats_config.top_n_accounts = vm["top-accounts"].as<size_t>();
         stats_config.top_n_currencies = vm["top-currencies"].as<size_t>();
         stats_config.top_n_amounts = vm["top-amounts"].as<size_t>();
+        stats_config.native_currency_code = "XAH";
 
         StatsVisitor stats(protocol, stats_config);
 

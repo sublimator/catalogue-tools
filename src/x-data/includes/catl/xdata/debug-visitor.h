@@ -65,7 +65,7 @@ public:
         scratch_cursor_ = scratch_buffer_;
     }
     bool
-    visit_object_start(const FieldPath& path, const FieldDef& field)
+    visit_object_start(const FieldPath& path, const FieldSlice& fs)
     {
         object_count_++;
 
@@ -73,6 +73,18 @@ public:
         if (path.empty())
         {
             reset_scratch();
+        }
+
+        // Check if this is an array element
+        if (!path.empty() && path.back().is_array_element())
+        {
+            // Output array element marker like "[0]:"
+            size_t level = std::min(path.size() - 1, MAX_INDENT_LEVEL);
+            byte_count_ += level * 2;  // indent
+            byte_count_ += 1;          // "["
+            byte_count_ +=
+                std::to_string(path.back().array_index).size();  // index
+            byte_count_ += 3;                                    // "]:\n"
         }
 
         char* ptr = scratch_cursor_;
@@ -86,6 +98,7 @@ public:
         }
 
         // Write field name
+        const auto& field = fs.get_field();
         memcpy(ptr, field.name.data(), field.name.size());
         ptr += field.name.size();
 
@@ -101,7 +114,7 @@ public:
     }
 
     void
-    visit_object_end(const FieldPath& path, const FieldDef&)
+    visit_object_end(const FieldPath& path, const FieldSlice&)
     {
         char* ptr = scratch_cursor_;
 
@@ -120,9 +133,10 @@ public:
     }
 
     bool
-    visit_array_start(const FieldPath& path, const FieldDef& field)
+    visit_array_start(const FieldPath& path, const FieldSlice& fs)
     {
         array_count_++;
+        const auto& field = fs.get_field();
         size_t level = std::min(path.size(), MAX_INDENT_LEVEL);
         byte_count_ += level * 2;          // indent
         byte_count_ += field.name.size();  // field name
@@ -131,21 +145,10 @@ public:
     }
 
     void
-    visit_array_end(const FieldPath& path, const FieldDef&)
+    visit_array_end(const FieldPath& path, const FieldSlice&)
     {
         size_t level = std::min(path.size(), MAX_INDENT_LEVEL);
         byte_count_ += level * 2 + 2;  // indent + "]\n"
-    }
-
-    bool
-    visit_array_element(const FieldPath& path, size_t index)
-    {
-        size_t level = std::min(path.size(), MAX_INDENT_LEVEL);
-        byte_count_ += level * 2;                     // indent
-        byte_count_ += 1;                             // "["
-        byte_count_ += std::to_string(index).size();  // index
-        byte_count_ += 3;                             // "]:\n"
-        return true;
     }
 
     void

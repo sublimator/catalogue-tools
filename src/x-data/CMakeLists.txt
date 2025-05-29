@@ -30,7 +30,7 @@ target_link_libraries(
           catl::catalogue_v1
           catl::base58
           OpenSSL::Crypto
-  PUBLIC Boost::program_options)
+  PUBLIC Boost::program_options Boost::json)
 
 add_library(catl::xdata ALIAS catl_xdata)
 

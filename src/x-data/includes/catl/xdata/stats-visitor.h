@@ -8,8 +8,10 @@
 #include "catl/xdata/slice-visitor.h"
 #include "catl/xdata/types.h"
 #include "catl/xdata/types/amount.h"
+#include "catl/xdata/types/iou-value.h"
 #include <algorithm>
 #include <array>
+#include <boost/json.hpp>
 #include <chrono>
 #include <cstdint>
 #include <cstring>  // for std::memcpy
@@ -22,7 +24,6 @@
 #include <vector>
 
 namespace catl::xdata {
-
 // Simple hasher for fixed-size byte arrays
 template <size_t N>
 struct ArrayHasher
@@ -62,14 +63,32 @@ public:
         size_t top_n_amounts = 100;     // Top N amounts to track
         size_t top_n_fields = 200;      // Top N field combinations
         bool track_field_pairs = true;  // Track which fields appear together
-        bool track_size_histograms = true;  // Track size distributions
+        bool track_size_histograms = true;         // Track size distributions
+        std::string native_currency_code = "XAH";  // Native currency code
     };
+
+    void
+    find_fields()
+    {
+        // Currency fields
+        taker_pays_currency_field_code =
+            protocol_.find_field("TakerPaysCurrency").value().code;
+        taker_gets_currency_field_code =
+            protocol_.find_field("TakerGetsCurrency").value().code;
+
+        // Type fields
+        transaction_type_field_code =
+            protocol_.find_field("TransactionType").value().code;
+        ledger_entry_type_field_code =
+            protocol_.find_field("LedgerEntryType").value().code;
+    }
 
     explicit StatsVisitor(const Protocol& protocol)
         : protocol_(protocol)
         , config_()
         , start_time_(std::chrono::steady_clock::now())
     {
+        find_fields();
     }
 
     explicit StatsVisitor(const Protocol& protocol, const Config& config)
@@ -77,12 +96,21 @@ public:
         , config_(config)
         , start_time_(std::chrono::steady_clock::now())
     {
+        find_fields();
     }
 
     // SliceVisitor interface implementation
     bool
-    visit_object_start(const FieldPath& path, const FieldDef& field)
+    visit_object_start(const FieldPath& path, const FieldSlice& fs)
     {
+        const auto& field = fs.get_field();
+
+        // Check if this is an array element
+        if (!path.empty() && path.back().is_array_element())
+        {
+            current_array_size_++;
+        }
+
         depth_stats_.current_depth = path.size() + 1;
         depth_stats_.max_depth =
             std::max(depth_stats_.max_depth, depth_stats_.current_depth);
@@ -108,7 +136,7 @@ public:
     }
 
     void
-    visit_object_end(const FieldPath& path, const FieldDef& field)
+    visit_object_end(const FieldPath& path, const FieldSlice& fs)
     {
         // Track field combinations that appear together
         if (config_.track_field_pairs && !current_object_fields_.empty())
@@ -119,11 +147,20 @@ public:
 
             // Create a key from the field combination
             std::string combo_key;
-            for (const auto& f : current_object_fields_)
+            for (const auto& code : current_object_fields_)
             {
                 if (!combo_key.empty())
                     combo_key += ",";
-                combo_key += f;
+                // Convert field code to name for output
+                auto it = field_stats_.find(code);
+                if (it != field_stats_.end())
+                {
+                    combo_key += it->second.field_name;
+                }
+                else
+                {
+                    combo_key += "field_" + std::to_string(code);
+                }
             }
 
             field_combinations_[combo_key]++;
@@ -133,8 +170,25 @@ public:
             {
                 for (size_t j = i + 1; j < current_object_fields_.size(); ++j)
                 {
-                    std::string pair = current_object_fields_[i] + " + " +
-                        current_object_fields_[j];
+                    std::string pair;
+                    // Convert field codes to names
+                    auto it1 = field_stats_.find(current_object_fields_[i]);
+                    auto it2 = field_stats_.find(current_object_fields_[j]);
+
+                    if (it1 != field_stats_.end())
+                        pair = it1->second.field_name;
+                    else
+                        pair = "field_" +
+                            std::to_string(current_object_fields_[i]);
+
+                    pair += " + ";
+
+                    if (it2 != field_stats_.end())
+                        pair += it2->second.field_name;
+                    else
+                        pair += "field_" +
+                            std::to_string(current_object_fields_[j]);
+
                     field_pairs_[pair]++;
                 }
             }
@@ -144,8 +198,9 @@ public:
     }
 
     bool
-    visit_array_start(const FieldPath& path, const FieldDef& field)
+    visit_array_start(const FieldPath& path, const FieldSlice& fs)
     {
+        const auto& field = fs.get_field();
         array_stats_[field.name].count++;
         current_array_field_ = &field;
         current_array_size_ = 0;
@@ -153,25 +208,25 @@ public:
     }
 
     void
-    visit_array_end(const FieldPath& path, const FieldDef& field)
+    visit_array_end(const FieldPath& path, const FieldSlice& fs)
     {
+        const auto& field = fs.get_field();
         // Record array size
         array_stats_[field.name].sizes.push_back(current_array_size_);
         current_array_field_ = nullptr;
-    }
-
-    bool
-    visit_array_element(const FieldPath& path, size_t index)
-    {
-        current_array_size_++;
-        return true;
     }
 
     void
     visit_field(const FieldPath& path, const FieldSlice& fs)
     {
         const auto& field = fs.get_field();
-        auto& stats = field_stats_[field.name];
+        auto& stats = field_stats_[field.code];
+
+        // Initialize field name on first use
+        if (stats.field_name.empty())
+        {
+            stats.field_name = field.name;
+        }
 
         stats.count++;
         stats.total_size += fs.data.size();
@@ -185,21 +240,34 @@ public:
         // Track in current object's field list
         if (path.size() > 0)
         {
-            current_object_fields_.push_back(std::string(field.name));
+            current_object_fields_.push_back(field.code);
         }
 
         // Track transaction types
-        if (field.name == "TransactionType" &&
-            field.meta.type == FieldTypes::UInt16 && fs.data.size() >= 2)
+        if (field.code == transaction_type_field_code && fs.data.size() >= 2)
         {
             // TransactionType is stored as UInt16
             SliceCursor cursor{fs.data};
-            uint16_t tx_type_code = cursor.read_uint16_be();
+            uint16_t type_code = cursor.read_uint16_be();
 
             // Use protocol to get the transaction type name
-            auto tx_name = protocol_.get_transaction_type_name(tx_type_code);
-            transaction_types_[tx_name.value_or(
-                "Unknown_" + format_hex_u16(tx_type_code))]++;
+            auto type_name = protocol_.get_transaction_type_name(type_code);
+            transaction_types_[type_name.value_or(
+                "Unknown_" + format_hex_u16(type_code))]++;
+        }
+
+        // Track ledger entry types
+        else if (
+            field.code == ledger_entry_type_field_code && fs.data.size() >= 2)
+        {
+            // LedgerEntryType is stored as UInt16
+            SliceCursor cursor{fs.data};
+            uint16_t type_code = cursor.read_uint16_be();
+
+            // Use protocol to get the ledger entry type name
+            auto type_name = protocol_.get_ledger_entry_type_name(type_code);
+            ledger_entry_types_[type_name.value_or(
+                "Unknown_" + format_hex_u16(type_code))]++;
         }
 
         // Analyze specific field types for compression opportunities
@@ -246,106 +314,86 @@ public:
     std::string
     to_json(bool pretty = true) const
     {
-        std::stringstream ss;
-        const std::string indent = pretty ? "  " : "";
-        const std::string nl = pretty ? "\n" : "";
+        namespace json = boost::json;
 
-        ss << "{" << nl;
+        json::object result;
 
         // Summary stats
-        ss << indent << "\"summary\": {" << nl;
-        ss << indent << indent << "\"total_fields\": " << total_fields_ << ","
-           << nl;
-        ss << indent << indent << "\"total_bytes\": " << total_bytes_ << ","
-           << nl;
-        ss << indent << indent << "\"unique_fields\": " << field_stats_.size()
-           << "," << nl;
-        ss << indent << indent << "\"max_depth\": " << depth_stats_.max_depth
-           << "," << nl;
-        ss << indent << indent << "\"first_ledger\": " << first_ledger_ << ","
-           << nl;
-        ss << indent << indent << "\"last_ledger\": " << last_ledger_ << ","
-           << nl;
-        ss << indent << indent << "\"ledger_count\": " << ledger_count_ << ","
-           << nl;
-        ss << indent << indent
-           << "\"total_key_accesses\": " << get_total_key_accesses() << ","
-           << nl;
-        ss << indent << indent
-           << "\"unique_keys_accessed\": " << key_frequency_.size() << ","
-           << nl;
-        ss << indent << indent
-           << "\"deletion_count\": " << get_total_deletions() << "," << nl;
-        ss << indent << indent << "\"duration_ms\": " << get_duration_ms()
-           << nl;
-        ss << indent << "}," << nl;
+        json::object summary;
+        summary["total_fields"] = total_fields_;
+        summary["total_bytes"] = total_bytes_;
+        summary["unique_fields"] = field_stats_.size();
+        summary["max_depth"] = depth_stats_.max_depth;
+        summary["first_ledger"] = first_ledger_;
+        summary["last_ledger"] = last_ledger_;
+        summary["ledger_count"] = ledger_count_;
+        summary["total_key_accesses"] = get_total_key_accesses();
+        summary["unique_keys_accessed"] = key_frequency_.size();
+        summary["deletion_count"] = get_total_deletions();
+        summary["duration_ms"] = get_duration_ms();
+        result["summary"] = std::move(summary);
 
         // Top accounts (most compressible via dictionary)
-        ss << indent << "\"top_accounts\": "
-           << format_top_n_bytes<20>(
-                  account_frequency_, config_.top_n_accounts, pretty)
-           << "," << nl;
+        result["top_accounts"] =
+            format_top_n_bytes<20>(account_frequency_, config_.top_n_accounts);
 
         // Top currencies (dictionary candidates)
-        ss << indent << "\"top_currencies\": "
-           << format_top_n_currencies(
-                  currency_frequency_, config_.top_n_currencies, pretty)
-           << "," << nl;
+        result["top_currencies"] = format_top_n_currencies(
+            currency_frequency_, config_.top_n_currencies);
 
         // Top amounts (special encoding candidates)
-        ss << indent << "\"top_amounts\": "
-           << format_top_n_amounts(
-                  amount_frequency_, config_.top_n_amounts, pretty)
-           << "," << nl;
+        result["top_amounts"] =
+            format_top_n_amounts(amount_frequency_, config_.top_n_amounts);
 
         // Field usage stats
-        ss << indent << "\"field_usage\": " << format_field_stats(pretty) << ","
-           << nl;
+        result["field_usage"] = format_field_stats();
 
         // Field combinations (for grouping/ordering optimization)
         if (config_.track_field_pairs)
         {
-            ss << indent << "\"field_combinations\": "
-               << format_top_n(field_combinations_, 20, pretty) << "," << nl;
-
-            ss << indent
-               << "\"field_pairs\": " << format_top_n(field_pairs_, 20, pretty)
-               << "," << nl;
+            result["field_combinations"] =
+                format_top_n(field_combinations_, 20);
+            result["field_pairs"] = format_top_n(field_pairs_, 20);
         }
 
         // Object type distribution
-        ss << indent << "\"object_types\": "
-           << format_frequency_map(root_object_types_, pretty) << "," << nl;
+        result["object_types"] = format_frequency_map(root_object_types_);
 
         // Transaction type distribution
-        ss << indent << "\"transaction_types\": "
-           << format_frequency_map(transaction_types_, pretty) << "," << nl;
+        result["transaction_types"] = format_frequency_map(transaction_types_);
+
+        // Ledger entry type distribution
+        result["ledger_entry_types"] =
+            format_frequency_map(ledger_entry_types_);
 
         // Array statistics
-        ss << indent << "\"array_stats\": " << format_array_stats(pretty) << ","
-           << nl;
+        result["array_stats"] = format_array_stats();
 
         // Key access patterns
-        ss << indent << "\"key_access_patterns\": {" << nl;
-        ss << indent << indent << "\"top_accessed_keys\": "
-           << format_top_n_bytes<32>(key_frequency_, 20, pretty) << "," << nl;
-        ss << indent << indent << "\"top_deleted_keys\": "
-           << format_top_n_bytes<32>(deletion_key_frequency_, 10, pretty) << nl;
-        ss << indent << "}," << nl;
+        json::object key_patterns;
+        key_patterns["top_accessed_keys"] =
+            format_top_n_bytes<32>(key_frequency_, 20);
+        key_patterns["top_deleted_keys"] =
+            format_top_n_bytes<32>(deletion_key_frequency_, 10);
+        result["key_access_patterns"] = std::move(key_patterns);
 
         // Compression opportunities summary
-        ss << indent << "\"compression_opportunities\": "
-           << analyze_compression_opportunities(pretty) << nl;
+        result["compression_opportunities"] =
+            analyze_compression_opportunities();
 
-        ss << "}";
-
-        return ss.str();
+        return json::serialize(result, {});
     }
 
 private:
     const Protocol& protocol_;
     Config config_;
     std::chrono::steady_clock::time_point start_time_;
+
+    // Cached field codes for performance
+    uint32_t taker_pays_currency_field_code;
+    uint32_t taker_gets_currency_field_code;
+    uint32_t transaction_type_field_code;
+    uint32_t ledger_entry_type_field_code;
 
     // Global counters
     uint64_t total_fields_ = 0;
@@ -364,12 +412,14 @@ private:
     // Field statistics
     struct FieldStats
     {
+        std::string field_name;  // Store field name for output
         uint64_t count = 0;
         uint64_t total_size = 0;
         std::unordered_map<size_t, uint64_t> size_histogram;
         std::unordered_map<size_t, uint64_t> depth_histogram;
     };
-    std::unordered_map<std::string, FieldStats> field_stats_;
+
+    std::unordered_map<uint32_t, FieldStats> field_stats_;  // Key is field code
 
     // Array statistics
     struct ArrayStats
@@ -377,6 +427,7 @@ private:
         uint64_t count = 0;
         std::vector<size_t> sizes;
     };
+
     std::unordered_map<std::string, ArrayStats> array_stats_;
 
     // Frequency maps for compression analysis
@@ -393,10 +444,13 @@ private:
     std::unordered_map<std::string, uint64_t> nesting_patterns_;
     std::unordered_map<std::string, uint64_t>
         transaction_types_;  // Track tx type distribution
+    std::unordered_map<std::string, uint64_t>
+        ledger_entry_types_;  // Track ledger entry type distribution
 
     // State for current parse
     std::string current_root_type_;
-    std::vector<std::string> current_object_fields_;
+    std::vector<uint32_t>
+        current_object_fields_;  // Store field codes instead of names
     const FieldDef* current_array_field_ = nullptr;
     size_t current_array_size_ = 0;
 
@@ -419,49 +473,41 @@ private:
             account_frequency_[account]++;
         }
 
-        // Currency code analysis
-        else if (
-            field.meta.type == FieldTypes::Currency && fs.data.size() >= 20)
-        {
-            // Store raw bytes directly
-            std::array<uint8_t, 20> currency;
-            std::memcpy(currency.data(), fs.data.data(), 20);
-            currency_frequency_[currency]++;
-        }
-
         // Amount analysis
         else if (field.meta.type == FieldTypes::Amount && fs.data.size() >= 8)
         {
             analyze_amount(fs.data);
 
             // Also track the currency from Amount fields!
-            if (!is_xrp_amount(fs.data))
+            if (!is_native_amount(fs.data))
             {
                 Slice currency = get_currency_raw(fs.data);
                 std::array<uint8_t, 20> currency_bytes;
                 std::memcpy(currency_bytes.data(), currency.data(), 20);
                 currency_frequency_[currency_bytes]++;
             }
-            // For XRP amounts, we could optionally track XRP_CURRENCY
-            // but it's probably not useful for compression analysis
-        }
+            else
+            {
+                // For Native (XRP/XAH) amounts, we could optionally track
+                // NATIVE_CURRENCY but it's probably not useful for compression
+                // analysis
+                // std::array<uint8_t, 20> currency_bytes;
+                // std::memcpy(currency_bytes.data(), NATIVE_CURRENCY, 20);
+                // currency_frequency_[currency_bytes]++;
 
-        // Hash fields - check for common patterns (e.g., zero hashes)
-        else if (field.meta.type == FieldTypes::Hash256 && fs.data.size() == 32)
-        {
-            bool is_zero = true;
-            for (size_t i = 0; i < 32; ++i)
-            {
-                if (fs.data.data()[i] != 0)
-                {
-                    is_zero = false;
-                    break;
-                }
+                // We do NOT want this, as we only really want taker pays etc
             }
-            if (is_zero)
+        }
+        // Track currency fields
+        else if (
+            field.code == taker_gets_currency_field_code ||
+            field.code == taker_pays_currency_field_code)
+        {
+            if (fs.data.size() >= 20)
             {
-                // Track zero hashes (could be useful for compression)
-                // We're already incrementing field_stats in visit_field
+                std::array<uint8_t, 20> currency_bytes;
+                std::memcpy(currency_bytes.data(), fs.data.data(), 20);
+                currency_frequency_[currency_bytes]++;
             }
         }
     }
@@ -469,29 +515,25 @@ private:
     void
     analyze_amount(const Slice& data)
     {
-        if (data.empty())
-            return;
-
-        uint8_t first_byte = data.data()[0];
-        bool is_xrp = (first_byte & 0x80) == 0;
-
-        if (is_xrp && data.size() >= 8)
+        if (is_native_amount(data))
         {
-            // XRP amount: 8 bytes total
+            // Native (XRP/XAH) amount: 8 bytes total
             uint64_t drops = 0;
             for (size_t i = 0; i < 8; ++i)
             {
                 drops = (drops << 8) | data.data()[i];
             }
 
-            // Clear the XRP bit for actual value
+            // Clear the Native (XRP/XAH) bit for actual value
             drops &= ~(1ULL << 62);
 
-            // Track round XRP amounts (divisible by 1,000,000)
+            // Track round Native (XRP/XAH) amounts (divisible by 1,000,000)
             if (drops % 1000000 == 0)
             {
-                uint64_t xrp = drops / 1000000;
-                amount_frequency_["XRP:" + std::to_string(xrp)]++;
+                uint64_t native_amount = drops / 1000000;
+                amount_frequency_
+                    [config_.native_currency_code + ":" +
+                     std::to_string(native_amount)]++;
             }
             else
             {
@@ -499,12 +541,22 @@ private:
                 amount_frequency_["drops:" + std::to_string(drops)]++;
             }
         }
-        else if (!is_xrp && data.size() >= 48)
+        else
         {
-            // IOU amount: Track if it's a round number
-            // This is simplified - real implementation would parse
-            // mantissa/exponent
-            amount_frequency_["IOU"]++;
+            // IOU amount: Parse the actual value
+            try
+            {
+                IOUValue iou = parse_iou_value(data);
+                std::string value_str = iou.to_string();
+
+                // Track the IOU amount
+                amount_frequency_["IOU:" + value_str]++;
+            }
+            catch (const IOUParseError& e)
+            {
+                // Invalid IOU format, just track as unknown
+                amount_frequency_["IOU:invalid"]++;
+            }
         }
     }
 
@@ -534,14 +586,15 @@ private:
 
     // Format top N for byte arrays (accounts)
     template <size_t N>
-    std::string
+    boost::json::array
     format_top_n_bytes(
         const std::
             unordered_map<std::array<uint8_t, N>, uint64_t, ArrayHasher<N>>&
                 map,
-        size_t n,
-        bool pretty) const
+        size_t n) const
     {
+        namespace json = boost::json;
+
         // Sort by frequency
         std::vector<std::pair<std::array<uint8_t, N>, uint64_t>> sorted;
         for (const auto& [key, count] : map)
@@ -553,49 +606,40 @@ private:
                 return a.second > b.second;
             });
 
-        std::stringstream ss;
-        const std::string indent = pretty ? "    " : "";
-        const std::string nl = pretty ? "\n" : "";
-
-        ss << "[" << nl;
+        json::array result;
         size_t count = 0;
         for (const auto& [bytes, freq] : sorted)
         {
             if (count >= n)
                 break;
-            if (count > 0)
-                ss << "," << nl;
 
-            // Convert bytes to hex string
-            std::string hex_str = to_hex(Slice(bytes.data(), N));
-            ss << indent << "{\"hex\": \"" << hex_str
-               << "\", \"count\": " << freq;
+            json::object item;
+            item["hex"] = to_hex(Slice(bytes.data(), N));
+            item["count"] = freq;
 
             // For 20-byte arrays (accounts), also add base58
             if constexpr (N == 20)
             {
-                std::string base58_str =
-                    base58::encode_account_id(bytes.data(), N);
-                ss << ", \"base58\": \"" << base58_str << "\"";
+                item["base58"] = base58::encode_account_id(bytes.data(), N);
             }
 
-            ss << "}";
+            result.push_back(std::move(item));
             count++;
         }
-        ss << nl << "  ]";
 
-        return ss.str();
+        return result;
     }
 
     // Format top N currencies (handles both standard and non-standard)
-    std::string
+    boost::json::array
     format_top_n_currencies(
         const std::
             unordered_map<std::array<uint8_t, 20>, uint64_t, ArrayHasher<20>>&
                 map,
-        size_t n,
-        bool pretty) const
+        size_t n) const
     {
+        namespace json = boost::json;
+
         // Sort by frequency
         std::vector<std::pair<std::array<uint8_t, 20>, uint64_t>> sorted;
         for (const auto& [key, count] : map)
@@ -607,62 +651,100 @@ private:
                 return a.second > b.second;
             });
 
-        std::stringstream ss;
-        const std::string indent = pretty ? "    " : "";
-        const std::string nl = pretty ? "\n" : "";
-
-        ss << "[" << nl;
+        json::array result;
         size_t count = 0;
         for (const auto& [bytes, freq] : sorted)
         {
             if (count >= n)
                 break;
-            if (count > 0)
-                ss << "," << nl;
 
-            // Check if standard currency (first 12 bytes are 0)
-            bool is_standard = true;
-            for (size_t i = 0; i < 12; ++i)
+            // Check if it's all zeros (native currency)
+            bool is_all_zeros = true;
+            for (size_t i = 0; i < 20; ++i)
             {
                 if (bytes[i] != 0)
                 {
-                    is_standard = false;
+                    is_all_zeros = false;
                     break;
                 }
             }
 
-            std::string value;
-            if (is_standard)
+            json::object item;
+            if (is_all_zeros)
             {
-                // Standard 3-char currency code at bytes 12-14
-                value =
-                    std::string(reinterpret_cast<const char*>(&bytes[12]), 3);
-                // Trim any trailing nulls
-                while (!value.empty() && value.back() == '\0')
-                {
-                    value.pop_back();
-                }
+                // Native currency (all zeros)
+                item["value"] = config_.native_currency_code;
+                item["type"] = "native";
             }
             else
             {
-                // Non-standard currency, use full hex
-                value = to_hex(Slice(bytes.data(), 20));
+                // Use helper to check if it's a standard currency
+                char currency_code[4] = {0};  // 3 chars + null terminator
+                bool is_standard = false;
+
+                // Create a temporary slice that looks like an IOU amount
+                // (8 bytes amount + 20 bytes currency)
+                uint8_t temp_amount[48] = {0};
+                temp_amount[0] = 0x80;  // Set IOU bit
+                std::memcpy(temp_amount + 8, bytes.data(), 20);
+
+                is_standard = get_currency_code(
+                    Slice(temp_amount, 48),
+                    currency_code,
+                    config_.native_currency_code.c_str());
+
+                if (is_standard)
+                {
+                    // Use the extracted currency code
+                    std::string value(currency_code, 3);
+                    // Trim any trailing nulls
+                    while (!value.empty() && value.back() == '\0')
+                    {
+                        value.pop_back();
+                    }
+                    item["value"] = value;
+                    item["type"] = "standard";
+                }
+                else
+                {
+                    // Non-standard currency, use full hex
+                    item["value"] = to_hex(Slice(bytes.data(), 20));
+
+                    // Also include ASCII representation for readability
+                    std::string ascii_value;
+                    ascii_value.reserve(20);
+                    for (size_t i = 0; i < 20; ++i)
+                    {
+                        uint8_t ch = bytes[i];
+                        if (ch >= 32 && ch <= 126)  // Printable ASCII
+                        {
+                            ascii_value += static_cast<char>(ch);
+                        }
+                        else
+                        {
+                            ascii_value += '?';
+                        }
+                    }
+                    item["value_ascii"] = ascii_value;
+                    item["type"] = "non-standard";
+                }
             }
 
-            ss << indent << "{\"value\": \"" << value
-               << "\", \"count\": " << freq << ", \"type\": \""
-               << (is_standard ? "standard" : "non-standard") << "\"}";
+            item["count"] = freq;
+
+            result.push_back(std::move(item));
             count++;
         }
-        ss << nl << "  ]";
 
-        return ss.str();
+        return result;
     }
 
     template <typename Map>
-    std::string
-    format_top_n(const Map& map, size_t n, bool pretty) const
+    boost::json::array
+    format_top_n(const Map& map, size_t n) const
     {
+        namespace json = boost::json;
+
         // Sort by frequency
         std::vector<std::pair<std::string, uint64_t>> sorted;
         for (const auto& [key, count] : map)
@@ -674,33 +756,30 @@ private:
                 return a.second > b.second;
             });
 
-        std::stringstream ss;
-        const std::string indent = pretty ? "    " : "";
-        const std::string nl = pretty ? "\n" : "";
-
-        ss << "[" << nl;
+        json::array result;
         size_t count = 0;
         for (const auto& [key, freq] : sorted)
         {
             if (count >= n)
                 break;
-            if (count > 0)
-                ss << "," << nl;
-            ss << indent << "{\"value\": \"" << key << "\", \"count\": " << freq
-               << "}";
+
+            json::object item;
+            item["value"] = key;
+            item["count"] = freq;
+            result.push_back(std::move(item));
             count++;
         }
-        ss << nl << "  ]";
 
-        return ss.str();
+        return result;
     }
 
-    std::string
+    boost::json::array
     format_top_n_amounts(
         const std::map<std::string, uint64_t>& amounts,
-        size_t n,
-        bool pretty) const
+        size_t n) const
     {
+        namespace json = boost::json;
+
         // Special handling for amounts to show both raw and percentage
         std::vector<std::pair<std::string, uint64_t>> sorted(
             amounts.begin(), amounts.end());
@@ -715,96 +794,73 @@ private:
             total_amounts += count;
         }
 
-        std::stringstream ss;
-        const std::string indent = pretty ? "    " : "";
-        const std::string nl = pretty ? "\n" : "";
-
-        ss << "[" << nl;
+        json::array result;
         size_t count = 0;
         for (const auto& [amount, freq] : sorted)
         {
             if (count >= n)
                 break;
-            if (count > 0)
-                ss << "," << nl;
 
             double percentage =
                 total_amounts > 0 ? (100.0 * freq / total_amounts) : 0.0;
 
-            ss << indent << "{\"amount\": \"" << amount
-               << "\", \"count\": " << freq
-               << ", \"percentage\": " << std::fixed << std::setprecision(2)
-               << percentage << "}";
+            json::object item;
+            item["amount"] = amount;
+            item["count"] = freq;
+            item["percentage"] = percentage;
+            result.push_back(std::move(item));
             count++;
         }
-        ss << nl << "  ]";
 
-        return ss.str();
+        return result;
     }
 
-    std::string
+    boost::json::object
     format_frequency_map(
-        const std::unordered_map<std::string, uint64_t>& map,
-        bool pretty) const
+        const std::unordered_map<std::string, uint64_t>& map) const
     {
-        std::stringstream ss;
-        const std::string indent = pretty ? "    " : "";
-        const std::string nl = pretty ? "\n" : "";
+        namespace json = boost::json;
 
-        ss << "{" << nl;
-        bool first = true;
+        json::object result;
         for (const auto& [key, count] : map)
         {
-            if (!first)
-                ss << "," << nl;
-            ss << indent << "\"" << key << "\": " << count;
-            first = false;
+            result[key] = count;
         }
-        ss << nl << "  }";
-
-        return ss.str();
+        return result;
     }
 
-    std::string
-    format_field_stats(bool pretty) const
+    boost::json::array
+    format_field_stats() const
     {
-        std::stringstream ss;
-        const std::string indent = pretty ? "    " : "";
-        const std::string nl = pretty ? "\n" : "";
+        namespace json = boost::json;
 
         // Sort fields by frequency
-        std::vector<std::pair<std::string, uint64_t>> sorted;
-        for (const auto& [name, stats] : field_stats_)
+        std::vector<std::pair<uint32_t, uint64_t>> sorted;
+        for (const auto& [code, stats] : field_stats_)
         {
-            sorted.emplace_back(name, stats.count);
+            sorted.emplace_back(code, stats.count);
         }
         std::sort(
             sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
                 return a.second > b.second;
             });
 
-        ss << "[" << nl;
-        bool first = true;
-        for (const auto& [name, count] : sorted)
+        json::array result;
+        for (const auto& [code, count] : sorted)
         {
-            if (!first)
-                ss << "," << nl;
-            first = false;
-
-            const auto& stats = field_stats_.at(name);
+            const auto& stats = field_stats_.at(code);
             double avg_size =
                 stats.count > 0 ? (double)stats.total_size / stats.count : 0.0;
 
-            ss << indent << "{";
-            ss << "\"field\": \"" << name << "\", ";
-            ss << "\"count\": " << count << ", ";
-            ss << "\"total_bytes\": " << stats.total_size << ", ";
-            ss << "\"avg_size\": " << std::fixed << std::setprecision(2)
-               << avg_size;
+            json::object item;
+            item["field"] = stats.field_name;
+            item["code"] = code;
+            item["count"] = count;
+            item["total_bytes"] = stats.total_size;
+            item["avg_size"] = avg_size;
 
             if (config_.track_size_histograms && !stats.size_histogram.empty())
             {
-                ss << ", \"common_sizes\": [";
                 // Show top 3 most common sizes
                 std::vector<std::pair<size_t, uint64_t>> sizes(
                     stats.size_histogram.begin(), stats.size_histogram.end());
@@ -815,38 +871,31 @@ private:
                         return a.second > b.second;
                     });
 
+                json::array common_sizes;
                 for (size_t i = 0; i < std::min(size_t{3}, sizes.size()); ++i)
                 {
-                    if (i > 0)
-                        ss << ", ";
-                    ss << "{\"size\": " << sizes[i].first
-                       << ", \"count\": " << sizes[i].second << "}";
+                    json::object size_item;
+                    size_item["size"] = sizes[i].first;
+                    size_item["count"] = sizes[i].second;
+                    common_sizes.push_back(std::move(size_item));
                 }
-                ss << "]";
+                item["common_sizes"] = std::move(common_sizes);
             }
 
-            ss << "}";
+            result.push_back(std::move(item));
         }
-        ss << nl << "  ]";
 
-        return ss.str();
+        return result;
     }
 
-    std::string
-    format_array_stats(bool pretty) const
+    boost::json::array
+    format_array_stats() const
     {
-        std::stringstream ss;
-        const std::string indent = pretty ? "    " : "";
-        const std::string nl = pretty ? "\n" : "";
+        namespace json = boost::json;
 
-        ss << "[" << nl;
-        bool first = true;
+        json::array result;
         for (const auto& [name, stats] : array_stats_)
         {
-            if (!first)
-                ss << "," << nl;
-            first = false;
-
             // Calculate size statistics
             double avg_size = 0;
             size_t min_size = SIZE_MAX;
@@ -864,32 +913,28 @@ private:
                 avg_size = (double)total / stats.sizes.size();
             }
 
-            ss << indent << "{";
-            ss << "\"array\": \"" << name << "\", ";
-            ss << "\"count\": " << stats.count << ", ";
-            ss << "\"avg_size\": " << std::fixed << std::setprecision(2)
-               << avg_size << ", ";
-            ss << "\"min_size\": " << (min_size == SIZE_MAX ? 0 : min_size)
-               << ", ";
-            ss << "\"max_size\": " << max_size;
-            ss << "}";
-        }
-        ss << nl << "  ]";
+            json::object item;
+            item["array"] = name;
+            item["count"] = stats.count;
+            item["avg_size"] = avg_size;
+            item["min_size"] = (min_size == SIZE_MAX ? 0 : min_size);
+            item["max_size"] = max_size;
 
-        return ss.str();
+            result.push_back(std::move(item));
+        }
+
+        return result;
     }
 
-    std::string
-    analyze_compression_opportunities(bool pretty) const
+    boost::json::object
+    analyze_compression_opportunities() const
     {
-        std::stringstream ss;
-        const std::string indent = pretty ? "    " : "";
-        const std::string nl = pretty ? "\n" : "";
+        namespace json = boost::json;
 
-        ss << "{" << nl;
+        json::object result;
 
         // Dictionary encoding opportunities
-        ss << indent << "\"dictionary_candidates\": {" << nl;
+        json::object dict_candidates;
 
         // Accounts that appear frequently enough for dictionary
         size_t dict_accounts = 0;
@@ -897,7 +942,8 @@ private:
         for (const auto& [acc, count] : account_frequency_)
         {
             if (count > 10)
-            {  // Threshold for dictionary benefit
+            {
+                // Threshold for dictionary benefit
                 dict_accounts++;
                 // 20 bytes per account, could be reduced to 1-2 bytes with
                 // dictionary
@@ -905,9 +951,10 @@ private:
             }
         }
 
-        ss << indent << indent << "\"accounts\": {";
-        ss << "\"count\": " << dict_accounts << ", ";
-        ss << "\"potential_savings_bytes\": " << account_savings << "}," << nl;
+        json::object accounts_info;
+        accounts_info["count"] = dict_accounts;
+        accounts_info["potential_savings_bytes"] = account_savings;
+        dict_candidates["accounts"] = std::move(accounts_info);
 
         // Similar for currencies
         size_t dict_currencies = 0;
@@ -921,45 +968,44 @@ private:
             }
         }
 
-        ss << indent << indent << "\"currencies\": {";
-        ss << "\"count\": " << dict_currencies << ", ";
-        ss << "\"potential_savings_bytes\": " << currency_savings << "}" << nl;
+        json::object currencies_info;
+        currencies_info["count"] = dict_currencies;
+        currencies_info["potential_savings_bytes"] = currency_savings;
+        dict_candidates["currencies"] = std::move(currencies_info);
 
-        ss << indent << "}," << nl;
+        result["dictionary_candidates"] = std::move(dict_candidates);
 
         // Field ordering optimization
-        ss << indent << "\"field_ordering\": {" << nl;
-        ss << indent << indent << "\"frequent_pairs\": " << field_pairs_.size()
-           << "," << nl;
-        ss << indent << indent
-           << "\"frequent_combinations\": " << field_combinations_.size() << nl;
-        ss << indent << "}," << nl;
+        json::object field_ordering;
+        field_ordering["frequent_pairs"] = field_pairs_.size();
+        field_ordering["frequent_combinations"] = field_combinations_.size();
+        result["field_ordering"] = std::move(field_ordering);
 
         // Special value encoding
         size_t zero_amounts = 0;
         size_t round_amounts = 0;
+
+        auto native_0 = config_.native_currency_code + ":0";
+        auto native_colon = config_.native_currency_code + ":";
+
         for (const auto& [amount, count] : amount_frequency_)
         {
-            if (amount == "XRP:0" || amount == "drops:0")
+            if (amount == native_0 || amount == "drops:0")
             {
                 zero_amounts += count;
             }
-            else if (amount.starts_with("XRP:"))
+            else if (amount.starts_with(native_colon))
             {
                 round_amounts += count;
             }
         }
 
-        ss << indent << "\"special_values\": {" << nl;
-        ss << indent << indent << "\"zero_amounts\": " << zero_amounts << ","
-           << nl;
-        ss << indent << indent << "\"round_xrp_amounts\": " << round_amounts
-           << nl;
-        ss << indent << "}" << nl;
+        json::object special_values;
+        special_values["zero_amounts"] = zero_amounts;
+        special_values["round_native_amounts"] = round_amounts;
+        result["special_values"] = std::move(special_values);
 
-        ss << "  }";
-
-        return ss.str();
+        return result;
     }
 
     uint64_t
@@ -993,5 +1039,4 @@ private:
         return total;
     }
 };
-
 }  // namespace catl::xdata
