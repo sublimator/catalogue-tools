@@ -12,6 +12,8 @@ else()
 endif()
 
 include(cmake/CheckCompiler.cmake)
+include(cmake/StrictIncludes.cmake)
+# include(cmake/IncludeWhatYouUse.cmake) # WIP - too slow/pedantic for regular use
 
 # Requires passing -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
 find_package(Boost REQUIRED)
@@ -84,24 +86,3 @@ message(STATUS "Configuration:")
 message(STATUS "  C++ standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Testing: ${BUILD_TESTING}")
-
-# cmake/StrictIncludeSettings.cmake
-if(is_apple_clang)
-  message(STATUS "Enabling strict include checking for Clang on macOS")
-
-  # Enable modules for stricter include checking
-  add_compile_options(-fmodules -fimplicit-module-maps -fbuiltin-module-map)
-
-  # Make missing includes an error
-  add_compile_options(-Werror=implicit-function-declaration
-                      -Werror=missing-declarations -Wmissing-include-dirs)
-
-  # For extra strictness, disable implicit includes from system headers
-  add_compile_options(
-    -nostdinc++
-    -isystem
-    /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1
-    -isystem
-    /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include
-  )
-endif()
