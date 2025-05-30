@@ -6,6 +6,7 @@
 #include "catl/xdata/slice-visitor.h"
 #include "catl/xdata/types/amount.h"
 #include "catl/xdata/types/iou-value.h"
+#include "catl/xdata/types/pathset.h"
 #include <boost/json.hpp>
 #include <sstream>
 #include <stack>
@@ -46,15 +47,6 @@ public:
 
         // Create new object
         boost::json::object obj;
-
-        // Check if this is an array element
-        if (!path.empty() && path.back().is_array_element())
-        {
-            // For array elements, add a type field to indicate what kind of
-            // element this is e.g., CreatedNode, ModifiedNode, DeletedNode
-            obj["NodeType"] = std::string(field.name);
-        }
-
         stack_.push(boost::json::value(std::move(obj)));
         return true;  // Always descend
     }
@@ -85,13 +77,38 @@ public:
         }
         else if (!stack_.empty())
         {
-            if (path.size() > 1 && path[path.size() - 2].is_array_element())
+            const auto& field = fs.get_field();
+
+            // Check if we're completing an object that's part of an array
+            // element
+            bool is_array_element_child = false;
+            if (path.size() >= 2)
             {
-                // This object is inside an array element
-                // Add to parent array
+                // Check if any ancestor is an array element
+                for (size_t i = 0; i < path.size() - 1; ++i)
+                {
+                    if (path[i].is_array_element())
+                    {
+                        is_array_element_child = true;
+                        break;
+                    }
+                }
+            }
+
+            // Special handling for objects that are direct children of array
+            // elements
+            if (path.size() > 1 && path[path.size() - 2].is_array_element() &&
+                (field.name == "ModifiedNode" || field.name == "CreatedNode" ||
+                 field.name == "DeletedNode" || field.name == "HookExecution" ||
+                 field.name == "HookParameter"))
+            {
+                // Create wrapper object with field name as key
+                boost::json::object wrapper;
+                wrapper[field.name] = std::move(completed);
+
                 if (stack_.top().is_array())
                 {
-                    stack_.top().as_array().push_back(std::move(completed));
+                    stack_.top().as_array().push_back(std::move(wrapper));
                 }
                 else
                 {
@@ -100,20 +117,25 @@ public:
                         stack_.top().kind());
                 }
             }
+            else if (is_array_element_child && stack_.top().is_object())
+            {
+                // This is a nested object inside an array element (like
+                // PreviousFields) Add it to the parent object
+                stack_.top().as_object()[field.name] = std::move(completed);
+            }
+            else if (stack_.top().is_object())
+            {
+                // Normal object field
+                stack_.top().as_object()[field.name] = std::move(completed);
+            }
+            else if (stack_.top().is_array())
+            {
+                // Direct array child without wrapper
+                stack_.top().as_array().push_back(std::move(completed));
+            }
             else
             {
-                // Add to parent object with field name
-                const auto& field = fs.get_field();
-                if (stack_.top().is_object())
-                {
-                    stack_.top().as_object()[field.name] = std::move(completed);
-                }
-                else
-                {
-                    LOGE(
-                        "Expected object on stack but got ",
-                        stack_.top().kind());
-                }
+                LOGE("Unexpected stack state: ", stack_.top().kind());
             }
         }
     }
@@ -358,8 +380,7 @@ private:
         }
         else if (field.meta.type == FieldTypes::PathSet)
         {
-            // PathSet is complex - just show as hex for now
-            return boost::json::string(to_hex(data));
+            return format_pathset(data);
         }
         else if (field.meta.type == FieldTypes::Vector256)
         {
@@ -471,6 +492,87 @@ private:
                 return boost::json::string(to_hex(data));
             }
         }
+    }
+
+    // Format PathSet field
+    boost::json::value
+    format_pathset(const Slice& data)
+    {
+        boost::json::array paths;
+        boost::json::array current_path;
+
+        size_t pos = 0;
+        while (pos < data.size())
+        {
+            uint8_t type_byte = data.data()[pos++];
+
+            if (type_byte == PathSet::END_BYTE)
+            {
+                // End of PathSet
+                if (!current_path.empty())
+                {
+                    paths.push_back(std::move(current_path));
+                }
+                break;
+            }
+
+            if (type_byte == PathSet::PATH_SEPARATOR)
+            {
+                // End current path, start new one
+                if (!current_path.empty())
+                {
+                    paths.push_back(std::move(current_path));
+                    current_path = boost::json::array();
+                }
+                continue;
+            }
+
+            // It's a hop - parse based on type bits
+            boost::json::object hop;
+
+            if (type_byte & PathSet::TYPE_ACCOUNT)
+            {
+                if (pos + 20 <= data.size())
+                {
+                    hop["account"] =
+                        base58::encode_account_id(data.data() + pos, 20);
+                    pos += 20;
+                }
+            }
+
+            if (type_byte & PathSet::TYPE_CURRENCY)
+            {
+                if (pos + 20 <= data.size())
+                {
+                    Slice currency_slice(data.data() + pos, 20);
+                    hop["currency"] = format_currency(currency_slice);
+                    pos += 20;
+                }
+            }
+
+            if (type_byte & PathSet::TYPE_ISSUER)
+            {
+                if (pos + 20 <= data.size())
+                {
+                    hop["issuer"] =
+                        base58::encode_account_id(data.data() + pos, 20);
+                    pos += 20;
+                }
+            }
+
+            if (!hop.empty())
+            {
+                current_path.push_back(std::move(hop));
+            }
+        }
+
+        // Add any remaining path
+        if (!current_path.empty())
+        {
+            paths.push_back(std::move(current_path));
+        }
+
+        return paths;
     }
 
     // Convert to hex string
