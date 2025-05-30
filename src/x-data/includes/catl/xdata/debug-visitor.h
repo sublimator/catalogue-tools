@@ -283,6 +283,14 @@ public:
     {
         return array_count_;
     }
+
+    // Get the actual output as a string
+    std::string
+    get_output() const
+    {
+        size_t output_size = scratch_cursor_ - scratch_buffer_;
+        return std::string(scratch_buffer_, output_size);
+    }
 };
 
 }  // namespace catl::xdata
