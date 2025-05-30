@@ -7,6 +7,7 @@
 #include "shamap-custom-traits.h"
 
 #include <boost/intrusive_ptr.hpp>
+#include <cassert>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -211,6 +212,8 @@ public:
         std::uint64_t compressed_leaves = 0;
         std::uint64_t uncompressed_size = 0;
         std::uint64_t compressed_size = 0;
+        std::uint64_t inner_bytes_written = 0;  // Total bytes for inner nodes
+        std::uint64_t leaf_bytes_written = 0;   // Total bytes for leaf nodes
     };
 
     const Stats&
@@ -312,6 +315,7 @@ private:
         // Write header
         output_.write(reinterpret_cast<const char*>(&header), sizeof(header));
         stats_.total_bytes_written += sizeof(header);
+        stats_.leaf_bytes_written += sizeof(header);
 
         if (compress)
         {
@@ -339,6 +343,7 @@ private:
                 output_.write(
                     reinterpret_cast<const char*>(data.data()), data.size());
                 stats_.total_bytes_written += data.size();
+                stats_.leaf_bytes_written += data.size();
             }
             else if (compressed_size >= data.size())
             {
@@ -349,6 +354,7 @@ private:
                 output_.write(
                     reinterpret_cast<const char*>(data.data()), data.size());
                 stats_.total_bytes_written += data.size();
+                stats_.leaf_bytes_written += data.size();
             }
             else
             {
@@ -360,6 +366,7 @@ private:
                     reinterpret_cast<const char*>(compressed_buffer.data()),
                     compressed_size);
                 stats_.total_bytes_written += compressed_size;
+                stats_.leaf_bytes_written += compressed_size;
 
                 // Track compression statistics
                 stats_.compressed_leaves++;
@@ -373,6 +380,7 @@ private:
             output_.write(
                 reinterpret_cast<const char*>(data.data()), data.size());
             stats_.total_bytes_written += data.size();
+            stats_.leaf_bytes_written += data.size();
         }
 
         stats_.leaf_nodes_written++;
@@ -401,13 +409,15 @@ private:
         // Write header
         output_.write(reinterpret_cast<const char*>(&header), sizeof(header));
         stats_.total_bytes_written += sizeof(header);
+        stats_.inner_bytes_written += sizeof(header);
 
         // Write child offsets (8 bytes each for non-empty children)
         child_offsets.resize(child_count);
+        size_t offsets_size = child_count * sizeof(std::uint64_t);
         output_.write(
-            reinterpret_cast<const char*>(child_offsets.data()),
-            child_count * sizeof(std::uint64_t));
-        stats_.total_bytes_written += child_count * sizeof(std::uint64_t);
+            reinterpret_cast<const char*>(child_offsets.data()), offsets_size);
+        stats_.total_bytes_written += offsets_size;
+        stats_.inner_bytes_written += offsets_size;
 
         stats_.inner_nodes_written++;
         return offset;
@@ -416,10 +426,80 @@ private:
     /**
      * Main serialization logic - depth first traversal using explicit stack
      *
-     * This method respects the 'processed' flag for incremental serialization:
-     * - Nodes with processed=true are skipped (already written to disk)
-     * - Their existing node_offset is used in parent references
-     * - Only nodes with processed=false are written (new/modified nodes)
+     * ## Copy-on-Write (CoW) and Structural Sharing
+     *
+     * This method implements incremental serialization that leverages SHAMap's
+     * Copy-on-Write semantics to achieve structural sharing on disk:
+     *
+     * 1. **Initial State**: When reading a ledger from CATL v1:
+     *    - All nodes start with processed=false, node_offset=0
+     *    - First serialize_tree() call writes entire tree to disk
+     *    - After writing, each node has processed=true and a valid node_offset
+     *
+     * 2. **Snapshot & Modify**: For the next ledger:
+     *    - state_map.snapshot() makes current tree immutable
+     *    - Applying state deltas (via set_item) triggers CoW:
+     *      - Creates new nodes from root to modified leaf
+     *      - New nodes have processed=false, node_offset=0 (SerializedNode
+     * defaults)
+     *      - Unchanged subtrees retain their processed=true nodes
+     *
+     * 3. **Incremental Write**: When serialize_tree() is called again:
+     *    - Nodes with processed=true are skipped (already on disk)
+     *    - Only new/modified nodes (processed=false) are written
+     *    - Parent nodes reference children by their file offsets
+     *
+     * ## Child Types Bitmap
+     *
+     * Each inner node has a 32-bit child_types field encoding all 16 children:
+     * - 2 bits per child: 00=EMPTY, 01=INNER, 02=LEAF, 11=RFU
+     * - Example: 0x55555555 = all 16 children are INNER nodes
+     * - Child offsets array only includes non-empty children
+     *
+     * ## Algorithm
+     *
+     * Uses explicit stack for iterative depth-first traversal:
+     *
+     * 1. **Inner Node First Visit**:
+     *    - If processed=true: use existing node_offset, skip subtree
+     *    - If processed=false:
+     *      - Write header with child_types bitmap
+     *      - Write placeholder offsets (zeros) for N children (N = non-empty)
+     *      - Mark processed=true, save node_offset
+     *      - Push children onto stack for processing
+     *
+     * 2. **Child Processing**:
+     *    - Process children in order (0-15)
+     *    - Collect offsets as children complete
+     *    - CRITICAL: Offsets must be stored in bitmap order!
+     *
+     * 3. **Inner Node Completion**:
+     *    - After all children processed, seek back to offset array location
+     *    - Overwrite placeholder zeros with actual child offsets
+     *    - Seek back to current write position
+     *
+     * ## File Writing Pattern
+     *
+     * The algorithm uses a two-phase approach for inner nodes:
+     * - Phase 1: Write header + placeholder offsets, continue depth-first
+     * - Phase 2: After children written, seek back and update offsets
+     *
+     * This requires file seeking but maintains depth-first layout for optimal
+     * cache locality during reads.
+     *
+     * ## Example
+     *
+     * Inner node with child_types=0x0000A802:
+     * - Binary: 00000000 00000000 10101000 00000010
+     * - Children at: 1(LEAF), 11(INNER), 13(LEAF), 15(LEAF)
+     * - Offsets array has 4 entries: [child1_offset, child11_offset, ...]
+     *
+     * ## Invariants
+     *
+     * - Nodes are written exactly once (first time processed=false)
+     * - Inner node headers written before children (offsets updated later)
+     * - Child offsets are ordered by their position in the bitmap
+     * - Zero offset means bug (all valid nodes have offset > sizeof(header))
      */
     std::uint64_t
     serialize_tree(const boost::intrusive_ptr<SHAMapTreeNodeS>& root)
@@ -434,6 +514,9 @@ private:
             std::vector<std::uint64_t> child_offsets;
             std::uint64_t inner_offset;
             int next_child_index;
+            int child_count;  // Total number of non-empty children
+            std::vector<int> child_positions;  // Maps child branch (0-15) to
+                                               // offset array position
         };
 
         if (!root)
@@ -442,9 +525,11 @@ private:
         }
 
         std::stack<StackEntry> stack;
-        stack.push({root, -1, true, nullptr, {}, 0, 0});
+        stack.push({root, -1, true, nullptr, {}, 0, 0, 0, {}});
 
         std::uint64_t root_offset = 0;
+
+        LOGD("Starting serialize_tree traversal");
 
         while (!stack.empty())
         {
@@ -458,6 +543,13 @@ private:
                     // Already written - use existing offset
                     std::uint64_t leaf_offset = entry.node->node_offset;
 
+                    LOGD(
+                        "Leaf already processed, using existing offset: ",
+                        leaf_offset);
+                    assert(
+                        leaf_offset > sizeof(CatlV2Header) &&
+                        "Invalid leaf offset");
+
                     if (stack.size() == 1)
                     {
                         root_offset = leaf_offset;
@@ -469,7 +561,34 @@ private:
                     if (!stack.empty() && stack.top().inner)
                     {
                         auto& parent = stack.top();
-                        parent.child_offsets.push_back(leaf_offset);
+                        // Find which child branch we just completed
+                        int branch = -1;
+                        for (int i = 0; i < 16; ++i)
+                        {
+                            if (parent.inner->get_child(i) == entry.node)
+                            {
+                                branch = i;
+                                break;
+                            }
+                        }
+                        assert(
+                            branch >= 0 && branch < 16 &&
+                            "Child not found in parent");
+
+                        int offset_index = parent.child_positions[branch];
+                        assert(
+                            offset_index >= 0 &&
+                            offset_index < parent.child_count &&
+                            "Invalid offset index");
+
+                        parent.child_offsets[offset_index] = leaf_offset;
+                        LOGD(
+                            "Set child offset[",
+                            offset_index,
+                            "] = ",
+                            leaf_offset,
+                            " for branch ",
+                            branch);
                     }
                 }
                 else
@@ -488,6 +607,11 @@ private:
                         item->slice(),
                         false);  // Default to no compression
 
+                    LOGD("Wrote new leaf at offset: ", leaf_offset);
+                    assert(
+                        leaf_offset > sizeof(CatlV2Header) &&
+                        "Invalid leaf offset");
+
                     // Mark as processed and save offset
                     entry.node->processed = true;
                     entry.node->node_offset = leaf_offset;
@@ -503,9 +627,39 @@ private:
                     if (!stack.empty() && stack.top().inner)
                     {
                         auto& parent = stack.top();
-                        parent.child_offsets.push_back(leaf_offset);
+                        // Find which child branch we just completed
+                        int branch = -1;
+                        for (int i = 0; i < 16; ++i)
+                        {
+                            if (parent.inner->get_child(i) == entry.node)
+                            {
+                                branch = i;
+                                break;
+                            }
+                        }
+                        assert(
+                            branch >= 0 && branch < 16 &&
+                            "Child not found in parent");
+
+                        int offset_index = parent.child_positions[branch];
+                        assert(
+                            offset_index >= 0 &&
+                            offset_index < parent.child_count &&
+                            "Invalid offset index");
+
+                        parent.child_offsets[offset_index] = leaf_offset;
+                        LOGD(
+                            "Set child offset[",
+                            offset_index,
+                            "] = ",
+                            leaf_offset,
+                            " for branch ",
+                            branch);
                     }
                 }
+
+                // Continue processing parent's children
+                continue;
             }
             else
             {
@@ -518,6 +672,14 @@ private:
                         // Already written - use existing offset
                         std::uint64_t inner_offset = entry.node->node_offset;
 
+                        LOGD(
+                            "Inner node already processed, using existing "
+                            "offset: ",
+                            inner_offset);
+                        assert(
+                            inner_offset > sizeof(CatlV2Header) &&
+                            "Invalid inner offset");
+
                         if (stack.size() == 1)
                         {
                             root_offset = inner_offset;
@@ -529,7 +691,34 @@ private:
                         if (!stack.empty() && stack.top().inner)
                         {
                             auto& parent = stack.top();
-                            parent.child_offsets.push_back(inner_offset);
+                            // Find which child branch we just completed
+                            int branch = -1;
+                            for (int i = 0; i < 16; ++i)
+                            {
+                                if (parent.inner->get_child(i) == entry.node)
+                                {
+                                    branch = i;
+                                    break;
+                                }
+                            }
+                            assert(
+                                branch >= 0 && branch < 16 &&
+                                "Child not found in parent");
+
+                            int offset_index = parent.child_positions[branch];
+                            assert(
+                                offset_index >= 0 &&
+                                offset_index < parent.child_count &&
+                                "Invalid offset index");
+
+                            parent.child_offsets[offset_index] = inner_offset;
+                            LOGD(
+                                "Set child offset[",
+                                offset_index,
+                                "] = ",
+                                inner_offset,
+                                " for branch ",
+                                branch);
                         }
                     }
                     else
@@ -539,9 +728,42 @@ private:
                             boost::static_pointer_cast<SHAMapInnerNodeS>(
                                 entry.node);
 
+                        LOGD(
+                            "Processing new inner node at depth ",
+                            entry.inner->get_depth());
+
+                        // Build child positions mapping
+                        entry.child_positions.resize(16, -1);
+                        entry.child_count = 0;
+                        for (int i = 0; i < 16; ++i)
+                        {
+                            if (entry.inner->get_child(i))
+                            {
+                                entry.child_positions[i] = entry.child_count++;
+                            }
+                        }
+
+                        LOGD(
+                            "Inner node has ",
+                            entry.child_count,
+                            " non-empty children");
+                        assert(
+                            entry.child_count > 0 &&
+                            "Inner node with no children");
+
+                        // Resize child_offsets to match child count
+                        entry.child_offsets.resize(entry.child_count, 0);
+
                         // Write inner node header with placeholder offsets
                         entry.inner_offset =
                             write_inner_node(entry.inner, entry.child_offsets);
+
+                        LOGD(
+                            "Wrote inner node header at offset: ",
+                            entry.inner_offset);
+                        assert(
+                            entry.inner_offset > sizeof(CatlV2Header) &&
+                            "Invalid inner offset");
 
                         // Mark as processed and save offset
                         entry.node->processed = true;
@@ -555,29 +777,16 @@ private:
                         entry.is_first_visit = false;
                         entry.next_child_index = 0;
 
-                        // Find and push first child
-                        for (int i = 0; i < 16; ++i)
-                        {
-                            auto child = entry.inner->get_child(i);
-                            if (child)
-                            {
-                                entry.next_child_index = i + 1;
-                                stack.push(
-                                    {child,
-                                     entry.inner->get_depth(),
-                                     true,
-                                     nullptr,
-                                     {},
-                                     0,
-                                     0});
-                                break;
-                            }
-                        }
+                        // Don't push first child here - let the main loop
+                        // handle it
                     }
                 }
-                else
+
+                // After first visit OR returning from a child - process next
+                // child
+                if (!entry.is_first_visit)
                 {
-                    // Returning from a child - check if we have more children
+                    // Look for next child to process
                     bool found_next = false;
 
                     for (int i = entry.next_child_index; i < 16; ++i)
@@ -586,6 +795,32 @@ private:
                         if (child)
                         {
                             entry.next_child_index = i + 1;
+                            LOGD("Pushing child at branch ", i);
+
+                            // Check if child is already processed
+                            if (child->processed)
+                            {
+                                LOGD(
+                                    "Child at branch ",
+                                    i,
+                                    " already processed with offset ",
+                                    child->node_offset);
+
+                                // Update offset directly without pushing to
+                                // stack
+                                int offset_index = entry.child_positions[i];
+                                assert(
+                                    offset_index >= 0 &&
+                                    offset_index < entry.child_count &&
+                                    "Invalid offset index");
+                                entry.child_offsets[offset_index] =
+                                    child->node_offset;
+
+                                // Continue loop to find next child
+                                continue;
+                            }
+
+                            // Child needs processing - push to stack
                             stack.push(
                                 {child,
                                  entry.inner->get_depth(),
@@ -593,7 +828,9 @@ private:
                                  nullptr,
                                  {},
                                  0,
-                                 0});
+                                 0,
+                                 0,
+                                 {}});
                             found_next = true;
                             break;
                         }
@@ -601,7 +838,24 @@ private:
 
                     if (!found_next)
                     {
-                        // All children processed - update offsets and pop
+                        // All children processed - verify and update offsets
+                        LOGD(
+                            "All children processed for inner node at offset ",
+                            entry.inner_offset);
+
+                        // Verify all child offsets have been filled
+                        for (int i = 0; i < entry.child_count; ++i)
+                        {
+                            assert(
+                                entry.child_offsets[i] != 0 &&
+                                "Child offset not set - this is a bug!");
+                            LOGD(
+                                "  Child offset[",
+                                i,
+                                "] = ",
+                                entry.child_offsets[i]);
+                        }
+
                         auto offset_position =
                             entry.inner_offset + sizeof(InnerNodeHeader);
                         write_at(
@@ -615,13 +869,42 @@ private:
                         if (!stack.empty() && stack.top().inner)
                         {
                             auto& parent = stack.top();
-                            parent.child_offsets.push_back(entry.inner_offset);
+                            // Find which child branch we just completed
+                            int branch = -1;
+                            for (int i = 0; i < 16; ++i)
+                            {
+                                if (parent.inner->get_child(i) == entry.node)
+                                {
+                                    branch = i;
+                                    break;
+                                }
+                            }
+                            assert(
+                                branch >= 0 && branch < 16 &&
+                                "Child not found in parent");
+
+                            int offset_index = parent.child_positions[branch];
+                            assert(
+                                offset_index >= 0 &&
+                                offset_index < parent.child_count &&
+                                "Invalid offset index");
+
+                            parent.child_offsets[offset_index] =
+                                entry.inner_offset;
+                            LOGD(
+                                "Set parent's child offset[",
+                                offset_index,
+                                "] = ",
+                                entry.inner_offset,
+                                " for branch ",
+                                branch);
                         }
                     }
                 }
             }
         }
 
+        LOGD("serialize_tree complete, root offset = ", root_offset);
         return root_offset;
     }
 };
