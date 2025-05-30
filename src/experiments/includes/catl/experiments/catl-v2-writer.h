@@ -1,8 +1,9 @@
 #pragma once
 
+#include "catl/common/ledger-info.h"
 #include "catl/core/log-macros.h"
 #include "catl/core/types.h"
-#include "catl/experiments/serialized-inners-structs.h"
+#include "catl/experiments/catl-v2-structs.h"
 #include "catl/experiments/shamap-custom-traits.h"
 
 #include <boost/intrusive_ptr.hpp>
@@ -18,14 +19,15 @@
 namespace catl::experiments {
 
 /**
- * Writer for serialized inner node trees with on-disk structural sharing
+ * Writer for CATL v2 format - multiple ledgers with canonical headers
  *
- * This writer enables incremental serialization of SHAMap snapshots by only
- * writing nodes that have changed since the last serialization. It uses the
- * 'processed' flag and 'node_offset' fields in SerializedNode to track which
- * nodes have already been written to disk.
+ * This writer creates a new catalogue format that:
+ * - Stores multiple ledgers in a single file
+ * - Uses canonical LedgerInfo format (compatible with rippled/xahaud)
+ * - Supports incremental serialization via structural sharing
+ * - Maintains an index for fast ledger lookup
  *
- * Key concepts:
+ * Key concepts (from serialized inner trees):
  * - **Structural sharing on disk**: Nodes written in previous snapshots are
  *   referenced by their file offset rather than re-written
  * - **Copy-on-Write aware**: Only writes nodes with processed=false
@@ -37,19 +39,24 @@ namespace catl::experiments {
  *   offsets array points to each subtree that can be processed independently
  *
  * Workflow:
- * 1. First map: All nodes have processed=false, write everything
+ * 1. First ledger: All nodes have processed=false, write everything
  * 2. Snapshot + modify: Creates new nodes with processed=false
- * 3. Second map: Skip processed=true nodes (use existing offsets),
+ * 3. Next ledger: Skip processed=true nodes (use existing offsets),
  *    only write new nodes
  *
  * This achieves the same structural sharing as in-memory CoW but persisted
  * to disk, allowing efficient storage of ledger history where each ledger
  * only adds its changes rather than duplicating the entire state.
+ *
+ * File layout:
+ * - CatlV2Header
+ * - Ledger data (headers + trees)
+ * - Ledger index (at end for easy appending)
  */
-class SerializedInnerWriter
+class CatlV2Writer
 {
 public:
-    explicit SerializedInnerWriter(const std::string& filename)
+    explicit CatlV2Writer(const std::string& filename)
         : output_(filename, std::ios::binary | std::ios::out | std::ios::trunc)
     {
         if (!output_)
@@ -58,10 +65,10 @@ public:
         }
 
         // Write placeholder header
-        write_header();
+        write_file_header();
     }
 
-    ~SerializedInnerWriter()
+    ~CatlV2Writer()
     {
         if (output_.is_open())
         {
@@ -70,35 +77,116 @@ public:
     }
 
     /**
-     * Serialize a SHAMapS to file
+     * Write a complete ledger (header + state tree + tx tree)
      *
-     * @param map The map to serialize
+     * @param ledger_info The canonical ledger header
+     * @param state_map The state tree for this ledger
+     * @param tx_map Transaction tree (always present, may be empty)
      * @return true on success
      */
     bool
-    serialize_map(const SHAMapS& map)
+    write_ledger(
+        const catl::common::LedgerInfo& ledger_info,
+        const SHAMapS& state_map,
+        const SHAMapS& tx_map)
     {
         try
         {
-            auto root = map.get_root();
-            if (!root)
+            // Record ledger entry for index
+            LedgerIndexEntry index_entry;
+            index_entry.sequence = ledger_info.seq;
+            index_entry.header_offset = current_offset();
+
+            // Write the canonical ledger header
+            output_.write(
+                reinterpret_cast<const char*>(&ledger_info),
+                sizeof(ledger_info));
+            stats_.total_bytes_written += sizeof(ledger_info);
+
+            // Reserve space for TreesHeader (we'll fill it in later)
+            TreesHeader trees_header{};
+            auto trees_header_offset = current_offset();
+            output_.write(
+                reinterpret_cast<const char*>(&trees_header),
+                sizeof(trees_header));
+            stats_.total_bytes_written += sizeof(trees_header);
+
+            // Write state tree
+            auto state_root = state_map.get_root();
+            if (!state_root)
             {
-                LOGE("Cannot serialize map with null root");
+                LOGE("Cannot serialize ledger with null state root");
                 return false;
             }
+            index_entry.state_tree_offset = current_offset();
+            auto state_start = current_offset();
+            serialize_tree(state_root);
+            trees_header.state_tree_size = current_offset() - state_start;
 
-            // Serialize the tree
-            serialize_tree(root);
+            // Write transaction tree (always present)
+            auto tx_root = tx_map.get_root();
+            if (!tx_root)
+            {
+                LOGE("Cannot serialize ledger with null tx root");
+                return false;
+            }
+            index_entry.tx_tree_offset = current_offset();
+            auto tx_start = current_offset();
+            serialize_tree(tx_root);
+            trees_header.tx_tree_size = current_offset() - tx_start;
 
-            // Update header with final values
-            finalize_header(map.get_hash());
+            // Go back and write the actual tree sizes
+            write_at(trees_header_offset, &trees_header, sizeof(trees_header));
+
+            // Add to ledger index
+            ledger_index_.push_back(index_entry);
+            ledger_count_++;
+
+            // Update sequence range
+            if (ledger_count_ == 1)
+            {
+                first_ledger_seq_ = ledger_info.seq;
+            }
+            last_ledger_seq_ = ledger_info.seq;
 
             output_.flush();
             return true;
         }
         catch (const std::exception& e)
         {
-            LOGE("Serialization failed: ", e.what());
+            LOGE("Failed to write ledger: ", e.what());
+            return false;
+        }
+    }
+
+    /**
+     * Finalize the file by writing the index and updating the header
+     */
+    bool
+    finalize()
+    {
+        try
+        {
+            // Record where the index starts
+            std::uint64_t index_offset = current_offset();
+
+            // Write the ledger index
+            for (const auto& entry : ledger_index_)
+            {
+                output_.write(
+                    reinterpret_cast<const char*>(&entry), sizeof(entry));
+                stats_.total_bytes_written += sizeof(entry);
+            }
+
+            // Update and rewrite the file header
+            finalize_file_header(index_offset);
+
+            output_.flush();
+            return true;
+        }
+        catch (const std::exception& e)
+        {
+            LOGE("Failed to finalize file: ", e.what());
             return false;
         }
     }
@@ -134,14 +222,18 @@ public:
 private:
     std::ofstream output_;
     Stats stats_;
+    std::vector<LedgerIndexEntry> ledger_index_;
+    std::uint64_t ledger_count_ = 0;
+    std::uint64_t first_ledger_seq_ = 0;
+    std::uint64_t last_ledger_seq_ = 0;
 
     /**
      * Write file header (placeholder - updated at end)
      */
     void
-    write_header()
+    write_file_header()
     {
-        SerializedTreeHeader header;
+        CatlV2Header header;
         output_.write(reinterpret_cast<const char*>(&header), sizeof(header));
         stats_.total_bytes_written += sizeof(header);
     }
@@ -150,14 +242,13 @@ private:
      * Update header with final values
      */
     void
-    finalize_header(const Hash256& root_hash)
+    finalize_file_header(std::uint64_t index_offset)
     {
-        SerializedTreeHeader header;
-        header.root_offset =
-            sizeof(SerializedTreeHeader);  // Root starts after header
-        header.total_inners = stats_.inner_nodes_written;
-        header.total_leaves = stats_.leaf_nodes_written;
-        std::memcpy(header.root_hash.data(), root_hash.data(), 32);
+        CatlV2Header header;
+        header.ledger_count = ledger_count_;
+        header.first_ledger_seq = first_ledger_seq_;
+        header.last_ledger_seq = last_ledger_seq_;
+        header.ledger_index_offset = index_offset;
 
         // Seek to beginning and rewrite header
         auto current_pos = output_.tellp();
@@ -181,7 +272,7 @@ private:
     /**
      * Write a leaf node and return its offset
      *
-     * Writes a leaf node to the output file with optional zstd compression.
+     * Writes a leaf node to the output file with optional compression.
      * The leaf format is:
      *   [LeafHeader (36 bytes)][data (variable length)]
      *
@@ -189,14 +280,16 @@ private:
      *   - 32-byte key
      *   - 4-byte packed size_and_flags field:
      *     - Bits 0-23: data size (compressed or uncompressed)
-     *     - Bit 24: is_compressed flag
-     *     - Bits 25-31: reserved
+     *     - Bits 24-27: compression type (see CompressionType enum)
+     *     - Bits 28-31: reserved for future compression params
      *
-     * Compression behavior:
-     *   - Only compresses if requested AND compression reduces size
-     *   - Falls back to uncompressed if compression fails or doesn't help
-     *   - Uses zstd level 3 (good balance of speed/compression)
-     *   - Tracks compression statistics for analysis
+     * Compression notes from experiments:
+     *   - Individual leaf ZSTD compression only gets ~1.5x (disappointing)
+     *   - Stream ZSTD achieves 7-10x due to 128MB rolling window
+     *   - 32-byte keys repeat millions of times (prime dictionary candidate)
+     *   - 20-byte accounts highly repetitive
+     *   - Object templates/patterns are exploitable
+     *   - Future: dictionary/template based compression per leaf
      *
      * @param key The 32-byte key identifying this leaf
      * @param data The leaf data (SLE - Serialized Ledger Entry)
@@ -213,7 +306,8 @@ private:
         std::memcpy(header.key.data(), key.data(), 32);
         header.size_and_flags = 0;
         header.set_data_size(data.size());
-        header.set_compressed(compress);
+        header.set_compression_type(
+            compress ? CompressionType::ZSTD : CompressionType::NONE);
 
         // Write header
         output_.write(reinterpret_cast<const char*>(&header), sizeof(header));
@@ -239,8 +333,8 @@ private:
                     "ZSTD compression failed: ",
                     ZSTD_getErrorName(compressed_size));
                 // Fall back to uncompressed
-                header.set_compressed(false);
-                // Rewrite header with updated flag
+                header.set_compression_type(CompressionType::NONE);
+                // Rewrite header with updated compression type
                 write_at(offset, &header, sizeof(header));
                 output_.write(
                     reinterpret_cast<const char*>(data.data()), data.size());
@@ -249,8 +343,8 @@ private:
             else if (compressed_size >= data.size())
             {
                 // Compression didn't help, write uncompressed
-                header.set_compressed(false);
-                // Rewrite header with updated flag
+                header.set_compression_type(CompressionType::NONE);
+                // Rewrite header with updated compression type
                 write_at(offset, &header, sizeof(header));
                 output_.write(
                     reinterpret_cast<const char*>(data.data()), data.size());
@@ -392,7 +486,7 @@ private:
                     std::uint64_t leaf_offset = write_leaf_node(
                         item->key(),
                         item->slice(),
-                        true);  // Enable compression
+                        false);  // Default to no compression
 
                     // Mark as processed and save offset
                     entry.node->processed = true;
