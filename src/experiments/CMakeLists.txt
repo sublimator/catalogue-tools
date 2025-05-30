@@ -45,6 +45,7 @@ target_link_libraries(
           catl_catalogue_common
           catl::xdata
           catl_catalogue_v1
+          catl::base58
           Boost::filesystem
           Boost::iostreams
           Boost::program_options

@@ -37,8 +37,10 @@
 #include "catl/v2/catl-v2-writer.h"
 #include "catl/v2/shamap-custom-traits.h"
 #include "catl/xdata/debug-visitor.h"
+#include "catl/xdata/json-visitor.h"
 #include "catl/xdata/parser.h"
 #include "catl/xdata/protocol.h"
+#include "pretty-print-json.h"
 
 using namespace catl;
 using namespace catl::v2;
@@ -119,22 +121,23 @@ lookup_key(
     // Parse and display using xdata
     try
     {
-        // Create a counting visitor to display the data
-        xdata::CountingVisitor visitor;
+        // Create a JSON visitor to build a JSON representation
+        xdata::JsonVisitor visitor(protocol);
         xdata::ParserContext ctx(data_slice.value());
 
         // Parse the SLE
         xdata::parse_with_visitor(ctx, protocol, visitor);
 
-        // Output the actual parsed data
-        LOGI("\nParsed data:");
-        std::cout << visitor.get_output();
+        // Get the resulting JSON
+        auto json_result = visitor.get_result();
 
-        LOGI("\nParsed data statistics:");
-        LOGI("  Fields: ", visitor.get_field_count());
-        LOGI("  Objects: ", visitor.get_object_count());
-        LOGI("  Arrays: ", visitor.get_array_count());
-        LOGI("  Total output size: ", visitor.get_byte_count(), " bytes");
+        // Output the parsed data as pretty-printed JSON
+        LOGI("\nParsed data:");
+        pretty_print_json(std::cout, json_result);
+
+        // Also show raw JSON size
+        std::string json_str = boost::json::serialize(json_result);
+        LOGI("\nJSON size: ", json_str.size(), " bytes");
     }
     catch (const std::exception& e)
     {
@@ -455,7 +458,7 @@ main(int argc, char* argv[])
         // TODO: use log level from command line
         // TODO: use Logger::set_level(const std::string& levelStr) and add to
         // the po::options_description
-        Logger::set_level(LogLevel::INFO);
+        Logger::set_level(LogLevel::DEBUG);
 
         // Check if we're in key lookup mode
         if (vm.count("get-key"))

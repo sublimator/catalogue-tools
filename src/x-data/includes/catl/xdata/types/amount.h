@@ -116,4 +116,42 @@ get_currency_raw(const Slice& amount)
     return {amount.data() + 8, 20};
 }
 
+// Parse native amount (XRP/XAH) and return drops as a string
+//
+// Native amount format (8 bytes):
+// - Bit 63 (0x80): 0 = native, 1 = IOU (must be 0 for native)
+// - Bit 62 (0x40): 0 = negative, 1 = positive
+// - Bits 61-0: Unsigned mantissa (drops value)
+//
+// This follows the same logic as ripple-lib's Amount.fromParser():
+// 1. Check the positive bit BEFORE clearing any bits
+// 2. Clear the top 2 bits with mantissa[0] &= 0x3F
+// 3. Interpret remaining 62 bits as unsigned drops value
+// 4. Apply sign based on the positive bit
+inline std::string
+parse_native_drops_string(const Slice& amount)
+{
+    if (amount.size() != 8 || (amount.data()[0] & 0x80) != 0)
+    {
+        throw std::runtime_error("Amount is not native");
+    }
+
+    // Check sign bit (bit 62) - positive when set
+    bool is_positive = (amount.data()[0] & 0x40) != 0;
+
+    // Build drops value, clearing top 2 bits of first byte
+    uint64_t drops = (amount.data()[0] & 0x3F);  // Clear bits 63-62
+    for (size_t i = 1; i < 8; ++i)
+    {
+        drops = (drops << 8) | amount.data()[i];
+    }
+
+    // Return as string with sign
+    if (!is_positive && drops > 0)
+    {
+        return "-" + std::to_string(drops);
+    }
+    return std::to_string(drops);
+}
+
 }  // namespace catl::xdata
