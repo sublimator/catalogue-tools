@@ -1,12 +1,12 @@
 #pragma once
 
 #include "catl/common/ledger-info.h"
-#include "catl/experiments/shamap-custom-traits.h"
+#include "shamap-custom-traits.h"
 #include <array>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
 
-namespace catl::experiments {
+namespace catl::v2 {
 
 /**
  * CATL v2 File Format Layout
@@ -276,4 +276,4 @@ build_child_types(const boost::intrusive_ptr<SHAMapInnerNodeS>& inner)
     return child_types;
 }
 
-}  // namespace catl::experiments
+}  // namespace catl::v2

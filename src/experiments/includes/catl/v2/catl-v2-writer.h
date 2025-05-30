@@ -1,10 +1,10 @@
 #pragma once
 
+#include "catl-v2-structs.h"
 #include "catl/common/ledger-info.h"
 #include "catl/core/log-macros.h"
 #include "catl/core/types.h"
-#include "catl/experiments/catl-v2-structs.h"
-#include "catl/experiments/shamap-custom-traits.h"
+#include "shamap-custom-traits.h"
 
 #include <boost/intrusive_ptr.hpp>
 #include <cstring>
@@ -16,7 +16,7 @@
 #include <vector>
 #include <zstd.h>
 
-namespace catl::experiments {
+namespace catl::v2 {
 
 /**
  * Writer for CATL v2 format - multiple ledgers with canonical headers
@@ -626,4 +626,4 @@ private:
     }
 };
 
-}  // namespace catl::experiments
+}  // namespace catl::v2
