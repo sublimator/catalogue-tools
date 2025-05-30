@@ -200,14 +200,12 @@ lookup_key(
             : parse_single_object(data_slice.value(), protocol);
 
         // Output the parsed data as pretty-printed JSON
-        LOGI(
-            "\nParsed ",
-            is_transaction ? "transaction and metadata:" : "data:");
+        LOGI("Parsed ", is_transaction ? "transaction and metadata:" : "data:");
         pretty_print_json(std::cout, json_result);
 
         // Also show raw JSON size
         std::string json_str = boost::json::serialize(json_result);
-        LOGI("\nJSON size: ", json_str.size(), " bytes");
+        LOGI("JSON size: ", json_str.size(), " bytes");
     }
     catch (const std::exception& e)
     {
@@ -529,6 +527,8 @@ main(int argc, char* argv[])
             return 1;
         }
 
+        LOGI("catl1-to-catl2 v0.0.1");
+
         // Check if we're in key lookup mode
         if (vm.count("get-key") || vm.count("get-key-tx"))
         {
@@ -565,6 +565,7 @@ main(int argc, char* argv[])
             CatlV2Reader reader(input_file);
 
             // Perform lookup
+            LOGI("Looking up key: \"", key_hex, "\" in ledger: ", ledger_seq);
             lookup_key(reader, protocol, key_hex, ledger_seq, is_transaction);
 
             return 0;
