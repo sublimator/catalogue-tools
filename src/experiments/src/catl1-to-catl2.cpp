@@ -38,6 +38,7 @@
 #include "catl/v2/shamap-custom-traits.h"
 #include "catl/xdata/debug-visitor.h"
 #include "catl/xdata/json-visitor.h"
+#include "catl/xdata/parser-context.h"
 #include "catl/xdata/parser.h"
 #include "catl/xdata/protocol.h"
 #include "pretty-print-json.h"
@@ -79,6 +80,73 @@ parse_hex_key(const std::string& hex)
 }
 
 /**
+ * Parse and display transaction with metadata
+ */
+boost::json::value
+parse_transaction_with_metadata(
+    const Slice& data,
+    const xdata::Protocol& protocol)
+{
+    xdata::ParserContext ctx(data);
+
+    // Create root object to hold both tx and meta
+    boost::json::object root;
+
+    // First: Parse VL-encoded transaction
+    size_t tx_vl_length = xdata::read_vl_length(ctx.cursor);
+    Slice tx_data = ctx.cursor.read_slice(tx_vl_length);
+
+    {
+        xdata::JsonVisitor tx_visitor(protocol);
+        xdata::ParserContext tx_ctx(tx_data);
+        xdata::parse_with_visitor(tx_ctx, protocol, tx_visitor);
+        root["tx"] = tx_visitor.get_result();
+    }
+
+    // Second: Parse VL-encoded metadata
+    size_t meta_vl_length = xdata::read_vl_length(ctx.cursor);
+    Slice meta_data = ctx.cursor.read_slice(meta_vl_length);
+
+    {
+        xdata::JsonVisitor meta_visitor(protocol);
+        xdata::ParserContext meta_ctx(meta_data);
+        xdata::parse_with_visitor(meta_ctx, protocol, meta_visitor);
+        root["meta"] = meta_visitor.get_result();
+    }
+
+    return boost::json::value(root);
+}
+
+/**
+ * Parse and display a single object (SLE)
+ */
+boost::json::value
+parse_single_object(const Slice& data, const xdata::Protocol& protocol)
+{
+    xdata::JsonVisitor visitor(protocol);
+    xdata::ParserContext ctx(data);
+    xdata::parse_with_visitor(ctx, protocol, visitor);
+    return visitor.get_result();
+}
+
+/**
+ * Display hex fallback
+ */
+void
+display_hex_fallback(const Slice& data)
+{
+    std::string hex;
+    hex.reserve(data.size() * 2);
+    for (size_t i = 0; i < data.size(); ++i)
+    {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02X", data.data()[i]);
+        hex += buf;
+    }
+    LOGI("Raw data (hex): ", hex);
+}
+
+/**
  * Look up a key and display it
  */
 void
@@ -86,7 +154,8 @@ lookup_key(
     CatlV2Reader& reader,
     const xdata::Protocol& protocol,
     const std::string& key_hex,
-    uint32_t ledger_seq)
+    uint32_t ledger_seq,
+    bool is_transaction = false)
 {
     auto key_bytes = parse_hex_key(key_hex);
     if (!key_bytes)
@@ -108,31 +177,32 @@ lookup_key(
 
     // Look up the key
     Key key(key_bytes->data());
-    auto data_slice = reader.lookup_key_in_state(key);
+    auto data_slice = is_transaction ? reader.lookup_key_in_tx(key)
+                                     : reader.lookup_key_in_state(key);
 
     if (!data_slice.has_value())
     {
-        LOGE("Key not found: ", key.hex());
+        LOGE(is_transaction ? "Transaction" : "Key", " not found: ", key.hex());
         return;
     }
 
-    LOGI("Key found! Data size: ", data_slice->size(), " bytes");
+    LOGI(
+        is_transaction ? "Transaction" : "Key",
+        " found! Data size: ",
+        data_slice->size(),
+        " bytes");
 
     // Parse and display using xdata
     try
     {
-        // Create a JSON visitor to build a JSON representation
-        xdata::JsonVisitor visitor(protocol);
-        xdata::ParserContext ctx(data_slice.value());
-
-        // Parse the SLE
-        xdata::parse_with_visitor(ctx, protocol, visitor);
-
-        // Get the resulting JSON
-        auto json_result = visitor.get_result();
+        boost::json::value json_result = is_transaction
+            ? parse_transaction_with_metadata(data_slice.value(), protocol)
+            : parse_single_object(data_slice.value(), protocol);
 
         // Output the parsed data as pretty-printed JSON
-        LOGI("\nParsed data:");
+        LOGI(
+            "\nParsed ",
+            is_transaction ? "transaction and metadata:" : "data:");
         pretty_print_json(std::cout, json_result);
 
         // Also show raw JSON size
@@ -142,16 +212,7 @@ lookup_key(
     catch (const std::exception& e)
     {
         LOGE("Failed to parse data: ", e.what());
-        // Fall back to hex display
-        std::string hex;
-        hex.reserve(data_slice->size() * 2);
-        for (size_t i = 0; i < data_slice->size(); ++i)
-        {
-            char buf[3];
-            snprintf(buf, sizeof(buf), "%02X", data_slice->data()[i]);
-            hex += buf;
-        }
-        LOGI("Raw data (hex): ", hex);
+        display_hex_fallback(data_slice.value());
     }
 }
 
@@ -433,7 +494,10 @@ main(int argc, char* argv[])
             "Log level (debug, info, warn, error)")(
             "get-key",
             po::value<std::string>(),
-            "Look up a key (hex) in the CATL v2 file")(
+            "Look up a key (hex) in the state tree")(
+            "get-key-tx",
+            po::value<std::string>(),
+            "Look up a key (hex) in the transaction tree")(
             "get-ledger",
             po::value<uint32_t>(),
             "Ledger sequence to use for key lookup")(
@@ -455,13 +519,18 @@ main(int argc, char* argv[])
 
         po::notify(vm);
 
-        // TODO: use log level from command line
-        // TODO: use Logger::set_level(const std::string& levelStr) and add to
-        // the po::options_description
-        Logger::set_level(LogLevel::DEBUG);
+        // Set log level from command line
+        std::string log_level = vm["log-level"].as<std::string>();
+        if (!Logger::set_level(log_level))
+        {
+            std::cerr << "Invalid log level: " << log_level << std::endl;
+            std::cerr << "Valid levels are: debug, info, warn/warning, error"
+                      << std::endl;
+            return 1;
+        }
 
         // Check if we're in key lookup mode
-        if (vm.count("get-key"))
+        if (vm.count("get-key") || vm.count("get-key-tx"))
         {
             // Key lookup mode - requires input file and ledger
             if (!vm.count("input"))
@@ -478,10 +547,15 @@ main(int argc, char* argv[])
             }
 
             std::string input_file = vm["input"].as<std::string>();
-            std::string key_hex = vm["get-key"].as<std::string>();
             uint32_t ledger_seq = vm["get-ledger"].as<uint32_t>();
             std::string protocol_path =
                 vm["protocol-definitions"].as<std::string>();
+
+            // Determine which type of lookup
+            bool is_transaction = vm.count("get-key-tx");
+            std::string key_hex = is_transaction
+                ? vm["get-key-tx"].as<std::string>()
+                : vm["get-key"].as<std::string>();
 
             // Load protocol
             xdata::Protocol protocol =
@@ -491,7 +565,7 @@ main(int argc, char* argv[])
             CatlV2Reader reader(input_file);
 
             // Perform lookup
-            lookup_key(reader, protocol, key_hex, ledger_seq);
+            lookup_key(reader, protocol, key_hex, ledger_seq, is_transaction);
 
             return 0;
         }
@@ -502,22 +576,6 @@ main(int argc, char* argv[])
         {
             verify = false;
         }
-
-        // // Set log level
-        // std::string log_level = vm["log-level"].as<std::string>();
-        // if (log_level == "debug")
-        //     Logger::set_level(LogLevel::DEBUG);
-        // else if (log_level == "info")
-        //     Logger::set_level(LogLevel::INFO);
-        // else if (log_level == "warn")
-        //     Logger::set_level(LogLevel::WARNING);
-        // else if (log_level == "error")
-        //     Logger::set_level(LogLevel::ERROR);
-        // else
-        // {
-        //     std::cerr << "Invalid log level: " << log_level << std::endl;
-        //     return 1;
-        // }
 
         // Conversion mode - require input and output
         if (!vm.count("input") || !vm.count("output"))

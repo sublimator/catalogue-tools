@@ -238,6 +238,34 @@ public:
     }
 
     /**
+     * Look up a key in the current transaction tree
+     *
+     * Must be called after read_ledger_info() to have tree offsets.
+     * Returns the leaf data as a Slice, or empty optional if not found.
+     *
+     * @param key The key to search for (transaction hash)
+     * @return Optional Slice containing the transaction + metadata
+     */
+    std::optional<Slice>
+    lookup_key_in_tx(const Key& key)
+    {
+        // The tx tree starts after the state tree
+        // current_pos_ is at the start of state tree after read_ledger_info()
+        size_t tree_offset =
+            current_pos_ + current_trees_header_.state_tree_size;
+        LOGD(
+            "Tx tree lookup - tree offset: ",
+            tree_offset,
+            ", current_pos: ",
+            current_pos_,
+            ", state_tree_size: ",
+            current_trees_header_.state_tree_size,
+            ", tx_tree_size: ",
+            current_trees_header_.tx_tree_size);
+        return lookup_key_at_node(key, tree_offset, 0);
+    }
+
+    /**
      * Get the ledger index view
      *
      * Loads the index on first access (lazy loading).
