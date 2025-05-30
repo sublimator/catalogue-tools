@@ -1,16 +1,18 @@
 /**
- * serialized-inners.cpp
+ * catl1-to-catl2.cpp
  *
- * An experimental tool for exploring efficient serialization approaches for
- * SHAMap inner nodes. This tool evaluates strategies for compactly representing
- * the inner node structure while maintaining structural sharing capabilities
- * for Copy-on-Write.
+ * Converts CATL v1 files to the new CATL v2 format with:
+ * - Canonical LedgerInfo format (compatible with rippled/xahaud)
+ * - Tree size headers for fast skipping
+ * - Structural sharing for incremental updates
+ * - Ledger index at EOF for random access
+ * - MMAP-friendly layout
  *
- * Key Design Goals:
+ * Key Features:
  * 1. Compact binary representation of inner nodes (6 bytes per inner)
- * 2. Support for depth-first serialization with structural sharing
- * 3. Efficient deserialization with potential for parallel loading
- * 4. Integration with Copy-on-Write for memory-efficient snapshots
+ * 2. Depth-first serialization with structural sharing
+ * 3. Zero-copy MMAP reading with tree size headers
+ * 4. Efficient ledger index for O(log n) random access
  */
 
 #include <chrono>
