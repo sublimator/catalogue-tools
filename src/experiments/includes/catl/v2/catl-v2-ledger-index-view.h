@@ -1,12 +1,12 @@
 #pragma once
 
-#include "catl/experiments/catl-v2-structs.h"
+#include "catl/v2/catl-v2-structs.h"
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 
-namespace catl::experiments {
+namespace catl::v2 {
 
 /**
  * Zero-copy view into the ledger index at the end of a CATL v2 file
@@ -195,4 +195,4 @@ private:
     size_t count_;
 };
 
-}  // namespace catl::experiments
+}  // namespace catl::v2

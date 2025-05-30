@@ -26,14 +26,14 @@
 
 #include "catl/core/log-macros.h"
 #include "catl/core/types.h"
-#include "catl/experiments/catl-v2-structs.h"
-#include "catl/experiments/catl-v2-writer.h"
-#include "catl/experiments/shamap-custom-traits.h"
 #include "catl/v1/catl-v1-reader.h"
 #include "catl/v1/catl-v1-utils.h"
+#include "catl/v2/catl-v2-structs.h"
+#include "catl/v2/catl-v2-writer.h"
+#include "catl/v2/shamap-custom-traits.h"
 
-using namespace catl::v1;
-using namespace catl::experiments;
+using namespace catl;
+using namespace catl::v2;
 namespace po = boost::program_options;
 namespace fs = boost::filesystem;
 
@@ -47,7 +47,7 @@ namespace fs = boost::filesystem;
 void
 process_all_ledgers(const std::string& filename)
 {
-    Reader reader(filename);
+    v1::Reader reader(filename);
     auto header = reader.header();
 
     LOGI(

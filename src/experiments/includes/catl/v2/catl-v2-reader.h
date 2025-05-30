@@ -3,9 +3,9 @@
 #include "catl/common/ledger-info.h"
 #include "catl/core/log-macros.h"
 #include "catl/core/types.h"
-#include "catl/experiments/catl-v2-ledger-index-view.h"
-#include "catl/experiments/catl-v2-structs.h"
-#include "catl/experiments/shamap-custom-traits.h"
+#include "catl/v2/catl-v2-ledger-index-view.h"
+#include "catl/v2/catl-v2-structs.h"
+#include "shamap-custom-traits.h"
 
 #include <boost/filesystem.hpp>
 #include <boost/iostreams/device/mapped_file.hpp>
@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace catl::experiments {
+namespace catl::v2 {
 
 /**
  * MMAP-based reader for CATL v2 format
@@ -312,4 +312,4 @@ private:
     }
 };
 
-}  // namespace catl::experiments
+}  // namespace catl::v2
