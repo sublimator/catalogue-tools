@@ -26,69 +26,16 @@
 
 #include "catl/core/log-macros.h"
 #include "catl/core/types.h"
-#include "catl/experiments/serialized-inners-structs.h"
-#include "catl/experiments/serialized-inners-writer.h"
+#include "catl/experiments/catl-v2-structs.h"
+#include "catl/experiments/catl-v2-writer.h"
 #include "catl/experiments/shamap-custom-traits.h"
 #include "catl/v1/catl-v1-reader.h"
+#include "catl/v1/catl-v1-utils.h"
 
 using namespace catl::v1;
 using namespace catl::experiments;
 namespace po = boost::program_options;
 namespace fs = boost::filesystem;
-
-//----------------------------------------------------------
-// File Format Structures
-//----------------------------------------------------------
-
-/**
- * Ledger metadata with offsets to serialized maps
- */
-struct Ledger
-{
-    LedgerInfo ledger_info;
-    std::uint64_t account_map_offset;
-    std::uint64_t transaction_map_offset;
-};
-
-/**
- * Binary-searchable ledger index entry
- * 128 bits for cache line efficiency
- */
-struct LedgerLookupEntry
-{
-    std::uint32_t ledger_index;
-    std::uint64_t ledger_offset;  // Points to Ledger struct
-    std::uint32_t rfu_padding;    // Maintains 16-byte alignment
-};
-
-/**
- * Proposed File Format:
- *
- * [Header]
- *   - Magic number, version, metadata
- *   - Body size
- *   - Footer size
- *
- * [Body]
- *   For each ledger:
- *     - LedgerInfo
- *     - AccountMap (depth-first serialized)
- *       - Inner nodes with child offsets
- *       - Leaf nodes inline with their parent's region
- *     - TransactionMap (same structure)
- *
- * [Footer]
- *   - LedgerLookupTable (sorted array for binary search)
- *   - Optional: Key-prefix index for random access
- *
- * Serialization Strategy:
- * - Depth-first order maximizes cache efficiency
- * - Leaves stored near their parent inner nodes
- * - Structural sharing via offset references
- * - Parallel deserialization enabled by inner node structure:
- *   The root inner node contains a bitmap of which children exist
- *   and their offsets, allowing threads to process subtrees independently
- */
 
 //----------------------------------------------------------
 // Main Processing Logic
@@ -109,15 +56,18 @@ process_all_ledgers(const std::string& filename)
         " to ",
         header.max_ledger);
 
-    // Initialize state map with CoW support
-    SHAMapS map(catl::shamap::tnACCOUNT_STATE);
-    map.snapshot();  // Enable CoW
+    // Initialize state and tx maps with CoW support
+    SHAMapS state_map(catl::shamap::tnACCOUNT_STATE);
+    SHAMapS tx_map(catl::shamap::tnTRANSACTION_MD);
+    state_map.snapshot();  // Enable CoW
+    tx_map.snapshot();     // Enable CoW
 
     // Create a writer for actual binary output
-    SerializedInnerWriter writer("test-serialized.bin");
+    CatlV2Writer writer("test-serialized.bin");
 
     // Process subset for experimentation
-    auto n_ledgers = header.min_ledger + 10;  // Just do 10 ledgers for testing
+    auto n_ledgers =
+        header.min_ledger + 10'000;  // Just do 10 ledgers for testing
     auto max_ledger =
         std::min(static_cast<uint32_t>(n_ledgers), header.max_ledger);
 
@@ -127,16 +77,22 @@ process_all_ledgers(const std::string& filename)
         LOGI("Processing ledger: ", ledger_seq);
 
         // Read ledger header
-        reader.read_ledger_info();  // Skip for now
+        auto v1_ledger_info = reader.read_ledger_info();
+        auto canonical_info = to_canonical_ledger_info(v1_ledger_info);
 
         // Read state map using owned items for proper CoW behavior
-        map.snapshot();  // Create snapshot point
+        state_map.snapshot();  // Create snapshot point
         reader.read_map_with_shamap_owned_items(
-            map, catl::shamap::tnACCOUNT_STATE, true);
+            state_map, catl::shamap::tnACCOUNT_STATE, true);
 
-        // Write the map to disk using the writer
+        // Read transaction map
+        tx_map.snapshot();  // Create snapshot point
+        reader.read_map_with_shamap_owned_items(
+            tx_map, catl::shamap::tnTRANSACTION_MD, true);
+
+        // Write the complete ledger to disk
         auto stats_before = writer.stats();
-        if (writer.serialize_map(map))
+        if (writer.write_ledger(canonical_info, state_map, tx_map))
         {
             auto stats_after = writer.stats();
             auto delta_inners = stats_after.inner_nodes_written -
@@ -159,11 +115,14 @@ process_all_ledgers(const std::string& filename)
         }
         else
         {
-            LOGE("Failed to serialize ledger ", ledger_seq);
+            LOGE("Failed to write ledger ", ledger_seq);
         }
+    }
 
-        // Skip transaction map
-        reader.skip_map(catl::shamap::tnTRANSACTION_MD);
+    // Finalize the file
+    if (!writer.finalize())
+    {
+        LOGE("Failed to finalize file");
     }
 
     // Print final statistics

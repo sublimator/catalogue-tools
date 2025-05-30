@@ -1,7 +1,9 @@
 #pragma once
 
+#include "catl/common/ledger-info.h"
 #include "catl/crypto/sha512-hasher.h"
 #include "catl/v1/catl-v1-structs.h"
+#include <cstring>
 #include <string>
 
 namespace catl::v1 {
@@ -39,6 +41,33 @@ make_catalogue_version_field(
     uint16_t result = catalogue_version & CATALOGUE_VERSION_MASK;
     result |= (compression_level << 8);  // Store level in bits 8-11
     return result;
+}
+
+/**
+ * Convert v1 LedgerInfo to canonical format
+ *
+ * The v1 format has a different field order than the canonical format
+ * used by rippled/xahaud. This function performs the conversion.
+ */
+inline catl::common::LedgerInfo
+to_canonical_ledger_info(const LedgerInfo& v1_info)
+{
+    catl::common::LedgerInfo canonical;
+
+    canonical.seq = v1_info.sequence;
+    canonical.drops = v1_info.drops;
+    std::memcpy(canonical.parent_hash.data(), v1_info.parent_hash, 32);
+    std::memcpy(canonical.tx_hash.data(), v1_info.tx_hash, 32);
+    std::memcpy(canonical.account_hash.data(), v1_info.account_hash, 32);
+    canonical.parent_close_time =
+        static_cast<uint32_t>(v1_info.parent_close_time);
+    canonical.close_time = static_cast<uint32_t>(v1_info.close_time);
+    canonical.close_time_resolution =
+        static_cast<uint8_t>(v1_info.close_time_resolution);
+    canonical.close_flags = static_cast<uint8_t>(v1_info.close_flags);
+    std::memcpy(canonical.hash.data(), v1_info.hash, 32);
+
+    return canonical;
 }
 
 }  // namespace catl::v1
