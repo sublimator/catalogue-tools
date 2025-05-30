@@ -43,6 +43,7 @@ target_link_libraries(
   PRIVATE catl_core
           catl::crypto
           catl_catalogue_common
+          catl::xdata
           catl_catalogue_v1
           Boost::filesystem
           Boost::iostreams

@@ -14,3 +14,5 @@ catl_snapshots
 # Decompressed test fixture (generated from compression-9.catl)
 tests/catalogue-v1/fixture/cat.2000000-2010000.compression-0.catl
 *.catl
+*.catl2
+*.zstd
