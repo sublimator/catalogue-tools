@@ -7,9 +7,9 @@ find_package(zstd REQUIRED)
 set(EXPERIMENTS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(EXPERIMENTS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/includes)
 
-# Define the serialized-inners executable
-set(EXECUTABLE_SERIALIZED_INNERS serialized-inners)
-set(SOURCES_SERIALIZED_INNERS ${EXPERIMENTS_SRC_DIR}/serialized-inners.cpp)
+# Define the catl1-to-catl2 executable
+set(EXECUTABLE_CATL1_TO_CATL2 catl1-to-catl2)
+set(SOURCES_CATL1_TO_CATL2 ${EXPERIMENTS_SRC_DIR}/catl1-to-catl2.cpp)
 
 # Define the catl1-to-zstd-dict executable
 set(EXECUTABLE_CATL1_TO_ZSTD_DICT catl1-to-zstd-dict)
@@ -20,13 +20,13 @@ set(EXECUTABLE_ZSTD_EXPERIMENTS zstd-experiments)
 set(SOURCES_ZSTD_EXPERIMENTS ${EXPERIMENTS_SRC_DIR}/zstd-experiments.cpp)
 
 # Create the executable
-add_executable(${EXECUTABLE_SERIALIZED_INNERS} ${SOURCES_SERIALIZED_INNERS})
+add_executable(${EXECUTABLE_CATL1_TO_CATL2} ${SOURCES_CATL1_TO_CATL2})
 add_executable(${EXECUTABLE_CATL1_TO_ZSTD_DICT} ${SOURCES_CATL1_TO_ZSTD_DICT})
 add_executable(${EXECUTABLE_ZSTD_EXPERIMENTS} ${SOURCES_ZSTD_EXPERIMENTS})
 
 # Set up include directories
 target_include_directories(
-  ${EXECUTABLE_SERIALIZED_INNERS}
+  ${EXECUTABLE_CATL1_TO_CATL2}
   PRIVATE ${EXPERIMENTS_INCLUDE_DIR}
           ${CATL_INCLUDE_DIR}
           ${CMAKE_SOURCE_DIR}/src/shamap/includes
@@ -34,12 +34,12 @@ target_include_directories(
 
 # Add the precompiled header for custom shamap traits
 target_precompile_headers(
-  ${EXECUTABLE_SERIALIZED_INNERS} PRIVATE
-  ${EXPERIMENTS_INCLUDE_DIR}/catl/experiments/shamap-custom-traits.h)
+  ${EXECUTABLE_CATL1_TO_CATL2} PRIVATE
+  ${EXPERIMENTS_INCLUDE_DIR}/catl/v2/shamap-custom-traits.h)
 
 # Link with required dependencies (removed catl_shamap to use header-only)
 target_link_libraries(
-  ${EXECUTABLE_SERIALIZED_INNERS}
+  ${EXECUTABLE_CATL1_TO_CATL2}
   PRIVATE catl_core
           catl::crypto
           catl_catalogue_common
@@ -79,11 +79,11 @@ foreach(EXECUTABLE ${EXECUTABLES})
 endforeach()
 
 # Output a message during build
-message(STATUS "Configured experimental tool: ${EXECUTABLE_SERIALIZED_INNERS}")
+message(STATUS "Configured experimental tool: ${EXECUTABLE_CATL1_TO_CATL2}")
 message(STATUS "Configured experimental tool: ${EXECUTABLE_CATL1_TO_ZSTD_DICT}")
 message(STATUS "Configured experimental tool: ${EXECUTABLE_ZSTD_EXPERIMENTS}")
 
 # Install the executable
-install(TARGETS ${EXECUTABLE_SERIALIZED_INNERS} RUNTIME DESTINATION bin)
+install(TARGETS ${EXECUTABLE_CATL1_TO_CATL2} RUNTIME DESTINATION bin)
 install(TARGETS ${EXECUTABLE_CATL1_TO_ZSTD_DICT} RUNTIME DESTINATION bin)
 install(TARGETS ${EXECUTABLE_ZSTD_EXPERIMENTS} RUNTIME DESTINATION bin)
