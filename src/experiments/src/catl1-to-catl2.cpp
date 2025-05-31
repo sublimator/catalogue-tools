@@ -227,8 +227,8 @@ verify_catl2_file(
 
     try
     {
-        CatlV2Reader reader(filename);
-        auto header = reader.header();
+        auto reader = CatlV2Reader::create(filename);
+        auto header = reader->header();
 
         LOGI("File contains ", header.ledger_count, " ledgers");
         LOGI(
@@ -257,9 +257,9 @@ verify_catl2_file(
         {
             uint32_t target_seq = sequences[i];
 
-            if (reader.seek_to_ledger(target_seq))
+            if (reader->seek_to_ledger(target_seq))
             {
-                auto info = reader.read_ledger_info();
+                auto info = reader->read_ledger_info();
                 if (info.seq == target_seq)
                 {
                     success_count++;
@@ -320,11 +320,9 @@ process_all_ledgers(
         " to ",
         header.max_ledger);
 
-    // Initialize state and tx maps with CoW support
+    // Initialize state map with CoW support (persists across ledgers)
     SHAMapS state_map(catl::shamap::tnACCOUNT_STATE);
-    SHAMapS tx_map(catl::shamap::tnTRANSACTION_MD);
     state_map.snapshot();  // Enable CoW
-    tx_map.snapshot();     // Enable CoW
 
     // Create a writer for actual binary output
     CatlV2Writer writer(output_file);
@@ -348,8 +346,9 @@ process_all_ledgers(
         reader.read_map_with_shamap_owned_items(
             state_map, catl::shamap::tnACCOUNT_STATE, true);
 
-        // Read transaction map
-        tx_map.snapshot();  // Create snapshot point
+        // Create a FRESH transaction map for each ledger (transactions don't
+        // persist)
+        SHAMapS tx_map(catl::shamap::tnTRANSACTION_MD);
         reader.read_map_with_shamap_owned_items(
             tx_map, catl::shamap::tnTRANSACTION_MD, true);
 
@@ -400,11 +399,11 @@ process_all_ledgers(
 
     // Print final statistics
     auto final_stats = writer.stats();
-    LOGI("\nFinal serialization statistics:");
+    LOGI("Final serialization statistics:");
     LOGI("  Total inner nodes written: ", final_stats.inner_nodes_written);
     LOGI("  Total leaf nodes written: ", final_stats.leaf_nodes_written);
     LOGI("  Total bytes written: ", final_stats.total_bytes_written);
-    LOGI("\nBytes breakdown:");
+    LOGI("Bytes breakdown:");
     LOGI(
         "  Inner nodes: ",
         final_stats.inner_bytes_written,
@@ -434,7 +433,7 @@ process_all_ledgers(
         double compression_ratio =
             static_cast<double>(final_stats.uncompressed_size) /
             static_cast<double>(final_stats.compressed_size);
-        LOGI("\nCompression statistics:");
+        LOGI("Compression statistics:");
         LOGI("  Compressed leaves: ", final_stats.compressed_leaves);
         LOGI("  Uncompressed size: ", final_stats.uncompressed_size, " bytes");
         LOGI("  Compressed size: ", final_stats.compressed_size, " bytes");
@@ -457,7 +456,7 @@ process_all_ledgers(
     // Verify the file if requested
     if (verify)
     {
-        LOGI("\nVerifying written file...");
+        LOGI("Verifying written file...");
         bool verify_success =
             verify_catl2_file(output_file, header.min_ledger, max_ledger);
         if (!verify_success)
@@ -503,7 +502,11 @@ main(int argc, char* argv[])
             po::value<std::string>()->default_value(
                 std::string(PROJECT_ROOT) +
                 "tests/x-data/fixture/xahau_definitions.json"),
-            "Path to protocol definitions JSON file");
+            "Path to protocol definitions JSON file")(
+            "walk-state",
+            "Walk all state items in the ledger (use with --get-ledger)")(
+            "walk-txns",
+            "Walk all transaction items in the ledger (use with --get-ledger)");
 
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -562,11 +565,119 @@ main(int argc, char* argv[])
                 xdata::Protocol::load_from_file(protocol_path);
 
             // Open reader
-            CatlV2Reader reader(input_file);
+            auto reader = CatlV2Reader::create(input_file);
 
             // Perform lookup
             LOGI("Looking up key: \"", key_hex, "\" in ledger: ", ledger_seq);
-            lookup_key(reader, protocol, key_hex, ledger_seq, is_transaction);
+            lookup_key(*reader, protocol, key_hex, ledger_seq, is_transaction);
+
+            return 0;
+        }
+
+        // Check if we're in walk mode
+        if (vm.count("walk-state") || vm.count("walk-txns"))
+        {
+            // Walk mode - requires input file and ledger
+            if (!vm.count("input"))
+            {
+                std::cerr << "Error: --input is required for walk mode"
+                          << std::endl;
+                return 1;
+            }
+            if (!vm.count("get-ledger"))
+            {
+                std::cerr << "Error: --get-ledger is required for walk mode"
+                          << std::endl;
+                return 1;
+            }
+
+            std::string input_file = vm["input"].as<std::string>();
+            uint32_t ledger_seq = vm["get-ledger"].as<uint32_t>();
+            std::string protocol_path =
+                vm["protocol-definitions"].as<std::string>();
+
+            // Load protocol for JSON formatting
+            xdata::Protocol protocol =
+                xdata::Protocol::load_from_file(protocol_path);
+
+            // Open reader
+            auto reader = CatlV2Reader::create(input_file);
+
+            // Seek to the requested ledger
+            if (!reader->seek_to_ledger(ledger_seq))
+            {
+                LOGE("Ledger ", ledger_seq, " not found in file");
+                return 1;
+            }
+
+            // Read the ledger header
+            auto ledger_info = reader->read_ledger_info();
+            LOGI("Walking items in ledger ", ledger_info.seq);
+
+            // Walk state items if requested
+            if (vm.count("walk-state"))
+            {
+                LOGI("=== State Tree Items ===");
+                size_t count = 0;
+                reader->walk_state_items([&](const Key& key,
+                                             const Slice& data) {
+                    count++;
+                    LOGI("--- State Entry ", count, " ---");
+                    LOGI("Key: ", key.hex());
+
+                    try
+                    {
+                        auto json_result = parse_single_object(data, protocol);
+                        pretty_print_json(std::cout, json_result);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        LOGE("Failed to parse entry: ", e.what());
+                        display_hex_fallback(data);
+                    }
+
+                    return true;  // Continue walking
+                });
+                LOGI("Total state entries: ", count);
+            }
+
+            // Walk transaction items if requested
+            if (vm.count("walk-txns"))
+            {
+                LOGI("=== Transaction Tree Items ===");
+                size_t count = 0;
+                std::set<std::string> seen_txids;
+                reader->walk_tx_items([&](const Key& key, const Slice& data) {
+                    count++;
+                    std::string txid = key.hex();
+
+                    // Check for duplicate
+                    if (seen_txids.find(txid) != seen_txids.end())
+                    {
+                        LOGE("DUPLICATE TRANSACTION DETECTED: ", txid);
+                        LOGE("This transaction was already processed!");
+                        return false;  // Stop iteration
+                    }
+                    seen_txids.insert(txid);
+
+                    LOGI("Transaction[", count, "] TxID: ", txid);
+
+                    try
+                    {
+                        auto json_result =
+                            parse_transaction_with_metadata(data, protocol);
+                        pretty_print_json(std::cout, json_result);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        LOGE("Failed to parse transaction: ", e.what());
+                        display_hex_fallback(data);
+                    }
+
+                    return true;  // Continue walking
+                });
+                LOGI("Total transactions: ", count);
+            }
 
             return 0;
         }
