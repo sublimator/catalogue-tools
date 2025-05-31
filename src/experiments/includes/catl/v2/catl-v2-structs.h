@@ -5,6 +5,7 @@
 #include <array>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
+#include <optional>
 
 namespace catl::v2 {
 
@@ -145,6 +146,68 @@ struct InnerNodeHeader
             }
         }
         return count;
+    }
+};
+
+/**
+ * Lightweight iterator for non-empty children in sparse offset array
+ *
+ * Designed for maximum performance - no virtual functions, minimal state.
+ * Only iterates over branches that actually have children.
+ */
+struct ChildIterator
+{
+    const InnerNodeHeader* header;
+    const uint64_t* offsets;  // Direct pointer to offset array
+    uint32_t remaining_mask;  // Bitmask of remaining children to visit
+    int offset_index;         // Current index in sparse offset array
+
+    ChildIterator(const InnerNodeHeader* h, const uint8_t* offset_data)
+        : header(h)
+        , offsets(reinterpret_cast<const uint64_t*>(offset_data))
+        , remaining_mask(0)
+        , offset_index(0)
+    {
+        // Build initial mask of non-empty children
+        for (int i = 0; i < 16; ++i)
+        {
+            if (header->get_child_type(i) != ChildType::EMPTY)
+            {
+                remaining_mask |= (1u << i);
+            }
+        }
+    }
+
+    struct Child
+    {
+        int branch;
+        ChildType type;
+        uint64_t offset;
+    };
+
+    // Check if more children available
+    inline bool
+    has_next() const
+    {
+        return remaining_mask != 0;
+    }
+
+    // Get next child - caller must check has_next() first
+    inline Child
+    next()
+    {
+        // Find next set bit (next non-empty branch)
+        int branch = __builtin_ctz(remaining_mask);  // Count trailing zeros
+
+        Child child;
+        child.branch = branch;
+        child.type = header->get_child_type(branch);
+        child.offset = offsets[offset_index++];
+
+        // Clear this bit from remaining mask
+        remaining_mask &= ~(1u << branch);
+
+        return child;
     }
 };
 
