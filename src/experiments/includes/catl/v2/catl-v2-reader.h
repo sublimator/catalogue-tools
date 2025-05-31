@@ -717,18 +717,12 @@ private:
         StackEntry stack[64];
         int stack_top = 0;
 
-        // For root node, we need to determine type by checking first byte
-        bool root_is_leaf = false;
-        if (root_offset + 2 <= file_size_)
-        {
-            std::uint16_t first_two_bytes;
-            std::memcpy(&first_two_bytes, data_ + root_offset, 2);
-            // Inner nodes have depth 0-63 in first byte
-            root_is_leaf = (first_two_bytes >= 64);
-        }
-
         // Push root
-        stack[stack_top++] = StackEntry(root_offset, start_depth, root_is_leaf);
+        // TODO: should be able to read the inner node here to determine the
+        // depth if this function should support also walking a leaf node, that
+        // would have to be passed in as an argument to the function, because
+        // it's not possible to determine a leaf from an inner node.
+        stack[stack_top++] = StackEntry(root_offset, start_depth, false);
 
         size_t items_visited = 0;
         size_t iterations = 0;
@@ -754,16 +748,6 @@ private:
                 entry.is_leaf,
                 ", is_processing=",
                 entry.is_processing_children);
-
-            if (entry.node_offset + 2 > file_size_)
-            {
-                LOGE(
-                    "Node offset ",
-                    entry.node_offset,
-                    " exceeds file size ",
-                    file_size_);
-                throw std::runtime_error("Node offset exceeds file bounds");
-            }
 
             if (entry.is_leaf)
             {

@@ -364,20 +364,6 @@ private:
         {
             return format_amount(data);
         }
-        else if (
-            field.meta.type == FieldTypes::Blob || field.meta.is_vl_encoded)
-        {
-            // For blobs, check if it might be ASCII text
-            if (is_printable_text(data))
-            {
-                return boost::json::string(std::string(
-                    reinterpret_cast<const char*>(data.data()), data.size()));
-            }
-            else
-            {
-                return boost::json::string(to_hex(data));
-            }
-        }
         else if (field.meta.type == FieldTypes::PathSet)
         {
             return format_pathset(data);
@@ -393,6 +379,20 @@ private:
                 arr.push_back(boost::json::string(to_hex(hash_slice)));
             }
             return arr;
+        }
+        else if (
+            field.meta.type == FieldTypes::Blob || field.meta.is_vl_encoded)
+        {
+            // For blobs, check if it might be ASCII text
+            if (is_printable_text(data))
+            {
+                return boost::json::string(std::string(
+                    reinterpret_cast<const char*>(data.data()), data.size()));
+            }
+            else
+            {
+                return boost::json::string(to_hex(data));
+            }
         }
 
         // Default: hex encode
