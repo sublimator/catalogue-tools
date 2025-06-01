@@ -21,8 +21,11 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <random>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <boost/filesystem.hpp>
@@ -506,7 +509,12 @@ main(int argc, char* argv[])
             "walk-state",
             "Walk all state items in the ledger (use with --get-ledger)")(
             "walk-txns",
-            "Walk all transaction items in the ledger (use with --get-ledger)");
+            "Walk all transaction items in the ledger (use with --get-ledger)")(
+            "parallel", "Use parallel processing for walk operations")(
+            "prefetch", "Use prefetch thread with parallel processing")(
+            "threads",
+            po::value<size_t>()->default_value(8),
+            "Number of threads for parallel processing");
 
         po::variables_map vm;
         po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -617,27 +625,48 @@ main(int argc, char* argv[])
             // Walk state items if requested
             if (vm.count("walk-state"))
             {
-                LOGI("=== State Tree Items ===");
+                // Create walk options based on command line flags
+                catl::v2::CatlV2Reader::WalkOptions walk_opts;
+                if (vm.count("parallel") > 0)
+                {
+                    walk_opts.parallel = true;
+                    walk_opts.prefetch = vm.count("prefetch") > 0;
+                    walk_opts.num_threads = vm["threads"].as<size_t>();
+                }
+
+                LOGI(
+                    "=== State Tree Items ",
+                    walk_opts.parallel
+                        ? (walk_opts.prefetch ? "(PARALLEL+PREFETCH "
+                                              : "(PARALLEL ") +
+                            std::to_string(walk_opts.num_threads) + " threads)"
+                        : "(SEQUENTIAL)",
+                    " ===");
                 size_t count = 0;
-                reader->walk_state_items([&](const Key& key,
-                                             const Slice& data) {
-                    count++;
-                    LOGI("--- State Entry ", count, " ---");
-                    LOGI("Key: ", key.hex());
+                std::mutex count_mutex;
+                reader->walk_state_items(
+                    [&](const Key& key, const Slice& data) {
+                        (void)key;  // Unused when output is disabled
+                        {
+                            std::lock_guard<std::mutex> lock(count_mutex);
+                            ++count;
+                        }
 
-                    try
-                    {
-                        auto json_result = parse_single_object(data, protocol);
-                        pretty_print_json(std::cout, json_result);
-                    }
-                    catch (const std::exception& e)
-                    {
-                        LOGE("Failed to parse entry: ", e.what());
-                        display_hex_fallback(data);
-                    }
+                        try
+                        {
+                            auto json_result =
+                                parse_single_object(data, protocol);
+                            // pretty_print_json(std::cout, json_result);
+                        }
+                        catch (const std::exception& e)
+                        {
+                            LOGE("Failed to parse entry: ", e.what());
+                            display_hex_fallback(data);
+                        }
 
-                    return true;  // Continue walking
-                });
+                        return true;  // Continue walking
+                    },
+                    walk_opts);
                 LOGI("Total state entries: ", count);
             }
 

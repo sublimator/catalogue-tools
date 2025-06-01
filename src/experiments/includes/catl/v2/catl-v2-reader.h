@@ -7,15 +7,24 @@
 #include "catl/v2/catl-v2-structs.h"
 #include "shamap-custom-traits.h"
 
+#include <atomic>
 #include <boost/filesystem.hpp>
 #include <boost/iostreams/device/mapped_file.hpp>
+#include <chrono>
 #include <cstring>
+#include <errno.h>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
+
+#if defined(__APPLE__) || defined(__linux__)
+#include <sys/mman.h>
+#endif
 
 #include "../../../../hasher-v1/includes/catl/hasher-v1/ledger.h"
 
@@ -312,6 +321,44 @@ public:
     }
 
     /**
+     * Options for controlling tree traversal behavior
+     */
+    struct WalkOptions
+    {
+        bool parallel;       // Use parallel processing with thread pool
+        bool prefetch;       // Do prefetch pass before parallel (experimental)
+        size_t num_threads;  // Number of worker threads for parallel mode
+
+        // Default constructor - sequential mode
+        WalkOptions() : parallel(false), prefetch(false), num_threads(8)
+        {
+        }
+
+        // Constructor for custom settings
+        WalkOptions(bool p, bool pf, size_t nt)
+            : parallel(p), prefetch(pf), num_threads(nt)
+        {
+        }
+
+        // Convenience constructors
+        static WalkOptions
+        sequential()
+        {
+            return WalkOptions();
+        }
+        static WalkOptions
+        parallel_only()
+        {
+            return WalkOptions(true, false, 8);
+        }
+        static WalkOptions
+        parallel_with_prefetch()
+        {
+            return WalkOptions(true, true, 8);
+        }
+    };
+
+    /**
      * Walk all items in the current state tree
      *
      * Performs a depth-first traversal of the tree, calling the callback
@@ -319,20 +366,36 @@ public:
      *
      * @param callback Function called for each item: (Key, Slice) -> bool
      *                 Return false to stop iteration
+     * @param options Controls traversal behavior (parallel, prefetch, etc)
      * @return Number of items visited
      */
     template <typename Callback>
     size_t
-    walk_state_items(Callback&& callback)
+    walk_state_items(Callback&& callback, const WalkOptions& options = {})
     {
         size_t tree_offset = current_pos_;
         LOGD(
             "walk_state_items - tree_offset: ",
             tree_offset,
             ", state_tree_size: ",
-            current_trees_header_.state_tree_size);
-        return walk_items_at_node(
-            tree_offset, 0, std::forward<Callback>(callback));
+            current_trees_header_.state_tree_size,
+            ", parallel: ",
+            options.parallel,
+            ", prefetch: ",
+            options.prefetch,
+            ", num_threads: ",
+            options.num_threads);
+
+        if (!options.parallel)
+        {
+            return walk_items_at_node(
+                tree_offset, 0, std::forward<Callback>(callback));
+        }
+        else
+        {
+            return walk_items_parallel(
+                tree_offset, 0, std::forward<Callback>(callback), options);
+        }
     }
 
     /**
@@ -826,15 +889,17 @@ private:
                         ", depth=",
                         entry.depth,
                         ", header depth=",
-                        (int)inner_header->bits.depth);
+                        static_cast<int>(inner_header->bits.depth));
 
+                    // TODO: this is actually fine, because it's a collapsed
+                    // tree of course!?
                     if (inner_header->bits.depth != entry.depth)
                     {
-                        LOGW(
-                            "Depth mismatch: expected ",
-                            entry.depth,
-                            " but header says ",
-                            (int)inner_header->bits.depth);
+                        // LOGW(
+                        //     "Depth mismatch: expected ",
+                        //     entry.depth,
+                        //     " but header says ",
+                        //     static_cast<int>(inner_header->bits.depth));
                     }
 
                     // Show all children for debugging
@@ -970,6 +1035,321 @@ private:
             iterations,
             " iterations");
         return items_visited;
+    }
+
+    /**
+     * Walk items in parallel using a thread pool
+     *
+     * @param root_offset Offset to the root node
+     * @param start_depth Starting depth (usually 0)
+     * @param callback Function to call for each leaf: (Key, Slice) -> bool
+     * @param options Walk options including thread count and prefetch settings
+     * @return Number of items visited
+     */
+    template <typename Callback>
+    size_t
+    walk_items_parallel(
+        size_t root_offset,
+        int start_depth,
+        Callback&& callback,
+        const WalkOptions& options)
+    {
+        const size_t NUM_THREADS = options.num_threads;
+
+        std::stringstream ss;
+        ss << std::this_thread::get_id();
+        LOGI(
+            "walk_items_parallel START - root_offset: ",
+            root_offset,
+            ", start_depth: ",
+            start_depth,
+            ", main thread: ",
+            ss.str(),
+            ", using ",
+            NUM_THREADS,
+            " threads");
+
+        // First, read the root node to get its children
+        if (root_offset + sizeof(InnerNodeHeader) > file_size_)
+        {
+            throw std::runtime_error("Root node header exceeds file bounds");
+        }
+
+        auto root_header =
+            reinterpret_cast<const InnerNodeHeader*>(data_ + root_offset);
+
+        LOGI(
+            "Root node depth: ",
+            static_cast<int>(root_header->bits.depth),
+            ", child count: ",
+            root_header->count_children());
+
+        // Collect all direct children
+        struct ChildInfo
+        {
+            size_t offset;
+            int branch;
+            bool is_leaf;
+        };
+        std::vector<ChildInfo> children;
+
+        size_t offsets_start = root_offset + sizeof(InnerNodeHeader);
+        const uint64_t* offsets =
+            reinterpret_cast<const uint64_t*>(data_ + offsets_start);
+        int offset_index = 0;
+
+        for (int branch = 0; branch < 16; ++branch)
+        {
+            ChildType child_type = root_header->get_child_type(branch);
+            if (child_type != ChildType::EMPTY)
+            {
+                ChildInfo info;
+                info.offset = offsets[offset_index++];
+                info.branch = branch;
+                info.is_leaf = (child_type == ChildType::LEAF);
+                children.push_back(info);
+
+                LOGD(
+                    "Root child[",
+                    branch,
+                    "]: offset=",
+                    info.offset,
+                    ", type=",
+                    info.is_leaf ? "LEAF" : "INNER");
+            }
+        }
+
+        // Thread-safe callback wrapper and item counter
+        std::mutex callback_mutex;
+        std::atomic<size_t> total_items{0};
+        std::atomic<bool> should_stop{false};
+
+        auto thread_safe_callback = [&](const Key& key,
+                                        const Slice& data) -> bool {
+            if (should_stop.load())
+                return false;
+
+            // std::lock_guard<std::mutex> lock(callback_mutex);
+            bool continue_walking = callback(key, data);
+            if (!continue_walking)
+            {
+                should_stop.store(true);
+            }
+            return continue_walking;
+        };
+
+        // Create work queue for children to process
+        std::mutex work_mutex;
+        size_t next_child_idx = 0;
+
+        // Worker function that processes 2 children at a time
+        auto worker = [&]() {
+            std::stringstream tid;
+            tid << std::this_thread::get_id();
+            LOGI("Worker thread ", tid.str(), " started");
+
+            while (true)
+            {
+                // Get next 2 children to process
+                std::vector<ChildInfo> my_children;
+                {
+                    std::lock_guard<std::mutex> lock(work_mutex);
+                    if (next_child_idx >= children.size())
+                        break;
+
+                    // Take up to 2 children
+                    size_t end = std::min(next_child_idx + 2, children.size());
+                    for (size_t i = next_child_idx; i < end; ++i)
+                    {
+                        my_children.push_back(children[i]);
+                    }
+                    next_child_idx = end;
+
+                    LOGI(
+                        "Thread ",
+                        tid.str(),
+                        " took children ",
+                        next_child_idx - my_children.size(),
+                        " to ",
+                        next_child_idx - 1);
+                }
+
+                // Process the children we took
+                for (const auto& child : my_children)
+                {
+                    if (child.is_leaf)
+                    {
+                        // Process leaf directly
+                        LOGI(
+                            "Thread ",
+                            tid.str(),
+                            " processing leaf child[",
+                            child.branch,
+                            "]");
+
+                        if (child.offset + sizeof(LeafHeader) > file_size_)
+                        {
+                            throw std::runtime_error(
+                                "Leaf header exceeds file bounds");
+                        }
+
+                        auto leaf_header = reinterpret_cast<const LeafHeader*>(
+                            data_ + child.offset);
+                        Key leaf_key(leaf_header->key.data());
+
+                        size_t data_offset = child.offset + sizeof(LeafHeader);
+                        size_t data_size = leaf_header->data_size();
+
+                        if (data_offset + data_size > file_size_)
+                        {
+                            throw std::runtime_error(
+                                "Leaf data exceeds file bounds");
+                        }
+
+                        Slice leaf_data(data_ + data_offset, data_size);
+
+                        if (thread_safe_callback(leaf_key, leaf_data))
+                        {
+                            total_items.fetch_add(1);
+                        }
+                    }
+                    else
+                    {
+                        // Process inner node subtree
+                        LOGI(
+                            "Thread ",
+                            tid.str(),
+                            " processing inner child[",
+                            child.branch,
+                            "]");
+
+                        try
+                        {
+                            size_t items = walk_items_at_node(
+                                child.offset,
+                                start_depth + 1,
+                                thread_safe_callback);
+                            total_items.fetch_add(items);
+
+                            LOGI(
+                                "Thread ",
+                                tid.str(),
+                                " completed child[",
+                                child.branch,
+                                "], items: ",
+                                items);
+                        }
+                        catch (const std::exception& e)
+                        {
+                            LOGE(
+                                "Thread error in child[",
+                                child.branch,
+                                "]: ",
+                                e.what());
+                        }
+                    }
+                }
+            }
+
+            LOGI("Worker thread ", tid.str(), " finished");
+        };
+
+        // Create thread vector
+        std::vector<std::thread> threads;
+        threads.reserve(NUM_THREADS);
+
+        // If prefetching, run the prefetch pass first and wait for completion
+        if (options.prefetch)
+        {
+            LOGI("Starting prefetch pass");
+            auto start_time = std::chrono::high_resolution_clock::now();
+
+            size_t prefetched = 0;
+
+            // First, madvise the entire tree region!
+            size_t tree_size = current_trees_header_.state_tree_size;
+
+            LOGI(
+                "Calling madvise(MADV_WILLNEED) on ",
+                tree_size,
+                " bytes at offset ",
+                root_offset);
+
+            // We don't actually know if madvise is too expensive!
+            // #if defined(__APPLE__) || defined(__linux__)
+            // if (madvise(const_cast<uint8_t*>(tree_start), tree_size,
+            // MADV_WILLNEED) != 0)
+            // {
+            //     LOGW("madvise(MADV_WILLNEED) failed: ", strerror(errno));
+            // }
+            // else
+            // {
+            //     LOGI("madvise(MADV_WILLNEED) succeeded!");
+            // }
+            //
+            // // Also try MADV_SEQUENTIAL for good measure
+            // if (madvise(const_cast<uint8_t*>(tree_start), tree_size,
+            // MADV_SEQUENTIAL) != 0)
+            // {
+            //     LOGW("madvise(MADV_SEQUENTIAL) failed: ", strerror(errno));
+            // }
+            // #endif
+
+            // Now walk and touch pages to ensure they're actually loaded
+            walk_items_at_node(
+                root_offset,
+                start_depth,
+                [&prefetched](const Key& key, const Slice& data) {
+                    (void)key;
+                    (void)data;
+                    // Just touch first byte of key and data to trigger page
+                    // faults volatile uint8_t k = key.data()[0]; volatile
+                    // uint8_t d = data.data()[0]; (void)k; (void)d;
+
+                    // NO PER-ITEM MADVISE - it's too expensive!
+
+                    prefetched++;
+                    // if (prefetched % 10000 == 0) {
+                    //     LOGI("Prefetched ", prefetched, " items");
+                    // }
+                    //
+                    return true;
+                });
+
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    end_time - start_time);
+
+            LOGW(
+                "Prefetch complete: ",
+                prefetched,
+                " items in ",
+                duration.count(),
+                "ms");
+            LOGW("Pausing for 2 seconds to let you see the timing...");
+
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+
+            LOGW("Resume! Now starting parallel processing with warm cache...");
+        }
+
+        // Start worker threads
+
+        for (size_t i = 0; i < NUM_THREADS; ++i)
+        {
+            threads.emplace_back(worker);
+        }
+
+        // Wait for all threads to complete
+        for (auto& thread : threads)
+        {
+            thread.join();
+        }
+
+        size_t final_count = total_items.load();
+        LOGD("Parallel walk complete - total items: ", final_count);
+        return final_count;
     }
 };
 
