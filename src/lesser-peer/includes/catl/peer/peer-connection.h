@@ -11,11 +11,6 @@
 
 namespace catl::peer {
 
-// Forward declaration for friend access
-namespace monitor {
-class peer_monitor;
-}
-
 class peer_connection : public std::enable_shared_from_this<peer_connection>
 {
 public:
@@ -57,8 +52,12 @@ public:
     void
     close();
 
-    // Get socket for acceptor (friend access)
-    friend class monitor::peer_monitor;
+    // Get socket for accept operations
+    ssl_socket&
+    socket()
+    {
+        return *socket_;
+    }
 
 private:
     void
