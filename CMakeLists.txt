@@ -13,12 +13,16 @@ endif()
 
 include(cmake/CheckCompiler.cmake)
 include(cmake/StrictIncludes.cmake)
+include(cmake/Protobuf.cmake)
+include(cmake/Secp256k1.cmake)
+
 # include(cmake/IncludeWhatYouUse.cmake) # WIP - too slow/pedantic for regular use
 
 # Requires passing -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
 find_package(Boost REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(GTest REQUIRED)
+find_package(libsodium REQUIRED)
 
 # Set C++ standard for all targets
 set(CMAKE_CXX_STANDARD 20)
@@ -72,6 +76,9 @@ add_subdirectory(src/x-data)
 
 # Add the experiments module
 add_subdirectory(src/experiments)
+
+# Add the lesser-peer module
+add_subdirectory(src/lesser-peer)
 
 # Add tests if testing is enabled
 option(BUILD_TESTING "Build the testing tree" ON)

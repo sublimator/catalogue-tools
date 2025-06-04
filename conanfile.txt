@@ -4,6 +4,8 @@ boost/1.86.0
 zlib/1.3.1
 openssl/3.3.2
 zstd/1.5.7
+protobuf/3.21.12
+libsodium/1.0.20
 
 [generators]
 CMakeDeps
