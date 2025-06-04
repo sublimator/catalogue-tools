@@ -170,13 +170,18 @@ packet_processor::handle_manifests(std::vector<std::uint8_t> const& payload)
     {
         auto const& manifest = manifests.list(i);
         auto const& sto = manifest.stobject();
-        LOGI("Manifest ", i, " is ", sto.size(), " bytes:");
-        print_hex(
-            reinterpret_cast<std::uint8_t const*>(sto.data()), sto.size());
+        
         if (!config_.no_json)
         {
-            print_sto(sto);
+            LOGI("Manifest ", i, " is ", sto.size(), " bytes: ", get_sto_json(sto));
         }
+        else
+        {
+            LOGI("Manifest ", i, " is ", sto.size(), " bytes:");
+        }
+        
+        print_hex(
+            reinterpret_cast<std::uint8_t const*>(sto.data()), sto.size());
     }
 }
 
@@ -190,14 +195,19 @@ packet_processor::handle_transaction(std::vector<std::uint8_t> const& payload)
         return;
     }
 
-    LOGI(" mtTRANSACTION");
     auto const& raw_txn = txn.rawtransaction();
-    print_hex(
-        reinterpret_cast<std::uint8_t const*>(raw_txn.data()), raw_txn.size());
+    
     if (!config_.no_json)
     {
-        print_sto(raw_txn);
+        LOGI(" mtTRANSACTION ", get_sto_json(raw_txn));
     }
+    else
+    {
+        LOGI(" mtTRANSACTION");
+    }
+    
+    print_hex(
+        reinterpret_cast<std::uint8_t const*>(raw_txn.data()), raw_txn.size());
 }
 
 void
@@ -355,13 +365,18 @@ packet_processor::handle_validation(std::vector<std::uint8_t> const& payload)
         return;
     }
 
-    LOGI(" mtVALIDATION");
     auto const& val = validation.validation();
-    print_hex(reinterpret_cast<std::uint8_t const*>(val.data()), val.size());
+    
     if (!config_.no_json)
     {
-        print_sto(val);
+        LOGI(" mtVALIDATION ", get_sto_json(val));
     }
+    else
+    {
+        LOGI(" mtVALIDATION");
+    }
+    
+    print_hex(reinterpret_cast<std::uint8_t const*>(val.data()), val.size());
 }
 
 void
@@ -394,8 +409,8 @@ packet_processor::print_hex(std::uint8_t const* data, std::size_t len) const
     std::cout << std::dec << "\n";
 }
 
-void
-packet_processor::print_sto(std::string const& st) const
+std::string
+packet_processor::get_sto_json(std::string const& st) const
 {
     try
     {
@@ -414,12 +429,18 @@ packet_processor::print_sto(std::string const& st) const
         xdata::parse_with_visitor(ctx, protocol, visitor);
 
         // Convert JSON to string
-        LOGI(boost::json::serialize(visitor.get_result()));
+        return boost::json::serialize(visitor.get_result());
     }
     catch (std::exception const& e)
     {
-        LOGI("Could not deserialize STObject: ", e.what());
+        return std::string("Could not deserialize STObject: ") + e.what();
     }
+}
+
+void
+packet_processor::print_sto(std::string const& st) const
+{
+    LOGI(get_sto_json(st));
 }
 
 void

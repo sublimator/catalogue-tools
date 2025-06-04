@@ -63,6 +63,8 @@ private:
     void
     print_sto(std::string const& st) const;
     std::string
+    get_sto_json(std::string const& st) const;
+    std::string
     format_bytes(double bytes) const;
 
 private:
