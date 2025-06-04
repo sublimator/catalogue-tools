@@ -26,20 +26,12 @@ struct packet_stats
 
 using packet_counters = std::map<int, packet_stats>;
 
-struct connection_config
+// Core peer connection configuration
+struct peer_config
 {
     std::string host;
     std::uint16_t port;
     bool listen_mode = false;
-    bool use_cls = true;
-    bool no_dump = false;
-    bool slow = false;
-    bool manifests_only = false;
-    bool raw_hex = false;
-    bool no_stats = false;
-    bool no_http = false;
-    bool no_hex = false;
-    bool no_json = false;  // Control JSON output separately from hex dumps
 
     // SSL/TLS config
     std::string cert_path = "listen.cert";
@@ -53,11 +45,8 @@ struct connection_config
     std::string protocol_definitions_path;
 };
 
-struct packet_filter
-{
-    std::set<int> show;
-    std::set<int> hide;
-};
+// TODO: Remove after migration - kept for backward compatibility
+using connection_config = peer_config;
 
 enum class packet_type : std::uint16_t {
     manifests = 2,

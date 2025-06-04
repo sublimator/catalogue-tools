@@ -2,8 +2,8 @@
 
 #include "catl/peer/monitor/command-line.h"
 #include "catl/peer/monitor/packet-processor.h"
+#include "catl/peer/monitor/types.h"
 #include "catl/peer/peer-connection.h"
-#include "catl/peer/types.h"
 
 #include <memory>
 #include <mutex>
@@ -15,7 +15,7 @@ namespace catl::peer::monitor {
 class peer_monitor
 {
 public:
-    peer_monitor(connection_config config, packet_filter filter);
+    peer_monitor(monitor_config config);
     ~peer_monitor();
 
     // Run the monitor (blocking)
@@ -43,8 +43,7 @@ private:
     handle_connection(std::shared_ptr<peer_connection> connection);
 
 private:
-    connection_config config_;
-    packet_filter filter_;
+    monitor_config config_;
 
     asio::io_context io_context_;
     std::unique_ptr<asio::ssl::context> ssl_context_;

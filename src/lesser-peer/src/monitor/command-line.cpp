@@ -48,7 +48,9 @@ command_line_parser::command_line_parser()
         "no-stats", po::bool_switch(), "Don't show statistics")(
         "no-http", po::bool_switch(), "Don't show HTTP upgrade messages")(
         "no-hex", po::bool_switch(), "Don't show hex dumps")(
-        "no-json", po::bool_switch(), "Don't show JSON output for transactions/validations")(
+        "no-json",
+        po::bool_switch(),
+        "Don't show JSON output for transactions/validations")(
         "raw-hex", po::bool_switch(), "Show raw hex without formatting")(
         "slow",
         po::bool_switch(),
@@ -75,7 +77,7 @@ command_line_parser::command_line_parser()
         .add(filter_desc_);
 }
 
-std::optional<connection_config>
+std::optional<monitor_config>
 command_line_parser::parse(int argc, char* argv[])
 {
     try
@@ -102,29 +104,32 @@ command_line_parser::parse(int argc, char* argv[])
 
         po::notify(vm);
 
-        connection_config config;
-        config.host = vm["host"].as<std::string>();
-        config.port = vm["port"].as<std::uint16_t>();
-        config.listen_mode = vm["listen"].as<bool>();
-        config.cert_path = vm["cert"].as<std::string>();
-        config.key_path = vm["key"].as<std::string>();
-        config.io_threads = vm["threads"].as<std::size_t>();
-        config.connection_timeout =
-            std::chrono::seconds(vm["timeout"].as<int>());
+        monitor_config config;
 
-        config.use_cls = !vm["no-cls"].as<bool>();
-        config.no_dump = vm["no-dump"].as<bool>();
-        config.no_stats = vm["no-stats"].as<bool>();
-        config.no_http = vm["no-http"].as<bool>();
-        config.no_hex = vm["no-hex"].as<bool>();
-        config.no_json = vm["no-json"].as<bool>();
-        config.raw_hex = vm["raw-hex"].as<bool>();
-        config.slow = vm["slow"].as<bool>();
-        config.manifests_only = vm["manifests-only"].as<bool>();
-        config.protocol_definitions_path =
+        // Populate peer config
+        config.peer.host = vm["host"].as<std::string>();
+        config.peer.port = vm["port"].as<std::uint16_t>();
+        config.peer.listen_mode = vm["listen"].as<bool>();
+        config.peer.cert_path = vm["cert"].as<std::string>();
+        config.peer.key_path = vm["key"].as<std::string>();
+        config.peer.io_threads = vm["threads"].as<std::size_t>();
+        config.peer.connection_timeout =
+            std::chrono::seconds(vm["timeout"].as<int>());
+        config.peer.protocol_definitions_path =
             vm["protocol-definitions"].as<std::string>();
 
-        if (config.no_hex && config.raw_hex)
+        // Populate display config
+        config.display.use_cls = !vm["no-cls"].as<bool>();
+        config.display.no_dump = vm["no-dump"].as<bool>();
+        config.display.no_stats = vm["no-stats"].as<bool>();
+        config.display.no_http = vm["no-http"].as<bool>();
+        config.display.no_hex = vm["no-hex"].as<bool>();
+        config.display.no_json = vm["no-json"].as<bool>();
+        config.display.raw_hex = vm["raw-hex"].as<bool>();
+        config.display.slow = vm["slow"].as<bool>();
+        config.display.manifests_only = vm["manifests-only"].as<bool>();
+
+        if (config.display.no_hex && config.display.raw_hex)
         {
             throw std::runtime_error("Cannot use both --no-hex and --raw-hex");
         }
@@ -142,6 +147,9 @@ command_line_parser::parse(int argc, char* argv[])
         {
             parse_packet_filter("", vm["hide"].as<std::string>());
         }
+
+        // Copy filter to config
+        config.filter = filter_;
 
         return config;
     }
