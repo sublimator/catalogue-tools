@@ -302,7 +302,7 @@ packet_processor::handle_status_change(std::vector<std::uint8_t> const& payload)
     }
 
     std::stringstream msg;
-    msg << COLORED_WITH(PACKET_TYPE, "mtSTATUS_CHANGE");
+    msg << PACKET_TYPE << "mtSTATUS_CHANGE" << catl::color::RESET;
 
     if (status.has_newstatus())
     {
