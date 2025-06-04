@@ -5,9 +5,40 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 #include <algorithm>
 #include <ranges>
+
+// ANSI color codes for terminal output
+namespace catl::color {
+inline constexpr const char* RESET = "\033[0m";
+inline constexpr const char* BLACK = "\033[0;30m";
+inline constexpr const char* RED = "\033[0;31m";
+inline constexpr const char* GREEN = "\033[0;32m";
+inline constexpr const char* YELLOW = "\033[0;33m";
+inline constexpr const char* BLUE = "\033[0;34m";
+inline constexpr const char* MAGENTA = "\033[0;35m";
+inline constexpr const char* CYAN = "\033[0;36m";
+inline constexpr const char* WHITE = "\033[0;37m";
+
+// Bold variants
+inline constexpr const char* BOLD_BLACK = "\033[1;30m";
+inline constexpr const char* BOLD_RED = "\033[1;31m";
+inline constexpr const char* BOLD_GREEN = "\033[1;32m";
+inline constexpr const char* BOLD_YELLOW = "\033[1;33m";
+inline constexpr const char* BOLD_BLUE = "\033[1;34m";
+inline constexpr const char* BOLD_MAGENTA = "\033[1;35m";
+inline constexpr const char* BOLD_CYAN = "\033[1;36m";
+inline constexpr const char* BOLD_WHITE = "\033[1;37m";
+}  // namespace catl::color
+
+// Macro to wrap text in color codes
+// Usage: LOGI(COLORED(RED, "Error:"), " something went wrong")
+#define COLORED(color, text) catl::color::color, text, catl::color::RESET
+
+// For custom color variables that aren't in the namespace
+#define COLORED_WITH(color_var, text) color_var, text, catl::color::RESET
 
 #ifndef PROJECT_ROOT
 #define PROJECT_ROOT ""

@@ -3,11 +3,7 @@ add_library(
   src/lesser-peer.cpp
   src/crypto-utils.cpp
   src/packet-names.cpp
-  src/peer-connection.cpp
-  src/monitor/command-line.cpp
-  src/monitor/packet-processor.cpp
-  src/monitor/monitor.cpp
-  src/monitor/main.cpp)
+  src/peer-connection.cpp)
 
 target_include_directories(
   catl_lesser_peer
@@ -25,8 +21,8 @@ target_link_libraries(
          Boost::program_options
          catl::base58
          catl::core
-         catl::xdata
-  PUBLIC catl::core)
+         catl::catalogue_common
+         catl::xdata)
 
 # Link secp256k1 - either from system or built from source
 if(SECP256K1_FOUND)
@@ -45,7 +41,18 @@ target_sources(catl_lesser_peer PRIVATE ${PROTO_SRCS} ${PROTO_HDRS})
 
 add_library(catl::lesser-peer ALIAS catl_lesser_peer)
 
-# Also build standalone peermon executable
-add_executable(peermon src/monitor/main.cpp)
+# Build peermon executable with monitor-specific sources
+add_executable(
+  peermon
+  src/monitor/main.cpp
+  src/monitor/monitor.cpp
+  src/monitor/packet-processor.cpp
+  src/monitor/command-line.cpp)
+
 target_link_libraries(peermon PRIVATE catl_lesser_peer)
-target_compile_definitions(peermon PRIVATE BUILD_PEERMON_EXECUTABLE)
+
+# peermon needs access to generated protobuf headers and src directory
+target_include_directories(
+  peermon
+  PRIVATE ${CMAKE_CURRENT_BINARY_DIR}
+  PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/src)

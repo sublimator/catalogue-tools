@@ -63,7 +63,8 @@ main(int argc, char* argv[])
     try
     {
         // Create and run peer monitor
-        g_monitor = std::make_unique<catl::peer::monitor::peer_monitor>(config, filter);
+        g_monitor =
+            std::make_unique<catl::peer::monitor::peer_monitor>(config, filter);
 
         LOGI("Starting XRPL Peer Monitor");
         LOGI("Connecting to ", config.host, ":", config.port);
@@ -81,12 +82,3 @@ main(int argc, char* argv[])
 
     return 0;
 }
-
-// Also create standalone executable
-#ifdef BUILD_PEERMON_EXECUTABLE
-int
-peermon_main(int argc, char* argv[])
-{
-    return main(argc, argv);
-}
-#endif
