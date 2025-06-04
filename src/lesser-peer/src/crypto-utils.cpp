@@ -30,14 +30,17 @@ crypto_utils::crypto_utils()
     }
 
     // Randomize the context
-    std::random_device rd;
+    std::random_device random_dev;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
     std::array<std::uint8_t, 32> seed;
     for (auto& byte : seed)
     {
-        byte = static_cast<std::uint8_t>(rd());
+        byte = static_cast<std::uint8_t>(random_dev());
     }
 
-    if (!secp256k1_context_randomize(ctx_.get(), seed.data()))
+    if (!secp256k1_context_randomize(
+            ctx_.get(),
+            seed.data()))  // NOLINT(readability-implicit-bool-conversion)
     {
         throw std::runtime_error("Failed to randomize secp256k1 context");
     }
@@ -46,27 +49,30 @@ crypto_utils::crypto_utils()
 crypto_utils::~crypto_utils() = default;
 
 crypto_utils::node_keys
-crypto_utils::generate_node_keys()
+crypto_utils::generate_node_keys() const
 {
     node_keys keys;
 
     // Generate random secret key
-    std::random_device rd;
+    std::random_device random_dev;
     for (auto& byte : keys.secret_key)
     {
-        byte = static_cast<std::uint8_t>(rd());
+        byte = static_cast<std::uint8_t>(random_dev());
     }
 
     // Create public key
     secp256k1_pubkey pubkey;
-    if (!secp256k1_ec_pubkey_create(
-            ctx_.get(), &pubkey, keys.secret_key.data()))
+    if (!secp256k1_ec_pubkey_create(  // NOLINT(readability-implicit-bool-conversion)
+            ctx_.get(),
+            &pubkey,
+            keys.secret_key.data()))
     {
         throw std::runtime_error("Failed to create public key");
     }
 
     // Serialize public key (uncompressed)
     std::size_t output_len = 65;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
     std::array<std::uint8_t, 65> uncompressed;
     secp256k1_ec_pubkey_serialize(
         ctx_.get(),
@@ -105,7 +111,9 @@ crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
     if (key_file.good())
     {
         node_keys keys;
-        key_file.read(reinterpret_cast<char*>(keys.secret_key.data()), 32);
+        key_file.read(
+            reinterpret_cast<char*>(keys.secret_key.data()),
+            32);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
         if (key_file.gcount() == 32)
         {
             // Recreate public key from secret
@@ -115,6 +123,7 @@ crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
             {
                 // Serialize public key (uncompressed)
                 std::size_t output_len = 65;
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
                 std::array<std::uint8_t, 65> uncompressed;
                 secp256k1_ec_pubkey_serialize(
                     ctx_.get(),
@@ -156,7 +165,7 @@ crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
 std::string
 crypto_utils::create_session_signature(
     std::array<std::uint8_t, 32> const& secret_key,
-    std::array<std::uint8_t, 32> const& cookie)
+    std::array<std::uint8_t, 32> const& cookie) const
 {
     secp256k1_ecdsa_signature sig;
     if (!secp256k1_ecdsa_sign(
@@ -171,7 +180,7 @@ crypto_utils::create_session_signature(
     }
 
     // Serialize signature to DER format
-    std::array<std::uint8_t, 72> der_sig;
+    std::array<std::uint8_t, 72> der_sig{};
     std::size_t der_len = der_sig.size();
     secp256k1_ecdsa_signature_serialize_der(
         ctx_.get(), der_sig.data(), &der_len, &sig);
@@ -186,7 +195,7 @@ crypto_utils::create_session_signature(
         der_len,
         sodium_base64_VARIANT_ORIGINAL);
 
-    return std::string(b64_sig.data());
+    return {b64_sig.data()};
 }
 
 std::array<std::uint8_t, 32>
@@ -206,8 +215,9 @@ crypto_utils::create_ssl_cookie(
 
     // SHA512 the result and take first 32 bytes
     auto final_cookie = sha512(cookie1.data(), 64);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
     std::array<std::uint8_t, 32> result;
-    std::copy(final_cookie.begin(), final_cookie.begin() + 32, result.begin());
+    std::copy_n(final_cookie.begin(), 32, result.begin());
 
     return result;
 }
@@ -215,6 +225,7 @@ crypto_utils::create_ssl_cookie(
 std::array<std::uint8_t, 64>
 crypto_utils::sha512(std::uint8_t const* data, std::size_t len)
 {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
     std::array<std::uint8_t, 64> hash;
     crypto_hash_sha512(hash.data(), data, len);
     return hash;
@@ -223,6 +234,7 @@ crypto_utils::sha512(std::uint8_t const* data, std::size_t len)
 std::array<std::uint8_t, 32>
 crypto_utils::sha256(std::uint8_t const* data, std::size_t len)
 {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
     std::array<std::uint8_t, 32> hash;
     crypto_hash_sha256(hash.data(), data, len);
     return hash;

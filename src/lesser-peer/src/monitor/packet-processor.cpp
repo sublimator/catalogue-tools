@@ -116,10 +116,11 @@ packet_processor::process_packet(
 
 void
 packet_processor::handle_ping(
-    std::shared_ptr<peer_connection> connection,
+    std::shared_ptr<peer_connection> connection,  // NOLINT(performance-unnecessary-value-param) - need shared ownership
     std::vector<std::uint8_t> const& payload)
 {
     protocol::TMPing ping;
+    // NOLINTNEXTLINE(bugprone-narrowing-conversions) - protobuf API uses int for size
     if (!ping.ParseFromArray(payload.data(), payload.size()))
     {
         LOGE("Failed to parse TMPing");
