@@ -81,6 +81,7 @@ packet_processor::process_packet(
                 // Unknown packet
                 if (!config_.no_dump)
                 {
+                    // TODO: we should actually print the packet type name too
                     LOGI(
                         "Unknown packet [",
                         header.type,
@@ -170,7 +171,7 @@ packet_processor::handle_manifests(std::vector<std::uint8_t> const& payload)
         LOGI("Manifest ", i, " is ", sto.size(), " bytes:");
         print_hex(
             reinterpret_cast<std::uint8_t const*>(sto.data()), sto.size());
-        if (!config_.no_hex)
+        if (!config_.no_json)
         {
             print_sto(sto);
         }
@@ -191,7 +192,7 @@ packet_processor::handle_transaction(std::vector<std::uint8_t> const& payload)
     auto const& raw_txn = txn.rawtransaction();
     print_hex(
         reinterpret_cast<std::uint8_t const*>(raw_txn.data()), raw_txn.size());
-    if (!config_.no_hex)
+    if (!config_.no_json)
     {
         print_sto(raw_txn);
     }
@@ -355,7 +356,7 @@ packet_processor::handle_validation(std::vector<std::uint8_t> const& payload)
     LOGI(" mtVALIDATION");
     auto const& val = validation.validation();
     print_hex(reinterpret_cast<std::uint8_t const*>(val.data()), val.size());
-    if (!config_.no_hex)
+    if (!config_.no_json)
     {
         print_sto(val);
     }
