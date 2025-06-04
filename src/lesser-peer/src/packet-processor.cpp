@@ -81,14 +81,19 @@ packet_processor::process_packet(
                 // Unknown packet
                 if (!config_.no_dump)
                 {
-                    std::cout << "Unknown packet [" << header.type
-                              << "] size = " << header.payload_size;
+                    LOGI(
+                        "Unknown packet [",
+                        header.type,
+                        "] size = ",
+                        header.payload_size);
                     if (header.compressed)
                     {
-                        std::cout << " (compressed, uncompressed size = "
-                                  << header.uncompressed_size << ")";
+                        LOGI(
+                            " (compressed, uncompressed size = ",
+                            header.uncompressed_size,
+                            ")");
                     }
-                    std::cout << "\n";
+                    LOGI("");
                     print_hex(
                         payload.data(),
                         std::min<std::size_t>(payload.size(), 128));
@@ -122,10 +127,10 @@ packet_processor::handle_ping(
 
     if (!config_.no_dump)
     {
-        std::cout << std::time(nullptr) << " mtPING - ";
+        LOGI(" mtPING - ");
         if (ping.type() == protocol::TMPing_pingType_ptPING)
         {
-            std::cout << "replying PONG\n";
+            LOGI("replying PONG");
 
             // Send pong response
             ping.set_type(protocol::TMPing_pingType_ptPONG);
@@ -142,7 +147,7 @@ packet_processor::handle_ping(
         }
         else
         {
-            std::cout << "received PONG\n";
+            LOGI("received PONG");
         }
     }
 }
@@ -153,17 +158,16 @@ packet_processor::handle_manifests(std::vector<std::uint8_t> const& payload)
     protocol::TMManifests manifests;
     if (!manifests.ParseFromArray(payload.data(), payload.size()))
     {
-        std::cout << "Failed to parse manifests\n";
+        LOGI("Failed to parse manifests");
         return;
     }
 
-    std::cout << "mtManifests contains " << manifests.list_size()
-              << " manifests\n";
+    LOGI("mtManifests contains ", manifests.list_size(), " manifests");
     for (int i = 0; i < manifests.list_size(); ++i)
     {
         auto const& manifest = manifests.list(i);
         auto const& sto = manifest.stobject();
-        std::cout << "Manifest " << i << " is " << sto.size() << " bytes:\n";
+        LOGI("Manifest ", i, " is ", sto.size(), " bytes:");
         print_hex(
             reinterpret_cast<std::uint8_t const*>(sto.data()), sto.size());
         if (!config_.no_hex)
@@ -179,11 +183,11 @@ packet_processor::handle_transaction(std::vector<std::uint8_t> const& payload)
     protocol::TMTransaction txn;
     if (!txn.ParseFromArray(payload.data(), payload.size()))
     {
-        std::cout << std::time(nullptr) << " mtTRANSACTION <error parsing>\n";
+        LOGI(" mtTRANSACTION <error parsing>");
         return;
     }
 
-    std::cout << std::time(nullptr) << " mtTRANSACTION\n";
+    LOGI(" mtTRANSACTION");
     auto const& raw_txn = txn.rawtransaction();
     print_hex(
         reinterpret_cast<std::uint8_t const*>(raw_txn.data()), raw_txn.size());
@@ -199,20 +203,26 @@ packet_processor::handle_get_ledger(std::vector<std::uint8_t> const& payload)
     protocol::TMGetLedger gl;
     if (!gl.ParseFromArray(payload.data(), payload.size()))
     {
-        std::cout << "Failed to parse TMGetLedger\n";
+        LOGI("Failed to parse TMGetLedger");
         return;
     }
 
-    std::cout << std::time(nullptr) << " mtGET_LEDGER seq=" << gl.ledgerseq()
-              << " hash=";
+    std::stringstream hash_str;
     auto const& hash = gl.ledgerhash();
     for (std::size_t i = 0; i < hash.size() && i < 32; ++i)
     {
-        std::cout << std::hex << std::setw(2) << std::setfill('0')
-                  << static_cast<int>(static_cast<std::uint8_t>(hash[i]));
+        hash_str << std::hex << std::setw(2) << std::setfill('0')
+                 << static_cast<int>(static_cast<std::uint8_t>(hash[i]));
     }
-    std::cout << std::dec << " itype=" << gl.itype() << " ltype=" << gl.ltype()
-              << "\n";
+    LOGI(
+        "mtGET_LEDGER seq=",
+        gl.ledgerseq(),
+        " hash=",
+        hash_str.str(),
+        " itype=",
+        gl.itype(),
+        " ltype=",
+        gl.ltype());
 }
 
 void
@@ -222,28 +232,35 @@ packet_processor::handle_propose_ledger(
     protocol::TMProposeSet ps;
     if (!ps.ParseFromArray(payload.data(), payload.size()))
     {
-        std::cout << "Failed to parse TMProposeSet\n";
+        LOGI("Failed to parse TMProposeSet");
         return;
     }
 
-    std::cout << std::time(nullptr)
-              << " mtPROPOSE_LEDGER seq=" << ps.proposeseq() << " set=";
+    std::stringstream hash_str;
     auto const& hash = ps.currenttxhash();
     for (std::size_t i = 0; i < hash.size() && i < 32; ++i)
     {
-        std::cout << std::hex << std::setw(2) << std::setfill('0')
-                  << static_cast<int>(static_cast<std::uint8_t>(hash[i]));
+        hash_str << std::hex << std::setw(2) << std::setfill('0')
+                 << static_cast<int>(static_cast<std::uint8_t>(hash[i]));
     }
 
-    std::cout << " pub=";
+    std::stringstream pub_str;
     auto const& pubkey = ps.nodepubkey();
     for (std::size_t i = 0; i < pubkey.size(); ++i)
     {
-        std::cout << std::hex << std::setw(2) << std::setfill('0')
-                  << static_cast<int>(static_cast<std::uint8_t>(pubkey[i]));
+        pub_str << std::hex << std::setw(2) << std::setfill('0')
+                << static_cast<int>(static_cast<std::uint8_t>(pubkey[i]));
     }
 
-    std::cout << std::dec << " ctime=" << ps.closetime() << "\n";
+    LOGI(
+        "mtPROPOSE_LEDGER seq=",
+        ps.proposeseq(),
+        " set=",
+        hash_str.str(),
+        " pub=",
+        pub_str.str(),
+        " ctime=",
+        ps.closetime());
 }
 
 void
@@ -252,77 +269,77 @@ packet_processor::handle_status_change(std::vector<std::uint8_t> const& payload)
     protocol::TMStatusChange status;
     if (!status.ParseFromArray(payload.data(), payload.size()))
     {
-        std::cout << std::time(nullptr) << " mtSTATUS_CHANGE <error parsing>\n";
+        LOGI(" mtSTATUS_CHANGE <error parsing>");
         return;
     }
 
-    std::cout << std::time(nullptr) << " mtSTATUS_CHANGE";
+    std::stringstream msg;
+    msg << "mtSTATUS_CHANGE";
 
     if (status.has_newstatus())
     {
-        std::cout << " stat=" << status.newstatus();
+        msg << " stat=" << status.newstatus();
         switch (status.newstatus())
         {
             case 1:
-                std::cout << " CONNECTING";
+                msg << " CONNECTING";
                 break;
             case 2:
-                std::cout << " CONNECTED";
+                msg << " CONNECTED";
                 break;
             case 3:
-                std::cout << " MONITORING";
+                msg << " MONITORING";
                 break;
             case 4:
-                std::cout << " VALIDATING";
+                msg << " VALIDATING";
                 break;
             case 5:
-                std::cout << " SHUTTING";
+                msg << " SHUTTING";
                 break;
             default:
-                std::cout << " UNKNOWN_STATUS";
+                msg << " UNKNOWN_STATUS";
         }
     }
 
     if (status.has_newevent())
     {
-        std::cout << " evnt=" << status.newevent();
+        msg << " evnt=" << status.newevent();
         switch (status.newevent())
         {
             case 1:
-                std::cout << " CLOSING_LEDGER";
+                msg << " CLOSING_LEDGER";
                 break;
             case 2:
-                std::cout << " ACCEPTED_LEDGER";
+                msg << " ACCEPTED_LEDGER";
                 break;
             case 3:
-                std::cout << " SWITCHED_LEDGER";
+                msg << " SWITCHED_LEDGER";
                 break;
             case 4:
-                std::cout << " LOST_SYNC";
+                msg << " LOST_SYNC";
                 break;
             default:
-                std::cout << " UNKNOWN_EVENT";
+                msg << " UNKNOWN_EVENT";
         }
     }
 
     if (status.has_ledgerseq())
     {
-        std::cout << " seq=" << status.ledgerseq();
+        msg << " seq=" << status.ledgerseq();
     }
 
     if (status.has_ledgerhash())
     {
-        std::cout << " hash=";
+        msg << " hash=";
         auto const& hash = status.ledgerhash();
         for (std::size_t i = 0; i < hash.size() && i < 32; ++i)
         {
-            std::cout << std::hex << std::setw(2) << std::setfill('0')
-                      << static_cast<int>(static_cast<std::uint8_t>(hash[i]));
+            msg << std::hex << std::setw(2) << std::setfill('0')
+                << static_cast<int>(static_cast<std::uint8_t>(hash[i]));
         }
-        std::cout << std::dec;
     }
 
-    std::cout << "\n";
+    LOGI(msg.str());
 }
 
 void
@@ -331,11 +348,11 @@ packet_processor::handle_validation(std::vector<std::uint8_t> const& payload)
     protocol::TMValidation validation;
     if (!validation.ParseFromArray(payload.data(), payload.size()))
     {
-        std::cout << std::time(nullptr) << " mtVALIDATION <error parsing>\n";
+        LOGI(" mtVALIDATION <error parsing>");
         return;
     }
 
-    std::cout << std::time(nullptr) << " mtVALIDATION\n";
+    LOGI(" mtVALIDATION");
     auto const& val = validation.validation();
     print_hex(reinterpret_cast<std::uint8_t const*>(val.data()), val.size());
     if (!config_.no_hex)
@@ -394,11 +411,11 @@ packet_processor::print_sto(std::string const& st) const
         xdata::parse_with_visitor(ctx, protocol, visitor);
 
         // Convert JSON to string
-        std::cout << boost::json::serialize(visitor.get_result()) << "\n";
+        LOGI(boost::json::serialize(visitor.get_result()));
     }
     catch (std::exception const& e)
     {
-        std::cout << "Could not deserialize STObject: " << e.what() << "\n";
+        LOGI("Could not deserialize STObject: ", e.what());
     }
 }
 
