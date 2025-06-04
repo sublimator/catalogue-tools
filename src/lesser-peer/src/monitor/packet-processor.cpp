@@ -87,7 +87,7 @@ packet_processor::process_packet(
                     auto packet_name = get_packet_name(header.type);
                     LOGI(
                         COLORED(PACKET_TYPE, packet_name),
-                        " [Unknown packet ",
+                        " [Unhandled packet ",
                         header.type,
                         "] size = ",
                         header.payload_size);
