@@ -52,9 +52,6 @@ private:
     void
     handle_validation(std::vector<std::uint8_t> const& payload);
     void
-    handle_resource_report(std::vector<std::uint8_t> const& payload);
-
-    void
     update_stats(packet_type type, std::size_t bytes);
     bool
     should_display_packet(packet_type type) const;
