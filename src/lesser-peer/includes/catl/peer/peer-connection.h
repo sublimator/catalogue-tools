@@ -68,10 +68,6 @@ private:
     handle_handshake(
         const boost::system::error_code& ec,
         const connection_handler& handler);
-    void
-    handle_ssl_upgrade(
-        boost::system::error_code ec,
-        connection_handler handler);
 
     void
     async_read_header();
@@ -86,16 +82,10 @@ private:
 
     void
     perform_http_upgrade(const connection_handler& handler);
-    void
-    send_http_request();
-    void
-    handle_http_response(std::error_code ec, std::size_t bytes_transferred);
 
     // Generate node keys
     void
     generate_node_keys();
-    std::string
-    create_session_signature();
 
 private:
     asio::io_context& io_context_;
