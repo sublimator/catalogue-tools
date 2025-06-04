@@ -35,7 +35,8 @@ inline constexpr const char* BOLD_WHITE = "\033[1;37m";
 
 // Macro to wrap text in color codes
 // Usage: LOGI(COLORED(RED, "Error:"), " something went wrong")
-#define COLORED(color, text) catl::color::color, text, catl::color::RESET
+#define COLORED(color_arg, text) \
+    catl::color::color_arg, text, catl::color::RESET
 
 // For custom color variables that aren't in the namespace
 #define COLORED_WITH(color_var, text) color_var, text, catl::color::RESET
