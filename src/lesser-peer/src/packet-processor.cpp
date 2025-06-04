@@ -69,10 +69,6 @@ packet_processor::process_packet(
             if (!config_.no_dump)
                 handle_validation(payload);
             break;
-        case packet_type::resource_report:
-            if (!config_.no_dump)
-                handle_resource_report(payload);
-            break;
         default:
             // Check for custom handler
             if (auto it = custom_handlers_.find(type);
@@ -346,22 +342,6 @@ packet_processor::handle_validation(std::vector<std::uint8_t> const& payload)
     {
         print_sto(val);
     }
-}
-
-void
-packet_processor::handle_resource_report(
-    std::vector<std::uint8_t> const& payload)
-{
-    protocol::TMResourceReport report;
-    if (!report.ParseFromArray(payload.data(), payload.size()))
-    {
-        std::cout << std::time(nullptr)
-                  << " mtRESOURCE_REPORT <error parsing>\n";
-        return;
-    }
-
-    std::cout << std::time(nullptr)
-              << " mtRESOURCE_REPORT: " << report.DebugString() << "\n";
 }
 
 void
