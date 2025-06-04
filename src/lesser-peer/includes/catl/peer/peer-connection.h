@@ -21,17 +21,17 @@ public:
     peer_connection(
         asio::io_context& io_context,
         asio::ssl::context& ssl_context,
-        connection_config const& config);
+        connection_config config);
 
     ~peer_connection();
 
     // Async connect to peer
     void
-    async_connect(connection_handler handler);
+    async_connect(const connection_handler& handler);
 
     // Async accept connection (listen mode)
     void
-    async_accept(tcp::acceptor& acceptor, connection_handler handler);
+    async_accept(tcp::acceptor& acceptor, const connection_handler& handler);
 
     // Start reading packets
     void
@@ -61,9 +61,13 @@ public:
 
 private:
     void
-    handle_connect(boost::system::error_code ec, connection_handler handler);
+    handle_connect(
+        const boost::system::error_code& ec,
+        const connection_handler& handler);
     void
-    handle_handshake(boost::system::error_code ec, connection_handler handler);
+    handle_handshake(
+        const boost::system::error_code& ec,
+        const connection_handler& handler);
     void
     handle_ssl_upgrade(
         boost::system::error_code ec,
@@ -81,7 +85,7 @@ private:
         std::size_t bytes_transferred);
 
     void
-    perform_http_upgrade(connection_handler handler);
+    perform_http_upgrade(const connection_handler& handler);
     void
     send_http_request();
     void
@@ -124,11 +128,11 @@ private:
 
     // Helper methods
     void
-    handle_http_request(connection_handler handler);
+    handle_http_request(const connection_handler& handler);
     void
-    handle_http_response(connection_handler handler);
+    handle_http_response(const connection_handler& handler);
     void
-    send_http_request(connection_handler handler);
+    send_http_request(const connection_handler& handler);
     void
     send_initial_ping();
 };
