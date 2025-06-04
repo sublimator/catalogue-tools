@@ -204,7 +204,7 @@ peer_monitor::start_accept()
         std::make_shared<peer_connection>(io_context_, *ssl_context_, config_);
 
     acceptor_->async_accept(
-        connection->socket_->lowest_layer(),
+        connection->socket().lowest_layer(),
         [this, connection](boost::system::error_code ec) {
             handle_accept(connection, ec);
         });
@@ -219,7 +219,7 @@ peer_monitor::handle_accept(
     {
         LOGI(
             "Accepted connection from ",
-            connection->socket_->lowest_layer().remote_endpoint());
+            connection->socket().lowest_layer().remote_endpoint());
 
         connection->async_accept(
             *acceptor_, [this, connection](boost::system::error_code ec) {
