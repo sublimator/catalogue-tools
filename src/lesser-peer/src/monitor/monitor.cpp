@@ -1,8 +1,8 @@
 #include <catl/core/logger.h>
-#include <catl/peer/peer-monitor.h>
+#include <catl/peer/monitor/monitor.h>
 #include <iostream>
 
-namespace catl::peer {
+namespace catl::peer::monitor {
 
 peer_monitor::peer_monitor(connection_config config, packet_filter filter)
     : config_(std::move(config))
@@ -258,4 +258,4 @@ peer_monitor::handle_connection(std::shared_ptr<peer_connection> connection)
     });
 }
 
-}  // namespace catl::peer
+}  // namespace catl::peer::monitor

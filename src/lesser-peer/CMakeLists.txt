@@ -1,13 +1,13 @@
 add_library(
   catl_lesser_peer
   src/lesser-peer.cpp
-  src/command-line.cpp
   src/crypto-utils.cpp
   src/packet-names.cpp
   src/peer-connection.cpp
-  src/packet-processor.cpp
-  src/peer-monitor.cpp
-  src/peermon-main.cpp)
+  src/monitor/command-line.cpp
+  src/monitor/packet-processor.cpp
+  src/monitor/monitor.cpp
+  src/monitor/main.cpp)
 
 target_include_directories(
   catl_lesser_peer
@@ -46,6 +46,6 @@ target_sources(catl_lesser_peer PRIVATE ${PROTO_SRCS} ${PROTO_HDRS})
 add_library(catl::lesser-peer ALIAS catl_lesser_peer)
 
 # Also build standalone peermon executable
-add_executable(peermon src/peermon-main.cpp)
+add_executable(peermon src/monitor/main.cpp)
 target_link_libraries(peermon PRIVATE catl_lesser_peer)
 target_compile_definitions(peermon PRIVATE BUILD_PEERMON_EXECUTABLE)
