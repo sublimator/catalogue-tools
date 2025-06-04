@@ -26,7 +26,7 @@ public:
     };
 
     node_keys
-    generate_node_keys();
+    generate_node_keys() const;
 
     // Load node keys from file or generate new ones
     node_keys
@@ -36,20 +36,20 @@ public:
     std::string
     create_session_signature(
         std::array<std::uint8_t, 32> const& secret_key,
-        std::array<std::uint8_t, 32> const& cookie);
+        std::array<std::uint8_t, 32> const& cookie) const;
 
     // Create SSL cookie from finished messages
-    std::array<std::uint8_t, 32>
+    static std::array<std::uint8_t, 32>
     create_ssl_cookie(
         std::vector<std::uint8_t> const& finished,
         std::vector<std::uint8_t> const& peer_finished);
 
     // SHA512 hash
-    std::array<std::uint8_t, 64>
+    static std::array<std::uint8_t, 64>
     sha512(std::uint8_t const* data, std::size_t len);
 
     // SHA256 hash
-    std::array<std::uint8_t, 32>
+    static std::array<std::uint8_t, 32>
     sha256(std::uint8_t const* data, std::size_t len);
 
 private:
