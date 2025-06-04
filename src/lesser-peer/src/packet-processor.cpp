@@ -96,7 +96,6 @@ packet_processor::process_packet(
                             header.uncompressed_size,
                             ")");
                     }
-                    LOGI("");
                     print_hex(
                         payload.data(),
                         std::min<std::size_t>(payload.size(), 128));
@@ -170,16 +169,22 @@ packet_processor::handle_manifests(std::vector<std::uint8_t> const& payload)
     {
         auto const& manifest = manifests.list(i);
         auto const& sto = manifest.stobject();
-        
+
         if (!config_.no_json)
         {
-            LOGI("Manifest ", i, " is ", sto.size(), " bytes: ", get_sto_json(sto));
+            LOGI(
+                "Manifest ",
+                i,
+                " is ",
+                sto.size(),
+                " bytes: ",
+                get_sto_json(sto));
         }
         else
         {
             LOGI("Manifest ", i, " is ", sto.size(), " bytes:");
         }
-        
+
         print_hex(
             reinterpret_cast<std::uint8_t const*>(sto.data()), sto.size());
     }
@@ -196,7 +201,7 @@ packet_processor::handle_transaction(std::vector<std::uint8_t> const& payload)
     }
 
     auto const& raw_txn = txn.rawtransaction();
-    
+
     if (!config_.no_json)
     {
         LOGI(" mtTRANSACTION ", get_sto_json(raw_txn));
@@ -205,7 +210,7 @@ packet_processor::handle_transaction(std::vector<std::uint8_t> const& payload)
     {
         LOGI(" mtTRANSACTION");
     }
-    
+
     print_hex(
         reinterpret_cast<std::uint8_t const*>(raw_txn.data()), raw_txn.size());
 }
@@ -366,7 +371,7 @@ packet_processor::handle_validation(std::vector<std::uint8_t> const& payload)
     }
 
     auto const& val = validation.validation();
-    
+
     if (!config_.no_json)
     {
         LOGI(" mtVALIDATION ", get_sto_json(val));
@@ -375,7 +380,7 @@ packet_processor::handle_validation(std::vector<std::uint8_t> const& payload)
     {
         LOGI(" mtVALIDATION");
     }
-    
+
     print_hex(reinterpret_cast<std::uint8_t const*>(val.data()), val.size());
 }
 

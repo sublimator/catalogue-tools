@@ -13,6 +13,9 @@ if(NOT SECP256K1_FOUND)
     GIT_TAG v0.6.0 # Latest stable release
   )
 
+  set(SECP256K1_BUILD_EXHAUSTIVE_TESTS
+      OFF
+      CACHE BOOL "" FORCE)
   set(SECP256K1_BUILD_TESTS
       OFF
       CACHE BOOL "" FORCE)

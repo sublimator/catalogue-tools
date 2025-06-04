@@ -53,7 +53,7 @@ TEST(Base58, DecodeMasterSeed)
     // Decode the seed
     auto decoded = catl::base58::decode_seed(master_seed);
     ASSERT_TRUE(decoded.has_value());
-    EXPECT_EQ(decoded->version_name, "seed_k256");
+    EXPECT_STREQ(decoded->version_name, "seed_k256");
     EXPECT_EQ(decoded->payload, expected_bytes);
 }
 
@@ -180,6 +180,6 @@ TEST(Base58, ED25519Seed)
 
     auto decoded = catl::base58::decode_seed(encoded);
     ASSERT_TRUE(decoded.has_value());
-    EXPECT_EQ(decoded->version_name, "seed_ed25519");
+    EXPECT_STREQ(decoded->version_name, "seed_ed25519");
     EXPECT_EQ(decoded->payload, ed_seed_bytes);
 }
