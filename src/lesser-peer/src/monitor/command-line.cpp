@@ -1,10 +1,10 @@
 #include <boost/algorithm/string.hpp>
-#include <catl/peer/command-line.h>
+#include <catl/peer/monitor/command-line.h>
 #include <catl/peer/packet-names.h>
 #include <iostream>
 #include <sstream>
 
-namespace catl::peer {
+namespace catl::peer::monitor {
 
 constexpr char VERSION[] = "2.0.0";
 
@@ -217,4 +217,4 @@ command_line_parser::print_version(std::ostream& os) const
     os << "Built with modern C++ and Boost.Asio\n";
 }
 
-}  // namespace catl::peer
+}  // namespace catl::peer::monitor

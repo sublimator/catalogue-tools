@@ -1,11 +1,11 @@
 #pragma once
 
-#include "types.h"
+#include "catl/peer/types.h"
 #include <boost/program_options.hpp>
 #include <optional>
 #include <string>
 
-namespace catl::peer {
+namespace catl::peer::monitor {
 
 namespace po = boost::program_options;
 
@@ -50,4 +50,4 @@ private:
         std::string const& hide_list);
 };
 
-}  // namespace catl::peer
+}  // namespace catl::peer::monitor

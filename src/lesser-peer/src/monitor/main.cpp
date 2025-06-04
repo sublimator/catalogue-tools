@@ -1,6 +1,6 @@
 #include <catl/core/logger.h>
-#include <catl/peer/command-line.h>
-#include <catl/peer/peer-monitor.h>
+#include <catl/peer/monitor/command-line.h>
+#include <catl/peer/monitor/monitor.h>
 
 #include <atomic>
 #include <csignal>
@@ -8,7 +8,7 @@
 #include <memory>
 
 namespace {
-std::unique_ptr<catl::peer::peer_monitor> g_monitor;
+std::unique_ptr<catl::peer::monitor::peer_monitor> g_monitor;
 std::atomic<bool> g_shutdown_requested{false};
 
 void
@@ -45,7 +45,7 @@ main(int argc, char* argv[])
     Logger::set_level(LogLevel::INFO);
 
     // Parse command line
-    catl::peer::command_line_parser parser;
+    catl::peer::monitor::command_line_parser parser;
     auto config_opt = parser.parse(argc, argv);
 
     if (!config_opt)
@@ -63,7 +63,7 @@ main(int argc, char* argv[])
     try
     {
         // Create and run peer monitor
-        g_monitor = std::make_unique<catl::peer::peer_monitor>(config, filter);
+        g_monitor = std::make_unique<catl::peer::monitor::peer_monitor>(config, filter);
 
         LOGI("Starting XRPL Peer Monitor");
         LOGI("Connecting to ", config.host, ":", config.port);

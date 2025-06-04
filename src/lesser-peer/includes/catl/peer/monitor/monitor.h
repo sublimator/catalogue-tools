@@ -1,16 +1,16 @@
 #pragma once
 
-#include "command-line.h"
-#include "packet-processor.h"
-#include "peer-connection.h"
-#include "types.h"
+#include "catl/peer/monitor/command-line.h"
+#include "catl/peer/monitor/packet-processor.h"
+#include "catl/peer/peer-connection.h"
+#include "catl/peer/types.h"
 
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
 
-namespace catl::peer {
+namespace catl::peer::monitor {
 
 class peer_monitor
 {
@@ -60,4 +60,4 @@ private:
         work_guard_;
 };
 
-}  // namespace catl::peer
+}  // namespace catl::peer::monitor

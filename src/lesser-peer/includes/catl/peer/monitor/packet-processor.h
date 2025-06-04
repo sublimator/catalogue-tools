@@ -1,11 +1,11 @@
 #pragma once
 
-#include "peer-connection.h"
-#include "types.h"
+#include "catl/peer/peer-connection.h"
+#include "catl/peer/types.h"
 #include <functional>
 #include <memory>
 
-namespace catl::peer {
+namespace catl::peer::monitor {
 
 class packet_processor
 {
@@ -77,4 +77,4 @@ private:
     std::chrono::steady_clock::time_point last_display_time_;
 };
 
-}  // namespace catl::peer
+}  // namespace catl::peer::monitor

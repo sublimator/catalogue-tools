@@ -1,7 +1,7 @@
 #include <boost/json.hpp>
 #include <catl/core/logger.h>
 #include <catl/peer/packet-names.h>
-#include <catl/peer/packet-processor.h>
+#include <catl/peer/monitor/packet-processor.h>
 #include <catl/xdata/json-visitor.h>
 #include <catl/xdata/parser.h>
 #include <catl/xdata/slice-cursor.h>
@@ -12,7 +12,7 @@
 #include <iostream>
 #include <sstream>
 
-namespace catl::peer {
+namespace catl::peer::monitor {
 
 packet_processor::packet_processor(
     connection_config const& config,
@@ -571,4 +571,4 @@ packet_processor::set_custom_handler(packet_type type, custom_handler handler)
     custom_handlers_[type] = handler;
 }
 
-}  // namespace catl::peer
+}  // namespace catl::peer::monitor
