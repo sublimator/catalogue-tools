@@ -15,7 +15,7 @@
 
 namespace catl::peer::monitor {
 
-constexpr const char* PACKET_TYPE = color::BOLD_CYAN;
+#define PACKET_TYPE BOLD_CYAN
 
 packet_processor::packet_processor(
     connection_config const& config,
@@ -86,7 +86,7 @@ packet_processor::process_packet(
                 {
                     auto packet_name = get_packet_name(header.type);
                     LOGI(
-                        COLORED_WITH(PACKET_TYPE, packet_name),
+                        COLORED(PACKET_TYPE, packet_name),
                         " [Unknown packet ",
                         header.type,
                         "] size = ",
@@ -133,7 +133,7 @@ packet_processor::handle_ping(
     {
         if (ping.type() == protocol::TMPing_pingType_ptPING)
         {
-            LOGI(COLORED_WITH(PACKET_TYPE, "mtPING"), " - replying PONG");
+            LOGI(COLORED(PACKET_TYPE, "mtPING"), " - replying PONG");
 
             // Send pong response
             ping.set_type(protocol::TMPing_pingType_ptPONG);
@@ -150,7 +150,7 @@ packet_processor::handle_ping(
         }
         else
         {
-            LOGI(COLORED_WITH(PACKET_TYPE, "mtPING"), " - received PONG");
+            LOGI(COLORED(PACKET_TYPE, "mtPING"), " - received PONG");
         }
     }
 }
@@ -166,7 +166,7 @@ packet_processor::handle_manifests(std::vector<std::uint8_t> const& payload)
     }
 
     LOGI(
-        COLORED_WITH(PACKET_TYPE, "mtManifests"),
+        COLORED(PACKET_TYPE, "mtManifests"),
         " contains ",
         manifests.list_size(),
         " manifests");
@@ -201,7 +201,7 @@ packet_processor::handle_transaction(std::vector<std::uint8_t> const& payload)
     protocol::TMTransaction txn;
     if (!txn.ParseFromArray(payload.data(), payload.size()))
     {
-        LOGI(COLORED_WITH(PACKET_TYPE, "mtTRANSACTION"), " <error parsing>");
+        LOGI(COLORED(PACKET_TYPE, "mtTRANSACTION"), " <error parsing>");
         return;
     }
 
@@ -209,14 +209,11 @@ packet_processor::handle_transaction(std::vector<std::uint8_t> const& payload)
 
     if (!config_.no_json)
     {
-        LOGI(
-            COLORED_WITH(PACKET_TYPE, "mtTRANSACTION"),
-            " ",
-            get_sto_json(raw_txn));
+        LOGI(COLORED(PACKET_TYPE, "mtTRANSACTION"), " ", get_sto_json(raw_txn));
     }
     else
     {
-        LOGI(COLORED_WITH(PACKET_TYPE, "mtTRANSACTION"));
+        LOGI(COLORED(PACKET_TYPE, "mtTRANSACTION"));
     }
 
     print_hex(
@@ -241,7 +238,7 @@ packet_processor::handle_get_ledger(std::vector<std::uint8_t> const& payload)
                  << static_cast<int>(static_cast<std::uint8_t>(hash[i]));
     }
     LOGI(
-        COLORED_WITH(PACKET_TYPE, "mtGET_LEDGER"),
+        COLORED(PACKET_TYPE, "mtGET_LEDGER"),
         " seq=",
         gl.ledgerseq(),
         " hash=",
@@ -280,14 +277,14 @@ packet_processor::handle_propose_ledger(
     }
 
     LOGI(
-        COLORED_WITH(PACKET_TYPE, "mtPROPOSE_LEDGER"),
+        COLORED(PACKET_TYPE, "mtPROPOSE_LEDGER"),
         " seq=",
         ps.proposeseq(),
         " set=",
         hash_str.str(),
         " pub=",
         pub_str.str(),
-        "time=",
+        " time=",
         common::format_ripple_time(ps.closetime()));
 }
 
@@ -297,12 +294,12 @@ packet_processor::handle_status_change(std::vector<std::uint8_t> const& payload)
     protocol::TMStatusChange status;
     if (!status.ParseFromArray(payload.data(), payload.size()))
     {
-        LOGI(COLORED_WITH(PACKET_TYPE, "mtSTATUS_CHANGE"), " <error parsing>");
+        LOGI(COLORED(PACKET_TYPE, "mtSTATUS_CHANGE"), " <error parsing>");
         return;
     }
 
     std::stringstream msg;
-    msg << PACKET_TYPE << "mtSTATUS_CHANGE" << catl::color::RESET;
+    msg << catl::color::PACKET_TYPE << "mtSTATUS_CHANGE" << catl::color::RESET;
 
     if (status.has_newstatus())
     {
@@ -376,7 +373,7 @@ packet_processor::handle_validation(std::vector<std::uint8_t> const& payload)
     protocol::TMValidation validation;
     if (!validation.ParseFromArray(payload.data(), payload.size()))
     {
-        LOGI(COLORED_WITH(PACKET_TYPE, "mtVALIDATION"), " <error parsing>");
+        LOGI(COLORED(PACKET_TYPE, "mtVALIDATION"), " <error parsing>");
         return;
     }
 
@@ -384,11 +381,11 @@ packet_processor::handle_validation(std::vector<std::uint8_t> const& payload)
 
     if (!config_.no_json)
     {
-        LOGI(COLORED_WITH(PACKET_TYPE, "mtVALIDATION"), " ", get_sto_json(val));
+        LOGI(COLORED(PACKET_TYPE, "mtVALIDATION"), " ", get_sto_json(val));
     }
     else
     {
-        LOGI(COLORED_WITH(PACKET_TYPE, "mtVALIDATION"));
+        LOGI(COLORED(PACKET_TYPE, "mtVALIDATION"));
     }
 
     print_hex(reinterpret_cast<std::uint8_t const*>(val.data()), val.size());
