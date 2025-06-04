@@ -5,6 +5,7 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <openssl/ssl.h>
+#include <utility>
 
 namespace catl::peer {
 
@@ -14,10 +15,10 @@ namespace http = beast::http;
 peer_connection::peer_connection(
     asio::io_context& io_context,
     asio::ssl::context& ssl_context,
-    connection_config const& config)
+    connection_config config)
     : io_context_(io_context)
     , socket_(std::make_unique<ssl_socket>(io_context, ssl_context))
-    , config_(config)
+    , config_(std::move(config))
 {
 }
 
@@ -27,7 +28,7 @@ peer_connection::~peer_connection()
 }
 
 void
-peer_connection::async_connect(connection_handler handler)
+peer_connection::async_connect(const connection_handler& handler)
 {
     if (config_.listen_mode)
     {
@@ -62,7 +63,7 @@ peer_connection::async_connect(connection_handler handler)
 void
 peer_connection::async_accept(
     tcp::acceptor& acceptor,
-    connection_handler handler)
+    const connection_handler& handler)
 {
     if (!config_.listen_mode)
     {
@@ -89,8 +90,8 @@ peer_connection::async_accept(
 
 void
 peer_connection::handle_connect(
-    boost::system::error_code ec,
-    connection_handler handler)
+    const boost::system::error_code& ec,
+    const connection_handler& handler)
 {
     if (ec)
     {
@@ -108,8 +109,8 @@ peer_connection::handle_connect(
 
 void
 peer_connection::handle_handshake(
-    boost::system::error_code ec,
-    connection_handler handler)
+    const boost::system::error_code& ec,
+    const connection_handler& handler)
 {
     if (ec)
     {
@@ -170,7 +171,7 @@ peer_connection::generate_node_keys()
 }
 
 void
-peer_connection::perform_http_upgrade(connection_handler handler)
+peer_connection::perform_http_upgrade(const connection_handler& handler)
 {
     if (config_.listen_mode)
     {
@@ -200,7 +201,7 @@ peer_connection::perform_http_upgrade(connection_handler handler)
 }
 
 void
-peer_connection::send_http_request(connection_handler handler)
+peer_connection::send_http_request(const connection_handler& handler)
 {
     auto req = std::make_shared<http::request<http::string_body>>(
         http::verb::get, "/", 11);
@@ -245,7 +246,7 @@ peer_connection::send_http_request(connection_handler handler)
 }
 
 void
-peer_connection::handle_http_request(connection_handler handler)
+peer_connection::handle_http_request(const connection_handler& handler)
 {
     // Send upgrade response
     auto res = std::make_shared<http::response<http::string_body>>(
@@ -284,7 +285,7 @@ peer_connection::handle_http_request(connection_handler handler)
 }
 
 void
-peer_connection::handle_http_response(connection_handler handler)
+peer_connection::handle_http_response(const connection_handler& handler)
 {
     if (http_response_.result() != http::status::switching_protocols)
     {
@@ -302,7 +303,7 @@ peer_connection::handle_http_response(connection_handler handler)
 void
 peer_connection::start_read(packet_handler handler)
 {
-    packet_handler_ = handler;
+    packet_handler_ = std::move(handler);
     async_read_header();
 }
 
