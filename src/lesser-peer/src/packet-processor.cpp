@@ -81,9 +81,11 @@ packet_processor::process_packet(
                 // Unknown packet
                 if (!config_.no_dump)
                 {
-                    // TODO: we should actually print the packet type name too
+                    auto packet_name = get_packet_name(header.type);
                     LOGI(
-                        "Unknown packet [",
+                        "Unknown packet ",
+                        packet_name,
+                        " [",
                         header.type,
                         "] size = ",
                         header.payload_size);
