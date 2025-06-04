@@ -15,7 +15,7 @@ namespace http = beast::http;
 peer_connection::peer_connection(
     asio::io_context& io_context,
     asio::ssl::context& ssl_context,
-    connection_config config)
+    peer_config config)
     : io_context_(io_context)
     , socket_(std::make_unique<ssl_socket>(io_context, ssl_context))
     , config_(std::move(config))

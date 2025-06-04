@@ -21,7 +21,7 @@ public:
     peer_connection(
         asio::io_context& io_context,
         asio::ssl::context& ssl_context,
-        connection_config config);
+        peer_config config);
 
     ~peer_connection();
 
@@ -90,7 +90,7 @@ private:
 private:
     asio::io_context& io_context_;
     std::unique_ptr<ssl_socket> socket_;
-    connection_config config_;
+    peer_config config_;
     packet_handler packet_handler_;
 
     // Read buffers

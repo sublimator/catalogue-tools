@@ -45,8 +45,6 @@ struct peer_config
     std::string protocol_definitions_path;
 };
 
-// TODO: Remove after migration - kept for backward compatibility
-using connection_config = peer_config;
 
 enum class packet_type : std::uint16_t {
     manifests = 2,
