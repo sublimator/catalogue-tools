@@ -1,7 +1,6 @@
 add_library(
   catl_lesser_peer
-  src/lesser-peer.cpp
-  src/crypto-utils.cpp
+        src/crypto-utils.cpp
   src/packet-names.cpp
   src/peer-connection.cpp)
 

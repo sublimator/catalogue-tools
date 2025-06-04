@@ -160,7 +160,8 @@ void
 peer_connection::generate_node_keys()
 {
     crypto_utils crypto;
-    std::string key_file = std::string(std::getenv("HOME") ?: "") + "/.peermon";
+    const char* home = std::getenv("HOME");
+    std::string key_file = std::string(home ? home : "") + "/.peermon";
     auto keys = crypto.load_or_generate_node_keys(key_file);
 
     secret_key_ = keys.secret_key;
