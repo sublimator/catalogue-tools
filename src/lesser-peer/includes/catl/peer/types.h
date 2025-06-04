@@ -39,6 +39,7 @@ struct connection_config
     bool no_stats = false;
     bool no_http = false;
     bool no_hex = false;
+    bool no_json = false;  // Control JSON output separately from hex dumps
 
     // SSL/TLS config
     std::string cert_path = "listen.cert";

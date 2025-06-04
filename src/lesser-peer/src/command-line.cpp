@@ -48,6 +48,7 @@ command_line_parser::command_line_parser()
         "no-stats", po::bool_switch(), "Don't show statistics")(
         "no-http", po::bool_switch(), "Don't show HTTP upgrade messages")(
         "no-hex", po::bool_switch(), "Don't show hex dumps")(
+        "no-json", po::bool_switch(), "Don't show JSON output for transactions/validations")(
         "raw-hex", po::bool_switch(), "Show raw hex without formatting")(
         "slow",
         po::bool_switch(),
@@ -116,6 +117,7 @@ command_line_parser::parse(int argc, char* argv[])
         config.no_stats = vm["no-stats"].as<bool>();
         config.no_http = vm["no-http"].as<bool>();
         config.no_hex = vm["no-hex"].as<bool>();
+        config.no_json = vm["no-json"].as<bool>();
         config.raw_hex = vm["raw-hex"].as<bool>();
         config.slow = vm["slow"].as<bool>();
         config.manifests_only = vm["manifests-only"].as<bool>();
