@@ -15,7 +15,21 @@ log_keeper::log_keeper(peer_config config)
 
 log_keeper::~log_keeper()
 {
+    // Ensure cleanup on destruction
     request_stop();
+
+    // Wait a bit for graceful shutdown
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Force stop if needed
+    try
+    {
+        stop();
+    }
+    catch (...)
+    {
+        // Ignore exceptions in destructor
+    }
 }
 
 void
@@ -76,57 +90,65 @@ log_keeper::run()
                 thread.join();
             }
         }
+        io_threads_.clear();
     }
     catch (std::exception const& e)
     {
-        LOGE("Log keeper error: ", e.what());
+        LOGE("Fatal error: ", e.what());
+        // Clean up threads even on error
+        try
+        {
+            stop();
+        }
+        catch (...)
+        {
+        }
     }
+}
 
-    running_ = false;
+void
+log_keeper::request_stop()
+{
+    bool expected = false;
+    if (stopping_.compare_exchange_strong(expected, true))
+    {
+        running_ = false;
+
+        // Reset work guard to allow io_context to finish
+        work_guard_.reset();
+
+        // Stop the io_context
+        io_context_.stop();
+    }
 }
 
 void
 log_keeper::stop()
 {
-    {
-        std::lock_guard<std::mutex> lock(shutdown_mutex_);
-        if (!running_ || stopping_)
-        {
-            return;
-        }
-        stopping_ = true;
-    }
+    // Request stop first
+    request_stop();
 
-    LOGI("Stopping log keeper...");
-
-    // Close connection
-    if (connection_)
-    {
-        connection_->close();
-    }
-
-    // Stop io_context
-    work_guard_.reset();
-    io_context_.stop();
+    // Use a lock to ensure we only join threads once
+    std::lock_guard<std::mutex> lock(shutdown_mutex_);
 
     // Wait for threads
     for (auto& thread : io_threads_)
     {
         if (thread.joinable())
         {
-            thread.join();
+            try
+            {
+                thread.join();
+            }
+            catch (std::exception const& e)
+            {
+                LOGE("Error joining thread: ", e.what());
+            }
         }
     }
 
+    // Clear the threads vector
     io_threads_.clear();
-    stopping_ = false;
-    LOGI("Log keeper stopped");
-}
-
-void
-log_keeper::request_stop()
-{
-    io_context_.post([this]() { stop(); });
 }
 
 void
