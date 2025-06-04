@@ -1,8 +1,5 @@
-add_library(
-  catl_lesser_peer
-        src/crypto-utils.cpp
-  src/packet-names.cpp
-  src/peer-connection.cpp)
+add_library(catl_lesser_peer src/crypto-utils.cpp src/packet-names.cpp
+                             src/peer-connection.cpp)
 
 target_include_directories(
   catl_lesser_peer
@@ -53,5 +50,16 @@ target_link_libraries(peermon PRIVATE catl_lesser_peer)
 # peermon needs access to generated protobuf headers and src directory
 target_include_directories(
   peermon
+  PRIVATE ${CMAKE_CURRENT_BINARY_DIR}
+  PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/src)
+
+# Build log-keeper executable
+add_executable(log-keeper src/log-keeper/main.cpp src/log-keeper/log-keeper.cpp)
+
+target_link_libraries(log-keeper PRIVATE catl_lesser_peer)
+
+# log-keeper needs access to generated protobuf headers
+target_include_directories(
+  log-keeper
   PRIVATE ${CMAKE_CURRENT_BINARY_DIR}
   PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/src)
