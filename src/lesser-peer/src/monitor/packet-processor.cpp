@@ -17,11 +17,8 @@ namespace catl::peer::monitor {
 
 #define PACKET_TYPE BOLD_CYAN
 
-packet_processor::packet_processor(
-    connection_config const& config,
-    packet_filter const& filter)
+packet_processor::packet_processor(monitor_config const& config)
     : config_(config)
-    , filter_(filter)
     , start_time_(std::chrono::steady_clock::now())
     , last_display_time_(start_time_)
 {
@@ -37,7 +34,7 @@ packet_processor::process_packet(
     update_stats(type, header.payload_size);
 
     // Check if we should display this packet
-    if (!should_display_packet(type) && !config_.no_dump)
+    if (!should_display_packet(type) && !config_.display.no_dump)
     {
         return;
     }
@@ -49,27 +46,27 @@ packet_processor::process_packet(
             handle_ping(connection, payload);
             break;
         case packet_type::manifests:
-            if (!config_.no_dump)
+            if (!config_.display.no_dump)
                 handle_manifests(payload);
             break;
         case packet_type::transaction:
-            if (!config_.no_dump)
+            if (!config_.display.no_dump)
                 handle_transaction(payload);
             break;
         case packet_type::get_ledger:
-            if (!config_.no_dump)
+            if (!config_.display.no_dump)
                 handle_get_ledger(payload);
             break;
         case packet_type::propose_ledger:
-            if (!config_.no_dump)
+            if (!config_.display.no_dump)
                 handle_propose_ledger(payload);
             break;
         case packet_type::status_change:
-            if (!config_.no_dump)
+            if (!config_.display.no_dump)
                 handle_status_change(payload);
             break;
         case packet_type::validation:
-            if (!config_.no_dump)
+            if (!config_.display.no_dump)
                 handle_validation(payload);
             break;
         default:
@@ -82,7 +79,7 @@ packet_processor::process_packet(
             else
             {
                 // Unknown packet
-                if (!config_.no_dump)
+                if (!config_.display.no_dump)
                 {
                     auto packet_name = get_packet_name(header.type);
                     LOGI(
@@ -110,7 +107,7 @@ packet_processor::process_packet(
     display_stats();
 
     // Check manifests-only mode
-    if (config_.manifests_only && type != packet_type::manifests)
+    if (config_.display.manifests_only && type != packet_type::manifests)
     {
         LOGI("Exiting due to manifests-only mode");
         std::exit(0);
@@ -129,7 +126,7 @@ packet_processor::handle_ping(
         return;
     }
 
-    if (!config_.no_dump)
+    if (!config_.display.no_dump)
     {
         if (ping.type() == protocol::TMPing_pingType_ptPING)
         {
@@ -175,7 +172,7 @@ packet_processor::handle_manifests(std::vector<std::uint8_t> const& payload)
         auto const& manifest = manifests.list(i);
         auto const& sto = manifest.stobject();
 
-        if (!config_.no_json)
+        if (!config_.display.no_json)
         {
             LOGI(
                 "Manifest ",
@@ -207,7 +204,7 @@ packet_processor::handle_transaction(std::vector<std::uint8_t> const& payload)
 
     auto const& raw_txn = txn.rawtransaction();
 
-    if (!config_.no_json)
+    if (!config_.display.no_json)
     {
         LOGI(COLORED(PACKET_TYPE, "mtTRANSACTION"), " ", get_sto_json(raw_txn));
     }
@@ -379,7 +376,7 @@ packet_processor::handle_validation(std::vector<std::uint8_t> const& payload)
 
     auto const& val = validation.validation();
 
-    if (!config_.no_json)
+    if (!config_.display.no_json)
     {
         LOGI(COLORED(PACKET_TYPE, "mtVALIDATION"), " ", get_sto_json(val));
     }
@@ -394,12 +391,12 @@ packet_processor::handle_validation(std::vector<std::uint8_t> const& payload)
 void
 packet_processor::print_hex(std::uint8_t const* data, std::size_t len) const
 {
-    if (config_.no_hex)
+    if (config_.display.no_hex)
         return;
 
     for (std::size_t j = 0; j < len; ++j)
     {
-        if (j % 16 == 0 && !config_.raw_hex)
+        if (j % 16 == 0 && !config_.display.raw_hex)
         {
             std::cout << "0x" << std::hex << std::setw(8) << std::setfill('0')
                       << j << ":\t";
@@ -408,7 +405,7 @@ packet_processor::print_hex(std::uint8_t const* data, std::size_t len) const
         std::cout << std::hex << std::setw(2) << std::setfill('0')
                   << static_cast<int>(data[j]);
 
-        if (!config_.raw_hex)
+        if (!config_.display.raw_hex)
         {
             if (j % 16 == 15)
                 std::cout << "\n";
@@ -432,8 +429,8 @@ packet_processor::get_sto_json(std::string const& st) const
         xdata::SliceCursor cursor{slice, 0};
 
         // Load protocol definitions (cached)
-        static auto protocol =
-            xdata::Protocol::load_from_file(config_.protocol_definitions_path);
+        static auto protocol = xdata::Protocol::load_from_file(
+            config_.peer.protocol_definitions_path);
 
         // Use JsonVisitor to format the output
         xdata::JsonVisitor visitor(protocol);
@@ -475,14 +472,14 @@ packet_processor::should_display_packet(packet_type type) const
 {
     auto type_val = static_cast<int>(type);
 
-    if (!filter_.show.empty())
+    if (!config_.filter.show.empty())
     {
-        return filter_.show.count(type_val) > 0;
+        return config_.filter.show.count(type_val) > 0;
     }
 
-    if (!filter_.hide.empty())
+    if (!config_.filter.hide.empty())
     {
-        return filter_.hide.count(type_val) == 0;
+        return config_.filter.hide.count(type_val) == 0;
     }
 
     return true;
@@ -491,11 +488,11 @@ packet_processor::should_display_packet(packet_type type) const
 void
 packet_processor::display_stats() const
 {
-    if (config_.no_stats)
+    if (config_.display.no_stats)
         return;
 
     auto now = std::chrono::steady_clock::now();
-    auto should_display = !config_.slow ||
+    auto should_display = !config_.display.slow ||
         std::chrono::duration_cast<std::chrono::seconds>(
             now - last_display_time_)
                 .count() >= 5;
@@ -507,7 +504,7 @@ packet_processor::display_stats() const
         now;
 
     // Clear screen if needed
-    if (config_.use_cls)
+    if (config_.display.use_cls)
     {
         std::cout << "\033c";
     }

@@ -4,12 +4,11 @@
 
 namespace catl::peer::monitor {
 
-peer_monitor::peer_monitor(connection_config config, packet_filter filter)
+peer_monitor::peer_monitor(monitor_config config)
     : config_(std::move(config))
-    , filter_(std::move(filter))
     , ssl_context_(
           std::make_unique<asio::ssl::context>(asio::ssl::context::tlsv12))
-    , processor_(std::make_unique<packet_processor>(config_, filter_))
+    , processor_(std::make_unique<packet_processor>(config_))
 {
     setup_ssl_context();
 }
@@ -33,15 +32,15 @@ peer_monitor::setup_ssl_context()
     // Enable ECDH
     SSL_CTX_set_ecdh_auto(ssl_context_->native_handle(), 1);
 
-    if (config_.listen_mode)
+    if (config_.peer.listen_mode)
     {
         // Load server certificate and key
         try
         {
             ssl_context_->use_certificate_file(
-                config_.cert_path, asio::ssl::context::pem);
+                config_.peer.cert_path, asio::ssl::context::pem);
             ssl_context_->use_private_key_file(
-                config_.key_path, asio::ssl::context::pem);
+                config_.peer.key_path, asio::ssl::context::pem);
         }
         catch (std::exception const& e)
         {
@@ -49,7 +48,7 @@ peer_monitor::setup_ssl_context()
                 "Failed to load certificate/key files: " +
                 std::string(e.what()) +
                 "\nTry: openssl req -nodes -new -x509 -keyout " +
-                config_.key_path + " -out " + config_.cert_path);
+                config_.peer.key_path + " -out " + config_.peer.cert_path);
         }
     }
 }
@@ -66,11 +65,11 @@ peer_monitor::run()
 
     try
     {
-        if (config_.listen_mode)
+        if (config_.peer.listen_mode)
         {
             // Setup acceptor
             acceptor_ = std::make_unique<tcp::acceptor>(io_context_);
-            tcp::endpoint endpoint(tcp::v4(), config_.port);
+            tcp::endpoint endpoint(tcp::v4(), config_.peer.port);
             acceptor_->open(endpoint.protocol());
             acceptor_->set_option(tcp::acceptor::reuse_address(true));
             acceptor_->bind(endpoint);
@@ -80,14 +79,14 @@ peer_monitor::run()
                 "Listening on ",
                 endpoint.address().to_string(),
                 ":",
-                config_.port);
+                config_.peer.port);
             start_accept();
         }
         else
         {
             // Connect to peer
             auto connection = std::make_shared<peer_connection>(
-                io_context_, *ssl_context_, config_);
+                io_context_, *ssl_context_, config_.peer);
             connection->async_connect(
                 [this, connection](boost::system::error_code ec) {
                     if (!ec)
@@ -108,7 +107,7 @@ peer_monitor::run()
         }
 
         // Start IO threads
-        for (std::size_t i = 0; i < config_.io_threads; ++i)
+        for (std::size_t i = 0; i < config_.peer.io_threads; ++i)
         {
             io_threads_.emplace_back([this] {
                 try
@@ -200,8 +199,8 @@ peer_monitor::stop()
 void
 peer_monitor::start_accept()
 {
-    auto connection =
-        std::make_shared<peer_connection>(io_context_, *ssl_context_, config_);
+    auto connection = std::make_shared<peer_connection>(
+        io_context_, *ssl_context_, config_.peer);
 
     acceptor_->async_accept(
         connection->socket().lowest_layer(),

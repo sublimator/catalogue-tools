@@ -1,6 +1,6 @@
 #pragma once
 
-#include "catl/peer/types.h"
+#include "catl/peer/monitor/types.h"
 #include <boost/program_options.hpp>
 #include <optional>
 #include <string>
@@ -15,7 +15,7 @@ public:
     command_line_parser();
 
     // Parse command line arguments
-    std::optional<connection_config>
+    std::optional<monitor_config>
     parse(int argc, char* argv[]);
 
     // Get packet filter from parsed options

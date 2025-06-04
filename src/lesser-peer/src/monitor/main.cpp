@@ -54,7 +54,6 @@ main(int argc, char* argv[])
     }
 
     auto config = *config_opt;
-    auto filter = parser.get_packet_filter();
 
     // Set up signal handlers
     std::signal(SIGINT, signal_handler);
@@ -63,11 +62,10 @@ main(int argc, char* argv[])
     try
     {
         // Create and run peer monitor
-        g_monitor =
-            std::make_unique<catl::peer::monitor::peer_monitor>(config, filter);
+        g_monitor = std::make_unique<catl::peer::monitor::peer_monitor>(config);
 
         LOGI("Starting XRPL Peer Monitor");
-        LOGI("Connecting to ", config.host, ":", config.port);
+        LOGI("Connecting to ", config.peer.host, ":", config.peer.port);
 
         g_monitor->run();
 

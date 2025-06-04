@@ -1,7 +1,7 @@
 #pragma once
 
+#include "catl/peer/monitor/types.h"
 #include "catl/peer/peer-connection.h"
-#include "catl/peer/types.h"
 #include <functional>
 #include <memory>
 
@@ -10,9 +10,7 @@ namespace catl::peer::monitor {
 class packet_processor
 {
 public:
-    packet_processor(
-        connection_config const& config,
-        packet_filter const& filter);
+    packet_processor(monitor_config const& config);
 
     // Process incoming packet
     void
@@ -68,8 +66,7 @@ private:
     format_bytes(double bytes) const;
 
 private:
-    connection_config config_;
-    packet_filter filter_;
+    monitor_config config_;
     packet_counters counters_;
     std::map<packet_type, custom_handler> custom_handlers_;
 
