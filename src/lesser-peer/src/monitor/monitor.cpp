@@ -11,6 +11,11 @@ peer_monitor::peer_monitor(monitor_config config)
     , processor_(std::make_unique<packet_processor>(config_))
 {
     setup_ssl_context();
+    
+    // Set shutdown callback for manifests-only mode
+    processor_->set_shutdown_callback([this]() {
+        request_stop();
+    });
 }
 
 peer_monitor::~peer_monitor()

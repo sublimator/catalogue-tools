@@ -109,8 +109,11 @@ packet_processor::process_packet(
     // Check manifests-only mode
     if (config_.display.manifests_only && type != packet_type::manifests)
     {
-        LOGI("Exiting due to manifests-only mode");
-        std::exit(0);
+        LOGI("Received non-manifest packet in manifests-only mode, requesting shutdown");
+        if (shutdown_callback_)
+        {
+            shutdown_callback_();
+        }
     }
 }
 

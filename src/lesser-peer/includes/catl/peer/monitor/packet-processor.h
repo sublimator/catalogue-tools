@@ -32,6 +32,14 @@ public:
     void
     set_custom_handler(packet_type type, custom_handler handler);
 
+    // Set shutdown callback
+    using shutdown_callback = std::function<void()>;
+    void
+    set_shutdown_callback(shutdown_callback callback)
+    {
+        shutdown_callback_ = std::move(callback);
+    }
+
 private:
     void
     handle_ping(
@@ -69,6 +77,7 @@ private:
     monitor_config config_;
     packet_counters counters_;
     std::map<packet_type, custom_handler> custom_handlers_;
+    shutdown_callback shutdown_callback_;
 
     std::chrono::steady_clock::time_point start_time_;
     std::chrono::steady_clock::time_point last_display_time_;
