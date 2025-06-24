@@ -161,9 +161,22 @@ void
 peer_connection::generate_node_keys()
 {
     crypto_utils crypto;
-    const char* home = std::getenv("HOME");
-    std::string key_file = std::string(home ? home : "") + "/.peermon";
-    auto keys = crypto.load_or_generate_node_keys(key_file);
+
+    crypto_utils::node_keys keys;
+
+    // Check if a private key was provided in the config
+    if (config_.node_private_key.has_value())
+    {
+        // Use the provided private key
+        keys = crypto.node_keys_from_private(config_.node_private_key.value());
+    }
+    else
+    {
+        // Fall back to loading from file or generating new keys
+        const char* home = std::getenv("HOME");
+        std::string key_file = std::string(home ? home : "") + "/.peermon";
+        keys = crypto.load_or_generate_node_keys(key_file);
+    }
 
     secret_key_ = keys.secret_key;
     public_key_compressed_ = keys.public_key_compressed;
@@ -206,12 +219,15 @@ peer_connection::send_http_request(const connection_handler& handler)
     auto req = std::make_shared<http::request<http::string_body>>(
         http::verb::get, "/", 11);
     req->set(http::field::user_agent, "rippled-2.2.2");
-    req->set(http::field::upgrade, "XRPL/2.1");
+    req->set(http::field::upgrade, "XRPL/2.2");
     req->set(http::field::connection, "Upgrade");
     req->set("Connect-As", "Peer");
     req->set("Crawl", "private");
     req->set("Session-Signature", session_signature_);
     req->set("Public-Key", node_public_key_b58_);
+
+    // Request ledger replay feature (lowercase as per rippled source)
+    req->set("X-Protocol-Ctl", "ledgerreplay=1;");
 
     http::async_write(
         *socket_,
@@ -289,8 +305,76 @@ peer_connection::handle_http_response(const connection_handler& handler)
 {
     if (http_response_.result() != http::status::switching_protocols)
     {
+        LOGE(
+            "HTTP upgrade failed with status: ",
+            static_cast<int>(http_response_.result()));
         handler(boost::asio::error::invalid_argument);
         return;
+    }
+
+    // Log important response headers
+    LOGI("HTTP upgrade successful - examining response headers:");
+
+    // Check protocol version
+    if (auto it = http_response_.find("Upgrade"); it != http_response_.end())
+    {
+        LOGI("  Protocol version: ", it->value());
+    }
+
+    // Check server version
+    if (auto it = http_response_.find("Server"); it != http_response_.end())
+    {
+        LOGI("  Server: ", it->value());
+    }
+
+    // Check feature support (X-Protocol-Ctl)
+    if (auto it = http_response_.find("X-Protocol-Ctl");
+        it != http_response_.end())
+    {
+        LOGI("  Protocol features: ", it->value());
+        // TODO: Parse features like LEDGER_REPLAY=1
+    }
+
+    // Check network ID
+    if (auto it = http_response_.find("Network-ID"); it != http_response_.end())
+    {
+        LOGI("  Network ID: ", it->value());
+    }
+
+    // Check public key
+    if (auto it = http_response_.find("Public-Key"); it != http_response_.end())
+    {
+        LOGI("  Node public key: ", it->value());
+    }
+
+    // Check closed ledger info
+    if (auto it = http_response_.find("Closed-Ledger");
+        it != http_response_.end())
+    {
+        LOGI("  Closed ledger: ", it->value());
+    }
+
+    if (auto it = http_response_.find("Previous-Ledger");
+        it != http_response_.end())
+    {
+        LOGI("  Previous ledger: ", it->value());
+    }
+
+    // Log any other headers we might not know about
+    for (auto const& field : http_response_)
+    {
+        if (field.name_string() != "Upgrade" &&
+            field.name_string() != "Server" &&
+            field.name_string() != "X-Protocol-Ctl" &&
+            field.name_string() != "Network-ID" &&
+            field.name_string() != "Public-Key" &&
+            field.name_string() != "Closed-Ledger" &&
+            field.name_string() != "Previous-Ledger" &&
+            field.name_string() != "Connection" &&
+            field.name_string() != "Connect-As")
+        {
+            LOGD("  ", field.name_string(), ": ", field.value());
+        }
     }
 
     http_upgraded_ = true;
@@ -336,14 +420,16 @@ peer_connection::handle_read_header(
     }
 
     // Parse header
-    std::uint32_t payload_size = (header_buffer_[0] << 24) |
+    // First check if compressed by looking at high nibble of first byte
+    current_header_.compressed = (header_buffer_[0] & 0xF0) != 0;
+
+    // Extract payload size (masking off compression bits)
+    std::uint32_t payload_size = ((header_buffer_[0] & 0x0F) << 24) |
         (header_buffer_[1] << 16) | (header_buffer_[2] << 8) |
         header_buffer_[3];
 
-    current_header_.compressed = (payload_size >> 28) != 0;
     if (current_header_.compressed)
     {
-        payload_size &= 0x0FFFFFFF;
         LOGD(
             "Compressed packet detected, need to read additional header bytes");
     }
@@ -465,9 +551,10 @@ peer_connection::async_send_packet(
     std::vector<std::uint8_t> packet;
     packet.reserve(6 + data.size());
 
-    // Payload size (big-endian)
+    // Payload size (big-endian) - for uncompressed, first 4 bits are 0
     std::uint32_t payload_size = static_cast<std::uint32_t>(data.size());
-    packet.push_back((payload_size >> 24) & 0xFF);
+    packet.push_back(
+        (payload_size >> 24) & 0x0F);  // Top 4 bits are 0 for uncompressed
     packet.push_back((payload_size >> 16) & 0xFF);
     packet.push_back((payload_size >> 8) & 0xFF);
     packet.push_back(payload_size & 0xFF);
