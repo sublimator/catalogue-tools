@@ -52,6 +52,28 @@ private:
     void
     handle_ledger_data(std::vector<std::uint8_t> const& payload);
 
+    void
+    handle_replay_delta_response(std::vector<std::uint8_t> const& payload);
+
+    void
+    handle_ping(std::vector<std::uint8_t> const& payload);
+
+    // Request transactions for a specific ledger
+    void
+    request_ledger_transactions(std::string const& ledger_hash);
+
+    // Request full ledger data using TMGetLedger
+    void
+    request_ledger_data(std::string const& ledger_hash);
+
+    // Send a ping to test connectivity
+    void
+    send_ping();
+
+    // Send our status to the peer
+    void
+    send_status();
+
 private:
     peer_config config_;
 
@@ -70,6 +92,9 @@ private:
     // Current ledger tracking
     std::uint32_t current_ledger_seq_{0};
     std::array<std::uint8_t, 32> current_ledger_hash_{};
+
+    // Request tracking
+    std::atomic<std::uint64_t> request_cookie_{1000};
 };
 
 }  // namespace catl::peer::log_keeper

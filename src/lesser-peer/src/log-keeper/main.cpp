@@ -1,6 +1,8 @@
 #include <atomic>
 #include <boost/program_options.hpp>
+#include <catl/base58/base58.h>
 #include <catl/core/logger.h>
+#include <catl/peer/crypto-utils.h>
 #include <catl/peer/log-keeper/log-keeper.h>
 #include <csignal>
 #include <iostream>
@@ -43,8 +45,9 @@ main(int argc, char* argv[])
     po::options_description desc("Log Keeper Options");
     desc.add_options()("help,h", "Show this help message")(
         "version,v", "Show version information")(
-        "host", po::value<std::string>()->required(), "Peer host address")(
-        "port", po::value<std::uint16_t>()->required(), "Peer port number")(
+        "create-keys", "Generate a new node keypair and exit")(
+        "host", po::value<std::string>(), "Peer host address")(
+        "port", po::value<std::uint16_t>(), "Peer port number")(
         "threads",
         po::value<std::size_t>()->default_value(2),
         "Number of IO threads")(
@@ -53,6 +56,9 @@ main(int argc, char* argv[])
             std::string(PROJECT_ROOT) +
             "src/lesser-peer/definitions/xrpl_definitions.json"),
         "Path to protocol definitions JSON")(
+        "node-private",
+        po::value<std::string>(),
+        "Node private key (base58-encoded)")(
         "debug,d", po::bool_switch(), "Enable debug logging");
 
     po::positional_options_description pos_desc;
@@ -82,12 +88,40 @@ main(int argc, char* argv[])
             return 0;
         }
 
+        if (vm.count("create-keys"))
+        {
+            // Generate a new keypair
+            catl::peer::crypto_utils crypto;
+            auto keys = crypto.generate_node_keys();
+
+            // Encode the private key to base58
+            std::string private_key_b58 =
+                catl::base58::xrpl_codec.encode_versioned(
+                    keys.secret_key.data(),
+                    keys.secret_key.size(),
+                    catl::base58::NODE_PRIVATE);
+
+            std::cout << "Generated new node keypair:\n";
+            std::cout << "Private Key: " << private_key_b58 << "\n";
+            std::cout << "Public Key:  " << keys.public_key_b58 << "\n";
+            return 0;
+        }
+
         po::notify(vm);
 
         // Set debug logging if requested
         if (vm["debug"].as<bool>())
         {
             Logger::set_level(LogLevel::DEBUG);
+        }
+
+        // Check required arguments for normal operation
+        if (!vm.count("host") || !vm.count("port"))
+        {
+            std::cerr << "Error: host and port are required\n\n";
+            std::cout << "Usage: " << argv[0] << " <host> <port> [options]\n\n";
+            std::cout << desc << "\n";
+            return 1;
         }
 
         // Create peer config
@@ -97,6 +131,12 @@ main(int argc, char* argv[])
         config.io_threads = vm["threads"].as<std::size_t>();
         config.protocol_definitions_path =
             vm["protocol-definitions"].as<std::string>();
+
+        // Set node private key if provided
+        if (vm.count("node-private"))
+        {
+            config.node_private_key = vm["node-private"].as<std::string>();
+        }
 
         // Set up signal handlers
         std::signal(SIGINT, signal_handler);
