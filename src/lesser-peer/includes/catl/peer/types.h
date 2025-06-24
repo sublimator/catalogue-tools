@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -43,8 +44,10 @@ struct peer_config
 
     // Protocol definitions
     std::string protocol_definitions_path;
-};
 
+    // Node identity (optional base58-encoded private key)
+    std::optional<std::string> node_private_key;
+};
 
 enum class packet_type : std::uint16_t {
     manifests = 2,

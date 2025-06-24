@@ -48,19 +48,15 @@ crypto_utils::crypto_utils()
 
 crypto_utils::~crypto_utils() = default;
 
+// Helper function to derive public keys from a secret key
 crypto_utils::node_keys
-crypto_utils::generate_node_keys() const
+crypto_utils::derive_public_keys(
+    std::array<std::uint8_t, 32> const& secret_key) const
 {
     node_keys keys;
+    keys.secret_key = secret_key;
 
-    // Generate random secret key
-    std::random_device random_dev;
-    for (auto& byte : keys.secret_key)
-    {
-        byte = static_cast<std::uint8_t>(random_dev());
-    }
-
-    // Create public key
+    // Create public key from secret
     secp256k1_pubkey pubkey;
     if (!secp256k1_ec_pubkey_create(  // NOLINT(readability-implicit-bool-conversion)
             ctx_.get(),
@@ -104,55 +100,41 @@ crypto_utils::generate_node_keys() const
 }
 
 crypto_utils::node_keys
+crypto_utils::generate_node_keys() const
+{
+    // Generate random secret key
+    std::array<std::uint8_t, 32> secret_key;
+    std::random_device random_dev;
+    for (auto& byte : secret_key)
+    {
+        byte = static_cast<std::uint8_t>(random_dev());
+    }
+
+    return derive_public_keys(secret_key);
+}
+
+crypto_utils::node_keys
 crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
 {
     // Try to load from file
     std::ifstream key_file(key_file_path, std::ios::binary);
     if (key_file.good())
     {
-        node_keys keys;
+        std::array<std::uint8_t, 32> secret_key;
         key_file.read(
-            reinterpret_cast<char*>(keys.secret_key.data()),
+            reinterpret_cast<char*>(secret_key.data()),
             32);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
         if (key_file.gcount() == 32)
         {
-            // Recreate public key from secret
-            secp256k1_pubkey pubkey;
-            if (secp256k1_ec_pubkey_create(
-                    ctx_.get(), &pubkey, keys.secret_key.data()))
+            try
             {
-                // Serialize public key (uncompressed)
-                std::size_t output_len = 65;
-                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
-                std::array<std::uint8_t, 65> uncompressed;
-                secp256k1_ec_pubkey_serialize(
-                    ctx_.get(),
-                    uncompressed.data(),
-                    &output_len,
-                    &pubkey,
-                    SECP256K1_EC_UNCOMPRESSED);
-
-                // Copy raw coordinates
-                std::copy(
-                    uncompressed.begin() + 1,
-                    uncompressed.end(),
-                    keys.public_key_raw.begin());
-
-                // Serialize public key (compressed)
-                output_len = 33;
-                secp256k1_ec_pubkey_serialize(
-                    ctx_.get(),
-                    keys.public_key_compressed.data(),
-                    &output_len,
-                    &pubkey,
-                    SECP256K1_EC_COMPRESSED);
-
-                // Encode to base58
-                keys.public_key_b58 = base58::encode_node_public(
-                    keys.public_key_compressed.data(), 33);
-
+                auto keys = derive_public_keys(secret_key);
                 LOGI("Loaded node keys from ", key_file_path);
                 return keys;
+            }
+            catch (std::exception const& e)
+            {
+                LOGW("Failed to derive public keys from file: ", e.what());
             }
         }
     }
@@ -160,6 +142,30 @@ crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
     // Generate new keys
     LOGI("Generating new random node keys");
     return generate_node_keys();
+}
+
+crypto_utils::node_keys
+crypto_utils::node_keys_from_private(std::string const& base58_private) const
+{
+    // Decode the base58 private key
+    auto decoded = base58::xrpl_codec.decode_versioned(
+        base58_private, base58::NODE_PRIVATE);
+    if (!decoded || decoded->payload.size() != 32)
+    {
+        throw std::runtime_error("Invalid base58 node private key");
+    }
+
+    // Convert payload to array
+    std::array<std::uint8_t, 32> secret_key;
+    std::copy(
+        decoded->payload.begin(), decoded->payload.end(), secret_key.begin());
+
+    auto keys = derive_public_keys(secret_key);
+    LOGI(
+        "Loaded node keys from base58 private key. Public: ",
+        keys.public_key_b58);
+
+    return keys;
 }
 
 std::string

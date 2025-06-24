@@ -28,9 +28,17 @@ public:
     node_keys
     generate_node_keys() const;
 
+    // Helper to derive public keys from a secret key
+    node_keys
+    derive_public_keys(std::array<std::uint8_t, 32> const& secret_key) const;
+
     // Load node keys from file or generate new ones
     node_keys
     load_or_generate_node_keys(std::string const& key_file_path);
+
+    // Create node keys from base58-encoded private key
+    node_keys
+    node_keys_from_private(std::string const& base58_private) const;
 
     // Create session signature for SSL upgrade
     std::string
