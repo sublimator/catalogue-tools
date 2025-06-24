@@ -65,7 +65,9 @@ to_canonical_ledger_info(const LedgerInfo& v1_info)
     canonical.close_time_resolution =
         static_cast<uint8_t>(v1_info.close_time_resolution);
     canonical.close_flags = static_cast<uint8_t>(v1_info.close_flags);
-    std::memcpy(canonical.hash.data(), v1_info.hash, 32);
+    // V1 format always has a hash, so we always copy it
+    canonical.hash.emplace();
+    std::memcpy(canonical.hash->data(), v1_info.hash, 32);
 
     return canonical;
 }

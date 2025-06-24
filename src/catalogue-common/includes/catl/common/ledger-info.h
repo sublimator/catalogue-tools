@@ -2,6 +2,7 @@
 
 #include "catl/core/types.h"
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace catl::common {
@@ -13,6 +14,11 @@ namespace catl::common {
  * Ripple/Xahau network protocol. This is the standard format for ledger headers
  * as they appear on the network, in contrast to format-specific storage
  * representations (e.g., the CATL v1 format which uses a different layout).
+ *
+ * IMPORTANT: This structure represents data in HOST byte order. The actual
+ * network protocol uses big-endian (network byte order) for multi-byte fields.
+ * The LedgerInfoView class handles the conversion from network to host byte
+ * order.
  */
 #pragma pack(push, 1)
 struct LedgerInfo  // NOLINT(*-pro-type-member-init)
@@ -45,7 +51,8 @@ struct LedgerInfo  // NOLINT(*-pro-type-member-init)
     uint8_t close_flags;
 
     // Hash of this ledger (computed from the above fields)
-    Hash256 hash;
+    // Optional because ledger headers can be serialized with or without hash
+    std::optional<Hash256> hash;
 
     /**
      * Convert to human-readable string representation
@@ -63,29 +70,41 @@ struct LedgerInfo  // NOLINT(*-pro-type-member-init)
  * canonical Ripple/Xahau network serialization format for ledger headers. This
  * format is:
  *
- * - seq:                  32 bits
- * - drops:                64 bits
- * - parent_hash:         256 bits
- * - tx_hash:             256 bits
- * - account_hash:        256 bits
- * - parent_close_time:    32 bits
- * - close_time:           32 bits
- * - close_time_resolution: 8 bits
- * - close_flags:           8 bits
- * - hash:                 256 bits
+ * - seq:                  32 bits (big-endian)
+ * - drops:                64 bits (big-endian)
+ * - parent_hash:         256 bits (byte array, no endianness)
+ * - tx_hash:             256 bits (byte array, no endianness)
+ * - account_hash:        256 bits (byte array, no endianness)
+ * - parent_close_time:    32 bits (big-endian)
+ * - close_time:           32 bits (big-endian)
+ * - close_time_resolution: 8 bits (single byte, no endianness)
+ * - close_flags:           8 bits (single byte, no endianness)
+ * - hash:                 256 bits (byte array, no endianness)
+ *
+ * This class automatically converts multi-byte integer fields from network
+ * byte order (big-endian) to host byte order when reading.
  */
 class LedgerInfoView
 {
+public:
+    // Size constants for ledger header serialization
+    static constexpr size_t HEADER_SIZE_WITHOUT_HASH = 118;
+    static constexpr size_t HEADER_SIZE_WITH_HASH = 150;
+
 private:
     const uint8_t* data;  // Raw pointer to header data
+    size_t size_;         // Size of the header data
 
 public:
     /**
      * Constructor with raw data pointer
      *
      * @param header_data Pointer to the start of the ledger header data
+     * @param size Size of the header data (defaults to full size with hash)
      */
-    explicit LedgerInfoView(const uint8_t* header_data);
+    explicit LedgerInfoView(
+        const uint8_t* header_data,
+        size_t size = HEADER_SIZE_WITH_HASH);
 
     /**
      * Get the sequence number
@@ -142,10 +161,11 @@ public:
     close_flags() const;
 
     /**
-     * Get the ledger hash
+     * Get the ledger hash (if present)
      *
+     * @return The ledger hash if the header includes it, std::nullopt otherwise
      */
-    Hash256
+    std::optional<Hash256>
     hash() const;
 
     /**

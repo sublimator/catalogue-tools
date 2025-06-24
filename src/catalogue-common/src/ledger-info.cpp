@@ -2,6 +2,7 @@
 #include "catl/common/utils.h"
 
 #include <cstring>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -13,9 +14,12 @@ std::string
 LedgerInfo::to_string() const
 {
     std::ostringstream oss;
-    oss << "Ledger " << seq << ":\n"
-        << "  Hash:           " << hash.hex() << "\n"
-        << "  Parent Hash:    " << parent_hash.hex() << "\n"
+    oss << "Ledger " << seq << ":\n";
+    if (hash.has_value())
+        oss << "  Hash:           " << hash->hex() << "\n";
+    else
+        oss << "  Hash:           <not present>\n";
+    oss << "  Parent Hash:    " << parent_hash.hex() << "\n"
         << "  Account Hash:   " << account_hash.hex() << "\n"
         << "  TX Hash:        " << tx_hash.hex() << "\n"
         << "  Close Time:     " << format_ripple_time(close_time) << "\n"
@@ -29,9 +33,10 @@ LedgerInfo::to_string() const
 
 // -------------------- LedgerInfoView implementation --------------------
 
-LedgerInfoView::LedgerInfoView(const uint8_t* header_data) : data(header_data)
+LedgerInfoView::LedgerInfoView(const uint8_t* header_data, size_t size)
+    : data(header_data), size_(size)
 {
-    // Just store the pointer, no copying
+    // Just store the pointer and size, no copying
 }
 
 uint32_t
@@ -39,7 +44,8 @@ LedgerInfoView::seq() const
 {
     uint32_t result;
     std::memcpy(&result, data + offsetof(LedgerInfo, seq), sizeof(uint32_t));
-    return result;
+    // Convert from big-endian (network byte order) to host byte order
+    return __builtin_bswap32(result);
 }
 
 uint64_t
@@ -47,7 +53,8 @@ LedgerInfoView::drops() const
 {
     uint64_t result;
     std::memcpy(&result, data + offsetof(LedgerInfo, drops), sizeof(uint64_t));
-    return result;
+    // Convert from big-endian (network byte order) to host byte order
+    return __builtin_bswap64(result);
 }
 
 Hash256
@@ -76,7 +83,8 @@ LedgerInfoView::parent_close_time() const
         &result,
         data + offsetof(LedgerInfo, parent_close_time),
         sizeof(uint32_t));
-    return result;
+    // Convert from big-endian (network byte order) to host byte order
+    return __builtin_bswap32(result);
 }
 
 uint32_t
@@ -85,7 +93,8 @@ LedgerInfoView::close_time() const
     uint32_t result;
     std::memcpy(
         &result, data + offsetof(LedgerInfo, close_time), sizeof(uint32_t));
-    return result;
+    // Convert from big-endian (network byte order) to host byte order
+    return __builtin_bswap32(result);
 }
 
 uint8_t
@@ -100,10 +109,16 @@ LedgerInfoView::close_flags() const
     return data[offsetof(LedgerInfo, close_flags)];
 }
 
-Hash256
+std::optional<Hash256>
 LedgerInfoView::hash() const
 {
-    return Hash256(data + offsetof(LedgerInfo, hash));
+    // Check if the data includes the hash field
+    if (size_ >= HEADER_SIZE_WITH_HASH)
+    {
+        // The hash is at offset 86 (after all other fields)
+        return Hash256(data + HEADER_SIZE_WITHOUT_HASH);
+    }
+    return std::nullopt;
 }
 
 LedgerInfo
