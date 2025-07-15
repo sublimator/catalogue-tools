@@ -149,20 +149,6 @@ public:
     }
 };
 
-// Get size for STNumber type (always 12 bytes)
-inline constexpr size_t
-get_number_size()
-{
-    return 12;  // 8 bytes mantissa + 4 bytes exponent
-}
-
-// Helper to get STNumber size from cursor (for consistency with other types)
-inline size_t
-get_number_size(SliceCursor& cursor)
-{
-    (void)cursor;  // Unused, STNumber is always 12 bytes
-    return 12;
-}
 
 /**
  * Parse STNumber from data.
