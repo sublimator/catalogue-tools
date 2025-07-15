@@ -56,6 +56,30 @@ namespace fs = boost::filesystem;
 //----------------------------------------------------------
 
 /**
+ * Load protocol definitions based on command line options
+ */
+xdata::Protocol
+load_protocol_from_options(const po::variables_map& vm)
+{
+    if (vm.count("protocol-definitions"))
+    {
+        std::string protocol_path = vm["protocol-definitions"].as<std::string>();
+        LOGI("Loading protocol definitions from file: ", protocol_path);
+        return xdata::Protocol::load_from_file(protocol_path);
+    }
+    else if (vm.count("use-xrpl-defs"))
+    {
+        LOGI("Using embedded XRPL protocol definitions");
+        return xdata::Protocol::load_embedded_xrpl_protocol();
+    }
+    else
+    {
+        LOGI("Using embedded Xahau protocol definitions (default)");
+        return xdata::Protocol::load_embedded_xahau_protocol();
+    }
+}
+
+/**
  * Parse hex string to binary key
  */
 std::optional<std::array<uint8_t, 32>>
@@ -570,28 +594,8 @@ main(int argc, char* argv[])
                 ? vm["get-key-tx"].as<std::string>()
                 : vm["get-key"].as<std::string>();
 
-            // Load protocol - check for custom file first, then use embedded
-            xdata::Protocol protocol = [&vm]() {
-                if (vm.count("protocol-definitions"))
-                {
-                    std::string protocol_path =
-                        vm["protocol-definitions"].as<std::string>();
-                    LOGI(
-                        "Loading protocol definitions from file: ",
-                        protocol_path);
-                    return xdata::Protocol::load_from_file(protocol_path);
-                }
-                else if (vm.count("use-xrpl-defs"))
-                {
-                    LOGI("Using embedded XRPL protocol definitions");
-                    return xdata::Protocol::load_embedded_xrpl_protocol();
-                }
-                else
-                {
-                    LOGI("Using embedded Xahau protocol definitions (default)");
-                    return xdata::Protocol::load_embedded_xahau_protocol();
-                }
-            }();
+            // Load protocol definitions
+            xdata::Protocol protocol = load_protocol_from_options(vm);
 
             // Open reader
             auto reader = CatlV2Reader::create(input_file);
@@ -623,29 +627,8 @@ main(int argc, char* argv[])
             std::string input_file = vm["input"].as<std::string>();
             uint32_t ledger_seq = vm["get-ledger"].as<uint32_t>();
 
-            // Load protocol for JSON formatting - check for custom file first,
-            // then use embedded
-            xdata::Protocol protocol = [&vm]() {
-                if (vm.count("protocol-definitions"))
-                {
-                    std::string protocol_path =
-                        vm["protocol-definitions"].as<std::string>();
-                    LOGI(
-                        "Loading protocol definitions from file: ",
-                        protocol_path);
-                    return xdata::Protocol::load_from_file(protocol_path);
-                }
-                else if (vm.count("use-xrpl-defs"))
-                {
-                    LOGI("Using embedded XRPL protocol definitions");
-                    return xdata::Protocol::load_embedded_xrpl_protocol();
-                }
-                else
-                {
-                    LOGI("Using embedded Xahau protocol definitions (default)");
-                    return xdata::Protocol::load_embedded_xahau_protocol();
-                }
-            }();
+            // Load protocol definitions
+            xdata::Protocol protocol = load_protocol_from_options(vm);
 
             // Open reader
             auto reader = CatlV2Reader::create(input_file);
