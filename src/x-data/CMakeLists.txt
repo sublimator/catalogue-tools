@@ -1,4 +1,55 @@
-add_library(catl_xdata src/protocol.cpp)
+# Find Python3 for code generation
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+# Generate embedded protocol definitions headers
+set(XAHAU_DEFINITIONS_JSON
+    ${CMAKE_SOURCE_DIR}/tests/x-data/fixture/xahau_definitions.json)
+set(XRPL_DEFINITIONS_JSON
+    ${CMAKE_SOURCE_DIR}/src/lesser-peer/definitions/xrpl_definitions.json)
+set(GENERATED_XAHAU_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/embedded_xahau_definitions.h)
+set(GENERATED_XRPL_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/embedded_xrpl_definitions.h)
+
+# Generate Xahau definitions header
+add_custom_command(
+  OUTPUT ${GENERATED_XAHAU_HEADER}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          ${CMAKE_CURRENT_BINARY_DIR}/generated
+  COMMAND
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/generate_definitions.py
+    ${XAHAU_DEFINITIONS_JSON} ${GENERATED_XAHAU_HEADER} --namespace
+    catl::xdata::xahau
+  DEPENDS ${XAHAU_DEFINITIONS_JSON}
+          ${CMAKE_SOURCE_DIR}/scripts/generate_definitions.py
+  COMMENT "Generating embedded Xahau definitions header")
+
+# Generate XRPL definitions header
+add_custom_command(
+  OUTPUT ${GENERATED_XRPL_HEADER}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          ${CMAKE_CURRENT_BINARY_DIR}/generated
+  COMMAND
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/generate_definitions.py
+    ${XRPL_DEFINITIONS_JSON} ${GENERATED_XRPL_HEADER} --namespace
+    catl::xdata::xrpl
+  DEPENDS ${XRPL_DEFINITIONS_JSON}
+          ${CMAKE_SOURCE_DIR}/scripts/generate_definitions.py
+  COMMENT "Generating embedded XRPL definitions header")
+
+# Create a custom target to ensure the headers are generated
+add_custom_target(generate_xdata_definitions DEPENDS ${GENERATED_XAHAU_HEADER}
+                                                     ${GENERATED_XRPL_HEADER})
+
+add_library(
+  catl_xdata
+  src/protocol.cpp
+  src/embedded_protocol.cpp
+  ${GENERATED_XAHAU_HEADER}
+  ${GENERATED_XRPL_HEADER})
+
+# Make sure the definitions are generated before building the library
+add_dependencies(catl_xdata generate_xdata_definitions)
 
 add_executable(catl_xdata_cli src/cli.cpp)
 
@@ -12,6 +63,7 @@ target_include_directories(
                                                                  # headers
          $<INSTALL_INTERFACE:include> # For installed headers
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src # Private implementation headers
+          ${CMAKE_CURRENT_BINARY_DIR}/generated # Generated headers
 )
 
 # Link libraries for the x-data library

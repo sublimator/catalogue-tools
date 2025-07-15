@@ -502,10 +502,11 @@ main(int argc, char* argv[])
             po::value<uint32_t>(),
             "Ledger sequence to use for key lookup")(
             "protocol-definitions",
-            po::value<std::string>()->default_value(
-                std::string(PROJECT_ROOT) +
-                "tests/x-data/fixture/xahau_definitions.json"),
-            "Path to protocol definitions JSON file")(
+            po::value<std::string>(),
+            "Path to protocol definitions JSON file (overrides embedded)")(
+            "use-xrpl-defs",
+            "Use embedded XRPL definitions instead of Xahau (default: use "
+            "Xahau)")(
             "walk-state",
             "Walk all state items in the ledger (use with --get-ledger)")(
             "walk-txns",
@@ -559,8 +560,6 @@ main(int argc, char* argv[])
 
             std::string input_file = vm["input"].as<std::string>();
             uint32_t ledger_seq = vm["get-ledger"].as<uint32_t>();
-            std::string protocol_path =
-                vm["protocol-definitions"].as<std::string>();
 
             // Determine which type of lookup
             bool is_transaction = vm.count("get-key-tx");
@@ -568,9 +567,28 @@ main(int argc, char* argv[])
                 ? vm["get-key-tx"].as<std::string>()
                 : vm["get-key"].as<std::string>();
 
-            // Load protocol
-            xdata::Protocol protocol =
-                xdata::Protocol::load_from_file(protocol_path);
+            // Load protocol - check for custom file first, then use embedded
+            xdata::Protocol protocol = [&vm]() {
+                if (vm.count("protocol-definitions"))
+                {
+                    std::string protocol_path =
+                        vm["protocol-definitions"].as<std::string>();
+                    LOGI(
+                        "Loading protocol definitions from file: ",
+                        protocol_path);
+                    return xdata::Protocol::load_from_file(protocol_path);
+                }
+                else if (vm.count("use-xrpl-defs"))
+                {
+                    LOGI("Using embedded XRPL protocol definitions");
+                    return xdata::Protocol::load_embedded_xrpl_protocol();
+                }
+                else
+                {
+                    LOGI("Using embedded Xahau protocol definitions (default)");
+                    return xdata::Protocol::load_embedded_xahau_protocol();
+                }
+            }();
 
             // Open reader
             auto reader = CatlV2Reader::create(input_file);
@@ -601,12 +619,30 @@ main(int argc, char* argv[])
 
             std::string input_file = vm["input"].as<std::string>();
             uint32_t ledger_seq = vm["get-ledger"].as<uint32_t>();
-            std::string protocol_path =
-                vm["protocol-definitions"].as<std::string>();
 
-            // Load protocol for JSON formatting
-            xdata::Protocol protocol =
-                xdata::Protocol::load_from_file(protocol_path);
+            // Load protocol for JSON formatting - check for custom file first,
+            // then use embedded
+            xdata::Protocol protocol = [&vm]() {
+                if (vm.count("protocol-definitions"))
+                {
+                    std::string protocol_path =
+                        vm["protocol-definitions"].as<std::string>();
+                    LOGI(
+                        "Loading protocol definitions from file: ",
+                        protocol_path);
+                    return xdata::Protocol::load_from_file(protocol_path);
+                }
+                else if (vm.count("use-xrpl-defs"))
+                {
+                    LOGI("Using embedded XRPL protocol definitions");
+                    return xdata::Protocol::load_embedded_xrpl_protocol();
+                }
+                else
+                {
+                    LOGI("Using embedded Xahau protocol definitions (default)");
+                    return xdata::Protocol::load_embedded_xahau_protocol();
+                }
+            }();
 
             // Open reader
             auto reader = CatlV2Reader::create(input_file);
