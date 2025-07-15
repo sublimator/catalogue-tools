@@ -74,7 +74,7 @@ inline const FieldType Number{
     "Number",
     9,
     {{Networks::XRPL}},
-    0};  // XRPL specific, variable encoding
+    12};  // XRPL specific, 12 bytes (8 byte mantissa + 4 byte exponent)
 
 // Container types - Universal
 inline const FieldType STObject{"STObject", 14, std::nullopt, 0};
