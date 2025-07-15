@@ -57,13 +57,16 @@ namespace catl::v2 {
 class CatlV2Writer
 {
 public:
-    explicit CatlV2Writer(const std::string& filename)
+    explicit CatlV2Writer(const std::string& filename, uint32_t network_id = 0)
         : output_(filename, std::ios::binary | std::ios::out | std::ios::trunc)
     {
         if (!output_)
         {
             throw std::runtime_error("Failed to open output file: " + filename);
         }
+
+        // Set network ID in header
+        header_.network_id = network_id;
 
         // Write placeholder header
         write_file_header();
@@ -229,6 +232,7 @@ private:
     std::uint64_t ledger_count_ = 0;
     std::uint64_t first_ledger_seq_ = 0;
     std::uint64_t last_ledger_seq_ = 0;
+    CatlV2Header header_;  // Store header to preserve network_id
 
     /**
      * Write file header (placeholder - updated at end)
@@ -236,9 +240,8 @@ private:
     void
     write_file_header()
     {
-        CatlV2Header header;
-        output_.write(reinterpret_cast<const char*>(&header), sizeof(header));
-        stats_.total_bytes_written += sizeof(header);
+        output_.write(reinterpret_cast<const char*>(&header_), sizeof(header_));
+        stats_.total_bytes_written += sizeof(header_);
     }
 
     /**
@@ -247,16 +250,15 @@ private:
     void
     finalize_file_header(std::uint64_t index_offset)
     {
-        CatlV2Header header;
-        header.ledger_count = ledger_count_;
-        header.first_ledger_seq = first_ledger_seq_;
-        header.last_ledger_seq = last_ledger_seq_;
-        header.ledger_index_offset = index_offset;
+        header_.ledger_count = ledger_count_;
+        header_.first_ledger_seq = first_ledger_seq_;
+        header_.last_ledger_seq = last_ledger_seq_;
+        header_.ledger_index_offset = index_offset;
 
         // Seek to beginning and rewrite header
         auto current_pos = output_.tellp();
         output_.seekp(0);
-        output_.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        output_.write(reinterpret_cast<const char*>(&header_), sizeof(header_));
         output_.seekp(current_pos);
     }
 

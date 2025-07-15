@@ -13,9 +13,10 @@ namespace catl::v2 {
  * CATL v2 File Format Layout
  * =========================
  *
- * [CatlV2Header]                    // 48 bytes
+ * [CatlV2Header]                    // 52 bytes
  *   - magic: 'CAT2'                 // 4 bytes
  *   - version: 1                    // 4 bytes
+ *   - network_id                    // 4 bytes (0=XRPL, 21337=Xahau)
  *   - ledger_count                  // 8 bytes
  *   - first_ledger_seq              // 8 bytes
  *   - last_ledger_seq               // 8 bytes
@@ -221,6 +222,7 @@ struct CatlV2Header
 {
     std::array<char, 4> magic = {'C', 'A', 'T', '2'};  // CATL v2
     std::uint32_t version = 1;
+    std::uint32_t network_id = 0;           // Network ID (0=XRPL, 21337=Xahau)
     std::uint64_t ledger_count = 0;         // Number of ledgers in file
     std::uint64_t first_ledger_seq = 0;     // Sequence of first ledger
     std::uint64_t last_ledger_seq = 0;      // Sequence of last ledger
