@@ -22,25 +22,28 @@ namespace catl::xdata {
 class STNumber
 {
 private:
-    uint64_t mantissa_;
+    int64_t mantissa_;
     int32_t exponent_;
 
 public:
     // Constructors
     STNumber() : mantissa_(0), exponent_(0) {}
-    STNumber(uint64_t mantissa, int32_t exponent) 
+    STNumber(int64_t mantissa, int32_t exponent) 
         : mantissa_(mantissa), exponent_(exponent) {}
 
     // Static factory method from byte array (big-endian)
     static STNumber
     from_bytes(const uint8_t* data)
     {
-        // Read mantissa (8 bytes, big-endian)
-        uint64_t mantissa = 0;
+        // Read mantissa (8 bytes, big-endian, signed)
+        uint64_t mantissa_unsigned = 0;
         for (int i = 0; i < 8; ++i)
         {
-            mantissa = (mantissa << 8) | data[i];
+            mantissa_unsigned = (mantissa_unsigned << 8) | data[i];
         }
+        
+        // Interpret as signed 64-bit
+        int64_t mantissa = static_cast<int64_t>(mantissa_unsigned);
 
         // Read exponent (4 bytes, big-endian)
         uint32_t exp_unsigned = 0;
@@ -56,12 +59,16 @@ public:
     }
 
     // Getters
-    uint64_t mantissa() const { return mantissa_; }
+    int64_t mantissa() const { return mantissa_; }
     int32_t exponent() const { return exponent_; }
 
     /**
      * Convert to human-readable string.
      * Format: mantissa * 10^exponent
+     * 
+     * Based on XRPL's Number::to_string implementation:
+     * - Use scientific notation for very large/small exponents
+     * - Otherwise format as decimal with proper decimal point placement
      */
     std::string
     to_string() const
@@ -71,55 +78,62 @@ public:
             return "0";
         }
 
-        std::stringstream ss;
+        // Use scientific notation for exponents that are too small or too large
+        // (matching XRPL's logic: exponent < -25 or > -5)
+        if (exponent_ != 0 && (exponent_ < -25 || exponent_ > -5))
+        {
+            std::string ret = std::to_string(mantissa_);
+            ret.append(1, 'e');
+            ret.append(std::to_string(exponent_));
+            return ret;
+        }
+
+        // Handle sign
+        bool negative = mantissa_ < 0;
+        int64_t abs_mantissa = negative ? -mantissa_ : mantissa_;
         
-        // For simple cases where exponent is 0
+        // For zero exponent, just return the mantissa
         if (exponent_ == 0)
         {
-            ss << mantissa_;
-            return ss.str();
+            return std::to_string(mantissa_);
         }
         
-        // For positive exponents, multiply by 10^exponent
-        if (exponent_ > 0)
-        {
-            ss << mantissa_;
-            for (int i = 0; i < exponent_; ++i)
-            {
-                ss << "0";
-            }
-            return ss.str();
-        }
+        // Convert mantissa to string
+        std::string mantissa_str = std::to_string(abs_mantissa);
         
-        // For negative exponents, we need to add decimal point
-        std::string mantissa_str = std::to_string(mantissa_);
-        int mantissa_len = mantissa_str.length();
-        int decimal_pos = mantissa_len + exponent_;
+        // Calculate decimal point position
+        int decimal_pos = static_cast<int>(mantissa_str.length()) + exponent_;
+        
+        std::string result;
         
         if (decimal_pos <= 0)
         {
             // Need leading zeros after decimal point
-            ss << "0.";
+            result = "0.";
             for (int i = 0; i < -decimal_pos; ++i)
             {
-                ss << "0";
+                result += "0";
             }
-            ss << mantissa_str;
+            result += mantissa_str;
         }
-        else if (decimal_pos < mantissa_len)
+        else if (decimal_pos < static_cast<int>(mantissa_str.length()))
         {
             // Insert decimal point within the number
-            ss << mantissa_str.substr(0, decimal_pos);
-            ss << ".";
-            ss << mantissa_str.substr(decimal_pos);
+            result = mantissa_str.substr(0, decimal_pos);
+            result += ".";
+            result += mantissa_str.substr(decimal_pos);
         }
         else
         {
-            // This shouldn't happen with negative exponent, but handle it
-            ss << mantissa_str;
+            // Add trailing zeros (positive exponent)
+            result = mantissa_str;
+            for (int i = 0; i < exponent_; ++i)
+            {
+                result += "0";
+            }
         }
         
-        return ss.str();
+        return negative ? "-" + result : result;
     }
 
     /**
