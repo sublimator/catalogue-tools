@@ -7,6 +7,7 @@
 #include "catl/xdata/types/amount.h"
 #include "catl/xdata/types/iou-value.h"
 #include "catl/xdata/types/issue.h"
+#include "catl/xdata/types/number.h"
 #include "catl/xdata/types/pathset.h"
 #include <boost/json.hpp>
 #include <sstream>
@@ -360,6 +361,10 @@ private:
         {
             return format_issue(data);
         }
+        else if (field.meta.type == FieldTypes::Number)
+        {
+            return format_number(data);
+        }
         else if (field.meta.type == FieldTypes::PathSet)
         {
             return format_pathset(data);
@@ -519,6 +524,25 @@ private:
                 // Fall back to hex
                 return boost::json::string(to_hex(data));
             }
+        }
+    }
+
+    // Format STNumber field
+    boost::json::value
+    format_number(const Slice& data)
+    {
+        try
+        {
+            STNumber number = parse_number(data);
+            
+            // Return as string to preserve precision
+            return boost::json::string(number.to_string());
+        }
+        catch (const std::exception& e)
+        {
+            // Fall back to hex
+            LOGE("Failed to parse STNumber: ", e.what());
+            return boost::json::string(to_hex(data));
         }
     }
 
