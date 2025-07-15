@@ -195,6 +195,9 @@ lookup_key(
         data_slice->size(),
         " bytes");
 
+    // Display raw hex data
+    display_hex_fallback(data_slice.value());
+
     // Parse and display using xdata
     try
     {
@@ -678,13 +681,13 @@ main(int argc, char* argv[])
                             std::to_string(walk_opts.num_threads) + " threads)"
                         : "(SEQUENTIAL)",
                     " ===");
-                size_t count = 0;
+                std::atomic<size_t> count = 0;
                 std::mutex count_mutex;
                 reader->walk_state_items(
                     [&](const Key& key, const Slice& data) {
                         (void)key;  // Unused when output is disabled
                         {
-                            std::lock_guard<std::mutex> lock(count_mutex);
+                            // std::lock_guard<std::mutex> lock(count_mutex);
                             ++count;
                         }
 

@@ -9,6 +9,7 @@
 #include "catl/xdata/slice-visitor.h"
 #include "catl/xdata/types.h"
 #include "catl/xdata/types/amount.h"
+#include "catl/xdata/types/issue.h"
 #include "catl/xdata/types/pathset.h"
 #include <array>
 #include <cstdint>
@@ -95,6 +96,12 @@ skip_object(ParserContext& ctx, const Protocol& protocol)
             // Amount is special - size depends on first byte
             size_t amount_size = get_amount_size(ctx.cursor.peek_u8());
             ctx.cursor.advance(amount_size);
+        }
+        else if (field->meta.type == FieldTypes::Issue)
+        {
+            // Issue is special - 20 bytes for XRP, 40 bytes for non-XRP
+            size_t issue_size = get_issue_size(ctx.cursor);
+            ctx.cursor.advance(issue_size);
         }
         else
         {
@@ -352,6 +359,11 @@ parse_with_visitor_impl(
             {
                 // Amount is special - peek at first byte to determine size
                 field_size = get_amount_size(ctx.cursor.peek_u8());
+            }
+            else if (field->meta.type == FieldTypes::Issue)
+            {
+                // Issue is special - 20 bytes for XRP, 40 bytes for non-XRP
+                field_size = get_issue_size(ctx.cursor);
             }
             else if (field->meta.type == FieldTypes::PathSet)
             {

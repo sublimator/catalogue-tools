@@ -6,6 +6,7 @@
 #include "catl/xdata/slice-visitor.h"
 #include "catl/xdata/types/amount.h"
 #include "catl/xdata/types/iou-value.h"
+#include "catl/xdata/types/issue.h"
 #include "catl/xdata/types/pathset.h"
 #include <boost/json.hpp>
 #include <sstream>
@@ -70,9 +71,10 @@ public:
         boost::json::value completed = std::move(stack_.top());
         stack_.pop();
 
-        if (path.empty())
+        if (path.empty() && stack_.empty())
         {
-            // This is the root object - it becomes our result
+            // This is truly the root object (empty path and nothing left on
+            // stack)
             result_ = std::move(completed);
         }
         else if (!stack_.empty())
@@ -95,27 +97,17 @@ public:
                 }
             }
 
-            // Special handling for objects that are direct children of array
-            // elements
+            // Generic handling for STObject fields in arrays
+            // When an STObject is a direct child of an array element,
+            // wrap it in an object with the field name as the key
             if (path.size() > 1 && path[path.size() - 2].is_array_element() &&
-                (field.name == "ModifiedNode" || field.name == "CreatedNode" ||
-                 field.name == "DeletedNode" || field.name == "HookExecution" ||
-                 field.name == "HookParameter"))
+                field.meta.type == FieldTypes::STObject &&
+                stack_.top().is_array())
             {
                 // Create wrapper object with field name as key
                 boost::json::object wrapper;
                 wrapper[field.name] = std::move(completed);
-
-                if (stack_.top().is_array())
-                {
-                    stack_.top().as_array().push_back(std::move(wrapper));
-                }
-                else
-                {
-                    LOGE(
-                        "Expected array on stack but got ",
-                        stack_.top().kind());
-                }
+                stack_.top().as_array().push_back(std::move(wrapper));
             }
             else if (is_array_element_child && stack_.top().is_object())
             {
@@ -231,18 +223,18 @@ public:
     boost::json::value
     get_result() const
     {
+        // If no result but stack has content, return the top of the stack
+        // This handles cases where only fields were visited without proper
+        // object end, which is common for XRPL root objects
+        if (!const_cast<std::stack<boost::json::value>&>(stack_).empty())
+        {
+            return const_cast<std::stack<boost::json::value>&>(stack_).top();
+        }
+
         // If we have a result, return it
         if (!result_.is_null())
         {
             return result_;
-        }
-
-        // If no result but stack has content, return the top of the stack
-        // This handles cases where only fields were visited without object
-        // start/end
-        if (!const_cast<std::stack<boost::json::value>&>(stack_).empty())
-        {
-            return const_cast<std::stack<boost::json::value>&>(stack_).top();
         }
 
         // Return empty object if nothing was parsed
@@ -364,6 +356,10 @@ private:
         {
             return format_amount(data);
         }
+        else if (field.meta.type == FieldTypes::Issue)
+        {
+            return format_issue(data);
+        }
         else if (field.meta.type == FieldTypes::PathSet)
         {
             return format_pathset(data);
@@ -452,6 +448,38 @@ private:
 
         // Non-standard currency - return as hex
         return boost::json::string(to_hex(data));
+    }
+
+    // Format issue field
+    boost::json::value
+    format_issue(const Slice& data)
+    {
+        try
+        {
+            auto parsed = parse_issue(data);
+
+            if (parsed.is_native())
+            {
+                // XRP/Native - just return the currency
+                return format_currency(parsed.currency);
+            }
+            else
+            {
+                // Non-native - return object with currency and issuer
+                boost::json::object issue_obj;
+                issue_obj["currency"] = format_currency(parsed.currency);
+                issue_obj["issuer"] =
+                    boost::json::string(base58::encode_account_id(
+                        parsed.issuer.data(), parsed.issuer.size()));
+                return issue_obj;
+            }
+        }
+        catch (const std::exception& e)
+        {
+            // Fall back to hex
+            LOGE("Failed to parse Issue: ", e.what());
+            return boost::json::string(to_hex(data));
+        }
     }
 
     // Format amount field
