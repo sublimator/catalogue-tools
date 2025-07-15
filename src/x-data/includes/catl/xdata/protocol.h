@@ -2,6 +2,7 @@
 
 #include "catl/xdata/fields.h"
 #include "catl/xdata/types.h"
+#include <boost/json.hpp>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -23,7 +24,21 @@ class Protocol
 public:
     // Load definitions from JSON file with options
     static Protocol
-    load_from_file(const std::string& path, ProtocolOptions opts = {});
+    load_from_file(const std::string& path, const ProtocolOptions& opts = {});
+
+    // Load definitions from JSON value with options
+    static Protocol
+    load_from_json_value(
+        const boost::json::value& jv,
+        const ProtocolOptions& opts = {});
+
+    // Load embedded Xahau protocol definitions
+    static Protocol
+    load_embedded_xahau_protocol(const ProtocolOptions& opts = {});
+
+    // Load embedded XRPL protocol definitions
+    static Protocol
+    load_embedded_xrpl_protocol(const ProtocolOptions& opts = {});
 
     // Access field definitions
     const std::vector<FieldDef>&

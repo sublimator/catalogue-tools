@@ -12,7 +12,7 @@ namespace json = boost::json;
 namespace catl::xdata {
 
 Protocol
-Protocol::load_from_file(const std::string& path, ProtocolOptions opts)
+Protocol::load_from_file(const std::string& path, const ProtocolOptions& opts)
 {
     // Read the entire file
     std::ifstream file(path);
@@ -33,20 +33,30 @@ Protocol::load_from_file(const std::string& path, ProtocolOptions opts)
         throw std::runtime_error("Failed to parse JSON: " + ec.message());
     }
 
+    return load_from_json_value(jv, opts);
+}
+
+Protocol
+Protocol::load_from_json_value(
+    const json::value& jv,
+    const ProtocolOptions& opts)
+{
+    json::value json_value = jv;  // Make a copy to handle wrapped format
+
     // Handle wrapped result format
-    if (jv.is_object() && jv.as_object().contains("result"))
+    if (json_value.is_object() && json_value.as_object().contains("result"))
     {
-        jv = jv.at("result");
+        json_value = json_value.at("result");
     }
 
-    if (!jv.is_object())
+    if (!json_value.is_object())
     {
         throw std::runtime_error("Protocol JSON must be an object");
     }
 
     Protocol protocol;
     protocol.network_id_ = opts.network_id;
-    const auto& obj = jv.as_object();
+    const auto& obj = json_value.as_object();
 
     // Parse TYPES mapping first (but don't validate yet)
     if (obj.contains("TYPES"))
