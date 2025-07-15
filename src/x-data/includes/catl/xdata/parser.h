@@ -10,6 +10,7 @@
 #include "catl/xdata/types.h"
 #include "catl/xdata/types/amount.h"
 #include "catl/xdata/types/issue.h"
+#include "catl/xdata/types/number.h"
 #include "catl/xdata/types/pathset.h"
 #include <array>
 #include <cstdint>
@@ -102,6 +103,11 @@ skip_object(ParserContext& ctx, const Protocol& protocol)
             // Issue is special - 20 bytes for XRP, 40 bytes for non-XRP
             size_t issue_size = get_issue_size(ctx.cursor);
             ctx.cursor.advance(issue_size);
+        }
+        else if (field->meta.type == FieldTypes::Number)
+        {
+            // Number is always 12 bytes (8 bytes mantissa + 4 bytes exponent)
+            ctx.cursor.advance(12);
         }
         else
         {
@@ -364,6 +370,11 @@ parse_with_visitor_impl(
             {
                 // Issue is special - 20 bytes for XRP, 40 bytes for non-XRP
                 field_size = get_issue_size(ctx.cursor);
+            }
+            else if (field->meta.type == FieldTypes::Number)
+            {
+                // Number is always 12 bytes (8 bytes mantissa + 4 bytes exponent)
+                field_size = 12;
             }
             else if (field->meta.type == FieldTypes::PathSet)
             {
