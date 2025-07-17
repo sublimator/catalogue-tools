@@ -17,11 +17,11 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E make_directory
           ${CMAKE_CURRENT_BINARY_DIR}/generated
   COMMAND
-    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/generate_definitions.py
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/generate-definitions.py
     ${XAHAU_DEFINITIONS_JSON} ${GENERATED_XAHAU_HEADER} --namespace
     catl::xdata::xahau
   DEPENDS ${XAHAU_DEFINITIONS_JSON}
-          ${CMAKE_SOURCE_DIR}/scripts/generate_definitions.py
+          ${CMAKE_SOURCE_DIR}/scripts/generate-definitions.py
   COMMENT "Generating embedded Xahau definitions header")
 
 # Generate XRPL definitions header
@@ -30,11 +30,11 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E make_directory
           ${CMAKE_CURRENT_BINARY_DIR}/generated
   COMMAND
-    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/generate_definitions.py
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/generate-definitions.py
     ${XRPL_DEFINITIONS_JSON} ${GENERATED_XRPL_HEADER} --namespace
     catl::xdata::xrpl
   DEPENDS ${XRPL_DEFINITIONS_JSON}
-          ${CMAKE_SOURCE_DIR}/scripts/generate_definitions.py
+          ${CMAKE_SOURCE_DIR}/scripts/generate-definitions.py
   COMMENT "Generating embedded XRPL definitions header")
 
 # Create a custom target to ensure the headers are generated
