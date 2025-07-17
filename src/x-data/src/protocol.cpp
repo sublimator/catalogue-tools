@@ -26,7 +26,7 @@ Protocol::load_from_file(const std::string& path, const ProtocolOptions& opts)
     std::string content = buffer.str();
 
     // Parse JSON
-    json::error_code ec;
+    boost::system::error_code ec;
     json::value jv = json::parse(content, ec);
     if (ec)
     {
