@@ -9,6 +9,7 @@ import sys
 import argparse
 from pathlib import Path
 from typing import Dict, Any
+from datetime import datetime
 
 
 def load_json_file(filepath: Path) -> Dict[str, Any]:
@@ -22,25 +23,40 @@ def generate_cpp_header(
 ) -> str:
     """Generate C++ header content with embedded JSON definition."""
 
-    # Convert the dictionary back to a formatted JSON string
-    json_str = json.dumps(definitions, indent=2)
+    # Convert the dictionary to a compact JSON string (no indentation)
+    json_str = json.dumps(definitions, separators=(',', ':'))
+    
+    # Split into chunks of reasonable size
+    # Target chunk size around 32000 chars to stay well under 65536 limit
+    chunk_size = 32000
+    chunks = []
+    
+    for i in range(0, len(json_str), chunk_size):
+        chunk = json_str[i:i+chunk_size]
+        chunks.append(f'    R"json({chunk})json"')
+    
+    # Wrap chunks in std::string() for concatenation
+    wrapped_chunks = [f'    std::string({chunk})' for chunk in chunks]
+    
+    # Join chunks with string concatenation
+    json_literal = '\n    +\n'.join(wrapped_chunks)
 
-    # Escape the JSON string for C++ string literal
-    escaped_json = (
-        json_str.replace("\\", "\\\\").replace('"', '\\"').replace("\n", '\\n"\n    "')
-    )
-
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+    
     header_content = f"""// Auto-generated file. DO NOT EDIT.
 // Generated from protocol definitions JSON
+// Generated at: {timestamp}
 
 #pragma once
 
-#include <string_view>
+#include <string>
 
 namespace {namespace} {{
 
-// Embedded protocol definitions as a string literal
-constexpr std::string_view EMBEDDED_DEFINITIONS = R"json({json_str})json";
+// Embedded protocol definitions as a string
+// Split into chunks to avoid compiler string literal length limits
+inline const std::string EMBEDDED_DEFINITIONS = 
+{json_literal};
 
 }} // namespace {namespace}
 """
