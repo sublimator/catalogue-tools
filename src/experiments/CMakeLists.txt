@@ -2,7 +2,6 @@
 # implementations not intended for production use
 
 find_package(zstd REQUIRED)
-
 # Define source directories
 set(EXPERIMENTS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(EXPERIMENTS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/includes)
@@ -32,7 +31,6 @@ target_include_directories(
           ${CMAKE_SOURCE_DIR}/src/shamap/includes
           ${CMAKE_SOURCE_DIR}/src/shamap/src)
 
-# Add the precompiled header for custom shamap traits
 target_precompile_headers(
   ${EXECUTABLE_CATL1_TO_CATL2} PRIVATE
   ${EXPERIMENTS_INCLUDE_DIR}/catl/v2/shamap-custom-traits.h)

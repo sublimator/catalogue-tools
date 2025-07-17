@@ -1352,5 +1352,4 @@ private:
         return final_count;
     }
 };
-
 }  // namespace catl::v2

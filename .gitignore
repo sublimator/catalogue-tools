@@ -18,3 +18,4 @@ tests/catalogue-v1/fixture/cat.2000000-2010000.compression-0.catl
 *.zstd
 *.zst
 bla.txt
+CLAUDE.local.md

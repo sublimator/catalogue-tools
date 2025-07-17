@@ -74,7 +74,7 @@ inline const FieldType Number{
     "Number",
     9,
     {{Networks::XRPL}},
-    0};  // XRPL specific, variable encoding
+    12};  // XRPL specific, 12 bytes (8 byte mantissa + 4 byte exponent)
 
 // Container types - Universal
 inline const FieldType STObject{"STObject", 14, std::nullopt, 0};
@@ -103,7 +103,7 @@ inline const FieldType Issue{
     "Issue",
     24,
     {{Networks::XRPL}},
-    24};  // 20 currency + 4 reserved
+    0};  // SPECIAL: 20 bytes (XRP) or 40 bytes (currency + issuer)
 inline const FieldType XChainBridge{
     "XChainBridge",
     25,
@@ -112,7 +112,7 @@ inline const FieldType XChainBridge{
 
 // TODO: we don't actually know this type yet, it might not be the 160-bit
 // encoding per the Amount
-inline const FieldType Currency{"Currency", 26, {{Networks::XRPL}}, 0};
+inline const FieldType Currency{"Currency", 26, {{Networks::XRPL}}, 20};
 
 // High level types (cannot be serialized inside other types)
 inline const FieldType Transaction{"Transaction", 10001, std::nullopt, 0};

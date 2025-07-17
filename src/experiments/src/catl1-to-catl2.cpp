@@ -56,6 +56,44 @@ namespace fs = boost::filesystem;
 //----------------------------------------------------------
 
 /**
+ * Load protocol definitions based on command line options and network ID
+ */
+xdata::Protocol
+load_protocol_from_options(const po::variables_map& vm, uint32_t network_id = 0)
+{
+    if (vm.count("protocol-definitions"))
+    {
+        std::string protocol_path = vm["protocol-definitions"].as<std::string>();
+        LOGI("Loading protocol definitions from file: ", protocol_path);
+        return xdata::Protocol::load_from_file(protocol_path);
+    }
+    else if (vm.count("use-xrpl-defs"))
+    {
+        LOGI("Using embedded XRPL protocol definitions (forced by --use-xrpl-defs)");
+        return xdata::Protocol::load_embedded_xrpl_protocol();
+    }
+    else
+    {
+        // Auto-detect based on network ID
+        if (network_id == 0)  // XRPL
+        {
+            LOGI("Auto-detected network ID ", network_id, " - using embedded XRPL protocol definitions");
+            return xdata::Protocol::load_embedded_xrpl_protocol();
+        }
+        else if (network_id == 21337)  // XAHAU
+        {
+            LOGI("Auto-detected network ID ", network_id, " - using embedded Xahau protocol definitions");
+            return xdata::Protocol::load_embedded_xahau_protocol();
+        }
+        else
+        {
+            LOGW("Unknown network ID ", network_id, " - falling back to Xahau protocol definitions");
+            return xdata::Protocol::load_embedded_xahau_protocol();
+        }
+    }
+}
+
+/**
  * Parse hex string to binary key
  */
 std::optional<std::array<uint8_t, 32>>
@@ -195,6 +233,9 @@ lookup_key(
         data_slice->size(),
         " bytes");
 
+    // Display raw hex data
+    display_hex_fallback(data_slice.value());
+
     // Parse and display using xdata
     try
     {
@@ -322,13 +363,14 @@ process_all_ledgers(
         header.min_ledger,
         " to ",
         header.max_ledger);
+    LOGI("Network ID: ", header.network_id);
 
     // Initialize state map with CoW support (persists across ledgers)
     SHAMapS state_map(catl::shamap::tnACCOUNT_STATE);
     state_map.snapshot();  // Enable CoW
 
     // Create a writer for actual binary output
-    CatlV2Writer writer(output_file);
+    CatlV2Writer writer(output_file, header.network_id);
 
     // Process subset if requested
     auto max_ledger = (max_ledgers > 0)
@@ -502,10 +544,11 @@ main(int argc, char* argv[])
             po::value<uint32_t>(),
             "Ledger sequence to use for key lookup")(
             "protocol-definitions",
-            po::value<std::string>()->default_value(
-                std::string(PROJECT_ROOT) +
-                "tests/x-data/fixture/xahau_definitions.json"),
-            "Path to protocol definitions JSON file")(
+            po::value<std::string>(),
+            "Path to protocol definitions JSON file (overrides embedded)")(
+            "use-xrpl-defs",
+            "Use embedded XRPL definitions instead of Xahau (default: use "
+            "Xahau)")(
             "walk-state",
             "Walk all state items in the ledger (use with --get-ledger)")(
             "walk-txns",
@@ -559,8 +602,6 @@ main(int argc, char* argv[])
 
             std::string input_file = vm["input"].as<std::string>();
             uint32_t ledger_seq = vm["get-ledger"].as<uint32_t>();
-            std::string protocol_path =
-                vm["protocol-definitions"].as<std::string>();
 
             // Determine which type of lookup
             bool is_transaction = vm.count("get-key-tx");
@@ -568,12 +609,12 @@ main(int argc, char* argv[])
                 ? vm["get-key-tx"].as<std::string>()
                 : vm["get-key"].as<std::string>();
 
-            // Load protocol
-            xdata::Protocol protocol =
-                xdata::Protocol::load_from_file(protocol_path);
-
-            // Open reader
+            // Open reader to get network ID
             auto reader = CatlV2Reader::create(input_file);
+            uint32_t network_id = reader->header().network_id;
+            
+            // Load protocol definitions
+            xdata::Protocol protocol = load_protocol_from_options(vm, network_id);
 
             // Perform lookup
             LOGI("Looking up key: \"", key_hex, "\" in ledger: ", ledger_seq);
@@ -601,15 +642,13 @@ main(int argc, char* argv[])
 
             std::string input_file = vm["input"].as<std::string>();
             uint32_t ledger_seq = vm["get-ledger"].as<uint32_t>();
-            std::string protocol_path =
-                vm["protocol-definitions"].as<std::string>();
 
-            // Load protocol for JSON formatting
-            xdata::Protocol protocol =
-                xdata::Protocol::load_from_file(protocol_path);
-
-            // Open reader
+            // Open reader to get network ID
             auto reader = CatlV2Reader::create(input_file);
+            uint32_t network_id = reader->header().network_id;
+            
+            // Load protocol definitions
+            xdata::Protocol protocol = load_protocol_from_options(vm, network_id);
 
             // Seek to the requested ledger
             if (!reader->seek_to_ledger(ledger_seq))
@@ -642,13 +681,13 @@ main(int argc, char* argv[])
                             std::to_string(walk_opts.num_threads) + " threads)"
                         : "(SEQUENTIAL)",
                     " ===");
-                size_t count = 0;
+                std::atomic<size_t> count = 0;
                 std::mutex count_mutex;
                 reader->walk_state_items(
                     [&](const Key& key, const Slice& data) {
                         (void)key;  // Unused when output is disabled
                         {
-                            std::lock_guard<std::mutex> lock(count_mutex);
+                            // std::lock_guard<std::mutex> lock(count_mutex);
                             ++count;
                         }
 
