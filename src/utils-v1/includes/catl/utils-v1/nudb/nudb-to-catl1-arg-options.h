@@ -4,17 +4,17 @@
 #include <optional>
 #include <string>
 
-namespace catl::v1::utils::slicer {
+namespace catl::v1::utils::nudb {
 
 /**
- * Type-safe structure for command line options
+ * Type-safe structure for nudb-to-catl1 command line options
  */
-struct CommandLineOptions
+struct NudbToCatl1Options
 {
-    /** Path to the input CATL file */
-    std::optional<std::string> input_file;
+    /** Path to the input NuDB database directory */
+    std::optional<std::string> nudb_path;
 
-    /** Path to the output slice file */
+    /** Path to the output CATL file */
     std::optional<std::string> output_file;
 
     /** Start ledger sequence number */
@@ -23,20 +23,14 @@ struct CommandLineOptions
     /** End ledger sequence number */
     std::optional<uint32_t> end_ledger;
 
-    /** Path to store snapshots */
-    std::optional<std::string> snapshots_path;
+    /** Network ID for the output CATL file */
+    uint16_t network_id = 0;
 
     /** Compression level for output (0-9) */
     uint8_t compression_level = 0;
 
     /** Whether to force overwrite existing output file without prompting */
     bool force_overwrite = false;
-
-    /** Whether to create a state snapshot for the next slice */
-    bool create_next_slice_state_snapshot = true;
-
-    /** Whether to use start snapshot if available */
-    bool use_start_snapshot = true;
 
     /** Log level (error, warn, info, debug) */
     std::string log_level = "info";
@@ -59,9 +53,9 @@ struct CommandLineOptions
  *
  * @param argc Argument count from main
  * @param argv Argument values from main
- * @return A populated CommandLineOptions structure
+ * @return A populated NudbToCatl1Options structure
  */
-CommandLineOptions
-parse_argv(int argc, char* argv[]);
+NudbToCatl1Options
+parse_nudb_to_catl1_argv(int argc, char* argv[]);
 
-}  // namespace catl::v1::utils::slicer
+}  // namespace catl::v1::utils::nudb

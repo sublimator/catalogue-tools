@@ -1,4 +1,4 @@
-#include "catl/utils-v1/slicer/arg-options.h"
+#include "catl/utils-v1/nudb/nudb-to-catl1-arg-options.h"
 
 #include <boost/program_options.hpp>
 #include <iostream>
@@ -6,72 +6,54 @@
 #include <stdexcept>
 #include <string>
 
-#include "catl/core/logger.h"
-
 namespace po = boost::program_options;
-namespace catl::v1::utils::slicer {
+namespace catl::v1::utils::nudb {
 
-CommandLineOptions
-parse_argv(int argc, char* argv[])
+NudbToCatl1Options
+parse_nudb_to_catl1_argv(int argc, char* argv[])
 {
-    CommandLineOptions options;
+    NudbToCatl1Options options;
 
     // Define command line options with Boost
     po::options_description desc("Allowed options");
     desc.add_options()("help,h", "Display this help message")(
-        "input,i",
+        "nudb-path,n",
         po::value<std::string>(),
-        "Path to the source CATL file (v1 format)")(
-        "output,o",
-        po::value<std::string>(),
-        "Path where the generated CATL slice file will be saved")(
+        "Path to the NuDB database directory")(
+        "output,o", po::value<std::string>(), "Path to the output CATL file")(
         "start-ledger,s",
         po::value<uint32_t>(),
-        "The sequence number of the first ledger to include in the slice")(
-        "end-ledger,e",
-        po::value<uint32_t>(),
-        "The sequence number of the last ledger to include in the slice")(
-        "snapshots-path",
-        po::value<std::string>(),
-        "Directory where state snapshots are stored and looked for")(
-        "compression-level",
+        "Start ledger sequence number")(
+        "end-ledger,e", po::value<uint32_t>(), "End ledger sequence number")(
+        "network-id",
+        po::value<uint16_t>()->default_value(0),
+        "Network ID for the output CATL file")(
+        "compression-level,c",
         po::value<int>()->default_value(0),
         "Compression level for output (0-9)")(
-        "force-overwrite,f",
+        "force,f",
         po::bool_switch(),
         "Force overwrite of existing output file without prompting")(
-        "no-create-next-slice-state-snapshot",
-        po::bool_switch(),
-        "Disable creation of state snapshot for the next slice")(
-        "no-use-start-snapshot",
-        po::bool_switch(),
-        "Don't use existing start snapshot even if available")(
         "log-level,l",
         po::value<std::string>()->default_value("info"),
         "Log level (error, warn, info, debug)");
 
     // Generate the help text
     std::ostringstream help_stream;
-    help_stream << "CATL Slice Tool" << std::endl
-                << "-------------" << std::endl
-                << "Extract a contiguous range of ledgers (a 'slice') from a "
-                   "larger CATL file"
-                << std::endl
-                << std::endl
-                << "Usage: " << (argc > 0 ? argv[0] : "catl1-slice")
-                << " --input <input_file> --output <output_file> "
-                   "--start-ledger <seq> --end-ledger <seq> [options]"
-                << std::endl
-                << desc << std::endl
-                << "This tool extracts a specified range of ledgers from a "
-                   "CATL file, creating a new"
-                << std::endl
-                << "valid CATL file containing only those ledgers. It can "
-                   "optionally use and create"
-                << std::endl
-                << "state snapshots to improve performance when creating "
-                   "multiple consecutive slices."
-                << std::endl;
+    help_stream
+        << "NuDB to CATL Converter Tool" << std::endl
+        << "---------------------------" << std::endl
+        << "Converts a NuDB database into a CATL v1 file format" << std::endl
+        << std::endl
+        << "Usage: " << (argc > 0 ? argv[0] : "nudb-to-catl1")
+        << " --nudb-path <db_directory> --output <output_file> "
+           "--start-ledger <seq> --end-ledger <seq> [options]"
+        << std::endl
+        << desc << std::endl
+        << "This tool reads ledger data from a NuDB database and creates "
+           "a CATL file"
+        << std::endl
+        << "containing the specified range of ledgers." << std::endl;
     options.help_text = help_stream.str();
 
     try
@@ -88,15 +70,15 @@ parse_argv(int argc, char* argv[])
             return options;
         }
 
-        // Check for required input file
-        if (vm.count("input"))
+        // Check for required nudb path
+        if (vm.count("nudb-path"))
         {
-            options.input_file = vm["input"].as<std::string>();
+            options.nudb_path = vm["nudb-path"].as<std::string>();
         }
         else
         {
             options.valid = false;
-            options.error_message = "No input file specified (--input)";
+            options.error_message = "No NuDB path specified (--nudb-path)";
             return options;
         }
 
@@ -146,18 +128,15 @@ parse_argv(int argc, char* argv[])
             return options;
         }
 
-        // Check optional snapshots path
-        if (vm.count("snapshots-path"))
+        // Get network ID
+        if (vm.count("network-id"))
         {
-            options.snapshots_path = vm["snapshots-path"].as<std::string>();
+            options.network_id = vm["network-id"].as<uint16_t>();
         }
 
         // Get compression level
         if (vm.count("compression-level"))
         {
-            LOGI(
-                "Parsing compression level: ",
-                vm["compression-level"].as<int>());
             int level = vm["compression-level"].as<int>();
             if (level < 0 || level > 9)
             {
@@ -171,23 +150,9 @@ parse_argv(int argc, char* argv[])
         }
 
         // Check force overwrite flag
-        if (vm.count("force-overwrite"))
+        if (vm.count("force"))
         {
-            options.force_overwrite = vm["force-overwrite"].as<bool>();
-        }
-
-        // Check snapshot creation flag (inverted from command line)
-        if (vm.count("no-create-next-slice-state-snapshot"))
-        {
-            options.create_next_slice_state_snapshot =
-                !vm["no-create-next-slice-state-snapshot"].as<bool>();
-        }
-
-        // Check use start snapshot flag (inverted from command line)
-        if (vm.count("no-use-start-snapshot"))
-        {
-            options.use_start_snapshot =
-                !vm["no-use-start-snapshot"].as<bool>();
+            options.force_overwrite = vm["force"].as<bool>();
         }
 
         // Get log level
@@ -220,4 +185,4 @@ parse_argv(int argc, char* argv[])
     return options;
 }
 
-}  // namespace catl::v1::utils::slicer
+}  // namespace catl::v1::utils::nudb

@@ -14,7 +14,7 @@
 #include <string>
 
 using namespace catl::v1;
-using namespace catl::utils::slicer;
+using namespace catl::v1::utils::slicer;
 using namespace catl::shamap;
 namespace fs = boost::filesystem;
 
