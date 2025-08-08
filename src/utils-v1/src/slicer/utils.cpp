@@ -6,7 +6,7 @@
 #include <iomanip>
 #include <sstream>
 
-namespace catl::utils::slicer {
+namespace catl::v1::utils::slicer {
 
 std::string
 format_file_size(uint64_t bytes)
@@ -180,4 +180,4 @@ copy_snapshot_to_stream(
     }
 }
 
-}  // namespace catl::utils::slicer
+}  // namespace catl::v1::utils::slicer

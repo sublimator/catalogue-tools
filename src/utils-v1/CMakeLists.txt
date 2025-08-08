@@ -17,6 +17,21 @@ set(SOURCES_CATL_SLICE
     ${UTILS_SRC_DIR}/slicer/catl1-slice.cpp
     ${UTILS_SRC_DIR}/slicer/arg-options.cpp ${UTILS_SRC_DIR}/slicer/utils.cpp)
 
+# Define the nudb-to-catl1 executable and its sources
+set(EXECUTABLE_NUDB_TO_CATL1 nudb-to-catl1)
+set(SOURCES_NUDB_TO_CATL1 ${UTILS_SRC_DIR}/nudb/nudb-to-catl1.cpp
+                          ${UTILS_SRC_DIR}/nudb/nudb-to-catl1-arg-options.cpp)
+
+# Define the catl1-to-nudb executable and its sources
+set(EXECUTABLE_CATL1_TO_NUDB catl1-to-nudb)
+set(SOURCES_CATL1_TO_NUDB ${UTILS_SRC_DIR}/nudb/catl1-to-nudb.cpp
+                          ${UTILS_SRC_DIR}/nudb/catl1-to-nudb-arg-options.cpp)
+
+# Define the nudb-exp executable and its sources
+set(EXECUTABLE_NUDB_EXP nudb-exp)
+set(SOURCES_NUDB_EXP ${UTILS_SRC_DIR}/nudb/nudb-exp.cpp
+                     ${UTILS_SRC_DIR}/nudb/nudb-exp-arg-options.cpp)
+
 # Create the executables
 
 # catl1-validator
@@ -60,6 +75,53 @@ target_link_libraries(
           Boost::iostreams
           OpenSSL::SSL)
 
+# nudb-to-catl1
+add_executable(${EXECUTABLE_NUDB_TO_CATL1} ${SOURCES_NUDB_TO_CATL1})
+target_include_directories(${EXECUTABLE_NUDB_TO_CATL1}
+                           PRIVATE ${UTILS_INCLUDE_DIR} ${CATL_INCLUDE_DIR})
+target_link_libraries(
+  ${EXECUTABLE_NUDB_TO_CATL1}
+  PRIVATE catl_core
+          catl_shamap
+          catl_catalogue_v1
+          NuDB
+          Boost::filesystem
+          Boost::program_options
+          OpenSSL::SSL)
+
+# catl1-to-nudb
+add_executable(${EXECUTABLE_CATL1_TO_NUDB} ${SOURCES_CATL1_TO_NUDB})
+target_include_directories(${EXECUTABLE_CATL1_TO_NUDB}
+                           PRIVATE ${UTILS_INCLUDE_DIR} ${CATL_INCLUDE_DIR})
+target_link_libraries(
+  ${EXECUTABLE_CATL1_TO_NUDB}
+  PRIVATE catl_core
+          catl_shamap
+          catl_catalogue_v1
+          NuDB
+          Boost::filesystem
+          Boost::program_options
+          OpenSSL::SSL)
+
+# nudb-exp
+add_executable(${EXECUTABLE_NUDB_EXP} ${SOURCES_NUDB_EXP})
+target_include_directories(${EXECUTABLE_NUDB_EXP} PRIVATE ${UTILS_INCLUDE_DIR}
+                                                          ${CATL_INCLUDE_DIR})
+target_link_libraries(
+  ${EXECUTABLE_NUDB_EXP}
+  PRIVATE catl_core
+          catl_catalogue_common
+          NuDB
+          lz4::lz4
+          Boost::filesystem
+          Boost::program_options)
+
 # Install all executables
-install(TARGETS ${EXECUTABLE_CATL_VALIDATOR} ${EXECUTABLE_CATL_COPY}
-                ${EXECUTABLE_CATL_SLICE} RUNTIME DESTINATION bin)
+install(
+  TARGETS ${EXECUTABLE_CATL_VALIDATOR}
+          ${EXECUTABLE_CATL_COPY}
+          ${EXECUTABLE_CATL_SLICE}
+          ${EXECUTABLE_NUDB_TO_CATL1}
+          ${EXECUTABLE_CATL1_TO_NUDB}
+          ${EXECUTABLE_NUDB_EXP}
+  RUNTIME DESTINATION bin)
