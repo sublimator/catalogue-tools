@@ -360,8 +360,7 @@ PathFinderT<Traits>::invalidated_possibly_copied_leaf_for_updating(
     // Check if we need to copy the leaf
     if (found_leaf_->get_version() != targetVersion)
     {
-        theLeaf = found_leaf_->copy();
-        theLeaf->set_version(targetVersion);
+        theLeaf = found_leaf_->copy(targetVersion);
         terminal->set_child(terminal_branch_, theLeaf);
         found_leaf_ = theLeaf;  // Update our reference
     }

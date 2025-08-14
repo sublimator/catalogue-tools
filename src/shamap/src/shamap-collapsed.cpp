@@ -136,8 +136,7 @@ SHAMapT<Traits>::collapse_inner_node(
                         if (leaf_child->get_version() != this->current_version_)
                         {
                             // Copy leaf nodes too if needed
-                            auto leaf_copy = leaf_child->copy();
-                            leaf_copy->set_version(this->current_version_);
+                            auto leaf_copy = leaf_child->copy(this->current_version_);
                             node->set_child(i, leaf_copy);
                             continue;
                         }

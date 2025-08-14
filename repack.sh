@@ -1,0 +1,2 @@
+ninja -C build && ./build/src/experiments/catl1-to-catl2 --use-xrpl-defs --input $HOME/projects/xahaud-worktrees/xahaud/cat_all.bin --output $HOME/projects/xahaud-worktrees/xahaud/cat_all.catl2 --log-level info
+ninja -C build && ./build/src/experiments/catl1-to-catl2 --input $HOME/projects/xahaud-worktrees/xahaud/cat_all.catl2  --get-ledger 97480076 --get-key 0002DBD178A4A4033B016621EAA5F503DB8FA6C6B6DF0105FC5B34CC7790D07C

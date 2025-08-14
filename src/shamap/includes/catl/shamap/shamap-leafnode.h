@@ -63,7 +63,7 @@ protected:
 
     // CoW support - only accessible to friends
     boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
-    copy() const;
+    copy(int newVersion) const;
 };
 
 // Type alias for backward compatibility
