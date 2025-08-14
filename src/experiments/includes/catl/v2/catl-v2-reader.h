@@ -497,16 +497,19 @@ private:
                 "Unsupported file version: " + std::to_string(header_.version) +
                 " (experimental code only supports version 1)");
         }
-        
+
         // Check endianness compatibility
         std::uint32_t host_endian = get_host_endianness();
         if (header_.endianness != host_endian)
         {
-            const char* file_endian = (header_.endianness == 0x01020304) ? "big-endian" : "little-endian";
-            const char* host_type = (host_endian == 0x01020304) ? "big-endian" : "little-endian";
+            const char* file_endian = (header_.endianness == 0x01020304)
+                ? "big-endian"
+                : "little-endian";
+            const char* host_type =
+                (host_endian == 0x01020304) ? "big-endian" : "little-endian";
             throw std::runtime_error(
-                std::string("Endianness mismatch: file is ") + file_endian + 
-                ", but host is " + host_type + 
+                std::string("Endianness mismatch: file is ") + file_endian +
+                ", but host is " + host_type +
                 ". Cannot mmap files created on different endian systems.");
         }
     }
@@ -977,9 +980,8 @@ private:
                     const std::uint8_t* rel_base = data_ + offsets_start;
 
                     // Calculate absolute offset from self-relative offset
-                    std::uint64_t slot = offsets_start +
-                        static_cast<std::uint64_t>(entry.offset_index) *
-                            sizeof(rel_off_t);
+                    std::uint64_t slot =
+                        slot_from_index(offsets_start, entry.offset_index);
 
                     // Load relative offset safely (unaligned-friendly)
                     rel_off_t rel{};
@@ -1132,9 +1134,8 @@ private:
             {
                 ChildInfo info;
                 // Calculate absolute offset from self-relative offset
-                std::uint64_t slot = offsets_start +
-                    static_cast<std::uint64_t>(offset_index) *
-                        sizeof(rel_off_t);
+                std::uint64_t slot =
+                    slot_from_index(offsets_start, offset_index);
 
                 // Load relative offset safely (unaligned-friendly)
                 rel_off_t rel{};

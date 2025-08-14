@@ -67,7 +67,7 @@ public:
 
         // Set network ID in header
         header_.network_id = network_id;
-        
+
         // Set endianness marker for the current platform
         header_.endianness = get_host_endianness();
 
@@ -872,9 +872,8 @@ private:
                         std::vector<rel_off_t> rels(entry.child_offsets.size());
                         for (size_t i = 0; i < entry.child_offsets.size(); ++i)
                         {
-                            std::uint64_t slot = offset_position +
-                                static_cast<std::uint64_t>(i) *
-                                    sizeof(rel_off_t);
+                            std::uint64_t slot =
+                                slot_from_index(offset_position, i);
                             rels[i] =
                                 rel_from_abs(entry.child_offsets[i], slot);
                         }

@@ -59,6 +59,19 @@ rel_from_abs(std::uint64_t abs, std::uint64_t slot)
 }
 
 /**
+ * Helper to calculate slot position in offset array
+ * @param base Base address of offset array
+ * @param index Index of the slot (0-based)
+ * @return File position of the slot
+ */
+inline std::uint64_t
+slot_from_index(std::uint64_t base, int index)
+{
+    assert(index >= 0);
+    return base + static_cast<std::uint64_t>(index) * sizeof(rel_off_t);
+}
+
+/**
  * CATL v2 File Format Layout
  * =========================
  *
@@ -162,10 +175,10 @@ struct DepthAndFlags
 /**
  * Compact inner node header
  * Total size: 8 bytes (was 6, added overlay_mask for alignment and future use)
- * 
+ *
  * Field ordering is important to avoid padding:
  *   child_types (4 bytes) at offset 0
- *   depth union (2 bytes) at offset 4  
+ *   depth union (2 bytes) at offset 4
  *   overlay_mask (2 bytes) at offset 6
  * Total: 8 bytes with no padding
  */
@@ -295,8 +308,7 @@ struct ChildIterator
             sizeof(rel));
 
         // Calculate the file position of this slot
-        std::uint64_t slot = offsets_file_base +
-            static_cast<std::uint64_t>(offset_index) * sizeof(rel_off_t);
+        std::uint64_t slot = slot_from_index(offsets_file_base, offset_index);
 
         Child child;
         child.branch = branch;
@@ -322,10 +334,12 @@ struct ChildIterator
 struct CatlV2Header
 {
     std::array<char, 4> magic = {'C', 'A', 'T', '2'};  // CATL v2
-    std::uint32_t version = 1;               // Currently experimental - no version handling yet
-                                             // Will be used for compatibility when out of experimental
-    std::uint32_t network_id = 0;           // Network ID (0=XRPL, 21337=Xahau)
-    std::uint32_t endianness = 0x01020304;  // Endianness marker (little=0x04030201, big=0x01020304)
+    std::uint32_t version =
+        1;  // Currently experimental - no version handling yet
+            // Will be used for compatibility when out of experimental
+    std::uint32_t network_id = 0;  // Network ID (0=XRPL, 21337=Xahau)
+    std::uint32_t endianness =
+        0x01020304;  // Endianness marker (little=0x04030201, big=0x01020304)
     std::uint64_t ledger_count = 0;         // Number of ledgers in file
     std::uint64_t first_ledger_seq = 0;     // Sequence of first ledger
     std::uint64_t last_ledger_seq = 0;      // Sequence of last ledger
@@ -338,7 +352,9 @@ static_assert(sizeof(CatlV2Header) == 48, "CatlV2Header must be 48 bytes");
  * Get the host system's endianness marker
  * @return 0x01020304 for big endian, 0x04030201 for little endian
  */
-inline std::uint32_t get_host_endianness() {
+inline std::uint32_t
+get_host_endianness()
+{
     const std::uint32_t test = 0x01020304;
     const std::uint8_t* bytes = reinterpret_cast<const std::uint8_t*>(&test);
     return bytes[0] == 0x04 ? 0x04030201 : 0x01020304;
@@ -356,7 +372,9 @@ struct LedgerIndexEntry
     std::uint64_t tx_tree_offset;     // Offset to tx tree root (0 if none)
 };
 #pragma pack(pop)  // Restore default alignment
-static_assert(sizeof(LedgerIndexEntry) == 28, "LedgerIndexEntry must be 28 bytes");
+static_assert(
+    sizeof(LedgerIndexEntry) == 28,
+    "LedgerIndexEntry must be 28 bytes");
 
 /**
  * Tree size header written after each LedgerInfo
