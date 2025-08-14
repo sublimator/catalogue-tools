@@ -245,7 +245,8 @@ SHAMapInnerNodeT<Traits>::get_only_child_leaf() const
 
 template <typename Traits>
 boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>
-SHAMapInnerNodeT<Traits>::copy(int newVersion) const
+SHAMapInnerNodeT<Traits>::copy(int newVersion, SHAMapInnerNodeT<Traits>* parent)
+    const
 {
     // Create a new inner node with same depth
     auto new_node = boost::intrusive_ptr(
@@ -268,10 +269,11 @@ SHAMapInnerNodeT<Traits>::copy(int newVersion) const
     if constexpr (requires(Traits & t) {
                       t.on_inner_node_copied(
                           (SHAMapInnerNodeT<Traits>*)nullptr,
-                          (const SHAMapInnerNodeT<Traits>*)nullptr);
+                          (const SHAMapInnerNodeT<Traits>*)nullptr,
+                          (SHAMapInnerNodeT<Traits>*)nullptr);
                   })
     {
-        new_node->on_inner_node_copied(new_node.get(), this);
+        new_node->on_inner_node_copied(new_node.get(), this, parent);
     }
 
     return new_node;

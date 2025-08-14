@@ -83,7 +83,7 @@ SHAMapT<Traits>::enable_cow()
         if (!root->is_cow_enabled())
         {
             OLOGD("Root node created without CoW, creating a copy");
-            root = root->copy(current_version_);
+            root = root->copy(current_version_, nullptr);
         }
 
         root->enable_cow(true);
@@ -147,7 +147,7 @@ SHAMapT<Traits>::snapshot()
     // Create a new SHAMap that shares the same root and version counter
     auto copy = std::make_shared<SHAMapT<Traits>>(SHAMapT<Traits>(
         node_type_,
-        root->copy(snapshot_version),
+        root->copy(snapshot_version, nullptr),
         version_counter_,
         snapshot_version,
         options_));

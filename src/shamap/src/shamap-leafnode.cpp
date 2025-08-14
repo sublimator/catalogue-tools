@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "catl/shamap/shamap-errors.h"
+#include "catl/shamap/shamap-innernode.h"
 #include "catl/shamap/shamap-leafnode.h"
 
 #include "catl/shamap/shamap-hashprefix.h"
@@ -101,7 +102,8 @@ SHAMapLeafNodeT<Traits>::get_type() const
 
 template <typename Traits>
 boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
-SHAMapLeafNodeT<Traits>::copy(int newVersion) const
+SHAMapLeafNodeT<Traits>::copy(int newVersion, SHAMapInnerNodeT<Traits>* parent)
+    const
 {
     auto new_leaf =
         boost::intrusive_ptr(new SHAMapLeafNodeT<Traits>(item, type));
@@ -113,10 +115,11 @@ SHAMapLeafNodeT<Traits>::copy(int newVersion) const
     if constexpr (requires(Traits & t) {
                       t.on_leaf_node_copied(
                           (SHAMapLeafNodeT<Traits>*)nullptr,
-                          (const SHAMapLeafNodeT<Traits>*)nullptr);
+                          (const SHAMapLeafNodeT<Traits>*)nullptr,
+                          (SHAMapInnerNodeT<Traits>*)nullptr);
                   })
     {
-        new_leaf->on_leaf_node_copied(new_leaf.get(), this);
+        new_leaf->on_leaf_node_copied(new_leaf.get(), this, parent);
     }
 
     return new_leaf;

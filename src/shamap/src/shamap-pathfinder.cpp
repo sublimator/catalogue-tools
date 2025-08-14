@@ -269,7 +269,8 @@ PathFinderT<Traits>::dirty_or_copy_inners(int target_version)
                 target_version);
 
             // Create a copy and enable CoW on it
-            auto copy = current_inner->copy(target_version);
+            auto copy = current_inner->copy(
+                target_version, i > 0 ? inners_[i - 1].get() : nullptr);
             copy->enable_cow(true);
 
             // If this is the root, update the search root
@@ -308,7 +309,8 @@ PathFinderT<Traits>::dirty_or_copy_inners(int target_version)
             target_version);
 
         // Create copy with new version
-        auto copy = current_inner->copy(target_version);
+        auto copy = current_inner->copy(
+            target_version, i > 0 ? inners_[i - 1].get() : nullptr);
 
         // If this is the root, update the search root
         if (i == 0)
@@ -360,7 +362,7 @@ PathFinderT<Traits>::invalidated_possibly_copied_leaf_for_updating(
     // Check if we need to copy the leaf
     if (found_leaf_->get_version() != targetVersion)
     {
-        theLeaf = found_leaf_->copy(targetVersion);
+        theLeaf = found_leaf_->copy(targetVersion, terminal.get());
         terminal->set_child(terminal_branch_, theLeaf);
         found_leaf_ = theLeaf;  // Update our reference
     }

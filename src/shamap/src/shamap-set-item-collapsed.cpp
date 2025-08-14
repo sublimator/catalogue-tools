@@ -114,7 +114,8 @@ SHAMapT<Traits>::set_item_collapsed(
             auto existing_leaf = path_finder.get_leaf_mutable();
             if (this->cow_enabled_)
             {
-                existing_leaf = existing_leaf->copy(this->current_version_);
+                existing_leaf = existing_leaf->copy(
+                    this->current_version_, new_inner.get());
             }
             // TODO: leaf cow ?
             new_inner->set_child(

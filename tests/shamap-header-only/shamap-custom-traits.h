@@ -45,7 +45,10 @@ struct HookTestTraits
 
     // CoW hook for inner nodes
     void
-    on_inner_node_copied(HookInnerNode* this_copy, const HookInnerNode* source)
+    on_inner_node_copied(
+        HookInnerNode* this_copy,
+        const HookInnerNode* source,
+        HookInnerNode* parent)
     {
         test_counters::inner_copies++;
 
@@ -55,11 +58,15 @@ struct HookTestTraits
         // Track what we copied from (for testing)
         test_counters::last_source_offset = source->node_offset;
         test_counters::last_copy_version = this_copy->get_version();
+        // Could also track parent info if needed for tests
     }
 
     // CoW hook for leaf nodes
     void
-    on_leaf_node_copied(HookLeafNode* this_copy, const HookLeafNode* source)
+    on_leaf_node_copied(
+        HookLeafNode* this_copy,
+        const HookLeafNode* source,
+        HookInnerNode* parent)
     {
         test_counters::leaf_copies++;
 
@@ -69,6 +76,7 @@ struct HookTestTraits
         // Track what we copied from (for testing)
         test_counters::last_source_offset = source->node_offset;
         test_counters::last_copy_version = this_copy->get_version();
+        // Could also track parent info if needed for tests
     }
 };
 
