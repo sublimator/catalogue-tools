@@ -31,12 +31,41 @@
  * This enables incremental serialization where each snapshot only writes
  * its changes, with unchanged nodes referenced by their disk offsets.
  */
+
+struct SerializedNode;
+
+using SHAMapInnerNodeS = catl::shamap::SHAMapInnerNodeT<SerializedNode>;
+using SHAMapLeafNodeS = catl::shamap::SHAMapLeafNodeT<SerializedNode>;
+using SHAMapTreeNodeS = catl::shamap::SHAMapTreeNodeT<SerializedNode>;
+
 struct SerializedNode
 {
     // offset of the node in the file, 0 is never going to be used as the header
     // will take that, so we can just use 0 a special value
     uint64_t node_offset = 0;
     bool processed = false;
+
+    // CoW hook: called after an inner node has been copied
+    void
+    on_inner_node_copied(
+        SHAMapInnerNodeS* this_copy,
+        const SHAMapInnerNodeS* source)
+    {
+        // Reset serialization state for the new copy
+        this->processed = false;
+        // Could track lineage: store source->node_offset for overlay decisions
+    }
+
+    // CoW hook: called after a leaf node has been copied
+    void
+    on_leaf_node_copied(
+        SHAMapLeafNodeS* this_copy,
+        const SHAMapLeafNodeS* source)
+    {
+        // Reset serialization state for the new copy
+        this->processed = false;
+        // Could track which items are being modified frequently
+    }
 };
 
 // Instantiate all templates with custom traits
@@ -45,6 +74,3 @@ INSTANTIATE_READER_SHAMAP_NODE_TRAITS(SerializedNode);
 
 // Define aliases for easier typing
 using SHAMapS = catl::shamap::SHAMapT<SerializedNode>;
-using SHAMapInnerNodeS = catl::shamap::SHAMapInnerNodeT<SerializedNode>;
-using SHAMapLeafNodeS = catl::shamap::SHAMapLeafNodeT<SerializedNode>;
-using SHAMapTreeNodeS = catl::shamap::SHAMapTreeNodeT<SerializedNode>;
