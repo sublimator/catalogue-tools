@@ -404,6 +404,7 @@ private:
         header.bits.depth = inner->get_depth();
         header.bits.rfu = 0;
         header.child_types = build_child_types(inner);
+        header.overlay_mask = 0;  // overlay disabled in this experimental phase
 
         // Count non-empty children
         int child_count = header.count_children();

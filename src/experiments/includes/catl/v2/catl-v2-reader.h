@@ -961,15 +961,22 @@ private:
                     // Get offset array
                     size_t offsets_start =
                         entry.node_offset + sizeof(InnerNodeHeader);
-                    const rel_off_t* rel_offsets =
-                        reinterpret_cast<const rel_off_t*>(
-                            data_ + offsets_start);
+                    const std::uint8_t* rel_base = data_ + offsets_start;
 
                     // Calculate absolute offset from self-relative offset
                     std::uint64_t slot = offsets_start +
                         static_cast<std::uint64_t>(entry.offset_index) *
                             sizeof(rel_off_t);
-                    rel_off_t rel = rel_offsets[entry.offset_index];
+
+                    // Load relative offset safely (unaligned-friendly)
+                    rel_off_t rel{};
+                    std::memcpy(
+                        &rel,
+                        rel_base +
+                            static_cast<std::size_t>(entry.offset_index) *
+                                sizeof(rel_off_t),
+                        sizeof(rel));
+
                     std::uint64_t child_offset = abs_from_rel(slot, rel);
 
                     bool child_is_leaf = (child_type == ChildType::LEAF);
@@ -1102,8 +1109,7 @@ private:
         std::vector<ChildInfo> children;
 
         size_t offsets_start = root_offset + sizeof(InnerNodeHeader);
-        const rel_off_t* rel_offsets =
-            reinterpret_cast<const rel_off_t*>(data_ + offsets_start);
+        const std::uint8_t* rel_base = data_ + offsets_start;
         int offset_index = 0;
 
         for (int branch = 0; branch < 16; ++branch)
@@ -1116,7 +1122,17 @@ private:
                 std::uint64_t slot = offsets_start +
                     static_cast<std::uint64_t>(offset_index) *
                         sizeof(rel_off_t);
-                rel_off_t rel = rel_offsets[offset_index++];
+
+                // Load relative offset safely (unaligned-friendly)
+                rel_off_t rel{};
+                std::memcpy(
+                    &rel,
+                    rel_base +
+                        static_cast<std::size_t>(offset_index) *
+                            sizeof(rel_off_t),
+                    sizeof(rel));
+                ++offset_index;
+
                 info.offset = abs_from_rel(slot, rel);
                 info.branch = branch;
                 info.is_leaf = (child_type == ChildType::LEAF);
