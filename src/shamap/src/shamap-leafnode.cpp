@@ -101,13 +101,13 @@ SHAMapLeafNodeT<Traits>::get_type() const
 
 template <typename Traits>
 boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
-SHAMapLeafNodeT<Traits>::copy() const
+SHAMapLeafNodeT<Traits>::copy(int newVersion) const
 {
     auto new_leaf =
         boost::intrusive_ptr(new SHAMapLeafNodeT<Traits>(item, type));
     new_leaf->hash = this->hash;
     new_leaf->hash_valid_ = this->hash_valid_;
-    new_leaf->version = version;
+    new_leaf->version = newVersion;
     return new_leaf;
 }
 
