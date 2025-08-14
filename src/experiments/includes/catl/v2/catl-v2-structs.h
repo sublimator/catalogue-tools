@@ -6,6 +6,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cassert>
 #include <cstdint>
+#include <cstring>  // for std::memcpy
 #include <limits>
 #include <optional>
 
@@ -160,7 +161,7 @@ struct DepthAndFlags
 
 /**
  * Compact inner node header
- * Total size: 6 bytes
+ * Total size: 8 bytes (was 6, added overlay_mask for alignment and future use)
  */
 struct InnerNodeHeader
 {
@@ -170,6 +171,21 @@ struct InnerNodeHeader
         DepthAndFlags bits;        // Structured field access
     };
     std::uint32_t child_types;  // 2 bits × 16 children = 32 bits
+    std::uint16_t
+        overlay_mask;  // 16 bits: which branches are overridden
+                       // 0 => no overlay (current experimental format)
+                       //
+                       // Future overlay layout when overlay_mask != 0:
+                       //   [InnerNodeHeader (8 bytes)]
+                       //   [rel_off_t base_rel]
+                       //   [rel_off_t × popcount(overlay_mask) for changed
+                       //   branches
+                       //        in increasing branch order]
+                       //
+                       // Semantics: child_types describes the POST-overlay
+                       // node. For branch b:
+                       //   if (overlay_mask bit b) use the next overlay entry,
+                       //   else resolve from base_rel's inner.
 
     // Helper to get/set child type
     ChildType
@@ -201,6 +217,7 @@ struct InnerNodeHeader
         return count;
     }
 };
+static_assert(sizeof(InnerNodeHeader) == 8, "InnerNodeHeader must be 8 bytes");
 
 /**
  * Lightweight iterator for non-empty children in sparse offset array
@@ -212,7 +229,7 @@ struct InnerNodeHeader
 struct ChildIterator
 {
     const InnerNodeHeader* header;
-    const rel_off_t* rel_offsets;     // Direct pointer to relative offset array
+    const std::uint8_t* rel_base;     // Byte pointer to relative offset array
     std::uint64_t offsets_file_base;  // File offset of the FIRST slot
     uint32_t remaining_mask;          // Bitmask of remaining children to visit
     int offset_index;                 // Current index in sparse offset array
@@ -222,11 +239,14 @@ struct ChildIterator
         const uint8_t* offset_data,
         std::uint64_t offsets_file_base_)
         : header(h)
-        , rel_offsets(reinterpret_cast<const rel_off_t*>(offset_data))
+        , rel_base(offset_data)
         , offsets_file_base(offsets_file_base_)
         , remaining_mask(0)
         , offset_index(0)
     {
+        // Overlay not implemented in the reader path yet
+        assert(h->overlay_mask == 0 && "overlay not implemented in iterator");
+
         // Build initial mask of non-empty children
         for (int i = 0; i < 16; ++i)
         {
@@ -258,8 +278,13 @@ struct ChildIterator
         // Find next set bit (next non-empty branch)
         int branch = __builtin_ctz(remaining_mask);  // Count trailing zeros
 
-        // Get the relative offset
-        rel_off_t rel = rel_offsets[offset_index];
+        // Load relative offset safely (unaligned-friendly)
+        rel_off_t rel{};
+        std::memcpy(
+            &rel,
+            rel_base +
+                static_cast<std::size_t>(offset_index) * sizeof(rel_off_t),
+            sizeof(rel));
 
         // Calculate the file position of this slot
         std::uint64_t slot = offsets_file_base +
