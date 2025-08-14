@@ -871,10 +871,8 @@ private:
                             std::uint64_t slot = offset_position +
                                 static_cast<std::uint64_t>(i) *
                                     sizeof(rel_off_t);
-                            rels[i] = static_cast<rel_off_t>(
-                                static_cast<std::int64_t>(
-                                    entry.child_offsets[i]) -
-                                static_cast<std::int64_t>(slot));
+                            rels[i] =
+                                rel_from_abs(entry.child_offsets[i], slot);
                         }
                         write_at(
                             offset_position,

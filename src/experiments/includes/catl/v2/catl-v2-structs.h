@@ -4,7 +4,9 @@
 #include "shamap-custom-traits.h"
 #include <array>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <cassert>
 #include <cstdint>
+#include <limits>
 #include <optional>
 
 namespace catl::v2 {
@@ -16,6 +18,44 @@ namespace catl::v2 {
  */
 using rel_off_t = std::int64_t;  // self-relative, signed 64-bit offsets
 static_assert(sizeof(rel_off_t) == 8, "rel_off_t must be 8 bytes");
+
+/**
+ * Helper to convert relative offset to absolute offset
+ * @param slot File position of the offset slot
+ * @param rel Relative offset value
+ * @return Absolute file offset
+ */
+inline std::uint64_t
+abs_from_rel(std::uint64_t slot, rel_off_t rel)
+{
+    // Defensive checks (compiled out in release with NDEBUG)
+    // File sizes >> 2^63-1 are not a realistic target for this format
+    assert(
+        slot <=
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
+    std::int64_t a = static_cast<std::int64_t>(slot) + rel;
+    assert(a >= 0);
+    return static_cast<std::uint64_t>(a);
+}
+
+/**
+ * Helper to convert absolute offset to relative offset
+ * @param abs Absolute file offset
+ * @param slot File position of the offset slot
+ * @return Relative offset value
+ */
+inline rel_off_t
+rel_from_abs(std::uint64_t abs, std::uint64_t slot)
+{
+    assert(
+        abs <=
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
+    assert(
+        slot <=
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
+    return static_cast<rel_off_t>(
+        static_cast<std::int64_t>(abs) - static_cast<std::int64_t>(slot));
+}
 
 /**
  * CATL v2 File Format Layout
@@ -229,8 +269,7 @@ struct ChildIterator
         child.branch = branch;
         child.type = header->get_child_type(branch);
         // Convert relative to absolute: abs = slot + rel
-        child.offset =
-            static_cast<std::uint64_t>(static_cast<std::int64_t>(slot) + rel);
+        child.offset = abs_from_rel(slot, rel);
 
         // Clear this bit from remaining mask
         remaining_mask &= ~(1u << branch);
