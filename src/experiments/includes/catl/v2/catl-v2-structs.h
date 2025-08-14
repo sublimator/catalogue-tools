@@ -322,15 +322,27 @@ struct ChildIterator
 struct CatlV2Header
 {
     std::array<char, 4> magic = {'C', 'A', 'T', '2'};  // CATL v2
-    std::uint32_t version = 1;
+    std::uint32_t version = 1;               // Currently experimental - no version handling yet
+                                             // Will be used for compatibility when out of experimental
     std::uint32_t network_id = 0;           // Network ID (0=XRPL, 21337=Xahau)
+    std::uint32_t endianness = 0x01020304;  // Endianness marker (little=0x04030201, big=0x01020304)
     std::uint64_t ledger_count = 0;         // Number of ledgers in file
     std::uint64_t first_ledger_seq = 0;     // Sequence of first ledger
     std::uint64_t last_ledger_seq = 0;      // Sequence of last ledger
     std::uint64_t ledger_index_offset = 0;  // Offset to ledger index
 };
 #pragma pack(pop)  // Restore default alignment
-static_assert(sizeof(CatlV2Header) == 44, "CatlV2Header must be 44 bytes");
+static_assert(sizeof(CatlV2Header) == 48, "CatlV2Header must be 48 bytes");
+
+/**
+ * Get the host system's endianness marker
+ * @return 0x01020304 for big endian, 0x04030201 for little endian
+ */
+inline std::uint32_t get_host_endianness() {
+    const std::uint32_t test = 0x01020304;
+    const std::uint8_t* bytes = reinterpret_cast<const std::uint8_t*>(&test);
+    return bytes[0] == 0x04 ? 0x04030201 : 0x01020304;
+}
 
 /**
  * Entry in the ledger index

@@ -67,6 +67,9 @@ public:
 
         // Set network ID in header
         header_.network_id = network_id;
+        
+        // Set endianness marker for the current platform
+        header_.endianness = get_host_endianness();
 
         // Write placeholder header
         write_file_header();
