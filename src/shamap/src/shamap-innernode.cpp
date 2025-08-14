@@ -264,6 +264,16 @@ SHAMapInnerNodeT<Traits>::copy(int newVersion) const
         " to version ",
         newVersion);
 
+    // Invoke CoW hook if present
+    if constexpr (requires(Traits & t) {
+                      t.on_inner_node_copied(
+                          (SHAMapInnerNodeT<Traits>*)nullptr,
+                          (const SHAMapInnerNodeT<Traits>*)nullptr);
+                  })
+    {
+        new_node->on_inner_node_copied(new_node.get(), this);
+    }
+
     return new_node;
 }
 

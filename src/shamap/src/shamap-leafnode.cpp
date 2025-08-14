@@ -108,6 +108,17 @@ SHAMapLeafNodeT<Traits>::copy(int newVersion) const
     new_leaf->hash = this->hash;
     new_leaf->hash_valid_ = this->hash_valid_;
     new_leaf->version = newVersion;
+
+    // Invoke CoW hook if present
+    if constexpr (requires(Traits & t) {
+                      t.on_leaf_node_copied(
+                          (SHAMapLeafNodeT<Traits>*)nullptr,
+                          (const SHAMapLeafNodeT<Traits>*)nullptr);
+                  })
+    {
+        new_leaf->on_leaf_node_copied(new_leaf.get(), this);
+    }
+
     return new_leaf;
 }
 
