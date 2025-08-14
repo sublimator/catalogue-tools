@@ -142,7 +142,8 @@ SHAMapT<Traits>::set_item_reference(
                         if (existing_leaf->get_version() !=
                             this->current_version_)
                         {
-                            auto copied_leaf = existing_leaf->copy(this->current_version_);
+                            auto copied_leaf = existing_leaf->copy(
+                                this->current_version_, current_parent.get());
                             existing_leaf = copied_leaf;
                         }
                     }

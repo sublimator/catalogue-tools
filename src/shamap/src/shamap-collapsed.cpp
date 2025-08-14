@@ -33,7 +33,7 @@ SHAMapT<Traits>::collapse_inner_node(
         node->get_version() != this->current_version_)
     {
         // Create a copy with the current version
-        auto node_copy = node->copy(this->current_version_);
+        auto node_copy = node->copy(this->current_version_, nullptr);
         // Important: update the reference passed to this function
         node = node_copy;
         // No need to rechain as the caller will update its reference to node
@@ -83,8 +83,8 @@ SHAMapT<Traits>::collapse_inner_node(
             if (single_inner_child->is_cow_enabled() &&
                 single_inner_child->get_version() != this->current_version_)
             {
-                auto child_copy =
-                    single_inner_child->copy(this->current_version_);
+                auto child_copy = single_inner_child->copy(
+                    this->current_version_, node.get());
                 // Update our reference to this child
                 single_inner_child = child_copy;
                 // Note: We don't need to rechain this reference since we're
@@ -119,8 +119,8 @@ SHAMapT<Traits>::collapse_inner_node(
                                 this->current_version_)
                         {
                             // Create a version-compatible copy
-                            auto child_copy =
-                                inner_child->copy(this->current_version_);
+                            auto child_copy = inner_child->copy(
+                                this->current_version_, node.get());
                             // Update this node to point to the new copy
                             node->set_child(i, child_copy);
                             // No additional rechaining needed since we just
@@ -136,7 +136,8 @@ SHAMapT<Traits>::collapse_inner_node(
                         if (leaf_child->get_version() != this->current_version_)
                         {
                             // Copy leaf nodes too if needed
-                            auto leaf_copy = leaf_child->copy(this->current_version_);
+                            auto leaf_copy = leaf_child->copy(
+                                this->current_version_, node.get());
                             node->set_child(i, leaf_copy);
                             continue;
                         }

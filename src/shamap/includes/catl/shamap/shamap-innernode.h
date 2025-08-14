@@ -167,7 +167,7 @@ protected:
     }
 
     boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>
-    copy(int newVersion) const;
+    copy(int newVersion, SHAMapInnerNodeT<Traits>* parent = nullptr) const;
 
     boost::intrusive_ptr<SHAMapInnerNodeT<Traits>>
     make_child(int depth) const;

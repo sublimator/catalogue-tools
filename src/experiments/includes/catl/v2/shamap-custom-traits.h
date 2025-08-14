@@ -49,22 +49,27 @@ struct SerializedNode
     void
     on_inner_node_copied(
         SHAMapInnerNodeS* this_copy,
-        const SHAMapInnerNodeS* source)
+        const SHAMapInnerNodeS* source,
+        SHAMapInnerNodeS* parent)
     {
         // Reset serialization state for the new copy
         this->processed = false;
         // Could track lineage: store source->node_offset for overlay decisions
+        // Parent can be used to establish parent-child relationships in
+        // serialization
     }
 
     // CoW hook: called after a leaf node has been copied
     void
     on_leaf_node_copied(
         SHAMapLeafNodeS* this_copy,
-        const SHAMapLeafNodeS* source)
+        const SHAMapLeafNodeS* source,
+        SHAMapInnerNodeS* parent)
     {
         // Reset serialization state for the new copy
         this->processed = false;
         // Could track which items are being modified frequently
+        // Parent can be used to understand which branch this leaf belongs to
     }
 };
 

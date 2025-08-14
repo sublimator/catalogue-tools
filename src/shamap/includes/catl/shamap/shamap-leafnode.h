@@ -13,6 +13,9 @@ class SHAMapT;
 template <typename Traits>
 class PathFinderT;
 
+template <typename Traits>
+class SHAMapInnerNodeT;
+
 /**
  * Leaf node in the SHAMap tree
  */
@@ -63,7 +66,7 @@ protected:
 
     // CoW support - only accessible to friends
     boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
-    copy(int newVersion) const;
+    copy(int newVersion, SHAMapInnerNodeT<Traits>* parent = nullptr) const;
 };
 
 // Type alias for backward compatibility
