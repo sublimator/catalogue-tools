@@ -984,13 +984,7 @@ private:
                         slot_from_index(offsets_start, entry.offset_index);
 
                     // Load relative offset safely (unaligned-friendly)
-                    rel_off_t rel{};
-                    std::memcpy(
-                        &rel,
-                        rel_base +
-                            static_cast<std::size_t>(entry.offset_index) *
-                                sizeof(rel_off_t),
-                        sizeof(rel));
+                    rel_off_t rel = load_rel(rel_base, entry.offset_index);
 
                     std::uint64_t child_offset = abs_from_rel(slot, rel);
 
@@ -1138,13 +1132,7 @@ private:
                     slot_from_index(offsets_start, offset_index);
 
                 // Load relative offset safely (unaligned-friendly)
-                rel_off_t rel{};
-                std::memcpy(
-                    &rel,
-                    rel_base +
-                        static_cast<std::size_t>(offset_index) *
-                            sizeof(rel_off_t),
-                    sizeof(rel));
+                rel_off_t rel = load_rel(rel_base, offset_index);
                 ++offset_index;
 
                 info.offset = abs_from_rel(slot, rel);

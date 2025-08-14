@@ -72,6 +72,24 @@ slot_from_index(std::uint64_t base, int index)
 }
 
 /**
+ * Helper to load a relative offset from unaligned memory
+ * @param base Base address of offset array
+ * @param index Index of the offset to load (0-based)
+ * @return The loaded relative offset
+ */
+inline rel_off_t
+load_rel(const uint8_t* base, int index)
+{
+    assert(index >= 0);
+    rel_off_t rel{};
+    std::memcpy(
+        &rel,
+        base + static_cast<std::size_t>(index) * sizeof(rel_off_t),
+        sizeof(rel));
+    return rel;
+}
+
+/**
  * CATL v2 File Format Layout
  * =========================
  *
@@ -300,12 +318,7 @@ struct ChildIterator
         int branch = __builtin_ctz(remaining_mask);  // Count trailing zeros
 
         // Load relative offset safely (unaligned-friendly)
-        rel_off_t rel{};
-        std::memcpy(
-            &rel,
-            rel_base +
-                static_cast<std::size_t>(offset_index) * sizeof(rel_off_t),
-            sizeof(rel));
+        rel_off_t rel = load_rel(rel_base, offset_index);
 
         // Calculate the file position of this slot
         std::uint64_t slot = slot_from_index(offsets_file_base, offset_index);
