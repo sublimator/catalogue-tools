@@ -165,12 +165,12 @@ struct DepthAndFlags
  */
 struct InnerNodeHeader
 {
+    std::uint32_t child_types;  // 2 bits × 16 children = 32 bits
     union
     {
         std::uint16_t depth_plus;  // Raw access for serialization
         DepthAndFlags bits;        // Structured field access
     };
-    std::uint32_t child_types;  // 2 bits × 16 children = 32 bits
     std::uint16_t
         overlay_mask;  // 16 bits: which branches are overridden
                        // 0 => no overlay (current experimental format)
