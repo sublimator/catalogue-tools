@@ -631,7 +631,8 @@ private:
 
                 // Use iterator to find the specific child
                 size_t offsets_start = node_offset + sizeof(InnerNodeHeader);
-                ChildIterator child_iter(inner_header, data_ + offsets_start);
+                ChildIterator child_iter(
+                    inner_header, data_ + offsets_start, offsets_start);
 
                 std::uint64_t child_offset = 0;
                 bool found = false;
@@ -960,9 +961,17 @@ private:
                     // Get offset array
                     size_t offsets_start =
                         entry.node_offset + sizeof(InnerNodeHeader);
-                    const uint64_t* offsets = reinterpret_cast<const uint64_t*>(
-                        data_ + offsets_start);
-                    uint64_t child_offset = offsets[entry.offset_index];
+                    const rel_off_t* rel_offsets =
+                        reinterpret_cast<const rel_off_t*>(
+                            data_ + offsets_start);
+
+                    // Calculate absolute offset from self-relative offset
+                    std::uint64_t slot = offsets_start +
+                        static_cast<std::uint64_t>(entry.offset_index) *
+                            sizeof(rel_off_t);
+                    rel_off_t rel = rel_offsets[entry.offset_index];
+                    std::uint64_t child_offset = static_cast<std::uint64_t>(
+                        static_cast<std::int64_t>(slot) + rel);
 
                     bool child_is_leaf = (child_type == ChildType::LEAF);
                     LOGD(
@@ -1094,8 +1103,8 @@ private:
         std::vector<ChildInfo> children;
 
         size_t offsets_start = root_offset + sizeof(InnerNodeHeader);
-        const uint64_t* offsets =
-            reinterpret_cast<const uint64_t*>(data_ + offsets_start);
+        const rel_off_t* rel_offsets =
+            reinterpret_cast<const rel_off_t*>(data_ + offsets_start);
         int offset_index = 0;
 
         for (int branch = 0; branch < 16; ++branch)
@@ -1104,7 +1113,13 @@ private:
             if (child_type != ChildType::EMPTY)
             {
                 ChildInfo info;
-                info.offset = offsets[offset_index++];
+                // Calculate absolute offset from self-relative offset
+                std::uint64_t slot = offsets_start +
+                    static_cast<std::uint64_t>(offset_index) *
+                        sizeof(rel_off_t);
+                rel_off_t rel = rel_offsets[offset_index++];
+                info.offset = static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(slot) + rel);
                 info.branch = branch;
                 info.is_leaf = (child_type == ChildType::LEAF);
                 children.push_back(info);

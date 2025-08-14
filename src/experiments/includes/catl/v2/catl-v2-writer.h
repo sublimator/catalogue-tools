@@ -395,7 +395,7 @@ private:
     std::uint64_t
     write_inner_node(
         const boost::intrusive_ptr<SHAMapInnerNodeS>& inner,
-        std::vector<std::uint64_t>& child_offsets)
+        std::vector<std::uint64_t>& child_offsets_abs)
     {
         auto offset = current_offset();
 
@@ -413,11 +413,12 @@ private:
         stats_.total_bytes_written += sizeof(header);
         stats_.inner_bytes_written += sizeof(header);
 
-        // Write child offsets (8 bytes each for non-empty children)
-        child_offsets.resize(child_count);
-        size_t offsets_size = child_count * sizeof(std::uint64_t);
+        // Write placeholder rel_off_t zeros for the N child slots
+        child_offsets_abs.resize(child_count);  // we'll fill absolutes later
+        std::vector<rel_off_t> zeros(child_count, 0);
+        size_t offsets_size = child_count * sizeof(rel_off_t);
         output_.write(
-            reinterpret_cast<const char*>(child_offsets.data()), offsets_size);
+            reinterpret_cast<const char*>(zeros.data()), offsets_size);
         stats_.total_bytes_written += offsets_size;
         stats_.inner_bytes_written += offsets_size;
 
@@ -860,10 +861,25 @@ private:
 
                         auto offset_position =
                             entry.inner_offset + sizeof(InnerNodeHeader);
+
+                        // Convert each absolute child offset to a self-relative
+                        // rel_off_t, where the base is the file position of
+                        // that slot.
+                        std::vector<rel_off_t> rels(entry.child_offsets.size());
+                        for (size_t i = 0; i < entry.child_offsets.size(); ++i)
+                        {
+                            std::uint64_t slot = offset_position +
+                                static_cast<std::uint64_t>(i) *
+                                    sizeof(rel_off_t);
+                            rels[i] = static_cast<rel_off_t>(
+                                static_cast<std::int64_t>(
+                                    entry.child_offsets[i]) -
+                                static_cast<std::int64_t>(slot));
+                        }
                         write_at(
                             offset_position,
-                            entry.child_offsets.data(),
-                            entry.child_offsets.size() * sizeof(std::uint64_t));
+                            rels.data(),
+                            rels.size() * sizeof(rel_off_t));
 
                         stack.pop();
 
