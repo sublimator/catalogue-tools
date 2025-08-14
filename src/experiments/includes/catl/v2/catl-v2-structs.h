@@ -10,6 +10,14 @@
 namespace catl::v2 {
 
 /**
+ * Type alias for self-relative offsets
+ * Each offset is relative to its own slot position in the file:
+ * absolute_offset = slot_position + relative_offset
+ */
+using rel_off_t = std::int64_t;  // self-relative, signed 64-bit offsets
+static_assert(sizeof(rel_off_t) == 8, "rel_off_t must be 8 bytes");
+
+/**
  * CATL v2 File Format Layout
  * =========================
  *
@@ -43,7 +51,11 @@ namespace catl::v2 {
  *     [InnerNodeHeader]             // 6 bytes
  *       - depth                     // 2 bytes (6 bits used)
  *       - child_types               // 4 bytes (2 bits × 16 children)
- *     [Child Offsets]               // 8 bytes × N non-empty children
+ *     [Child Offsets]               // rel_off_t (8 bytes) × N non-empty
+ * children
+ *                                   // Each entry is self-relative to its own
+ * slot:
+ *                                   // abs_child = slot_file_offset + rel_off
  *     ... (depth-first traversal)
  *
  *     [LeafHeader]                  // 36 bytes
@@ -155,17 +167,23 @@ struct InnerNodeHeader
  *
  * Designed for maximum performance - no virtual functions, minimal state.
  * Only iterates over branches that actually have children.
+ * Converts self-relative offsets to absolute offsets on-the-fly.
  */
 struct ChildIterator
 {
     const InnerNodeHeader* header;
-    const uint64_t* offsets;  // Direct pointer to offset array
-    uint32_t remaining_mask;  // Bitmask of remaining children to visit
-    int offset_index;         // Current index in sparse offset array
+    const rel_off_t* rel_offsets;     // Direct pointer to relative offset array
+    std::uint64_t offsets_file_base;  // File offset of the FIRST slot
+    uint32_t remaining_mask;          // Bitmask of remaining children to visit
+    int offset_index;                 // Current index in sparse offset array
 
-    ChildIterator(const InnerNodeHeader* h, const uint8_t* offset_data)
+    ChildIterator(
+        const InnerNodeHeader* h,
+        const uint8_t* offset_data,
+        std::uint64_t offsets_file_base_)
         : header(h)
-        , offsets(reinterpret_cast<const uint64_t*>(offset_data))
+        , rel_offsets(reinterpret_cast<const rel_off_t*>(offset_data))
+        , offsets_file_base(offsets_file_base_)
         , remaining_mask(0)
         , offset_index(0)
     {
@@ -183,7 +201,7 @@ struct ChildIterator
     {
         int branch;
         ChildType type;
-        uint64_t offset;
+        std::uint64_t offset;
     };
 
     // Check if more children available
@@ -200,13 +218,23 @@ struct ChildIterator
         // Find next set bit (next non-empty branch)
         int branch = __builtin_ctz(remaining_mask);  // Count trailing zeros
 
+        // Get the relative offset
+        rel_off_t rel = rel_offsets[offset_index];
+
+        // Calculate the file position of this slot
+        std::uint64_t slot = offsets_file_base +
+            static_cast<std::uint64_t>(offset_index) * sizeof(rel_off_t);
+
         Child child;
         child.branch = branch;
         child.type = header->get_child_type(branch);
-        child.offset = offsets[offset_index++];
+        // Convert relative to absolute: abs = slot + rel
+        child.offset =
+            static_cast<std::uint64_t>(static_cast<std::int64_t>(slot) + rel);
 
         // Clear this bit from remaining mask
         remaining_mask &= ~(1u << branch);
+        ++offset_index;
 
         return child;
     }
