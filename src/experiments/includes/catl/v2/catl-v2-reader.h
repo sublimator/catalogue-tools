@@ -490,11 +490,24 @@ private:
             throw std::runtime_error("Invalid file magic");
         }
 
-        // Validate version
+        // Validate version (experimental - only version 1 supported)
         if (header_.version != 1)
         {
             throw std::runtime_error(
-                "Unsupported file version: " + std::to_string(header_.version));
+                "Unsupported file version: " + std::to_string(header_.version) +
+                " (experimental code only supports version 1)");
+        }
+        
+        // Check endianness compatibility
+        std::uint32_t host_endian = get_host_endianness();
+        if (header_.endianness != host_endian)
+        {
+            const char* file_endian = (header_.endianness == 0x01020304) ? "big-endian" : "little-endian";
+            const char* host_type = (host_endian == 0x01020304) ? "big-endian" : "little-endian";
+            throw std::runtime_error(
+                std::string("Endianness mismatch: file is ") + file_endian + 
+                ", but host is " + host_type + 
+                ". Cannot mmap files created on different endian systems.");
         }
     }
 
