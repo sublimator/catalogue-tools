@@ -162,17 +162,24 @@ struct DepthAndFlags
 /**
  * Compact inner node header
  * Total size: 8 bytes (was 6, added overlay_mask for alignment and future use)
+ * 
+ * Field ordering is important to avoid padding:
+ *   child_types (4 bytes) at offset 0
+ *   depth union (2 bytes) at offset 4  
+ *   overlay_mask (2 bytes) at offset 6
+ * Total: 8 bytes with no padding
  */
+#pragma pack(push, 1)  // Ensure no padding between fields
 struct InnerNodeHeader
 {
-    std::uint32_t child_types;  // 2 bits × 16 children = 32 bits
+    std::uint32_t child_types;  // 2 bits × 16 children = 32 bits (offset 0)
     union
     {
-        std::uint16_t depth_plus;  // Raw access for serialization
+        std::uint16_t depth_plus;  // Raw access for serialization (offset 4)
         DepthAndFlags bits;        // Structured field access
     };
     std::uint16_t
-        overlay_mask;  // 16 bits: which branches are overridden
+        overlay_mask;  // 16 bits: which branches are overridden (offset 6)
                        // 0 => no overlay (current experimental format)
                        //
                        // Future overlay layout when overlay_mask != 0:
@@ -217,6 +224,7 @@ struct InnerNodeHeader
         return count;
     }
 };
+#pragma pack(pop)  // Restore default alignment
 static_assert(sizeof(InnerNodeHeader) == 8, "InnerNodeHeader must be 8 bytes");
 
 /**
