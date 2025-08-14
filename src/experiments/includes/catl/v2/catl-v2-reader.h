@@ -970,8 +970,7 @@ private:
                         static_cast<std::uint64_t>(entry.offset_index) *
                             sizeof(rel_off_t);
                     rel_off_t rel = rel_offsets[entry.offset_index];
-                    std::uint64_t child_offset = static_cast<std::uint64_t>(
-                        static_cast<std::int64_t>(slot) + rel);
+                    std::uint64_t child_offset = abs_from_rel(slot, rel);
 
                     bool child_is_leaf = (child_type == ChildType::LEAF);
                     LOGD(
@@ -1118,8 +1117,7 @@ private:
                     static_cast<std::uint64_t>(offset_index) *
                         sizeof(rel_off_t);
                 rel_off_t rel = rel_offsets[offset_index++];
-                info.offset = static_cast<std::uint64_t>(
-                    static_cast<std::int64_t>(slot) + rel);
+                info.offset = abs_from_rel(slot, rel);
                 info.branch = branch;
                 info.is_leaf = (child_type == ChildType::LEAF);
                 children.push_back(info);
