@@ -318,6 +318,7 @@ struct ChildIterator
  * This format stores multiple ledgers with their canonical headers
  * and serialized state/transaction trees
  */
+#pragma pack(push, 1)  // Ensure consistent binary layout
 struct CatlV2Header
 {
     std::array<char, 4> magic = {'C', 'A', 'T', '2'};  // CATL v2
@@ -328,10 +329,13 @@ struct CatlV2Header
     std::uint64_t last_ledger_seq = 0;      // Sequence of last ledger
     std::uint64_t ledger_index_offset = 0;  // Offset to ledger index
 };
+#pragma pack(pop)  // Restore default alignment
+static_assert(sizeof(CatlV2Header) == 44, "CatlV2Header must be 44 bytes");
 
 /**
  * Entry in the ledger index
  */
+#pragma pack(push, 1)  // Ensure consistent binary layout
 struct LedgerIndexEntry
 {
     std::uint32_t sequence;           // Ledger sequence number
@@ -339,17 +343,22 @@ struct LedgerIndexEntry
     std::uint64_t state_tree_offset;  // Offset to state tree root
     std::uint64_t tx_tree_offset;     // Offset to tx tree root (0 if none)
 };
+#pragma pack(pop)  // Restore default alignment
+static_assert(sizeof(LedgerIndexEntry) == 28, "LedgerIndexEntry must be 28 bytes");
 
 /**
  * Tree size header written after each LedgerInfo
  *
  * This allows readers to skip entire trees without parsing them
  */
+#pragma pack(push, 1)  // Ensure consistent binary layout
 struct TreesHeader
 {
     std::uint64_t state_tree_size;  // Size of state tree in bytes
     std::uint64_t tx_tree_size;     // Size of tx tree in bytes
 };
+#pragma pack(pop)  // Restore default alignment
+static_assert(sizeof(TreesHeader) == 16, "TreesHeader must be 16 bytes");
 
 /**
  * Compression type for future extensibility
@@ -361,8 +370,9 @@ enum class CompressionType : std::uint8_t {
 
 /**
  * Unified leaf header for all leaf nodes
- * Total size: 36 bytes (good alignment)
+ * Total size: 36 bytes (32 + 4, packed)
  */
+#pragma pack(push, 1)  // Ensure consistent binary layout
 struct LeafHeader
 {
     std::array<std::uint8_t, 32> key;  // 32 bytes
@@ -407,6 +417,8 @@ struct LeafHeader
         size_and_flags = (size_and_flags & 0xFF000000) | size;
     }
 };
+#pragma pack(pop)  // Restore default alignment
+static_assert(sizeof(LeafHeader) == 36, "LeafHeader must be 36 bytes");
 
 /**
  * Build child types bitmap from a SHAMapInnerNodeS
