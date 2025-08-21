@@ -526,4 +526,91 @@ build_child_types(const boost::intrusive_ptr<SHAMapInnerNodeS>& inner)
     return child_types;
 }
 
+//----------------------------------------------------------
+// Wire Format Static Assertions
+// These ensure binary compatibility across platforms
+//----------------------------------------------------------
+
+// rel_off_t type guarantees
+static_assert(sizeof(rel_off_t) == 8, "rel_off_t must be 8 bytes");
+static_assert(std::is_signed_v<rel_off_t>, "rel_off_t must be signed");
+static_assert(
+    std::is_same_v<rel_off_t, std::int64_t>,
+    "rel_off_t must be int64_t");
+
+// CatlV2Header layout guarantees
+static_assert(
+    std::is_trivially_copyable_v<CatlV2Header>,
+    "CatlV2Header must be trivially copyable");
+static_assert(
+    std::is_standard_layout_v<CatlV2Header>,
+    "CatlV2Header must be standard layout");
+static_assert(sizeof(CatlV2Header) == 48, "CatlV2Header must be 48 bytes");
+static_assert(alignof(CatlV2Header) == 1, "CatlV2Header must be packed");
+static_assert(offsetof(CatlV2Header, magic) == 0, "magic at offset 0");
+static_assert(offsetof(CatlV2Header, version) == 4, "version at offset 4");
+static_assert(offsetof(CatlV2Header, network_id) == 8, "network_id at offset 8");
+static_assert(offsetof(CatlV2Header, endianness) == 12, "endianness at offset 12");
+static_assert(offsetof(CatlV2Header, ledger_count) == 16, "ledger_count at offset 16");
+static_assert(offsetof(CatlV2Header, first_ledger_seq) == 24, "first_ledger_seq at offset 24");
+static_assert(offsetof(CatlV2Header, last_ledger_seq) == 32, "last_ledger_seq at offset 32");
+static_assert(offsetof(CatlV2Header, ledger_index_offset) == 40, "ledger_index_offset at offset 40");
+
+// InnerNodeHeader layout guarantees
+static_assert(
+    std::is_trivially_copyable_v<InnerNodeHeader>,
+    "InnerNodeHeader must be trivially copyable");
+static_assert(
+    std::is_standard_layout_v<InnerNodeHeader>,
+    "InnerNodeHeader must be standard layout");
+static_assert(sizeof(InnerNodeHeader) == 8, "InnerNodeHeader must be 8 bytes");
+static_assert(alignof(InnerNodeHeader) == 1, "InnerNodeHeader must be packed");
+static_assert(offsetof(InnerNodeHeader, child_types) == 0, "child_types at offset 0");
+static_assert(offsetof(InnerNodeHeader, depth_plus) == 4, "depth_plus at offset 4");
+static_assert(offsetof(InnerNodeHeader, overlay_mask) == 6, "overlay_mask at offset 6");
+
+// LeafHeader layout guarantees
+static_assert(
+    std::is_trivially_copyable_v<LeafHeader>,
+    "LeafHeader must be trivially copyable");
+static_assert(
+    std::is_standard_layout_v<LeafHeader>,
+    "LeafHeader must be standard layout");
+static_assert(sizeof(LeafHeader) == 36, "LeafHeader must be 36 bytes");
+static_assert(alignof(LeafHeader) == 1, "LeafHeader must be packed");
+static_assert(offsetof(LeafHeader, key) == 0, "key at offset 0");
+static_assert(offsetof(LeafHeader, size_and_flags) == 32, "size_and_flags at offset 32");
+
+// LedgerIndexEntry layout guarantees
+static_assert(
+    std::is_trivially_copyable_v<LedgerIndexEntry>,
+    "LedgerIndexEntry must be trivially copyable");
+static_assert(
+    std::is_standard_layout_v<LedgerIndexEntry>,
+    "LedgerIndexEntry must be standard layout");
+static_assert(sizeof(LedgerIndexEntry) == 28, "LedgerIndexEntry must be 28 bytes");
+static_assert(alignof(LedgerIndexEntry) == 1, "LedgerIndexEntry must be packed");
+static_assert(offsetof(LedgerIndexEntry, sequence) == 0, "sequence at offset 0");
+static_assert(offsetof(LedgerIndexEntry, header_offset) == 4, "header_offset at offset 4");
+static_assert(offsetof(LedgerIndexEntry, state_tree_offset) == 12, "state_tree_offset at offset 12");
+static_assert(offsetof(LedgerIndexEntry, tx_tree_offset) == 20, "tx_tree_offset at offset 20");
+
+// TreesHeader layout guarantees
+static_assert(
+    std::is_trivially_copyable_v<TreesHeader>,
+    "TreesHeader must be trivially copyable");
+static_assert(
+    std::is_standard_layout_v<TreesHeader>,
+    "TreesHeader must be standard layout");
+static_assert(sizeof(TreesHeader) == 16, "TreesHeader must be 16 bytes");
+static_assert(alignof(TreesHeader) == 1, "TreesHeader must be packed");
+static_assert(offsetof(TreesHeader, state_tree_size) == 0, "state_tree_size at offset 0");
+static_assert(offsetof(TreesHeader, tx_tree_size) == 8, "tx_tree_size at offset 8");
+
+// DepthAndFlags layout guarantees
+static_assert(
+    std::is_trivially_copyable_v<DepthAndFlags>,
+    "DepthAndFlags must be trivially copyable");
+static_assert(sizeof(DepthAndFlags) == 2, "DepthAndFlags must be 2 bytes");
+
 }  // namespace catl::v2
