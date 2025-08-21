@@ -46,12 +46,22 @@ namespace catl::v2 {
 class CatlV2Reader
 {
 private:
+    // Forward declaration for MmapHolder
+    struct MmapHolder
+    {
+        boost::iostreams::mapped_file_source mmap_file;
+        std::string filename;
+    };
+
     /**
-     * Private constructor that takes raw memory
+     * Private constructor that takes raw memory and ownership
      * Used by create() and share() methods
      */
-    CatlV2Reader(const uint8_t* data, size_t size)
-        : data_(data), file_size_(size)
+    CatlV2Reader(
+        const uint8_t* data,
+        size_t size,
+        std::shared_ptr<MmapHolder> holder = nullptr)
+        : data_(data), file_size_(size), mmap_holder_(holder)
     {
         // Read and validate header
         read_and_validate_header();
@@ -71,13 +81,6 @@ public:
     static std::shared_ptr<CatlV2Reader>
     create(const std::string& filename)
     {
-        // Store the mmap object in a shared structure
-        struct MmapHolder
-        {
-            boost::iostreams::mapped_file_source mmap_file;
-            std::string filename;
-        };
-
         auto holder = std::make_shared<MmapHolder>();
         holder->filename = filename;
 
@@ -115,12 +118,10 @@ public:
                     "Memory mapping succeeded but data pointer is null");
             }
 
-            // Create reader with custom deleter that keeps mmap alive
+            // Create reader with the holder for lifetime management
+            // Can't use make_shared due to private constructor
             return std::shared_ptr<CatlV2Reader>(
-                new CatlV2Reader(data, size), [holder](CatlV2Reader* reader) {
-                    delete reader;
-                    // holder destructor will close mmap
-                });
+                new CatlV2Reader(data, size, holder));
         }
         catch (const boost::filesystem::filesystem_error& e)
         {
@@ -136,16 +137,22 @@ public:
     /**
      * Create a new reader sharing the same memory
      * Each reader has its own traversal state (current_pos_, etc)
+     * The memory mapping stays alive as long as any reader references it.
      *
      * @return New reader instance sharing same memory
      */
     std::shared_ptr<CatlV2Reader>
     share() const
     {
-        // Simply create a new reader with the same memory
-        // It will re-parse the header (48 bytes) but that's negligible
+        if (!mmap_holder_)
+        {
+            // Fallback for readers created without mmap holder (e.g., from raw memory)
+            return std::shared_ptr<CatlV2Reader>(
+                new CatlV2Reader(data_, file_size_, nullptr));
+        }
+        // Share the mmap holder to keep memory alive
         return std::shared_ptr<CatlV2Reader>(
-            new CatlV2Reader(data_, file_size_));
+            new CatlV2Reader(data_, file_size_, mmap_holder_));
     }
 
     ~CatlV2Reader() = default;
@@ -463,6 +470,7 @@ private:
     const uint8_t* data_ = nullptr;
     size_t file_size_ = 0;
     size_t current_pos_ = 0;
+    std::shared_ptr<MmapHolder> mmap_holder_;  // Keeps mmap alive
 
     CatlV2Header header_;
     std::uint32_t current_ledger_seq_ = 0;
