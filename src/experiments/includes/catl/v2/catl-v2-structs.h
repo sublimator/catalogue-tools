@@ -90,6 +90,36 @@ load_rel(const uint8_t* base, int index)
 }
 
 /**
+ * Safe loading of POD types from memory-mapped data.
+ * This avoids undefined behavior from reinterpret_cast on potentially
+ * misaligned pointers and ensures proper object lifetime.
+ * 
+ * @tparam T The trivially copyable type to load
+ * @param base Base pointer to the memory-mapped data
+ * @param offset Byte offset from base
+ * @param file_size Total size of the memory-mapped file (for bounds checking)
+ * @return Copy of the object at the specified location
+ * @throws std::runtime_error if reading past end of file
+ */
+template <typename T>
+inline T
+load_pod(const uint8_t* base, size_t offset, size_t file_size)
+{
+    static_assert(
+        std::is_trivially_copyable_v<T>,
+        "T must be trivially copyable");
+    
+    if (offset + sizeof(T) > file_size)
+    {
+        throw std::runtime_error("read past end of file");
+    }
+    
+    T out;
+    std::memcpy(&out, base + offset, sizeof(T));
+    return out;
+}
+
+/**
  * CATL v2 File Format Layout
  * =========================
  *

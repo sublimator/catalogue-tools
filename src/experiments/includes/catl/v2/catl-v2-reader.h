@@ -188,8 +188,7 @@ public:
         current_pos_ += sizeof(catl::common::LedgerInfo);
 
         // Read the trees header that follows
-        current_trees_header_ =
-            *reinterpret_cast<const TreesHeader*>(data_ + current_pos_);
+        current_trees_header_ = load_pod<TreesHeader>(data_, current_pos_, file_size_);
         current_pos_ += sizeof(TreesHeader);
 
         current_ledger_seq_ = info->seq;
@@ -589,20 +588,20 @@ private:
                         "Inner node header exceeds file size");
                 }
 
-                auto inner_header = reinterpret_cast<const InnerNodeHeader*>(
-                    data_ + node_offset);
+                auto inner_header = load_pod<InnerNodeHeader>(
+                    data_, node_offset, file_size_);
 
                 LOGD(
                     "Inner node depth from header: ",
-                    (int)inner_header->bits.depth);
+                    (int)inner_header.bits.depth);
                 LOGD(
                     "Child types bitmap: 0x",
                     std::hex,
-                    inner_header->child_types,
+                    inner_header.child_types,
                     std::dec);
 
                 // Determine which branch to follow based on the key nibble
-                int nibble_idx = inner_header->bits.depth;
+                int nibble_idx = inner_header.bits.depth;
                 if (nibble_idx >= 64)  // Sanity check
                 {
                     LOGE("Invalid nibble index: ", nibble_idx);
@@ -626,7 +625,7 @@ private:
                     static_cast<int>(nibble));
 
                 // Check if this child exists
-                ChildType child_type = inner_header->get_child_type(nibble);
+                ChildType child_type = inner_header.get_child_type(nibble);
                 LOGD(
                     "Child type for nibble ",
                     static_cast<int>(nibble),
@@ -648,7 +647,7 @@ private:
                 // Use iterator to find the specific child
                 size_t offsets_start = node_offset + sizeof(InnerNodeHeader);
                 ChildIterator child_iter(
-                    inner_header, data_ + offsets_start, offsets_start);
+                    &inner_header, data_ + offsets_start, offsets_start);
 
                 std::uint64_t child_offset = 0;
                 bool found = false;
@@ -682,7 +681,7 @@ private:
 
                 bool child_is_leaf = (child_type == ChildType::LEAF);
                 stack[stack_top++] = {
-                    child_offset, inner_header->bits.depth + 1, child_is_leaf};
+                    child_offset, inner_header.bits.depth + 1, child_is_leaf};
                 LOGD(
                     "Pushed child to stack, new stack top: ",
                     stack_top,
@@ -703,15 +702,14 @@ private:
                     throw std::runtime_error("Leaf header exceeds file size");
                 }
 
-                auto leaf_header = reinterpret_cast<const LeafHeader*>(
-                    data_ + leaf_header_offset);
+                auto leaf_header = load_pod<LeafHeader>(data_, leaf_header_offset, file_size_);
 
                 // Convert leaf key to hex for logging
-                LOGD("Leaf key: ", Hash256(leaf_header->key.data()).hex());
+                LOGD("Leaf key: ", Hash256(leaf_header.key.data()).hex());
 
                 // Check if this is the key we're looking for
                 bool key_match =
-                    std::memcmp(leaf_header->key.data(), key.data(), 32) == 0;
+                    std::memcmp(leaf_header.key.data(), key.data(), 32) == 0;
                 LOGD("Key match: ", key_match ? "YES!" : "no");
 
                 if (key_match)
@@ -719,7 +717,7 @@ private:
                     // Found it! Return the data (after LeafHeader)
                     size_t data_offset =
                         leaf_header_offset + sizeof(LeafHeader);
-                    size_t data_size = leaf_header->data_size();
+                    size_t data_size = leaf_header.data_size();
                     LOGD("Found key! Data size: ", data_size, " bytes");
 
                     if (data_offset + data_size > file_size_)
@@ -842,9 +840,9 @@ private:
                     throw std::runtime_error("Leaf header exceeds file bounds");
                 }
 
-                auto leaf_header = reinterpret_cast<const LeafHeader*>(
-                    data_ + entry.node_offset);
-                Key leaf_key(leaf_header->key.data());
+                auto leaf_header = load_pod<LeafHeader>(
+                    data_, entry.node_offset, file_size_);
+                Key leaf_key(leaf_header.key.data());
 
                 LOGD(
                     "Processing leaf at offset ",
@@ -854,7 +852,7 @@ private:
 
                 // Get leaf data
                 size_t data_offset = entry.node_offset + sizeof(LeafHeader);
-                size_t data_size = leaf_header->data_size();
+                size_t data_size = leaf_header.data_size();
 
                 if (data_offset + data_size > file_size_)
                 {
@@ -897,33 +895,32 @@ private:
                             "Inner node header exceeds file bounds");
                     }
 
-                    auto inner_header =
-                        reinterpret_cast<const InnerNodeHeader*>(
-                            data_ + entry.node_offset);
+                    auto inner_header = load_pod<InnerNodeHeader>(
+                        data_, entry.node_offset, file_size_);
                     LOGD(
                         "Processing inner node at offset ",
                         entry.node_offset,
                         ", depth=",
                         entry.depth,
                         ", header depth=",
-                        static_cast<int>(inner_header->bits.depth));
+                        static_cast<int>(inner_header.bits.depth));
 
                     // TODO: this is actually fine, because it's a collapsed
                     // tree of course!?
-                    if (inner_header->bits.depth != entry.depth)
+                    if (inner_header.bits.depth != entry.depth)
                     {
                         // LOGW(
                         //     "Depth mismatch: expected ",
                         //     entry.depth,
                         //     " but header says ",
-                        //     static_cast<int>(inner_header->bits.depth));
+                        //     static_cast<int>(inner_header.bits.depth));
                     }
 
                     // Show all children for debugging
                     LOGD("Inner node at depth ", entry.depth, " has children:");
                     for (int i = 0; i < 16; ++i)
                     {
-                        ChildType ct = inner_header->get_child_type(i);
+                        ChildType ct = inner_header.get_child_type(i);
                         if (ct != ChildType::EMPTY)
                         {
                             LOGD(
@@ -937,7 +934,7 @@ private:
                         }
                     }
 
-                    int child_count = inner_header->count_children();
+                    int child_count = inner_header.count_children();
                     LOGD("Total non-empty children: ", child_count);
 
                     if (child_count == 0)
@@ -953,7 +950,7 @@ private:
                     entry.remaining_children_mask = 0;
                     for (int i = 0; i < 16; ++i)
                     {
-                        if (inner_header->get_child_type(i) != ChildType::EMPTY)
+                        if (inner_header.get_child_type(i) != ChildType::EMPTY)
                         {
                             entry.remaining_children_mask |= (1u << i);
                         }
@@ -969,10 +966,9 @@ private:
                     int branch = __builtin_ctz(entry.remaining_children_mask);
 
                     // Get inner header again
-                    auto inner_header =
-                        reinterpret_cast<const InnerNodeHeader*>(
-                            data_ + entry.node_offset);
-                    ChildType child_type = inner_header->get_child_type(branch);
+                    auto inner_header = load_pod<InnerNodeHeader>(
+                        data_, entry.node_offset, file_size_);
+                    ChildType child_type = inner_header.get_child_type(branch);
 
                     // Get offset array
                     size_t offsets_start =
@@ -1099,14 +1095,13 @@ private:
             throw std::runtime_error("Root node header exceeds file bounds");
         }
 
-        auto root_header =
-            reinterpret_cast<const InnerNodeHeader*>(data_ + root_offset);
+        auto root_header = load_pod<InnerNodeHeader>(data_, root_offset, file_size_);
 
         LOGI(
             "Root node depth: ",
-            static_cast<int>(root_header->bits.depth),
+            static_cast<int>(root_header.bits.depth),
             ", child count: ",
-            root_header->count_children());
+            root_header.count_children());
 
         // Collect all direct children
         struct ChildInfo
@@ -1123,7 +1118,7 @@ private:
 
         for (int branch = 0; branch < 16; ++branch)
         {
-            ChildType child_type = root_header->get_child_type(branch);
+            ChildType child_type = root_header.get_child_type(branch);
             if (child_type != ChildType::EMPTY)
             {
                 ChildInfo info;
@@ -1224,12 +1219,12 @@ private:
                                 "Leaf header exceeds file bounds");
                         }
 
-                        auto leaf_header = reinterpret_cast<const LeafHeader*>(
-                            data_ + child.offset);
-                        Key leaf_key(leaf_header->key.data());
+                        auto leaf_header = load_pod<LeafHeader>(
+                            data_, child.offset, file_size_);
+                        Key leaf_key(leaf_header.key.data());
 
                         size_t data_offset = child.offset + sizeof(LeafHeader);
-                        size_t data_size = leaf_header->data_size();
+                        size_t data_size = leaf_header.data_size();
 
                         if (data_offset + data_size > file_size_)
                         {
