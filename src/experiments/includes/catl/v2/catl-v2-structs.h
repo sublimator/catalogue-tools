@@ -94,6 +94,9 @@ load_rel(const uint8_t* base, int index)
  * This avoids undefined behavior from reinterpret_cast on potentially
  * misaligned pointers and ensures proper object lifetime.
  * 
+ * Define CATL_UNSAFE_POD_LOADS to use direct reinterpret_cast for
+ * performance on platforms where alignment is guaranteed.
+ * 
  * @tparam T The trivially copyable type to load
  * @param base Base pointer to the memory-mapped data
  * @param offset Byte offset from base
@@ -114,9 +117,15 @@ load_pod(const uint8_t* base, size_t offset, size_t file_size)
         throw std::runtime_error("read past end of file");
     }
     
+#ifdef CATL_UNSAFE_POD_LOADS
+    // Fast path: direct cast (platform-specific, may be unsafe)
+    return *reinterpret_cast<const T*>(base + offset);
+#else
+    // Safe path: memcpy (portable, compiler optimizes for small types)
     T out;
     std::memcpy(&out, base + offset, sizeof(T));
     return out;
+#endif
 }
 
 /**
@@ -207,26 +216,12 @@ enum class ChildType : std::uint8_t {
 };
 
 /**
- * Compact depth and flags representation
- *
- * Using 2 bytes provides:
- * - 6 bits for depth (supports 0-63)
- * - 10 bits reserved for future features
- * - Word alignment efficiency
- */
-struct DepthAndFlags
-{
-    std::uint16_t depth : 6;  // Current depth in tree
-    std::uint16_t rfu : 10;   // Reserved for future use
-};
-
-/**
  * Compact inner node header
- * Total size: 8 bytes (was 6, added overlay_mask for alignment and future use)
+ * Total size: 8 bytes
  *
  * Field ordering is important to avoid padding:
  *   child_types (4 bytes) at offset 0
- *   depth union (2 bytes) at offset 4
+ *   depth_plus (2 bytes) at offset 4 - bits 0-5: depth, bits 6-15: reserved
  *   overlay_mask (2 bytes) at offset 6
  * Total: 8 bytes with no padding
  */
@@ -234,11 +229,7 @@ struct DepthAndFlags
 struct InnerNodeHeader
 {
     std::uint32_t child_types;  // 2 bits × 16 children = 32 bits (offset 0)
-    union
-    {
-        std::uint16_t depth_plus;  // Raw access for serialization (offset 4)
-        DepthAndFlags bits;        // Structured field access
-    };
+    std::uint16_t depth_plus;    // bits 0-5: depth (0-63), bits 6-15: reserved
     std::uint16_t
         overlay_mask;  // 16 bits: which branches are overridden (offset 6)
                        // 0 => no overlay (current experimental format)
@@ -254,6 +245,34 @@ struct InnerNodeHeader
                        // node. For branch b:
                        //   if (overlay_mask bit b) use the next overlay entry,
                        //   else resolve from base_rel's inner.
+
+    // Portable depth accessors (bits 0-5 of depth_plus)
+    inline std::uint8_t
+    get_depth() const
+    {
+        return static_cast<std::uint8_t>(depth_plus & 0x3F);  // Extract lower 6 bits
+    }
+
+    inline void
+    set_depth(std::uint8_t depth)
+    {
+        assert(depth <= 63);  // Max value for 6 bits
+        depth_plus = (depth_plus & 0xFFC0) | (depth & 0x3F);
+    }
+
+    // Reserved field accessors (bits 6-15 of depth_plus)
+    inline std::uint16_t
+    get_rfu() const
+    {
+        return depth_plus >> 6;  // Extract upper 10 bits
+    }
+
+    inline void
+    set_rfu(std::uint16_t rfu)
+    {
+        assert(rfu <= 1023);  // Max value for 10 bits
+        depth_plus = (depth_plus & 0x003F) | ((rfu & 0x3FF) << 6);
+    }
 
     // Helper to get/set child type
     ChildType
@@ -606,11 +625,5 @@ static_assert(sizeof(TreesHeader) == 16, "TreesHeader must be 16 bytes");
 static_assert(alignof(TreesHeader) == 1, "TreesHeader must be packed");
 static_assert(offsetof(TreesHeader, state_tree_size) == 0, "state_tree_size at offset 0");
 static_assert(offsetof(TreesHeader, tx_tree_size) == 8, "tx_tree_size at offset 8");
-
-// DepthAndFlags layout guarantees
-static_assert(
-    std::is_trivially_copyable_v<DepthAndFlags>,
-    "DepthAndFlags must be trivially copyable");
-static_assert(sizeof(DepthAndFlags) == 2, "DepthAndFlags must be 2 bytes");
 
 }  // namespace catl::v2
