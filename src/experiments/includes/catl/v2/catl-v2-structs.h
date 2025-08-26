@@ -93,10 +93,10 @@ load_rel(const uint8_t* base, int index)
  * Safe loading of POD types from memory-mapped data.
  * This avoids undefined behavior from reinterpret_cast on potentially
  * misaligned pointers and ensures proper object lifetime.
- * 
+ *
  * Define CATL_UNSAFE_POD_LOADS to use direct reinterpret_cast for
  * performance on platforms where alignment is guaranteed.
- * 
+ *
  * @tparam T The trivially copyable type to load
  * @param base Base pointer to the memory-mapped data
  * @param offset Byte offset from base
@@ -109,14 +109,13 @@ inline T
 load_pod(const uint8_t* base, size_t offset, size_t file_size)
 {
     static_assert(
-        std::is_trivially_copyable_v<T>,
-        "T must be trivially copyable");
-    
+        std::is_trivially_copyable_v<T>, "T must be trivially copyable");
+
     if (offset + sizeof(T) > file_size)
     {
         throw std::runtime_error("read past end of file");
     }
-    
+
 #ifdef CATL_UNSAFE_POD_LOADS
     // Fast path: direct cast (platform-specific, may be unsafe)
     return *reinterpret_cast<const T*>(base + offset);
@@ -131,6 +130,31 @@ load_pod(const uint8_t* base, size_t offset, size_t file_size)
 /**
  * CATL v2 File Format Layout
  * =========================
+ *
+ * Portability Status:
+ * ------------------
+ * This format has been tested on:
+ *   - ARM64 (Apple M2 Mac)
+ *   - x86_64 (Linux via Docker)
+ *
+ * The combination of #pragma pack(1) and comprehensive static_assert checks
+ * ensures consistent binary layout across these platforms. All structs are
+ * trivially copyable with exact offsets verified at compile time.
+ *
+ * Current approach:
+ *   - No compiler-specific bitfields (replaced with portable getters/setters)
+ *   - Explicit bit manipulation for sub-byte fields
+ *   - Safe POD loading available via CATL_UNSAFE_POD_LOADS flag
+ *   - Both platforms tested are little-endian
+ *
+ * Future considerations:
+ *   - May add explicit endianness conversion (currently files are created in
+ * host endianness)
+ *   - The endianness field in the header allows detecting mismatch but no
+ * conversion yet
+ *   - For now, keeping it nimble for experimental R&D
+ *   - The pack(1) + static_assert approach works well in practice
+ *   - Enable safe loading (memcpy) if targeting exotic architectures
  *
  * [CatlV2Header]                    // 52 bytes
  *   - magic: 'CAT2'                 // 4 bytes
@@ -229,7 +253,7 @@ enum class ChildType : std::uint8_t {
 struct InnerNodeHeader
 {
     std::uint32_t child_types;  // 2 bits × 16 children = 32 bits (offset 0)
-    std::uint16_t depth_plus;    // bits 0-5: depth (0-63), bits 6-15: reserved
+    std::uint16_t depth_plus;   // bits 0-5: depth (0-63), bits 6-15: reserved
     std::uint16_t
         overlay_mask;  // 16 bits: which branches are overridden (offset 6)
                        // 0 => no overlay (current experimental format)
@@ -250,7 +274,8 @@ struct InnerNodeHeader
     inline std::uint8_t
     get_depth() const
     {
-        return static_cast<std::uint8_t>(depth_plus & 0x3F);  // Extract lower 6 bits
+        return static_cast<std::uint8_t>(
+            depth_plus & 0x3F);  // Extract lower 6 bits
     }
 
     inline void
@@ -568,12 +593,24 @@ static_assert(sizeof(CatlV2Header) == 48, "CatlV2Header must be 48 bytes");
 static_assert(alignof(CatlV2Header) == 1, "CatlV2Header must be packed");
 static_assert(offsetof(CatlV2Header, magic) == 0, "magic at offset 0");
 static_assert(offsetof(CatlV2Header, version) == 4, "version at offset 4");
-static_assert(offsetof(CatlV2Header, network_id) == 8, "network_id at offset 8");
-static_assert(offsetof(CatlV2Header, endianness) == 12, "endianness at offset 12");
-static_assert(offsetof(CatlV2Header, ledger_count) == 16, "ledger_count at offset 16");
-static_assert(offsetof(CatlV2Header, first_ledger_seq) == 24, "first_ledger_seq at offset 24");
-static_assert(offsetof(CatlV2Header, last_ledger_seq) == 32, "last_ledger_seq at offset 32");
-static_assert(offsetof(CatlV2Header, ledger_index_offset) == 40, "ledger_index_offset at offset 40");
+static_assert(
+    offsetof(CatlV2Header, network_id) == 8,
+    "network_id at offset 8");
+static_assert(
+    offsetof(CatlV2Header, endianness) == 12,
+    "endianness at offset 12");
+static_assert(
+    offsetof(CatlV2Header, ledger_count) == 16,
+    "ledger_count at offset 16");
+static_assert(
+    offsetof(CatlV2Header, first_ledger_seq) == 24,
+    "first_ledger_seq at offset 24");
+static_assert(
+    offsetof(CatlV2Header, last_ledger_seq) == 32,
+    "last_ledger_seq at offset 32");
+static_assert(
+    offsetof(CatlV2Header, ledger_index_offset) == 40,
+    "ledger_index_offset at offset 40");
 
 // InnerNodeHeader layout guarantees
 static_assert(
@@ -584,9 +621,15 @@ static_assert(
     "InnerNodeHeader must be standard layout");
 static_assert(sizeof(InnerNodeHeader) == 8, "InnerNodeHeader must be 8 bytes");
 static_assert(alignof(InnerNodeHeader) == 1, "InnerNodeHeader must be packed");
-static_assert(offsetof(InnerNodeHeader, child_types) == 0, "child_types at offset 0");
-static_assert(offsetof(InnerNodeHeader, depth_plus) == 4, "depth_plus at offset 4");
-static_assert(offsetof(InnerNodeHeader, overlay_mask) == 6, "overlay_mask at offset 6");
+static_assert(
+    offsetof(InnerNodeHeader, child_types) == 0,
+    "child_types at offset 0");
+static_assert(
+    offsetof(InnerNodeHeader, depth_plus) == 4,
+    "depth_plus at offset 4");
+static_assert(
+    offsetof(InnerNodeHeader, overlay_mask) == 6,
+    "overlay_mask at offset 6");
 
 // LeafHeader layout guarantees
 static_assert(
@@ -598,7 +641,9 @@ static_assert(
 static_assert(sizeof(LeafHeader) == 36, "LeafHeader must be 36 bytes");
 static_assert(alignof(LeafHeader) == 1, "LeafHeader must be packed");
 static_assert(offsetof(LeafHeader, key) == 0, "key at offset 0");
-static_assert(offsetof(LeafHeader, size_and_flags) == 32, "size_and_flags at offset 32");
+static_assert(
+    offsetof(LeafHeader, size_and_flags) == 32,
+    "size_and_flags at offset 32");
 
 // LedgerIndexEntry layout guarantees
 static_assert(
@@ -607,12 +652,24 @@ static_assert(
 static_assert(
     std::is_standard_layout_v<LedgerIndexEntry>,
     "LedgerIndexEntry must be standard layout");
-static_assert(sizeof(LedgerIndexEntry) == 28, "LedgerIndexEntry must be 28 bytes");
-static_assert(alignof(LedgerIndexEntry) == 1, "LedgerIndexEntry must be packed");
-static_assert(offsetof(LedgerIndexEntry, sequence) == 0, "sequence at offset 0");
-static_assert(offsetof(LedgerIndexEntry, header_offset) == 4, "header_offset at offset 4");
-static_assert(offsetof(LedgerIndexEntry, state_tree_offset) == 12, "state_tree_offset at offset 12");
-static_assert(offsetof(LedgerIndexEntry, tx_tree_offset) == 20, "tx_tree_offset at offset 20");
+static_assert(
+    sizeof(LedgerIndexEntry) == 28,
+    "LedgerIndexEntry must be 28 bytes");
+static_assert(
+    alignof(LedgerIndexEntry) == 1,
+    "LedgerIndexEntry must be packed");
+static_assert(
+    offsetof(LedgerIndexEntry, sequence) == 0,
+    "sequence at offset 0");
+static_assert(
+    offsetof(LedgerIndexEntry, header_offset) == 4,
+    "header_offset at offset 4");
+static_assert(
+    offsetof(LedgerIndexEntry, state_tree_offset) == 12,
+    "state_tree_offset at offset 12");
+static_assert(
+    offsetof(LedgerIndexEntry, tx_tree_offset) == 20,
+    "tx_tree_offset at offset 20");
 
 // TreesHeader layout guarantees
 static_assert(
@@ -623,7 +680,11 @@ static_assert(
     "TreesHeader must be standard layout");
 static_assert(sizeof(TreesHeader) == 16, "TreesHeader must be 16 bytes");
 static_assert(alignof(TreesHeader) == 1, "TreesHeader must be packed");
-static_assert(offsetof(TreesHeader, state_tree_size) == 0, "state_tree_size at offset 0");
-static_assert(offsetof(TreesHeader, tx_tree_size) == 8, "tx_tree_size at offset 8");
+static_assert(
+    offsetof(TreesHeader, state_tree_size) == 0,
+    "state_tree_size at offset 0");
+static_assert(
+    offsetof(TreesHeader, tx_tree_size) == 8,
+    "tx_tree_size at offset 8");
 
 }  // namespace catl::v2
