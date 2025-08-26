@@ -18,18 +18,32 @@ set(SOURCES_CATL1_TO_ZSTD_DICT ${EXPERIMENTS_SRC_DIR}/catl1-to-zstd-dict.cpp)
 set(EXECUTABLE_ZSTD_EXPERIMENTS zstd-experiments)
 set(SOURCES_ZSTD_EXPERIMENTS ${EXPERIMENTS_SRC_DIR}/zstd-experiments.cpp)
 
+# Define the hybrid-shamap-exp executable
+set(EXECUTABLE_HYBRID_SHAMAP_EXP hybrid-shamap-exp)
+set(SOURCES_HYBRID_SHAMAP_EXP ${EXPERIMENTS_SRC_DIR}/hybrid-shamap-exp.cpp)
+
 # Create the executable
 add_executable(${EXECUTABLE_CATL1_TO_CATL2} ${SOURCES_CATL1_TO_CATL2})
 add_executable(${EXECUTABLE_CATL1_TO_ZSTD_DICT} ${SOURCES_CATL1_TO_ZSTD_DICT})
 add_executable(${EXECUTABLE_ZSTD_EXPERIMENTS} ${SOURCES_ZSTD_EXPERIMENTS})
+add_executable(${EXECUTABLE_HYBRID_SHAMAP_EXP} ${SOURCES_HYBRID_SHAMAP_EXP})
 
 # Option to use unsafe (but faster) POD loads - off by default for portability
-option(CATL_UNSAFE_POD_LOADS "Use direct reinterpret_cast for POD loads (faster but platform-specific)" OFF)
+option(
+  CATL_UNSAFE_POD_LOADS
+  "Use direct reinterpret_cast for POD loads (faster but platform-specific)"
+  OFF)
 if(CATL_UNSAFE_POD_LOADS)
-    target_compile_definitions(${EXECUTABLE_CATL1_TO_CATL2} PRIVATE CATL_UNSAFE_POD_LOADS)
-    target_compile_definitions(${EXECUTABLE_CATL1_TO_ZSTD_DICT} PRIVATE CATL_UNSAFE_POD_LOADS)
-    target_compile_definitions(${EXECUTABLE_ZSTD_EXPERIMENTS} PRIVATE CATL_UNSAFE_POD_LOADS)
-    message(STATUS "Using unsafe POD loads (reinterpret_cast) for better performance")
+  target_compile_definitions(${EXECUTABLE_CATL1_TO_CATL2}
+                             PRIVATE CATL_UNSAFE_POD_LOADS)
+  target_compile_definitions(${EXECUTABLE_CATL1_TO_ZSTD_DICT}
+                             PRIVATE CATL_UNSAFE_POD_LOADS)
+  target_compile_definitions(${EXECUTABLE_ZSTD_EXPERIMENTS}
+                             PRIVATE CATL_UNSAFE_POD_LOADS)
+  target_compile_definitions(${EXECUTABLE_HYBRID_SHAMAP_EXP}
+                             PRIVATE CATL_UNSAFE_POD_LOADS)
+  message(
+    STATUS "Using unsafe POD loads (reinterpret_cast) for better performance")
 endif()
 
 # Set up include directories
@@ -60,7 +74,8 @@ target_link_libraries(
           OpenSSL::SSL
           zstd::libzstd_static)
 
-set(EXECUTABLES ${EXECUTABLE_ZSTD_EXPERIMENTS} ${EXECUTABLE_CATL1_TO_ZSTD_DICT})
+set(EXECUTABLES ${EXECUTABLE_ZSTD_EXPERIMENTS} ${EXECUTABLE_CATL1_TO_ZSTD_DICT}
+                ${EXECUTABLE_HYBRID_SHAMAP_EXP})
 
 # loop over both the catl1-to-zstd-dict and zstd-experiments executables
 foreach(EXECUTABLE ${EXECUTABLES})
@@ -91,8 +106,10 @@ endforeach()
 message(STATUS "Configured experimental tool: ${EXECUTABLE_CATL1_TO_CATL2}")
 message(STATUS "Configured experimental tool: ${EXECUTABLE_CATL1_TO_ZSTD_DICT}")
 message(STATUS "Configured experimental tool: ${EXECUTABLE_ZSTD_EXPERIMENTS}")
+message(STATUS "Configured experimental tool: ${EXECUTABLE_HYBRID_SHAMAP_EXP}")
 
 # Install the executable
 install(TARGETS ${EXECUTABLE_CATL1_TO_CATL2} RUNTIME DESTINATION bin)
 install(TARGETS ${EXECUTABLE_CATL1_TO_ZSTD_DICT} RUNTIME DESTINATION bin)
 install(TARGETS ${EXECUTABLE_ZSTD_EXPERIMENTS} RUNTIME DESTINATION bin)
+install(TARGETS ${EXECUTABLE_HYBRID_SHAMAP_EXP} RUNTIME DESTINATION bin)
