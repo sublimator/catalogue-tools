@@ -601,7 +601,7 @@ private:
 
                 LOGD(
                     "Inner node depth from header: ",
-                    (int)inner_header.bits.depth);
+                    (int)inner_header.get_depth());
                 LOGD(
                     "Child types bitmap: 0x",
                     std::hex,
@@ -609,7 +609,7 @@ private:
                     std::dec);
 
                 // Determine which branch to follow based on the key nibble
-                int nibble_idx = inner_header.bits.depth;
+                int nibble_idx = inner_header.get_depth();
                 if (nibble_idx >= 64)  // Sanity check
                 {
                     LOGE("Invalid nibble index: ", nibble_idx);
@@ -689,7 +689,7 @@ private:
 
                 bool child_is_leaf = (child_type == ChildType::LEAF);
                 stack[stack_top++] = {
-                    child_offset, inner_header.bits.depth + 1, child_is_leaf};
+                    child_offset, inner_header.get_depth() + 1, child_is_leaf};
                 LOGD(
                     "Pushed child to stack, new stack top: ",
                     stack_top,
@@ -911,17 +911,17 @@ private:
                         ", depth=",
                         entry.depth,
                         ", header depth=",
-                        static_cast<int>(inner_header.bits.depth));
+                        static_cast<int>(inner_header.get_depth()));
 
                     // TODO: this is actually fine, because it's a collapsed
                     // tree of course!?
-                    if (inner_header.bits.depth != entry.depth)
+                    if (inner_header.get_depth() != entry.depth)
                     {
                         // LOGW(
                         //     "Depth mismatch: expected ",
                         //     entry.depth,
                         //     " but header says ",
-                        //     static_cast<int>(inner_header.bits.depth));
+                        //     static_cast<int>(inner_header.get_depth()));
                     }
 
                     // Show all children for debugging
@@ -1107,7 +1107,7 @@ private:
 
         LOGI(
             "Root node depth: ",
-            static_cast<int>(root_header.bits.depth),
+            static_cast<int>(root_header.get_depth()),
             ", child count: ",
             root_header.count_children());
 

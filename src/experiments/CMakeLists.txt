@@ -23,6 +23,15 @@ add_executable(${EXECUTABLE_CATL1_TO_CATL2} ${SOURCES_CATL1_TO_CATL2})
 add_executable(${EXECUTABLE_CATL1_TO_ZSTD_DICT} ${SOURCES_CATL1_TO_ZSTD_DICT})
 add_executable(${EXECUTABLE_ZSTD_EXPERIMENTS} ${SOURCES_ZSTD_EXPERIMENTS})
 
+# Option to use unsafe (but faster) POD loads - off by default for portability
+option(CATL_UNSAFE_POD_LOADS "Use direct reinterpret_cast for POD loads (faster but platform-specific)" OFF)
+if(CATL_UNSAFE_POD_LOADS)
+    target_compile_definitions(${EXECUTABLE_CATL1_TO_CATL2} PRIVATE CATL_UNSAFE_POD_LOADS)
+    target_compile_definitions(${EXECUTABLE_CATL1_TO_ZSTD_DICT} PRIVATE CATL_UNSAFE_POD_LOADS)
+    target_compile_definitions(${EXECUTABLE_ZSTD_EXPERIMENTS} PRIVATE CATL_UNSAFE_POD_LOADS)
+    message(STATUS "Using unsafe POD loads (reinterpret_cast) for better performance")
+endif()
+
 # Set up include directories
 target_include_directories(
   ${EXECUTABLE_CATL1_TO_CATL2}

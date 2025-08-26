@@ -404,8 +404,8 @@ private:
 
         // Build inner node header
         InnerNodeHeader header;
-        header.bits.depth = inner->get_depth();
-        header.bits.rfu = 0;
+        header.set_depth(inner->get_depth());
+        header.set_rfu(0);
         header.child_types = build_child_types(inner);
         header.overlay_mask = 0;  // overlay disabled in this experimental phase
 
