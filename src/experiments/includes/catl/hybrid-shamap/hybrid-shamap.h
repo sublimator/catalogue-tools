@@ -1,6 +1,7 @@
 #pragma once
 #include "catl/v2/catl-v2-reader.h"
 #include "catl/v2/catl-v2-structs.h"
+#include "catl/shamap/shamap-utils.h"
 #include <array>
 #include <memory>
 #include <stdexcept>
@@ -217,15 +218,8 @@ public:
         // Walk down the tree following the key nibbles
         while (true)
         {
-            // Extract the nibble from the key at current depth
-            int nibble_idx = depth;
-            if (nibble_idx >= 64)  // 32 bytes * 2 nibbles
-            {
-                throw std::runtime_error("Invalid tree depth");
-            }
-            
-            uint8_t byte = key.data()[nibble_idx / 2];
-            uint8_t nibble = (nibble_idx & 1) ? (byte & 0x0F) : (byte >> 4);
+            // Use shamap utility to extract nibble at current depth
+            int nibble = catl::shamap::select_branch(key, depth);
             
             // Check child type
             auto child_type = current.get_child_type(nibble);
