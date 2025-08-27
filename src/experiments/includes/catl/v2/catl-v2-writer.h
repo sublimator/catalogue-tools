@@ -118,25 +118,33 @@ public:
                 sizeof(trees_header));
             stats_.total_bytes_written += sizeof(trees_header);
 
-            // Write state tree
+            // CRITICAL: Compute hashes for both trees before serialization
+            // This populates the cached hash in every node
+            state_map.get_hash();  // Trigger recursive hash computation on
+                                   // state tree
+            tx_map.get_hash();  // Trigger recursive hash computation on tx tree
+
             auto state_root = state_map.get_root();
             if (!state_root)
             {
                 LOGE("Cannot serialize ledger with null state root");
                 return false;
             }
-            index_entry.state_tree_offset = current_offset();
-            auto state_start = current_offset();
-            serialize_tree(state_root);
-            trees_header.state_tree_size = current_offset() - state_start;
 
-            // Write transaction tree (always present)
             auto tx_root = tx_map.get_root();
             if (!tx_root)
             {
                 LOGE("Cannot serialize ledger with null tx root");
                 return false;
             }
+
+            // Write state tree (now with hashes computed)
+            index_entry.state_tree_offset = current_offset();
+            auto state_start = current_offset();
+            serialize_tree(state_root);
+            trees_header.state_tree_size = current_offset() - state_start;
+
+            // Write transaction tree (now with hashes computed)
             index_entry.tx_tree_offset = current_offset();
             auto tx_start = current_offset();
             serialize_tree(tx_root);
@@ -282,10 +290,11 @@ private:
      *
      * Writes a leaf node to the output file with optional compression.
      * The leaf format is:
-     *   [LeafHeader (36 bytes)][data (variable length)]
+     *   [LeafHeader (68 bytes)][data (variable length)]
      *
      * Where LeafHeader contains:
      *   - 32-byte key
+     *   - 32-byte perma-cached hash (first 256 bits of SHA512)
      *   - 4-byte packed size_and_flags field:
      *     - Bits 0-23: data size (compressed or uncompressed)
      *     - Bits 24-27: compression type (see CompressionType enum)
@@ -299,19 +308,29 @@ private:
      *   - Object templates/patterns are exploitable
      *   - Future: dictionary/template based compression per leaf
      *
+     * @param leaf The leaf node (to get its hash)
      * @param key The 32-byte key identifying this leaf
      * @param data The leaf data (SLE - Serialized Ledger Entry)
      * @param compress Whether to attempt compression (default: false)
      * @return File offset where this leaf was written
      */
     std::uint64_t
-    write_leaf_node(const Key& key, const Slice& data, bool compress = false)
+    write_leaf_node(
+        const boost::intrusive_ptr<SHAMapLeafNodeS>& leaf,
+        const Key& key,
+        const Slice& data,
+        bool compress = false)
     {
         auto offset = current_offset();
 
-        // Build leaf header
+        // Build leaf header with perma-cached hash
         LeafHeader header;
         std::memcpy(header.key.data(), key.data(), 32);
+
+        // Copy the node's hash (computed earlier via map.get_hash())
+        auto node_hash = leaf->valid_hash_or_throw();
+        std::memcpy(header.hash.data(), node_hash.data(), 32);
+
         header.size_and_flags = 0;
         header.set_data_size(data.size());
         header.set_compression_type(
@@ -402,17 +421,21 @@ private:
     {
         auto offset = current_offset();
 
-        // Build inner node header
+        // Build inner node header with perma-cached hash
         InnerNodeHeader header;
         header.set_depth(inner->get_depth());
         header.set_rfu(0);
         header.child_types = build_child_types(inner);
         header.overlay_mask = 0;  // overlay disabled in this experimental phase
 
+        // Copy the node's hash (computed earlier via map.get_hash())
+        auto node_hash = inner->valid_hash_or_throw();
+        std::memcpy(header.hash.data(), node_hash.data(), 32);
+
         // Count non-empty children
         int child_count = header.count_children();
 
-        // Write header
+        // Write header (now includes hash)
         output_.write(reinterpret_cast<const char*>(&header), sizeof(header));
         stats_.total_bytes_written += sizeof(header);
         stats_.inner_bytes_written += sizeof(header);
@@ -610,6 +633,7 @@ private:
                     }
 
                     std::uint64_t leaf_offset = write_leaf_node(
+                        leaf,  // Pass the leaf node so we can get its hash
                         item->key(),
                         item->slice(),
                         false);  // Default to no compression
