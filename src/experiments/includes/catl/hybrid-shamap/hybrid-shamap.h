@@ -30,30 +30,20 @@ class HmapLeafNode;
 class HmapPlaceholder;
 
 /**
- * Tag for pointer types - WHERE does this node live?
- */
-enum class PtrTag : uint8_t {
-    RAW_MEMORY = 0,   // Points into mmap (could be any mmap file)
-    MATERIALIZED = 1  // Points to heap-allocated node
-};
-
-/**
- * Tagged pointer for hybrid SHAMap nodes
+ * PolyNodeRef - A polymorphic reference to nodes that can be either:
+ * - In mmap memory (no ref counting)
+ * - In heap memory (with ref counting)
  *
- * Uses the lower 2 bits for tagging since pointers are 8-byte aligned.
- * This tells us WHERE the node lives (mmap vs heap), while the node's
- * class type tells us WHAT it is (Inner/Leaf/Placeholder).
- *
- * For MATERIALIZED nodes, this class manages reference counting via
- * intrusive_ptr semantics. For RAW_MEMORY nodes, no ref counting occurs.
+ * This is a VIEW type - generated lazily from HmapInnerNode's storage.
+ * It explicitly stores metadata since we can't use bit-tagging with
+ * unaligned pointers from #pragma pack(1).
  */
-class TaggedPtr
+class PolyNodeRef
 {
 private:
-    uintptr_t ptr_;  // Lower 2 bits used for tag
-
-    static constexpr uintptr_t TAG_MASK = 0x3;
-    static constexpr uintptr_t PTR_MASK = ~TAG_MASK;
+    void* ptr_;                 // Raw pointer (could point anywhere)
+    catl::v2::ChildType type_;  // What type of node (empty/inner/leaf/hash)
+    bool materialized_;  // true = heap (needs ref counting), false = mmap
 
     // Helper to increment ref count if materialized
     void
@@ -64,145 +54,186 @@ private:
     release() const;
 
 public:
-    // Default constructor - creates empty/null pointer
-    TaggedPtr() : ptr_(0)
+    // Default constructor - creates empty reference
+    PolyNodeRef()
+        : ptr_(nullptr), type_(catl::v2::ChildType::EMPTY), materialized_(false)
     {
     }
 
+    // Constructor with all fields
+    PolyNodeRef(void* p, catl::v2::ChildType t, bool m)
+        : ptr_(p), type_(t), materialized_(m)
+    {
+        add_ref();
+    }
+
     // Copy constructor - increments ref count if materialized
-    TaggedPtr(const TaggedPtr& other) : ptr_(other.ptr_)
+    PolyNodeRef(const PolyNodeRef& other)
+        : ptr_(other.ptr_)
+        , type_(other.type_)
+        , materialized_(other.materialized_)
     {
         add_ref();
     }
 
     // Move constructor - takes ownership, no ref count change
-    TaggedPtr(TaggedPtr&& other) noexcept : ptr_(other.ptr_)
+    PolyNodeRef(PolyNodeRef&& other) noexcept
+        : ptr_(other.ptr_)
+        , type_(other.type_)
+        , materialized_(other.materialized_)
     {
-        other.ptr_ = 0;  // Clear source
+        other.ptr_ = nullptr;
+        other.type_ = catl::v2::ChildType::EMPTY;
+        other.materialized_ = false;
     }
 
     // Destructor - decrements ref count if materialized
-    ~TaggedPtr()
+    ~PolyNodeRef()
     {
         release();
     }
 
     // Copy assignment
-    TaggedPtr&
-    operator=(const TaggedPtr& other)
+    PolyNodeRef&
+    operator=(const PolyNodeRef& other)
     {
         if (this != &other)
         {
             release();  // Release old
             ptr_ = other.ptr_;
+            type_ = other.type_;
+            materialized_ = other.materialized_;
             add_ref();  // Add ref to new
         }
         return *this;
     }
 
     // Move assignment
-    TaggedPtr&
-    operator=(TaggedPtr&& other) noexcept
+    PolyNodeRef&
+    operator=(PolyNodeRef&& other) noexcept
     {
         if (this != &other)
         {
             release();  // Release old
             ptr_ = other.ptr_;
-            other.ptr_ = 0;  // Clear source
+            type_ = other.type_;
+            materialized_ = other.materialized_;
+            other.ptr_ = nullptr;
+            other.type_ = catl::v2::ChildType::EMPTY;
+            other.materialized_ = false;
         }
         return *this;
     }
 
     // Factory methods
-    static TaggedPtr
-    make_raw_memory(const void* p)
+    static PolyNodeRef
+    make_raw_memory(
+        const void* p,
+        catl::v2::ChildType type = catl::v2::ChildType::INNER)
     {
-        TaggedPtr tp;
-        tp.ptr_ = reinterpret_cast<uintptr_t>(p) |
-            static_cast<uintptr_t>(PtrTag::RAW_MEMORY);
+        // Note: does NOT call add_ref since it's not materialized
+        PolyNodeRef tp;
+        tp.ptr_ = const_cast<void*>(p);
+        tp.type_ = type;
+        tp.materialized_ = false;
         return tp;
     }
 
-    static TaggedPtr
-    make_materialized(HMapNode* p)
+    static PolyNodeRef
+    make_materialized(
+        HMapNode* p,
+        catl::v2::ChildType type = catl::v2::ChildType::INNER)
     {
-        TaggedPtr tp;
-        tp.ptr_ = reinterpret_cast<uintptr_t>(p) |
-            static_cast<uintptr_t>(PtrTag::MATERIALIZED);
         // Note: Caller is responsible for ensuring proper ref count
         // This is a raw factory - use from_intrusive() for managed pointers
+        PolyNodeRef tp;
+        tp.ptr_ = p;
+        tp.type_ = type;
+        tp.materialized_ = true;
         return tp;
     }
 
     // Factory from intrusive_ptr - takes a ref-counted pointer
-    static TaggedPtr
+    static PolyNodeRef
     from_intrusive(const boost::intrusive_ptr<HMapNode>& p);
 
     // Convert to intrusive_ptr (only valid for MATERIALIZED)
     [[nodiscard]] boost::intrusive_ptr<HMapNode>
     to_intrusive() const;
 
-    static TaggedPtr
+    static PolyNodeRef
     make_empty()
     {
-        return TaggedPtr();  // null
+        return PolyNodeRef();  // null/empty reference
     }
 
     // Accessors
-    [[nodiscard]] PtrTag
-    get_tag() const
-    {
-        return static_cast<PtrTag>(ptr_ & TAG_MASK);
-    }
-
     [[nodiscard]] void*
     get_raw_ptr() const
     {
-        return reinterpret_cast<void*>(ptr_ & PTR_MASK);
+        return ptr_;
     }
 
     [[nodiscard]] const uint8_t*
     get_raw_memory() const
     {
-        assert(is_raw_memory());
-        return reinterpret_cast<const uint8_t*>(ptr_ & PTR_MASK);
+        assert(!materialized_);  // Should be mmap memory
+        return static_cast<const uint8_t*>(ptr_);
     }
 
     [[nodiscard]] HMapNode*
     get_materialized() const
     {
-        assert(is_materialized());
-        return reinterpret_cast<HMapNode*>(ptr_ & PTR_MASK);
+        assert(materialized_);  // Should be heap memory
+        return static_cast<HMapNode*>(ptr_);
+    }
+
+    [[nodiscard]] catl::v2::ChildType
+    get_type() const
+    {
+        return type_;
     }
 
     // Type checks
     [[nodiscard]] bool
     is_raw_memory() const
     {
-        return get_tag() == PtrTag::RAW_MEMORY;
+        return !materialized_ && ptr_ != nullptr;
     }
 
     [[nodiscard]] bool
     is_materialized() const
     {
-        return get_tag() == PtrTag::MATERIALIZED;
+        return materialized_;
     }
 
     [[nodiscard]] bool
     is_empty() const
     {
-        return (ptr_ & PTR_MASK) == 0;
+        return ptr_ == nullptr || type_ == catl::v2::ChildType::EMPTY;
     }
 
-    // Equality
+    [[nodiscard]] bool
+    is_inner() const
+    {
+        return type_ == catl::v2::ChildType::INNER;
+    }
+
+    [[nodiscard]] bool
+    is_leaf() const
+    {
+        return type_ == catl::v2::ChildType::LEAF;
+    }
+
+    // Equality (based on pointer only, not metadata)
     bool
-    operator==(const TaggedPtr& other) const
+    operator==(const PolyNodeRef& other) const
     {
         return ptr_ == other.ptr_;
     }
 
     bool
-    operator!=(const TaggedPtr& other) const
+    operator!=(const PolyNodeRef& other) const
     {
         return ptr_ != other.ptr_;
     }
@@ -377,7 +408,8 @@ public:
 
         // Load leaf header using MemPtr
         catl::v2::MemPtr<catl::v2::LeafHeader> leaf_header_ptr(leaf_ptr);
-        const auto& leaf_header = leaf_header_ptr.get_uncopyable();  // Force ref binding
+        const auto& leaf_header =
+            leaf_header_ptr.get_uncopyable();  // Force ref binding
 
         return LeafView{
             Key(leaf_header.key.data()),  // Now safe - ref in UNSAFE mode!
@@ -548,8 +580,10 @@ class HmapInnerNode : public HMapNode
 {
 private:
     std::array<void*, 16> children_{};  // Just raw pointers, no tagging
-    uint32_t child_types_ = 0;  // 2 bits × 16 children = 32 bits (WHAT: empty/inner/leaf/hash)
-    uint16_t materialized_mask_ = 0;  // 1 bit × 16 children (WHERE: mmap vs heap)
+    uint32_t child_types_ =
+        0;  // 2 bits × 16 children = 32 bits (WHAT: empty/inner/leaf/hash)
+    uint16_t materialized_mask_ =
+        0;  // 1 bit × 16 children (WHERE: mmap vs heap)
     uint8_t depth_ = 0;
     Hash256 hash_;  // Cached hash (invalidated on modification)
     bool hash_valid_ = false;
@@ -566,30 +600,25 @@ public:
         return Type::INNER;
     }
 
-    // Combined child info structure
-    struct ChildInfo
-    {
-        TaggedPtr ptr;
-        catl::v2::ChildType type;
-    };
-
-    // Child access - combined getter
-    [[nodiscard]] ChildInfo
-    get_child_info(int branch) const
+    // Check if a child is materialized (heap-allocated)
+    [[nodiscard]] bool
+    is_child_materialized(int branch) const
     {
         assert(branch >= 0 && branch < 16);
-        return {
-            children_[branch],
-            static_cast<catl::v2::ChildType>(
-                (child_types_ >> (branch * 2)) & 0x3)};
+        return (materialized_mask_ >> branch) & 1;
     }
 
-    // Legacy individual getters (for compatibility)
-    [[nodiscard]] TaggedPtr
+    // Get child as PolyNodeRef (lazily generated view)
+    [[nodiscard]] PolyNodeRef
     get_child(int branch) const
     {
         assert(branch >= 0 && branch < 16);
-        return children_[branch];
+
+        // Lazily construct PolyNodeRef from our storage
+        return PolyNodeRef(
+            children_[branch],
+            get_child_type(branch),
+            is_child_materialized(branch));
     }
 
     [[nodiscard]] catl::v2::ChildType
@@ -600,20 +629,40 @@ public:
             (child_types_ >> (branch * 2)) & 0x3);
     }
 
-    // Combined setter - set both pointer and type together
+    // Set child from PolyNodeRef
     void
-    set_child(int branch, TaggedPtr ptr, catl::v2::ChildType type)
+    set_child(int branch, const PolyNodeRef& ref)
     {
         assert(branch >= 0 && branch < 16);
-        
-        children_[branch] = ptr;
+
+        // Extract raw pointer
+        children_[branch] = ref.get_raw_ptr();
 
         // Update child type
-        uint32_t mask = ~(0x3u << (branch * 2));
-        child_types_ = (child_types_ & mask) |
-            (static_cast<uint32_t>(type) << (branch * 2));
+        uint32_t type_mask = ~(0x3u << (branch * 2));
+        child_types_ = (child_types_ & type_mask) |
+            (static_cast<uint32_t>(ref.get_type()) << (branch * 2));
+
+        // Update materialized bit
+        if (ref.is_materialized())
+        {
+            materialized_mask_ |= (1u << branch);
+        }
+        else
+        {
+            materialized_mask_ &= ~(1u << branch);
+        }
 
         hash_valid_ = false;  // Invalidate cached hash
+    }
+
+    // Overload for backward compatibility
+    void
+    set_child(int branch, const PolyNodeRef& ptr, catl::v2::ChildType type)
+    {
+        // Create a new PolyNodeRef with the specified type
+        PolyNodeRef ref(ptr.get_raw_ptr(), type, ptr.is_materialized());
+        set_child(branch, ref);
     }
 
     [[nodiscard]] uint8_t
@@ -744,16 +793,17 @@ public:
 class HmapPathFinder
 {
 private:
-    // TODO: this is never actually used ?! cause just using relative pointer arithmetic ?
+    // TODO: this is never actually used ?! cause just using relative pointer
+    // arithmetic ?
     HybridReader* reader_;  // For accessing mmap nodes
     Key target_key_;
 
     // Path we've traversed: pair of (node_ptr, branch_taken_to_get_here)
     // First element has branch=-1 (root)
-    std::vector<std::pair<TaggedPtr, int>> path_;
+    std::vector<std::pair<PolyNodeRef, int>> path_;
 
     // Terminal node we found (if any)
-    TaggedPtr found_leaf_;
+    PolyNodeRef found_leaf_;
     bool key_matches_ = false;
 
 public:
@@ -767,16 +817,16 @@ public:
      * Root can be either RAW_MEMORY or MATERIALIZED
      */
     void
-    find_path(TaggedPtr root)
+    find_path(PolyNodeRef root)
     {
         path_.clear();
-        found_leaf_ = TaggedPtr::make_empty();
+        found_leaf_ = PolyNodeRef::make_empty();
         key_matches_ = false;
 
         // Start at root
         path_.push_back({root, -1});
 
-        TaggedPtr current = root;
+        PolyNodeRef current = root;
         int depth = 0;
 
         while (current)
@@ -818,7 +868,7 @@ public:
 
                     int branch =
                         catl::shamap::select_branch(target_key_, depth);
-                    TaggedPtr child = inner->get_child(branch);
+                    PolyNodeRef child = inner->get_child(branch);
 
                     if (!child)
                     {
@@ -885,7 +935,7 @@ public:
                 auto materialized = materialize_raw_node(raw, is_leaf);
 
                 // Update this entry in the path using proper ref counting
-                node_ptr = TaggedPtr::from_intrusive(materialized);
+                node_ptr = PolyNodeRef::from_intrusive(materialized);
 
                 // Update parent's child pointer if not root
                 if (i > 0)
@@ -915,12 +965,12 @@ public:
     {
         return key_matches_;
     }
-    [[nodiscard]] TaggedPtr
+    [[nodiscard]] PolyNodeRef
     get_found_leaf() const
     {
         return found_leaf_;
     }
-    [[nodiscard]] const std::vector<std::pair<TaggedPtr, int>>&
+    [[nodiscard]] const std::vector<std::pair<PolyNodeRef, int>>&
     get_path() const
     {
         return path_;
@@ -967,7 +1017,7 @@ private:
      * Returns true if we should continue, false if we hit a leaf/empty
      */
     bool
-    navigate_raw_inner(TaggedPtr& current, int& depth)
+    navigate_raw_inner(PolyNodeRef& current, int& depth)
     {
         const uint8_t* raw = current.get_raw_memory();
         InnerNodeView view{catl::v2::MemPtr<catl::v2::InnerNodeHeader>(raw)};
@@ -985,7 +1035,7 @@ private:
         }
 
         const uint8_t* child_ptr = view.get_child_ptr(branch);
-        TaggedPtr child = TaggedPtr::make_raw_memory(child_ptr);
+        PolyNodeRef child = PolyNodeRef::make_raw_memory(child_ptr, child_type);
 
         if (child_type == catl::v2::ChildType::LEAF)
         {
@@ -1049,7 +1099,9 @@ private:
                 {
                     const uint8_t* child_raw = offsets.get_child_ptr(i);
                     inner->set_child(
-                        i, TaggedPtr::make_raw_memory(child_raw), child_type);
+                        i,
+                        PolyNodeRef::make_raw_memory(child_raw, child_type),
+                        child_type);
                 }
             }
 
@@ -1061,7 +1113,7 @@ private:
 class Hmap
 {
 private:
-    TaggedPtr root_;  // Root can be any type of pointer
+    PolyNodeRef root_;  // Root can be any type of pointer
     std::shared_ptr<catl::v2::CatlV2Reader> reader_;  // Keeps mmap alive
 
 public:
@@ -1077,17 +1129,17 @@ public:
     void
     set_root_raw(const uint8_t* raw_root)
     {
-        root_ = TaggedPtr::make_raw_memory(raw_root);
+        root_ = PolyNodeRef::make_raw_memory(raw_root);
     }
 
     // Initialize with a materialized root
     void
     set_root_materialized(HmapInnerNode* node)
     {
-        root_ = TaggedPtr::make_materialized(node);
+        root_ = PolyNodeRef::make_materialized(node);
     }
 
-    [[nodiscard]] TaggedPtr
+    [[nodiscard]] PolyNodeRef
     get_root() const
     {
         return root_;
@@ -1103,7 +1155,7 @@ public:
 // Implementation of TaggedPtr methods that depend on HMapNode
 
 inline void
-TaggedPtr::add_ref() const
+PolyNodeRef::add_ref() const
 {
     if (is_materialized() && !is_empty())
     {
@@ -1112,7 +1164,7 @@ TaggedPtr::add_ref() const
 }
 
 inline void
-TaggedPtr::release() const
+PolyNodeRef::release() const
 {
     if (is_materialized() && !is_empty())
     {
@@ -1120,22 +1172,40 @@ TaggedPtr::release() const
     }
 }
 
-inline TaggedPtr
-TaggedPtr::from_intrusive(const boost::intrusive_ptr<HMapNode>& p)
+inline PolyNodeRef
+PolyNodeRef::from_intrusive(const boost::intrusive_ptr<HMapNode>& p)
 {
     if (!p)
     {
-        return TaggedPtr::make_empty();
+        return PolyNodeRef::make_empty();
     }
 
-    // Create tagged pointer and manually increment ref count
-    TaggedPtr tp = TaggedPtr::make_materialized(p.get());
+    // Determine the child type from the node type
+    catl::v2::ChildType type;
+    switch (p->get_type())
+    {
+        case HMapNode::Type::INNER:
+            type = catl::v2::ChildType::INNER;
+            break;
+        case HMapNode::Type::LEAF:
+            type = catl::v2::ChildType::LEAF;
+            break;
+        case HMapNode::Type::PLACEHOLDER:
+            type =
+                catl::v2::ChildType::RFU;  // Or could use a different approach
+            break;
+        default:
+            type = catl::v2::ChildType::EMPTY;
+    }
+
+    // Create PolyNodeRef and manually increment ref count
+    PolyNodeRef tp = PolyNodeRef::make_materialized(p.get(), type);
     intrusive_ptr_add_ref(p.get());
     return tp;
 }
 
 inline boost::intrusive_ptr<HMapNode>
-TaggedPtr::to_intrusive() const
+PolyNodeRef::to_intrusive() const
 {
     if (!is_materialized() || is_empty())
     {
