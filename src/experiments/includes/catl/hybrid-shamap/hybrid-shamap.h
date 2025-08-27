@@ -52,7 +52,7 @@ struct InnerNodeView
         return header_val.get_child_type(branch);
     }
 
-    // Get pointer to child at branch i
+    // Get pointer to child at branch i using SparseChildOffsets
     [[nodiscard]] const uint8_t*
     get_child_ptr(int branch) const
     {
@@ -64,35 +64,29 @@ struct InnerNodeView
         }
 
         auto header_val = header.get();
-        auto child_type = header_val.get_child_type(branch);
-        if (child_type == catl::v2::ChildType::EMPTY)
+        
+        // Create SparseChildOffsets accessor
+        const uint8_t* offsets_base = header.offset(sizeof(catl::v2::InnerNodeHeader)).raw();
+        catl::v2::SparseChildOffsets offsets(offsets_base, header_val.child_types);
+        
+        // Get the child pointer (will return nullptr if empty)
+        const uint8_t* child_ptr = offsets.get_child_ptr(branch);
+        if (!child_ptr)
         {
             throw std::runtime_error(
                 "No child at branch " + std::to_string(branch));
         }
+        
+        return child_ptr;
+    }
 
-        // Count how many non-empty children come before this branch
-        int offset_index = 0;
-        for (int i = 0; i < branch; ++i)
-        {
-            if (header_val.get_child_type(i) != catl::v2::ChildType::EMPTY)
-            {
-                offset_index++;
-            }
-        }
-
-        // Get pointer to the slot where this offset is stored
-        const uint8_t* slot_ptr = header
-            .offset(sizeof(catl::v2::InnerNodeHeader) +
-                    offset_index * sizeof(catl::v2::rel_off_t))
-            .raw();
-
-        // Read the relative offset (safely)
-        catl::v2::rel_off_t rel;
-        std::memcpy(&rel, slot_ptr, sizeof(rel));
-
-        // The absolute pointer is just slot + relative!
-        return slot_ptr + rel;
+    // Get a SparseChildOffsets accessor for this node
+    [[nodiscard]] catl::v2::SparseChildOffsets
+    get_sparse_offsets() const
+    {
+        auto header_val = header.get();
+        const uint8_t* offsets_base = header.offset(sizeof(catl::v2::InnerNodeHeader)).raw();
+        return catl::v2::SparseChildOffsets(offsets_base, header_val.child_types);
     }
 
     // Find first leaf using depth-first traversal
