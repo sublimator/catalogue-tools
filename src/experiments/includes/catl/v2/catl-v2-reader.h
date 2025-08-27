@@ -6,7 +6,6 @@
 #include "catl/core/types.h"
 #include "catl/v2/catl-v2-ledger-index-view.h"
 #include "catl/v2/catl-v2-structs.h"
-#include "shamap-custom-traits.h"
 
 #include <atomic>
 #include <boost/filesystem.hpp>

@@ -20,6 +20,39 @@
 namespace catl::v2 {
 
 /**
+ * Build child types bitmap from a SHAMapInnerNodeS
+ */
+inline std::uint32_t
+build_child_types(const boost::intrusive_ptr<SHAMapInnerNodeS>& inner)
+{
+    std::uint32_t child_types = 0;
+
+    for (int i = 0; i < 16; ++i)
+    {
+        auto child = inner->get_child(i);
+        ChildType type;
+
+        if (!child)
+        {
+            type = ChildType::EMPTY;
+        }
+        else if (child->is_inner())
+        {
+            type = ChildType::INNER;
+        }
+        else
+        {
+            type = ChildType::LEAF;
+        }
+
+        // Set 2 bits for this branch
+        child_types |= (static_cast<std::uint32_t>(type) << (i * 2));
+    }
+
+    return child_types;
+}
+
+/**
  * Writer for CATL v2 format - multiple ledgers with canonical headers
  *
  * This writer creates a new catalogue format that:
