@@ -5,6 +5,7 @@
  * mmap'd nodes, memory nodes, and placeholder nodes.
  */
 
+#include "../../../src/shamap/src/pretty-print-json.h"
 #include "catl/core/log-macros.h"
 #include "catl/hybrid-shamap/hybrid-shamap.h"
 #include "catl/v2/catl-v2-reader.h"
@@ -13,7 +14,6 @@
 #include "catl/xdata/parser-context.h"
 #include "catl/xdata/parser.h"
 #include "catl/xdata/protocol.h"
-#include "../../../src/shamap/src/pretty-print-json.h"
 #include <boost/json.hpp>
 #include <iostream>
 #include <memory>
@@ -26,15 +26,16 @@ class LeafJsonConverter
 {
 private:
     catl::xdata::Protocol protocol_;
-    
+
 public:
     explicit LeafJsonConverter(uint32_t network_id)
-        : protocol_((network_id == 0) 
-            ? catl::xdata::Protocol::load_embedded_xrpl_protocol()
-            : catl::xdata::Protocol::load_embedded_xahau_protocol())
+        : protocol_(
+              (network_id == 0)
+                  ? catl::xdata::Protocol::load_embedded_xrpl_protocol()
+                  : catl::xdata::Protocol::load_embedded_xahau_protocol())
     {
     }
-    
+
     [[nodiscard]] boost::json::value
     to_json(const catl::hybrid_shamap::LeafView& leaf) const
     {
@@ -43,9 +44,10 @@ public:
         catl::xdata::parse_with_visitor(ctx, protocol_, visitor);
         return visitor.get_result();
     }
-    
+
     void
-    pretty_print(std::ostream& os, const catl::hybrid_shamap::LeafView& leaf) const
+    pretty_print(std::ostream& os, const catl::hybrid_shamap::LeafView& leaf)
+        const
     {
         auto json = to_json(leaf);
         pretty_print_json(os, json);
@@ -121,13 +123,15 @@ main(int argc, char* argv[])
         auto root_view = hybrid_reader.get_state_root();
 
         std::cout << "\nState Tree Root Node:" << std::endl;
-        std::cout << "  Header pointer: " << root_view.header << std::endl;
-        std::cout << "  Depth: " << (int)root_view.header->get_depth()
+        std::cout << "  Header pointer: "
+                  << static_cast<const void*>(root_view.header.raw())
                   << std::endl;
-        std::cout << "  Child types: 0x" << std::hex
-                  << root_view.header->child_types << std::dec << std::endl;
-        std::cout << "  Non-empty children: "
-                  << root_view.header->count_children() << std::endl;
+        auto root_header = root_view.header.get();
+        std::cout << "  Depth: " << (int)root_header.get_depth() << std::endl;
+        std::cout << "  Child types: 0x" << std::hex << root_header.child_types
+                  << std::dec << std::endl;
+        std::cout << "  Non-empty children: " << root_header.count_children()
+                  << std::endl;
 
         // Create an HmapInnerNode and populate with child offsets
         catl::hybrid_shamap::HmapInnerNode hybrid_root;
@@ -169,29 +173,34 @@ main(int argc, char* argv[])
         try
         {
             auto first_leaf = hybrid_reader.first_leaf_depth_first(root_view);
-            std::cout << "  Found first leaf with key: " << first_leaf.key.hex() << std::endl;
-            
+            std::cout << "  Found first leaf with key: " << first_leaf.key.hex()
+                      << std::endl;
+
             // Now test lookup with the key we found
             std::cout << "\nTesting key lookup:" << std::endl;
-            std::cout << "  Looking for key: " << first_leaf.key.hex() << std::endl;
-            
+            std::cout << "  Looking for key: " << first_leaf.key.hex()
+                      << std::endl;
+
             // Lookup the key using our simplified traversal
             auto leaf = hybrid_reader.lookup_key_in_state(first_leaf.key);
             std::cout << "  Found leaf!" << std::endl;
-            std::cout << "  Data size: " << leaf.data.size() << " bytes" << std::endl;
-            
+            std::cout << "  Data size: " << leaf.data.size() << " bytes"
+                      << std::endl;
+
             // Parse and display as JSON using the converter
             try
             {
-                // Create converter with the appropriate protocol based on network ID
+                // Create converter with the appropriate protocol based on
+                // network ID
                 LeafJsonConverter converter(reader->header().network_id);
-                
+
                 std::cout << "\nParsed object as JSON:" << std::endl;
                 converter.pretty_print(std::cout, leaf);
             }
             catch (const std::exception& e)
             {
-                std::cout << "Failed to parse as JSON: " << e.what() << std::endl;
+                std::cout << "Failed to parse as JSON: " << e.what()
+                          << std::endl;
                 std::cout << "Raw hex data: ";
                 std::string hex;
                 slice_hex(leaf.data, hex);
