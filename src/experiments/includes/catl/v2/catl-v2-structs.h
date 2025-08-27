@@ -1,6 +1,7 @@
 #pragma once
 
 #include "catl/common/ledger-info.h"
+#include "catl/core/bit-utils.h"
 #include "shamap-custom-traits.h"
 #include <array>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -545,7 +546,7 @@ struct ChildIterator
     next()
     {
         // Find next set bit (next non-empty branch)
-        int branch = __builtin_ctz(remaining_mask);  // Count trailing zeros
+        int branch = catl::core::ctz(remaining_mask);  // Count trailing zeros
 
         // Load relative offset safely (unaligned-friendly)
         rel_off_t rel = load_rel(rel_base, offset_index);

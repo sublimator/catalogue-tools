@@ -1,6 +1,7 @@
 #pragma once
 
 #include "catl/common/ledger-info.h"
+#include "catl/core/bit-utils.h"
 #include "catl/core/log-macros.h"
 #include "catl/core/types.h"
 #include "catl/v2/catl-v2-ledger-index-view.h"
@@ -995,7 +996,7 @@ private:
                 if (entry.remaining_children_mask != 0)
                 {
                     // Find next child (least significant bit)
-                    int branch = __builtin_ctz(entry.remaining_children_mask);
+                    int branch = catl::core::ctz(entry.remaining_children_mask);
 
                     // Get inner header again
                     const auto& inner_header = load_pod<InnerNodeHeader>(
