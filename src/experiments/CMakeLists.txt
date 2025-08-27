@@ -94,6 +94,8 @@ foreach(EXECUTABLE ${EXECUTABLES})
             catl::crypto
             catl_catalogue_common
             catl_catalogue_v1
+            catl::xdata
+            catl::base58
             Boost::filesystem
             Boost::iostreams
             Boost::program_options
