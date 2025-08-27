@@ -310,15 +310,15 @@ public:
         // The state tree starts at current_pos_ after read_ledger_info()
         // read_ledger_info() reads: LedgerInfo + TreesHeader
         // and positions current_pos_ right at the start of the state tree
-        size_t tree_offset = current_pos_;
+        const uint8_t* tree_ptr = data_ + current_pos_;
         LOGD(
-            "State tree lookup - tree offset: ",
-            tree_offset,
+            "State tree lookup - tree ptr: ",
+            static_cast<const void*>(tree_ptr),
             ", current_pos: ",
             current_pos_,
             ", state_tree_size: ",
             current_trees_header_.state_tree_size);
-        return lookup_key_at_node(key, tree_offset, 0);
+        return lookup_key_at_node(key, tree_ptr, 0);
     }
 
     /**
@@ -335,18 +335,18 @@ public:
     {
         // The tx tree starts after the state tree
         // current_pos_ is at the start of state tree after read_ledger_info()
-        size_t tree_offset =
-            current_pos_ + current_trees_header_.state_tree_size;
+        const uint8_t* tree_ptr =
+            data_ + current_pos_ + current_trees_header_.state_tree_size;
         LOGD(
-            "Tx tree lookup - tree offset: ",
-            tree_offset,
+            "Tx tree lookup - tree ptr: ",
+            static_cast<const void*>(tree_ptr),
             ", current_pos: ",
             current_pos_,
             ", state_tree_size: ",
             current_trees_header_.state_tree_size,
             ", tx_tree_size: ",
             current_trees_header_.tx_tree_size);
-        return lookup_key_at_node(key, tree_offset, 0);
+        return lookup_key_at_node(key, tree_ptr, 0);
     }
 
     /**
@@ -402,10 +402,12 @@ public:
     size_t
     walk_state_items(Callback&& callback, const WalkOptions& options = {})
     {
-        size_t tree_offset = current_pos_;
+        const uint8_t* tree_ptr = data_ + current_pos_;
         LOGD(
-            "walk_state_items - tree_offset: ",
-            tree_offset,
+            "walk_state_items - tree_ptr: ",
+            static_cast<const void*>(tree_ptr),
+            ", current_pos: ",
+            current_pos_,
             ", state_tree_size: ",
             current_trees_header_.state_tree_size,
             ", parallel: ",
@@ -418,12 +420,12 @@ public:
         if (!options.parallel)
         {
             return walk_items_at_node(
-                tree_offset, 0, std::forward<Callback>(callback));
+                tree_ptr, 0, std::forward<Callback>(callback));
         }
         else
         {
             return walk_items_parallel(
-                tree_offset, 0, std::forward<Callback>(callback), options);
+                tree_ptr, 0, std::forward<Callback>(callback), options);
         }
     }
 
@@ -438,15 +440,15 @@ public:
     size_t
     walk_tx_items(Callback&& callback)
     {
-        size_t tree_offset =
-            current_pos_ + current_trees_header_.state_tree_size;
+        const uint8_t* tree_ptr =
+            data_ + current_pos_ + current_trees_header_.state_tree_size;
         LOGD(
-            "walk_tx_items - tree_offset: ",
-            tree_offset,
+            "walk_tx_items - tree_ptr: ",
+            static_cast<const void*>(tree_ptr),
             ", tx_tree_size: ",
             current_trees_header_.tx_tree_size);
         return walk_items_at_node(
-            tree_offset, 0, std::forward<Callback>(callback));
+            tree_ptr, 0, std::forward<Callback>(callback));
     }
 
     /**
@@ -492,7 +494,7 @@ public:
 private:
     const uint8_t* data_ = nullptr;
     size_t file_size_ = 0;
-    size_t current_pos_ = 0;
+    abs_off_t current_pos_ = 0;  // Current position in file (absolute offset)
     std::shared_ptr<MmapHolder> mmap_holder_;  // Keeps mmap alive
 
     CatlV2Header header_;
@@ -568,24 +570,24 @@ private:
      * Lookup a key in the tree using stack-based traversal
      *
      * @param key The key to search for
-     * @param root_offset Offset to the root node
+     * @param root_ptr Pointer to the root node
      * @param start_depth Starting depth (usually 0)
      * @return Optional Slice containing the leaf data
      */
     [[nodiscard]] std::optional<Slice>
-    lookup_key_at_node(const Key& key, size_t root_offset, int start_depth)
+    lookup_key_at_node(const Key& key, const uint8_t* root_ptr, int start_depth)
         const
     {
         struct StackEntry
         {
-            size_t node_offset;
+            const uint8_t* node_ptr;  // Direct memory pointer to node
             int depth;
             bool is_leaf;  // Determined by parent's child_types bitmap
         };
 
         LOGD("=== Starting key lookup ===");
         LOGD("Target key: ", key.hex());
-        LOGD("Root offset: ", root_offset);
+        LOGD("Root ptr: ", static_cast<const void*>(root_ptr));
         LOGD("Start depth: ", start_depth);
 
         // Use a fixed-size stack (max tree depth is 64)
@@ -593,17 +595,17 @@ private:
         int stack_top = 0;
 
         // Push root
-        stack[stack_top++] = {root_offset, start_depth, false};
+        stack[stack_top++] = {root_ptr, start_depth, false};
         LOGD("Pushed root to stack");
 
         int nodes_visited = 0;
         while (stack_top > 0)
         {
-            auto [node_offset, depth, is_leaf] = stack[--stack_top];
+            auto [node_ptr, depth, is_leaf] = stack[--stack_top];
             nodes_visited++;
 
             LOGD("--- Node ", nodes_visited, " ---");
-            LOGD("Node offset: ", node_offset);
+            LOGD("Node ptr: ", static_cast<const void*>(node_ptr));
             LOGD("Depth: ", depth);
             LOGD("Is leaf: ", is_leaf);
 
@@ -612,15 +614,8 @@ private:
                 LOGD("Processing INNER node");
 
                 // Read the inner node header
-                if (node_offset + sizeof(InnerNodeHeader) > file_size_)
-                {
-                    LOGE("Inner node header exceeds file size!");
-                    throw std::runtime_error(
-                        "Inner node header exceeds file size");
-                }
-
-                auto inner_header =
-                    load_pod<InnerNodeHeader>(data_, node_offset, file_size_);
+                MemPtr<InnerNodeHeader> header_ptr(node_ptr);
+                const auto& inner_header = header_ptr.get_uncopyable();
 
                 LOGD(
                     "Inner node depth from header: ",
@@ -676,12 +671,11 @@ private:
                 }
 
                 // Use iterator to find the specific child
-                size_t offsets_start = node_offset + sizeof(InnerNodeHeader);
-                MemPtr<InnerNodeHeader> header_ptr(data_ + node_offset);
-                ChildIterator child_iter(
-                    header_ptr, data_ + offsets_start, offsets_start);
+                const uint8_t* offsets_start =
+                    node_ptr + sizeof(InnerNodeHeader);
+                ChildIterator child_iter(header_ptr, offsets_start);
 
-                std::uint64_t child_offset = 0;
+                const uint8_t* child_ptr = nullptr;
                 bool found = false;
 
                 while (child_iter.has_next())
@@ -689,7 +683,7 @@ private:
                     auto child = child_iter.next();
                     if (child.branch == nibble)
                     {
-                        child_offset = child.offset;
+                        child_ptr = child.ptr;
                         found = true;
                         break;
                     }
@@ -703,7 +697,7 @@ private:
                     return std::nullopt;
                 }
 
-                LOGD("Child offset: ", child_offset);
+                LOGD("Child ptr: ", static_cast<const void*>(child_ptr));
 
                 // Push child to stack with proper type information
                 if (stack_top >= 64)  // Stack overflow protection
@@ -713,7 +707,7 @@ private:
 
                 bool child_is_leaf = (child_type == ChildType::LEAF);
                 stack[stack_top++] = {
-                    child_offset, inner_header.get_depth() + 1, child_is_leaf};
+                    child_ptr, inner_header.get_depth() + 1, child_is_leaf};
                 LOGD(
                     "Pushed child to stack, new stack top: ",
                     stack_top,
@@ -724,18 +718,9 @@ private:
             {
                 LOGD("Processing LEAF node");
 
-                // Leaf nodes start directly with LeafHeader (no marker)
-                size_t leaf_header_offset = node_offset;
-
                 // Read the leaf header
-                if (leaf_header_offset + sizeof(LeafHeader) > file_size_)
-                {
-                    LOGE("Leaf header exceeds file size!");
-                    throw std::runtime_error("Leaf header exceeds file size");
-                }
-
-                auto leaf_header =
-                    load_pod<LeafHeader>(data_, leaf_header_offset, file_size_);
+                MemPtr<LeafHeader> leaf_ptr(node_ptr);
+                const auto& leaf_header = leaf_ptr.get_uncopyable();
 
                 // Convert leaf key to hex for logging
                 LOGD("Leaf key: ", Hash256(leaf_header.key.data()).hex());
@@ -748,20 +733,13 @@ private:
                 if (key_match)
                 {
                     // Found it! Return the data (after LeafHeader)
-                    size_t data_offset =
-                        leaf_header_offset + sizeof(LeafHeader);
+                    const uint8_t* data_ptr = node_ptr + sizeof(LeafHeader);
                     size_t data_size = leaf_header.data_size();
                     LOGD("Found key! Data size: ", data_size, " bytes");
 
-                    if (data_offset + data_size > file_size_)
-                    {
-                        LOGE("Leaf data exceeds file size!");
-                        throw std::runtime_error("Leaf data exceeds file size");
-                    }
-
                     LOGD("=== Key lookup successful! ===");
                     LOGD("Total nodes visited: ", nodes_visited);
-                    return Slice(data_ + data_offset, data_size);
+                    return Slice(data_ptr, data_size);
                 }
 
                 // Not the key we're looking for, continue
@@ -777,18 +755,21 @@ private:
     /**
      * Walk all items in a tree using iterative traversal
      *
-     * @param root_offset Offset to the root node
+     * @param root_ptr Pointer to the root node
      * @param start_depth Starting depth (usually 0)
      * @param callback Function to call for each leaf: (Key, Slice) -> bool
      * @return Number of items visited
      */
     template <typename Callback>
     size_t
-    walk_items_at_node(size_t root_offset, int start_depth, Callback&& callback)
+    walk_items_at_node(
+        const uint8_t* root_ptr,
+        int start_depth,
+        Callback&& callback)
     {
         struct StackEntry
         {
-            size_t node_offset;
+            const uint8_t* node_ptr;  // Direct memory pointer to node
             int depth;
             bool is_leaf;  // Determined by parent's child_types bitmap
 
@@ -799,7 +780,7 @@ private:
             int offset_index;  // Current index in sparse offset array
 
             StackEntry()
-                : node_offset(0)
+                : node_ptr(nullptr)
                 , depth(0)
                 , is_leaf(false)
                 , is_processing_children(false)
@@ -807,8 +788,8 @@ private:
                 , offset_index(0)
             {
             }
-            StackEntry(size_t offset, int d, bool leaf)
-                : node_offset(offset)
+            StackEntry(const uint8_t* ptr, int d, bool leaf)
+                : node_ptr(ptr)
                 , depth(d)
                 , is_leaf(leaf)
                 , is_processing_children(false)
@@ -819,8 +800,8 @@ private:
         };
 
         LOGD(
-            "walk_items_at_node - root_offset: ",
-            root_offset,
+            "walk_items_at_node - root_ptr: ",
+            static_cast<const void*>(root_ptr),
             ", start_depth: ",
             start_depth);
 
@@ -833,7 +814,7 @@ private:
         // depth if this function should support also walking a leaf node, that
         // would have to be passed in as an argument to the function, because
         // it's not possible to determine a leaf from an inner node.
-        stack[stack_top++] = StackEntry(root_offset, start_depth, false);
+        stack[stack_top++] = StackEntry(root_ptr, start_depth, false);
 
         size_t items_visited = 0;
         size_t iterations = 0;
@@ -851,8 +832,8 @@ private:
                 iterations,
                 " - Stack[",
                 stack_top - 1,
-                "]: offset=",
-                entry.node_offset,
+                "]: ptr=",
+                static_cast<const void*>(entry.node_ptr),
                 ", depth=",
                 entry.depth,
                 ", is_leaf=",
@@ -864,41 +845,21 @@ private:
             {
                 // Process leaf node - no marker, starts directly with
                 // LeafHeader
-                if (entry.node_offset + sizeof(LeafHeader) > file_size_)
-                {
-                    LOGE(
-                        "Leaf header at offset ",
-                        entry.node_offset,
-                        " exceeds file size");
-                    throw std::runtime_error("Leaf header exceeds file bounds");
-                }
-
-                auto leaf_header =
-                    load_pod<LeafHeader>(data_, entry.node_offset, file_size_);
+                MemPtr<LeafHeader> leaf_ptr(entry.node_ptr);
+                const auto& leaf_header = leaf_ptr.get_uncopyable();
                 Key leaf_key(leaf_header.key.data());
 
                 LOGD(
-                    "Processing leaf at offset ",
-                    entry.node_offset,
+                    "Processing leaf at ptr ",
+                    static_cast<const void*>(entry.node_ptr),
                     " with key: ",
                     leaf_key.hex());
 
                 // Get leaf data
-                size_t data_offset = entry.node_offset + sizeof(LeafHeader);
+                const uint8_t* data_ptr = entry.node_ptr + sizeof(LeafHeader);
                 size_t data_size = leaf_header.data_size();
 
-                if (data_offset + data_size > file_size_)
-                {
-                    LOGE(
-                        "Leaf data at offset ",
-                        data_offset,
-                        " with size ",
-                        data_size,
-                        " exceeds file size");
-                    throw std::runtime_error("Leaf data exceeds file bounds");
-                }
-
-                Slice leaf_data(data_ + data_offset, data_size);
+                Slice leaf_data(data_ptr, data_size);
 
                 // Call the callback
                 items_visited++;
@@ -917,22 +878,11 @@ private:
                 if (!entry.is_processing_children)
                 {
                     // First time visiting this inner node
-                    if (entry.node_offset + sizeof(InnerNodeHeader) >
-                        file_size_)
-                    {
-                        LOGE(
-                            "Inner node header at offset ",
-                            entry.node_offset,
-                            " exceeds file size");
-                        throw std::runtime_error(
-                            "Inner node header exceeds file bounds");
-                    }
-
-                    const auto& inner_header = load_pod<InnerNodeHeader>(
-                        data_, entry.node_offset, file_size_);
+                    MemPtr<InnerNodeHeader> header_ptr(entry.node_ptr);
+                    const auto& inner_header = header_ptr.get_uncopyable();
                     LOGD(
-                        "Processing inner node at offset ",
-                        entry.node_offset,
+                        "Processing inner node at ptr ",
+                        static_cast<const void*>(entry.node_ptr),
                         ", depth=",
                         entry.depth,
                         ", header depth=",
@@ -973,8 +923,8 @@ private:
                     if (child_count == 0)
                     {
                         LOGW(
-                            "Inner node with no children at offset ",
-                            entry.node_offset);
+                            "Inner node with no children at ptr ",
+                            static_cast<const void*>(entry.node_ptr));
                         stack_top--;  // Pop this node
                         continue;
                     }
@@ -999,23 +949,17 @@ private:
                     int branch = catl::core::ctz(entry.remaining_children_mask);
 
                     // Get inner header again
-                    const auto& inner_header = load_pod<InnerNodeHeader>(
-                        data_, entry.node_offset, file_size_);
+                    MemPtr<InnerNodeHeader> header_ptr(entry.node_ptr);
+                    const auto& inner_header = header_ptr.get_uncopyable();
                     ChildType child_type = inner_header.get_child_type(branch);
 
                     // Get offset array
-                    size_t offsets_start =
-                        entry.node_offset + sizeof(InnerNodeHeader);
-                    const std::uint8_t* rel_base = data_ + offsets_start;
+                    const std::uint8_t* offsets_array =
+                        entry.node_ptr + sizeof(InnerNodeHeader);
 
-                    // Calculate absolute offset from self-relative offset
-                    std::uint64_t slot =
-                        slot_from_index(offsets_start, entry.offset_index);
-
-                    // Load relative offset safely (unaligned-friendly)
-                    rel_off_t rel = load_rel(rel_base, entry.offset_index);
-
-                    std::uint64_t child_offset = abs_from_rel(slot, rel);
+                    // Resolve self-relative offset to get child pointer
+                    const uint8_t* child_ptr = resolve_self_relative(
+                        offsets_array, entry.offset_index);
 
                     bool child_is_leaf = (child_type == ChildType::LEAF);
                     LOGD(
@@ -1023,21 +967,8 @@ private:
                         branch,
                         ", type=",
                         child_is_leaf ? "LEAF" : "INNER",
-                        ", offset=",
-                        child_offset);
-
-                    // Basic sanity check on offset
-                    if (child_offset < sizeof(CatlV2Header) ||
-                        child_offset >= file_size_)
-                    {
-                        LOGE(
-                            "Invalid child offset: ",
-                            child_offset,
-                            " (file size: ",
-                            file_size_,
-                            ")");
-                        throw std::runtime_error("Invalid child offset");
-                    }
+                        ", ptr=",
+                        static_cast<const void*>(child_ptr));
 
                     // Clear this bit from mask
                     entry.remaining_children_mask &= ~(1u << branch);
@@ -1051,21 +982,21 @@ private:
                     }
 
                     LOGD(
-                        "Pushing child: offset=",
-                        child_offset,
+                        "Pushing child: ptr=",
+                        static_cast<const void*>(child_ptr),
                         ", depth=",
                         entry.depth + 1,
                         ", is_leaf=",
                         child_is_leaf);
-                    stack[stack_top++] = StackEntry(
-                        child_offset, entry.depth + 1, child_is_leaf);
+                    stack[stack_top++] =
+                        StackEntry(child_ptr, entry.depth + 1, child_is_leaf);
                 }
                 else
                 {
                     // No more children, pop this inner node
                     LOGD(
-                        "Inner node at offset ",
-                        entry.node_offset,
+                        "Inner node at ptr ",
+                        static_cast<const void*>(entry.node_ptr),
                         " has no more children, popping");
                     stack_top--;
                 }
@@ -1093,7 +1024,7 @@ private:
     /**
      * Walk items in parallel using a thread pool
      *
-     * @param root_offset Offset to the root node
+     * @param root_ptr Pointer to the root node
      * @param start_depth Starting depth (usually 0)
      * @param callback Function to call for each leaf: (Key, Slice) -> bool
      * @param options Walk options including thread count and prefetch settings
@@ -1102,7 +1033,7 @@ private:
     template <typename Callback>
     size_t
     walk_items_parallel(
-        size_t root_offset,
+        const uint8_t* root_ptr,
         int start_depth,
         Callback&& callback,
         const WalkOptions& options)
@@ -1112,8 +1043,8 @@ private:
         std::stringstream ss;
         ss << std::this_thread::get_id();
         LOGI(
-            "walk_items_parallel START - root_offset: ",
-            root_offset,
+            "walk_items_parallel START - root_ptr: ",
+            static_cast<const void*>(root_ptr),
             ", start_depth: ",
             start_depth,
             ", main thread: ",
@@ -1123,13 +1054,8 @@ private:
             " threads");
 
         // First, read the root node to get its children
-        if (root_offset + sizeof(InnerNodeHeader) > file_size_)
-        {
-            throw std::runtime_error("Root node header exceeds file bounds");
-        }
-
-        auto root_header =
-            load_pod<InnerNodeHeader>(data_, root_offset, file_size_);
+        MemPtr<InnerNodeHeader> root_header_ptr(root_ptr);
+        const auto& root_header = root_header_ptr.get_uncopyable();
 
         LOGI(
             "Root node depth: ",
@@ -1140,14 +1066,13 @@ private:
         // Collect all direct children
         struct ChildInfo
         {
-            size_t offset;
+            const uint8_t* ptr;  // Direct memory pointer
             int branch;
             bool is_leaf;
         };
         std::vector<ChildInfo> children;
 
-        size_t offsets_start = root_offset + sizeof(InnerNodeHeader);
-        const std::uint8_t* rel_base = data_ + offsets_start;
+        const std::uint8_t* rel_base = root_ptr + sizeof(InnerNodeHeader);
         int offset_index = 0;
 
         for (int branch = 0; branch < 16; ++branch)
@@ -1156,15 +1081,12 @@ private:
             if (child_type != ChildType::EMPTY)
             {
                 ChildInfo info;
-                // Calculate absolute offset from self-relative offset
-                std::uint64_t slot =
-                    slot_from_index(offsets_start, offset_index);
-
-                // Load relative offset safely (unaligned-friendly)
-                rel_off_t rel = load_rel(rel_base, offset_index);
+                // Resolve self-relative offset to get child pointer
+                const uint8_t* child_ptr =
+                    resolve_self_relative(rel_base, offset_index);
                 ++offset_index;
 
-                info.offset = abs_from_rel(slot, rel);
+                info.ptr = child_ptr;
                 info.branch = branch;
                 info.is_leaf = (child_type == ChildType::LEAF);
                 children.push_back(info);
@@ -1172,8 +1094,8 @@ private:
                 LOGD(
                     "Root child[",
                     branch,
-                    "]: offset=",
-                    info.offset,
+                    "]: ptr=",
+                    static_cast<const void*>(info.ptr),
                     ", type=",
                     info.is_leaf ? "LEAF" : "INNER");
             }
@@ -1247,26 +1169,15 @@ private:
                             child.branch,
                             "]");
 
-                        if (child.offset + sizeof(LeafHeader) > file_size_)
-                        {
-                            throw std::runtime_error(
-                                "Leaf header exceeds file bounds");
-                        }
-
-                        const auto& leaf_header = load_pod<LeafHeader>(
-                            data_, child.offset, file_size_);
+                        MemPtr<LeafHeader> leaf_ptr(child.ptr);
+                        const auto& leaf_header = leaf_ptr.get_uncopyable();
                         Key leaf_key(leaf_header.key.data());
 
-                        size_t data_offset = child.offset + sizeof(LeafHeader);
+                        const uint8_t* data_ptr =
+                            child.ptr + sizeof(LeafHeader);
                         size_t data_size = leaf_header.data_size();
 
-                        if (data_offset + data_size > file_size_)
-                        {
-                            throw std::runtime_error(
-                                "Leaf data exceeds file bounds");
-                        }
-
-                        Slice leaf_data(data_ + data_offset, data_size);
+                        Slice leaf_data(data_ptr, data_size);
 
                         if (thread_safe_callback(leaf_key, leaf_data))
                         {
@@ -1286,7 +1197,7 @@ private:
                         try
                         {
                             size_t items = walk_items_at_node(
-                                child.offset,
+                                child.ptr,
                                 start_depth + 1,
                                 thread_safe_callback);
                             total_items.fetch_add(items);
@@ -1332,8 +1243,8 @@ private:
             LOGI(
                 "Calling madvise(MADV_WILLNEED) on ",
                 tree_size,
-                " bytes at offset ",
-                root_offset);
+                " bytes at ptr ",
+                static_cast<const void*>(root_ptr));
 
             // We don't actually know if madvise is too expensive!
             // #if defined(__APPLE__) || defined(__linux__)
@@ -1357,7 +1268,7 @@ private:
 
             // Now walk and touch pages to ensure they're actually loaded
             walk_items_at_node(
-                root_offset,
+                root_ptr,
                 start_depth,
                 [&prefetched](const Key& key, const Slice& data) {
                     (void)key;
