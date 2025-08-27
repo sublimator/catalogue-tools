@@ -259,6 +259,13 @@ public:
     
     /**
      * Find the first leaf in depth-first order starting from given node
+     * 
+     * Note: Uses recursion which is optimal here because:
+     * - Max depth is bounded by key size (64 nibbles = 64 levels max)
+     * - Stack usage is tiny (~8KB worst case vs 8MB default stack)
+     * - CPU call stack is faster than heap-allocated stack (better cache locality)
+     * - Code is cleaner and compiler can optimize
+     * 
      * @param node The inner node to start from
      * @return LeafView of the first leaf found
      * @throws std::runtime_error if no leaf found (malformed tree)
