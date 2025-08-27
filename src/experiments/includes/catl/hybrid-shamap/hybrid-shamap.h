@@ -228,11 +228,8 @@ struct InnerNodeView
     {
         const auto* offsets_data =
             header.offset(sizeof(catl::v2::InnerNodeHeader)).raw();
-        // For the iterator, we need file offset - calculate from pointer
-        // This is a bit hacky but avoids storing file_offset
-        size_t offsets_file_base = reinterpret_cast<uintptr_t>(offsets_data);
-        // Pass MemPtr to iterator
-        return {header, offsets_data, offsets_file_base};
+        // Simple: just pass the header and offset array pointer
+        return {header, offsets_data};
     }
 
     // Get child type for branch i (EMPTY, INNER, or LEAF)
@@ -245,7 +242,7 @@ struct InnerNodeView
                 "Branch index " + std::to_string(branch) +
                 " out of range [0,16)");
         }
-        auto header_val = header.get();
+        const auto& header_val = header.get_uncopyable();
         return header_val.get_child_type(branch);
     }
 
@@ -260,7 +257,7 @@ struct InnerNodeView
                 " out of range [0,16)");
         }
 
-        auto header_val = header.get();
+        const auto& header_val = header.get_uncopyable();
 
         // Create SparseChildOffsets accessor
         const uint8_t* offsets_base =
@@ -283,7 +280,7 @@ struct InnerNodeView
     [[nodiscard]] catl::v2::SparseChildOffsets
     get_sparse_offsets() const
     {
-        auto header_val = header.get();
+        const auto& header_val = header.get_uncopyable();
         const uint8_t* offsets_base =
             header.offset(sizeof(catl::v2::InnerNodeHeader)).raw();
         return catl::v2::SparseChildOffsets(
@@ -316,20 +313,8 @@ public:
     }
 
     /**
-     * Get an inner node view at the given offset
-     * Returns lightweight view with pointer into mmap data
-     */
-    [[nodiscard]] InnerNodeView
-    get_inner_node_at(size_t offset) const
-    {
-        // Create MemPtr to the header in mmap (no copy)
-        catl::v2::MemPtr<catl::v2::InnerNodeHeader> header(
-            reader_->data_at(offset));
-        return InnerNodeView{header};
-    }
-
-    /**
      * Get an inner node view from a pointer
+     * Returns lightweight view with pointer into mmap data
      */
     [[nodiscard]] InnerNodeView
     get_inner_node(const uint8_t* ptr) const
@@ -345,7 +330,7 @@ public:
     [[nodiscard]] InnerNodeView
     get_state_root() const
     {
-        return get_inner_node_at(reader_->current_offset());
+        return get_inner_node(reader_->current_data());
     }
 
     /**
@@ -392,7 +377,7 @@ public:
 
         // Load leaf header using MemPtr
         catl::v2::MemPtr<catl::v2::LeafHeader> leaf_header_ptr(leaf_ptr);
-        const auto& leaf_header = leaf_header_ptr.get();  // Force ref binding
+        const auto& leaf_header = leaf_header_ptr.get_uncopyable();  // Force ref binding
 
         return LeafView{
             Key(leaf_header.key.data()),  // Now safe - ref in UNSAFE mode!
@@ -412,7 +397,7 @@ public:
     lookup_key(const InnerNodeView& root, const Key& key) const
     {
         InnerNodeView current = root;
-        auto root_header = root.header.get();
+        const auto& root_header = root.header.get_uncopyable();
         int depth = root_header.get_depth();
 
         // Walk down the tree following the key nibbles
@@ -444,7 +429,7 @@ public:
 
             // It's an inner node, continue traversing
             current = get_inner_child(current, nibble);
-            auto current_header = current.header.get();
+            const auto& current_header = current.header.get_uncopyable();
             depth = current_header.get_depth();
         }
     }
@@ -562,8 +547,9 @@ public:
 class HmapInnerNode : public HMapNode
 {
 private:
-    std::array<TaggedPtr, 16> children_{};
-    uint32_t child_types_ = 0;  // 2 bits × 16 children = 32 bits
+    std::array<void*, 16> children_{};  // Just raw pointers, no tagging
+    uint32_t child_types_ = 0;  // 2 bits × 16 children = 32 bits (WHAT: empty/inner/leaf/hash)
+    uint16_t materialized_mask_ = 0;  // 1 bit × 16 children (WHERE: mmap vs heap)
     uint8_t depth_ = 0;
     Hash256 hash_;  // Cached hash (invalidated on modification)
     bool hash_valid_ = false;
@@ -580,7 +566,25 @@ public:
         return Type::INNER;
     }
 
-    // Child access
+    // Combined child info structure
+    struct ChildInfo
+    {
+        TaggedPtr ptr;
+        catl::v2::ChildType type;
+    };
+
+    // Child access - combined getter
+    [[nodiscard]] ChildInfo
+    get_child_info(int branch) const
+    {
+        assert(branch >= 0 && branch < 16);
+        return {
+            children_[branch],
+            static_cast<catl::v2::ChildType>(
+                (child_types_ >> (branch * 2)) & 0x3)};
+    }
+
+    // Legacy individual getters (for compatibility)
     [[nodiscard]] TaggedPtr
     get_child(int branch) const
     {
@@ -588,15 +592,6 @@ public:
         return children_[branch];
     }
 
-    void
-    set_child(int branch, TaggedPtr ptr)
-    {
-        assert(branch >= 0 && branch < 16);
-        children_[branch] = ptr;
-        hash_valid_ = false;  // Invalidate cached hash
-    }
-
-    // Child type management (EMPTY/INNER/LEAF/PLACEHOLDER)
     [[nodiscard]] catl::v2::ChildType
     get_child_type(int branch) const
     {
@@ -605,13 +600,20 @@ public:
             (child_types_ >> (branch * 2)) & 0x3);
     }
 
+    // Combined setter - set both pointer and type together
     void
-    set_child_type(int branch, catl::v2::ChildType type)
+    set_child(int branch, TaggedPtr ptr, catl::v2::ChildType type)
     {
         assert(branch >= 0 && branch < 16);
+        
+        children_[branch] = ptr;
+
+        // Update child type
         uint32_t mask = ~(0x3u << (branch * 2));
         child_types_ = (child_types_ & mask) |
             (static_cast<uint32_t>(type) << (branch * 2));
+
+        hash_valid_ = false;  // Invalidate cached hash
     }
 
     [[nodiscard]] uint8_t
@@ -742,6 +744,7 @@ public:
 class HmapPathFinder
 {
 private:
+    // TODO: this is never actually used ?! cause just using relative pointer arithmetic ?
     HybridReader* reader_;  // For accessing mmap nodes
     Key target_key_;
 
@@ -867,7 +870,7 @@ public:
                         const uint8_t* parent_raw = parent_ptr.get_raw_memory();
                         catl::v2::MemPtr<catl::v2::InnerNodeHeader> header(
                             parent_raw);
-                        auto header_val = header.get();
+                        const auto& header_val = header.get_uncopyable();
                         is_leaf =
                             (header_val.get_child_type(branch_taken) ==
                              catl::v2::ChildType::LEAF);
@@ -891,7 +894,11 @@ public:
                     assert(parent_ptr.is_materialized());
                     auto* parent_inner = static_cast<HmapInnerNode*>(
                         parent_ptr.get_materialized());
-                    parent_inner->set_child(branch_taken, node_ptr);
+                    // Determine child type based on whether it's a leaf
+                    catl::v2::ChildType child_type = is_leaf
+                        ? catl::v2::ChildType::LEAF
+                        : catl::v2::ChildType::INNER;
+                    parent_inner->set_child(branch_taken, node_ptr, child_type);
                 }
             }
         }
@@ -965,7 +972,7 @@ private:
         const uint8_t* raw = current.get_raw_memory();
         InnerNodeView view{catl::v2::MemPtr<catl::v2::InnerNodeHeader>(raw)};
 
-        auto header = view.header.get();
+        const auto& header = view.header.get_uncopyable();
         depth = header.get_depth();
 
         int branch = catl::shamap::select_branch(target_key_, depth);
@@ -984,7 +991,7 @@ private:
         {
             // It's a leaf - check the key
             catl::v2::MemPtr<catl::v2::LeafHeader> leaf_header_ptr(child_ptr);
-            const auto& leaf_header = leaf_header_ptr.get();
+            const auto& leaf_header = leaf_header_ptr.get_uncopyable();
 
             found_leaf_ = child;
             key_matches_ =
@@ -1015,7 +1022,7 @@ private:
         {
             // Materialize as leaf
             catl::v2::MemPtr<catl::v2::LeafHeader> leaf_header_ptr(raw);
-            const auto& header = leaf_header_ptr.get();
+            const auto& header = leaf_header_ptr.get_uncopyable();
 
             Key key(header.key.data());
             Slice data(raw + sizeof(catl::v2::LeafHeader), header.data_size());
@@ -1026,27 +1033,23 @@ private:
         {
             // Materialize as inner
             catl::v2::MemPtr<catl::v2::InnerNodeHeader> inner_ptr(raw);
-            const auto& header = inner_ptr.get();
+            const auto& header = inner_ptr.get_uncopyable();
 
             auto* inner = new HmapInnerNode(header.get_depth());
             boost::intrusive_ptr<HMapNode> inner_ptr_managed(inner);
 
-            // Copy child_types from mmap header
-            for (int i = 0; i < 16; ++i)
-            {
-                inner->set_child_type(i, header.get_child_type(i));
-            }
-
-            // Copy children pointers as RAW_MEMORY tagged pointers
+            // Copy children (both types and pointers) from mmap header
             InnerNodeView view{inner_ptr};
             auto offsets = view.get_sparse_offsets();
 
             for (int i = 0; i < 16; ++i)
             {
-                if (offsets.has_child(i))
+                catl::v2::ChildType child_type = header.get_child_type(i);
+                if (child_type != catl::v2::ChildType::EMPTY)
                 {
                     const uint8_t* child_raw = offsets.get_child_ptr(i);
-                    inner->set_child(i, TaggedPtr::make_raw_memory(child_raw));
+                    inner->set_child(
+                        i, TaggedPtr::make_raw_memory(child_raw), child_type);
                 }
             }
 

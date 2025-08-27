@@ -2,6 +2,7 @@
 
 #include "catl/common/ledger-info.h"
 #include "catl/core/bit-utils.h"
+#include "catl/core/logger.h"
 #include "shamap-custom-traits.h"
 #include <array>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -13,12 +14,19 @@
 
 namespace catl::v2 {
 
+// Log partition for v2 structs debugging
+inline LogPartition& get_v2_structs_log_partition() {
+    static LogPartition partition("v2-structs", LogLevel::NONE);
+    return partition;
+}
+
 /**
- * Type alias for self-relative offsets
- * Each offset is relative to its own slot position in the file:
- * absolute_offset = slot_position + relative_offset
+ * Type aliases for different offset types
  */
-using rel_off_t = std::int64_t;  // self-relative, signed 64-bit offsets
+using abs_off_t = std::uint64_t;  // absolute file offsets (from start of file)
+using rel_off_t = std::int64_t;   // self-relative, signed 64-bit offsets
+
+static_assert(sizeof(abs_off_t) == 8, "abs_off_t must be 8 bytes");
 static_assert(sizeof(rel_off_t) == 8, "rel_off_t must be 8 bytes");
 
 /**
@@ -80,7 +88,7 @@ public:
      */
 #ifdef CATL_UNSAFE_POD_LOADS
     [[nodiscard]] const T&
-    get() const
+    get_uncopyable() const
     {
         static_assert(
             std::is_trivially_copyable_v<T>, "T must be trivially copyable");
@@ -90,7 +98,7 @@ public:
     }
 #else
     [[nodiscard]] T
-    get() const
+    get_uncopyable() const
     {
         static_assert(
             std::is_trivially_copyable_v<T>, "T must be trivially copyable");
@@ -151,84 +159,55 @@ static_assert(
     "MemPtr must be same size as a pointer");
 
 /**
- * Helper to convert relative offset to absolute offset
- * @param slot File position of the offset slot
- * @param rel Relative offset value
- * @return Absolute file offset
+ * This codebase uses memory pointers (const uint8_t*) exclusively for
+ * navigation. File offsets are not used - everything is direct pointer
+ * arithmetic.
  *
- * TODO: This is overcomplicated - when working with mmap'd memory,
- * self-relative offsets work directly with pointer arithmetic:
- *   uint8_t* absolute_ptr = slot_ptr + relative_offset;
- * The abstraction to "file offsets" actually obscures the simplicity!
- */
-inline std::uint64_t
-abs_from_rel(std::uint64_t slot, rel_off_t rel)
-{
-    // Defensive checks (compiled out in release with NDEBUG)
-    // File sizes >> 2^63-1 are not a realistic target for this format
-    assert(
-        slot <=
-        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
-    std::int64_t a = static_cast<std::int64_t>(slot) + rel;
-    assert(a >= 0);
-    return static_cast<std::uint64_t>(a);
-}
-
-/**
- * Helper to convert absolute offset to relative offset
- * @param abs Absolute file offset
- * @param slot File position of the offset slot
- * @return Relative offset value
+ * Self-relative offsets work simply:
+ *   child_ptr = slot_ptr + relative_offset
  *
- * TODO: Similarly overcomplicated - with pointers it's just:
- *   rel_off_t rel = target_ptr - slot_ptr;
- */
-inline rel_off_t
-rel_from_abs(std::uint64_t abs, std::uint64_t slot)
-{
-    assert(
-        abs <=
-        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
-    assert(
-        slot <=
-        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
-    return static_cast<rel_off_t>(
-        static_cast<std::int64_t>(abs) - static_cast<std::int64_t>(slot));
-}
-
-/**
- * Helper to calculate slot position in offset array
- * @param base Base address of offset array
- * @param index Index of the slot (0-based)
- * @return File position of the slot
+ * This enables:
+ * - Multiple mmap files (each with their own base pointer)
+ * - Simpler code (no offset/pointer conversions)
+ * - Better performance (direct pointer access)
+ * Resolve a self-relative offset to get the actual pointer
  *
- * TODO: When working with pointers, this is just:
- *   uint8_t* slot_ptr = base_ptr + index * sizeof(rel_off_t);
- * No need for the uint64_t abstraction!
+ * Self-relative offsets are stored relative to their own storage location.
+ * This function loads the offset and adds it to the slot address to get
+ * the final pointer.
+ *
+ * @param offsets_array Base address of the offset array
+ * @param index Index of the offset to resolve (0-based)
+ * @return Pointer to the target location
  */
-inline std::uint64_t
-slot_from_index(std::uint64_t base, int index)
+inline const uint8_t*
+resolve_self_relative(const uint8_t* offsets_array, int index)
 {
     assert(index >= 0);
-    return base + static_cast<std::uint64_t>(index) * sizeof(rel_off_t);
-}
-
-/**
- * Helper to load a relative offset from unaligned memory
- * @param base Base address of offset array
- * @param index Index of the offset to load (0-based)
- * @return The loaded relative offset
- */
-inline rel_off_t
-load_rel(const uint8_t* base, int index)
-{
-    assert(index >= 0);
-    rel_off_t rel{};
-    std::memcpy(
-        &rel,
-        base + static_cast<std::size_t>(index) * sizeof(rel_off_t),
-        sizeof(rel));
-    return rel;
+    const uint8_t* slot =
+        offsets_array + static_cast<std::size_t>(index) * sizeof(rel_off_t);
+    
+    auto& log = get_v2_structs_log_partition();
+    if (log.should_log(LogLevel::DEBUG)) {
+        Logger::log(LogLevel::DEBUG, "[v2-structs] resolve_self_relative: index=", index, 
+                    ", offsets_array=", static_cast<const void*>(offsets_array),
+                    ", slot=", static_cast<const void*>(slot));
+    }
+    
+    rel_off_t offset{};
+    std::memcpy(&offset, slot, sizeof(offset));
+    
+    if (log.should_log(LogLevel::DEBUG)) {
+        Logger::log(LogLevel::DEBUG, "[v2-structs]   loaded offset=", offset);
+    }
+    
+    const uint8_t* result = slot + offset;
+    
+    if (log.should_log(LogLevel::DEBUG)) {
+        Logger::log(LogLevel::DEBUG, "[v2-structs]   result ptr=", static_cast<const void*>(result));
+    }
+    
+    return slot + offset;  // Self-relative: slot + offset_from_slot
 }
 
 /**
@@ -488,52 +467,55 @@ static_assert(sizeof(InnerNodeHeader) == 8, "InnerNodeHeader must be 8 bytes");
 
 /**
  * Sparse child offset array accessor
- * 
+ *
  * Provides efficient access to child offsets in a sparse array where only
  * non-empty children have offsets stored. Uses popcount for O(1) indexing.
- * 
- * This is specifically designed for our 16-branch merkle tree with 
+ *
+ * This is specifically designed for our 16-branch merkle tree with
  * 2-bits-per-branch encoding.
  */
 class SparseChildOffsets
 {
 private:
-    const uint8_t* base_;      // First offset location in memory
-    uint32_t child_types_;     // 2-bits-per-branch mask from header
-    
+    const uint8_t* base_;   // First offset location in memory
+    uint32_t child_types_;  // 2-bits-per-branch mask from header
+
 public:
     SparseChildOffsets(const uint8_t* offset_base, uint32_t child_types)
         : base_(offset_base), child_types_(child_types)
     {
     }
-    
+
     /**
      * Check if a branch has a child
      */
-    [[nodiscard]] bool has_child(int branch) const
+    [[nodiscard]] bool
+    has_child(int branch) const
     {
         assert(branch >= 0 && branch < 16);
         return ((child_types_ >> (branch * 2)) & 0x3) != 0;
     }
-    
+
     /**
      * Get the child type for a branch
      */
-    [[nodiscard]] ChildType get_child_type(int branch) const
+    [[nodiscard]] ChildType
+    get_child_type(int branch) const
     {
         assert(branch >= 0 && branch < 16);
         return static_cast<ChildType>((child_types_ >> (branch * 2)) & 0x3);
     }
-    
+
     /**
      * Get the sparse array index for a branch
      * Returns -1 if the branch has no child
      */
-    [[nodiscard]] int get_sparse_index(int branch) const
+    [[nodiscard]] int
+    get_sparse_index(int branch) const
     {
         if (!has_child(branch))
             return -1;
-        
+
         // Count non-empty children before this branch
         uint32_t mask = 0;
         for (int i = 0; i < branch; ++i)
@@ -545,44 +527,41 @@ public:
         }
         return catl::core::popcount(mask);
     }
-    
+
     /**
      * Get a MemPtr to the offset slot for a branch
      * Returns null MemPtr if branch has no child
      */
-    [[nodiscard]] MemPtr<rel_off_t> get_offset_ptr(int branch) const
+    [[nodiscard]] MemPtr<rel_off_t>
+    get_offset_ptr(int branch) const
     {
         int index = get_sparse_index(branch);
         if (index < 0)
             return MemPtr<rel_off_t>();
-        
+
         return MemPtr<rel_off_t>(base_ + index * sizeof(rel_off_t));
     }
-    
+
     /**
      * Get the absolute child pointer for a branch
      * Returns nullptr if branch has no child
      */
-    [[nodiscard]] const uint8_t* get_child_ptr(int branch) const
+    [[nodiscard]] const uint8_t*
+    get_child_ptr(int branch) const
     {
         int index = get_sparse_index(branch);
         if (index < 0)
             return nullptr;
-        
-        // Get pointer to this offset slot
-        const uint8_t* slot_ptr = base_ + index * sizeof(rel_off_t);
-        
-        // Load the relative offset
-        rel_off_t rel = load_rel(base_, index);
-        
-        // Convert to absolute: child = slot + rel
-        return slot_ptr + rel;
+
+        // Resolve self-relative offset to get child pointer
+        return resolve_self_relative(base_, index);
     }
-    
+
     /**
      * Count total non-empty children
      */
-    [[nodiscard]] int count_children() const
+    [[nodiscard]] int
+    count_children() const
     {
         int count = 0;
         for (int i = 0; i < 16; ++i)
@@ -605,29 +584,29 @@ public:
  */
 struct ChildIterator
 {
-    MemPtr<InnerNodeHeader> header;   // Memory-mapped header pointer
-    const std::uint8_t* rel_base;     // Byte pointer to relative offset array
-    std::uint64_t offsets_file_base;  // File offset of the FIRST slot
-    uint32_t remaining_mask;          // Bitmask of remaining children to visit
-    int offset_index;                 // Current index in sparse offset array
+    MemPtr<InnerNodeHeader> header;     // Memory-mapped header pointer
+    const std::uint8_t* offsets_start;  // Byte pointer to relative offset array
+    uint32_t remaining_mask;  // Bitmask of remaining children to visit
+    int offset_index;         // Current index in sparse offset array
 
-    ChildIterator(
-        MemPtr<InnerNodeHeader> h,
-        const uint8_t* offset_data,
-        std::uint64_t offsets_file_base_)
+    // Static log partition getter for OLOGD support
+    static LogPartition& get_log_partition() {
+        return get_v2_structs_log_partition();
+    }
+
+    ChildIterator(MemPtr<InnerNodeHeader> h, const uint8_t* offset_data)
         : header(h)
-        , rel_base(offset_data)
-        , offsets_file_base(offsets_file_base_)
+        , offsets_start(offset_data)
         , remaining_mask(0)
         , offset_index(0)
     {
-        auto header_val = header.get();
+        // Build initial mask of non-empty children
+        const auto& header_val = header.get_uncopyable();
+        
         // Overlay not implemented in the reader path yet
         assert(
             header_val.overlay_mask == 0 &&
             "overlay not implemented in iterator");
-
-        // Build initial mask of non-empty children
         for (int i = 0; i < 16; ++i)
         {
             if (header_val.get_child_type(i) != ChildType::EMPTY)
@@ -641,7 +620,7 @@ struct ChildIterator
     {
         int branch;
         ChildType type;
-        std::uint64_t offset;
+        const uint8_t* ptr;  // Direct memory pointer to child
     };
 
     // Check if more children available
@@ -655,26 +634,56 @@ struct ChildIterator
     inline Child
     next()
     {
+        OLOGD("next() called: remaining_mask=0x", std::hex,
+              remaining_mask, std::dec, ", offset_index=", offset_index);
+
         // Find next set bit (next non-empty branch)
         int branch = catl::core::ctz(remaining_mask);  // Count trailing zeros
 
-        // Load relative offset safely (unaligned-friendly)
-        rel_off_t rel = load_rel(rel_base, offset_index);
+        OLOGD("  ctz returned branch=", branch);
 
-        // Calculate the file position of this slot
-        std::uint64_t slot = slot_from_index(offsets_file_base, offset_index);
+        // DEBUG
+        if (branch >= 16)
+        {
+            throw std::runtime_error(
+                "ChildIterator: Invalid branch " + std::to_string(branch) +
+                " from remaining_mask=0x" + std::to_string(remaining_mask));
+        }
 
-        auto header_val = header.get();
+        // Bounds check
+        if (offset_index >= 16)
+        {
+            throw std::runtime_error(
+                "ChildIterator offset_index out of bounds: " +
+                std::to_string(offset_index));
+        }
+
+        OLOGD("  About to call resolve_self_relative with offsets_start=",
+              static_cast<const void*>(offsets_start), ", offset_index=", offset_index);
+
+        // Resolve self-relative offset to get child pointer
+        const uint8_t* child_ptr =
+            resolve_self_relative(offsets_start, offset_index);
+        
+        OLOGD("  resolve_self_relative returned child_ptr=", static_cast<const void*>(child_ptr));
+
+        // Use get_type to ensure we get the right type (ref in unsafe, value in safe)
+        const auto& header_val = header.get_uncopyable();
+        
         Child child;
         child.branch = branch;
         child.type = header_val.get_child_type(branch);
-        // Convert relative to absolute: abs = slot + rel
-        child.offset = abs_from_rel(slot, rel);
+        child.ptr = child_ptr;
+        
+        OLOGD("  Created child struct: branch=", child.branch, 
+              ", type=", static_cast<int>(child.type),
+              ", ptr=", static_cast<const void*>(child.ptr));
 
         // Clear this bit from remaining mask
         remaining_mask &= ~(1u << branch);
         ++offset_index;
 
+        OLOGD("  About to return child");
         return child;
     }
 };
@@ -695,10 +704,10 @@ struct CatlV2Header
     std::uint32_t network_id = 0;  // Network ID (0=XRPL, 21337=Xahau)
     std::uint32_t endianness =
         0x01020304;  // Endianness marker (little=0x04030201, big=0x01020304)
-    std::uint64_t ledger_count = 0;         // Number of ledgers in file
-    std::uint64_t first_ledger_seq = 0;     // Sequence of first ledger
-    std::uint64_t last_ledger_seq = 0;      // Sequence of last ledger
-    std::uint64_t ledger_index_offset = 0;  // Offset to ledger index
+    std::uint64_t ledger_count = 0;      // Number of ledgers in file
+    std::uint64_t first_ledger_seq = 0;  // Sequence of first ledger
+    std::uint64_t last_ledger_seq = 0;   // Sequence of last ledger
+    abs_off_t ledger_index_offset = 0;   // Offset to ledger index
 };
 #pragma pack(pop)  // Restore default alignment
 static_assert(sizeof(CatlV2Header) == 48, "CatlV2Header must be 48 bytes");
@@ -721,15 +730,70 @@ get_host_endianness()
 #pragma pack(push, 1)  // Ensure consistent binary layout
 struct LedgerIndexEntry
 {
-    std::uint32_t sequence;           // Ledger sequence number
-    std::uint64_t header_offset;      // Offset to LedgerInfo
-    std::uint64_t state_tree_offset;  // Offset to state tree root
-    std::uint64_t tx_tree_offset;     // Offset to tx tree root (0 if none)
+    std::uint32_t sequence;       // Ledger sequence number
+    abs_off_t header_offset;      // Offset to LedgerInfo
+    abs_off_t state_tree_offset;  // Offset to state tree root
+    abs_off_t tx_tree_offset;     // Offset to tx tree root (0 if none)
 };
 #pragma pack(pop)  // Restore default alignment
 static_assert(
     sizeof(LedgerIndexEntry) == 28,
     "LedgerIndexEntry must be 28 bytes");
+
+/**
+ * View that wraps a LedgerIndexEntry and provides lazy pointer conversion
+ *
+ * This provides a clean interface that automatically converts file offsets
+ * to memory pointers on demand, avoiding the need to store converted pointers.
+ */
+class LedgerIndexEntryView
+{
+private:
+    const LedgerIndexEntry* entry_;
+    const uint8_t* file_base_;
+
+public:
+    LedgerIndexEntryView(
+        const LedgerIndexEntry* entry,
+        const uint8_t* file_base)
+        : entry_(entry), file_base_(file_base)
+    {
+    }
+
+    // Direct access to sequence number (no conversion needed)
+    [[nodiscard]] uint32_t
+    sequence() const
+    {
+        return entry_->sequence;
+    }
+
+    // Lazy conversions to pointers
+    [[nodiscard]] const uint8_t*
+    header_ptr() const
+    {
+        return file_base_ + entry_->header_offset;
+    }
+
+    [[nodiscard]] const uint8_t*
+    state_tree_ptr() const
+    {
+        return file_base_ + entry_->state_tree_offset;
+    }
+
+    [[nodiscard]] const uint8_t*
+    tx_tree_ptr() const
+    {
+        return entry_->tx_tree_offset ? file_base_ + entry_->tx_tree_offset
+                                      : nullptr;
+    }
+
+    // Check if transaction tree exists
+    [[nodiscard]] bool
+    has_tx_tree() const
+    {
+        return entry_->tx_tree_offset != 0;
+    }
+};
 
 /**
  * Tree size header written after each LedgerInfo
