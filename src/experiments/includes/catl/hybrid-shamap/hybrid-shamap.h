@@ -30,7 +30,7 @@ struct InnerNodeView
     get_child_iter() const
     {
         const auto* offsets_data =
-            header.raw() + sizeof(catl::v2::InnerNodeHeader);
+            header.offset(sizeof(catl::v2::InnerNodeHeader)).raw();
         // For the iterator, we need file offset - calculate from pointer
         // This is a bit hacky but avoids storing file_offset
         size_t offsets_file_base = reinterpret_cast<uintptr_t>(offsets_data);
@@ -82,9 +82,10 @@ struct InnerNodeView
         }
 
         // Get pointer to the slot where this offset is stored
-        const uint8_t* slot_ptr = header.raw() +
-            sizeof(catl::v2::InnerNodeHeader) +
-            offset_index * sizeof(catl::v2::rel_off_t);
+        const uint8_t* slot_ptr = header
+            .offset(sizeof(catl::v2::InnerNodeHeader) +
+                    offset_index * sizeof(catl::v2::rel_off_t))
+            .raw();
 
         // Read the relative offset (safely)
         catl::v2::rel_off_t rel;
@@ -194,15 +195,15 @@ public:
 
         const uint8_t* leaf_ptr = parent.get_child_ptr(branch);
 
-        // Load leaf header directly from pointer
-        const auto* leaf_header =
-            reinterpret_cast<const catl::v2::LeafHeader*>(leaf_ptr);
+        // Load leaf header using MemPtr  
+        catl::v2::MemPtr<catl::v2::LeafHeader> leaf_header_ptr(leaf_ptr);
+        const auto& leaf_header = leaf_header_ptr.get();  // Force ref binding
 
         return LeafView{
-            Key(leaf_header->key.data()),
+            Key(leaf_header.key.data()),  // Now safe - ref in UNSAFE mode!
             Slice(
-                leaf_ptr + sizeof(catl::v2::LeafHeader),
-                leaf_header->data_size())};
+                leaf_header_ptr.offset(sizeof(catl::v2::LeafHeader)).raw(),
+                leaf_header.data_size())};
     }
 
     /**
