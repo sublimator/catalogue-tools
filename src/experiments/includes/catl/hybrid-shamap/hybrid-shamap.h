@@ -87,6 +87,9 @@ struct InnerNodeView
         // The absolute pointer is just slot + relative!
         return slot_ptr + rel;
     }
+    
+    // Find first leaf using depth-first traversal
+    // This needs HybridReader to recurse, so it's better placed there
 };
 
 // Leaf view structure
@@ -196,6 +199,102 @@ public:
             Slice(
                 leaf_ptr + sizeof(catl::v2::LeafHeader),
                 leaf_header->data_size())};
+    }
+
+    /**
+     * Lookup a key in the state tree starting from a given inner node
+     * @param root The root node to start from
+     * @param key The key to search for
+     * @return LeafView if found
+     * @throws std::runtime_error if key not found
+     */
+    [[nodiscard]] LeafView
+    lookup_key(const InnerNodeView& root, const Key& key) const
+    {
+        InnerNodeView current = root;
+        int depth = root.header->get_depth();
+        
+        // Walk down the tree following the key nibbles
+        while (true)
+        {
+            // Extract the nibble from the key at current depth
+            int nibble_idx = depth;
+            if (nibble_idx >= 64)  // 32 bytes * 2 nibbles
+            {
+                throw std::runtime_error("Invalid tree depth");
+            }
+            
+            uint8_t byte = key.data()[nibble_idx / 2];
+            uint8_t nibble = (nibble_idx & 1) ? (byte & 0x0F) : (byte >> 4);
+            
+            // Check child type
+            auto child_type = current.get_child_type(nibble);
+            if (child_type == catl::v2::ChildType::EMPTY)
+            {
+                throw std::runtime_error("Key not found - no child at nibble " + 
+                                       std::to_string(nibble) + " at depth " + 
+                                       std::to_string(depth));
+            }
+            
+            if (child_type == catl::v2::ChildType::LEAF)
+            {
+                // Found a leaf, verify it's the right key
+                auto leaf = get_leaf_child(current, nibble);
+                if (std::memcmp(leaf.key.data(), key.data(), 32) == 0)
+                {
+                    return leaf;
+                }
+                throw std::runtime_error("Key mismatch at leaf");
+            }
+            
+            // It's an inner node, continue traversing
+            current = get_inner_child(current, nibble);
+            depth = current.header->get_depth();
+        }
+    }
+    
+    /**
+     * Lookup a key in the current state tree
+     * Convenience method that uses the current state root
+     */
+    [[nodiscard]] LeafView
+    lookup_key_in_state(const Key& key) const
+    {
+        return lookup_key(get_state_root(), key);
+    }
+    
+    /**
+     * Find the first leaf in depth-first order starting from given node
+     * @param node The inner node to start from
+     * @return LeafView of the first leaf found
+     * @throws std::runtime_error if no leaf found (malformed tree)
+     */
+    [[nodiscard]] LeafView
+    first_leaf_depth_first(const InnerNodeView& node) const
+    {
+        // Check each branch in order
+        for (int i = 0; i < 16; ++i)
+        {
+            auto child_type = node.get_child_type(i);
+            if (child_type == catl::v2::ChildType::EMPTY)
+            {
+                continue;  // Skip empty branches
+            }
+            
+            if (child_type == catl::v2::ChildType::LEAF)
+            {
+                // Found a leaf!
+                return get_leaf_child(node, i);
+            }
+            
+            // It's an inner node, recurse
+            auto inner_child = get_inner_child(node, i);
+            // Recursive call will throw if no leaf found in subtree
+            return first_leaf_depth_first(inner_child);
+        }
+        
+        // No children at all or all empty - malformed tree
+        throw std::runtime_error("No leaf found - malformed tree");
     }
 
     // Forward key methods

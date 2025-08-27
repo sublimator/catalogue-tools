@@ -9,6 +9,12 @@
 #include "catl/hybrid-shamap/hybrid-shamap.h"
 #include "catl/v2/catl-v2-reader.h"
 #include "catl/v2/catl-v2-structs.h"
+#include "catl/xdata/json-visitor.h"
+#include "catl/xdata/parser-context.h"
+#include "catl/xdata/parser.h"
+#include "catl/xdata/protocol.h"
+#include "../../../src/shamap/src/pretty-print-json.h"
+#include <boost/json.hpp>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -124,6 +130,52 @@ main(int argc, char* argv[])
         }
         std::cout << "Total populated children: " << populated_count
                   << std::endl;
+
+        // Find first available key to test with
+        std::cout << "\nFinding first leaf in tree:" << std::endl;
+        try
+        {
+            auto first_leaf = hybrid_reader.first_leaf_depth_first(root_view);
+            std::cout << "  Found first leaf with key: " << first_leaf.key.hex() << std::endl;
+            
+            // Now test lookup with the key we found
+            std::cout << "\nTesting key lookup:" << std::endl;
+            std::cout << "  Looking for key: " << first_leaf.key.hex() << std::endl;
+            
+            // Lookup the key using our simplified traversal
+            auto leaf = hybrid_reader.lookup_key_in_state(first_leaf.key);
+            std::cout << "  Found leaf!" << std::endl;
+            std::cout << "  Data size: " << leaf.data.size() << " bytes" << std::endl;
+            
+            // Parse and display as JSON
+            try
+            {
+                // Determine which protocol to use based on network ID
+                bool use_xrpl = (reader->header().network_id == 0);
+                auto protocol = use_xrpl ? catl::xdata::Protocol::load_embedded_xrpl_protocol() 
+                                         : catl::xdata::Protocol::load_embedded_xahau_protocol();
+                
+                catl::xdata::JsonVisitor visitor(protocol);
+                catl::xdata::ParserContext ctx(leaf.data);
+                catl::xdata::parse_with_visitor(ctx, protocol, visitor);
+                
+                boost::json::value json_result = visitor.get_result();
+                std::cout << "\nParsed object as JSON:" << std::endl;
+                pretty_print_json(std::cout, json_result);
+            }
+            catch (const std::exception& e)
+            {
+                std::cout << "Failed to parse as JSON: " << e.what() << std::endl;
+                std::cout << "Raw hex data: ";
+                std::string hex;
+                slice_hex(leaf.data, hex);
+                std::cout << hex << std::endl;
+            }
+        }
+        catch (const std::exception& e)
+        {
+            std::cout << "  Key lookup failed: " << e.what() << std::endl;
+        }
 
         std::cout << "\n[Hybrid SHAMap experiment completed successfully]"
                   << std::endl;
