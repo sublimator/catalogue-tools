@@ -15,7 +15,9 @@
 namespace catl::v2 {
 
 // Log partition for v2 structs debugging
-inline LogPartition& get_v2_structs_log_partition() {
+inline LogPartition&
+get_v2_structs_log_partition()
+{
     static LogPartition partition("v2-structs", LogLevel::NONE);
     return partition;
 }
@@ -28,6 +30,25 @@ using rel_off_t = std::int64_t;   // self-relative, signed 64-bit offsets
 
 static_assert(sizeof(abs_off_t) == 8, "abs_off_t must be 8 bytes");
 static_assert(sizeof(rel_off_t) == 8, "rel_off_t must be 8 bytes");
+
+/**
+ * Helper functions for self-relative offset conversion
+ * Used by: catl-v2-writer.h serialize_tree() method
+ *
+ * These convert between absolute file offsets (used during writing)
+ * and self-relative offsets (stored in the file format)
+ */
+inline abs_off_t
+slot_from_index(abs_off_t base_offset, size_t index)
+{
+    return base_offset + index * sizeof(rel_off_t);
+}
+
+inline rel_off_t
+rel_from_abs(abs_off_t target_offset, abs_off_t slot_offset)
+{
+    return static_cast<rel_off_t>(target_offset - slot_offset);
+}
 
 /**
  * MemPtr - A typed pointer wrapper for memory-mapped data
@@ -186,27 +207,38 @@ resolve_self_relative(const uint8_t* offsets_array, int index)
     assert(index >= 0);
     const uint8_t* slot =
         offsets_array + static_cast<std::size_t>(index) * sizeof(rel_off_t);
-    
+
     auto& log = get_v2_structs_log_partition();
-    if (log.should_log(LogLevel::DEBUG)) {
-        Logger::log(LogLevel::DEBUG, "[v2-structs] resolve_self_relative: index=", index, 
-                    ", offsets_array=", static_cast<const void*>(offsets_array),
-                    ", slot=", static_cast<const void*>(slot));
+    if (log.should_log(LogLevel::DEBUG))
+    {
+        Logger::log(
+            LogLevel::DEBUG,
+            "[v2-structs] resolve_self_relative: index=",
+            index,
+            ", offsets_array=",
+            static_cast<const void*>(offsets_array),
+            ", slot=",
+            static_cast<const void*>(slot));
     }
-    
+
     rel_off_t offset{};
     std::memcpy(&offset, slot, sizeof(offset));
-    
-    if (log.should_log(LogLevel::DEBUG)) {
+
+    if (log.should_log(LogLevel::DEBUG))
+    {
         Logger::log(LogLevel::DEBUG, "[v2-structs]   loaded offset=", offset);
     }
-    
+
     const uint8_t* result = slot + offset;
-    
-    if (log.should_log(LogLevel::DEBUG)) {
-        Logger::log(LogLevel::DEBUG, "[v2-structs]   result ptr=", static_cast<const void*>(result));
+
+    if (log.should_log(LogLevel::DEBUG))
+    {
+        Logger::log(
+            LogLevel::DEBUG,
+            "[v2-structs]   result ptr=",
+            static_cast<const void*>(result));
     }
-    
+
     return slot + offset;  // Self-relative: slot + offset_from_slot
 }
 
@@ -316,18 +348,22 @@ load_pod(const uint8_t* base, size_t offset, size_t file_size)
  *     - tx_tree_size                // 8 bytes
  *
  *   [State Tree]
- *     [InnerNodeHeader]             // 6 bytes
- *       - depth                     // 2 bytes (6 bits used)
+ *     [InnerNodeHeader]             // 40 bytes
  *       - child_types               // 4 bytes (2 bits × 16 children)
- *     [Child Offsets]               // rel_off_t (8 bytes) × N non-empty
+ *       - depth                     // 2 bytes (6 bits used)
+ *       - overlay_mask              // 2 bytes
+ *       - hash                      // 32 bytes (perma-cached, first 256 bits
+ * of SHA512) [Child Offsets]               // rel_off_t (8 bytes) × N non-empty
  * children
  *                                   // Each entry is self-relative to its own
  * slot:
  *                                   // abs_child = slot_file_offset + rel_off
  *     ... (depth-first traversal)
  *
- *     [LeafHeader]                  // 36 bytes
+ *     [LeafHeader]                  // 68 bytes
  *       - key                       // 32 bytes
+ *       - hash                      // 32 bytes (perma-cached, first 256 bits
+ * of SHA512)
  *       - size_and_flags            // 4 bytes
  *         - bits 0-23: data size
  *         - bits 24-27: compression type
@@ -373,14 +409,15 @@ enum class ChildType : std::uint8_t {
 };
 
 /**
- * Compact inner node header
- * Total size: 8 bytes
+ * Compact inner node header with embedded perma-cached hash
+ * Total size: 40 bytes
  *
  * Field ordering is important to avoid padding:
  *   child_types (4 bytes) at offset 0
  *   depth_plus (2 bytes) at offset 4 - bits 0-5: depth, bits 6-15: reserved
  *   overlay_mask (2 bytes) at offset 6
- * Total: 8 bytes with no padding
+ *   hash (32 bytes) at offset 8 - perma-cached hash (first 256 bits of SHA512)
+ * Total: 40 bytes with no padding
  */
 #pragma pack(push, 1)  // Ensure no padding between fields
 struct InnerNodeHeader
@@ -392,7 +429,7 @@ struct InnerNodeHeader
                        // 0 => no overlay (current experimental format)
                        //
                        // Future overlay layout when overlay_mask != 0:
-                       //   [InnerNodeHeader (8 bytes)]
+                       //   [InnerNodeHeader (40 bytes)]
                        //   [rel_off_t base_rel]
                        //   [rel_off_t × popcount(overlay_mask) for changed
                        //   branches
@@ -402,6 +439,8 @@ struct InnerNodeHeader
                        // node. For branch b:
                        //   if (overlay_mask bit b) use the next overlay entry,
                        //   else resolve from base_rel's inner.
+    std::array<std::uint8_t, 32>
+        hash;  // Perma-cached hash: first 256 bits of SHA512 (offset 8)
 
     // Portable depth accessors (bits 0-5 of depth_plus)
     inline std::uint8_t
@@ -461,9 +500,18 @@ struct InnerNodeHeader
         }
         return count;
     }
+
+    // Get perma-cached hash as Slice (zero-copy, read-only from mmap)
+    Slice
+    get_hash() const
+    {
+        return Slice(hash.data(), 32);
+    }
 };
 #pragma pack(pop)  // Restore default alignment
-static_assert(sizeof(InnerNodeHeader) == 8, "InnerNodeHeader must be 8 bytes");
+static_assert(
+    sizeof(InnerNodeHeader) == 40,
+    "InnerNodeHeader must be 40 bytes");
 
 /**
  * Sparse child offset array accessor
@@ -590,7 +638,9 @@ struct ChildIterator
     int offset_index;         // Current index in sparse offset array
 
     // Static log partition getter for OLOGD support
-    static LogPartition& get_log_partition() {
+    static LogPartition&
+    get_log_partition()
+    {
         return get_v2_structs_log_partition();
     }
 
@@ -602,7 +652,7 @@ struct ChildIterator
     {
         // Build initial mask of non-empty children
         const auto& header_val = header.get_uncopyable();
-        
+
         // Overlay not implemented in the reader path yet
         assert(
             header_val.overlay_mask == 0 &&
@@ -634,8 +684,13 @@ struct ChildIterator
     inline Child
     next()
     {
-        OLOGD("next() called: remaining_mask=0x", std::hex,
-              remaining_mask, std::dec, ", offset_index=", offset_index);
+        OLOGD(
+            "next() called: remaining_mask=0x",
+            std::hex,
+            remaining_mask,
+            std::dec,
+            ", offset_index=",
+            offset_index);
 
         // Find next set bit (next non-empty branch)
         int branch = catl::core::ctz(remaining_mask);  // Count trailing zeros
@@ -658,26 +713,36 @@ struct ChildIterator
                 std::to_string(offset_index));
         }
 
-        OLOGD("  About to call resolve_self_relative with offsets_start=",
-              static_cast<const void*>(offsets_start), ", offset_index=", offset_index);
+        OLOGD(
+            "  About to call resolve_self_relative with offsets_start=",
+            static_cast<const void*>(offsets_start),
+            ", offset_index=",
+            offset_index);
 
         // Resolve self-relative offset to get child pointer
         const uint8_t* child_ptr =
             resolve_self_relative(offsets_start, offset_index);
-        
-        OLOGD("  resolve_self_relative returned child_ptr=", static_cast<const void*>(child_ptr));
 
-        // Use get_type to ensure we get the right type (ref in unsafe, value in safe)
+        OLOGD(
+            "  resolve_self_relative returned child_ptr=",
+            static_cast<const void*>(child_ptr));
+
+        // Use get_type to ensure we get the right type (ref in unsafe, value in
+        // safe)
         const auto& header_val = header.get_uncopyable();
-        
+
         Child child;
         child.branch = branch;
         child.type = header_val.get_child_type(branch);
         child.ptr = child_ptr;
-        
-        OLOGD("  Created child struct: branch=", child.branch, 
-              ", type=", static_cast<int>(child.type),
-              ", ptr=", static_cast<const void*>(child.ptr));
+
+        OLOGD(
+            "  Created child struct: branch=",
+            child.branch,
+            ", type=",
+            static_cast<int>(child.type),
+            ", ptr=",
+            static_cast<const void*>(child.ptr));
 
         // Clear this bit from remaining mask
         remaining_mask &= ~(1u << branch);
@@ -818,17 +883,28 @@ enum class CompressionType : std::uint8_t {
 };
 
 /**
- * Unified leaf header for all leaf nodes
- * Total size: 36 bytes (32 + 4, packed)
+ * Unified leaf header with perma-cached hash
+ * Total size: 68 bytes (32 key + 32 hash + 4 flags, packed)
+ *
+ * Why we need the perma-cached hash:
+ * - Without it, computing merkle hashes requires traversing entire mmap'd
+ * subtrees
+ * - This defeats lazy loading - you'd materialize the whole tree just for
+ * hashing
+ * - With perma-cached hashes: instant O(1) hash access for any node
+ * - Enables efficient merkle proofs and incremental updates
+ * - After one-time bulk verification, these hashes are trusted forever
  */
 #pragma pack(push, 1)  // Ensure consistent binary layout
 struct LeafHeader
 {
     std::array<std::uint8_t, 32> key;  // 32 bytes
-    std::uint32_t size_and_flags;      // 4 bytes packed:
-                                       // Bits 0-23: data size (up to 16MB)
-                                       // Bits 24-27: compression type
-                                       // Bits 28-31: reserved
+    std::array<std::uint8_t, 32>
+        hash;  // 32 bytes - perma-cached hash (first 256 bits of SHA512)
+    std::uint32_t size_and_flags;  // 4 bytes packed:
+                                   // Bits 0-23: data size (up to 16MB)
+                                   // Bits 24-27: compression type
+                                   // Bits 28-31: reserved
 
     // Helper methods
     CompressionType
@@ -865,9 +941,16 @@ struct LeafHeader
         }
         size_and_flags = (size_and_flags & 0xFF000000) | size;
     }
+
+    // Get perma-cached hash as Slice (zero-copy, read-only from mmap)
+    Slice
+    get_hash() const
+    {
+        return Slice(hash.data(), 32);
+    }
 };
 #pragma pack(pop)  // Restore default alignment
-static_assert(sizeof(LeafHeader) == 36, "LeafHeader must be 36 bytes");
+static_assert(sizeof(LeafHeader) == 68, "LeafHeader must be 68 bytes");
 
 /**
  * Build child types bitmap from a SHAMapInnerNodeS
@@ -951,7 +1034,9 @@ static_assert(
 static_assert(
     std::is_standard_layout_v<InnerNodeHeader>,
     "InnerNodeHeader must be standard layout");
-static_assert(sizeof(InnerNodeHeader) == 8, "InnerNodeHeader must be 8 bytes");
+static_assert(
+    sizeof(InnerNodeHeader) == 40,
+    "InnerNodeHeader must be 40 bytes");
 static_assert(alignof(InnerNodeHeader) == 1, "InnerNodeHeader must be packed");
 static_assert(
     offsetof(InnerNodeHeader, child_types) == 0,
@@ -962,6 +1047,7 @@ static_assert(
 static_assert(
     offsetof(InnerNodeHeader, overlay_mask) == 6,
     "overlay_mask at offset 6");
+static_assert(offsetof(InnerNodeHeader, hash) == 8, "hash at offset 8");
 
 // LeafHeader layout guarantees
 static_assert(
@@ -970,12 +1056,13 @@ static_assert(
 static_assert(
     std::is_standard_layout_v<LeafHeader>,
     "LeafHeader must be standard layout");
-static_assert(sizeof(LeafHeader) == 36, "LeafHeader must be 36 bytes");
+static_assert(sizeof(LeafHeader) == 68, "LeafHeader must be 68 bytes");
 static_assert(alignof(LeafHeader) == 1, "LeafHeader must be packed");
 static_assert(offsetof(LeafHeader, key) == 0, "key at offset 0");
+static_assert(offsetof(LeafHeader, hash) == 32, "hash at offset 32");
 static_assert(
-    offsetof(LeafHeader, size_and_flags) == 32,
-    "size_and_flags at offset 32");
+    offsetof(LeafHeader, size_and_flags) == 64,
+    "size_and_flags at offset 64");
 
 // LedgerIndexEntry layout guarantees
 static_assert(
