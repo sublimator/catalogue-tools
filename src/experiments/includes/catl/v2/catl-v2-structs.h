@@ -69,31 +69,37 @@ public:
     /**
      * Get the value pointed to, safely handling alignment.
      *
-     * Returns a VALUE (not pointer) - use in function scope on stack.
-     * In CATL_UNSAFE_POD_LOADS mode: direct reinterpret_cast + dereference
-     * In safe mode: memcpy to ensure alignment safety
+     * In CATL_UNSAFE_POD_LOADS mode: returns const reference (zero-copy!)
+     * In safe mode: returns by value (copy for alignment safety)
      *
-     * The compiler often optimizes away the copy in unsafe mode.
-     * This ensures code works identically in both modes.
+     * This allows zero-copy access in unsafe mode while maintaining
+     * safety in portable mode.
      *
-     * @return Copy of the pointed-to object (stack value)
+     * @return Reference (unsafe mode) or copy (safe mode)
      */
+#ifdef CATL_UNSAFE_POD_LOADS
+    [[nodiscard]] const T&
+    get() const
+    {
+        static_assert(
+            std::is_trivially_copyable_v<T>, "T must be trivially copyable");
+        assert(ptr_ != nullptr);
+        // Fast path: direct cast, return reference (zero-copy!)
+        return *reinterpret_cast<const T*>(ptr_);
+    }
+#else
     [[nodiscard]] T
     get() const
     {
         static_assert(
             std::is_trivially_copyable_v<T>, "T must be trivially copyable");
         assert(ptr_ != nullptr);
-#ifdef CATL_UNSAFE_POD_LOADS
-        // Fast path: direct cast (platform-specific, may be unsafe)
-        return *reinterpret_cast<const T*>(ptr_);
-#else
         // Safe path: memcpy (portable, compiler optimizes for small types)
         T out;
         std::memcpy(&out, ptr_, sizeof(T));
         return out;
-#endif
     }
+#endif
 
     /**
      * Get the raw byte pointer
