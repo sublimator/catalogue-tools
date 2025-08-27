@@ -36,6 +36,8 @@ get_level_string(const LogLevel& level)
             return "DEBUG";
         case LogLevel::NONE:
             return "NONE";
+        case LogLevel::INHERIT:
+            return "INHERIT";
         default:
             throw std::runtime_error("Invalid log level");
     }
