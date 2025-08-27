@@ -242,10 +242,26 @@ load_rel(const uint8_t* base, int index)
  * @param base Base pointer to the memory-mapped data
  * @param offset Byte offset from base
  * @param file_size Total size of the memory-mapped file (for bounds checking)
- * @return Copy of the object at the specified location
+ * @return Reference (UNSAFE mode) or copy (safe mode) of the object
  * @throws std::runtime_error if reading past end of file
  */
 template <typename T>
+#ifdef CATL_UNSAFE_POD_LOADS
+inline const T&
+load_pod(const uint8_t* base, size_t offset, size_t file_size)
+{
+    static_assert(
+        std::is_trivially_copyable_v<T>, "T must be trivially copyable");
+
+    if (offset + sizeof(T) > file_size)
+    {
+        throw std::runtime_error("read past end of file");
+    }
+
+    // Fast path: direct cast, return reference (zero-copy!)
+    return *reinterpret_cast<const T*>(base + offset);
+}
+#else
 inline T
 load_pod(const uint8_t* base, size_t offset, size_t file_size)
 {
@@ -257,16 +273,12 @@ load_pod(const uint8_t* base, size_t offset, size_t file_size)
         throw std::runtime_error("read past end of file");
     }
 
-#ifdef CATL_UNSAFE_POD_LOADS
-    // Fast path: direct cast (platform-specific, may be unsafe)
-    return *reinterpret_cast<const T*>(base + offset);
-#else
     // Safe path: memcpy (portable, compiler optimizes for small types)
     T out;
     std::memcpy(&out, base + offset, sizeof(T));
     return out;
-#endif
 }
+#endif
 
 /**
  * CATL v2 File Format Layout

@@ -927,7 +927,7 @@ private:
                             "Inner node header exceeds file bounds");
                     }
 
-                    auto inner_header = load_pod<InnerNodeHeader>(
+                    const auto& inner_header = load_pod<InnerNodeHeader>(
                         data_, entry.node_offset, file_size_);
                     LOGD(
                         "Processing inner node at offset ",
@@ -998,7 +998,7 @@ private:
                     int branch = __builtin_ctz(entry.remaining_children_mask);
 
                     // Get inner header again
-                    auto inner_header = load_pod<InnerNodeHeader>(
+                    const auto& inner_header = load_pod<InnerNodeHeader>(
                         data_, entry.node_offset, file_size_);
                     ChildType child_type = inner_header.get_child_type(branch);
 
@@ -1252,7 +1252,7 @@ private:
                                 "Leaf header exceeds file bounds");
                         }
 
-                        auto leaf_header = load_pod<LeafHeader>(
+                        const auto& leaf_header = load_pod<LeafHeader>(
                             data_, child.offset, file_size_);
                         Key leaf_key(leaf_header.key.data());
 
