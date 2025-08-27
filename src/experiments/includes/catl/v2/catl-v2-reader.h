@@ -676,7 +676,7 @@ private:
 
                 // Use iterator to find the specific child
                 size_t offsets_start = node_offset + sizeof(InnerNodeHeader);
-                MapPtr<InnerNodeHeader> header_ptr(data_ + node_offset);
+                MemPtr<InnerNodeHeader> header_ptr(data_ + node_offset);
                 ChildIterator child_iter(
                     header_ptr, data_ + offsets_start, offsets_start);
 

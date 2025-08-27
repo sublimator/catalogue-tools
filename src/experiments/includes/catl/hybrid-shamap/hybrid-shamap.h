@@ -22,7 +22,7 @@ class HybridReader;
  */
 struct InnerNodeView
 {
-    catl::v2::MapPtr<catl::v2::InnerNodeHeader>
+    catl::v2::MemPtr<catl::v2::InnerNodeHeader>
         header;  // Points directly into mmap
 
     // Get a child iterator on demand
@@ -34,7 +34,7 @@ struct InnerNodeView
         // For the iterator, we need file offset - calculate from pointer
         // This is a bit hacky but avoids storing file_offset
         size_t offsets_file_base = reinterpret_cast<uintptr_t>(offsets_data);
-        // Pass MapPtr to iterator
+        // Pass MemPtr to iterator
         return {header, offsets_data, offsets_file_base};
     }
 
@@ -126,8 +126,8 @@ public:
     [[nodiscard]] InnerNodeView
     get_inner_node_at(size_t offset) const
     {
-        // Create MapPtr to the header in mmap (no copy)
-        catl::v2::MapPtr<catl::v2::InnerNodeHeader> header(
+        // Create MemPtr to the header in mmap (no copy)
+        catl::v2::MemPtr<catl::v2::InnerNodeHeader> header(
             reader_->data_at(offset));
         return InnerNodeView{header};
     }
@@ -138,7 +138,7 @@ public:
     [[nodiscard]] InnerNodeView
     get_inner_node(const uint8_t* ptr) const
     {
-        catl::v2::MapPtr<catl::v2::InnerNodeHeader> header(ptr);
+        catl::v2::MemPtr<catl::v2::InnerNodeHeader> header(ptr);
         return InnerNodeView{header};
     }
 
