@@ -21,6 +21,129 @@ using rel_off_t = std::int64_t;  // self-relative, signed 64-bit offsets
 static_assert(sizeof(rel_off_t) == 8, "rel_off_t must be 8 bytes");
 
 /**
+ * MapPtr - A typed pointer wrapper for memory-mapped data
+ *
+ * This class provides a thin (8-byte) wrapper around pointers into mmap'd
+ * memory. It documents ownership semantics (the data is owned by the mapped
+ * file) and provides safe/unsafe access patterns based on compile-time
+ * configuration.
+ *
+ * Key design principles:
+ * - Same size as a raw pointer (8 bytes)
+ * - get() returns a VALUE (not pointer) for stack-based usage
+ * - Respects CATL_UNSAFE_POD_LOADS for performance vs portability
+ * - Makes memory-mapped pointer semantics explicit in the type system
+ *
+ * Usage:
+ *   MapPtr<InnerNodeHeader> header_ptr(mmap_data);
+ *   // ... pass header_ptr around (cheap, 8 bytes) ...
+ *   auto header = header_ptr.get();  // Get value on stack when needed
+ *   auto depth = header.get_depth(); // Use the value
+ */
+template <typename T>
+class MapPtr
+{
+private:
+    const uint8_t* ptr_;
+
+public:
+    // Constructors
+    explicit MapPtr(const uint8_t* p) : ptr_(p)
+    {
+    }
+    explicit MapPtr(const void* p) : ptr_(static_cast<const uint8_t*>(p))
+    {
+    }
+    MapPtr() : ptr_(nullptr)
+    {
+    }
+
+    // Copy and move semantics (trivial, it's just a pointer)
+    MapPtr(const MapPtr&) = default;
+    MapPtr&
+    operator=(const MapPtr&) = default;
+    MapPtr(MapPtr&&) = default;
+    MapPtr&
+    operator=(MapPtr&&) = default;
+
+    /**
+     * Get the value pointed to, safely handling alignment.
+     *
+     * Returns a VALUE (not pointer) - use in function scope on stack.
+     * In CATL_UNSAFE_POD_LOADS mode: direct reinterpret_cast + dereference
+     * In safe mode: memcpy to ensure alignment safety
+     *
+     * The compiler often optimizes away the copy in unsafe mode.
+     * This ensures code works identically in both modes.
+     *
+     * @return Copy of the pointed-to object (stack value)
+     */
+    T
+    get() const
+    {
+        static_assert(
+            std::is_trivially_copyable_v<T>, "T must be trivially copyable");
+        assert(ptr_ != nullptr);
+#ifdef CATL_UNSAFE_POD_LOADS
+        // Fast path: direct cast (platform-specific, may be unsafe)
+        return *reinterpret_cast<const T*>(ptr_);
+#else
+        // Safe path: memcpy (portable, compiler optimizes for small types)
+        T out;
+        std::memcpy(&out, ptr_, sizeof(T));
+        return out;
+#endif
+    }
+
+    /**
+     * Get the raw byte pointer
+     * Useful for pointer arithmetic or passing to functions that need uint8_t*
+     */
+    const uint8_t*
+    raw() const
+    {
+        return ptr_;
+    }
+
+    /**
+     * Check if the pointer is null
+     */
+    bool
+    is_null() const
+    {
+        return ptr_ == nullptr;
+    }
+    explicit operator bool() const
+    {
+        return ptr_ != nullptr;
+    }
+
+    /**
+     * Offset the pointer by a number of bytes
+     */
+    MapPtr<T>
+    offset(std::ptrdiff_t bytes) const
+    {
+        return MapPtr<T>(ptr_ + bytes);
+    }
+
+    /**
+     * Cast to a different type (for reinterpreting memory)
+     */
+    template <typename U>
+    MapPtr<U>
+    cast() const
+    {
+        return MapPtr<U>(ptr_);
+    }
+};
+
+// Ensure MapPtr is truly just a pointer (8 bytes on 64-bit systems)
+static_assert(
+    sizeof(MapPtr<int>) == sizeof(void*),
+    "MapPtr must be same size as a pointer");
+
+/**
  * Helper to convert relative offset to absolute offset
  * @param slot File position of the offset slot
  * @param rel Relative offset value
@@ -353,14 +476,14 @@ static_assert(sizeof(InnerNodeHeader) == 8, "InnerNodeHeader must be 8 bytes");
  */
 struct ChildIterator
 {
-    const InnerNodeHeader* header;
+    MapPtr<InnerNodeHeader> header;   // Memory-mapped header pointer
     const std::uint8_t* rel_base;     // Byte pointer to relative offset array
     std::uint64_t offsets_file_base;  // File offset of the FIRST slot
     uint32_t remaining_mask;          // Bitmask of remaining children to visit
     int offset_index;                 // Current index in sparse offset array
 
     ChildIterator(
-        const InnerNodeHeader* h,
+        MapPtr<InnerNodeHeader> h,
         const uint8_t* offset_data,
         std::uint64_t offsets_file_base_)
         : header(h)
@@ -369,13 +492,16 @@ struct ChildIterator
         , remaining_mask(0)
         , offset_index(0)
     {
+        auto header_val = header.get();
         // Overlay not implemented in the reader path yet
-        assert(h->overlay_mask == 0 && "overlay not implemented in iterator");
+        assert(
+            header_val.overlay_mask == 0 &&
+            "overlay not implemented in iterator");
 
         // Build initial mask of non-empty children
         for (int i = 0; i < 16; ++i)
         {
-            if (header->get_child_type(i) != ChildType::EMPTY)
+            if (header_val.get_child_type(i) != ChildType::EMPTY)
             {
                 remaining_mask |= (1u << i);
             }
@@ -409,9 +535,10 @@ struct ChildIterator
         // Calculate the file position of this slot
         std::uint64_t slot = slot_from_index(offsets_file_base, offset_index);
 
+        auto header_val = header.get();
         Child child;
         child.branch = branch;
-        child.type = header->get_child_type(branch);
+        child.type = header_val.get_child_type(branch);
         // Convert relative to absolute: abs = slot + rel
         child.offset = abs_from_rel(slot, rel);
 
