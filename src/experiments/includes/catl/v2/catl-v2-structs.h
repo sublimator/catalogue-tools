@@ -21,7 +21,7 @@ using rel_off_t = std::int64_t;  // self-relative, signed 64-bit offsets
 static_assert(sizeof(rel_off_t) == 8, "rel_off_t must be 8 bytes");
 
 /**
- * MapPtr - A typed pointer wrapper for memory-mapped data
+ * MemPtr - A typed pointer wrapper for memory-mapped data
  *
  * This class provides a thin (8-byte) wrapper around pointers into mmap'd
  * memory. It documents ownership semantics (the data is owned by the mapped
@@ -35,36 +35,36 @@ static_assert(sizeof(rel_off_t) == 8, "rel_off_t must be 8 bytes");
  * - Makes memory-mapped pointer semantics explicit in the type system
  *
  * Usage:
- *   MapPtr<InnerNodeHeader> header_ptr(mmap_data);
+ *   MemPtr<InnerNodeHeader> header_ptr(mmap_data);
  *   // ... pass header_ptr around (cheap, 8 bytes) ...
  *   auto header = header_ptr.get();  // Get value on stack when needed
  *   auto depth = header.get_depth(); // Use the value
  */
 template <typename T>
-class MapPtr
+class MemPtr
 {
 private:
     const uint8_t* ptr_;
 
 public:
     // Constructors
-    explicit MapPtr(const uint8_t* p) : ptr_(p)
+    explicit MemPtr(const uint8_t* p) : ptr_(p)
     {
     }
-    explicit MapPtr(const void* p) : ptr_(static_cast<const uint8_t*>(p))
+    explicit MemPtr(const void* p) : ptr_(static_cast<const uint8_t*>(p))
     {
     }
-    MapPtr() : ptr_(nullptr)
+    MemPtr() : ptr_(nullptr)
     {
     }
 
     // Copy and move semantics (trivial, it's just a pointer)
-    MapPtr(const MapPtr&) = default;
-    MapPtr&
-    operator=(const MapPtr&) = default;
-    MapPtr(MapPtr&&) = default;
-    MapPtr&
-    operator=(MapPtr&&) = default;
+    MemPtr(const MemPtr&) = default;
+    MemPtr&
+    operator=(const MemPtr&) = default;
+    MemPtr(MemPtr&&) = default;
+    MemPtr&
+    operator=(MemPtr&&) = default;
 
     /**
      * Get the value pointed to, safely handling alignment.
@@ -78,7 +78,7 @@ public:
      *
      * @return Copy of the pointed-to object (stack value)
      */
-    T
+    [[nodiscard]] T
     get() const
     {
         static_assert(
@@ -99,7 +99,7 @@ public:
      * Get the raw byte pointer
      * Useful for pointer arithmetic or passing to functions that need uint8_t*
      */
-    const uint8_t*
+    [[nodiscard]] const uint8_t*
     raw() const
     {
         return ptr_;
@@ -108,7 +108,7 @@ public:
     /**
      * Check if the pointer is null
      */
-    bool
+    [[nodiscard]] bool
     is_null() const
     {
         return ptr_ == nullptr;
@@ -121,27 +121,27 @@ public:
     /**
      * Offset the pointer by a number of bytes
      */
-    MapPtr<T>
+    [[nodiscard]] MemPtr<T>
     offset(std::ptrdiff_t bytes) const
     {
-        return MapPtr<T>(ptr_ + bytes);
+        return MemPtr<T>(ptr_ + bytes);
     }
 
     /**
      * Cast to a different type (for reinterpreting memory)
      */
     template <typename U>
-    MapPtr<U>
+    MemPtr<U>
     cast() const
     {
-        return MapPtr<U>(ptr_);
+        return MemPtr<U>(ptr_);
     }
 };
 
-// Ensure MapPtr is truly just a pointer (8 bytes on 64-bit systems)
+// Ensure MemPtr is truly just a pointer (8 bytes on 64-bit systems)
 static_assert(
-    sizeof(MapPtr<int>) == sizeof(void*),
-    "MapPtr must be same size as a pointer");
+    sizeof(MemPtr<int>) == sizeof(void*),
+    "MemPtr must be same size as a pointer");
 
 /**
  * Helper to convert relative offset to absolute offset
@@ -476,14 +476,14 @@ static_assert(sizeof(InnerNodeHeader) == 8, "InnerNodeHeader must be 8 bytes");
  */
 struct ChildIterator
 {
-    MapPtr<InnerNodeHeader> header;   // Memory-mapped header pointer
+    MemPtr<InnerNodeHeader> header;   // Memory-mapped header pointer
     const std::uint8_t* rel_base;     // Byte pointer to relative offset array
     std::uint64_t offsets_file_base;  // File offset of the FIRST slot
     uint32_t remaining_mask;          // Bitmask of remaining children to visit
     int offset_index;                 // Current index in sparse offset array
 
     ChildIterator(
-        MapPtr<InnerNodeHeader> h,
+        MemPtr<InnerNodeHeader> h,
         const uint8_t* offset_data,
         std::uint64_t offsets_file_base_)
         : header(h)
