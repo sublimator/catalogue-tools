@@ -558,6 +558,7 @@ main(int argc, char* argv[])
 
         size_t total_nodes = 0;
         size_t mmap_nodes = 0;
+        size_t materialized_nodes = 0;
         size_t inner_nodes = 0;
         size_t leaf_nodes = 0;
         size_t max_depth = 0;
@@ -569,6 +570,8 @@ main(int argc, char* argv[])
             total_nodes++;
             if (visit.is_mmap())
                 mmap_nodes++;
+            if (visit.is_materialized())
+                materialized_nodes++;
             if (visit.is_inner())
                 inner_nodes++;
             if (visit.is_leaf())
@@ -601,6 +604,7 @@ main(int argc, char* argv[])
         LOGI("  Inner nodes: ", inner_nodes);
         LOGI("  Leaf nodes: ", leaf_nodes);
         LOGI("  Mmap nodes: ", mmap_nodes);
+        LOGI("  Materialized nodes: ", materialized_nodes);
         LOGI("  Max depth: ", max_depth);
 
         // Count leaves only
@@ -800,8 +804,7 @@ main(int argc, char* argv[])
                 "...");
 
             // Find the path using pathfinder
-            catl::hybrid_shamap::HmapPathFinder pathfinder(
-                &hybrid_reader, key_info.key);
+            HmapPathFinder pathfinder(&hybrid_reader, key_info.key);
             pathfinder.find_path(hmap.get_root());
 
             // Check if we found the key (path will be empty if not found)
@@ -821,6 +824,12 @@ main(int argc, char* argv[])
 
             // Materialize the path
             pathfinder.materialize_path();
+
+            // Update the hmap root to the materialized root from the path
+            if (!path.empty())
+            {
+                hmap.set_root(path[0].first);  // First node in path is the root
+            }
 
             // Get the leaf node and verify its hash
             if (!path.empty() && path.back().first.is_leaf())
@@ -896,6 +905,31 @@ main(int argc, char* argv[])
         {
             LOGI("  🎉 All paths verified successfully with synthetic hashes!");
         }
+
+        // Count materialized nodes in the final tree
+        LOGI("\n=== Final Tree State ===");
+        size_t final_materialized = 0;
+        size_t final_mmap = 0;
+        size_t final_total = 0;
+
+        for (const auto& visit :
+             catl::hybrid_shamap::TreeWalker::walk_depth_first(hmap.get_root()))
+        {
+            final_total++;
+            if (visit.is_materialized())
+                final_materialized++;
+            if (visit.is_mmap())
+                final_mmap++;
+        }
+
+        LOGI("  Total nodes: ", final_total);
+        LOGI("  Materialized (heap) nodes: ", final_materialized);
+        LOGI("  Mmap nodes: ", final_mmap);
+        LOGI(
+            "  Materialization ratio: ",
+            final_materialized > 0 ? (100.0 * final_materialized / final_total)
+                                   : 0.0,
+            "%");
 
         LOGI("\n[Hybrid SHAMap experiment completed successfully]");
 
