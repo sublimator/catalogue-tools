@@ -25,6 +25,11 @@ static_assert(sizeof(rel_off_t) == 8, "rel_off_t must be 8 bytes");
  * @param slot File position of the offset slot
  * @param rel Relative offset value
  * @return Absolute file offset
+ *
+ * TODO: This is overcomplicated - when working with mmap'd memory,
+ * self-relative offsets work directly with pointer arithmetic:
+ *   uint8_t* absolute_ptr = slot_ptr + relative_offset;
+ * The abstraction to "file offsets" actually obscures the simplicity!
  */
 inline std::uint64_t
 abs_from_rel(std::uint64_t slot, rel_off_t rel)
@@ -44,6 +49,9 @@ abs_from_rel(std::uint64_t slot, rel_off_t rel)
  * @param abs Absolute file offset
  * @param slot File position of the offset slot
  * @return Relative offset value
+ *
+ * TODO: Similarly overcomplicated - with pointers it's just:
+ *   rel_off_t rel = target_ptr - slot_ptr;
  */
 inline rel_off_t
 rel_from_abs(std::uint64_t abs, std::uint64_t slot)
@@ -63,6 +71,10 @@ rel_from_abs(std::uint64_t abs, std::uint64_t slot)
  * @param base Base address of offset array
  * @param index Index of the slot (0-based)
  * @return File position of the slot
+ *
+ * TODO: When working with pointers, this is just:
+ *   uint8_t* slot_ptr = base_ptr + index * sizeof(rel_off_t);
+ * No need for the uint64_t abstraction!
  */
 inline std::uint64_t
 slot_from_index(std::uint64_t base, int index)
