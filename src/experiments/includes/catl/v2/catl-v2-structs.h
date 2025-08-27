@@ -3,9 +3,7 @@
 #include "catl/common/ledger-info.h"
 #include "catl/core/bit-utils.h"
 #include "catl/core/logger.h"
-#include "shamap-custom-traits.h"
 #include <array>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cassert>
 #include <cstdint>
 #include <cstring>  // for std::memcpy
@@ -405,7 +403,7 @@ enum class ChildType : std::uint8_t {
     EMPTY = 0,  // No child at this branch
     INNER = 1,  // Points to another inner node
     LEAF = 2,   // Points to a leaf node
-    RFU = 3     // Reserved for future use
+    RFU = 3     // Reserved for future use // TODO: rename placeholder
 };
 
 /**
@@ -951,39 +949,6 @@ struct LeafHeader
 };
 #pragma pack(pop)  // Restore default alignment
 static_assert(sizeof(LeafHeader) == 68, "LeafHeader must be 68 bytes");
-
-/**
- * Build child types bitmap from a SHAMapInnerNodeS
- */
-inline std::uint32_t
-build_child_types(const boost::intrusive_ptr<SHAMapInnerNodeS>& inner)
-{
-    std::uint32_t child_types = 0;
-
-    for (int i = 0; i < 16; ++i)
-    {
-        auto child = inner->get_child(i);
-        ChildType type;
-
-        if (!child)
-        {
-            type = ChildType::EMPTY;
-        }
-        else if (child->is_inner())
-        {
-            type = ChildType::INNER;
-        }
-        else
-        {
-            type = ChildType::LEAF;
-        }
-
-        // Set 2 bits for this branch
-        child_types |= (static_cast<std::uint32_t>(type) << (i * 2));
-    }
-
-    return child_types;
-}
 
 //----------------------------------------------------------
 // Wire Format Static Assertions

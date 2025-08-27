@@ -1,4 +1,6 @@
 #pragma once
+#include "catl/crypto/sha512-half-hasher.h"
+#include "catl/shamap/shamap-hashprefix.h"
 #include "catl/shamap/shamap-utils.h"
 #include "catl/v2/catl-v2-reader.h"
 #include "catl/v2/catl-v2-structs.h"
@@ -225,6 +227,13 @@ public:
         return type_ == catl::v2::ChildType::LEAF;
     }
 
+    [[nodiscard]] bool
+    is_placeholder() const
+    {
+        return type_ ==
+            catl::v2::ChildType::RFU;  // We're using RFU for placeholder
+    }
+
     // Equality (based on pointer only, not metadata)
     bool
     operator==(const PolyNodeRef& other) const
@@ -243,6 +252,19 @@ public:
     {
         return !is_empty();
     }
+
+    /**
+     * Copy hash to a buffer (works for all node types)
+     * @param dest Buffer to copy 32 bytes to
+     */
+    void
+    copy_hash_to(uint8_t* dest) const;
+
+    /**
+     * Get hash as Hash256 (involves a copy)
+     */
+    [[nodiscard]] Hash256
+    get_hash() const;
 };
 
 /**
@@ -347,8 +369,8 @@ public:
      * Get an inner node view from a pointer
      * Returns lightweight view with pointer into mmap data
      */
-    [[nodiscard]] InnerNodeView
-    get_inner_node(const uint8_t* ptr) const
+    [[nodiscard]] static InnerNodeView
+    get_inner_node(const uint8_t* ptr)
     {
         catl::v2::MemPtr<catl::v2::InnerNodeHeader> header(ptr);
         return InnerNodeView{header};
@@ -359,7 +381,7 @@ public:
      * (must be called after read_ledger_info)
      */
     [[nodiscard]] InnerNodeView
-    get_state_root() const
+    get_state_root() const  // TODO: just pass in ptr
     {
         return get_inner_node(reader_->current_data());
     }
@@ -367,8 +389,8 @@ public:
     /**
      * Get an inner child from a node view
      */
-    [[nodiscard]] InnerNodeView
-    get_inner_child(const InnerNodeView& parent, int branch) const
+    [[nodiscard]] static InnerNodeView
+    get_inner_child(const InnerNodeView& parent, int branch)
     {
         auto child_type = parent.get_child_type(branch);
         if (child_type != catl::v2::ChildType::INNER)
@@ -388,8 +410,8 @@ public:
     /**
      * Get a leaf child from a node view
      */
-    [[nodiscard]] LeafView
-    get_leaf_child(const InnerNodeView& parent, int branch) const
+    [[nodiscard]] static LeafView
+    get_leaf_child(const InnerNodeView& parent, int branch)
     {
         auto child_type = parent.get_child_type(branch);
         if (child_type != catl::v2::ChildType::LEAF)
@@ -425,8 +447,8 @@ public:
      * @return LeafView if found
      * @throws std::runtime_error if key not found
      */
-    [[nodiscard]] LeafView
-    lookup_key(const InnerNodeView& root, const Key& key) const
+    [[nodiscard]] static LeafView
+    lookup_key(const InnerNodeView& root, const Key& key)
     {
         InnerNodeView current = root;
         const auto& root_header = root.header.get_uncopyable();
@@ -490,8 +512,8 @@ public:
      * @return LeafView of the first leaf found
      * @throws std::runtime_error if no leaf found (malformed tree)
      */
-    [[nodiscard]] LeafView
-    first_leaf_depth_first(const InnerNodeView& node) const
+    [[nodiscard]] static LeafView
+    first_leaf_depth_first(const InnerNodeView& node)
     {
         // Check each branch in order
         for (int i = 0; i < 16; ++i)
@@ -544,12 +566,37 @@ class HMapNode
 private:
     mutable std::atomic<int> ref_count_{0};
 
+protected:
+    Hash256 hash_;
+    bool hash_valid_ = false;
+
 public:
     enum class Type : uint8_t { INNER, LEAF, PLACEHOLDER };
 
     virtual ~HMapNode() = default;
     virtual Type
     get_type() const = 0;
+
+    // Hash support
+    virtual void
+    update_hash() = 0;
+
+    const Hash256&
+    get_hash()
+    {
+        if (!hash_valid_)
+        {
+            update_hash();
+            hash_valid_ = true;
+        }
+        return hash_;
+    }
+
+    void
+    invalidate_hash()
+    {
+        hash_valid_ = false;
+    }
 
     // For debugging
     virtual std::string
@@ -585,8 +632,6 @@ private:
     uint16_t materialized_mask_ =
         0;  // 1 bit × 16 children (WHERE: mmap vs heap)
     uint8_t depth_ = 0;
-    Hash256 hash_;  // Cached hash (invalidated on modification)
-    bool hash_valid_ = false;
 
 public:
     HmapInnerNode() = default;
@@ -653,7 +698,7 @@ public:
             materialized_mask_ &= ~(1u << branch);
         }
 
-        hash_valid_ = false;  // Invalidate cached hash
+        invalidate_hash();  // Invalidate cached hash
     }
 
     // Overload for backward compatibility
@@ -695,6 +740,9 @@ public:
         return "InnerNode(depth=" + std::to_string(depth_) +
             ", children=" + std::to_string(count_children()) + ")";
     }
+
+    void
+    update_hash() override;
 };
 
 /**
@@ -705,8 +753,6 @@ class HmapLeafNode : public HMapNode
 private:
     Key key_;
     std::vector<uint8_t> data_;  // Owned copy of data
-    Hash256 hash_;               // Cached hash
-    bool hash_valid_ = false;
 
 public:
     HmapLeafNode(const Key& key, const Slice& data)
@@ -735,7 +781,7 @@ public:
     set_data(const Slice& data)
     {
         data_.assign(data.data(), data.data() + data.size());
-        hash_valid_ = false;
+        invalidate_hash();
     }
 
     std::string
@@ -744,6 +790,9 @@ public:
         return "LeafNode(key=" + key_.hex().substr(0, 8) +
             "..., size=" + std::to_string(data_.size()) + ")";
     }
+
+    void
+    update_hash() override;
 };
 
 /**
@@ -783,6 +832,13 @@ public:
     describe() const override
     {
         return "Placeholder(hash=" + hash_.hex().substr(0, 8) + "...)";
+    }
+
+    void
+    update_hash() override
+    {
+        // Placeholder already has its hash
+        // Do nothing - hash_ is already set
     }
 };
 
@@ -989,14 +1045,57 @@ public:
             {
                 std::cout << "branch " << branch << " -> ";
             }
+
+            // Print node info and hash
             if (node_ptr.is_raw_memory())
             {
                 std::cout << "RAW_MEMORY @ " << node_ptr.get_raw_ptr();
+
+                // Print hash from mmap header
+                const uint8_t* raw = node_ptr.get_raw_memory();
+                if (node_ptr.is_inner())
+                {
+                    catl::v2::MemPtr<catl::v2::InnerNodeHeader> header(raw);
+                    const auto& h = header.get_uncopyable();
+                    std::cout << " depth=" << (int)h.get_depth();
+                    std::cout << " hash=";
+                    for (int j = 0; j < 8; ++j)
+                    {  // First 8 bytes
+                        printf("%02x", h.hash[j]);
+                    }
+                    std::cout << "...";
+                }
+                else if (node_ptr.is_leaf())
+                {
+                    catl::v2::MemPtr<catl::v2::LeafHeader> header(raw);
+                    const auto& h = header.get_uncopyable();
+                    std::cout << " hash=";
+                    for (int j = 0; j < 8; ++j)
+                    {  // First 8 bytes
+                        printf("%02x", h.hash[j]);
+                    }
+                    std::cout << "...";
+                }
             }
             else
             {
                 auto* node = node_ptr.get_materialized();
                 std::cout << "MATERIALIZED " << node->describe();
+
+                // Print hash if valid
+                if (node->get_type() == HMapNode::Type::INNER)
+                {
+                    auto* inner = static_cast<HmapInnerNode*>(node);
+                    std::cout
+                        << " hash=" << node->get_hash().hex().substr(0, 16)
+                        << "...";
+                }
+                else if (node->get_type() == HMapNode::Type::LEAF)
+                {
+                    std::cout
+                        << " hash=" << node->get_hash().hex().substr(0, 16)
+                        << "...";
+                }
             }
             std::cout << "\n";
         }
@@ -1214,6 +1313,63 @@ PolyNodeRef::to_intrusive() const
 
     // Create intrusive_ptr which will increment ref count
     return boost::intrusive_ptr<HMapNode>(get_materialized());
+}
+
+inline void
+PolyNodeRef::copy_hash_to(uint8_t* dest) const
+{
+    if (is_empty())
+    {
+        // Zero hash for empty
+        std::memset(dest, 0, Hash256::size());
+        return;
+    }
+
+    if (is_materialized())
+    {
+        // Get hash from materialized node
+        auto* node = get_materialized();
+        const auto& hash = node->get_hash();
+        std::memcpy(dest, hash.data(), Hash256::size());
+    }
+    else
+    {
+        // Get perma-cached hash from mmap header
+        const uint8_t* raw = get_raw_memory();
+        if (is_inner())
+        {
+            catl::v2::MemPtr<catl::v2::InnerNodeHeader> header(raw);
+            const auto& h = header.get_uncopyable();
+            std::memcpy(dest, h.hash.data(), Hash256::size());
+        }
+        else if (is_leaf())
+        {
+            catl::v2::MemPtr<catl::v2::LeafHeader> header(raw);
+            const auto& h = header.get_uncopyable();
+            std::memcpy(dest, h.hash.data(), Hash256::size());
+        }
+        else if (is_placeholder())
+        {
+            // Placeholder should have its hash stored
+            auto* placeholder =
+                static_cast<HmapPlaceholder*>(get_materialized());
+            const auto& hash = placeholder->get_hash();
+            std::memcpy(dest, hash.data(), Hash256::size());
+        }
+        else
+        {
+            // Unknown type - zero hash
+            std::memset(dest, 0, Hash256::size());
+        }
+    }
+}
+
+inline Hash256
+PolyNodeRef::get_hash() const
+{
+    Hash256 result;
+    copy_hash_to(result.data());
+    return result;
 }
 
 }  // namespace catl::hybrid_shamap

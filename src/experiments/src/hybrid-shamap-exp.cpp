@@ -55,89 +55,6 @@ public:
     }
 };
 
-void
-test_tagged_ptr()
-{
-    LOGI("=== Testing TaggedPtr ===");
-
-    // Test 1: Default construction
-    LOGD("Test 1: Default construction");
-    catl::hybrid_shamap::PolyNodeRef tp1;
-    LOGI("  Default ptr is_empty: ", tp1.is_empty());
-    LOGI("  Default ptr raw: ", tp1.get_raw_ptr());
-
-    // Test 2: Create RAW_MEMORY pointer
-    LOGD("Test 2: RAW_MEMORY pointer");
-    const void* test_ptr = reinterpret_cast<const void*>(
-        0x105c66599);  // Use the branch 13 pointer
-    LOGI("  Test pointer: ", test_ptr);
-    LOGI(
-        "  Pointer & 0x7 (lower 3 bits): ",
-        (reinterpret_cast<uintptr_t>(test_ptr) & 0x7));
-    LOGI(
-        "  Is 8-byte aligned? ",
-        ((reinterpret_cast<uintptr_t>(test_ptr) & 0x7) == 0));
-    auto tp2 = catl::hybrid_shamap::PolyNodeRef::make_raw_memory(test_ptr);
-    LOGI("  RAW ptr is_raw_memory: ", tp2.is_raw_memory());
-    LOGI("  RAW ptr get_raw_ptr: ", tp2.get_raw_ptr());
-
-    // Test 3: Assignment to array element
-    LOGD("Test 3: Assignment to array elements");
-    std::array<catl::hybrid_shamap::PolyNodeRef, 16> test_array{};
-    LOGI("  Array[0] before assignment: ", test_array[0].get_raw_ptr());
-    test_array[0] = tp2;
-    LOGI("  Array[0] after assignment: ", test_array[0].get_raw_ptr());
-
-    // Test 4: Assignment to element 13 specifically
-    LOGD("Test 4: Assignment to element 13");
-    LOGI("  Array[13] before assignment: ", test_array[13].get_raw_ptr());
-    test_array[13] = tp2;
-    LOGI("  Array[13] after assignment: ", test_array[13].get_raw_ptr());
-
-    // Test 5: Multiple assignments
-    LOGD("Test 5: Assigning all 16 elements");
-    for (int i = 0; i < 16; i++)
-    {
-        auto ptr_val = reinterpret_cast<const void*>(0x100000000 + i * 0x1000);
-        auto tp = catl::hybrid_shamap::PolyNodeRef::make_raw_memory(ptr_val);
-        test_array[i] = tp;
-        LOGD("  Assigned ", ptr_val, " to index ", i);
-    }
-    LOGI("  All 16 assignments completed");
-
-    // Test 6: Test in a class similar to HmapInnerNode
-    LOGD("Test 6: Test in mock inner node");
-    struct MockInner
-    {
-        std::array<catl::hybrid_shamap::PolyNodeRef, 16> children_{};
-        uint32_t child_types_ = 0;
-
-        void
-        set_child(int branch, catl::hybrid_shamap::PolyNodeRef ptr)
-        {
-            LOGD(
-                "    MockInner::set_child(",
-                branch,
-                ", ",
-                ptr.get_raw_ptr(),
-                ")");
-            children_[branch] = ptr;
-            LOGD("    Assignment completed");
-        }
-    };
-
-    MockInner mock;
-    for (int i = 0; i < 16; i++)
-    {
-        auto ptr_val = reinterpret_cast<const void*>(0x100000000 + i * 0x1000);
-        auto tp = catl::hybrid_shamap::PolyNodeRef::make_raw_memory(ptr_val);
-        LOGD("  Setting child ", i);
-        mock.set_child(i, tp);
-    }
-
-    LOGI("=== TaggedPtr tests completed ===");
-}
-
 int
 main(int argc, char* argv[])
 {
@@ -573,6 +490,60 @@ main(int argc, char* argv[])
         LOGI(
             "Materialized nodes will be automatically deleted when path goes "
             "out of scope");
+
+        // Display first state entry and transaction for verification
+        LOGI("\n=== Testing Hash Computation ===\n");
+
+        // Create a small hybrid tree for testing
+        auto* root = new catl::hybrid_shamap::HmapInnerNode(0);  // depth 0
+        boost::intrusive_ptr<catl::hybrid_shamap::HMapNode> root_ptr(root);
+
+        // Add a leaf
+        std::array<uint8_t, 32> test_key_data{};
+        test_key_data[31] = 1;  // Key ending in 01
+        Key test_key(test_key_data.data());
+        std::vector<uint8_t> test_data = {1, 2, 3, 4, 5};
+        auto* leaf = new catl::hybrid_shamap::HmapLeafNode(
+            test_key, Slice(test_data.data(), test_data.size()));
+        boost::intrusive_ptr<catl::hybrid_shamap::HMapNode> leaf_ptr(leaf);
+
+        // Add leaf to root at branch 1 (last nibble of key)
+        root->set_child(
+            1,
+            catl::hybrid_shamap::PolyNodeRef::from_intrusive(leaf_ptr),
+            catl::v2::ChildType::LEAF);
+
+        // Compute hash
+        auto root_hash = root->get_hash();
+        LOGI("Hybrid root hash: ", root_hash.hex());
+
+        // Now test with mixed mmap and heap nodes
+        LOGI("\n=== Testing Mixed Mmap/Heap Tree ===\n");
+
+        // Set the mmap root as a child of our heap root
+        root->set_child(
+            0,
+            catl::hybrid_shamap::PolyNodeRef::make_raw_memory(
+                state_root_raw, catl::v2::ChildType::INNER),
+            catl::v2::ChildType::INNER);
+
+        // Invalidate and recompute hash
+        root->invalidate_hash();
+        auto mixed_hash = root->get_hash();
+        LOGI("Mixed tree root hash: ", mixed_hash.hex());
+
+        // Get the perma-cached hash from the mmap node for comparison
+        catl::v2::MemPtr<catl::v2::InnerNodeHeader> mmap_header(state_root_raw);
+        const auto& h = mmap_header.get_uncopyable();
+        LOGI("Mmap child's perma-cached hash: ");
+        std::string hash_str;
+        for (int i = 0; i < 32; ++i)
+        {
+            char buf[3];
+            snprintf(buf, sizeof(buf), "%02x", h.hash[i]);
+            hash_str += buf;
+        }
+        LOGI(hash_str);
 
         LOGI("[Hybrid SHAMap experiment completed successfully]");
 

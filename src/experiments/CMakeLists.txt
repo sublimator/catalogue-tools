@@ -20,7 +20,8 @@ set(SOURCES_ZSTD_EXPERIMENTS ${EXPERIMENTS_SRC_DIR}/zstd-experiments.cpp)
 
 # Define the hybrid-shamap-exp executable
 set(EXECUTABLE_HYBRID_SHAMAP_EXP hybrid-shamap-exp)
-set(SOURCES_HYBRID_SHAMAP_EXP ${EXPERIMENTS_SRC_DIR}/hybrid-shamap-exp.cpp)
+set(SOURCES_HYBRID_SHAMAP_EXP ${EXPERIMENTS_SRC_DIR}/hybrid-shamap-exp.cpp
+                              ${EXPERIMENTS_SRC_DIR}/hybrid-shamap-hash.cpp)
 
 # Create the executable
 add_executable(${EXECUTABLE_CATL1_TO_CATL2} ${SOURCES_CATL1_TO_CATL2})
@@ -54,6 +55,7 @@ target_include_directories(
           ${CMAKE_SOURCE_DIR}/src/shamap/includes
           ${CMAKE_SOURCE_DIR}/src/shamap/src)
 
+# Only precompile headers for catl1-to-catl2, not for other experiments
 target_precompile_headers(
   ${EXECUTABLE_CATL1_TO_CATL2} PRIVATE
   ${EXPERIMENTS_INCLUDE_DIR}/catl/v2/shamap-custom-traits.h)
