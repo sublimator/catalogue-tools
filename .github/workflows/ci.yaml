@@ -19,6 +19,7 @@ jobs:
         compiler: [gcc, clang]
         build_type: [Debug, Release]
         generator: [Ninja, Makefiles]
+        unsafe_pod_loads: [ON, OFF]
         include:
           - compiler: gcc
             cc: gcc-13
@@ -72,9 +73,9 @@ jobs:
         with:
           path: |
             ~/.conan2
-          key: ${{ runner.os }}-conan-${{env.CACHE_VERSION}}=${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
+          key: ${{ runner.os }}-conan-${{env.CACHE_VERSION}}=${{ matrix.compiler }}-${{ matrix.build_type }}-${{ matrix.unsafe_pod_loads }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
           restore-keys: |
-            ${{ runner.os }}-conan-${{env.CACHE_VERSION}}-${{ matrix.compiler }}-${{ matrix.build_type }}
+            ${{ runner.os }}-conan-${{env.CACHE_VERSION}}-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ matrix.unsafe_pod_loads }}
 
       - name: Configure Conan
         run: |
@@ -112,7 +113,7 @@ jobs:
         with:
           path: |
             ~/.conan2
-          key: ${{ runner.os }}-conan-${{env.CACHE_VERSION}}-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
+          key: ${{ runner.os }}-conan-${{env.CACHE_VERSION}}-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ matrix.unsafe_pod_loads }}-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
 
       - name: Configure CMake
         run: |
@@ -123,6 +124,7 @@ jobs:
               -DCMAKE_C_COMPILER=/usr/bin/${{ matrix.cc }} \
               -DCMAKE_CXX_COMPILER=/usr/bin/${{ matrix.cxx }} \
               -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake \
+              -DCATL_UNSAFE_POD_LOADS=${{ matrix.unsafe_pod_loads }} \
               ..
           else
             cmake -G "Unix Makefiles" \
@@ -130,6 +132,7 @@ jobs:
               -DCMAKE_C_COMPILER=/usr/bin/${{ matrix.cc }} \
               -DCMAKE_CXX_COMPILER=/usr/bin/${{ matrix.cxx }} \
               -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake \
+              -DCATL_UNSAFE_POD_LOADS=${{ matrix.unsafe_pod_loads }} \
               ..
           fi
 
