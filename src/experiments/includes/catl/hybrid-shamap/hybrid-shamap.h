@@ -639,6 +639,20 @@ public:
     {
     }
 
+    ~HmapInnerNode()
+    {
+        // Release references to all materialized children
+        for (int i = 0; i < 16; ++i)
+        {
+            if (is_child_materialized(i) && children_[i] != nullptr)
+            {
+                // Decrement reference count
+                auto* node = static_cast<HMapNode*>(children_[i]);
+                intrusive_ptr_release(node);
+            }
+        }
+    }
+
     Type
     get_type() const override
     {
@@ -680,8 +694,22 @@ public:
     {
         assert(branch >= 0 && branch < 16);
 
-        // Extract raw pointer
+        // Release old child if it was materialized
+        if (is_child_materialized(branch) && children_[branch] != nullptr)
+        {
+            auto* old_node = static_cast<HMapNode*>(children_[branch]);
+            intrusive_ptr_release(old_node);
+        }
+
+        // Extract raw pointer and store it
         children_[branch] = ref.get_raw_ptr();
+
+        // Add reference to new child if it's materialized
+        if (ref.is_materialized() && ref.get_raw_ptr() != nullptr)
+        {
+            auto* new_node = static_cast<HMapNode*>(ref.get_raw_ptr());
+            intrusive_ptr_add_ref(new_node);
+        }
 
         // Update child type
         uint32_t type_mask = ~(0x3u << (branch * 2));
@@ -1242,6 +1270,13 @@ public:
     get_root() const
     {
         return root_;
+    }
+
+    // Set the root to any PolyNodeRef
+    void
+    set_root(const PolyNodeRef& new_root)
+    {
+        root_ = new_root;
     }
 
     [[nodiscard]] std::shared_ptr<catl::v2::CatlV2Reader>
