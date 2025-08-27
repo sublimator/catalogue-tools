@@ -82,7 +82,7 @@ main(int argc, char* argv[])
         auto root_view = hybrid_reader.get_state_root();
 
         std::cout << "\nState Tree Root Node:" << std::endl;
-        std::cout << "  File offset: " << root_view.file_offset << std::endl;
+        std::cout << "  Header pointer: " << root_view.header << std::endl;
         std::cout << "  Depth: " << (int)root_view.header->get_depth()
                   << std::endl;
         std::cout << "  Child types: 0x" << std::hex
