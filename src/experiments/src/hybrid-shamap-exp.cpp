@@ -19,6 +19,39 @@
 #include <memory>
 #include <string>
 
+/**
+ * Helper class to convert LeafView data to JSON using appropriate protocol
+ */
+class LeafJsonConverter
+{
+private:
+    catl::xdata::Protocol protocol_;
+    
+public:
+    explicit LeafJsonConverter(uint32_t network_id)
+        : protocol_((network_id == 0) 
+            ? catl::xdata::Protocol::load_embedded_xrpl_protocol()
+            : catl::xdata::Protocol::load_embedded_xahau_protocol())
+    {
+    }
+    
+    [[nodiscard]] boost::json::value
+    to_json(const catl::hybrid_shamap::LeafView& leaf) const
+    {
+        catl::xdata::JsonVisitor visitor(protocol_);
+        catl::xdata::ParserContext ctx(leaf.data);
+        catl::xdata::parse_with_visitor(ctx, protocol_, visitor);
+        return visitor.get_result();
+    }
+    
+    void
+    pretty_print(std::ostream& os, const catl::hybrid_shamap::LeafView& leaf) const
+    {
+        auto json = to_json(leaf);
+        pretty_print_json(os, json);
+    }
+};
+
 int
 main(int argc, char* argv[])
 {
@@ -147,21 +180,14 @@ main(int argc, char* argv[])
             std::cout << "  Found leaf!" << std::endl;
             std::cout << "  Data size: " << leaf.data.size() << " bytes" << std::endl;
             
-            // Parse and display as JSON
+            // Parse and display as JSON using the converter
             try
             {
-                // Determine which protocol to use based on network ID
-                bool use_xrpl = (reader->header().network_id == 0);
-                auto protocol = use_xrpl ? catl::xdata::Protocol::load_embedded_xrpl_protocol() 
-                                         : catl::xdata::Protocol::load_embedded_xahau_protocol();
+                // Create converter with the appropriate protocol based on network ID
+                LeafJsonConverter converter(reader->header().network_id);
                 
-                catl::xdata::JsonVisitor visitor(protocol);
-                catl::xdata::ParserContext ctx(leaf.data);
-                catl::xdata::parse_with_visitor(ctx, protocol, visitor);
-                
-                boost::json::value json_result = visitor.get_result();
                 std::cout << "\nParsed object as JSON:" << std::endl;
-                pretty_print_json(std::cout, json_result);
+                converter.pretty_print(std::cout, leaf);
             }
             catch (const std::exception& e)
             {
