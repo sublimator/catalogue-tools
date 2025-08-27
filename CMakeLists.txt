@@ -25,6 +25,7 @@ find_package(GTest REQUIRED)
 find_package(libsodium REQUIRED)
 
 # Set C++ standard for all targets
+# Using C++20 since Apple Clang doesn't have full C++23 support yet (no std::generator)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF) # This is optional but recommended to ensure

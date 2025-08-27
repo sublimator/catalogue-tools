@@ -8,6 +8,7 @@
 #include "../../../src/shamap/src/pretty-print-json.h"
 #include "catl/core/logger.h"
 #include "catl/hybrid-shamap/hybrid-shamap.h"
+#include "catl/hybrid-shamap/tree-walker.h"
 #include "catl/v2/catl-v2-reader.h"
 #include "catl/v2/catl-v2-structs.h"
 #include "catl/xdata/json-visitor.h"
@@ -19,6 +20,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+
+using namespace catl::hybrid_shamap;
 
 /**
  * Helper class to convert LeafView data to JSON using appropriate protocol
@@ -38,7 +41,7 @@ public:
     }
 
     [[nodiscard]] boost::json::value
-    to_json(const catl::hybrid_shamap::LeafView& leaf) const
+    to_json(const LeafView& leaf) const
     {
         catl::xdata::JsonVisitor visitor(protocol_);
         catl::xdata::ParserContext ctx(leaf.data);
@@ -47,8 +50,7 @@ public:
     }
 
     void
-    pretty_print(std::ostream& os, const catl::hybrid_shamap::LeafView& leaf)
-        const
+    pretty_print(std::ostream& os, const LeafView& leaf) const
     {
         auto json = to_json(leaf);
         pretty_print_json(os, json);
@@ -61,8 +63,8 @@ main(int argc, char* argv[])
     // Set log level to DEBUG for maximum visibility
     Logger::set_level(LogLevel::DEBUG);
 
-    // Enable v2-structs partition for debugging
-    catl::v2::get_v2_structs_log_partition().set_level(LogLevel::DEBUG);
+    // Disable v2-structs partition logging
+    catl::v2::get_v2_structs_log_partition().set_level(LogLevel::NONE);
 
     if (argc != 2)
     {
@@ -545,7 +547,357 @@ main(int argc, char* argv[])
         }
         LOGI(hash_str);
 
-        LOGI("[Hybrid SHAMap experiment completed successfully]");
+        // Test the tree walker with C++23 generators
+        LOGI("\n=== Testing Tree Walker with Generators ===\n");
+
+        // Walk the mmap state tree and count nodes
+        auto state_root_ref = catl::hybrid_shamap::PolyNodeRef::make_raw_memory(
+            state_root_raw, catl::v2::ChildType::INNER);
+
+        LOGI("Walking the state tree depth-first...");
+
+        size_t total_nodes = 0;
+        size_t mmap_nodes = 0;
+        size_t inner_nodes = 0;
+        size_t leaf_nodes = 0;
+        size_t max_depth = 0;
+
+        // Use range-based for with our generator
+        for (const auto& visit :
+             catl::hybrid_shamap::TreeWalker::walk_depth_first(state_root_ref))
+        {
+            total_nodes++;
+            if (visit.is_mmap())
+                mmap_nodes++;
+            if (visit.is_inner())
+                inner_nodes++;
+            if (visit.is_leaf())
+                leaf_nodes++;
+            if (visit.depth > static_cast<int>(max_depth))
+                max_depth = visit.depth;
+
+            // Print first few nodes
+            if (total_nodes <= 5)
+            {
+                LOGI(
+                    "  Node ",
+                    total_nodes,
+                    ": depth=",
+                    visit.depth,
+                    ", branch=",
+                    visit.branch,
+                    ", type=",
+                    visit.is_leaf() ? "LEAF" : "INNER",
+                    ", storage=",
+                    visit.is_mmap() ? "MMAP" : "HEAP",
+                    ", hash=",
+                    visit.get_hash().hex().substr(0, 8),
+                    "...");
+            }
+        }
+
+        LOGI("\nTree Statistics:");
+        LOGI("  Total nodes: ", total_nodes);
+        LOGI("  Inner nodes: ", inner_nodes);
+        LOGI("  Leaf nodes: ", leaf_nodes);
+        LOGI("  Mmap nodes: ", mmap_nodes);
+        LOGI("  Max depth: ", max_depth);
+
+        // Count leaves only
+        LOGI("\nCounting leaves only...");
+        size_t leaf_count = 0;
+        for (const auto& visit :
+             catl::hybrid_shamap::TreeWalker::walk_leaves_only(state_root_ref))
+        {
+            leaf_count++;
+            if (leaf_count <= 3)
+            {
+                // Get the key if it's a leaf
+                if (visit.node.is_leaf())
+                {
+                    if (visit.node.is_raw_memory())
+                    {
+                        const uint8_t* raw = visit.node.get_raw_memory();
+                        catl::v2::MemPtr<catl::v2::LeafHeader> header(raw);
+                        const auto& h = header.get_uncopyable();
+                        Key key(h.key.data());
+                        LOGI(
+                            "  Leaf ",
+                            leaf_count,
+                            ": key=",
+                            key.hex().substr(0, 16),
+                            "...");
+                    }
+                }
+            }
+        }
+        LOGI("  Total leaves found: ", leaf_count);
+
+        // Test filtered walk - count nodes at specific depth
+        LOGI("\nCounting nodes at depth 3...");
+        auto depth3_nodes = catl::hybrid_shamap::TreeWalker::count_if(
+            state_root_ref, [](const auto& visit) { return visit.depth == 3; });
+        LOGI("  Nodes at depth 3: ", depth3_nodes);
+
+        // Collect keys where there's a depth skip (collapsed tree)
+        LOGI("\n=== Testing Collapsed Tree Hash Verification ===\n");
+        LOGI("Finding inner nodes with depth skips (collapsed tree)...");
+
+        struct InnerWithSkip
+        {
+            PolyNodeRef node;
+            int depth;
+            int parent_depth;
+            int skip_amount;
+        };
+
+        std::vector<InnerWithSkip> inners_with_skips;
+
+        // Walk tree and find inner nodes with depth skips
+        size_t inner_count = 0;
+        size_t checked_count = 0;
+        for (const auto& visit :
+             catl::hybrid_shamap::TreeWalker::walk_depth_first(state_root_ref))
+        {
+            if (visit.is_inner())
+            {
+                inner_count++;
+                if (inner_count <= 10)
+                {
+                    // Get the actual depth from the node header
+                    int actual_depth = -1;
+                    if (visit.node.is_raw_memory())
+                    {
+                        const uint8_t* raw = visit.node.get_raw_memory();
+                        InnerNodeView view = HybridReader::get_inner_node(raw);
+                        actual_depth = view.header.get_uncopyable().get_depth();
+                    }
+                    LOGD(
+                        "Inner node ",
+                        inner_count,
+                        ": traversal_depth=",
+                        visit.depth,
+                        ", actual_depth=",
+                        actual_depth,
+                        ", parent_depth=",
+                        visit.parent_depth,
+                        ", skip=",
+                        visit.depth_skip_amount());
+                }
+
+                if (visit.has_depth_skip())
+                {
+                    LOGI(
+                        "Found skip! depth=",
+                        visit.depth,
+                        ", parent_depth=",
+                        visit.parent_depth,
+                        ", skip amount=",
+                        visit.depth_skip_amount());
+                    inners_with_skips.push_back(
+                        {visit.node,
+                         visit.depth,
+                         visit.parent_depth,
+                         visit.depth_skip_amount()});
+
+                    if (inners_with_skips.size() >= 50)
+                    {
+                        break;
+                    }
+                }
+            }
+            checked_count++;
+        }
+        LOGI(
+            "Checked ",
+            checked_count,
+            " nodes, found ",
+            inner_count,
+            " inner nodes");
+
+        LOGI(
+            "Found ",
+            inners_with_skips.size(),
+            " inner nodes with depth skips");
+
+        // Now get first leaf from each of these inner nodes
+        struct KeyWithDepthInfo
+        {
+            Key key;
+            int leaf_depth;
+            int inner_depth;
+            int skip_amount;
+            Hash256 original_hash;
+        };
+
+        std::vector<KeyWithDepthInfo> keys_with_skips;
+
+        for (const auto& inner_info : inners_with_skips)
+        {
+            // Skip if not an mmap node
+            if (!inner_info.node.is_raw_memory())
+            {
+                continue;
+            }
+
+            // Get first leaf from this inner node
+            auto first_leaf = hybrid_reader.first_leaf_depth_first(
+                catl::hybrid_shamap::InnerNodeView{
+                    catl::v2::MemPtr<catl::v2::InnerNodeHeader>(
+                        inner_info.node.get_raw_memory())});
+
+            // Get the actual hash from the leaf
+            Hash256 leaf_hash;
+            // The first_leaf contains the raw leaf data, we need to get its
+            // hash Find the actual leaf node and get its hash
+            HmapPathFinder finder(&hybrid_reader, first_leaf.key);
+            finder.find_path(hmap.get_root());
+            const auto& path = finder.get_path();
+            if (!path.empty() && path.back().first.is_leaf())
+            {
+                leaf_hash = path.back().first.get_hash();
+            }
+
+            keys_with_skips.push_back(
+                {first_leaf.key,
+                 inner_info.depth + 1,  // Approximate leaf depth
+                 inner_info.depth,
+                 inner_info.skip_amount,
+                 leaf_hash});
+
+            if (keys_with_skips.size() >= 10)
+            {
+                break;
+            }
+        }
+
+        LOGI(
+            "Collected ",
+            keys_with_skips.size(),
+            " leaf keys from inner nodes with collapsed ancestors");
+
+        // Now let's materialize paths for a sample of these keys and verify
+        // hashes
+        LOGI("\nMaterializing and verifying paths for sampled keys...");
+
+        // Limit to first 10 for testing
+        size_t keys_to_test = std::min(size_t(10), keys_with_skips.size());
+        size_t verified_count = 0;
+        size_t mismatch_count = 0;
+
+        for (size_t i = 0; i < keys_to_test; ++i)
+        {
+            const auto& key_info = keys_with_skips[i];
+            LOGD(
+                "Testing key ",
+                i + 1,
+                ": ",
+                key_info.key.hex().substr(0, 16),
+                "...");
+            LOGD(
+                "  Original leaf hash: ",
+                key_info.original_hash.hex().substr(0, 16),
+                "...");
+
+            // Find the path using pathfinder
+            catl::hybrid_shamap::HmapPathFinder pathfinder(
+                &hybrid_reader, key_info.key);
+            pathfinder.find_path(hmap.get_root());
+
+            // Check if we found the key (path will be empty if not found)
+            const auto& path = pathfinder.get_path();
+            if (path.empty())
+            {
+                LOGW("  Key not found in tree!");
+                continue;
+            }
+
+            // Get original hash before materialization
+            Hash256 original_root_hash = hmap.get_root().get_hash();
+            LOGD(
+                "  Original root hash: ",
+                original_root_hash.hex().substr(0, 16),
+                "...");
+
+            // Materialize the path
+            pathfinder.materialize_path();
+
+            // Get the leaf node and verify its hash
+            if (!path.empty() && path.back().first.is_leaf())
+            {
+                Hash256 materialized_leaf_hash = path.back().first.get_hash();
+
+                if (materialized_leaf_hash == key_info.original_hash)
+                {
+                    LOGI(
+                        "  ✓ Leaf hash verified: ",
+                        materialized_leaf_hash.hex().substr(0, 16),
+                        "...");
+
+                    // Now check if root hash is preserved after materialization
+                    // This verifies that synthetic hashes for collapsed nodes
+                    // work correctly
+                    Hash256 new_root_hash = hmap.get_root().get_hash();
+
+                    if (new_root_hash == original_root_hash)
+                    {
+                        LOGI("  ✓ Root hash preserved after materialization!");
+                        verified_count++;
+                    }
+                    else
+                    {
+                        LOGE("  ✗ Root hash changed after materialization!");
+                        LOGE("    Original: ", original_root_hash.hex());
+                        LOGE("    New:      ", new_root_hash.hex());
+                        mismatch_count++;
+                    }
+                }
+                else
+                {
+                    LOGE("  ✗ Leaf hash mismatch!");
+                    LOGE("    Original: ", key_info.original_hash.hex());
+                    LOGE("    Materialized: ", materialized_leaf_hash.hex());
+                    mismatch_count++;
+                }
+
+                // Check for depth skips in the path
+                int actual_skips = 0;
+                for (size_t j = 1; j < path.size(); ++j)
+                {
+                    int depth_diff = path[j].second - path[j - 1].second;
+                    if (depth_diff > 1)
+                    {
+                        actual_skips += (depth_diff - 1);
+                        LOGD(
+                            "  Found depth skip of ",
+                            depth_diff - 1,
+                            " between depths ",
+                            path[j - 1].second,
+                            " and ",
+                            path[j].second);
+                    }
+                }
+                if (actual_skips > 0)
+                {
+                    LOGI(
+                        "  Total depth skips in path: ",
+                        actual_skips,
+                        " (collapsed inner nodes)");
+                }
+            }
+        }
+
+        LOGI("\nHash Verification Summary:");
+        LOGI("  Tested: ", keys_to_test, " keys");
+        LOGI("  Verified: ", verified_count, " paths");
+        LOGI("  Mismatches: ", mismatch_count, " paths");
+
+        if (mismatch_count == 0 && verified_count > 0)
+        {
+            LOGI("  🎉 All paths verified successfully with synthetic hashes!");
+        }
+
+        LOGI("\n[Hybrid SHAMap experiment completed successfully]");
 
         return 0;
     }

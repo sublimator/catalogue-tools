@@ -52,7 +52,8 @@ inline constexpr const char* BOLD_WHITE = "\033[1;37m";
          : __FILE__)
 
 enum class LogLevel {
-    NONE = -1,  // Special level to disable all logging
+    NONE = -2,     // Special level to disable all logging
+    INHERIT = -1,  // Special level for partitions to inherit global level
     ERROR = 0,
     WARNING = 1,
     INFO = 2,
@@ -132,6 +133,7 @@ public:
                 oss << "[DEBUG] ";
                 break;
             case LogLevel::NONE:
+            case LogLevel::INHERIT:
                 return;  // Should not happen due to shouldLog
         }
 
@@ -176,6 +178,7 @@ public:
                 oss << "[DEBUG] ";
                 break;
             case LogLevel::NONE:
+            case LogLevel::INHERIT:
                 return;  // Should not happen
         }
         oss << formatted;
@@ -253,7 +256,7 @@ log_with_partition_check(
 class LogPartition
 {
 public:
-    LogPartition(const std::string& name, LogLevel level = LogLevel::NONE)
+    LogPartition(const std::string& name, LogLevel level = LogLevel::INHERIT)
         : name_(name), level_(level)
     {
     }
@@ -267,7 +270,7 @@ public:
     LogLevel
     level() const
     {
-        return (level_ == LogLevel::NONE) ? Logger::get_level() : level_;
+        return (level_ == LogLevel::INHERIT) ? Logger::get_level() : level_;
     }
 
     void
