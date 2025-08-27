@@ -487,6 +487,116 @@ struct InnerNodeHeader
 static_assert(sizeof(InnerNodeHeader) == 8, "InnerNodeHeader must be 8 bytes");
 
 /**
+ * Sparse child offset array accessor
+ * 
+ * Provides efficient access to child offsets in a sparse array where only
+ * non-empty children have offsets stored. Uses popcount for O(1) indexing.
+ * 
+ * This is specifically designed for our 16-branch merkle tree with 
+ * 2-bits-per-branch encoding.
+ */
+class SparseChildOffsets
+{
+private:
+    const uint8_t* base_;      // First offset location in memory
+    uint32_t child_types_;     // 2-bits-per-branch mask from header
+    
+public:
+    SparseChildOffsets(const uint8_t* offset_base, uint32_t child_types)
+        : base_(offset_base), child_types_(child_types)
+    {
+    }
+    
+    /**
+     * Check if a branch has a child
+     */
+    [[nodiscard]] bool has_child(int branch) const
+    {
+        assert(branch >= 0 && branch < 16);
+        return ((child_types_ >> (branch * 2)) & 0x3) != 0;
+    }
+    
+    /**
+     * Get the child type for a branch
+     */
+    [[nodiscard]] ChildType get_child_type(int branch) const
+    {
+        assert(branch >= 0 && branch < 16);
+        return static_cast<ChildType>((child_types_ >> (branch * 2)) & 0x3);
+    }
+    
+    /**
+     * Get the sparse array index for a branch
+     * Returns -1 if the branch has no child
+     */
+    [[nodiscard]] int get_sparse_index(int branch) const
+    {
+        if (!has_child(branch))
+            return -1;
+        
+        // Count non-empty children before this branch
+        uint32_t mask = 0;
+        for (int i = 0; i < branch; ++i)
+        {
+            if (((child_types_ >> (i * 2)) & 0x3) != 0)
+            {
+                mask |= (1u << i);
+            }
+        }
+        return catl::core::popcount(mask);
+    }
+    
+    /**
+     * Get a MemPtr to the offset slot for a branch
+     * Returns null MemPtr if branch has no child
+     */
+    [[nodiscard]] MemPtr<rel_off_t> get_offset_ptr(int branch) const
+    {
+        int index = get_sparse_index(branch);
+        if (index < 0)
+            return MemPtr<rel_off_t>();
+        
+        return MemPtr<rel_off_t>(base_ + index * sizeof(rel_off_t));
+    }
+    
+    /**
+     * Get the absolute child pointer for a branch
+     * Returns nullptr if branch has no child
+     */
+    [[nodiscard]] const uint8_t* get_child_ptr(int branch) const
+    {
+        int index = get_sparse_index(branch);
+        if (index < 0)
+            return nullptr;
+        
+        // Get pointer to this offset slot
+        const uint8_t* slot_ptr = base_ + index * sizeof(rel_off_t);
+        
+        // Load the relative offset
+        rel_off_t rel = load_rel(base_, index);
+        
+        // Convert to absolute: child = slot + rel
+        return slot_ptr + rel;
+    }
+    
+    /**
+     * Count total non-empty children
+     */
+    [[nodiscard]] int count_children() const
+    {
+        int count = 0;
+        for (int i = 0; i < 16; ++i)
+        {
+            if (((child_types_ >> (i * 2)) & 0x3) != 0)
+            {
+                count++;
+            }
+        }
+        return count;
+    }
+};
+
+/**
  * Lightweight iterator for non-empty children in sparse offset array
  *
  * Designed for maximum performance - no virtual functions, minimal state.
