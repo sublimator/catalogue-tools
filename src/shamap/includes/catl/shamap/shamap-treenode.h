@@ -3,6 +3,7 @@
 #include "catl/core/types.h"
 #include <atomic>
 
+#include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-options.h"  // NO LOGGING INSIDE IMPLEMENTATIONS
 #include "catl/shamap/shamap-traits.h"
 
@@ -36,6 +37,16 @@ public:
         const SHAMapOptions& options) = 0;  // NO LOGGING INSIDE IMPLEMENTATIONS
     const Hash256&
     get_hash(const SHAMapOptions& options);
+
+    const Hash256&
+    valid_hash_or_throw()
+    {
+        if (!hash_valid_)
+        {
+            throw HashCalculationException("Hash not yet computed");
+        }
+        return hash;
+    }
 
     // friend declarations needed for boost::intrusive_ptr
     template <typename T>
