@@ -168,8 +168,9 @@ main(int argc, char* argv[])
         std::cout << "Total populated children: " << populated_count
                   << std::endl;
 
-        // Find first available key to test with
-        std::cout << "\nFinding first leaf in tree:" << std::endl;
+        // Find first available key to test with IN STATE TREE
+        std::cout << "\n=== STATE TREE ===" << std::endl;
+        std::cout << "Finding first leaf in state tree:" << std::endl;
         try
         {
             auto first_leaf = hybrid_reader.first_leaf_depth_first(root_view);
@@ -194,7 +195,7 @@ main(int argc, char* argv[])
                 // network ID
                 LeafJsonConverter converter(reader->header().network_id);
 
-                std::cout << "\nParsed object as JSON:" << std::endl;
+                std::cout << "\nParsed state object as JSON:" << std::endl;
                 converter.pretty_print(std::cout, leaf);
             }
             catch (const std::exception& e)
@@ -209,7 +210,90 @@ main(int argc, char* argv[])
         }
         catch (const std::exception& e)
         {
-            std::cout << "  Key lookup failed: " << e.what() << std::endl;
+            std::cout << "  State key lookup failed: " << e.what() << std::endl;
+        }
+
+        // Now let's look at the TRANSACTION TREE
+        std::cout << "\n=== TRANSACTION TREE ===" << std::endl;
+        
+        // Skip the state tree to get to the tx tree
+        auto state_tree_size = reader->skip_state_map();
+        std::cout << "Skipped state tree (" << state_tree_size << " bytes)" << std::endl;
+        
+        // Now we're at the tx tree - get it as an InnerNodeView
+        auto tx_root_view = hybrid_reader.get_inner_node_at(reader->current_offset());
+        
+        std::cout << "\nTransaction Tree Root Node:" << std::endl;
+        auto tx_root_header = tx_root_view.header.get();
+        std::cout << "  Depth: " << (int)tx_root_header.get_depth() << std::endl;
+        std::cout << "  Child types: 0x" << std::hex << tx_root_header.child_types
+                  << std::dec << std::endl;
+        std::cout << "  Non-empty children: " << tx_root_header.count_children()
+                  << std::endl;
+
+        // Find first transaction
+        std::cout << "\nFinding first transaction:" << std::endl;
+        try
+        {
+            auto first_tx = hybrid_reader.first_leaf_depth_first(tx_root_view);
+            std::cout << "  Found first transaction with ID: " << first_tx.key.hex()
+                      << std::endl;
+            std::cout << "  Transaction data size: " << first_tx.data.size() << " bytes"
+                      << std::endl;
+
+            // Parse transaction + metadata
+            try
+            {
+                // Parse as transaction with metadata (VL-encoded tx + VL-encoded metadata)
+                catl::xdata::ParserContext ctx(first_tx.data);
+                
+                // Create root object to hold both tx and meta
+                boost::json::object root;
+                
+                // First: Parse VL-encoded transaction
+                size_t tx_vl_length = catl::xdata::read_vl_length(ctx.cursor);
+                Slice tx_data = ctx.cursor.read_slice(tx_vl_length);
+                
+                {
+                    catl::xdata::Protocol protocol = (reader->header().network_id == 0)
+                        ? catl::xdata::Protocol::load_embedded_xrpl_protocol()
+                        : catl::xdata::Protocol::load_embedded_xahau_protocol();
+                    catl::xdata::JsonVisitor tx_visitor(protocol);
+                    catl::xdata::ParserContext tx_ctx(tx_data);
+                    catl::xdata::parse_with_visitor(tx_ctx, protocol, tx_visitor);
+                    root["tx"] = tx_visitor.get_result();
+                }
+                
+                // Second: Parse VL-encoded metadata
+                size_t meta_vl_length = catl::xdata::read_vl_length(ctx.cursor);
+                Slice meta_data = ctx.cursor.read_slice(meta_vl_length);
+                
+                {
+                    catl::xdata::Protocol protocol = (reader->header().network_id == 0)
+                        ? catl::xdata::Protocol::load_embedded_xrpl_protocol()
+                        : catl::xdata::Protocol::load_embedded_xahau_protocol();
+                    catl::xdata::JsonVisitor meta_visitor(protocol);
+                    catl::xdata::ParserContext meta_ctx(meta_data);
+                    catl::xdata::parse_with_visitor(meta_ctx, protocol, meta_visitor);
+                    root["meta"] = meta_visitor.get_result();
+                }
+                
+                std::cout << "\nParsed transaction as JSON:" << std::endl;
+                pretty_print_json(std::cout, boost::json::value(root));
+            }
+            catch (const std::exception& e)
+            {
+                std::cout << "Failed to parse transaction: " << e.what()
+                          << std::endl;
+                std::cout << "Raw hex data: ";
+                std::string hex;
+                slice_hex(first_tx.data, hex);
+                std::cout << hex << std::endl;
+            }
+        }
+        catch (const std::exception& e)
+        {
+            std::cout << "  Transaction lookup failed: " << e.what() << std::endl;
         }
 
         std::cout << "\n[Hybrid SHAMap experiment completed successfully]"
