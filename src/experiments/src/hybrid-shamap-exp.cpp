@@ -6,7 +6,9 @@
  */
 
 #include "catl/core/log-macros.h"
+#include "catl/hybrid-shamap/hybrid-shamap.h"
 #include "catl/v2/catl-v2-reader.h"
+#include "catl/v2/catl-v2-structs.h"
 #include <iostream>
 #include <memory>
 #include <string>
@@ -73,12 +75,57 @@ main(int argc, char* argv[])
             std::cout << "  Ledger hash: (not present)" << std::endl;
         }
 
-        // TODO: Next steps
-        // 1. Walk the state tree and collect statistics
-        // 2. Experiment with creating a hybrid node structure
-        // 3. Test CoW operations on hybrid trees
+        // Now use HybridReader to get the state tree root
+        catl::hybrid_shamap::HybridReader hybrid_reader(reader);
 
-        std::cout << "\n[Hybrid SHAMap experiment initialized successfully]"
+        // Get the state tree root as an InnerNodeView
+        auto root_view = hybrid_reader.get_state_root();
+
+        std::cout << "\nState Tree Root Node:" << std::endl;
+        std::cout << "  File offset: " << root_view.file_offset << std::endl;
+        std::cout << "  Depth: " << (int)root_view.header->get_depth()
+                  << std::endl;
+        std::cout << "  Child types: 0x" << std::hex
+                  << root_view.header->child_types << std::dec << std::endl;
+        std::cout << "  Non-empty children: "
+                  << root_view.header->count_children() << std::endl;
+
+        // Create an HmapInnerNode and populate with child offsets
+        catl::hybrid_shamap::HmapInnerNode hybrid_root;
+
+        // Get child iterator and load offsets
+        auto child_iter = root_view.get_child_iter();
+
+        std::cout << "\nLoading child offsets into hybrid node:" << std::endl;
+        while (child_iter.has_next())
+        {
+            auto child = child_iter.next();
+
+            // Store the absolute offset as a void* (for now, no tagging yet)
+            hybrid_root.children[child.branch] =
+                reinterpret_cast<void*>(child.offset);
+
+            std::cout << "  Branch[" << child.branch << "]: "
+                      << (child.type == catl::v2::ChildType::INNER ? "INNER"
+                                                                   : "LEAF")
+                      << " at offset 0x" << std::hex << child.offset << std::dec
+                      << std::endl;
+        }
+
+        // Print summary
+        std::cout << "\nHybrid root node populated:" << std::endl;
+        int populated_count = 0;
+        for (int i = 0; i < 16; ++i)
+        {
+            if (hybrid_root.children[i] != nullptr)
+            {
+                populated_count++;
+            }
+        }
+        std::cout << "Total populated children: " << populated_count
+                  << std::endl;
+
+        std::cout << "\n[Hybrid SHAMap experiment completed successfully]"
                   << std::endl;
 
         return 0;

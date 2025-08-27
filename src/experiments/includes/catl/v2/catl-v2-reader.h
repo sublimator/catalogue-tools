@@ -146,7 +146,8 @@ public:
     {
         if (!mmap_holder_)
         {
-            // Fallback for readers created without mmap holder (e.g., from raw memory)
+            // Fallback for readers created without mmap holder (e.g., from raw
+            // memory)
             return std::shared_ptr<CatlV2Reader>(
                 new CatlV2Reader(data_, file_size_, nullptr));
         }
@@ -195,7 +196,8 @@ public:
         current_pos_ += sizeof(catl::common::LedgerInfo);
 
         // Read the trees header that follows
-        current_trees_header_ = load_pod<TreesHeader>(data_, current_pos_, file_size_);
+        current_trees_header_ =
+            load_pod<TreesHeader>(data_, current_pos_, file_size_);
         current_pos_ += sizeof(TreesHeader);
 
         current_ledger_seq_ = info->seq;
@@ -270,6 +272,26 @@ public:
             throw std::runtime_error("Requested offset is beyond file bounds");
         }
         return data_ + offset;
+    }
+
+    /**
+     * Load a POD type from the current position
+     * Uses the safe/unsafe loading based on CATL_UNSAFE_POD_LOADS flag
+     */
+    template <typename T>
+    T
+    load_pod_at_current() const
+    {
+        return load_pod<T>(data_, current_pos_, file_size_);
+    }
+
+    /**
+     * Get the file size for bounds checking
+     */
+    size_t
+    file_size() const
+    {
+        return file_size_;
     }
 
     /**
@@ -596,8 +618,8 @@ private:
                         "Inner node header exceeds file size");
                 }
 
-                auto inner_header = load_pod<InnerNodeHeader>(
-                    data_, node_offset, file_size_);
+                auto inner_header =
+                    load_pod<InnerNodeHeader>(data_, node_offset, file_size_);
 
                 LOGD(
                     "Inner node depth from header: ",
@@ -710,7 +732,8 @@ private:
                     throw std::runtime_error("Leaf header exceeds file size");
                 }
 
-                auto leaf_header = load_pod<LeafHeader>(data_, leaf_header_offset, file_size_);
+                auto leaf_header =
+                    load_pod<LeafHeader>(data_, leaf_header_offset, file_size_);
 
                 // Convert leaf key to hex for logging
                 LOGD("Leaf key: ", Hash256(leaf_header.key.data()).hex());
@@ -848,8 +871,8 @@ private:
                     throw std::runtime_error("Leaf header exceeds file bounds");
                 }
 
-                auto leaf_header = load_pod<LeafHeader>(
-                    data_, entry.node_offset, file_size_);
+                auto leaf_header =
+                    load_pod<LeafHeader>(data_, entry.node_offset, file_size_);
                 Key leaf_key(leaf_header.key.data());
 
                 LOGD(
@@ -1103,7 +1126,8 @@ private:
             throw std::runtime_error("Root node header exceeds file bounds");
         }
 
-        auto root_header = load_pod<InnerNodeHeader>(data_, root_offset, file_size_);
+        auto root_header =
+            load_pod<InnerNodeHeader>(data_, root_offset, file_size_);
 
         LOGI(
             "Root node depth: ",
