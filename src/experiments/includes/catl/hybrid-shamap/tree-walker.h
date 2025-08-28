@@ -277,7 +277,7 @@ public:
                 {
                     // Mmap inner node
                     const uint8_t* raw = node.get_raw_memory();
-                    InnerNodeView view = HybridReader::get_inner_node(raw);
+                    InnerNodeView view = MemTreeOps::get_inner_node(raw);
 
                     for (int i = 15; i >= 0; --i)
                     {
@@ -292,7 +292,7 @@ public:
                             if (child_type == catl::v2::ChildType::INNER)
                             {
                                 InnerNodeView child_view =
-                                    HybridReader::get_inner_node(child_ptr);
+                                    MemTreeOps::get_inner_node(child_ptr);
                                 child_depth = child_view.header.get_uncopyable()
                                                   .get_depth();
                             }
@@ -355,7 +355,7 @@ public:
                 {
                     // Mmap inner node
                     const uint8_t* raw = node.get_raw_memory();
-                    InnerNodeView view = HybridReader::get_inner_node(raw);
+                    InnerNodeView view = MemTreeOps::get_inner_node(raw);
 
                     for (int i = 0; i < 16; ++i)
                     {

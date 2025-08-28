@@ -124,18 +124,14 @@ main(int argc, char* argv[])
         auto ptr = reader->data_at(reader->current_offset());
         LOGI("Direct pointer from reader: ", static_cast<const void*>(ptr));
 
-        // Now use HybridReader to get the state tree root
-        LOGD("Creating HybridReader");
-        catl::hybrid_shamap::HybridReader hybrid_reader(reader);
-
         // Get the state tree root as an InnerNodeView
         LOGD("Getting state tree root view");
-        auto root_view = hybrid_reader.get_state_root();
+        auto state_root = MemTreeOps::get_inner_node(reader->current_data());
 
         LOGI("State Tree Root Node:");
         LOGD(
             "  Header pointer from HybridReader: ",
-            static_cast<const void*>(root_view.header.raw()));
+            static_cast<const void*>(state_root.header.raw()));
 
         // Let's also create a MemPtr directly and compare
         catl::v2::MemPtr<catl::v2::InnerNodeHeader> direct_header(ptr);
@@ -149,7 +145,7 @@ main(int argc, char* argv[])
             std::hex,
             direct_header_val.child_types,
             std::dec);
-        const auto& root_header = root_view.header.get_uncopyable();
+        const auto& root_header = state_root.header.get_uncopyable();
         LOGI("  Depth: ", (int)root_header.get_depth());
         LOGI("  Child types: 0x", std::hex, root_header.child_types, std::dec);
         LOGI("  Non-empty children: ", root_header.count_children());
@@ -165,8 +161,8 @@ main(int argc, char* argv[])
         LOGD("Getting child iterator from root view");
         LOGD(
             "  root_view.header.raw() = ",
-            static_cast<const void*>(root_view.header.raw()));
-        auto child_iter = root_view.get_child_iter();
+            static_cast<const void*>(state_root.header.raw()));
+        auto child_iter = state_root.get_child_iter();
         LOGD(
             "  child_iter.header.raw() = ",
             static_cast<const void*>(child_iter.header.raw()));
@@ -314,7 +310,7 @@ main(int argc, char* argv[])
         try
         {
             LOGD("Calling first_leaf_depth_first");
-            auto first_leaf = hybrid_reader.first_leaf_depth_first(root_view);
+            auto first_leaf = MemTreeOps::first_leaf_depth_first(state_root);
             first_leaf_key = first_leaf.key;
             LOGI("  Found first leaf with key: ", first_leaf.key.hex());
 
@@ -324,7 +320,7 @@ main(int argc, char* argv[])
 
             // Lookup the key using our simplified traversal
             LOGD("Calling lookup_key_in_state");
-            auto leaf = hybrid_reader.lookup_key_in_state(first_leaf.key);
+            auto leaf = MemTreeOps::lookup_key(state_root, first_leaf.key);
             LOGI("  Found leaf!");
             LOGI("  Data size: ", leaf.data.size(), " bytes");
 
@@ -364,8 +360,7 @@ main(int argc, char* argv[])
 
         // Now we're at the tx tree - get it as an InnerNodeView
         LOGD("Getting transaction tree root view");
-        auto tx_root_view =
-            hybrid_reader.get_inner_node(reader->current_data());
+        auto tx_root_view = MemTreeOps::get_inner_node(reader->current_data());
 
         LOGI("Transaction Tree Root Node:");
         const auto& tx_root_header = tx_root_view.header.get_uncopyable();
@@ -382,7 +377,7 @@ main(int argc, char* argv[])
         try
         {
             LOGD("Calling first_leaf_depth_first on tx tree");
-            auto first_tx = hybrid_reader.first_leaf_depth_first(tx_root_view);
+            auto first_tx = MemTreeOps::first_leaf_depth_first(tx_root_view);
             LOGI("  Found first transaction with ID: ", first_tx.key.hex());
             LOGI("  Transaction data size: ", first_tx.data.size(), " bytes");
 
@@ -472,8 +467,7 @@ main(int argc, char* argv[])
         LOGI("Finding path to key: ", first_leaf_key->hex());
 
         LOGD("Creating HmapPathFinder");
-        catl::hybrid_shamap::HmapPathFinder pathfinder(
-            &hybrid_reader, *first_leaf_key);
+        catl::hybrid_shamap::HmapPathFinder pathfinder(*first_leaf_key);
         LOGD("Calling find_path");
         pathfinder.find_path(hmap.get_root());
 
@@ -505,9 +499,8 @@ main(int argc, char* argv[])
         test_key_data[31] = 1;  // Key ending in 01
         Key test_key(test_key_data.data());
         std::vector<uint8_t> test_data = {1, 2, 3, 4, 5};
-        auto* leaf = new catl::hybrid_shamap::HmapLeafNode(
-            test_key, Slice(test_data.data(), test_data.size()));
-        boost::intrusive_ptr<catl::hybrid_shamap::HMapNode> leaf_ptr(leaf);
+        boost::intrusive_ptr<HMapNode> leaf_ptr(new HmapLeafNode(
+            test_key, Slice(test_data.data(), test_data.size())));
 
         // Add leaf to root at branch 1 (last nibble of key)
         root->set_child(
@@ -673,7 +666,7 @@ main(int argc, char* argv[])
                     if (visit.node.is_raw_memory())
                     {
                         const uint8_t* raw = visit.node.get_raw_memory();
-                        InnerNodeView view = HybridReader::get_inner_node(raw);
+                        InnerNodeView view = MemTreeOps::get_inner_node(raw);
                         actual_depth = view.header.get_uncopyable().get_depth();
                     }
                     LOGD(
@@ -745,16 +738,15 @@ main(int argc, char* argv[])
             }
 
             // Get first leaf from this inner node
-            auto first_leaf = hybrid_reader.first_leaf_depth_first(
-                catl::hybrid_shamap::InnerNodeView{
-                    catl::v2::MemPtr<catl::v2::InnerNodeHeader>(
-                        inner_info.node.get_raw_memory())});
+            auto [key, data] = MemTreeOps::first_leaf_depth_first(
+                InnerNodeView{catl::v2::MemPtr<catl::v2::InnerNodeHeader>(
+                    inner_info.node.get_raw_memory())});
 
             // Get the actual hash from the leaf
             Hash256 leaf_hash;
             // The first_leaf contains the raw leaf data, we need to get its
             // hash Find the actual leaf node and get its hash
-            HmapPathFinder finder(&hybrid_reader, first_leaf.key);
+            HmapPathFinder finder(key);
             finder.find_path(hmap.get_root());
             const auto& path = finder.get_path();
             if (!path.empty() && path.back().first.is_leaf())
@@ -763,7 +755,7 @@ main(int argc, char* argv[])
             }
 
             keys_with_skips.push_back(
-                {first_leaf.key,
+                {key,
                  inner_info.depth + 1,  // Approximate leaf depth
                  inner_info.depth,
                  inner_info.skip_amount,
@@ -804,7 +796,7 @@ main(int argc, char* argv[])
                 "...");
 
             // Find the path using pathfinder
-            HmapPathFinder pathfinder(&hybrid_reader, key_info.key);
+            HmapPathFinder pathfinder(key_info.key);
             pathfinder.find_path(hmap.get_root());
 
             // Check if we found the key (path will be empty if not found)
