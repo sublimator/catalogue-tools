@@ -1021,20 +1021,21 @@ public:
     void
     debug_path() const
     {
-        std::cout << "Path to key " << target_key_.hex() << ":\n";
+        LOGD("Path to key ", target_key_.hex());
         for (size_t i = 0; i < path_.size(); ++i)
         {
             const auto& [node_ptr, branch] = path_[i];
-            std::cout << "  [" << i << "] ";
+            std::stringstream ss;
+            ss << "  [" << i << "] ";
             if (branch >= 0)
             {
-                std::cout << "branch " << branch << " -> ";
+                ss << "branch " << branch << " -> ";
             }
 
             // Print node info and hash
             if (node_ptr.is_raw_memory())
             {
-                std::cout << "RAW_MEMORY @ " << node_ptr.get_raw_ptr();
+                ss << "RAW_MEMORY @ " << node_ptr.get_raw_ptr();
 
                 // Print hash from mmap header
                 const uint8_t* raw = node_ptr.get_raw_memory();
@@ -1042,55 +1043,58 @@ public:
                 {
                     v2::MemPtr<v2::InnerNodeHeader> header(raw);
                     const auto& h = header.get_uncopyable();
-                    std::cout << " depth=" << (int)h.get_depth();
-                    std::cout << " hash=";
+                    ss << " depth=" << (int)h.get_depth();
+                    ss << " hash=";
                     for (int j = 0; j < 8; ++j)
                     {  // First 8 bytes
-                        printf("%02x", h.hash[j]);
+                        char buf[3];
+                        sprintf(buf, "%02x", h.hash[j]);
+                        ss << buf;
                     }
-                    std::cout << "...";
+                    ss << "...";
                 }
                 else if (node_ptr.is_leaf())
                 {
                     v2::MemPtr<v2::LeafHeader> header(raw);
                     const auto& h = header.get_uncopyable();
-                    std::cout << " hash=";
+                    ss << " hash=";
                     for (int j = 0; j < 8; ++j)
                     {  // First 8 bytes
-                        printf("%02x", h.hash[j]);
+                        char buf[3];
+                        sprintf(buf, "%02x", h.hash[j]);
+                        ss << buf;
                     }
-                    std::cout << "...";
+                    ss << "...";
                 }
             }
             else
             {
                 auto* node = node_ptr.get_materialized();
-                std::cout << "MATERIALIZED " << node->describe();
+                ss << "MATERIALIZED " << node->describe();
 
                 // Print hash if valid
                 if (node->get_type() == HMapNode::Type::INNER)
                 {
-                    std::cout
-                        << " hash=" << node->get_hash().hex().substr(0, 16)
-                        << "...";
+                    ss << " hash=" << node->get_hash().hex().substr(0, 16)
+                       << "...";
                 }
                 else if (node->get_type() == HMapNode::Type::LEAF)
                 {
-                    std::cout
-                        << " hash=" << node->get_hash().hex().substr(0, 16)
-                        << "...";
+                    ss << " hash=" << node->get_hash().hex().substr(0, 16)
+                       << "...";
                 }
             }
-            std::cout << "\n";
+            LOGD(ss.str());
         }
         if (found_leaf_)
         {
-            std::cout << "  Found leaf, key "
-                      << (key_matches_ ? "MATCHES" : "does NOT match") << "\n";
+            LOGD(
+                "  Found leaf, key ",
+                (key_matches_ ? "MATCHES" : "does NOT match"));
         }
         else
         {
-            std::cout << "  No leaf found\n";
+            LOGD("  No leaf found");
         }
     }
 
@@ -1199,16 +1203,35 @@ class Hmap
 {
 private:
     PolyNodePtr root_;  // Root can be any type of pointer
-    std::shared_ptr<v2::CatlV2Reader>
-        reader_;  // Keeps mmap alive TODO: vector of mmap holders
+    std::vector<std::shared_ptr<v2::MmapHolder>>
+        mmap_holders_;  // Keeps all mmap files alive
 
 public:
     Hmap() = default;
 
-    // Constructor with reader for mmap lifetime management
-    explicit Hmap(std::shared_ptr<v2::CatlV2Reader> reader)
-        : reader_(std::move(reader))
+    // Constructor with single mmap holder
+    explicit Hmap(std::shared_ptr<v2::MmapHolder> holder)
     {
+        if (holder)
+        {
+            mmap_holders_.push_back(std::move(holder));
+        }
+    }
+
+    // Constructor with vector of mmap holders
+    explicit Hmap(std::vector<std::shared_ptr<v2::MmapHolder>> holders)
+        : mmap_holders_(std::move(holders))
+    {
+    }
+
+    // Add an mmap holder to keep a file alive
+    void
+    add_mmap_holder(std::shared_ptr<v2::MmapHolder> holder)
+    {
+        if (holder)
+        {
+            mmap_holders_.push_back(std::move(holder));
+        }
     }
 
     // Initialize with a raw memory root (from mmap)
@@ -1239,10 +1262,10 @@ public:
         root_ = new_root;
     }
 
-    [[nodiscard]] std::shared_ptr<v2::CatlV2Reader>
-    get_reader() const
+    [[nodiscard]] const std::vector<std::shared_ptr<v2::MmapHolder>>&
+    get_mmap_holders() const
     {
-        return reader_;
+        return mmap_holders_;
     }
 };
 

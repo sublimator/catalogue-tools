@@ -30,6 +30,12 @@
 
 namespace catl::v2 {
 
+struct MmapHolder
+{
+    boost::iostreams::mapped_file_source mmap_file;
+    std::string filename;
+};
+
 /**
  * MMAP-based reader for CATL v2 format
  *
@@ -45,14 +51,6 @@ namespace catl::v2 {
  */
 class CatlV2Reader
 {
-private:
-    // Forward declaration for MmapHolder
-    struct MmapHolder
-    {
-        boost::iostreams::mapped_file_source mmap_file;
-        std::string filename;
-    };
-
     /**
      * Private constructor that takes raw memory and ownership
      * Used by create() and share() methods
@@ -348,6 +346,12 @@ public:
             ", tx_tree_size: ",
             current_trees_header_.tx_tree_size);
         return lookup_key_at_node(key, tree_ptr, 0);
+    }
+
+    std::shared_ptr<MmapHolder>
+    mmap_holder()
+    {
+        return mmap_holder_;
     }
 
     /**
