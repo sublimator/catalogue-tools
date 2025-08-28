@@ -9,6 +9,7 @@
 #include "catl/core/logger.h"
 #include "catl/hybrid-shamap-v2/hybrid-shamap.h"
 #include "catl/hybrid-shamap-v2/tree-walker.h"
+#include "catl/v2/catl-v2-memtree-diff.h"
 #include "catl/v2/catl-v2-reader.h"
 #include "catl/v2/catl-v2-structs.h"
 #include "catl/xdata/json-visitor.h"
@@ -20,6 +21,12 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
+#include <vector>
+
+#include "catl/shamap/shamap.h"
+#include "catl/v1/catl-v1-ledger-info-view.h"
+// #include "catl/v2/shamap-custom-traits.h"
 
 using namespace catl::hybrid_shamap;
 
@@ -57,11 +64,148 @@ public:
     }
 };
 
+std::shared_ptr<catl::shamap::SHAMap>
+create_state_map(InnerNodeView state_view)
+{
+    auto _state_map =
+        std::make_shared<catl::shamap::SHAMap>(catl::shamap::tnACCOUNT_STATE);
+    MemTreeOps::walk_leaves(state_view, [&](const Key& k, const Slice& data) {
+        boost::intrusive_ptr<MmapItem> mmap_item(
+            new MmapItem(k.data(), data.data(), data.size()));
+        _state_map->add_item(mmap_item);
+        return true;
+    });
+    return _state_map;
+}
+
+void
+test_diff(
+    catl::v2::CatlV2Reader& reader,
+    const catl::common::LedgerInfo& ledger_info)
+{
+    auto state_view = MemTreeOps::get_inner_node(reader.current_data());
+    auto state_map = *create_state_map(state_view);
+
+    if (ledger_info.account_hash != state_map.get_hash())
+    {
+        throw std::runtime_error("Account state hash mismatch, for ledger 1");
+    }
+    reader.seek_to_ledger(ledger_info.seq + 9998);
+    auto second_ledger_info = reader.read_ledger_info();
+    auto second_state_view = MemTreeOps::get_inner_node(reader.current_data());
+    auto second_state_map = *create_state_map(second_state_view);
+    // confirming that our catl packs and readers are working correctly
+    // we can walk an InnerNodeView and get the hash of the state tree using our
+    // gold SHAMap impl
+    if (second_ledger_info.account_hash != second_state_map.get_hash())
+    {
+        throw std::runtime_error(
+            "Account state hash mismatch, for ledger 2 full rebuild");
+    }
+
+    // This means the error must be in the diff code
+
+    auto i = 0;
+    size_t added = 0, modified = 0, deleted = 0;
+    std::unordered_set<std::string> processed_keys;
+    auto callback = [&](const Key& key,
+                        catl::v2::DiffOp op,
+                        const Slice& old_data,
+                        const Slice& new_data) {
+        // Check for duplicate processing
+        auto key_str = key.hex();
+        if (!processed_keys.insert(key_str).second)
+        {
+            LOGW(
+                "DUPLICATE: Key processed multiple times: ",
+                key.hex(),
+                " op=",
+                op == catl::v2::DiffOp::Added
+                    ? "Added"
+                    : op == catl::v2::DiffOp::Modified ? "Modified"
+                                                       : "Deleted");
+            // Let's check what the key looks like in both trees
+            auto check_a = MemTreeOps::lookup_key_optional(state_view, key);
+            auto check_b =
+                MemTreeOps::lookup_key_optional(second_state_view, key);
+            LOGW(
+                "  -> Key in tree A: ",
+                check_a.has_value() ? "EXISTS" : "NOT FOUND");
+            LOGW(
+                "  -> Key in tree B: ",
+                check_b.has_value() ? "EXISTS" : "NOT FOUND");
+        }
+
+        boost::intrusive_ptr mmap_item(
+            new MmapItem(key.data(), new_data.data(), new_data.size()));
+
+        if (op == catl::v2::DiffOp::Added)
+        {
+            added++;
+            // Use set_item with ADD_OR_UPDATE mode to handle potential
+            // duplicates
+            auto result =
+                state_map.set_item(mmap_item, catl::shamap::SetMode::ADD_ONLY);
+            if (result != catl::shamap::SetResult::ADD)
+            {
+                LOGW("Item reported as Added but already existed: ", key.hex());
+                // Debug: check if this item exists in the original tree
+                auto check = MemTreeOps::lookup_key_optional(state_view, key);
+                if (check)
+                {
+                    LOGW("  -> This key DOES exist in original tree A!");
+                }
+            }
+        }
+        else if (op == catl::v2::DiffOp::Deleted)
+        {
+            deleted++;
+            if (!state_map.remove_item(key))
+            {
+                LOGW("Failed to delete item: ", key.hex());
+            }
+        }
+        else if (op == catl::v2::DiffOp::Modified)
+        {
+            modified++;
+            auto result = state_map.set_item(
+                mmap_item, catl::shamap::SetMode::UPDATE_ONLY);
+            if (result != catl::shamap::SetResult::UPDATE)
+            {
+                LOGW("Failed to modify item: ", key.hex());
+            }
+        }
+        i++;
+        return true;
+    };
+    LOGI("Diffing ledgers...");
+    diff_memtree_nodes(state_view, second_state_view, callback);
+    LOGI(
+        "Diff complete: ",
+        i,
+        " changes (Added: ",
+        added,
+        ", Modified: ",
+        modified,
+        ", Deleted: ",
+        deleted,
+        ")");
+    auto final_hash = state_map.get_hash();
+    if (second_ledger_info.account_hash != final_hash)
+    {
+        LOGE("Hash mismatch for ledger 2:");
+        LOGE("  Expected: ", second_ledger_info.account_hash.hex());
+        LOGE("  Got:      ", final_hash.hex());
+        throw std::runtime_error("Account state hash mismatch, for ledger 2");
+    }
+    LOGI("✓ Hash verified successfully!");
+}
+
 int
 main(int argc, char* argv[])
 {
     // Set log level to DEBUG for maximum visibility
-    Logger::set_level(LogLevel::DEBUG);
+    Logger::set_level(LogLevel::INFO);
 
     // Disable v2-structs partition logging
     catl::v2::get_v2_memtree_log_partition().set_level(LogLevel::NONE);
@@ -92,14 +236,6 @@ main(int argc, char* argv[])
         LOGI("  Last ledger: ", header.last_ledger_seq);
         LOGI("  Index offset: ", header.ledger_index_offset, " bytes");
 
-        // Read the first ledger
-        LOGD("Checking for ledgers in file");
-        if (reader->at_end_of_ledgers())
-        {
-            LOGE("No ledgers in file!");
-            return 1;
-        }
-
         LOGD("Reading first ledger info");
         const auto& ledger_info = reader->read_ledger_info();
 
@@ -113,817 +249,8 @@ main(int argc, char* argv[])
         LOGI("  Close time: ", ledger_info.close_time);
         LOGI("  Close time res: ", (int)ledger_info.close_time_resolution);
         LOGI("  Close flags: ", (int)ledger_info.close_flags);
-        if (ledger_info.hash.has_value())
-        {
-            LOGI("  Ledger hash: ", ledger_info.hash->hex());
-        }
-        else
-        {
-            LOGI("  Ledger hash: (not present)");
-        }
-        auto ptr = reader->data_at(reader->current_offset());
-        LOGI("Direct pointer from reader: ", static_cast<const void*>(ptr));
 
-        // Get the state tree root as an InnerNodeView
-        LOGD("Getting state tree root view");
-        auto state_root = MemTreeOps::get_inner_node(reader->current_data());
-
-        LOGI("State Tree Root Node:");
-        LOGD(
-            "  Header pointer from HybridReader: ",
-            static_cast<const void*>(state_root.header.raw()));
-
-        // Let's also create a MemPtr directly and compare
-        catl::v2::MemPtr<catl::v2::InnerNodeHeader> direct_header(ptr);
-        LOGD(
-            "  Direct MemPtr raw: ",
-            static_cast<const void*>(direct_header.raw()));
-        const auto& direct_header_val = direct_header.get_uncopyable();
-        LOGI("  Direct header depth: ", (int)direct_header_val.get_depth());
-        LOGI(
-            "  Direct header child_types: 0x",
-            std::hex,
-            direct_header_val.child_types,
-            std::dec);
-        const auto& root_header = state_root.header.get_uncopyable();
-        LOGI("  Depth: ", (int)root_header.get_depth());
-        LOGI("  Child types: 0x", std::hex, root_header.child_types, std::dec);
-        LOGI("  Non-empty children: ", root_header.count_children());
-
-        // Create an HmapInnerNode and populate with child offsets
-        LOGD("Creating HmapInnerNode at depth 0");
-        auto hybrid_root_heap =
-            new catl::hybrid_shamap::HmapInnerNode(0);  // depth 0
-        // catl::hybrid_shamap::HmapInnerNode hybrid_root(0);  // depth 0
-        auto& hybrid_root = *hybrid_root_heap;
-
-        // Get child iterator and load offsets
-        LOGD("Getting child iterator from root view");
-        LOGD(
-            "  root_view.header.raw() = ",
-            static_cast<const void*>(state_root.header.raw()));
-        auto child_iter = state_root.get_child_iter();
-        LOGD(
-            "  child_iter.header.raw() = ",
-            static_cast<const void*>(child_iter.header.raw()));
-        LOGD(
-            "  child_iter.offsets_start = ",
-            static_cast<const void*>(child_iter.offsets_start));
-
-        LOGI("Loading child offsets into hybrid node:");
-        LOGI(
-            "Initial remaining_mask: 0x",
-            std::hex,
-            child_iter.remaining_mask,
-            std::dec);
-
-        // Let's also test creating an iterator directly
-        LOGD("Testing direct iterator creation:");
-        const uint8_t* offsets_ptr = ptr + sizeof(catl::v2::InnerNodeHeader);
-        catl::v2::ChildIterator direct_iter(direct_header, offsets_ptr);
-        LOGI(
-            "Direct iterator remaining_mask: 0x",
-            std::hex,
-            direct_iter.remaining_mask,
-            std::dec);
-
-        // Test iterating with direct iterator and save results
-        LOGD("Testing direct iteration (GOLD STANDARD):");
-        std::vector<std::pair<int, const void*>> gold_results;
-        int test_count = 0;
-        while (direct_iter.has_next() && test_count < 20)
-        {
-            auto test_child = direct_iter.next();
-            gold_results.push_back(
-                {test_child.branch, static_cast<const void*>(test_child.ptr)});
-            uintptr_t addr = reinterpret_cast<uintptr_t>(test_child.ptr);
-            LOGD(
-                "  GOLD[",
-                test_count,
-                "]: branch=",
-                test_child.branch,
-                ", ptr=",
-                static_cast<const void*>(test_child.ptr),
-                ", align=",
-                (addr & 0x7));
-            test_count++;
-        }
-        LOGI("Direct iteration completed, count=", test_count);
-
-        // Check minimum alignment
-        int min_align = 7;
-        for (auto& [branch, ptr] : gold_results)
-        {
-            uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-            int align =
-                __builtin_ctz(addr | 0x8);  // Count trailing zeros (or 3 max)
-            if (align < min_align)
-                min_align = align;
-        }
-        LOGI("Minimum alignment across all pointers: ", min_align, " bits");
-        LOGI("Can use ", min_align, " bits for tagging");
-
-        int branch_count = 0;
-        int safety_counter = 0;
-        while (true)
-        {
-            LOGD(
-                "Checking has_next() with remaining_mask=0x",
-                std::hex,
-                child_iter.remaining_mask,
-                std::dec);
-            if (!child_iter.has_next())
-            {
-                LOGD("has_next() returned false, exiting loop");
-                break;
-            }
-
-            if (++safety_counter > 20)
-            {
-                LOGE(
-                    "Iterator stuck in infinite loop after ",
-                    safety_counter,
-                    " iterations!");
-                LOGE(
-                    "Remaining mask: 0x",
-                    std::hex,
-                    child_iter.remaining_mask,
-                    std::dec);
-                break;
-            }
-
-            LOGD("Calling child_iter.next() for iteration ", safety_counter);
-            auto child = child_iter.next();
-
-            // Compare with gold results
-            if (branch_count < gold_results.size())
-            {
-                auto& gold = gold_results[branch_count];
-                bool match =
-                    (gold.first == child.branch &&
-                     gold.second == static_cast<const void*>(child.ptr));
-                if (!match)
-                {
-                    LOGE("MISMATCH at index ", branch_count, "!");
-                    LOGE("  GOLD: branch=", gold.first, ", ptr=", gold.second);
-                    LOGE(
-                        "  OUR:  branch=",
-                        child.branch,
-                        ", ptr=",
-                        static_cast<const void*>(child.ptr));
-                }
-                else
-                {
-                    LOGI(
-                        "  MATCH[",
-                        branch_count,
-                        "]: branch=",
-                        child.branch,
-                        ", ptr=",
-                        static_cast<const void*>(child.ptr));
-                }
-            }
-
-            branch_count++;
-
-            // Set the child in our hybrid node
-            LOGD("Setting child for branch ", child.branch);
-            auto child_ref = catl::hybrid_shamap::PolyNodePtr::make_raw_memory(
-                child.ptr, child.type);
-            hybrid_root.set_child(child.branch, child_ref, child.type);
-            LOGD("  Set child ", child.branch, " successfully");
-        }
-
-        LOGI("Finished loading children, branch_count = ", branch_count);
-
-        // Print summary
-        LOGI("Hybrid root node populated:");
-        LOGI("Loaded ", branch_count, " branches from iterator");
-        LOGI("Total populated children: ", hybrid_root.count_children());
-
-        // Keep first_leaf key in outer scope for later use
-        std::optional<Key> first_leaf_key;
-
-        // Find first available key to test with IN STATE TREE
-        LOGI("=== STATE TREE ===");
-        LOGD("Finding first leaf in state tree");
-        try
-        {
-            LOGD("Calling first_leaf_depth_first");
-            auto first_leaf = MemTreeOps::first_leaf_depth_first(state_root);
-            first_leaf_key = first_leaf.key;
-            LOGI("  Found first leaf with key: ", first_leaf.key.hex());
-
-            // Now test lookup with the key we found
-            LOGI("Testing key lookup:");
-            LOGI("  Looking for key: ", first_leaf.key.hex());
-
-            // Lookup the key using our simplified traversal
-            LOGD("Calling lookup_key_in_state");
-            auto leaf = MemTreeOps::lookup_key(state_root, first_leaf.key);
-            LOGI("  Found leaf!");
-            LOGI("  Data size: ", leaf.data.size(), " bytes");
-
-            // Parse and display as JSON using the converter
-            try
-            {
-                // Create converter with the appropriate protocol based on
-                // network ID
-                LOGD(
-                    "Creating LeafJsonConverter for network ID: ",
-                    reader->header().network_id);
-                LeafJsonConverter converter(reader->header().network_id);
-
-                LOGI("Parsed state object as JSON:");
-                converter.pretty_print(std::cout, leaf);
-            }
-            catch (const std::exception& e)
-            {
-                LOGW("Failed to parse as JSON: ", e.what());
-                std::string hex;
-                slice_hex(leaf.data, hex);
-                LOGD("Raw hex data: ", hex);
-            }
-        }
-        catch (const std::exception& e)
-        {
-            LOGE("  State key lookup failed: ", e.what());
-        }
-
-        // Now let's look at the TRANSACTION TREE
-        LOGI("=== TRANSACTION TREE ===");
-
-        // Skip the state tree to get to the tx tree
-        LOGD("Skipping state tree");
-        auto state_tree_size = reader->skip_state_map();
-        LOGI("Skipped state tree (", state_tree_size, " bytes)");
-
-        // Now we're at the tx tree - get it as an InnerNodeView
-        LOGD("Getting transaction tree root view");
-        auto tx_root_view = MemTreeOps::get_inner_node(reader->current_data());
-
-        LOGI("Transaction Tree Root Node:");
-        const auto& tx_root_header = tx_root_view.header.get_uncopyable();
-        LOGI("  Depth: ", (int)tx_root_header.get_depth());
-        LOGI(
-            "  Child types: 0x",
-            std::hex,
-            tx_root_header.child_types,
-            std::dec);
-        LOGI("  Non-empty children: ", tx_root_header.count_children());
-
-        // Find first transaction
-        LOGI("Finding first transaction:");
-        try
-        {
-            LOGD("Calling first_leaf_depth_first on tx tree");
-            auto first_tx = MemTreeOps::first_leaf_depth_first(tx_root_view);
-            LOGI("  Found first transaction with ID: ", first_tx.key.hex());
-            LOGI("  Transaction data size: ", first_tx.data.size(), " bytes");
-
-            // Parse transaction + metadata
-            try
-            {
-                // Parse as transaction with metadata (VL-encoded tx +
-                // VL-encoded metadata)
-                catl::xdata::ParserContext ctx(first_tx.data);
-
-                // Create root object to hold both tx and meta
-                boost::json::object root;
-
-                // First: Parse VL-encoded transaction
-                size_t tx_vl_length = catl::xdata::read_vl_length(ctx.cursor);
-                Slice tx_data = ctx.cursor.read_slice(tx_vl_length);
-
-                {
-                    catl::xdata::Protocol protocol =
-                        (reader->header().network_id == 0)
-                        ? catl::xdata::Protocol::load_embedded_xrpl_protocol()
-                        : catl::xdata::Protocol::load_embedded_xahau_protocol();
-                    catl::xdata::JsonVisitor tx_visitor(protocol);
-                    catl::xdata::ParserContext tx_ctx(tx_data);
-                    catl::xdata::parse_with_visitor(
-                        tx_ctx, protocol, tx_visitor);
-                    root["tx"] = tx_visitor.get_result();
-                }
-
-                // Second: Parse VL-encoded metadata
-                size_t meta_vl_length = catl::xdata::read_vl_length(ctx.cursor);
-                Slice meta_data = ctx.cursor.read_slice(meta_vl_length);
-
-                {
-                    catl::xdata::Protocol protocol =
-                        (reader->header().network_id == 0)
-                        ? catl::xdata::Protocol::load_embedded_xrpl_protocol()
-                        : catl::xdata::Protocol::load_embedded_xahau_protocol();
-                    catl::xdata::JsonVisitor meta_visitor(protocol);
-                    catl::xdata::ParserContext meta_ctx(meta_data);
-                    catl::xdata::parse_with_visitor(
-                        meta_ctx, protocol, meta_visitor);
-                    root["meta"] = meta_visitor.get_result();
-                }
-
-                LOGI("Parsed transaction as JSON:");
-                pretty_print_json(std::cout, boost::json::value(root));
-            }
-            catch (const std::exception& e)
-            {
-                LOGW("Failed to parse transaction: ", e.what());
-                std::string hex;
-                slice_hex(first_tx.data, hex);
-                LOGD("Raw hex data: ", hex);
-            }
-        }
-        catch (const std::exception& e)
-        {
-            LOGE("  Transaction lookup failed: ", e.what());
-        }
-
-        // Now test the HYBRID PATHFINDER
-        LOGI("=== HYBRID PATHFINDER TEST ===");
-
-        // Reset reader position back to state tree
-        LOGD("Seeking back to ledger ", ledger_info.seq);
-        reader->seek_to_ledger(ledger_info.seq);
-        reader->read_ledger_info();  // Re-read to position at state tree
-
-        // Create an Hmap with reader for mmap lifetime management
-        LOGD("Creating Hmap with reader");
-        catl::hybrid_shamap::Hmap hmap(reader->mmap_holder());
-        const uint8_t* state_root_raw = reader->current_data();
-        hmap.set_root_raw(state_root_raw);
-
-        LOGI(
-            "Created Hmap with RAW_MEMORY root at: ",
-            static_cast<const void*>(state_root_raw));
-
-        // Use the first leaf key we found earlier
-        if (!first_leaf_key)
-        {
-            LOGW("No leaf key found to test with!");
-            return 0;
-        }
-
-        LOGI("Finding path to key: ", first_leaf_key->hex());
-
-        LOGD("Creating HmapPathFinder");
-        catl::hybrid_shamap::HmapPathFinder pathfinder(*first_leaf_key);
-        LOGD("Calling find_path");
-        pathfinder.find_path(hmap.get_root());
-
-        LOGI("Path traversal result:");
-        pathfinder.debug_path();
-
-        // Now materialize the path
-        LOGI("Materializing path for modification...");
-        pathfinder.materialize_path();
-
-        LOGI("Path after materialization:");
-        pathfinder.debug_path();
-
-        // Verify no memory leaks by checking the nodes are properly managed
-        LOGI("[Memory management check: Using boost::intrusive_ptr]");
-        LOGI(
-            "Materialized nodes will be automatically deleted when path goes "
-            "out of scope");
-
-        // Display first state entry and transaction for verification
-        LOGI("\n=== Testing Hash Computation ===\n");
-
-        // Create a small hybrid tree for testing
-        auto* root = new catl::hybrid_shamap::HmapInnerNode(0);  // depth 0
-        boost::intrusive_ptr<catl::hybrid_shamap::HMapNode> root_ptr(root);
-
-        // Add a leaf
-        std::array<uint8_t, 32> test_key_data{};
-        test_key_data[31] = 1;  // Key ending in 01
-        Key test_key(test_key_data.data());
-        std::vector<uint8_t> test_data = {1, 2, 3, 4, 5};
-        boost::intrusive_ptr<HMapNode> leaf_ptr(new HmapLeafNode(
-            test_key, Slice(test_data.data(), test_data.size())));
-
-        // Add leaf to root at branch 1 (last nibble of key)
-        root->set_child(
-            1,
-            catl::hybrid_shamap::PolyNodePtr::from_intrusive(leaf_ptr),
-            catl::v2::ChildType::LEAF);
-
-        // Compute hash
-        auto root_hash = root->get_hash();
-        LOGI("Hybrid root hash: ", root_hash.hex());
-
-        // Now test with mixed mmap and heap nodes
-        LOGI("\n=== Testing Mixed Mmap/Heap Tree ===\n");
-
-        // Set the mmap root as a child of our heap root
-        root->set_child(
-            0,
-            catl::hybrid_shamap::PolyNodePtr::make_raw_memory(
-                state_root_raw, catl::v2::ChildType::INNER),
-            catl::v2::ChildType::INNER);
-
-        // Invalidate and recompute hash
-        root->invalidate_hash();
-        auto mixed_hash = root->get_hash();
-        LOGI("Mixed tree root hash: ", mixed_hash.hex());
-
-        // Get the perma-cached hash from the mmap node for comparison
-        catl::v2::MemPtr<catl::v2::InnerNodeHeader> mmap_header(state_root_raw);
-        const auto& h = mmap_header.get_uncopyable();
-        LOGI("Mmap child's perma-cached hash: ");
-        std::string hash_str;
-        for (int i = 0; i < 32; ++i)
-        {
-            char buf[3];
-            snprintf(buf, sizeof(buf), "%02x", h.hash[i]);
-            hash_str += buf;
-        }
-        LOGI(hash_str);
-
-        // Test the tree walker with C++23 generators
-        LOGI("\n=== Testing Tree Walker with Generators ===\n");
-
-        // Walk the mmap state tree and count nodes
-        auto state_root_ref = catl::hybrid_shamap::PolyNodePtr::make_raw_memory(
-            state_root_raw, catl::v2::ChildType::INNER);
-
-        LOGI("Walking the state tree depth-first...");
-
-        size_t total_nodes = 0;
-        size_t mmap_nodes = 0;
-        size_t materialized_nodes = 0;
-        size_t inner_nodes = 0;
-        size_t leaf_nodes = 0;
-        size_t max_depth = 0;
-
-        // Use range-based for with our generator
-        for (const auto& visit :
-             catl::hybrid_shamap::TreeWalker::walk_depth_first(state_root_ref))
-        {
-            total_nodes++;
-            if (visit.is_mmap())
-                mmap_nodes++;
-            if (visit.is_materialized())
-                materialized_nodes++;
-            if (visit.is_inner())
-                inner_nodes++;
-            if (visit.is_leaf())
-                leaf_nodes++;
-            if (visit.depth > static_cast<int>(max_depth))
-                max_depth = visit.depth;
-
-            // Print first few nodes
-            if (total_nodes <= 5)
-            {
-                LOGI(
-                    "  Node ",
-                    total_nodes,
-                    ": depth=",
-                    visit.depth,
-                    ", branch=",
-                    visit.branch,
-                    ", type=",
-                    visit.is_leaf() ? "LEAF" : "INNER",
-                    ", storage=",
-                    visit.is_mmap() ? "MMAP" : "HEAP",
-                    ", hash=",
-                    visit.get_hash().hex().substr(0, 8),
-                    "...");
-            }
-        }
-
-        LOGI("\nTree Statistics:");
-        LOGI("  Total nodes: ", total_nodes);
-        LOGI("  Inner nodes: ", inner_nodes);
-        LOGI("  Leaf nodes: ", leaf_nodes);
-        LOGI("  Mmap nodes: ", mmap_nodes);
-        LOGI("  Materialized nodes: ", materialized_nodes);
-        LOGI("  Max depth: ", max_depth);
-
-        // Count leaves only
-        LOGI("\nCounting leaves only...");
-        size_t leaf_count = 0;
-        for (const auto& visit :
-             catl::hybrid_shamap::TreeWalker::walk_leaves_only(state_root_ref))
-        {
-            leaf_count++;
-            if (leaf_count <= 3)
-            {
-                // Get the key if it's a leaf
-                if (visit.node.is_leaf())
-                {
-                    if (visit.node.is_raw_memory())
-                    {
-                        const uint8_t* raw = visit.node.get_raw_memory();
-                        catl::v2::MemPtr<catl::v2::LeafHeader> header(raw);
-                        const auto& h = header.get_uncopyable();
-                        Key key(h.key.data());
-                        LOGI(
-                            "  Leaf ",
-                            leaf_count,
-                            ": key=",
-                            key.hex().substr(0, 16),
-                            "...");
-                    }
-                }
-            }
-        }
-        LOGI("  Total leaves found: ", leaf_count);
-
-        // Test filtered walk - count nodes at specific depth
-        LOGI("\nCounting nodes at depth 3...");
-        auto depth3_nodes = catl::hybrid_shamap::TreeWalker::count_if(
-            state_root_ref, [](const auto& visit) { return visit.depth == 3; });
-        LOGI("  Nodes at depth 3: ", depth3_nodes);
-
-        // Collect keys where there's a depth skip (collapsed tree)
-        LOGI("\n=== Testing Collapsed Tree Hash Verification ===\n");
-        LOGI("Finding inner nodes with depth skips (collapsed tree)...");
-
-        struct InnerWithSkip
-        {
-            PolyNodePtr node;
-            int depth;
-            int parent_depth;
-            int skip_amount;
-        };
-
-        std::vector<InnerWithSkip> inners_with_skips;
-
-        // Walk tree and find inner nodes with depth skips
-        size_t inner_count = 0;
-        size_t checked_count = 0;
-        for (const auto& visit :
-             catl::hybrid_shamap::TreeWalker::walk_depth_first(state_root_ref))
-        {
-            if (visit.is_inner())
-            {
-                inner_count++;
-                if (inner_count <= 10)
-                {
-                    // Get the actual depth from the node header
-                    int actual_depth = -1;
-                    if (visit.node.is_raw_memory())
-                    {
-                        const uint8_t* raw = visit.node.get_raw_memory();
-                        InnerNodeView view = MemTreeOps::get_inner_node(raw);
-                        actual_depth = view.header.get_uncopyable().get_depth();
-                    }
-                    LOGD(
-                        "Inner node ",
-                        inner_count,
-                        ": traversal_depth=",
-                        visit.depth,
-                        ", actual_depth=",
-                        actual_depth,
-                        ", parent_depth=",
-                        visit.parent_depth,
-                        ", skip=",
-                        visit.depth_skip_amount());
-                }
-
-                if (visit.has_depth_skip())
-                {
-                    LOGI(
-                        "Found skip! depth=",
-                        visit.depth,
-                        ", parent_depth=",
-                        visit.parent_depth,
-                        ", skip amount=",
-                        visit.depth_skip_amount());
-                    inners_with_skips.push_back(
-                        {visit.node,
-                         visit.depth,
-                         visit.parent_depth,
-                         visit.depth_skip_amount()});
-
-                    if (inners_with_skips.size() >= 50)
-                    {
-                        break;
-                    }
-                }
-            }
-            checked_count++;
-        }
-        LOGI(
-            "Checked ",
-            checked_count,
-            " nodes, found ",
-            inner_count,
-            " inner nodes");
-
-        LOGI(
-            "Found ",
-            inners_with_skips.size(),
-            " inner nodes with depth skips");
-
-        // Now get first leaf from each of these inner nodes
-        struct KeyWithDepthInfo
-        {
-            Key key;
-            int leaf_depth;
-            int inner_depth;
-            int skip_amount;
-            Hash256 original_hash;
-        };
-
-        std::vector<KeyWithDepthInfo> keys_with_skips;
-
-        for (const auto& inner_info : inners_with_skips)
-        {
-            // Skip if not an mmap node
-            if (!inner_info.node.is_raw_memory())
-            {
-                continue;
-            }
-
-            // Get first leaf from this inner node
-            auto [key, data] = MemTreeOps::first_leaf_depth_first(
-                InnerNodeView{catl::v2::MemPtr<catl::v2::InnerNodeHeader>(
-                    inner_info.node.get_raw_memory())});
-
-            // Get the actual hash from the leaf
-            Hash256 leaf_hash;
-            // The first_leaf contains the raw leaf data, we need to get its
-            // hash Find the actual leaf node and get its hash
-            HmapPathFinder finder(key);
-            finder.find_path(hmap.get_root());
-            const auto& path = finder.get_path();
-            if (!path.empty() && path.back().first.is_leaf())
-            {
-                leaf_hash = path.back().first.get_hash();
-            }
-
-            keys_with_skips.push_back(
-                {key,
-                 inner_info.depth + 1,  // Approximate leaf depth
-                 inner_info.depth,
-                 inner_info.skip_amount,
-                 leaf_hash});
-
-            if (keys_with_skips.size() >= 10)
-            {
-                break;
-            }
-        }
-
-        LOGI(
-            "Collected ",
-            keys_with_skips.size(),
-            " leaf keys from inner nodes with collapsed ancestors");
-
-        // Now let's materialize paths for a sample of these keys and verify
-        // hashes
-        LOGI("\nMaterializing and verifying paths for sampled keys...");
-
-        // Limit to first 10 for testing
-        size_t keys_to_test = std::min(size_t(10), keys_with_skips.size());
-        size_t verified_count = 0;
-        size_t mismatch_count = 0;
-
-        for (size_t i = 0; i < keys_to_test; ++i)
-        {
-            const auto& key_info = keys_with_skips[i];
-            LOGD(
-                "Testing key ",
-                i + 1,
-                ": ",
-                key_info.key.hex().substr(0, 16),
-                "...");
-            LOGD(
-                "  Original leaf hash: ",
-                key_info.original_hash.hex().substr(0, 16),
-                "...");
-
-            // Find the path using pathfinder
-            HmapPathFinder pathfinder(key_info.key);
-            pathfinder.find_path(hmap.get_root());
-
-            // Check if we found the key (path will be empty if not found)
-            const auto& path = pathfinder.get_path();
-            if (path.empty())
-            {
-                LOGW("  Key not found in tree!");
-                continue;
-            }
-
-            // Get original hash before materialization
-            Hash256 original_root_hash = hmap.get_root().get_hash();
-            LOGD(
-                "  Original root hash: ",
-                original_root_hash.hex().substr(0, 16),
-                "...");
-
-            // Materialize the path
-            pathfinder.materialize_path();
-
-            // Update the hmap root to the materialized root from the path
-            if (!path.empty())
-            {
-                hmap.set_root(path[0].first);  // First node in path is the root
-            }
-
-            // Get the leaf node and verify its hash
-            if (!path.empty() && path.back().first.is_leaf())
-            {
-                Hash256 materialized_leaf_hash = path.back().first.get_hash();
-
-                if (materialized_leaf_hash == key_info.original_hash)
-                {
-                    LOGI(
-                        "  ✓ Leaf hash verified: ",
-                        materialized_leaf_hash.hex().substr(0, 16),
-                        "...");
-
-                    // Now check if root hash is preserved after materialization
-                    // This verifies that synthetic hashes for collapsed nodes
-                    // work correctly
-                    Hash256 new_root_hash = hmap.get_root().get_hash();
-
-                    if (new_root_hash == original_root_hash)
-                    {
-                        LOGI("  ✓ Root hash preserved after materialization!");
-                        verified_count++;
-                    }
-                    else
-                    {
-                        LOGE("  ✗ Root hash changed after materialization!");
-                        LOGE("    Original: ", original_root_hash.hex());
-                        LOGE("    New:      ", new_root_hash.hex());
-                        mismatch_count++;
-                    }
-                }
-                else
-                {
-                    LOGE("  ✗ Leaf hash mismatch!");
-                    LOGE("    Original: ", key_info.original_hash.hex());
-                    LOGE("    Materialized: ", materialized_leaf_hash.hex());
-                    mismatch_count++;
-                }
-
-                // Check for depth skips in the path
-                int actual_skips = 0;
-                for (size_t j = 1; j < path.size(); ++j)
-                {
-                    int depth_diff = path[j].second - path[j - 1].second;
-                    if (depth_diff > 1)
-                    {
-                        actual_skips += (depth_diff - 1);
-                        LOGD(
-                            "  Found depth skip of ",
-                            depth_diff - 1,
-                            " between depths ",
-                            path[j - 1].second,
-                            " and ",
-                            path[j].second);
-                    }
-                }
-                if (actual_skips > 0)
-                {
-                    LOGI(
-                        "  Total depth skips in path: ",
-                        actual_skips,
-                        " (collapsed inner nodes)");
-                }
-            }
-        }
-
-        LOGI("\nHash Verification Summary:");
-        LOGI("  Tested: ", keys_to_test, " keys");
-        LOGI("  Verified: ", verified_count, " paths");
-        LOGI("  Mismatches: ", mismatch_count, " paths");
-
-        if (mismatch_count == 0 && verified_count > 0)
-        {
-            LOGI("  🎉 All paths verified successfully with synthetic hashes!");
-        }
-
-        // Count materialized nodes in the final tree
-        LOGI("\n=== Final Tree State ===");
-        size_t final_materialized = 0;
-        size_t final_mmap = 0;
-        size_t final_total = 0;
-
-        for (const auto& visit :
-             catl::hybrid_shamap::TreeWalker::walk_depth_first(hmap.get_root()))
-        {
-            final_total++;
-            if (visit.is_materialized())
-                final_materialized++;
-            if (visit.is_mmap())
-                final_mmap++;
-        }
-
-        LOGI("  Total nodes: ", final_total);
-        LOGI("  Materialized (heap) nodes: ", final_materialized);
-        LOGI("  Mmap nodes: ", final_mmap);
-        LOGI(
-            "  Materialization ratio: ",
-            final_materialized > 0 ? (100.0 * final_materialized / final_total)
-                                   : 0.0,
-            "%");
-
-        LOGI("\n[Hybrid SHAMap experiment completed successfully]");
+        test_diff(*reader, ledger_info);
 
         return 0;
     }

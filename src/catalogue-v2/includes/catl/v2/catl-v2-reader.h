@@ -657,8 +657,8 @@ private:
             " threads");
 
         // First, read the root node to get its children
-        MemPtr<InnerNodeHeader> root_header_ptr(root_ptr);
-        const auto& root_header = root_header_ptr.get_uncopyable();
+        const auto& root_header =
+            MemPtr<InnerNodeHeader>(root_ptr).get_uncopyable();
 
         LOGI(
             "Root node depth: ",
