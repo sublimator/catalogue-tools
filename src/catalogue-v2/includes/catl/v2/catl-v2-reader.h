@@ -13,7 +13,7 @@
 #include <boost/iostreams/device/mapped_file.hpp>
 #include <chrono>
 #include <cstring>
-#include <errno.h>
+#include <errno.h>  // TODO: use cerrno
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -318,7 +318,7 @@ public:
             current_pos_,
             ", state_tree_size: ",
             current_trees_header_.state_tree_size);
-        return lookup_key_at_node(key, tree_ptr, 0);
+        return lookup_key_at_node(key, tree_ptr);
     }
 
     /**
@@ -346,7 +346,7 @@ public:
             current_trees_header_.state_tree_size,
             ", tx_tree_size: ",
             current_trees_header_.tx_tree_size);
-        return lookup_key_at_node(key, tree_ptr, 0);
+        return lookup_key_at_node(key, tree_ptr);
     }
 
     std::shared_ptr<MmapHolder>
@@ -426,12 +426,12 @@ public:
         if (!options.parallel)
         {
             return walk_items_at_node(
-                tree_ptr, 0, std::forward<Callback>(callback));
+                tree_ptr, std::forward<Callback>(callback));
         }
         else
         {
             return walk_items_parallel(
-                tree_ptr, 0, std::forward<Callback>(callback), options);
+                tree_ptr, std::forward<Callback>(callback), options);
         }
     }
 
@@ -453,8 +453,7 @@ public:
             static_cast<const void*>(tree_ptr),
             ", tx_tree_size: ",
             current_trees_header_.tx_tree_size);
-        return walk_items_at_node(
-            tree_ptr, 0, std::forward<Callback>(callback));
+        return walk_items_at_node(tree_ptr, std::forward<Callback>(callback));
     }
 
     /**
@@ -573,457 +572,59 @@ private:
     }
 
     /**
-     * Lookup a key in the tree using stack-based traversal
+     * Lookup a key in the tree using MemTreeOps
      *
      * @param key The key to search for
      * @param root_ptr Pointer to the root node
-     * @param start_depth Starting depth (usually 0)
      * @return Optional Slice containing the leaf data
      */
     [[nodiscard]] std::optional<Slice>
-    lookup_key_at_node(const Key& key, const uint8_t* root_ptr, int start_depth)
-        const
+    lookup_key_at_node(const Key& key, const uint8_t* root_ptr) const
     {
-        struct StackEntry
-        {
-            const uint8_t* node_ptr;  // Direct memory pointer to node
-            int depth;
-            bool is_leaf;  // Determined by parent's child_types bitmap
-        };
-
         LOGD("=== Starting key lookup ===");
         LOGD("Target key: ", key.hex());
         LOGD("Root ptr: ", static_cast<const void*>(root_ptr));
-        LOGD("Start depth: ", start_depth);
 
-        // Use a fixed-size stack (max tree depth is 64)
-        StackEntry stack[64];
-        int stack_top = 0;
-
-        // Push root
-        stack[stack_top++] = {root_ptr, start_depth, false};
-        LOGD("Pushed root to stack");
-
-        int nodes_visited = 0;
-        while (stack_top > 0)
+        try
         {
-            auto [node_ptr, depth, is_leaf] = stack[--stack_top];
-            nodes_visited++;
+            // Use MemTreeOps to do the lookup
+            auto root_view = MemTreeOps::get_inner_node(root_ptr);
+            auto leaf = MemTreeOps::lookup_key(root_view, key);
 
-            LOGD("--- Node ", nodes_visited, " ---");
-            LOGD("Node ptr: ", static_cast<const void*>(node_ptr));
-            LOGD("Depth: ", depth);
-            LOGD("Is leaf: ", is_leaf);
+            LOGD("=== Key lookup successful! ===");
+            LOGD("Found key! Data size: ", leaf.data.size(), " bytes");
 
-            if (!is_leaf)  // It's an inner node
-            {
-                LOGD("Processing INNER node");
-
-                // Read the inner node header
-                MemPtr<InnerNodeHeader> header_ptr(node_ptr);
-                const auto& inner_header = header_ptr.get_uncopyable();
-
-                LOGD(
-                    "Inner node depth from header: ",
-                    (int)inner_header.get_depth());
-                LOGD(
-                    "Child types bitmap: 0x",
-                    std::hex,
-                    inner_header.child_types,
-                    std::dec);
-
-                // Determine which branch to follow based on the key nibble
-                int nibble_idx = inner_header.get_depth();
-                if (nibble_idx >= 64)  // Sanity check
-                {
-                    LOGE("Invalid nibble index: ", nibble_idx);
-                    throw std::runtime_error("Invalid nibble index");
-                }
-
-                // Extract the nibble from the key
-                uint8_t byte = key.data()[nibble_idx / 2];
-                uint8_t nibble = (nibble_idx & 1) ? (byte & 0x0F) : (byte >> 4);
-                LOGD(
-                    "Key byte[",
-                    nibble_idx / 2,
-                    "] = 0x",
-                    std::hex,
-                    static_cast<int>(byte),
-                    std::dec);
-                LOGD(
-                    "Extracted nibble[",
-                    nibble_idx,
-                    "] = ",
-                    static_cast<int>(nibble));
-
-                // Check if this child exists
-                ChildType child_type = inner_header.get_child_type(nibble);
-                LOGD(
-                    "Child type for nibble ",
-                    static_cast<int>(nibble),
-                    ": ",
-                    (child_type == ChildType::EMPTY
-                         ? "EMPTY"
-                         : (child_type == ChildType::INNER ? "INNER"
-                                                           : "LEAF")));
-
-                if (child_type == ChildType::EMPTY)
-                {
-                    LOGW(
-                        "No child at nibble ",
-                        static_cast<int>(nibble),
-                        " - key not found");
-                    return std::nullopt;
-                }
-
-                // Use iterator to find the specific child
-                const uint8_t* offsets_start =
-                    node_ptr + sizeof(InnerNodeHeader);
-                ChildIterator child_iter(header_ptr, offsets_start);
-
-                const uint8_t* child_ptr = nullptr;
-                bool found = false;
-
-                while (child_iter.has_next())
-                {
-                    auto child = child_iter.next();
-                    if (child.branch == nibble)
-                    {
-                        child_ptr = child.ptr;
-                        found = true;
-                        break;
-                    }
-                }
-
-                if (!found)
-                {
-                    LOGE(
-                        "Failed to find child at nibble ",
-                        static_cast<int>(nibble));
-                    return std::nullopt;
-                }
-
-                LOGD("Child ptr: ", static_cast<const void*>(child_ptr));
-
-                // Push child to stack with proper type information
-                if (stack_top >= 64)  // Stack overflow protection
-                {
-                    throw std::runtime_error("Tree depth exceeds 64");
-                }
-
-                bool child_is_leaf = (child_type == ChildType::LEAF);
-                stack[stack_top++] = {
-                    child_ptr, inner_header.get_depth() + 1, child_is_leaf};
-                LOGD(
-                    "Pushed child to stack, new stack top: ",
-                    stack_top,
-                    ", child is ",
-                    child_is_leaf ? "LEAF" : "INNER");
-            }
-            else  // It's a leaf node
-            {
-                LOGD("Processing LEAF node");
-
-                // Read the leaf header
-                MemPtr<LeafHeader> leaf_ptr(node_ptr);
-                const auto& leaf_header = leaf_ptr.get_uncopyable();
-
-                // Convert leaf key to hex for logging
-                LOGD("Leaf key: ", Hash256(leaf_header.key.data()).hex());
-
-                // Check if this is the key we're looking for
-                bool key_match =
-                    std::memcmp(leaf_header.key.data(), key.data(), 32) == 0;
-                LOGD("Key match: ", key_match ? "YES!" : "no");
-
-                if (key_match)
-                {
-                    // Found it! Return the data (after LeafHeader)
-                    const uint8_t* data_ptr = node_ptr + sizeof(LeafHeader);
-                    size_t data_size = leaf_header.data_size();
-                    LOGD("Found key! Data size: ", data_size, " bytes");
-
-                    LOGD("=== Key lookup successful! ===");
-                    LOGD("Total nodes visited: ", nodes_visited);
-                    return Slice(data_ptr, data_size);
-                }
-
-                // Not the key we're looking for, continue
-                LOGD("Not our key, continuing search...");
-            }
+            // Return the leaf data as a Slice
+            return Slice(leaf.data.data(), leaf.data.size());
         }
-
-        LOGW("=== Key lookup failed - key not found ===");
-        LOGW("Total nodes visited: ", nodes_visited);
-        return std::nullopt;  // Key not found
+        catch (const std::runtime_error& e)
+        {
+            LOGW("=== Key lookup failed ===");
+            LOGW("Error: ", e.what());
+            return std::nullopt;  // Key not found
+        }
     }
 
     /**
-     * Walk all items in a tree using iterative traversal
+     * Walk all items in a tree using MemTreeOps
      *
      * @param root_ptr Pointer to the root node
-     * @param start_depth Starting depth (usually 0)
      * @param callback Function to call for each leaf: (Key, Slice) -> bool
      * @return Number of items visited
      */
     template <typename Callback>
     size_t
-    walk_items_at_node(
-        const uint8_t* root_ptr,
-        int start_depth,
-        Callback&& callback)
+    walk_items_at_node(const uint8_t* root_ptr, Callback&& callback)
     {
-        struct StackEntry
-        {
-            const uint8_t* node_ptr;  // Direct memory pointer to node
-            int depth;
-            bool is_leaf;  // Determined by parent's child_types bitmap
-
-            // For inner nodes, we store iteration state
-            bool is_processing_children;
-            uint32_t
-                remaining_children_mask;  // Bitmask of children yet to process
-            int offset_index;  // Current index in sparse offset array
-
-            StackEntry()
-                : node_ptr(nullptr)
-                , depth(0)
-                , is_leaf(false)
-                , is_processing_children(false)
-                , remaining_children_mask(0)
-                , offset_index(0)
-            {
-            }
-            StackEntry(const uint8_t* ptr, int d, bool leaf)
-                : node_ptr(ptr)
-                , depth(d)
-                , is_leaf(leaf)
-                , is_processing_children(false)
-                , remaining_children_mask(0)
-                , offset_index(0)
-            {
-            }
-        };
-
         LOGD(
             "walk_items_at_node - root_ptr: ",
-            static_cast<const void*>(root_ptr),
-            ", start_depth: ",
-            start_depth);
+            static_cast<const void*>(root_ptr));
 
-        // Use a fixed-size stack (max tree depth is 64)
-        StackEntry stack[64];
-        int stack_top = 0;
+        // Use MemTreeOps to walk the leaves
+        size_t items_visited = MemTreeOps::walk_leaves_from_ptr(
+            root_ptr, std::forward<Callback>(callback));
 
-        // Push root
-        // TODO: should be able to read the inner node here to determine the
-        // depth if this function should support also walking a leaf node, that
-        // would have to be passed in as an argument to the function, because
-        // it's not possible to determine a leaf from an inner node.
-        stack[stack_top++] = StackEntry(root_ptr, start_depth, false);
-
-        size_t items_visited = 0;
-        size_t iterations = 0;
-        const size_t MAX_ITERATIONS = 100'000'000;  // Safety limit
-
-        while (stack_top > 0 && iterations < MAX_ITERATIONS)
-        {
-            iterations++;
-
-            // Peek at top of stack (don't pop yet)
-            auto& entry = stack[stack_top - 1];
-
-            LOGD(
-                "Iteration ",
-                iterations,
-                " - Stack[",
-                stack_top - 1,
-                "]: ptr=",
-                static_cast<const void*>(entry.node_ptr),
-                ", depth=",
-                entry.depth,
-                ", is_leaf=",
-                entry.is_leaf,
-                ", is_processing=",
-                entry.is_processing_children);
-
-            if (entry.is_leaf)
-            {
-                // Process leaf node - no marker, starts directly with
-                // LeafHeader
-                MemPtr<LeafHeader> leaf_ptr(entry.node_ptr);
-                const auto& leaf_header = leaf_ptr.get_uncopyable();
-                Key leaf_key(leaf_header.key.data());
-
-                LOGD(
-                    "Processing leaf at ptr ",
-                    static_cast<const void*>(entry.node_ptr),
-                    " with key: ",
-                    leaf_key.hex());
-
-                // Get leaf data
-                const uint8_t* data_ptr = entry.node_ptr + sizeof(LeafHeader);
-                size_t data_size = leaf_header.data_size();
-
-                Slice leaf_data(data_ptr, data_size);
-
-                // Call the callback
-                items_visited++;
-                if (!callback(leaf_key, leaf_data))
-                {
-                    LOGD("Callback requested early termination");
-                    break;
-                }
-
-                // Pop the leaf from stack
-                stack_top--;
-            }
-            else
-            {
-                // Process inner node
-                if (!entry.is_processing_children)
-                {
-                    // First time visiting this inner node
-                    MemPtr<InnerNodeHeader> header_ptr(entry.node_ptr);
-                    const auto& inner_header = header_ptr.get_uncopyable();
-                    LOGD(
-                        "Processing inner node at ptr ",
-                        static_cast<const void*>(entry.node_ptr),
-                        ", depth=",
-                        entry.depth,
-                        ", header depth=",
-                        static_cast<int>(inner_header.get_depth()));
-
-                    // TODO: this is actually fine, because it's a collapsed
-                    // tree of course!?
-                    if (inner_header.get_depth() != entry.depth)
-                    {
-                        // LOGW(
-                        //     "Depth mismatch: expected ",
-                        //     entry.depth,
-                        //     " but header says ",
-                        //     static_cast<int>(inner_header.get_depth()));
-                    }
-
-                    // Show all children for debugging
-                    LOGD("Inner node at depth ", entry.depth, " has children:");
-                    for (int i = 0; i < 16; ++i)
-                    {
-                        ChildType ct = inner_header.get_child_type(i);
-                        if (ct != ChildType::EMPTY)
-                        {
-                            LOGD(
-                                "  Branch ",
-                                i,
-                                ": ",
-                                ct == ChildType::INNER
-                                    ? "INNER"
-                                    : ct == ChildType::LEAF ? "LEAF"
-                                                            : "UNKNOWN");
-                        }
-                    }
-
-                    int child_count = inner_header.count_children();
-                    LOGD("Total non-empty children: ", child_count);
-
-                    if (child_count == 0)
-                    {
-                        LOGW(
-                            "Inner node with no children at ptr ",
-                            static_cast<const void*>(entry.node_ptr));
-                        stack_top--;  // Pop this node
-                        continue;
-                    }
-
-                    // Build mask of non-empty children
-                    entry.remaining_children_mask = 0;
-                    for (int i = 0; i < 16; ++i)
-                    {
-                        if (inner_header.get_child_type(i) != ChildType::EMPTY)
-                        {
-                            entry.remaining_children_mask |= (1u << i);
-                        }
-                    }
-                    entry.offset_index = 0;
-                    entry.is_processing_children = true;
-                }
-
-                // Process next child
-                if (entry.remaining_children_mask != 0)
-                {
-                    // Find next child (least significant bit)
-                    int branch = catl::core::ctz(entry.remaining_children_mask);
-
-                    // Get inner header again
-                    MemPtr<InnerNodeHeader> header_ptr(entry.node_ptr);
-                    const auto& inner_header = header_ptr.get_uncopyable();
-                    ChildType child_type = inner_header.get_child_type(branch);
-
-                    // Get offset array
-                    const std::uint8_t* offsets_array =
-                        entry.node_ptr + sizeof(InnerNodeHeader);
-
-                    // Resolve self-relative offset to get child pointer
-                    const uint8_t* child_ptr = resolve_self_relative(
-                        offsets_array, entry.offset_index);
-
-                    bool child_is_leaf = (child_type == ChildType::LEAF);
-                    LOGD(
-                        "Processing child: branch=",
-                        branch,
-                        ", type=",
-                        child_is_leaf ? "LEAF" : "INNER",
-                        ", ptr=",
-                        static_cast<const void*>(child_ptr));
-
-                    // Clear this bit from mask
-                    entry.remaining_children_mask &= ~(1u << branch);
-                    ++entry.offset_index;
-
-                    // Push child onto stack
-                    if (stack_top >= 64)
-                    {
-                        throw std::runtime_error(
-                            "Stack overflow - tree depth exceeds 64");
-                    }
-
-                    LOGD(
-                        "Pushing child: ptr=",
-                        static_cast<const void*>(child_ptr),
-                        ", depth=",
-                        entry.depth + 1,
-                        ", is_leaf=",
-                        child_is_leaf);
-                    stack[stack_top++] =
-                        StackEntry(child_ptr, entry.depth + 1, child_is_leaf);
-                }
-                else
-                {
-                    // No more children, pop this inner node
-                    LOGD(
-                        "Inner node at ptr ",
-                        static_cast<const void*>(entry.node_ptr),
-                        " has no more children, popping");
-                    stack_top--;
-                }
-            }
-        }
-
-        if (iterations >= MAX_ITERATIONS)
-        {
-            LOGE(
-                "Walk aborted after ",
-                MAX_ITERATIONS,
-                " iterations - possible infinite loop");
-            throw std::runtime_error("Walk iteration limit exceeded");
-        }
-
-        LOGD(
-            "Walk complete - visited ",
-            items_visited,
-            " items in ",
-            iterations,
-            " iterations");
+        LOGD("Walk complete - visited ", items_visited, " items");
         return items_visited;
     }
 
@@ -1031,7 +632,6 @@ private:
      * Walk items in parallel using a thread pool
      *
      * @param root_ptr Pointer to the root node
-     * @param start_depth Starting depth (usually 0)
      * @param callback Function to call for each leaf: (Key, Slice) -> bool
      * @param options Walk options including thread count and prefetch settings
      * @return Number of items visited
@@ -1040,7 +640,6 @@ private:
     size_t
     walk_items_parallel(
         const uint8_t* root_ptr,
-        int start_depth,
         Callback&& callback,
         const WalkOptions& options)
     {
@@ -1051,8 +650,6 @@ private:
         LOGI(
             "walk_items_parallel START - root_ptr: ",
             static_cast<const void*>(root_ptr),
-            ", start_depth: ",
-            start_depth,
             ", main thread: ",
             ss.str(),
             ", using ",
@@ -1203,9 +800,7 @@ private:
                         try
                         {
                             size_t items = walk_items_at_node(
-                                child.ptr,
-                                start_depth + 1,
-                                thread_safe_callback);
+                                child.ptr, thread_safe_callback);
                             total_items.fetch_add(items);
 
                             LOGI(
@@ -1274,9 +869,7 @@ private:
 
             // Now walk and touch pages to ensure they're actually loaded
             walk_items_at_node(
-                root_ptr,
-                start_depth,
-                [&prefetched](const Key& key, const Slice& data) {
+                root_ptr, [&prefetched](const Key& key, const Slice& data) {
                     (void)key;
                     (void)data;
                     // Just touch first byte of key and data to trigger page
