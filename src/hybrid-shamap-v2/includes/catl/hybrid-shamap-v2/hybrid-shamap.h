@@ -1,6 +1,7 @@
 #pragma once
 #include "catl/crypto/sha512-half-hasher.h"
 #include "catl/shamap/shamap-hashprefix.h"
+#include "catl/shamap/shamap-options.h"  // For SetMode and SetResult
 #include "catl/shamap/shamap-utils.h"
 #include "catl/v2/catl-v2-memtree.h"
 #include "catl/v2/catl-v2-reader.h"
@@ -630,16 +631,35 @@ public:
         found_leaf_ = PolyNodePtr::make_empty();
         key_matches_ = false;
 
+        LOGD(
+            "[HmapPathFinder] Starting path finding for key: ",
+            target_key_.hex());
+        LOGD(
+            "  Root is raw: ",
+            root.is_raw_memory(),
+            " materialized: ",
+            root.is_materialized());
+
         // Start at root
         path_.emplace_back(root, -1);
 
         PolyNodePtr current = root;
         int depth = 0;
+        int iteration = 0;
 
         while (current)
         {
+            if (++iteration > 64)
+            {
+                LOGE("Path finding exceeded maximum depth!");
+                throw std::runtime_error("Path finding exceeded maximum depth");
+            }
+
+            LOGD("  Iteration ", iteration, " at depth ", depth);
+
             if (current.is_raw_memory())
             {
+                LOGD("    Navigating raw memory node...");
                 // Navigate through raw memory node
                 if (!navigate_raw_inner(current, depth))
                 {
@@ -684,6 +704,37 @@ public:
                         break;
                     }
 
+                    // Check if we've reached a leaf
+                    if (child.is_leaf())
+                    {
+                        // Found a leaf - check if it matches our key
+                        if (child.is_materialized())
+                        {
+                            auto* leaf = static_cast<HmapLeafNode*>(
+                                child.get_materialized());
+                            found_leaf_ = child;
+                            key_matches_ = (leaf->get_key() == target_key_);
+                        }
+                        else
+                        {
+                            // Raw memory leaf
+                            const uint8_t* leaf_raw = child.get_raw_memory();
+                            const v2::MemPtr<v2::LeafHeader> leaf_header_ptr(
+                                leaf_raw);
+                            const auto& leaf_header =
+                                leaf_header_ptr.get_uncopyable();
+                            found_leaf_ = child;
+                            key_matches_ =
+                                (std::memcmp(
+                                     leaf_header.key.data(),
+                                     target_key_.data(),
+                                     32) == 0);
+                        }
+                        path_.emplace_back(child, branch);
+                        break;  // Stop navigation at leaf
+                    }
+
+                    // It's an inner node, continue navigation
                     path_.emplace_back(child, branch);
                     current = child;
                     depth++;  // Move to next level
@@ -872,10 +923,37 @@ private:
     navigate_raw_inner(PolyNodePtr& current, int& depth)
     {
         const uint8_t* raw = current.get_raw_memory();
+
+        // Debug: validate the pointer
+        if (!raw || reinterpret_cast<uintptr_t>(raw) < 0x1000)
+        {
+            LOGE("Invalid raw pointer in navigate_raw_inner: ", raw);
+            throw std::runtime_error("Invalid raw pointer in tree navigation");
+        }
+
+        // Check for suspicious addresses (like our crash address)
+        if (reinterpret_cast<uintptr_t>(raw) > 0x700000000000)
+        {
+            LOGE("Suspicious raw pointer (too large): ", raw);
+            LOGE("  This indicates corrupt node data or wrong node type");
+            throw std::runtime_error("Corrupt raw pointer detected");
+        }
+
         InnerNodeView view{v2::MemPtr<v2::InnerNodeHeader>(raw)};
 
         const auto& header = view.header.get_uncopyable();
         depth = header.get_depth();
+
+        // Validate depth
+        if (depth < 0 || depth >= 64)
+        {
+            LOGE("Invalid depth in inner node: ", depth);
+            LOGE("  Raw pointer: ", raw);
+            LOGE(
+                "  This likely means we're reading wrong data type as inner "
+                "node");
+            throw std::runtime_error("Invalid depth in inner node");
+        }
 
         int branch = shamap::select_branch(target_key_, depth);
         auto child_type = header.get_child_type(branch);
@@ -887,6 +965,22 @@ private:
         }
 
         const uint8_t* child_ptr = view.get_child_ptr(branch);
+
+        // Validate child pointer
+        if (!child_ptr || reinterpret_cast<uintptr_t>(child_ptr) < 0x1000)
+        {
+            LOGE("Invalid child pointer from sparse offsets");
+            LOGE("  Branch: ", branch, " Type: ", static_cast<int>(child_type));
+            throw std::runtime_error("Invalid child pointer");
+        }
+
+        if (reinterpret_cast<uintptr_t>(child_ptr) > 0x700000000000)
+        {
+            LOGE("Suspicious child pointer (too large): ", child_ptr);
+            LOGE("  Parent depth: ", depth, " branch: ", branch);
+            throw std::runtime_error("Corrupt child pointer detected");
+        }
+
         PolyNodePtr child = PolyNodePtr::make_raw_memory(child_ptr, child_type);
 
         if (child_type == v2::ChildType::LEAF)
@@ -1031,6 +1125,467 @@ public:
     get_mmap_holders() const
     {
         return mmap_holders_;
+    }
+
+    [[nodiscard]] Hash256
+    get_root_hash() const
+    {
+        if (!root_)
+        {
+            return Hash256::zero();
+        }
+        return root_.get_hash();
+    }
+
+    /**
+     * Set (add or update) an item in the tree
+     * Will materialize nodes along the path as needed
+     *
+     * @param key The key to set
+     * @param data The data to store
+     * @return true if item was added, false if updated
+     */
+    shamap::SetResult
+    set_item(
+        const Key& key,
+        const Slice& data,
+        shamap::SetMode mode = shamap::SetMode::ADD_OR_UPDATE)
+    {
+        // If we have no root, create one
+        if (!root_)
+        {
+            // Create a new root at depth 0
+            auto* new_root = new HmapInnerNode(0);
+            root_ = PolyNodePtr::from_intrusive(
+                boost::intrusive_ptr<HMapNode>(new_root));
+        }
+
+        // Find the path to where this key should go
+        HmapPathFinder pathfinder(key);
+        pathfinder.find_path(root_);
+
+        // Materialize the path so we can modify it
+        pathfinder.materialize_path();
+
+        // Update root if it was materialized
+        const auto& path = pathfinder.get_path();
+        if (!path.empty())
+        {
+            root_ = path[0].first;  // Update root to materialized version
+        }
+
+        // Check if we found an existing leaf with this key
+        if (pathfinder.found_leaf() && pathfinder.key_matches())
+        {
+            // UPDATE case - replace the old leaf with a new one
+            // (Leaves are immutable, so we always create a new leaf)
+
+            // Find the parent of the leaf
+            for (size_t i = 0; i < path.size(); ++i)
+            {
+                if (i > 0 && path[i].first.is_leaf())
+                {
+                    // Previous node is the parent
+                    auto& parent_node = path[i - 1].first;
+                    assert(
+                        parent_node.is_inner() &&
+                        parent_node.is_materialized());
+
+                    auto* parent = static_cast<HmapInnerNode*>(
+                        parent_node.get_materialized());
+                    int branch = path[i].second;
+
+                    // Create new leaf with updated data
+                    auto* new_leaf = new HmapLeafNode(key, data);
+                    parent->set_child(
+                        branch,
+                        PolyNodePtr::from_intrusive(
+                            boost::intrusive_ptr<HMapNode>(new_leaf)),
+                        v2::ChildType::LEAF);
+
+                    // Check mode constraints
+                    if (mode == shamap::SetMode::ADD_ONLY)
+                    {
+                        // Item exists but ADD_ONLY was specified
+                        return shamap::SetResult::FAILED;
+                    }
+                    return shamap::SetResult::UPDATE;
+                }
+            }
+
+            // This shouldn't happen - we found a leaf but can't find its parent
+            throw std::runtime_error(
+                "Found leaf but couldn't find parent in path");
+        }
+
+        // ADD case - need to insert a new leaf
+
+        // Get the last inner node in the path
+        if (path.empty())
+        {
+            throw std::runtime_error(
+                "Path should not be empty after materialization");
+        }
+
+        // Find the deepest inner node
+        HmapInnerNode* insert_parent = nullptr;
+        int insert_depth = 0;
+
+        for (auto it = path.rbegin(); it != path.rend(); ++it)
+        {
+            if (it->first.is_inner() && it->first.is_materialized())
+            {
+                insert_parent =
+                    static_cast<HmapInnerNode*>(it->first.get_materialized());
+                insert_depth = insert_parent->get_depth();
+                break;
+            }
+        }
+
+        if (!insert_parent)
+        {
+            throw std::runtime_error("No inner node found in path");
+        }
+
+        // Determine which branch to use
+        int branch = shamap::select_branch(key, insert_depth);
+
+        // Check what's at that branch
+        auto existing = insert_parent->get_child(branch);
+
+        if (existing.is_empty())
+        {
+            // Simple case - empty branch, just insert the leaf
+            auto* new_leaf = new HmapLeafNode(key, data);
+            insert_parent->set_child(
+                branch,
+                PolyNodePtr::from_intrusive(
+                    boost::intrusive_ptr<HMapNode>(new_leaf)),
+                v2::ChildType::LEAF);
+            // Check mode constraints
+            if (mode == shamap::SetMode::UPDATE_ONLY)
+            {
+                // Item doesn't exist but UPDATE_ONLY was specified
+                return shamap::SetResult::FAILED;
+            }
+            return shamap::SetResult::ADD;
+        }
+        else if (existing.is_leaf())
+        {
+            // Collision - need to create intermediate inner node(s)
+
+            // Get the existing leaf's key
+            Key existing_key = [&]() -> Key {
+                if (existing.is_materialized())
+                {
+                    auto* existing_leaf =
+                        static_cast<HmapLeafNode*>(existing.get_materialized());
+                    return existing_leaf->get_key();
+                }
+                else
+                {
+                    // Read from mmap
+                    const uint8_t* raw = existing.get_raw_memory();
+                    v2::MemPtr<v2::LeafHeader> header(raw);
+                    return Key(header.get_uncopyable().key.data());
+                }
+            }();
+
+            // Find where they diverge using existing utility
+            int divergence_depth = shamap::find_divergence_depth(
+                key, existing_key, insert_depth + 1);
+
+            // Create new inner node at divergence depth
+            auto* divergence_node = new HmapInnerNode(divergence_depth);
+
+            // Add the new leaf
+            auto* new_leaf = new HmapLeafNode(key, data);
+            divergence_node->set_child(
+                shamap::select_branch(key, divergence_depth),
+                PolyNodePtr::from_intrusive(
+                    boost::intrusive_ptr<HMapNode>(new_leaf)),
+                v2::ChildType::LEAF);
+
+            // Add the existing leaf
+            divergence_node->set_child(
+                shamap::select_branch(existing_key, divergence_depth),
+                existing,
+                v2::ChildType::LEAF);
+
+            // Replace the branch in the parent
+            insert_parent->set_child(
+                branch,
+                PolyNodePtr::from_intrusive(
+                    boost::intrusive_ptr<HMapNode>(divergence_node)),
+                v2::ChildType::INNER);
+
+            // Check mode constraints
+            if (mode == shamap::SetMode::UPDATE_ONLY)
+            {
+                // Item doesn't exist but UPDATE_ONLY was specified
+                return shamap::SetResult::FAILED;
+            }
+            return shamap::SetResult::ADD;
+        }
+        else
+        {
+            // Existing is an inner node - this shouldn't happen if pathfinder
+            // worked correctly
+            throw std::runtime_error(
+                "Unexpected inner node at insertion point");
+        }
+    }
+
+    /**
+     * Remove an item from the tree
+     *
+     * @param key The key to remove
+     * @return true if item was removed, false if not found
+     */
+    bool
+    remove_item(const Key& key)
+    {
+        LOGD("[remove_item] Starting removal for key: ", key.hex());
+
+        if (!root_)
+        {
+            LOGD("[remove_item] Empty tree, nothing to remove");
+            return false;  // Empty tree
+        }
+
+        // Find the path to the key
+        HmapPathFinder pathfinder(key);
+        pathfinder.find_path(root_);
+
+        // Check if we found the key
+        if (!pathfinder.found_leaf() || !pathfinder.key_matches())
+        {
+            LOGD("[remove_item] Key not found: ", key.hex());
+            return false;  // Key not found
+        }
+
+        LOGD(
+            "[remove_item] Found key, materializing path of size ",
+            pathfinder.get_path().size());
+
+        // Materialize the path so we can modify it
+        pathfinder.materialize_path();
+
+        // Update root if it was materialized
+        const auto& path = pathfinder.get_path();
+        if (!path.empty())
+        {
+            assert(
+                path[0].first.is_materialized() &&
+                "Root should be materialized after materialize_path()");
+            root_ = path[0].first;  // Update root to materialized version
+        }
+
+        // Verify all nodes in path are properly set up
+        for (size_t i = 0; i < path.size(); ++i)
+        {
+            LOGD(
+                "[remove_item] Path[",
+                i,
+                "] is_materialized=",
+                path[i].first.is_materialized(),
+                " is_leaf=",
+                path[i].first.is_leaf(),
+                " is_inner=",
+                path[i].first.is_inner(),
+                " branch=",
+                path[i].second);
+            if (i <
+                path.size() - 1)  // All non-leaf nodes should be materialized
+            {
+                assert(
+                    path[i].first.is_materialized() &&
+                    "All inner nodes in path should be materialized");
+                assert(
+                    path[i].first.is_inner() &&
+                    "Non-terminal path nodes should be inner nodes");
+            }
+        }
+
+        // Find the parent of the leaf to remove
+        HmapInnerNode* parent = nullptr;
+        int branch_to_remove = -1;
+        size_t leaf_index = 0;
+
+        for (size_t i = 0; i < path.size(); ++i)
+        {
+            if (i > 0 && path[i].first.is_leaf())
+            {
+                // Previous node is the parent
+                auto& parent_node = path[i - 1].first;
+                assert(
+                    parent_node.is_inner() &&
+                    "Parent of leaf should be inner node");
+                assert(
+                    parent_node.is_materialized() &&
+                    "Parent should be materialized");
+
+                if (parent_node.is_inner() && parent_node.is_materialized())
+                {
+                    parent = static_cast<HmapInnerNode*>(
+                        parent_node.get_materialized());
+                    branch_to_remove = path[i].second;
+                    leaf_index = i;
+                    LOGD(
+                        "[remove_item] Found leaf at path[",
+                        i,
+                        "], parent at [",
+                        i - 1,
+                        "], branch=",
+                        branch_to_remove);
+                    break;
+                }
+            }
+        }
+
+        if (!parent || branch_to_remove == -1)
+        {
+            LOGE("[remove_item] Couldn't find parent of leaf!");
+            return false;  // Couldn't find parent
+        }
+
+        LOGD(
+            "[remove_item] Removing leaf from parent at branch ",
+            branch_to_remove);
+
+        // Remove the leaf
+        parent->set_child(
+            branch_to_remove, PolyNodePtr::make_empty(), v2::ChildType::EMPTY);
+
+        LOGD("[remove_item] Starting collapse phase");
+
+        // Collapse path - promote single children up the tree
+        // Start from the parent and work our way up
+        for (int i = static_cast<int>(path.size()) - 2; i >= 0; --i)
+        {
+            LOGD("[remove_item] Checking collapse at path[", i, "]");
+
+            // After materialize_path(), ALL inner nodes in path should be
+            // materialized! (The leaf might still be raw, but we've already
+            // removed it)
+            if (i < static_cast<int>(leaf_index))
+            {
+                assert(
+                    path[i].first.is_materialized() &&
+                    "Inner path node not materialized after "
+                    "materialize_path()!");
+            }
+
+            if (!path[i].first.is_inner())
+            {
+                LOGD("[remove_item] Path[", i, "] is not inner, skipping");
+                continue;  // It's a leaf, skip
+            }
+
+            assert(
+                path[i].first.is_materialized() &&
+                "Inner node must be materialized for collapse");
+            auto* inner =
+                static_cast<HmapInnerNode*>(path[i].first.get_materialized());
+
+            // Count children and find the single child if there is one
+            PolyNodePtr single_child;
+            int child_count = 0;
+            int single_child_branch = -1;
+
+            for (int branch = 0; branch < 16; ++branch)
+            {
+                auto child = inner->get_child(branch);
+                if (!child.is_empty())
+                {
+                    child_count++;
+                    if (child_count == 1)
+                    {
+                        single_child = child;
+                        single_child_branch = branch;
+                    }
+                    else if (child_count > 1)
+                    {
+                        break;  // More than one child, can't collapse
+                    }
+                }
+            }
+
+            LOGD("[remove_item] Path[", i, "] has ", child_count, " children");
+            if (child_count == 1)
+            {
+                LOGD(
+                    "  Single child at branch ",
+                    single_child_branch,
+                    " is_leaf=",
+                    single_child.is_leaf(),
+                    " is_materialized=",
+                    single_child.is_materialized());
+            }
+
+            // If this inner node has only one child and it's a leaf, promote it
+            if (child_count == 1 && single_child.is_leaf() && i > 0)
+            {
+                LOGD(
+                    "[remove_item] Collapsing: promoting single leaf child up "
+                    "from path[",
+                    i,
+                    "]");
+
+                // Get the parent of this inner node
+                auto& parent_entry = path[i - 1];
+                assert(parent_entry.first.is_inner() && "Parent must be inner");
+                assert(
+                    parent_entry.first.is_materialized() &&
+                    "Parent must be materialized");
+
+                if (parent_entry.first.is_inner() &&
+                    parent_entry.first.is_materialized())
+                {
+                    auto* parent_inner = static_cast<HmapInnerNode*>(
+                        parent_entry.first.get_materialized());
+                    int branch_in_parent = path[i].second;
+
+                    LOGD(
+                        "  Replacing inner at parent's branch ",
+                        branch_in_parent,
+                        " with leaf (type=",
+                        static_cast<int>(single_child.get_type()),
+                        ")");
+
+                    // Replace this inner node with its single leaf child
+                    // IMPORTANT: preserve the actual type of the child
+                    parent_inner->set_child(
+                        branch_in_parent,
+                        single_child,
+                        single_child.get_type());
+                }
+            }
+            else if (child_count == 1 && !single_child.is_leaf())
+            {
+                LOGD(
+                    "[remove_item] Single child is inner node, stopping "
+                    "collapse");
+                break;  // Don't collapse inner nodes
+            }
+            else if (child_count > 1)
+            {
+                LOGD(
+                    "[remove_item] Multiple children (",
+                    child_count,
+                    "), stopping collapse");
+                break;
+            }
+            else if (child_count == 0)
+            {
+                LOGW(
+                    "[remove_item] Inner node has NO children after removal! "
+                    "This shouldn't happen");
+            }
+        }
+
+        LOGD("[remove_item] Successfully removed key: ", key.hex());
+        return true;
     }
 };
 

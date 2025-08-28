@@ -531,6 +531,13 @@ struct LeafView
 {
     Key key;
     Slice data;
+
+    bool
+    eq(const LeafView& other) const
+    {
+        return key == other.key && data.size() == other.data.size() &&
+            std::memcmp(data.data(), other.data.data(), data.size()) == 0;
+    }
 };
 
 /**
@@ -677,6 +684,22 @@ public:
     [[nodiscard]] static LeafView
     lookup_key(const InnerNodeView& root, const Key& key)
     {
+        auto leaf_view = lookup_key_optional(root, key);
+        if (!leaf_view)
+        {
+            throw std::runtime_error("Key not found");
+        }
+        return *leaf_view;
+    }
+    /**
+     * Lookup a key in the state tree starting from a given inner node
+     * @param root The root node to start from
+     * @param key The key to search for
+     * @return std::optional<LeafView>
+     */
+    [[nodiscard]] static std::optional<LeafView>
+    lookup_key_optional(const InnerNodeView& root, const Key& key)
+    {
         InnerNodeView current = root;
         const auto& root_header = root.header.get_uncopyable();
         int depth = root_header.get_depth();
@@ -691,10 +714,7 @@ public:
             auto child_type = current.get_child_type(nibble);
             if (child_type == v2::ChildType::EMPTY)
             {
-                throw std::runtime_error(
-                    "Key not found - no child at nibble " +
-                    std::to_string(nibble) + " at depth " +
-                    std::to_string(depth));
+                return std::nullopt;
             }
 
             if (child_type == v2::ChildType::LEAF)
@@ -705,7 +725,7 @@ public:
                 {
                     return leaf;
                 }
-                throw std::runtime_error("Key mismatch at leaf");
+                return std::nullopt;
             }
 
             // It's an inner node, continue traversing
@@ -714,7 +734,6 @@ public:
             depth = current_header.get_depth();
         }
     }
-
     /**
      * Find the first leaf in depth-first order starting from given node
      *
