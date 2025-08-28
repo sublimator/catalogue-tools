@@ -449,7 +449,7 @@ main(int argc, char* argv[])
 
         // Create an Hmap with reader for mmap lifetime management
         LOGD("Creating Hmap with reader");
-        catl::hybrid_shamap::Hmap hmap(reader);
+        catl::hybrid_shamap::Hmap hmap(reader->mmap_holder());
         const uint8_t* state_root_raw = reader->current_data();
         hmap.set_root_raw(state_root_raw);
 
