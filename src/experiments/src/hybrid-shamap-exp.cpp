@@ -178,7 +178,7 @@ test_diff(
         i++;
         return true;
     };
-    LOGI("Diffing ledgers...");
+    LOGI("Pre diffing ledgers...");
     diff_memtree_nodes(state_view, second_state_view, callback);
     LOGI(
         "Diff complete: ",

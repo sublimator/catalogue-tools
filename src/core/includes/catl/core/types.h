@@ -45,6 +45,10 @@ public:
     {
         return {data_ + pos, size_ - pos};
     }
+
+    bool eq(const Slice& other) const {
+        return size_ == other.size_ && std::memcmp(data_, other.data_, size_) == 0;
+    }
 };
 
 /**
