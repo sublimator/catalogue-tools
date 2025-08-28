@@ -25,3 +25,15 @@ target_link_libraries(
 
 # Create alias target for easier reference in other CMake files
 add_library(catl::shamap ALIAS catl_shamap)
+
+# Create interface library for just the headers (no compiled code) Useful for
+# libraries that only need the shamap headers
+add_library(catl_shamap_headers INTERFACE)
+target_include_directories(
+  catl_shamap_headers
+  INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/includes>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src> # For internal
+                                                               # headers like
+                                                               # hashprefix
+            $<INSTALL_INTERFACE:include>)
+add_library(catl::shamap_headers ALIAS catl_shamap_headers)

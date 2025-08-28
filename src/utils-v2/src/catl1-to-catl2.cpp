@@ -63,13 +63,16 @@ load_protocol_from_options(const po::variables_map& vm, uint32_t network_id = 0)
 {
     if (vm.count("protocol-definitions"))
     {
-        std::string protocol_path = vm["protocol-definitions"].as<std::string>();
+        std::string protocol_path =
+            vm["protocol-definitions"].as<std::string>();
         LOGI("Loading protocol definitions from file: ", protocol_path);
         return xdata::Protocol::load_from_file(protocol_path);
     }
     else if (vm.count("use-xrpl-defs"))
     {
-        LOGI("Using embedded XRPL protocol definitions (forced by --use-xrpl-defs)");
+        LOGI(
+            "Using embedded XRPL protocol definitions (forced by "
+            "--use-xrpl-defs)");
         return xdata::Protocol::load_embedded_xrpl_protocol();
     }
     else
@@ -77,17 +80,26 @@ load_protocol_from_options(const po::variables_map& vm, uint32_t network_id = 0)
         // Auto-detect based on network ID
         if (network_id == 0)  // XRPL
         {
-            LOGI("Auto-detected network ID ", network_id, " - using embedded XRPL protocol definitions");
+            LOGI(
+                "Auto-detected network ID ",
+                network_id,
+                " - using embedded XRPL protocol definitions");
             return xdata::Protocol::load_embedded_xrpl_protocol();
         }
         else if (network_id == 21337)  // XAHAU
         {
-            LOGI("Auto-detected network ID ", network_id, " - using embedded Xahau protocol definitions");
+            LOGI(
+                "Auto-detected network ID ",
+                network_id,
+                " - using embedded Xahau protocol definitions");
             return xdata::Protocol::load_embedded_xahau_protocol();
         }
         else
         {
-            LOGW("Unknown network ID ", network_id, " - falling back to Xahau protocol definitions");
+            LOGW(
+                "Unknown network ID ",
+                network_id,
+                " - falling back to Xahau protocol definitions");
             return xdata::Protocol::load_embedded_xahau_protocol();
         }
     }
@@ -612,9 +624,10 @@ main(int argc, char* argv[])
             // Open reader to get network ID
             auto reader = CatlV2Reader::create(input_file);
             uint32_t network_id = reader->header().network_id;
-            
+
             // Load protocol definitions
-            xdata::Protocol protocol = load_protocol_from_options(vm, network_id);
+            xdata::Protocol protocol =
+                load_protocol_from_options(vm, network_id);
 
             // Perform lookup
             LOGI("Looking up key: \"", key_hex, "\" in ledger: ", ledger_seq);
@@ -646,9 +659,10 @@ main(int argc, char* argv[])
             // Open reader to get network ID
             auto reader = CatlV2Reader::create(input_file);
             uint32_t network_id = reader->header().network_id;
-            
+
             // Load protocol definitions
-            xdata::Protocol protocol = load_protocol_from_options(vm, network_id);
+            xdata::Protocol protocol =
+                load_protocol_from_options(vm, network_id);
 
             // Seek to the requested ledger
             if (!reader->seek_to_ledger(ledger_seq))

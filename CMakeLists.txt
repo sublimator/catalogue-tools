@@ -63,14 +63,23 @@ add_subdirectory(src/catalogue-common)
 # Add the catalogue v1 library
 add_subdirectory(src/catalogue-v1)
 
+# Add the catalogue v2 library
+add_subdirectory(src/catalogue-v2)
+
 # Add the shamap library
 add_subdirectory(src/shamap)
 
 # Add the hasher library
 add_subdirectory(src/hasher-v1)
 
+# Add the hybrid-shamap-v2 library
+add_subdirectory(src/hybrid-shamap-v2)
+
 # Add the utils library
 add_subdirectory(src/utils-v1)
+
+# Add the utils-v2 library
+add_subdirectory(src/utils-v2)
 
 # Add the x-data module
 add_subdirectory(src/x-data)

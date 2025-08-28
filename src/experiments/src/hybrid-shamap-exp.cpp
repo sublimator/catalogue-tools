@@ -5,10 +5,10 @@
  * mmap'd nodes, memory nodes, and placeholder nodes.
  */
 
-#include "../../../src/shamap/src/pretty-print-json.h"
+#include "../../shamap/src/pretty-print-json.h"
 #include "catl/core/logger.h"
-#include "catl/hybrid-shamap/hybrid-shamap.h"
-#include "catl/hybrid-shamap/tree-walker.h"
+#include "catl/hybrid-shamap-v2/hybrid-shamap.h"
+#include "catl/hybrid-shamap-v2/tree-walker.h"
 #include "catl/v2/catl-v2-reader.h"
 #include "catl/v2/catl-v2-structs.h"
 #include "catl/xdata/json-visitor.h"
