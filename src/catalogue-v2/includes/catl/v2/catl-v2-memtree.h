@@ -541,8 +541,19 @@ struct LeafView
             return true;
         }
 
+        if (get_hash().eq(other.get_hash()))
+        {
+            return true;
+        }
+
         return key == other.key && data.size() == other.data.size() &&
             std::memcmp(data.data(), other.data.data(), data.size()) == 0;
+    }
+
+    Slice
+    get_hash() const
+    {
+        return header.get_uncopyable().get_hash();
     }
 };
 
