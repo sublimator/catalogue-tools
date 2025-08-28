@@ -14,7 +14,6 @@
 #include <stdexcept>
 
 namespace catl::v2 {
-
 // Log partition for v2 structs debugging
 inline LogPartition&
 get_v2_memtree_log_partition()
@@ -186,18 +185,23 @@ public:
     explicit MemPtr(const uint8_t* p) : ptr_(p)
     {
     }
+
     explicit MemPtr(const void* p) : ptr_(static_cast<const uint8_t*>(p))
     {
     }
+
     MemPtr() : ptr_(nullptr)
     {
     }
 
     // Copy and move semantics (trivial, it's just a pointer)
     MemPtr(const MemPtr&) = default;
+
     MemPtr&
     operator=(const MemPtr&) = default;
+
     MemPtr(MemPtr&&) = default;
+
     MemPtr&
     operator=(MemPtr&&) = default;
 
@@ -254,6 +258,7 @@ public:
     {
         return ptr_ == nullptr;
     }
+
     explicit operator bool() const
     {
         return ptr_ != nullptr;
@@ -536,18 +541,8 @@ struct LeafView
     bool
     eq(const LeafView& other) const
     {
-        if (header.raw() == other.header.raw())
-        {
-            return true;
-        }
-
-        if (get_hash().eq(other.get_hash()))
-        {
-            return true;
-        }
-
-        return key == other.key && data.size() == other.data.size() &&
-            std::memcmp(data.data(), other.data.data(), data.size()) == 0;
+        return header.raw() == other.header.raw() ||
+            get_hash().eq(other.get_hash());
     }
 
     Slice
@@ -723,6 +718,7 @@ public:
         }
         return *leaf_view;
     }
+
     /**
      * Lookup a key in the state tree starting from a given inner node
      * @param root The root node to start from
@@ -766,6 +762,7 @@ public:
             depth = current_header.get_depth();
         }
     }
+
     /**
      * Find the first leaf in depth-first order starting from given node
      *
@@ -904,5 +901,4 @@ public:
         return walk_leaves(root, std::forward<Callback>(callback));
     }
 };
-
 }  // namespace catl::v2
