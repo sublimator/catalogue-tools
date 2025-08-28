@@ -14,6 +14,7 @@ target_include_directories(
 target_link_libraries(
   catl_catalogue_v2
   INTERFACE catl_core
+            catl_shamap_headers
             catl_catalogue_common # For ledger-info.h
             catl_catalogue_v1 # For catl-v1-ledger-info-view.h
             Boost::iostreams # For mapped_file_source
