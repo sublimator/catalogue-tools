@@ -1,5 +1,5 @@
 #include "catl/crypto/sha512-half-hasher.h"
-#include "catl/hybrid-shamap/hybrid-shamap.h"
+#include "catl/hybrid-shamap-v2/hybrid-shamap.h"
 #include "catl/shamap/shamap-hashprefix.h"
 #include <vector>
 
