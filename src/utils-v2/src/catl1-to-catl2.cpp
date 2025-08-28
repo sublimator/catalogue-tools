@@ -38,13 +38,15 @@
 #include "catl/v2/catl-v2-reader.h"
 #include "catl/v2/catl-v2-structs.h"
 #include "catl/v2/catl-v2-writer.h"
-#include "catl/v2/shamap-custom-traits.h"
+// #include "catl/v2/shamap-custom-traits.h"
 #include "catl/xdata/debug-visitor.h"
 #include "catl/xdata/json-visitor.h"
 #include "catl/xdata/parser-context.h"
 #include "catl/xdata/parser.h"
 #include "catl/xdata/protocol.h"
 #include "pretty-print-json.h"
+
+// Note: SHAMap with SerializedNode is provided via precompiled header
 
 using namespace catl;
 using namespace catl::v2;

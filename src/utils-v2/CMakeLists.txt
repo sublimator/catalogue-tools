@@ -10,10 +10,11 @@ target_include_directories(
   catl1-to-catl2 PRIVATE ${CMAKE_SOURCE_DIR}/src/shamap/includes
                          ${CMAKE_SOURCE_DIR}/src/shamap/src)
 
-# Precompile headers for better build performance
+# Precompile headers for better build performance Use the bundled header that
+# includes all SHAMap implementations
 target_precompile_headers(
   catl1-to-catl2 PRIVATE
-  ${CMAKE_SOURCE_DIR}/src/catalogue-v2/includes/catl/v2/shamap-custom-traits.h)
+  ${CMAKE_SOURCE_DIR}/src/catalogue-v2/includes/catl/v2/shamap-serialized.h)
 
 # Link with required dependencies
 target_link_libraries(
