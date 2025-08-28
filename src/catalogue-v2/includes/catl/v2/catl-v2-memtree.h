@@ -620,6 +620,20 @@ public:
         return InnerNodeView{(v2::MemPtr<v2::InnerNodeHeader>(ptr))};
     }
 
+    // In catl/v2/catl-v2-memtree.h, inside class MemTreeOps
+    static Slice
+    get_leaf_hash(const InnerNodeView& parent, int branch)
+    {
+        // Sanity: must be a leaf at this branch
+        auto ct = parent.get_child_type(branch);
+        if (ct != v2::ChildType::LEAF)
+            throw std::runtime_error("get_leaf_hash: not a leaf");
+        const uint8_t* leaf_ptr = parent.get_child_ptr(branch);
+        v2::MemPtr<v2::LeafHeader> leaf_header_ptr(leaf_ptr);
+        const auto& hdr = leaf_header_ptr.get_uncopyable();
+        return hdr.get_hash();  // 32-byte slice
+    }
+
     /**
      * Get an inner child from a node view
      */

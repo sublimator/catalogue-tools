@@ -6,7 +6,6 @@
 #include <cassert>
 #include <cstring>
 #include <functional>
-#include <optional>
 
 namespace catl::v2 {
 enum class DiffOp : uint8_t { Added, Modified, Deleted };
@@ -78,31 +77,11 @@ diff_memtree_nodes(
 
     struct Projected
     {
-        enum class Kind { Empty, Inner, Leaf };
-        Kind kind;
+        enum class Kind { Empty, Inner, Leaf } kind;
 
-        // Use std::optional to handle the initialization issue
-        std::optional<InnerNodeView> inner;  // valid if kind==Inner
-        std::optional<LeafView> leaf;        // valid if kind==Leaf
-
-        // Factory methods
-        static Projected
-        make_empty()
-        {
-            return {Kind::Empty, std::nullopt, std::nullopt};
-        }
-
-        static Projected
-        make_inner(const InnerNodeView& iv)
-        {
-            return {Kind::Inner, iv, std::nullopt};
-        }
-
-        static Projected
-        make_leaf(const LeafView& lv)
-        {
-            return {Kind::Leaf, std::nullopt, lv};
-        }
+        InnerNodeView inner{};
+        LeafView leaf{};
+        // For leaves, we’ll load the hash on demand
     };
 
     auto project_branch = [&](const InnerNodeView& node,
@@ -113,28 +92,27 @@ diff_memtree_nodes(
         int dN = hdr.get_depth();
 
         if (dN < target_depth)
-        {
             throw std::logic_error("project_branch: node depth < target_depth");
-        }
 
-        // If node is exactly at target depth: real child selection
         if (dN == target_depth)
         {
-            ChildType ct = node.get_child_type(branch);
+            auto ct = node.get_child_type(branch);
             if (ct == ChildType::PLACEHOLDER)
                 throw std::runtime_error("PLACEHOLDER child encountered");
             if (ct == ChildType::EMPTY)
-                return Projected::make_empty();
+                return {Projected::Kind::Empty, {}, {}};
             if (ct == ChildType::LEAF)
-                return Projected::make_leaf(
-                    MemTreeOps::get_leaf_child(node, branch));
-            // INNER
-            return Projected::make_inner(
-                MemTreeOps::get_inner_child(node, branch));
+                return {
+                    Projected::Kind::Leaf,
+                    {},
+                    MemTreeOps::get_leaf_child(node, branch)};
+            return {
+                Projected::Kind::Inner,
+                MemTreeOps::get_inner_child(node, branch),
+                {}};
         }
 
-        // Node is deeper than target depth: the whole subtree belongs under
-        // exactly one branch at target_depth
+        // Deeper node -> projects under exactly one branch at target_depth
         int nib = pre_nibble;
         if (nib < 0)
         {
@@ -142,13 +120,13 @@ diff_memtree_nodes(
             nib = shamap::select_branch(rep, target_depth);
         }
         if (nib != branch)
-            return Projected::make_empty();
-        return Projected::make_inner(node);
+            return {Projected::Kind::Empty, {}, {}};
+        return {Projected::Kind::Inner, node, {}};
     };
 
     std::function<bool(const InnerNodeView&, const InnerNodeView&)> go;
     go = [&](const InnerNodeView& A, const InnerNodeView& B) -> bool {
-        // Fast subtree equality
+        // subtree pointer/hash fast path
         if (A.header.raw() == B.header.raw())
             return true;
         if (slice32_eq(
@@ -160,9 +138,9 @@ diff_memtree_nodes(
         const auto& hb = B.header.get_uncopyable();
         int da = ha.get_depth();
         int db = hb.get_depth();
-        int d = da < db ? da : db;  // align to common (shallower) depth
+        int d = da < db ? da : db;  // align to shallower depth
 
-        // Precompute the single branch where a deeper node will project
+        // Precompute which branch each deeper node projects into at depth d
         int a_proj_nib = -1, b_proj_nib = -1;
         if (da > d)
         {
@@ -187,25 +165,25 @@ diff_memtree_nodes(
             // EMPTY ↔ LEAF / EMPTY ↔ INNER
             if (pa.kind == K::Empty && pb.kind == K::Leaf)
             {
-                if (!emit_add(pb.leaf->key, pb.leaf->data))
+                if (!emit_add(pb.leaf.key, pb.leaf.data))
                     return false;
                 continue;
             }
             if (pa.kind == K::Leaf && pb.kind == K::Empty)
             {
-                if (!emit_del(pa.leaf->key, pa.leaf->data))
+                if (!emit_del(pa.leaf.key, pa.leaf.data))
                     return false;
                 continue;
             }
             if (pa.kind == K::Empty && pb.kind == K::Inner)
             {
-                if (!add_subtree(*pb.inner))
+                if (!add_subtree(pb.inner))
                     return false;
                 continue;
             }
             if (pa.kind == K::Inner && pb.kind == K::Empty)
             {
-                if (!del_subtree(*pa.inner))
+                if (!del_subtree(pa.inner))
                     return false;
                 continue;
             }
@@ -213,50 +191,72 @@ diff_memtree_nodes(
             // LEAF ↔ LEAF
             if (pa.kind == K::Leaf && pb.kind == K::Leaf)
             {
-                // If key matches and data changed => Modified; if key differs
-                // => Delete+Add
-                if (key_eq(pa.leaf->key, pb.leaf->key))
+                // pointer/hash fast path
+                if (pa.leaf.data.data() == pb.leaf.data.data())
                 {
-                    if (!pa.leaf->eq(*pb.leaf))
-                    {
-                        if (!emit_mod(
-                                pa.leaf->key, pa.leaf->data, pb.leaf->data))
-                            return false;
-                    }
+                    // same backing bytes => unchanged
                 }
                 else
                 {
-                    if (!emit_del(pa.leaf->key, pa.leaf->data))
-                        return false;
-                    if (!emit_add(pb.leaf->key, pb.leaf->data))
-                        return false;
+                    // Compare cached leaf hashes before memcmp
+                    // (we must fetch them from the parents)
+                    // Note: parents here are the nodes we projected from:
+                    // when d==depth(parent) both pa/pb are real children.
+                    // When projected, pa/pb.inner was the deeper node and
+                    // is not a parent-of-leaf at depth d, so the LeafView
+                    // came from a real child fetch at d (safe).
+                    // We can safely call get_leaf_hash here using (A|B, d, i).
+                    Slice ha32 = MemTreeOps::get_leaf_hash(
+                        (da == d ? A : MemTreeOps::get_inner_child(A, i)), i);
+                    Slice hb32 = MemTreeOps::get_leaf_hash(
+                        (db == d ? B : MemTreeOps::get_inner_child(B, i)), i);
+
+                    if (!slice32_eq(ha32, hb32))
+                    {
+                        if (key_eq(pa.leaf.key, pb.leaf.key))
+                        {
+                            if (!emit_mod(
+                                    pa.leaf.key, pa.leaf.data, pb.leaf.data))
+                                return false;
+                        }
+                        else
+                        {
+                            if (!emit_del(pa.leaf.key, pa.leaf.data))
+                                return false;
+                            if (!emit_add(pb.leaf.key, pb.leaf.data))
+                                return false;
+                        }
+                    }
+                    // else hashes equal -> unchanged
                 }
                 continue;
             }
 
-            // LEAF ↔ INNER  (search survivor only inside that INNER)
+            // LEAF ↔ INNER (local survivor search)
             if (pa.kind == K::Leaf && pb.kind == K::Inner)
             {
                 auto survivor =
-                    MemTreeOps::lookup_key_optional(*pb.inner, pa.leaf->key);
+                    MemTreeOps::lookup_key_optional(pb.inner, pa.leaf.key);
                 if (survivor)
                 {
-                    if (survivor->data.size() != pa.leaf->data.size() ||
+                    // hash path for modification check
+                    // (cheap size+memcmp fall back if you prefer)
+                    if (survivor->data.size() != pa.leaf.data.size() ||
                         std::memcmp(
                             survivor->data.data(),
-                            pa.leaf->data.data(),
+                            pa.leaf.data.data(),
                             survivor->data.size()) != 0)
                     {
                         if (!emit_mod(
-                                pa.leaf->key, pa.leaf->data, survivor->data))
+                                pa.leaf.key, pa.leaf.data, survivor->data))
                             return false;
                     }
                     bool ok = true;
                     MemTreeOps::walk_leaves(
-                        *pb.inner, [&](const Key& k, const Slice& d) {
+                        pb.inner, [&](const Key& k, const Slice& d) {
                             if (!ok)
                                 return false;
-                            if (key_eq(k, pa.leaf->key))
+                            if (key_eq(k, pa.leaf.key))
                                 return true;
                             ok = emit_add(k, d);
                             return ok;
@@ -266,37 +266,37 @@ diff_memtree_nodes(
                 }
                 else
                 {
-                    if (!emit_del(pa.leaf->key, pa.leaf->data))
+                    if (!emit_del(pa.leaf.key, pa.leaf.data))
                         return false;
-                    if (!add_subtree(*pb.inner))
+                    if (!add_subtree(pb.inner))
                         return false;
                 }
                 continue;
             }
 
-            // INNER ↔ LEAF  (mirror)
+            // INNER ↔ LEAF (mirror)
             if (pa.kind == K::Inner && pb.kind == K::Leaf)
             {
                 auto survivor =
-                    MemTreeOps::lookup_key_optional(*pa.inner, pb.leaf->key);
+                    MemTreeOps::lookup_key_optional(pa.inner, pb.leaf.key);
                 if (survivor)
                 {
-                    if (survivor->data.size() != pb.leaf->data.size() ||
+                    if (survivor->data.size() != pb.leaf.data.size() ||
                         std::memcmp(
                             survivor->data.data(),
-                            pb.leaf->data.data(),
-                            pb.leaf->data.size()) != 0)
+                            pb.leaf.data.data(),
+                            pb.leaf.data.size()) != 0)
                     {
                         if (!emit_mod(
-                                pb.leaf->key, survivor->data, pb.leaf->data))
+                                pb.leaf.key, survivor->data, pb.leaf.data))
                             return false;
                     }
                     bool ok = true;
                     MemTreeOps::walk_leaves(
-                        *pa.inner, [&](const Key& k, const Slice& d) {
+                        pa.inner, [&](const Key& k, const Slice& d) {
                             if (!ok)
                                 return false;
-                            if (key_eq(k, pb.leaf->key))
+                            if (key_eq(k, pb.leaf.key))
                                 return true;
                             ok = emit_del(k, d);
                             return ok;
@@ -306,9 +306,9 @@ diff_memtree_nodes(
                 }
                 else
                 {
-                    if (!del_subtree(*pa.inner))
+                    if (!del_subtree(pa.inner))
                         return false;
-                    if (!emit_add(pb.leaf->key, pb.leaf->data))
+                    if (!emit_add(pb.leaf.key, pb.leaf.data))
                         return false;
                 }
                 continue;
@@ -317,19 +317,18 @@ diff_memtree_nodes(
             // INNER ↔ INNER
             if (pa.kind == K::Inner && pb.kind == K::Inner)
             {
-                // pointer/hash skip again at this subpair
-                if (pa.inner->header.raw() == pb.inner->header.raw())
+                // pointer/hash fast path again
+                if (pa.inner.header.raw() == pb.inner.header.raw())
                     continue;
                 if (slice32_eq(
-                        pa.inner->header.get_uncopyable().get_hash(),
-                        pb.inner->header.get_uncopyable().get_hash()))
+                        pa.inner.header.get_uncopyable().get_hash(),
+                        pb.inner.header.get_uncopyable().get_hash()))
                     continue;
-                if (!go(*pa.inner, *pb.inner))
+                if (!go(pa.inner, pb.inner))
                     return false;
                 continue;
             }
 
-            // Should be exhaustive
             throw std::logic_error("Unhandled projected pair");
         }
         return true;
