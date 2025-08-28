@@ -13,6 +13,7 @@ enum class DiffOp : uint8_t { Added, Modified, Deleted };
 struct DiffStats
 {
     size_t added = 0, modified = 0, deleted = 0;
+
     size_t
     total() const
     {
@@ -25,12 +26,138 @@ slice32_eq(Slice a, Slice b)
 {
     return std::memcmp(a.data(), b.data(), 32) == 0;
 }
+
 inline bool
 key_eq(const Key& a, const Key& b)
 {
     return std::memcmp(a.data(), b.data(), 32) == 0;
 }
 
+/**
+ * diff_memtree_nodes (pointer+hash aligned)
+ * =========================================
+ *
+ * A canonical, *purely local* Merkle-tree diff that exploits structural
+ * sharing (pointer equality) and perma-cached node hashes to skip whole
+ * subtrees — while remaining correct in the presence of path collapsing.
+ *
+ * Motivation & challenges
+ * -----------------------
+ * - **Canonical paths.** In a radix/SHAMap-style tree each key K has a
+ *   deterministic path (nibble sequence). A key can only live at the node
+ *   determined by that path; it never “moves sideways”.
+ * - **Collapsing.** Implementations often collapse chains of inners. After
+ *   updates, one version may hold an **INNER** at depth `d` while the other
+ *   holds a **LEAF** or a “deeper” **INNER** referencing the same keyspace.
+ *   A naïve child-by-child diff at mismatched depths will misclassify moves
+ *   or double-count adds/deletes.
+ * - **Structural sharing.** Unchanged subtrees are literally the same
+ *   memory in both versions. If two node headers are the same pointer, the
+ *   subtrees are identical by construction.
+ * - **Hash skipping.** Every node (inner/leaf) carries a perma-cached hash.
+ *   Equal hashes imply equal content, so we can skip without descending.
+ *
+ * Core idea: **Projection**
+ * -------------------------
+ * To compare nodes A and B despite depth mismatches, we **align** them to
+ * the shallower depth `d = min(depth(A), depth(B))` and *project* each node
+ * into the 16 branches at that depth:
+ *
+ *   - If a node is already at `d`, projection is its real child at branch `i`.
+ *   - If a node is deeper than `d`, its entire subtree belongs under exactly
+ *     **one** branch at depth `d` (the nibble of *any* representative key in
+ *     that subtree at depth `d`). All other branches are empty for that node.
+ *
+ * This yields a pair of **Projected** values per branch:
+ *
+ *   ```text
+ *   Projected::Kind = { Empty, Leaf, Inner }
+ *   ```
+ *
+ * and lets us run normal local cases (Empty/Leaf/Inner) branch-by-branch,
+ * without global lookups or a “seen set”.
+ *
+ * Fast paths
+ * ----------
+ * 1) **Pointer equality** (`A.header.raw() == B.header.raw()`): subtree is
+ *    identical → skip entirely.
+ * 2) **Hash equality** (`A.hash == B.hash`): subtree content identical →
+ *    skip entirely.
+ * 3) **Leaf↔Leaf short-circuit**: if both projected children are leaves at
+ *    the same aligned branch, first check backing pointer and cached leaf
+ *    hashes before touching leaf bytes.
+ *
+ * Local decision table (per aligned branch)
+ * -----------------------------------------
+ * - **Empty ↔ Leaf**       → `Added` / `Deleted`
+ * - **Empty ↔ Inner**      → add/delete the whole subtree via a linear
+ *                           leaf walk (no recursion needed)
+ * - **Leaf ↔ Leaf**        → if same key:
+ *                               `Modified` iff data differs
+ *                             else:
+ *                               `Deleted(old)` + `Added(new)`
+ * - **Leaf ↔ Inner**       → search **only inside that inner** for the
+ *                           leaf’s key (the canonical survivor); if found,
+ *                           `Modified` iff data differs; every other leaf
+ *                           in the inner is `Added`. If not found, `Deleted`
+ *                           the old leaf + `Added` the inner’s leaves.
+ * - **Inner ↔ Leaf**       → mirror of the above (`Deleted` others in old
+ *                           inner; survivor becomes `Modified` iff needed).
+ * - **Inner ↔ Inner**      → recurse (with the same pointer/hash fast paths
+ *                           at the new pair).
+ *
+ * Why projection is necessary
+ * ---------------------------
+ * With collapsing, one side may compress a path segment (fewer inner levels)
+ * while the other retains it. Direct child-by-child comparison would pair
+ * incomparable nodes. Projecting both nodes *to the same depth* ensures:
+ *
+ *   - Each key’s canonical position appears in exactly one aligned branch.
+ *   - “Promotions”/“demotions” caused by collapsing do not create duplicates.
+ *   - We never need global lookups; all survivor checks are *local to the
+ *     mismatched subtree*.
+ *
+ * Correctness sketch
+ * ------------------
+ * 1) **Uniqueness.** At a fixed depth `d`, all keys in a subtree share the
+ *    same length-`d` prefix; hence every key maps to exactly one branch at `d`.
+ * 2) **Completeness.** The branch-wise pass over i∈[0,15] covers all keys in
+ *    both subtrees at depth `d`.
+ * 3) **Non-duplication.** A key can only appear in one projected pair at `d`.
+ *    Combined with local handling of Leaf↔Inner/Inner↔Leaf, each key is
+ *    emitted at most once.
+ * 4) **Equivalence under collapsing.** Projecting deeper nodes to the single
+ *    branch they inhabit at `d` preserves the canonical position of every key.
+ *
+ * Error handling & invariants
+ * ---------------------------
+ * - **PLACEHOLDER** children are not expected in packed snapshots; encountering
+ *   one is a logic error → we `throw`.
+ * - Both inputs must be *canonical* snapshots of the same tree type.
+ * - Overlay/experimental modes not implemented in the reader are asserted off.
+ *
+ * Complexity
+ * ----------
+ * - Best case: dominated by fast paths (pointer/hash), ~O(#changed_nodes).
+ * - Worst case: we visit and linearly emit every leaf in changed subtrees.
+ * - No global map/set; stack depth is bounded by key length.
+ *
+ * Callback contract
+ * -----------------
+ * The user-supplied `callback(Key, DiffOp, old_data, new_data)` is invoked
+ * exactly once per changed key:
+ *   - `Added`   : `old_data = {nullptr,0}`, `new_data` points to mmap bytes
+ *   - `Deleted` : `old_data` points to mmap bytes, `new_data = {nullptr,0}`
+ *   - `Modified`: both slices valid
+ * Returning `false` aborts the diff early.
+ *
+ * Notes on hashes
+ * ---------------
+ * - Inner/leaf hashes are first-class fields in the binary format. We trust
+ *   them as equality oracles to skip subtrees or avoid expensive memcmps.
+ * - If defensive verification is desired, a debug/verification mode can
+ *   rehash on demand (not enabled here).
+ */
 template <typename Callback>
 DiffStats
 diff_memtree_nodes(
