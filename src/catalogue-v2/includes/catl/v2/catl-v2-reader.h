@@ -5,6 +5,7 @@
 #include "catl/core/log-macros.h"
 #include "catl/core/types.h"
 #include "catl/v2/catl-v2-ledger-index-view.h"
+#include "catl/v2/catl-v2-memtree.h"
 #include "catl/v2/catl-v2-structs.h"
 
 #include <atomic>

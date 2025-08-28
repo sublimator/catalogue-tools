@@ -2,6 +2,7 @@
 #include "catl/crypto/sha512-half-hasher.h"
 #include "catl/shamap/shamap-hashprefix.h"
 #include "catl/shamap/shamap-utils.h"
+#include "catl/v2/catl-v2-memtree.h"
 #include "catl/v2/catl-v2-reader.h"
 #include "catl/v2/catl-v2-structs.h"
 #include <array>
@@ -23,7 +24,11 @@ To start with we'll just allocate an array in the struct
  */
 
 namespace catl::hybrid_shamap {
-class MemTreeOps;
+
+// Import v2 types we'll use
+using catl::v2::InnerNodeView;
+using catl::v2::LeafView;
+using catl::v2::MemTreeOps;
 
 // Forward declarations
 class HMapNode;
@@ -274,246 +279,6 @@ public:
      */
     [[nodiscard]] Hash256
     get_hash() const;
-};
-
-/**
- * Lightweight view for an inner node - just holds pointer to mmap data
- */
-struct InnerNodeView
-{
-    v2::MemPtr<v2::InnerNodeHeader> header;  // Points directly into mmap
-
-    // Get a child iterator on demand
-    [[nodiscard]] v2::ChildIterator
-    get_child_iter() const
-    {
-        const auto* offsets_data =
-            header.offset(sizeof(v2::InnerNodeHeader)).raw();
-        // Simple: just pass the header and offset array pointer
-        return {header, offsets_data};
-    }
-
-    // Get child type for branch i (EMPTY, INNER, or LEAF)
-    [[nodiscard]] v2::ChildType
-    get_child_type(int branch) const
-    {
-        if (branch < 0 || branch >= 16)
-        {
-            throw std::out_of_range(
-                "Branch index " + std::to_string(branch) +
-                " out of range [0,16)");
-        }
-        const auto& header_val = header.get_uncopyable();
-        return header_val.get_child_type(branch);
-    }
-
-    // Get pointer to child at branch i using SparseChildOffsets
-    [[nodiscard]] const uint8_t*
-    get_child_ptr(int branch) const
-    {
-        if (branch < 0 || branch >= 16)
-        {
-            throw std::out_of_range(
-                "Branch index " + std::to_string(branch) +
-                " out of range [0,16)");
-        }
-
-        // const auto& header_val = header.get_uncopyable();
-        //
-        // // Create SparseChildOffsets accessor
-        // const uint8_t* offsets_base =
-        //     header.offset(sizeof(catl::v2::InnerNodeHeader)).raw();
-        // catl::v2::SparseChildOffsets offsets(
-        //     offsets_base, header_val.child_types);
-
-        // Get the child pointer (will return nullptr if empty)
-        const uint8_t* child_ptr = get_sparse_offsets().get_child_ptr(branch);
-        if (!child_ptr)
-        {
-            throw std::runtime_error(
-                "No child at branch " + std::to_string(branch));
-        }
-
-        return child_ptr;
-    }
-
-    // Get a SparseChildOffsets accessor for this node
-    [[nodiscard]] v2::SparseChildOffsets
-    get_sparse_offsets() const
-    {
-        const auto& header_val = header.get_uncopyable();
-        const uint8_t* offsets_base =
-            header.offset(sizeof(v2::InnerNodeHeader)).raw();
-        return {offsets_base, header_val.child_types};
-    }
-
-    // Find first leaf using depth-first traversal
-    // This needs HybridReader to recurse, so it's better placed there
-};
-
-// Leaf view structure
-struct LeafView
-{
-    Key key;
-    Slice data;
-};
-
-class MemTreeOps  // TODO:
-{
-public:
-    /**
-     * Get an inner node view from a pointer
-     * Returns lightweight view with pointer into mmap data
-     */
-    [[nodiscard]] static InnerNodeView
-    get_inner_node(const uint8_t* ptr)
-    {
-        return InnerNodeView{(v2::MemPtr<v2::InnerNodeHeader>(ptr))};
-    }
-
-    /**
-     * Get an inner child from a node view
-     */
-    [[nodiscard]] static InnerNodeView
-    get_inner_child(const InnerNodeView& parent, int branch)
-    {
-        auto child_type = parent.get_child_type(branch);
-        if (child_type != v2::ChildType::INNER)
-        {
-            if (child_type == v2::ChildType::EMPTY)
-            {
-                throw std::runtime_error(
-                    "No child at branch " + std::to_string(branch));
-            }
-            throw std::runtime_error(
-                "Child at branch " + std::to_string(branch) +
-                " is a leaf, not an inner node");
-        }
-        return get_inner_node(parent.get_child_ptr(branch));
-    }
-
-    /**
-     * Get a leaf child from a node view
-     */
-    [[nodiscard]] static LeafView
-    get_leaf_child(const InnerNodeView& parent, int branch)
-    {
-        auto child_type = parent.get_child_type(branch);
-        if (child_type != v2::ChildType::LEAF)
-        {
-            if (child_type == v2::ChildType::EMPTY)
-            {
-                throw std::runtime_error(
-                    "No child at branch " + std::to_string(branch));
-            }
-            throw std::runtime_error(
-                "Child at branch " + std::to_string(branch) +
-                " is an inner node, not a leaf");
-        }
-
-        const uint8_t* leaf_ptr = parent.get_child_ptr(branch);
-
-        // Load leaf header using MemPtr
-        v2::MemPtr<v2::LeafHeader> leaf_header_ptr(leaf_ptr);
-        const auto& leaf_header =
-            leaf_header_ptr.get_uncopyable();  // Force ref binding
-
-        return LeafView{
-            Key(leaf_header.key.data()),  // Now safe - ref in UNSAFE mode!
-            Slice(
-                leaf_header_ptr.offset(sizeof(v2::LeafHeader)).raw(),
-                leaf_header.data_size())};
-    }
-
-    /**
-     * Lookup a key in the state tree starting from a given inner node
-     * @param root The root node to start from
-     * @param key The key to search for
-     * @return LeafView if found
-     * @throws std::runtime_error if key not found
-     */
-    [[nodiscard]] static LeafView
-    lookup_key(const InnerNodeView& root, const Key& key)
-    {
-        InnerNodeView current = root;
-        const auto& root_header = root.header.get_uncopyable();
-        int depth = root_header.get_depth();
-
-        // Walk down the tree following the key nibbles
-        while (true)
-        {
-            // Use shamap utility to extract nibble at current depth
-            int nibble = shamap::select_branch(key, depth);
-
-            // Check child type
-            auto child_type = current.get_child_type(nibble);
-            if (child_type == v2::ChildType::EMPTY)
-            {
-                throw std::runtime_error(
-                    "Key not found - no child at nibble " +
-                    std::to_string(nibble) + " at depth " +
-                    std::to_string(depth));
-            }
-
-            if (child_type == v2::ChildType::LEAF)
-            {
-                // Found a leaf, verify it's the right key
-                auto leaf = get_leaf_child(current, nibble);
-                if (std::memcmp(leaf.key.data(), key.data(), 32) == 0)
-                {
-                    return leaf;
-                }
-                throw std::runtime_error("Key mismatch at leaf");
-            }
-
-            // It's an inner node, continue traversing
-            current = get_inner_child(current, nibble);
-            const auto& current_header = current.header.get_uncopyable();
-            depth = current_header.get_depth();
-        }
-    }
-
-    /**
-     * Find the first leaf in depth-first order starting from given node
-     *
-     * Note: Uses recursion which is optimal here because:
-     * - Max depth is bounded by key size (64 nibbles = 64 levels max)
-     * - Stack usage is tiny (~8KB worst case vs 8MB default stack)
-     * - CPU call stack is faster than heap-allocated stack (better cache
-     * locality)
-     * - Code is cleaner and compiler can optimize
-     *
-     * @param node The inner node to start from
-     * @return LeafView of the first leaf found
-     * @throws std::runtime_error if no leaf found (malformed tree)
-     */
-    [[nodiscard]] static LeafView
-    first_leaf_depth_first(const InnerNodeView& node)
-    {
-        // Check each branch in order
-        for (int i = 0; i < 16; ++i)
-        {
-            auto child_type = node.get_child_type(i);
-            if (child_type == v2::ChildType::EMPTY)
-            {
-                continue;  // Skip empty branches
-            }
-
-            if (child_type == v2::ChildType::LEAF)
-            {
-                // Found a leaf!
-                return get_leaf_child(node, i);
-            }
-
-            // It's an inner node, recurse
-            auto inner_child = get_inner_child(node, i);
-            // Recursive call will throw if no leaf found in subtree
-            return first_leaf_depth_first(inner_child);
-        }
-
-        // No children at all or all empty - malformed tree
-        throw std::runtime_error("No leaf found - malformed tree");
-    }
 };
 
 /**
@@ -1107,7 +872,7 @@ private:
     navigate_raw_inner(PolyNodePtr& current, int& depth)
     {
         const uint8_t* raw = current.get_raw_memory();
-        InnerNodeView view{catl::v2::MemPtr<v2::InnerNodeHeader>(raw)};
+        InnerNodeView view{v2::MemPtr<v2::InnerNodeHeader>(raw)};
 
         const auto& header = view.header.get_uncopyable();
         depth = header.get_depth();

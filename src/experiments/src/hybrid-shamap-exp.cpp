@@ -64,7 +64,7 @@ main(int argc, char* argv[])
     Logger::set_level(LogLevel::DEBUG);
 
     // Disable v2-structs partition logging
-    catl::v2::get_v2_structs_log_partition().set_level(LogLevel::NONE);
+    catl::v2::get_v2_memtree_log_partition().set_level(LogLevel::NONE);
 
     if (argc != 2)
     {
