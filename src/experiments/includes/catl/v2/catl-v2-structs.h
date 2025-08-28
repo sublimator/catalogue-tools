@@ -65,8 +65,8 @@ rel_from_abs(abs_off_t target_offset, abs_off_t slot_offset)
  * Usage:
  *   MemPtr<InnerNodeHeader> header_ptr(mmap_data);
  *   // ... pass header_ptr around (cheap, 8 bytes) ...
- *   auto header = header_ptr.get();  // Get value on stack when needed
- *   auto depth = header.get_depth(); // Use the value
+ *   auto header = header_ptr.get_uncopyable();  // Get value on stack when
+ * needed auto depth = header.get_depth(); // Use the value
  */
 template <typename T>
 class MemPtr

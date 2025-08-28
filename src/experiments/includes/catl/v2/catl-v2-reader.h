@@ -191,6 +191,8 @@ public:
             throw std::runtime_error("Attempted to read past end of file");
         }
 
+        // TODO: this is not using load_pod
+        // Should this just use MemPtr ?
         auto info = reinterpret_cast<const catl::common::LedgerInfo*>(
             data_ + current_pos_);
         current_pos_ += sizeof(catl::common::LedgerInfo);

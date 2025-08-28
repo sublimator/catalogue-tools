@@ -82,7 +82,7 @@ find_first_leaf_key(const PolyNodeRef& node, Key& found_key)
     {
         // Navigate through mmap inner node
         const uint8_t* raw = node.get_raw_memory();
-        InnerNodeView view = HybridReader::get_inner_node(raw);
+        InnerNodeView view = MemTreeOps::get_inner_node(raw);
 
         // Try each branch
         for (int i = 0; i < 16; ++i)
