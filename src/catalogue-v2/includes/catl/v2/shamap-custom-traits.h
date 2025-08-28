@@ -2,8 +2,8 @@
 
 // Include the header-only version of shamap and reader so can instantiate the
 // templates
-#include "catl/shamap/shamap-header-only.h"
-#include "catl/v1/catl-v1-reader-header-only.h"
+#include "catl/shamap/shamap.h"
+// #include "catl/v1/catl-v1-reader-header-only.h"
 
 /**
  * Custom traits for serialized SHAMap nodes that enable on-disk structural
@@ -72,10 +72,6 @@ struct SerializedNode
         // Parent can be used to understand which branch this leaf belongs to
     }
 };
-
-// Instantiate all templates with custom traits
-INSTANTIATE_SHAMAP_NODE_TRAITS(SerializedNode);
-INSTANTIATE_READER_SHAMAP_NODE_TRAITS(SerializedNode);
 
 // Define aliases for easier typing
 using SHAMapS = catl::shamap::SHAMapT<SerializedNode>;
