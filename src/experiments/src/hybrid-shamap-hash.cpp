@@ -39,7 +39,7 @@ HmapLeafNode::update_hash()
  * @return true if a leaf was found
  */
 static bool
-find_first_leaf_key(const PolyNodeRef& node, Key& found_key)
+find_first_leaf_key(const PolyNodePtr& node, Key& found_key)
 {
     if (node.is_empty())
         return false;
@@ -91,8 +91,8 @@ find_first_leaf_key(const PolyNodeRef& node, Key& found_key)
             if (child_type != catl::v2::ChildType::EMPTY)
             {
                 const uint8_t* child_ptr = view.get_child_ptr(i);
-                PolyNodeRef child =
-                    PolyNodeRef::make_raw_memory(child_ptr, child_type);
+                PolyNodePtr child =
+                    PolyNodePtr::make_raw_memory(child_ptr, child_type);
                 if (find_first_leaf_key(child, found_key))
                     return true;
             }
@@ -107,7 +107,7 @@ find_first_leaf_key(const PolyNodeRef& node, Key& found_key)
  */
 static Hash256
 compute_synthetic_hash(
-    const PolyNodeRef& child_node,
+    const PolyNodePtr& child_node,
     const Key& rep_key,
     int start_depth,
     int end_depth)

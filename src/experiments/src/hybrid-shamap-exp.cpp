@@ -288,7 +288,7 @@ main(int argc, char* argv[])
 
             // Set the child in our hybrid node
             LOGD("Setting child for branch ", child.branch);
-            auto child_ref = catl::hybrid_shamap::PolyNodeRef::make_raw_memory(
+            auto child_ref = catl::hybrid_shamap::PolyNodePtr::make_raw_memory(
                 child.ptr, child.type);
             hybrid_root.set_child(child.branch, child_ref, child.type);
             LOGD("  Set child ", child.branch, " successfully");
@@ -472,14 +472,14 @@ main(int argc, char* argv[])
         pathfinder.find_path(hmap.get_root());
 
         LOGI("Path traversal result:");
-        pathfinder.print_path();
+        pathfinder.debug_path();
 
         // Now materialize the path
         LOGI("Materializing path for modification...");
         pathfinder.materialize_path();
 
         LOGI("Path after materialization:");
-        pathfinder.print_path();
+        pathfinder.debug_path();
 
         // Verify no memory leaks by checking the nodes are properly managed
         LOGI("[Memory management check: Using boost::intrusive_ptr]");
@@ -505,7 +505,7 @@ main(int argc, char* argv[])
         // Add leaf to root at branch 1 (last nibble of key)
         root->set_child(
             1,
-            catl::hybrid_shamap::PolyNodeRef::from_intrusive(leaf_ptr),
+            catl::hybrid_shamap::PolyNodePtr::from_intrusive(leaf_ptr),
             catl::v2::ChildType::LEAF);
 
         // Compute hash
@@ -518,7 +518,7 @@ main(int argc, char* argv[])
         // Set the mmap root as a child of our heap root
         root->set_child(
             0,
-            catl::hybrid_shamap::PolyNodeRef::make_raw_memory(
+            catl::hybrid_shamap::PolyNodePtr::make_raw_memory(
                 state_root_raw, catl::v2::ChildType::INNER),
             catl::v2::ChildType::INNER);
 
@@ -544,7 +544,7 @@ main(int argc, char* argv[])
         LOGI("\n=== Testing Tree Walker with Generators ===\n");
 
         // Walk the mmap state tree and count nodes
-        auto state_root_ref = catl::hybrid_shamap::PolyNodeRef::make_raw_memory(
+        auto state_root_ref = catl::hybrid_shamap::PolyNodePtr::make_raw_memory(
             state_root_raw, catl::v2::ChildType::INNER);
 
         LOGI("Walking the state tree depth-first...");
@@ -642,7 +642,7 @@ main(int argc, char* argv[])
 
         struct InnerWithSkip
         {
-            PolyNodeRef node;
+            PolyNodePtr node;
             int depth;
             int parent_depth;
             int skip_amount;
