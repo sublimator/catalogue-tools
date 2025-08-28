@@ -318,44 +318,30 @@ diff_memtree_nodes(
             // LEAF ↔ LEAF
             if (pa.kind == K::Leaf && pb.kind == K::Leaf)
             {
-                // pointer/hash fast path
-                if (pa.leaf->data.data() == pb.leaf->data.data())
+                // Use LeafView::eq() which checks:
+                // 1. Pointer equality (header.raw())
+                // 2. Hash equality (get_hash())
+                // 3. Data equality (key and data memcmp)
+                if (!pa.leaf->eq(*pb.leaf))
                 {
-                    // same backing bytes => unchanged
-                }
-                else
-                {
-                    // Compare cached leaf hashes before memcmp
-                    // (we must fetch them from the parents)
-                    // Note: parents here are the nodes we projected from:
-                    // when d==depth(parent) both pa/pb are real children.
-                    // When projected, pa/pb.inner was the deeper node and
-                    // is not a parent-of-leaf at depth d, so the LeafView
-                    // came from a real child fetch at d (safe).
-                    // We can safely call get_leaf_hash here using (A|B, d, i).
-                    Slice ha32 = MemTreeOps::get_leaf_hash(
-                        (da == d ? A : MemTreeOps::get_inner_child(A, i)), i);
-                    Slice hb32 = MemTreeOps::get_leaf_hash(
-                        (db == d ? B : MemTreeOps::get_inner_child(B, i)), i);
-
-                    if (!slice32_eq(ha32, hb32))
+                    // Leaves are different
+                    if (key_eq(pa.leaf->key, pb.leaf->key))
                     {
-                        if (key_eq(pa.leaf->key, pb.leaf->key))
-                        {
-                            if (!emit_mod(
-                                    pa.leaf->key, pa.leaf->data, pb.leaf->data))
-                                return false;
-                        }
-                        else
-                        {
-                            if (!emit_del(pa.leaf->key, pa.leaf->data))
-                                return false;
-                            if (!emit_add(pb.leaf->key, pb.leaf->data))
-                                return false;
-                        }
+                        // Same key, different data => Modified
+                        if (!emit_mod(
+                                pa.leaf->key, pa.leaf->data, pb.leaf->data))
+                            return false;
                     }
-                    // else hashes equal -> unchanged
+                    else
+                    {
+                        // Different keys => Delete old, Add new
+                        if (!emit_del(pa.leaf->key, pa.leaf->data))
+                            return false;
+                        if (!emit_add(pb.leaf->key, pb.leaf->data))
+                            return false;
+                    }
                 }
+                // else leaves are equal -> unchanged
                 continue;
             }
 
