@@ -529,12 +529,18 @@ struct ChildIterator
  */
 struct LeafView
 {
+    MemPtr<LeafHeader> header;
     Key key;
     Slice data;
 
     bool
     eq(const LeafView& other) const
     {
+        if (header.raw() == other.header.raw())
+        {
+            return true;
+        }
+
         return key == other.key && data.size() == other.data.size() &&
             std::memcmp(data.data(), other.data.data(), data.size()) == 0;
     }
@@ -682,6 +688,7 @@ public:
             leaf_header_ptr.get_uncopyable();  // Force ref binding
 
         return LeafView{
+            leaf_header_ptr,
             Key(leaf_header.key.data()),  // Now safe - ref in UNSAFE mode!
             Slice(
                 leaf_header_ptr.offset(sizeof(v2::LeafHeader)).raw(),

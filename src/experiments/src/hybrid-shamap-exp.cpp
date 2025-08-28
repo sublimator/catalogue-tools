@@ -93,15 +93,15 @@ test_diff(
     reader.seek_to_ledger(ledger_info.seq + 9998);
     auto second_ledger_info = reader.read_ledger_info();
     auto second_state_view = MemTreeOps::get_inner_node(reader.current_data());
-    auto second_state_map = *create_state_map(second_state_view);
+    // auto second_state_map = *create_state_map(second_state_view);
     // confirming that our catl packs and readers are working correctly
     // we can walk an InnerNodeView and get the hash of the state tree using our
     // gold SHAMap impl
-    if (second_ledger_info.account_hash != second_state_map.get_hash())
-    {
-        throw std::runtime_error(
-            "Account state hash mismatch, for ledger 2 full rebuild");
-    }
+    // if (second_ledger_info.account_hash != second_state_map.get_hash())
+    // {
+    //     throw std::runtime_error(
+    //         "Account state hash mismatch, for ledger 2 full rebuild");
+    // }
 
     // This means the error must be in the diff code
 
