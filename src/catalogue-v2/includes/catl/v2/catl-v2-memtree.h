@@ -756,6 +756,102 @@ public:
         // No children at all or all empty - malformed tree
         throw std::runtime_error("No leaf found - malformed tree");
     }
+
+    /**
+     * Walk all leaf nodes in a tree, calling callback for each
+     *
+     * Uses iterative traversal with explicit stack to visit all leaves.
+     * Callback can return false to stop traversal early.
+     *
+     * @param root Root node to start from
+     * @param callback Function (Key, Slice) -> bool, return false to stop
+     * @return Number of leaves visited
+     */
+    template <typename Callback>
+    static size_t
+    walk_leaves(const InnerNodeView& root, Callback&& callback)
+    {
+        struct StackEntry
+        {
+            InnerNodeView node;
+            int next_branch;  // Next branch to explore (0-15)
+        };
+
+        // Use fixed-size stack (max tree depth is 64)
+        StackEntry stack[64];
+        int stack_top = 0;
+
+        // Push root
+        stack[stack_top++] = {root, 0};
+
+        size_t leaves_visited = 0;
+
+        while (stack_top > 0)
+        {
+            auto& entry = stack[stack_top - 1];
+
+            // Find next non-empty child
+            bool found_child = false;
+            for (int i = entry.next_branch; i < 16; ++i)
+            {
+                auto child_type = entry.node.get_child_type(i);
+                if (child_type != v2::ChildType::EMPTY)
+                {
+                    entry.next_branch =
+                        i + 1;  // Next time, start from next branch
+                    found_child = true;
+
+                    if (child_type == v2::ChildType::LEAF)
+                    {
+                        // Process leaf
+                        auto leaf = get_leaf_child(entry.node, i);
+                        leaves_visited++;
+
+                        // Call callback - stop if it returns false
+                        if (!callback(leaf.key, leaf.data))
+                        {
+                            return leaves_visited;
+                        }
+                    }
+                    else
+                    {
+                        // It's an inner node - push onto stack
+                        if (stack_top >= 64)
+                        {
+                            throw std::runtime_error("Tree depth exceeds 64");
+                        }
+                        auto inner_child = get_inner_child(entry.node, i);
+                        stack[stack_top++] = {inner_child, 0};
+                    }
+                    break;
+                }
+            }
+
+            // If no more children at this level, pop
+            if (!found_child)
+            {
+                stack_top--;
+            }
+        }
+
+        return leaves_visited;
+    }
+
+    /**
+     * Walk all leaf nodes starting from a raw pointer
+     * Convenience method that creates the view first
+     *
+     * @param root_ptr Pointer to root inner node
+     * @param callback Function (Key, Slice) -> bool, return false to stop
+     * @return Number of leaves visited
+     */
+    template <typename Callback>
+    static size_t
+    walk_leaves_from_ptr(const uint8_t* root_ptr, Callback&& callback)
+    {
+        auto root = get_inner_node(root_ptr);
+        return walk_leaves(root, std::forward<Callback>(callback));
+    }
 };
 
 }  // namespace catl::v2
