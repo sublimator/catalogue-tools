@@ -400,10 +400,10 @@ load_pod(const uint8_t* base, size_t offset, size_t file_size)
  * Child type encoding for inner nodes (2 bits per child)
  */
 enum class ChildType : std::uint8_t {
-    EMPTY = 0,  // No child at this branch
-    INNER = 1,  // Points to another inner node
-    LEAF = 2,   // Points to a leaf node
-    RFU = 3     // Reserved for future use // TODO: rename placeholder
+    EMPTY = 0,       // No child at this branch
+    INNER = 1,       // Points to another inner node
+    LEAF = 2,        // Points to a leaf node
+    PLACEHOLDER = 3  // Reserved for future use
 };
 
 /**

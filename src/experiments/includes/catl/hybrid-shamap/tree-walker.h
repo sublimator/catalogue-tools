@@ -159,10 +159,10 @@ public:
  */
 struct NodeVisit
 {
-    PolyNodeRef node;
+    PolyNodePtr node;
     int depth;
     int branch;          // Branch taken from parent (-1 for root)
-    PolyNodeRef parent;  // Parent node (empty for root)
+    PolyNodePtr parent;  // Parent node (empty for root)
     int parent_depth;    // Actual depth of parent (-1 for root)
 
     // Convenience accessors
@@ -220,19 +220,19 @@ public:
      * Yields parent before children
      */
     static generator<NodeVisit>
-    walk_depth_first(const PolyNodeRef& root)
+    walk_depth_first(const PolyNodePtr& root)
     {
         struct StackItem
         {
-            PolyNodeRef node;
+            PolyNodePtr node;
             int depth;
             int branch;
-            PolyNodeRef parent;
+            PolyNodePtr parent;
             int parent_depth;
         };
 
         std::stack<StackItem> stack;
-        stack.push({root, 0, -1, PolyNodeRef::make_empty(), -1});
+        stack.push({root, 0, -1, PolyNodePtr::make_empty(), -1});
 
         while (!stack.empty())
         {
@@ -285,7 +285,7 @@ public:
                         if (child_type != catl::v2::ChildType::EMPTY)
                         {
                             const uint8_t* child_ptr = view.get_child_ptr(i);
-                            PolyNodeRef child = PolyNodeRef::make_raw_memory(
+                            PolyNodePtr child = PolyNodePtr::make_raw_memory(
                                 child_ptr, child_type);
                             // Get actual depth from child if it's an inner node
                             int child_depth = depth + 1;  // Default for leaves
@@ -309,19 +309,19 @@ public:
      * Yields all nodes at depth N before any at depth N+1
      */
     static generator<NodeVisit>
-    walk_breadth_first(const PolyNodeRef& root)
+    walk_breadth_first(const PolyNodePtr& root)
     {
         struct QueueItem
         {
-            PolyNodeRef node;
+            PolyNodePtr node;
             int depth;
             int branch;
-            PolyNodeRef parent;
+            PolyNodePtr parent;
             int parent_depth;
         };
 
         std::queue<QueueItem> queue;
-        queue.push({root, 0, -1, PolyNodeRef::make_empty(), -1});
+        queue.push({root, 0, -1, PolyNodePtr::make_empty(), -1});
 
         while (!queue.empty())
         {
@@ -363,7 +363,7 @@ public:
                         if (child_type != catl::v2::ChildType::EMPTY)
                         {
                             const uint8_t* child_ptr = view.get_child_ptr(i);
-                            PolyNodeRef child = PolyNodeRef::make_raw_memory(
+                            PolyNodePtr child = PolyNodePtr::make_raw_memory(
                                 child_ptr, child_type);
                             queue.push({child, depth + 1, i, node, depth});
                         }
@@ -378,7 +378,7 @@ public:
      * Useful for iterating through all key-value pairs
      */
     static generator<NodeVisit>
-    walk_leaves_only(const PolyNodeRef& root)
+    walk_leaves_only(const PolyNodePtr& root)
     {
         for (auto&& visit : walk_depth_first(root))
         {
@@ -395,7 +395,7 @@ public:
      */
     template <typename Predicate>
     static generator<NodeVisit>
-    walk_filtered(const PolyNodeRef& root, Predicate pred)
+    walk_filtered(const PolyNodePtr& root, Predicate pred)
     {
         for (auto&& visit : walk_depth_first(root))
         {
@@ -412,7 +412,7 @@ public:
      */
     template <typename Predicate>
     static size_t
-    count_if(const PolyNodeRef& root, Predicate pred)
+    count_if(const PolyNodePtr& root, Predicate pred)
     {
         size_t count = 0;
         for (auto&& visit : walk_depth_first(root))
@@ -430,7 +430,7 @@ public:
      */
     template <typename Predicate>
     static std::vector<NodeVisit>
-    collect_if(const PolyNodeRef& root, Predicate pred)
+    collect_if(const PolyNodePtr& root, Predicate pred)
     {
         std::vector<NodeVisit> result;
         for (auto&& visit : walk_depth_first(root))

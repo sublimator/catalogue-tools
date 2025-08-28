@@ -32,15 +32,29 @@ class HmapLeafNode;
 class HmapPlaceholder;
 
 /**
- * PolyNodeRef - A polymorphic reference to nodes that can be either:
- * - In mmap memory (no ref counting)
- * - In heap memory (with ref counting)
+ * PolyNodePtr - A polymorphic smart pointer to nodes that can be either:
+ * - In mmap memory (no ref counting, non-owning)
+ * - In heap memory (with ref counting, shared ownership)
  *
- * This is a VIEW type - generated lazily from HmapInnerNode's storage.
- * It explicitly stores metadata since we can't use bit-tagging with
+ * Acts like a shared_ptr for materialized nodes, and a raw pointer for mmap
+ * nodes. It explicitly stores metadata since we can't use bit-tagging with
  * unaligned pointers from #pragma pack(1).
+ *
+ * Size: 16 bytes (same as std::shared_ptr) - not the original 8-byte TaggedPtr
+ * dream, but necessary for explicit metadata since we can't use bit-tagging.
+ *
+ * Usage: PolyNodePtr instances typically have short lifetimes - created
+ * temporarily during traversal/manipulation then destroyed. The main exceptions
+ * are class members like Hmap::root_ which hold long-term references to the
+ * tree structure.
+ *
+ * Note: HmapInnerNode stores raw pointers directly and creates PolyNodePtr
+ * lazily via get_child(). This means HmapInnerNode must manually manage
+ * reference counts in set_child() and its destructor to maintain ownership
+ * correctly. The set_child() properly releases old children before setting
+ * new ones, preventing leaks when overwriting children.
  */
-class PolyNodeRef
+class PolyNodePtr
 {
 private:
     void* ptr_;           // Raw pointer (could point anywhere)
@@ -57,20 +71,20 @@ private:
 
 public:
     // Default constructor - creates empty reference
-    PolyNodeRef()
+    PolyNodePtr()
         : ptr_(nullptr), type_(v2::ChildType::EMPTY), materialized_(false)
     {
     }
 
     // Constructor with all fields
-    PolyNodeRef(void* p, v2::ChildType t, bool m)
+    PolyNodePtr(void* p, v2::ChildType t, bool m)
         : ptr_(p), type_(t), materialized_(m)
     {
         add_ref();
     }
 
     // Copy constructor - increments ref count if materialized
-    PolyNodeRef(const PolyNodeRef& other)
+    PolyNodePtr(const PolyNodePtr& other)
         : ptr_(other.ptr_)
         , type_(other.type_)
         , materialized_(other.materialized_)
@@ -79,7 +93,7 @@ public:
     }
 
     // Move constructor - takes ownership, no ref count change
-    PolyNodeRef(PolyNodeRef&& other) noexcept
+    PolyNodePtr(PolyNodePtr&& other) noexcept
         : ptr_(other.ptr_)
         , type_(other.type_)
         , materialized_(other.materialized_)
@@ -90,14 +104,14 @@ public:
     }
 
     // Destructor - decrements ref count if materialized
-    ~PolyNodeRef()
+    ~PolyNodePtr()
     {
         release();
     }
 
     // Copy assignment
-    PolyNodeRef&
-    operator=(const PolyNodeRef& other)
+    PolyNodePtr&
+    operator=(const PolyNodePtr& other)
     {
         if (this != &other)
         {
@@ -111,8 +125,8 @@ public:
     }
 
     // Move assignment
-    PolyNodeRef&
-    operator=(PolyNodeRef&& other) noexcept
+    PolyNodePtr&
+    operator=(PolyNodePtr&& other) noexcept
     {
         if (this != &other)
         {
@@ -128,23 +142,23 @@ public:
     }
 
     // Factory methods
-    static PolyNodeRef
+    static PolyNodePtr
     make_raw_memory(const void* p, v2::ChildType type = v2::ChildType::INNER)
     {
         // Note: does NOT call add_ref since it's not materialized
-        PolyNodeRef tp;
+        PolyNodePtr tp;
         tp.ptr_ = const_cast<void*>(p);
         tp.type_ = type;
         tp.materialized_ = false;
         return tp;
     }
 
-    static PolyNodeRef
+    static PolyNodePtr
     make_materialized(HMapNode* p, v2::ChildType type = v2::ChildType::INNER)
     {
         // Note: Caller is responsible for ensuring proper ref count
         // This is a raw factory - use from_intrusive() for managed pointers
-        PolyNodeRef tp;
+        PolyNodePtr tp;
         tp.ptr_ = p;
         tp.type_ = type;
         tp.materialized_ = true;
@@ -152,14 +166,14 @@ public:
     }
 
     // Factory from intrusive_ptr - takes a ref-counted pointer
-    static PolyNodeRef
+    static PolyNodePtr
     from_intrusive(const boost::intrusive_ptr<HMapNode>& p);
 
     // Convert to intrusive_ptr (only valid for MATERIALIZED)
     [[nodiscard]] boost::intrusive_ptr<HMapNode>
     to_intrusive() const;
 
-    static PolyNodeRef
+    static PolyNodePtr
     make_empty()
     {
         return {};  // null/empty reference
@@ -226,18 +240,18 @@ public:
     [[nodiscard]] bool
     is_placeholder() const
     {
-        return type_ == v2::ChildType::RFU;  // We're using RFU for placeholder
+        return type_ == v2::ChildType::PLACEHOLDER;
     }
 
     // Equality (based on pointer only, not metadata)
     bool
-    operator==(const PolyNodeRef& other) const
+    operator==(const PolyNodePtr& other) const
     {
         return ptr_ == other.ptr_;
     }
 
     bool
-    operator!=(const PolyNodeRef& other) const
+    operator!=(const PolyNodePtr& other) const
     {
         return ptr_ != other.ptr_;
     }
@@ -571,7 +585,7 @@ public:
 /**
  * Inner node - has up to 16 children
  */
-class HmapInnerNode : public HMapNode
+class HmapInnerNode final : public HMapNode
 {
 private:
     std::array<void*, 16> children_{};  // Just raw pointers, no tagging
@@ -616,13 +630,13 @@ public:
     }
 
     // Get child as PolyNodeRef (lazily generated view)
-    [[nodiscard]] PolyNodeRef
+    [[nodiscard]] PolyNodePtr
     get_child(int branch) const
     {
         assert(branch >= 0 && branch < 16);
 
         // Lazily construct PolyNodeRef from our storage
-        return PolyNodeRef(
+        return PolyNodePtr(
             children_[branch],
             get_child_type(branch),
             is_child_materialized(branch));
@@ -637,7 +651,7 @@ public:
 
     // Set child from PolyNodeRef
     void
-    _set_child(int branch, const PolyNodeRef& ref)
+    _set_child(int branch, const PolyNodePtr& ref)
     {
         assert(branch >= 0 && branch < 16);
 
@@ -678,10 +692,10 @@ public:
 
     // Overload for backward compatibility
     void
-    set_child(int branch, const PolyNodeRef& ptr, v2::ChildType type)
+    set_child(int branch, const PolyNodePtr& ptr, v2::ChildType type)
     {
         // Create a new PolyNodeRef with the specified type
-        PolyNodeRef ref(ptr.get_raw_ptr(), type, ptr.is_materialized());
+        PolyNodePtr ref(ptr.get_raw_ptr(), type, ptr.is_materialized());
         _set_child(branch, ref);
     }
 
@@ -723,7 +737,7 @@ public:
 /**
  * Leaf node - contains actual data
  */
-class HmapLeafNode : public HMapNode
+class HmapLeafNode final : public HMapNode
 {
 private:
     Key key_;
@@ -773,7 +787,7 @@ public:
 /**
  * Placeholder node - just knows the hash, content not loaded yet
  */
-class HmapPlaceholder : public HMapNode
+class HmapPlaceholder final : public HMapNode
 {
 private:
     Hash256 hash_;
@@ -824,17 +838,15 @@ public:
 class HmapPathFinder
 {
 private:
-    // TODO: this is never actually used ?! cause just using relative pointer
-    // arithmetic ?
     Key target_key_;
 
     // Path we've traversed: pair of (node_ptr, branch_taken_to_get_here)
     // First element has branch=-1 (root)
     // TODO: linked list!?
-    std::vector<std::pair<PolyNodeRef, int>> path_;
+    std::vector<std::pair<PolyNodePtr, int>> path_;
 
     // Terminal node we found (if any)
-    PolyNodeRef found_leaf_;
+    PolyNodePtr found_leaf_;
     bool key_matches_ = false;
 
 public:
@@ -847,16 +859,16 @@ public:
      * Root can be either RAW_MEMORY or MATERIALIZED
      */
     void
-    find_path(const PolyNodeRef& root)
+    find_path(const PolyNodePtr& root)
     {
         path_.clear();
-        found_leaf_ = PolyNodeRef::make_empty();
+        found_leaf_ = PolyNodePtr::make_empty();
         key_matches_ = false;
 
         // Start at root
         path_.emplace_back(root, -1);
 
-        PolyNodeRef current = root;
+        PolyNodePtr current = root;
         int depth = 0;
 
         while (current)
@@ -878,7 +890,7 @@ public:
                 if (node->get_type() == HMapNode::Type::LEAF)
                 {
                     // Found a leaf
-                    auto* leaf = static_cast<HmapLeafNode*>(
+                    const auto* leaf = static_cast<HmapLeafNode*>(
                         node);  // NOLINT(*-pro-type-static-cast-downcast)
                     found_leaf_ = current;
                     key_matches_ = (leaf->get_key() == target_key_);
@@ -894,12 +906,12 @@ public:
                 else
                 {
                     // It's an inner node
-                    auto* inner = static_cast<HmapInnerNode*>(
+                    const auto* inner = static_cast<HmapInnerNode*>(
                         node);  // NOLINT(*-pro-type-static-cast-downcast)
                     depth = inner->get_depth();
 
                     int branch = shamap::select_branch(target_key_, depth);
-                    PolyNodeRef child = inner->get_child(branch);
+                    PolyNodePtr child = inner->get_child(branch);
 
                     if (!child)
                     {
@@ -965,7 +977,7 @@ public:
                 auto materialized = materialize_raw_node(raw, is_leaf);
 
                 // Update this entry in the path using proper ref counting
-                node_ptr = PolyNodeRef::from_intrusive(materialized);
+                node_ptr = PolyNodePtr::from_intrusive(materialized);
 
                 // Update parent's child pointer if not root
                 if (i > 0)
@@ -994,12 +1006,12 @@ public:
     {
         return key_matches_;
     }
-    [[nodiscard]] PolyNodeRef
+    [[nodiscard]] PolyNodePtr
     get_found_leaf() const
     {
         return found_leaf_;
     }
-    [[nodiscard]] const std::vector<std::pair<PolyNodeRef, int>>&
+    [[nodiscard]] const std::vector<std::pair<PolyNodePtr, int>>&
     get_path() const
     {
         return path_;
@@ -1007,8 +1019,7 @@ public:
 
     // Debug helper
     void
-    print_path()
-        const  // TODO: custom ostream as arg, or use LOGD and a partition
+    debug_path() const
     {
         std::cout << "Path to key " << target_key_.hex() << ":\n";
         for (size_t i = 0; i < path_.size(); ++i)
@@ -1089,7 +1100,7 @@ private:
      * Returns true if we should continue, false if we hit a leaf/empty
      */
     bool
-    navigate_raw_inner(PolyNodeRef& current, int& depth)
+    navigate_raw_inner(PolyNodePtr& current, int& depth)
     {
         const uint8_t* raw = current.get_raw_memory();
         InnerNodeView view{catl::v2::MemPtr<v2::InnerNodeHeader>(raw)};
@@ -1107,7 +1118,7 @@ private:
         }
 
         const uint8_t* child_ptr = view.get_child_ptr(branch);
-        PolyNodeRef child = PolyNodeRef::make_raw_memory(child_ptr, child_type);
+        PolyNodePtr child = PolyNodePtr::make_raw_memory(child_ptr, child_type);
 
         if (child_type == v2::ChildType::LEAF)
         {
@@ -1162,8 +1173,8 @@ private:
             boost::intrusive_ptr<HMapNode> inner_ptr_managed(inner);
 
             // Copy children (both types and pointers) from mmap header
-            InnerNodeView view{inner_ptr};
-            auto offsets = view.get_sparse_offsets();
+            const InnerNodeView view{inner_ptr};
+            const auto offsets = view.get_sparse_offsets();
 
             for (int i = 0; i < 16; ++i)
             {
@@ -1173,11 +1184,12 @@ private:
                     const uint8_t* child_raw = offsets.get_child_ptr(i);
                     inner->set_child(
                         i,
-                        PolyNodeRef::make_raw_memory(child_raw, child_type),
+                        PolyNodePtr::make_raw_memory(child_raw, child_type),
                         child_type);
                 }
             }
 
+            // ReSharper disable once CppDFAMemoryLeak
             return inner_ptr_managed;
         }
     }
@@ -1186,8 +1198,7 @@ private:
 class Hmap
 {
 private:
-    // TODO: ref counting!
-    PolyNodeRef root_;  // Root can be any type of pointer
+    PolyNodePtr root_;  // Root can be any type of pointer
     std::shared_ptr<v2::CatlV2Reader>
         reader_;  // Keeps mmap alive TODO: vector of mmap holders
 
@@ -1204,7 +1215,7 @@ public:
     void
     set_root_raw(const uint8_t* raw_root)
     {
-        root_ = PolyNodeRef::make_raw_memory(raw_root);
+        root_ = PolyNodePtr::make_raw_memory(raw_root);
     }
 
     // Initialize with a materialized root
@@ -1212,10 +1223,10 @@ public:
     set_root_materialized(HmapInnerNode* node)
     {
         // We need to be careful about ownership here!
-        root_ = PolyNodeRef::make_materialized(node);
+        root_ = PolyNodePtr::make_materialized(node);
     }
 
-    [[nodiscard]] PolyNodeRef
+    [[nodiscard]] PolyNodePtr
     get_root() const
     {
         return root_;
@@ -1223,7 +1234,7 @@ public:
 
     // Set the root to any PolyNodeRef
     void
-    set_root(const PolyNodeRef& new_root)
+    set_root(const PolyNodePtr& new_root)
     {
         root_ = new_root;
     }
@@ -1238,7 +1249,7 @@ public:
 // Implementation of TaggedPtr methods that depend on HMapNode
 
 inline void
-PolyNodeRef::add_ref() const
+PolyNodePtr::add_ref() const
 {
     if (is_materialized() && !is_empty())
     {
@@ -1247,7 +1258,7 @@ PolyNodeRef::add_ref() const
 }
 
 inline void
-PolyNodeRef::release() const
+PolyNodePtr::release() const
 {
     if (is_materialized() && !is_empty())
     {
@@ -1255,8 +1266,8 @@ PolyNodeRef::release() const
     }
 }
 
-inline PolyNodeRef
-PolyNodeRef::from_intrusive(const boost::intrusive_ptr<HMapNode>& p)
+inline PolyNodePtr
+PolyNodePtr::from_intrusive(const boost::intrusive_ptr<HMapNode>& p)
 {
     if (!p)
     {
@@ -1274,20 +1285,20 @@ PolyNodeRef::from_intrusive(const boost::intrusive_ptr<HMapNode>& p)
             type = v2::ChildType::LEAF;
             break;
         case HMapNode::Type::PLACEHOLDER:
-            type = v2::ChildType::RFU;  // Or could use a different approach
+            type = v2::ChildType::PLACEHOLDER;
             break;
         default:
             type = v2::ChildType::EMPTY;
     }
 
     // Create PolyNodeRef and manually increment ref count
-    PolyNodeRef tp = make_materialized(p.get(), type);
+    PolyNodePtr tp = make_materialized(p.get(), type);
     intrusive_ptr_add_ref(p.get());
     return tp;
 }
 
 inline boost::intrusive_ptr<HMapNode>
-PolyNodeRef::to_intrusive() const
+PolyNodePtr::to_intrusive() const
 {
     if (!is_materialized() || is_empty())
     {
@@ -1299,7 +1310,7 @@ PolyNodeRef::to_intrusive() const
 }
 
 inline void
-PolyNodeRef::copy_hash_to(uint8_t* dest) const
+PolyNodePtr::copy_hash_to(uint8_t* dest) const
 {
     if (is_empty())
     {
@@ -1348,7 +1359,7 @@ PolyNodeRef::copy_hash_to(uint8_t* dest) const
 }
 
 inline Hash256
-PolyNodeRef::get_hash() const
+PolyNodePtr::get_hash() const
 {
     Hash256 result;
     copy_hash_to(result.data());
