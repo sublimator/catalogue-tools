@@ -542,7 +542,8 @@ struct LeafView
     eq(const LeafView& other) const
     {
         return header.raw() == other.header.raw() ||
-            get_hash().eq(other.get_hash());
+            get_hash().eq(other.get_hash()) ||
+            (key == other.key && data.eq(other.data));
     }
 
     Slice
@@ -613,6 +614,19 @@ struct InnerNodeView
         const uint8_t* offsets_base =
             header.offset(sizeof(v2::InnerNodeHeader)).raw();
         return {offsets_base, header_val.child_types};
+    }
+
+    Slice
+    get_hash() const
+    {
+        return header.get_uncopyable().get_hash();
+    }
+
+    bool
+    eq(const InnerNodeView& other) const
+    {
+        return header.raw() == other.header.raw() ||
+            get_hash().eq(other.get_hash());
     }
 };
 

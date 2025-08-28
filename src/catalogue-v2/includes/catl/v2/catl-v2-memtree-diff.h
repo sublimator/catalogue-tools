@@ -22,18 +22,6 @@ struct DiffStats
     }
 };
 
-inline bool
-slice32_eq(Slice a, Slice b)
-{
-    return std::memcmp(a.data(), b.data(), 32) == 0;
-}
-
-inline bool
-key_eq(const Key& a, const Key& b)
-{
-    return std::memcmp(a.data(), b.data(), 32) == 0;
-}
-
 /**
  * diff_memtree_nodes (pointer+hash aligned)
  * =========================================
@@ -254,11 +242,7 @@ diff_memtree_nodes(
     std::function<bool(const InnerNodeView&, const InnerNodeView&)> go;
     go = [&](const InnerNodeView& A, const InnerNodeView& B) -> bool {
         // subtree pointer/hash fast path
-        if (A.header.raw() == B.header.raw())
-            return true;
-        if (slice32_eq(
-                A.header.get_uncopyable().get_hash(),
-                B.header.get_uncopyable().get_hash()))
+        if (A.eq(B))
             return true;
 
         const auto& ha = A.header.get_uncopyable();
@@ -282,8 +266,8 @@ diff_memtree_nodes(
 
         for (int i = 0; i < 16; ++i)
         {
-            auto pa = project_branch(A, d, i, a_proj_nib);
-            auto pb = project_branch(B, d, i, b_proj_nib);
+            Projected pa = project_branch(A, d, i, a_proj_nib);
+            Projected pb = project_branch(B, d, i, b_proj_nib);
             using K = Projected::Kind;
 
             if (pa.kind == K::Empty && pb.kind == K::Empty)
@@ -325,7 +309,7 @@ diff_memtree_nodes(
                 if (!pa.leaf->eq(*pb.leaf))
                 {
                     // Leaves are different
-                    if (key_eq(pa.leaf->key, pb.leaf->key))
+                    if (pa.leaf->key == pb.leaf->key)
                     {
                         // Same key, different data => Modified
                         if (!emit_mod(
@@ -369,7 +353,7 @@ diff_memtree_nodes(
                         *pb.inner, [&](const Key& k, const Slice& d) {
                             if (!ok)
                                 return false;
-                            if (key_eq(k, pa.leaf->key))
+                            if (k == pa.leaf->key)
                                 return true;
                             ok = emit_add(k, d);
                             return ok;
@@ -409,7 +393,7 @@ diff_memtree_nodes(
                         *pa.inner, [&](const Key& k, const Slice& d) {
                             if (!ok)
                                 return false;
-                            if (key_eq(k, pb.leaf->key))
+                            if (k == pb.leaf->key)
                                 return true;
                             ok = emit_del(k, d);
                             return ok;
@@ -431,11 +415,7 @@ diff_memtree_nodes(
             if (pa.kind == K::Inner && pb.kind == K::Inner)
             {
                 // pointer/hash fast path again
-                if (pa.inner->header.raw() == pb.inner->header.raw())
-                    continue;
-                if (slice32_eq(
-                        pa.inner->header.get_uncopyable().get_hash(),
-                        pb.inner->header.get_uncopyable().get_hash()))
+                if ((*pa.inner).eq(*pb.inner))
                     continue;
                 if (!go(*pa.inner, *pb.inner))
                     return false;
