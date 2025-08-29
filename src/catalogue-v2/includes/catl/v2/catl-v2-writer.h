@@ -811,10 +811,7 @@ private:
                             "Inner node has ",
                             entry.child_count,
                             " non-empty children");
-                        assert(
-                            entry.child_count > 0 &&
-                            "Inner node with no children");
-
+                        // Empty inner nodes are valid (empty tree case)
                         // Resize child_offsets to match child count
                         entry.child_offsets.resize(entry.child_count, 0);
 
