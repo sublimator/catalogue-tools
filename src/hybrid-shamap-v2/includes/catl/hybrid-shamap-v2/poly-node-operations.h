@@ -68,7 +68,7 @@ poly_first_leaf(const PolyNodePtr& node)
             v2::InnerNodeView view =
                 v2::MemTreeOps::get_inner_node(node.get_raw_memory());
             auto leaf_view = v2::MemTreeOps::first_leaf_depth_first(view);
-            return PolyNodePtr::make_raw_memory(
+            return PolyNodePtr::wrap_raw_memory(
                 leaf_view.header_ptr.raw(), v2::ChildType::LEAF);
         }
     }

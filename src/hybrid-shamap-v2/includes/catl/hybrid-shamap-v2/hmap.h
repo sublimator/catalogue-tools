@@ -49,7 +49,7 @@ public:
     void
     set_root_raw(const uint8_t* raw_root)
     {
-        root_ = PolyNodePtr::make_raw_memory(raw_root);
+        root_ = PolyNodePtr::wrap_raw_memory(raw_root);
     }
 
     // Initialize with a materialized root
@@ -60,13 +60,6 @@ public:
     get_root() const
     {
         return root_;
-    }
-
-    // Set the root to any PolyNodePtr
-    void
-    set_root(const PolyNodePtr& new_root)
-    {
-        root_ = new_root;
     }
 
     [[nodiscard]] const std::vector<std::shared_ptr<v2::MmapHolder>>&

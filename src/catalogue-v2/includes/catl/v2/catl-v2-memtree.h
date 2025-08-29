@@ -171,7 +171,6 @@ public:
     MemPtr&
     operator=(MemPtr&&) = default;
 
-
     // operator* returns a reference to the object
     [[nodiscard]] const T&
     operator*() const
@@ -655,6 +654,19 @@ public:
         return get_inner_node(parent.get_child_ptr(branch));
     }
 
+    static LeafView
+    get_leaf_view(v2::MemPtr<v2::LeafHeader> leaf_header_ptr)
+    {
+        const auto& leaf_header = *leaf_header_ptr;  // Force ref binding
+
+        return LeafView{
+            leaf_header_ptr,
+            Key(leaf_header.key.data()),
+            Slice(
+                leaf_header_ptr.offset(sizeof(v2::LeafHeader)).raw(),
+                leaf_header.data_size())};
+    }
+
     /**
      * Get a leaf child from a node view
      */
@@ -677,15 +689,7 @@ public:
         const uint8_t* leaf_ptr = parent.get_child_ptr(branch);
 
         // Load leaf header using MemPtr
-        v2::MemPtr<v2::LeafHeader> leaf_header_ptr(leaf_ptr);
-        const auto& leaf_header = *leaf_header_ptr;  // Force ref binding
-
-        return LeafView{
-            leaf_header_ptr,
-            Key(leaf_header.key.data()),
-            Slice(
-                leaf_header_ptr.offset(sizeof(v2::LeafHeader)).raw(),
-                leaf_header.data_size())};
+        return get_leaf_view(v2::MemPtr<LeafHeader>(leaf_ptr));
     }
 
     /**

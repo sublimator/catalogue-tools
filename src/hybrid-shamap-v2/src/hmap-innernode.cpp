@@ -102,7 +102,7 @@ HmapInnerNode::first_leaf() const
 
             // Convert LeafView to PolyNodePtr
             // The leaf_view has the raw pointer in header_ptr
-            return PolyNodePtr::make_raw_memory(
+            return PolyNodePtr::wrap_raw_memory(
                 leaf_view.header_ptr.raw(), v2::ChildType::LEAF);
         }
     }

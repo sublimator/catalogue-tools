@@ -286,7 +286,7 @@ public:
                         if (child_type != catl::v2::ChildType::EMPTY)
                         {
                             const uint8_t* child_ptr = view.get_child_ptr(i);
-                            PolyNodePtr child = PolyNodePtr::make_raw_memory(
+                            PolyNodePtr child = PolyNodePtr::wrap_raw_memory(
                                 child_ptr, child_type);
                             // Get actual depth from child if it's an inner node
                             int child_depth = depth + 1;  // Default for leaves
@@ -364,7 +364,7 @@ public:
                         if (child_type != catl::v2::ChildType::EMPTY)
                         {
                             const uint8_t* child_ptr = view.get_child_ptr(i);
-                            PolyNodePtr child = PolyNodePtr::make_raw_memory(
+                            PolyNodePtr child = PolyNodePtr::wrap_raw_memory(
                                 child_ptr, child_type);
                             queue.push({child, depth + 1, i, node, depth});
                         }

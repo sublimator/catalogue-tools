@@ -47,10 +47,9 @@ HmapPathFinder::materialize_path()
                 is_leaf = true;
             }
 
-            auto materialized = materialize_raw_node(raw, is_leaf);
-
             // Update this entry in the path using proper ref counting
-            node_ptr = PolyNodePtr::from_intrusive(materialized);
+            node_ptr = PolyNodePtr::adopt_materialized(
+                materialize_raw_node_unmanaged(raw, is_leaf));
 
             // Update parent's child pointer if not root
             if (i > 0)
@@ -68,28 +67,21 @@ HmapPathFinder::materialize_path()
     }
 }
 
-boost::intrusive_ptr<HMapNode>
-HmapPathFinder::materialize_raw_node(const uint8_t* raw, bool is_leaf)
+HMapNode*
+HmapPathFinder::materialize_raw_node_unmanaged(const uint8_t* raw, bool is_leaf)
 {
     if (is_leaf)
     {
         // Materialize as leaf
         v2::MemPtr<v2::LeafHeader> leaf_header_ptr(raw);
-        const auto& header = *leaf_header_ptr;
-
-        Key key(header.key.data());
-        Slice data(raw + sizeof(v2::LeafHeader), header.data_size());
-
-        return {new HmapLeafNode(key, data)};
+        auto view = v2::MemTreeOps::get_leaf_view(leaf_header_ptr);
+        return new HmapLeafNode(view.key, view.data);
     }
     else
     {
         // Materialize as inner
         v2::MemPtr<v2::InnerNodeHeader> inner_ptr(raw);
-        const auto& header = *inner_ptr;
-
-        auto* inner = new HmapInnerNode(header.get_depth());
-        boost::intrusive_ptr<HMapNode> inner_ptr_managed(inner);
+        auto* inner = new HmapInnerNode(inner_ptr->get_depth());
 
         // Copy children (both types and pointers) from mmap header
         const v2::InnerNodeView view{inner_ptr};
@@ -97,18 +89,18 @@ HmapPathFinder::materialize_raw_node(const uint8_t* raw, bool is_leaf)
 
         for (int i = 0; i < 16; ++i)
         {
-            v2::ChildType child_type = header.get_child_type(i);
+            v2::ChildType child_type = inner_ptr->get_child_type(i);
             if (child_type != v2::ChildType::EMPTY)
             {
                 const uint8_t* child_raw = offsets.get_child_ptr(i);
                 inner->set_child(
                     i,
-                    PolyNodePtr::make_raw_memory(child_raw, child_type),
+                    PolyNodePtr::wrap_raw_memory(child_raw, child_type),
                     child_type);
             }
         }
 
-        return inner_ptr_managed;
+        return inner;
     }
 }
 
