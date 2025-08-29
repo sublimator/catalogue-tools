@@ -56,10 +56,10 @@ find_first_leaf_key(const PolyNodePtr& node, Key& found_key)
         else
         {
             // Get key from mmap leaf header
+            // TODO: polynode ref should have a get_memptr<X>() method
             const uint8_t* raw = node.get_raw_memory();
             catl::v2::MemPtr<catl::v2::LeafHeader> header(raw);
-            const auto& h = header.get_uncopyable();
-            found_key = Key(h.key.data());
+            found_key = Key(header->key.data());
             return true;
         }
     }

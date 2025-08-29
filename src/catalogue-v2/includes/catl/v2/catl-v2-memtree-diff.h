@@ -203,8 +203,8 @@ diff_memtree_nodes(
                               int target_depth,
                               int branch,
                               int pre_nibble /*-1 if unknown*/) -> Projected {
-        const auto& hdr = node.header.get_uncopyable();
-        int dN = hdr.get_depth();
+        auto hdr_ptr = node.header_ptr;
+        int dN = hdr_ptr->get_depth();
 
         if (dN < target_depth)
             throw std::logic_error("project_branch: node depth < target_depth");
@@ -245,10 +245,11 @@ diff_memtree_nodes(
         if (A.eq(B))
             return true;
 
-        const auto& ha = A.header.get_uncopyable();
-        const auto& hb = B.header.get_uncopyable();
-        int da = ha.get_depth();
-        int db = hb.get_depth();
+        // Store MemPtrs, get temporaries only when needed
+        auto ha_ptr = A.header_ptr;
+        auto hb_ptr = B.header_ptr;
+        int da = ha_ptr->get_depth();
+        int db = hb_ptr->get_depth();
         int d = da < db ? da : db;  // align to shallower depth
 
         // Precompute which branch each deeper node projects into at depth d

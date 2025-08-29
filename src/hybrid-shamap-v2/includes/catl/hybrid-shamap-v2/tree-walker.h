@@ -293,8 +293,8 @@ public:
                             {
                                 InnerNodeView child_view =
                                     MemTreeOps::get_inner_node(child_ptr);
-                                child_depth = child_view.header.get_uncopyable()
-                                                  .get_depth();
+                                child_depth =
+                                    child_view.header_ptr->get_depth();
                             }
                             stack.push({child, child_depth, i, node, depth});
                         }

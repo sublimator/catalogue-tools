@@ -721,8 +721,7 @@ public:
                             const uint8_t* leaf_raw = child.get_raw_memory();
                             const v2::MemPtr<v2::LeafHeader> leaf_header_ptr(
                                 leaf_raw);
-                            const auto& leaf_header =
-                                leaf_header_ptr.get_uncopyable();
+                            const auto& leaf_header = *leaf_header_ptr;
                             found_leaf_ = child;
                             key_matches_ =
                                 (std::memcmp(
@@ -778,7 +777,7 @@ public:
                         // Parent is still raw, check its header
                         const uint8_t* parent_raw = parent_ptr.get_raw_memory();
                         v2::MemPtr<v2::InnerNodeHeader> header(parent_raw);
-                        const auto& header_val = header.get_uncopyable();
+                        const auto& header_val = *header;
                         is_leaf =
                             (header_val.get_child_type(branch_taken) ==
                              v2::ChildType::LEAF);
@@ -858,7 +857,7 @@ public:
                 if (node_ptr.is_inner())
                 {
                     v2::MemPtr<v2::InnerNodeHeader> header(raw);
-                    const auto& h = header.get_uncopyable();
+                    const auto& h = *header;
                     ss << " depth=" << (int)h.get_depth();
                     ss << " hash=";
                     for (int j = 0; j < 8; ++j)
@@ -872,7 +871,7 @@ public:
                 else if (node_ptr.is_leaf())
                 {
                     v2::MemPtr<v2::LeafHeader> header(raw);
-                    const auto& h = header.get_uncopyable();
+                    const auto& h = *header;
                     ss << " hash=";
                     for (int j = 0; j < 8; ++j)
                     {  // First 8 bytes
@@ -941,7 +940,7 @@ private:
 
         InnerNodeView view{v2::MemPtr<v2::InnerNodeHeader>(raw)};
 
-        const auto& header = view.header.get_uncopyable();
+        const auto& header = *view.header_ptr;
         depth = header.get_depth();
 
         // Validate depth
@@ -987,7 +986,7 @@ private:
         {
             // It's a leaf - check the key
             const v2::MemPtr<v2::LeafHeader> leaf_header_ptr(child_ptr);
-            const auto& leaf_header = leaf_header_ptr.get_uncopyable();
+            const auto& leaf_header = *leaf_header_ptr;
 
             found_leaf_ = child;
             key_matches_ =
@@ -1018,7 +1017,7 @@ private:
         {
             // Materialize as leaf
             v2::MemPtr<v2::LeafHeader> leaf_header_ptr(raw);
-            const auto& header = leaf_header_ptr.get_uncopyable();
+            const auto& header = *leaf_header_ptr;
 
             Key key(header.key.data());
             Slice data(raw + sizeof(v2::LeafHeader), header.data_size());
@@ -1029,7 +1028,7 @@ private:
         {
             // Materialize as inner
             v2::MemPtr<v2::InnerNodeHeader> inner_ptr(raw);
-            const auto& header = inner_ptr.get_uncopyable();
+            const auto& header = *inner_ptr;
 
             // ReSharper disable once CppDFAMemoryLeak
             auto* inner = new HmapInnerNode(header.get_depth());
@@ -1287,7 +1286,7 @@ public:
                     // Read from mmap
                     const uint8_t* raw = existing.get_raw_memory();
                     v2::MemPtr<v2::LeafHeader> header(raw);
-                    return Key(header.get_uncopyable().key.data());
+                    return Key(header->key.data());
                 }
             }();
 
@@ -1676,13 +1675,13 @@ PolyNodePtr::copy_hash_to(uint8_t* dest) const
         if (is_inner())
         {
             v2::MemPtr<v2::InnerNodeHeader> header(raw);
-            const auto& h = header.get_uncopyable();
+            const auto& h = *header;
             std::memcpy(dest, h.hash.data(), Hash256::size());
         }
         else if (is_leaf())
         {
             v2::MemPtr<v2::LeafHeader> header(raw);
-            const auto& h = header.get_uncopyable();
+            const auto& h = *header;
             std::memcpy(dest, h.hash.data(), Hash256::size());
         }
         else if (is_placeholder())

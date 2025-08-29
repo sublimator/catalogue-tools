@@ -105,22 +105,14 @@ resolve_self_relative(const uint8_t* offsets_array, int index)
 }
 
 /**
- * Safe loading of POD types from memory-mapped data.
- * This avoids undefined behavior from reinterpret_cast on potentially
- * misaligned pointers and ensures proper object lifetime.
- *
- * Define CATL_UNSAFE_POD_LOADS to use direct reinterpret_cast for
- * performance on platforms where alignment is guaranteed.
- *
  * @tparam T The trivially copyable type to load
  * @param base Base pointer to the memory-mapped data
  * @param offset Byte offset from base
  * @param file_size Total size of the memory-mapped file (for bounds checking)
- * @return Reference (UNSAFE mode) or copy (safe mode) of the object
+ * @return Reference of the object
  * @throws std::runtime_error if reading past end of file
  */
 template <typename T>
-#ifdef CATL_UNSAFE_POD_LOADS
 inline const T&
 load_pod(const uint8_t* base, size_t offset, size_t file_size)
 {
@@ -135,44 +127,18 @@ load_pod(const uint8_t* base, size_t offset, size_t file_size)
     // Fast path: direct cast, return reference (zero-copy!)
     return *reinterpret_cast<const T*>(base + offset);
 }
-#else
-inline T
-load_pod(const uint8_t* base, size_t offset, size_t file_size)
-{
-    static_assert(
-        std::is_trivially_copyable_v<T>, "T must be trivially copyable");
-
-    if (offset + sizeof(T) > file_size)
-    {
-        throw std::runtime_error("read past end of file");
-    }
-
-    // Safe path: memcpy (portable, compiler optimizes for small types)
-    T out;
-    std::memcpy(&out, base + offset, sizeof(T));
-    return out;
-}
-#endif
 
 /**
  * MemPtr - A typed pointer wrapper for memory-mapped data
  *
  * This class provides a thin (8-byte) wrapper around pointers into mmap'd
  * memory. It documents ownership semantics (the data is owned by the mapped
- * file) and provides safe/unsafe access patterns based on compile-time
- * configuration.
+ * file)
  *
  * Key design principles:
  * - Same size as a raw pointer (8 bytes)
- * - get() returns a VALUE (not pointer) for stack-based usage
- * - Respects CATL_UNSAFE_POD_LOADS for performance vs portability
  * - Makes memory-mapped pointer semantics explicit in the type system
  *
- * Usage:
- *   MemPtr<InnerNodeHeader> header_ptr(mmap_data);
- *   // ... pass header_ptr around (cheap, 8 bytes) ...
- *   auto header = header_ptr.get_uncopyable();  // Get value on stack when
- * needed auto depth = header.get_depth(); // Use the value
  */
 template <typename T>
 class MemPtr
@@ -205,20 +171,8 @@ public:
     MemPtr&
     operator=(MemPtr&&) = default;
 
-    /**
-     * Get the value pointed to, safely handling alignment.
-     *
-     * In CATL_UNSAFE_POD_LOADS mode: returns const reference (zero-copy!)
-     * In safe mode: returns by value (copy for alignment safety)
-     *
-     * This allows zero-copy access in unsafe mode while maintaining
-     * safety in portable mode.
-     *
-     * @return Reference (unsafe mode) or copy (safe mode)
-     */
-#ifdef CATL_UNSAFE_POD_LOADS
     [[nodiscard]] const T&
-    get_uncopyable() const
+    get_temporary() const
     {
         static_assert(
             std::is_trivially_copyable_v<T>, "T must be trivially copyable");
@@ -226,19 +180,24 @@ public:
         // Fast path: direct cast, return reference (zero-copy!)
         return *reinterpret_cast<const T*>(ptr_);
     }
-#else
-    [[nodiscard]] T
-    get_uncopyable() const
+
+    // operator* returns a reference to the object
+    [[nodiscard]] const T&
+    operator*() const
     {
         static_assert(
             std::is_trivially_copyable_v<T>, "T must be trivially copyable");
         assert(ptr_ != nullptr);
-        // Safe path: memcpy (portable, compiler optimizes for small types)
-        T out;
-        std::memcpy(&out, ptr_, sizeof(T));
-        return out;
+        return *reinterpret_cast<const T*>(ptr_);
     }
-#endif
+
+    // operator-> for member access
+    [[nodiscard]] const T*
+    operator->() const
+    {
+        assert(ptr_ != nullptr);
+        return reinterpret_cast<const T*>(ptr_);
+    }
 
     /**
      * Get the raw byte pointer
@@ -271,16 +230,6 @@ public:
     offset(std::ptrdiff_t bytes) const
     {
         return MemPtr<T>(ptr_ + bytes);
-    }
-
-    /**
-     * Cast to a different type (for reinterpreting memory)
-     */
-    template <typename U>
-    MemPtr<U>
-    cast() const
-    {
-        return MemPtr<U>(ptr_);
     }
 };
 
@@ -427,7 +376,7 @@ struct ChildIterator
         , offset_index(0)
     {
         // Build initial mask of non-empty children
-        const auto& header_val = header.get_uncopyable();
+        const auto& header_val = *header;
 
         // Overlay not implemented in the reader path yet
         assert(
@@ -505,7 +454,7 @@ struct ChildIterator
 
         // Use get_type to ensure we get the right type (ref in unsafe, value in
         // safe)
-        const auto& header_val = header.get_uncopyable();
+        const auto& header_val = *header;
 
         Child child;
         child.branch = branch;
@@ -534,22 +483,57 @@ struct ChildIterator
  */
 struct LeafView
 {
-    MemPtr<LeafHeader> header;
+    MemPtr<LeafHeader> header_ptr;
+    // TODO: make this a lazy getter from header_ptr ?
     Key key;
     Slice data;
 
+    Key
+    get_key() const
+    {
+        return Key(header_ptr->key.data());
+    }
+
+    Slice
+    get_data() const
+    {
+        return Slice(
+            header_ptr.offset(sizeof(v2::LeafHeader)).raw(),
+            header_ptr->data_size());
+    }
+
+    /**
+     * @brief Checks for equality between two LeafView objects, optimized for
+     * high-performance tree diffing.
+     *
+     * @param other The other LeafView to compare against.
+     * @return true if the leaves are considered equal, false otherwise.
+     *
+     * @note Equality is determined using a two-step, short-circuiting process
+     * designed for speed and correctness:
+     * 1.  **Pointer Identity:** It first performs a near-zero-cost comparison
+     * of the raw pointers. This provides an immediate 'true' for the common
+     * case of object identity (e.g., self-comparison or shared instances).
+     * 2.  **Content Equality:** If the pointers differ, it falls back to
+     * comparing the leaves' 256-bit hashes. This is the definitive check,
+     * relying on the system's assumption that the hash function is
+     * collision-proof.
+     *
+     * This logic correctly handles cases of content duplication, such as when a
+     * leaf is deleted and later re-added to the tree at a different memory
+     * location, resulting in different pointers but an identical hash.
+     */
     bool
     eq(const LeafView& other) const
     {
-        return header.raw() == other.header.raw() ||
-            get_hash().eq(other.get_hash()) ||
-            (key == other.key && data.eq(other.data));
+        return header_ptr.raw() == other.header_ptr.raw() ||
+            get_hash().eq(other.get_hash());
     }
 
     Slice
     get_hash() const
     {
-        return header.get_uncopyable().get_hash();
+        return header_ptr->get_hash();
     }
 };
 
@@ -558,16 +542,16 @@ struct LeafView
  */
 struct InnerNodeView
 {
-    MemPtr<v2::InnerNodeHeader> header;  // Points directly into mmap
+    MemPtr<v2::InnerNodeHeader> header_ptr;  // Points directly into mmap
 
     // Get a child iterator on demand
     [[nodiscard]] v2::ChildIterator
     get_child_iter() const
     {
         const auto* offsets_data =
-            header.offset(sizeof(v2::InnerNodeHeader)).raw();
+            header_ptr.offset(sizeof(v2::InnerNodeHeader)).raw();
         // Simple: just pass the header and offset array pointer
-        return {header, offsets_data};
+        return {header_ptr, offsets_data};
     }
 
     // Get child type for branch i (EMPTY, INNER, or LEAF)
@@ -580,7 +564,7 @@ struct InnerNodeView
                 "Branch index " + std::to_string(branch) +
                 " out of range [0,16)");
         }
-        const auto& header_val = header.get_uncopyable();
+        const auto& header_val = *header_ptr;
         return header_val.get_child_type(branch);
     }
 
@@ -610,22 +594,22 @@ struct InnerNodeView
     [[nodiscard]] v2::SparseChildOffsets
     get_sparse_offsets() const
     {
-        const auto& header_val = header.get_uncopyable();
+        const auto& header_val = *header_ptr;
         const uint8_t* offsets_base =
-            header.offset(sizeof(v2::InnerNodeHeader)).raw();
+            header_ptr.offset(sizeof(v2::InnerNodeHeader)).raw();
         return {offsets_base, header_val.child_types};
     }
 
     Slice
     get_hash() const
     {
-        return header.get_uncopyable().get_hash();
+        return header_ptr->get_hash();
     }
 
     bool
     eq(const InnerNodeView& other) const
     {
-        return header.raw() == other.header.raw() ||
+        return header_ptr.raw() == other.header_ptr.raw() ||
             get_hash().eq(other.get_hash());
     }
 };
@@ -656,7 +640,7 @@ public:
             throw std::runtime_error("get_leaf_hash: not a leaf");
         const uint8_t* leaf_ptr = parent.get_child_ptr(branch);
         v2::MemPtr<v2::LeafHeader> leaf_header_ptr(leaf_ptr);
-        const auto& hdr = leaf_header_ptr.get_uncopyable();
+        const auto& hdr = *leaf_header_ptr;
         return hdr.get_hash();  // 32-byte slice
     }
 
@@ -704,8 +688,7 @@ public:
 
         // Load leaf header using MemPtr
         v2::MemPtr<v2::LeafHeader> leaf_header_ptr(leaf_ptr);
-        const auto& leaf_header =
-            leaf_header_ptr.get_uncopyable();  // Force ref binding
+        const auto& leaf_header = *leaf_header_ptr;  // Force ref binding
 
         return LeafView{
             leaf_header_ptr,
@@ -743,8 +726,7 @@ public:
     lookup_key_optional(const InnerNodeView& root, const Key& key)
     {
         InnerNodeView current = root;
-        const auto& root_header = root.header.get_uncopyable();
-        int depth = root_header.get_depth();
+        int depth = root.header_ptr->get_depth();
 
         // Walk down the tree following the key nibbles
         while (true)
@@ -772,8 +754,7 @@ public:
 
             // It's an inner node, continue traversing
             current = get_inner_child(current, nibble);
-            const auto& current_header = current.header.get_uncopyable();
-            depth = current_header.get_depth();
+            depth = current.header_ptr->get_depth();
         }
     }
 
