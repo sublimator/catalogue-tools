@@ -44,55 +44,44 @@ find_first_leaf_key(const PolyNodePtr& node, Key& found_key)
     if (node.is_empty())
         return false;
 
-    // If it's a leaf, extract the key
+    // If it's a leaf, extract the key using the new helper
     if (node.is_leaf())
     {
-        if (node.is_materialized())
-        {
-            auto* leaf = node.get_materialized<HmapLeafNode>();
-            found_key = leaf->get_key();
-            return true;
-        }
-        else
-        {
-            // Get key from mmap leaf header
-            auto header = node.get_memptr<catl::v2::LeafHeader>();
-            found_key = Key(header->key.data());
-            return true;
-        }
+        found_key = poly_get_leaf_key(node);
+        return true;
     }
 
     // It's an inner node - search its children
     if (node.is_materialized())
     {
         auto* inner = node.get_materialized<HmapInnerNode>();
-        for (int i = 0; i < 16; ++i)
+        // Use the inner node's first_leaf_key() method
+        try
         {
-            auto child = inner->get_child(i);
-            if (!child.is_empty())
-            {
-                if (find_first_leaf_key(child, found_key))
-                    return true;
-            }
+            found_key = inner->first_leaf_key();
+            return true;
+        }
+        catch (const std::runtime_error&)
+        {
+            // No leaf found in this subtree
+            return false;
         }
     }
     else
     {
-        // Navigate through mmap inner node
+        // Navigate through mmap inner node using MemTreeOps
         InnerNodeView view = MemTreeOps::get_inner_node(node.get_raw_memory());
 
-        // Try each branch
-        for (int i = 0; i < 16; ++i)
+        try
         {
-            auto child_type = view.get_child_type(i);
-            if (child_type != catl::v2::ChildType::EMPTY)
-            {
-                const uint8_t* child_ptr = view.get_child_ptr(i);
-                PolyNodePtr child =
-                    PolyNodePtr::make_raw_memory(child_ptr, child_type);
-                if (find_first_leaf_key(child, found_key))
-                    return true;
-            }
+            auto leaf_view = MemTreeOps::first_leaf_depth_first(view);
+            found_key = leaf_view.key;
+            return true;
+        }
+        catch (const std::runtime_error&)
+        {
+            // No leaf found in this subtree
+            return false;
         }
     }
 
@@ -177,57 +166,43 @@ HmapInnerNode::update_hash()
         auto child = get_child(i);
         if (!child.is_empty())
         {
-            if (child.is_materialized())
+            // Check for collapsed tree (depth skip) in inner nodes
+            if (child.is_inner() && child.is_materialized())
             {
-                // Heap node - check for depth skip (collapsed tree)
-                auto* node = child.get_materialized_base();
+                auto* inner_child = child.get_materialized<HmapInnerNode>();
+                int child_depth = inner_child->get_depth();
+                int expected_depth = depth_ + 1;
 
-                if (node->get_type() == Type::INNER)
+                if (child_depth > expected_depth)
                 {
-                    auto* inner_child = static_cast<HmapInnerNode*>(node);
-                    int child_depth = inner_child->get_depth();
-                    int expected_depth = depth_ + 1;
-
-                    if (child_depth > expected_depth)
+                    // We have a collapsed section - need synthetic hashes
+                    // Use the inner node's first_leaf_key() method to get
+                    // representative key
+                    try
                     {
-                        // We have a collapsed section - need synthetic hashes
-                        int skips = child_depth - expected_depth;
-
-                        // Find a representative key from the child subtree
-                        Key rep_key(nullptr);
-                        if (find_first_leaf_key(child, rep_key))
-                        {
-                            // Compute synthetic hashes for skipped levels
-                            child_hash = compute_synthetic_hash(
-                                child,
-                                rep_key,
-                                expected_depth,
-                                child_depth - 1);
-                        }
-                        else
-                        {
-                            // No leaf found - this shouldn't happen in a valid
-                            // tree Use the node's hash directly
-                            child_hash = node->get_hash();
-                        }
+                        Key rep_key = inner_child->first_leaf_key();
+                        child_hash = compute_synthetic_hash(
+                            child, rep_key, expected_depth, child_depth - 1);
                     }
-                    else
+                    catch (const std::runtime_error&)
                     {
-                        // Normal case - no skip
-                        child_hash = node->get_hash();
+                        // No leaf found - shouldn't happen in valid tree
+                        // Use the node's hash directly
+                        child_hash = child.get_hash();
                     }
                 }
                 else
                 {
-                    // Leaf or placeholder - just get hash
-                    child_hash = node->get_hash();
+                    // Normal case - no skip
+                    child_hash = child.get_hash();
                 }
             }
             else
             {
-                // Mmap node - use perma-cached hash
-                // The perma-cached hash already accounts for any synthetic
-                // hashes that were needed when the CATL file was created
+                // For leaves, placeholders, and mmap nodes - just get hash
+                // directly Mmap nodes have perma-cached hashes that already
+                // account for any synthetic hashes that were needed when the
+                // CATL file was created
                 child_hash = child.get_hash();
             }
         }
