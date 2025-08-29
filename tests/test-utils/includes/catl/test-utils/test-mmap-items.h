@@ -1,5 +1,7 @@
 #pragma once
 #include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "catl/core/types.h"
