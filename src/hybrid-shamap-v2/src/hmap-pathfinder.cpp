@@ -57,7 +57,7 @@ HmapPathFinder::find_path(const PolyNodePtr& root)
             assert(current.is_materialized());
             HMapNode* node = current.get_materialized_base();
 
-            if (node->get_type() == HMapNode::Type::LEAF)
+            if (node->get_type() == v2::ChildType::LEAF)
             {
                 // Found a leaf
                 const auto* leaf = current.get_materialized<HmapLeafNode>();
@@ -65,7 +65,7 @@ HmapPathFinder::find_path(const PolyNodePtr& root)
                 key_matches_ = (leaf->get_key() == target_key_);
                 break;
             }
-            else if (node->get_type() == HMapNode::Type::PLACEHOLDER)
+            else if (node->get_type() == v2::ChildType::PLACEHOLDER)
             {
                 // Can't navigate through placeholder yet
                 // Would need to fetch the actual node
@@ -209,11 +209,11 @@ HmapPathFinder::debug_path() const
             ss << "MATERIALIZED " << node->describe();
 
             // Print hash if valid
-            if (node->get_type() == HMapNode::Type::INNER)
+            if (node->get_type() == v2::ChildType::INNER)
             {
                 ss << " hash=" << node->get_hash().hex().substr(0, 16) << "...";
             }
-            else if (node->get_type() == HMapNode::Type::LEAF)
+            else if (node->get_type() == v2::ChildType::LEAF)
             {
                 ss << " hash=" << node->get_hash().hex().substr(0, 16) << "...";
             }

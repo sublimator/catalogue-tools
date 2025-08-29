@@ -21,10 +21,10 @@ public:
     {
     }
 
-    Type
+    v2::ChildType
     get_type() const override
     {
-        return Type::PLACEHOLDER;
+        return v2::ChildType::PLACEHOLDER;
     }
 
     [[nodiscard]] const Hash256&

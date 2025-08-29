@@ -96,25 +96,8 @@ PolyNodePtr::adopt_materialized(HMapNode* node)
     if (!node)
         return make_empty();
 
-    // Auto-detect type
-    v2::ChildType type;
-    switch (node->get_type())
-    {
-        case HMapNode::Type::INNER:
-            type = v2::ChildType::INNER;
-            break;
-        case HMapNode::Type::LEAF:
-            type = v2::ChildType::LEAF;
-            break;
-        case HMapNode::Type::PLACEHOLDER:
-            type = v2::ChildType::PLACEHOLDER;
-            break;
-        default:
-            type = v2::ChildType::EMPTY;
-    }
-
     // Use constructor which WILL increment ref count
-    return {node, type, true};
+    return {node, node->get_type(), true};
 }
 
 // Copy hash to buffer

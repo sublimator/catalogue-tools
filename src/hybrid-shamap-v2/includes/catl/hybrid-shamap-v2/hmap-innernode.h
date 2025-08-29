@@ -32,10 +32,10 @@ public:
 
     ~HmapInnerNode();
 
-    Type
+    v2::ChildType
     get_type() const override
     {
-        return Type::INNER;
+        return v2::ChildType::INNER;
     }
 
     // Check if a child is materialized (heap-allocated)
