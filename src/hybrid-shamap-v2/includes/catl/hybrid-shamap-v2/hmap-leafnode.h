@@ -21,10 +21,10 @@ public:
     {
     }
 
-    Type
+    v2::ChildType
     get_type() const override
     {
-        return Type::LEAF;
+        return v2::ChildType::LEAF;
     }
 
     [[nodiscard]] const Key&

@@ -4,6 +4,8 @@
 #include <atomic>
 #include <string>
 
+#include "catl/v2/catl-v2-structs.h"
+
 namespace catl::hybrid_shamap {
 
 /**
@@ -23,10 +25,8 @@ protected:
     bool hash_valid_ = false;
 
 public:
-    enum class Type : uint8_t { INNER, LEAF, PLACEHOLDER };
-
     virtual ~HMapNode() = default;
-    virtual Type
+    virtual v2::ChildType
     get_type() const = 0;
 
     // Hash support
