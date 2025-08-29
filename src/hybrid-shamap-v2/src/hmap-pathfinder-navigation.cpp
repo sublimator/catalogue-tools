@@ -69,7 +69,7 @@ HmapPathFinder::navigate_raw_inner(PolyNodePtr& current, int& depth)
         throw std::runtime_error("Corrupt child pointer detected");
     }
 
-    PolyNodePtr child = PolyNodePtr::make_raw_memory(child_ptr, child_type);
+    PolyNodePtr child = PolyNodePtr::wrap_raw_memory(child_ptr, child_type);
 
     if (child_type == v2::ChildType::LEAF)
     {

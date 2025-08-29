@@ -114,62 +114,7 @@ PolyNodePtr::adopt_materialized(HMapNode* node)
     }
 
     // Use constructor which WILL increment ref count
-    return PolyNodePtr(node, type, true);
-}
-
-// Wraps without changing ref count (advanced use)
-PolyNodePtr
-PolyNodePtr::wrap_uncounted(HMapNode* p, v2::ChildType type)
-{
-    PolyNodePtr tp;
-    tp.ptr_ = p;
-    tp.type_ = type;
-    tp.materialized_ = true;
-    // Note: NOT calling add_ref()
-    return tp;
-}
-
-// Factory from intrusive_ptr
-PolyNodePtr
-PolyNodePtr::from_intrusive(const boost::intrusive_ptr<HMapNode>& p)
-{
-    if (!p)
-    {
-        return make_empty();
-    }
-
-    // Determine the child type from the node type
-    v2::ChildType type;
-    switch (p->get_type())
-    {
-        case HMapNode::Type::INNER:
-            type = v2::ChildType::INNER;
-            break;
-        case HMapNode::Type::LEAF:
-            type = v2::ChildType::LEAF;
-            break;
-        case HMapNode::Type::PLACEHOLDER:
-            type = v2::ChildType::PLACEHOLDER;
-            break;
-        default:
-            type = v2::ChildType::EMPTY;
-    }
-
-    // Create PolyNodePtr using constructor which will increment ref count
-    return PolyNodePtr(p.get(), type, true);
-}
-
-// Convert to intrusive_ptr
-boost::intrusive_ptr<HMapNode>
-PolyNodePtr::to_intrusive() const
-{
-    if (!is_materialized() || is_empty())
-    {
-        return nullptr;
-    }
-
-    // Create intrusive_ptr which will increment ref count
-    return {get_materialized_base()};
+    return {node, type, true};
 }
 
 // Copy hash to buffer

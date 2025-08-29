@@ -111,8 +111,8 @@ private:
      * Materialize a raw node (convert from mmap to heap)
      * Returns intrusive_ptr for proper memory management
      */
-    static boost::intrusive_ptr<HMapNode>
-    materialize_raw_node(const uint8_t* raw, bool is_leaf);
+    static HMapNode*
+    materialize_raw_node_unmanaged(const uint8_t* raw, bool is_leaf);
 
     /**
      * Check if a key belongs in a collapsed inner node
