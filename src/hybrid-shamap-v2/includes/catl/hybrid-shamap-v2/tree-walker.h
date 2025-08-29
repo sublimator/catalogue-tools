@@ -255,7 +255,7 @@ public:
 
                     auto* inner = static_cast<
                         HmapInnerNode*>(  // NOLINT(*-pro-type-static-cast-downcast)
-                        node.get_materialized());
+                        node.get_materialized_base());
                     for (int i = 15; i >= 0; --i)
                     {
                         auto child = inner->get_child(i);
@@ -265,9 +265,7 @@ public:
                             int child_depth = depth + 1;  // Default
                             if (child.is_inner() && child.is_materialized())
                             {
-                                child_depth = static_cast<HmapInnerNode*>(
-                                                  child.get_materialized())
-                                                  ->get_depth();
+                                child_depth = child.get_materialized<HmapInnerNode>()->get_depth();
                             }
                             stack.push({child, child_depth, i, node, depth});
                         }
@@ -340,8 +338,7 @@ public:
                 if (node.is_materialized())
                 {
                     // Materialized inner node
-                    auto* inner = static_cast<HmapInnerNode*>(
-                        node.get_materialized());  // NOLINT(*-pro-type-static-cast-downcast)
+                    auto* inner = node.get_materialized<HmapInnerNode>();
                     for (int i = 0; i < 16; ++i)
                     {
                         auto child = inner->get_child(i);

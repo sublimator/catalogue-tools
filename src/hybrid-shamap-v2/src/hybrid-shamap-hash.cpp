@@ -49,7 +49,7 @@ find_first_leaf_key(const PolyNodePtr& node, Key& found_key)
     {
         if (node.is_materialized())
         {
-            auto* leaf = static_cast<HmapLeafNode*>(node.get_materialized());
+            auto* leaf = node.get_materialized<HmapLeafNode>();
             found_key = leaf->get_key();
             return true;
         }
@@ -65,7 +65,7 @@ find_first_leaf_key(const PolyNodePtr& node, Key& found_key)
     // It's an inner node - search its children
     if (node.is_materialized())
     {
-        auto* inner = static_cast<HmapInnerNode*>(node.get_materialized());
+        auto* inner = node.get_materialized<HmapInnerNode>();
         for (int i = 0; i < 16; ++i)
         {
             auto child = inner->get_child(i);
@@ -180,7 +180,7 @@ HmapInnerNode::update_hash()
             if (child.is_materialized())
             {
                 // Heap node - check for depth skip (collapsed tree)
-                auto* node = child.get_materialized();
+                auto* node = child.get_materialized_base();
 
                 if (node->get_type() == Type::INNER)
                 {
