@@ -56,9 +56,7 @@ find_first_leaf_key(const PolyNodePtr& node, Key& found_key)
         else
         {
             // Get key from mmap leaf header
-            // TODO: polynode ref should have a get_memptr<X>() method
-            const uint8_t* raw = node.get_raw_memory();
-            catl::v2::MemPtr<catl::v2::LeafHeader> header(raw);
+            auto header = node.get_memptr<catl::v2::LeafHeader>();
             found_key = Key(header->key.data());
             return true;
         }
@@ -81,8 +79,7 @@ find_first_leaf_key(const PolyNodePtr& node, Key& found_key)
     else
     {
         // Navigate through mmap inner node
-        const uint8_t* raw = node.get_raw_memory();
-        InnerNodeView view = MemTreeOps::get_inner_node(raw);
+        InnerNodeView view = MemTreeOps::get_inner_node(node.get_raw_memory());
 
         // Try each branch
         for (int i = 0; i < 16; ++i)
