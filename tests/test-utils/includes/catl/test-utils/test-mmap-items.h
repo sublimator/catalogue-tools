@@ -9,6 +9,7 @@ class TestMmapItems
 private:
     // Store vectors for memory management
     std::vector<std::vector<uint8_t>> buffers;
+    std::vector<boost::intrusive_ptr<MmapItem>> test_items;
 
 public:
     // Create an item from hex strings
@@ -25,5 +26,11 @@ public:
     get_buffers()
     {
         return buffers;
+    }
+
+    std::vector<boost::intrusive_ptr<MmapItem>>&
+    get_items()
+    {
+        return test_items;
     }
 };
