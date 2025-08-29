@@ -8,6 +8,11 @@ namespace catl::hybrid_shamap {
 void
 HmapPathFinder::materialize_path()
 {
+    // IMPORTANT: materialize_path should ONLY convert mmap nodes to heap nodes
+    // It should NOT modify the tree structure (no divergence handling here!)
+    // Divergence handling happens in set_item/remove_item AFTER materialization
+
+    // Simply materialize all nodes in the path
     for (size_t i = 0; i < path_.size(); ++i)
     {
         auto& [node_ptr, branch_taken] = path_[i];

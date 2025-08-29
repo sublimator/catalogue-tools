@@ -3,7 +3,7 @@
 #include "catl/core/types.h"
 #include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap-treenode.h"
-#include <boost/intrusive_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace catl::shamap {
 

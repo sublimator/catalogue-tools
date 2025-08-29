@@ -99,6 +99,47 @@ public:
     void
     add_node_at_divergence();
 
+    /**
+     * Static utility to materialize a path from root to a key
+     *
+     * This is a simple, focused method that ONLY materializes nodes,
+     * without any of the complexity of divergence detection or tree
+     * modification.
+     *
+     * @param root The root node to start from (may be mmap or heap)
+     * @param key The key to find the path to
+     * @param max_depth Maximum depth to materialize (-1 for no limit)
+     * @return The materialized root (may be different if root was mmap)
+     *
+     * BEHAVIOR:
+     * - Navigates from root toward the key
+     * - Materializes any mmap nodes encountered along the path
+     * - Stops at max_depth if specified, or when reaching a leaf/empty
+     * - Does NOT modify tree structure (no divergence handling)
+     * - Does NOT create new nodes, only converts mmap -> heap
+     *
+     * USE CASES:
+     * - Read-only operations that need heap nodes (e.g., hash computation)
+     * - Preparing a path for modification
+     * - Debugging/testing to ensure nodes are in memory
+     *
+     * EXAMPLE:
+     * ```cpp
+     * // Materialize entire path for a key
+     * auto materialized_root = HmapPathFinder::materialize_path_for_key(
+     *     root, key, -1);
+     *
+     * // Materialize only first 3 levels
+     * auto partial_root = HmapPathFinder::materialize_path_for_key(
+     *     root, key, 3);
+     * ```
+     */
+    static PolyNodePtr
+    materialize_path_for_key(
+        const PolyNodePtr& root,
+        const Key& key,
+        int max_depth = -1);
+
 private:
     /**
      * Navigate through a raw memory inner node

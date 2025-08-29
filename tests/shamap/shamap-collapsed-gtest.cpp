@@ -15,7 +15,7 @@ TEST(CollapseTest, WithSkips)
 {
     // Create a transaction-like tree (shallow)
     // Add a series of items that will create a specific structure
-    TestItems items;
+    TestMmapItems items;
 
     auto i1 = items.make(
         "0000000000000000000000000000000000000000000000000000000000010000");
@@ -58,7 +58,7 @@ TEST(CollapseTest, BasicNoSkips)
 {
     // Create a transaction-like tree (shallow)
     // Add a series of items that will create a specific structure
-    TestItems items;
+    TestMmapItems items;
 
     auto i1 = items.make(
         "0000000000000000000000000000000000000000000000000000000000010000");

@@ -1,26 +1,8 @@
 #pragma once
 
 #include "catl/shamap/shamap.h"
+#include "catl/test-utils/test-mmap-items.h"
 #include "catl/test-utils/test-utils.h"
-
-// Class to manage test items and their memory
-class TestItems
-{
-private:
-    // Store vectors for memory management
-    std::vector<std::vector<uint8_t>> buffers;
-
-public:
-    // Create an item from hex strings
-    boost::intrusive_ptr<MmapItem>
-    make(
-        const std::string& hex_string,
-        std::optional<std::string> hex_data = std::nullopt);
-
-    // Helper to clear buffers if needed
-    void
-    clear();
-};
 
 class ShaMapFixture : public ::testing::Test
 {
@@ -50,7 +32,7 @@ protected:
 
     // Member variables
     catl::shamap::SHAMap map;
-    TestItems items;
+    TestMmapItems items;
     std::string fixture_dir;
 };
 

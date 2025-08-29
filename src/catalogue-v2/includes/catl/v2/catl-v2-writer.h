@@ -127,8 +127,8 @@ public:
     bool
     write_ledger(
         const catl::common::LedgerInfo& ledger_info,
-        const SHAMapS& state_map,
-        const SHAMapS& tx_map)
+        const catl::v2::serialization::SHAMapS& state_map,
+        const catl::v2::serialization::SHAMapS& tx_map)
     {
         try
         {

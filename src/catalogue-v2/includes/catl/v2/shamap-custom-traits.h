@@ -73,5 +73,6 @@ struct SerializedNode
     }
 };
 
-// Define aliases for easier typing
+namespace catl::v2::serialization {
 using SHAMapS = catl::shamap::SHAMapT<SerializedNode>;
+}
