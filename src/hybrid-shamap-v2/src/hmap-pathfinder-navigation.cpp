@@ -56,12 +56,7 @@ HmapPathFinder::navigate_raw_inner(PolyNodePtr& current, int& depth)
         throw std::runtime_error("Invalid child pointer");
     }
 
-    if (reinterpret_cast<uintptr_t>(child_ptr) > 0x700000000000)
-    {
-        LOGE("Suspicious child pointer (too large): ", child_ptr);
-        LOGE("  Parent depth: ", depth, " branch: ", branch);
-        throw std::runtime_error("Corrupt child pointer detected");
-    }
+    // Removed arbitrary pointer range check - high addresses are valid on Linux
 
     PolyNodePtr child = PolyNodePtr::wrap_raw_memory(child_ptr, child_type);
 
