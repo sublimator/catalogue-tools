@@ -19,7 +19,9 @@ target_include_directories(
 target_link_libraries(
   catl_shamap
   PUBLIC catl_core # Depend on the core module
-         Boost::json catl::crypto # Add dependency for SHA-512 half hasher
+         Boost::json
+         Boost::headers # For boost/smart_ptr/intrusive_ptr.hpp
+         catl::crypto # Add dependency for SHA-512 half hasher
   PRIVATE OpenSSL::SSL # Only used in implementation
 )
 

@@ -113,7 +113,10 @@ TestMmapItems::make(
     }
 
     // Create and return the MmapItem
-    return {new MmapItem(key_ptr, data_ptr, data_size)};
+    auto item =
+        boost::intrusive_ptr(new MmapItem(key_ptr, data_ptr, data_size));
+    test_items.push_back(item);
+    return item;
 }
 
 void

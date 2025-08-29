@@ -1,4 +1,5 @@
 include(GoogleTest)
+find_package(zstd REQUIRED)
 
 # Basic hybrid-shamap-v2 tests
 add_executable(hybrid_shamap_v2_basic_gtest hybrid-shamap-v2-basic-gtest.cpp)
@@ -16,6 +17,8 @@ target_link_libraries(
           catl::test_utils
           GTest::gtest_main
           OpenSSL::SSL
-          Boost::json)
+          Boost::json
+          Boost::filesystem
+          zstd::libzstd_static)
 
 gtest_discover_tests(hybrid_shamap_v2_basic_gtest)
