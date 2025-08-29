@@ -13,11 +13,11 @@ HmapPathFinder::navigate_raw_inner(PolyNodePtr& current, int& depth)
 {
     const uint8_t* raw = current.get_raw_memory();
 
-    // Debug: validate the pointer
-    if (!raw || reinterpret_cast<uintptr_t>(raw) < 0x1000)
+    // Validate the pointer
+    if (!raw)
     {
-        LOGE("Invalid raw pointer in navigate_raw_inner: ", raw);
-        throw std::runtime_error("Invalid raw pointer in tree navigation");
+        LOGE("Null raw pointer in navigate_raw_inner");
+        throw std::runtime_error("Null raw pointer in tree navigation");
     }
 
     // Removed arbitrary pointer range check - high addresses are valid on Linux
@@ -49,11 +49,11 @@ HmapPathFinder::navigate_raw_inner(PolyNodePtr& current, int& depth)
     const uint8_t* child_ptr = view.get_child_ptr(branch);
 
     // Validate child pointer
-    if (!child_ptr || reinterpret_cast<uintptr_t>(child_ptr) < 0x1000)
+    if (!child_ptr)
     {
-        LOGE("Invalid child pointer from sparse offsets");
+        LOGE("Null child pointer from sparse offsets");
         LOGE("  Branch: ", branch, " Type: ", static_cast<int>(child_type));
-        throw std::runtime_error("Invalid child pointer");
+        throw std::runtime_error("Null child pointer");
     }
 
     // Removed arbitrary pointer range check - high addresses are valid on Linux
