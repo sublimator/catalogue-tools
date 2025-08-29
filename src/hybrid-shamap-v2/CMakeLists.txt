@@ -1,8 +1,22 @@
 # CMake configuration for Hybrid SHAMap v2 library This library depends on CATL
 # v2 format
 
-# Create static library with hash implementation
-add_library(catl_hybrid_shamap_v2 STATIC src/hybrid-shamap-hash.cpp)
+# Create static library with all implementation files
+add_library(
+  catl_hybrid_shamap_v2 STATIC
+  # Core components
+  src/poly-node-ptr.cpp
+  src/hmap-innernode.cpp
+  src/hmap-innernode-hash.cpp
+  src/hmap-leafnode-hash.cpp
+  # PathFinder components
+  src/hmap-pathfinder.cpp
+  src/hmap-pathfinder-navigation.cpp
+  src/hmap-pathfinder-materialize.cpp
+  # Main tree operations
+  src/hmap.cpp
+  src/hmap-set-item.cpp
+  src/hmap-remove-item.cpp)
 
 # Set up include directories
 target_include_directories(

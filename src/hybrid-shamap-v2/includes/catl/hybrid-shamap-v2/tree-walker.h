@@ -265,7 +265,9 @@ public:
                             int child_depth = depth + 1;  // Default
                             if (child.is_inner() && child.is_materialized())
                             {
-                                child_depth = child.get_materialized<HmapInnerNode>()->get_depth();
+                                child_depth =
+                                    child.get_materialized<HmapInnerNode>()
+                                        ->get_depth();
                             }
                             stack.push({child, child_depth, i, node, depth});
                         }
@@ -275,7 +277,8 @@ public:
                 {
                     // Mmap inner node
                     const uint8_t* raw = node.get_raw_memory();
-                    InnerNodeView view = MemTreeOps::get_inner_node(raw);
+                    v2::InnerNodeView view =
+                        v2::MemTreeOps::get_inner_node(raw);
 
                     for (int i = 15; i >= 0; --i)
                     {
@@ -289,8 +292,8 @@ public:
                             int child_depth = depth + 1;  // Default for leaves
                             if (child_type == catl::v2::ChildType::INNER)
                             {
-                                InnerNodeView child_view =
-                                    MemTreeOps::get_inner_node(child_ptr);
+                                v2::InnerNodeView child_view =
+                                    v2::MemTreeOps::get_inner_node(child_ptr);
                                 child_depth =
                                     child_view.header_ptr->get_depth();
                             }
@@ -352,7 +355,8 @@ public:
                 {
                     // Mmap inner node
                     const uint8_t* raw = node.get_raw_memory();
-                    InnerNodeView view = MemTreeOps::get_inner_node(raw);
+                    v2::InnerNodeView view =
+                        v2::MemTreeOps::get_inner_node(raw);
 
                     for (int i = 0; i < 16; ++i)
                     {

@@ -48,7 +48,7 @@ public:
     }
 
     [[nodiscard]] boost::json::value
-    to_json(const LeafView& leaf) const
+    to_json(const catl::v2::LeafView& leaf) const
     {
         catl::xdata::JsonVisitor visitor(protocol_);
         catl::xdata::ParserContext ctx(leaf.data);
@@ -57,7 +57,7 @@ public:
     }
 
     void
-    pretty_print(std::ostream& os, const LeafView& leaf) const
+    pretty_print(std::ostream& os, const catl::v2::LeafView& leaf) const
     {
         auto json = to_json(leaf);
         pretty_print_json(os, json);
@@ -65,16 +65,17 @@ public:
 };
 
 std::shared_ptr<catl::shamap::SHAMap>
-create_state_map(InnerNodeView state_view)
+create_state_map(catl::v2::InnerNodeView state_view)
 {
     auto _state_map =
         std::make_shared<catl::shamap::SHAMap>(catl::shamap::tnACCOUNT_STATE);
-    MemTreeOps::walk_leaves(state_view, [&](const Key& k, const Slice& data) {
-        boost::intrusive_ptr<MmapItem> mmap_item(
-            new MmapItem(k.data(), data.data(), data.size()));
-        _state_map->add_item(mmap_item);
-        return true;
-    });
+    catl::v2::MemTreeOps::walk_leaves(
+        state_view, [&](const Key& k, const Slice& data) {
+            boost::intrusive_ptr<MmapItem> mmap_item(
+                new MmapItem(k.data(), data.data(), data.size()));
+            _state_map->add_item(mmap_item);
+            return true;
+        });
     return _state_map;
 }
 
@@ -83,7 +84,8 @@ test_diff(
     catl::v2::CatlV2Reader& reader,
     const catl::common::LedgerInfo& ledger_info)
 {
-    auto state_view = MemTreeOps::get_inner_node(reader.current_data());
+    auto state_view =
+        catl::v2::MemTreeOps::get_inner_node(reader.current_data());
     auto state_map = *create_state_map(state_view);
 
     if (ledger_info.account_hash != state_map.get_hash())
@@ -92,7 +94,8 @@ test_diff(
     }
     reader.seek_to_ledger(ledger_info.seq + 9998);
     auto second_ledger_info = reader.read_ledger_info();
-    auto second_state_view = MemTreeOps::get_inner_node(reader.current_data());
+    auto second_state_view =
+        catl::v2::MemTreeOps::get_inner_node(reader.current_data());
     // auto second_state_map = *create_state_map(second_state_view);
     // confirming that our catl packs and readers are working correctly
     // we can walk an InnerNodeView and get the hash of the state tree using our
@@ -125,9 +128,10 @@ test_diff(
                     : op == catl::v2::DiffOp::Modified ? "Modified"
                                                        : "Deleted");
             // Let's check what the key looks like in both trees
-            auto check_a = MemTreeOps::lookup_key_optional(state_view, key);
-            auto check_b =
-                MemTreeOps::lookup_key_optional(second_state_view, key);
+            auto check_a =
+                catl::v2::MemTreeOps::lookup_key_optional(state_view, key);
+            auto check_b = catl::v2::MemTreeOps::lookup_key_optional(
+                second_state_view, key);
             LOGW(
                 "  -> Key in tree A: ",
                 check_a.has_value() ? "EXISTS" : "NOT FOUND");
@@ -150,7 +154,8 @@ test_diff(
             {
                 LOGW("Item reported as Added but already existed: ", key.hex());
                 // Debug: check if this item exists in the original tree
-                auto check = MemTreeOps::lookup_key_optional(state_view, key);
+                auto check =
+                    catl::v2::MemTreeOps::lookup_key_optional(state_view, key);
                 if (check)
                 {
                     LOGW("  -> This key DOES exist in original tree A!");
