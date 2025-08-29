@@ -171,15 +171,6 @@ public:
     MemPtr&
     operator=(MemPtr&&) = default;
 
-    [[nodiscard]] const T&
-    get_temporary() const
-    {
-        static_assert(
-            std::is_trivially_copyable_v<T>, "T must be trivially copyable");
-        assert(ptr_ != nullptr);
-        // Fast path: direct cast, return reference (zero-copy!)
-        return *reinterpret_cast<const T*>(ptr_);
-    }
 
     // operator* returns a reference to the object
     [[nodiscard]] const T&
@@ -452,8 +443,7 @@ struct ChildIterator
             "  resolve_self_relative returned child_ptr=",
             static_cast<const void*>(child_ptr));
 
-        // Use get_type to ensure we get the right type (ref in unsafe, value in
-        // safe)
+        // Get the header value
         const auto& header_val = *header;
 
         Child child;
@@ -692,7 +682,7 @@ public:
 
         return LeafView{
             leaf_header_ptr,
-            Key(leaf_header.key.data()),  // Now safe - ref in UNSAFE mode!
+            Key(leaf_header.key.data()),
             Slice(
                 leaf_header_ptr.offset(sizeof(v2::LeafHeader)).raw(),
                 leaf_header.data_size())};

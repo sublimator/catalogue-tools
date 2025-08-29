@@ -280,6 +280,21 @@ public:
      */
     [[nodiscard]] Hash256
     get_hash() const;
+
+    /**
+     * Get a MemPtr of specified type pointing to raw memory
+     * Only valid for non-materialized (mmap) nodes
+     * @tparam T The type to cast to (e.g., v2::LeafHeader, v2::InnerNodeHeader)
+     * @return MemPtr<T> pointing to the raw memory
+     */
+    template <typename T>
+    [[nodiscard]] v2::MemPtr<T>
+    get_memptr() const
+    {
+        assert(!materialized_);  // Should only be used for mmap nodes
+        assert(ptr_ != nullptr);
+        return v2::MemPtr<T>(static_cast<const uint8_t*>(ptr_));
+    }
 };
 
 /**
@@ -718,9 +733,7 @@ public:
                         else
                         {
                             // Raw memory leaf
-                            const uint8_t* leaf_raw = child.get_raw_memory();
-                            const v2::MemPtr<v2::LeafHeader> leaf_header_ptr(
-                                leaf_raw);
+                            auto leaf_header_ptr = child.get_memptr<v2::LeafHeader>();
                             const auto& leaf_header = *leaf_header_ptr;
                             found_leaf_ = child;
                             key_matches_ =
@@ -775,8 +788,7 @@ public:
                     else
                     {
                         // Parent is still raw, check its header
-                        const uint8_t* parent_raw = parent_ptr.get_raw_memory();
-                        v2::MemPtr<v2::InnerNodeHeader> header(parent_raw);
+                        auto header = parent_ptr.get_memptr<v2::InnerNodeHeader>();
                         const auto& header_val = *header;
                         is_leaf =
                             (header_val.get_child_type(branch_taken) ==
@@ -1284,8 +1296,7 @@ public:
                 else
                 {
                     // Read from mmap
-                    const uint8_t* raw = existing.get_raw_memory();
-                    v2::MemPtr<v2::LeafHeader> header(raw);
+                    auto header = existing.get_memptr<v2::LeafHeader>();
                     return Key(header->key.data());
                 }
             }();
@@ -1671,18 +1682,15 @@ PolyNodePtr::copy_hash_to(uint8_t* dest) const
     else
     {
         // Get perma-cached hash from mmap header
-        const uint8_t* raw = get_raw_memory();
         if (is_inner())
         {
-            v2::MemPtr<v2::InnerNodeHeader> header(raw);
-            const auto& h = *header;
-            std::memcpy(dest, h.hash.data(), Hash256::size());
+            auto header = get_memptr<v2::InnerNodeHeader>();
+            std::memcpy(dest, header->hash.data(), Hash256::size());
         }
         else if (is_leaf())
         {
-            v2::MemPtr<v2::LeafHeader> header(raw);
-            const auto& h = *header;
-            std::memcpy(dest, h.hash.data(), Hash256::size());
+            auto header = get_memptr<v2::LeafHeader>();
+            std::memcpy(dest, header->hash.data(), Hash256::size());
         }
         else if (is_placeholder())
         {
