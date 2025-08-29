@@ -65,7 +65,7 @@ TEST(ShaMapTest, BasicOperations)
         map.get_hash().hex(),
         "0000000000000000000000000000000000000000000000000000000000000000");
 
-    TestItems items;
+    TestMmapItems items;
     auto item = items.make(
         "0000000000000000000000000000000000000000000000000000000000000000");
     map.set_item(item);
@@ -78,7 +78,7 @@ TEST(ShaMapTest, BasicOperations)
 TEST(ShaMapTest, AddItemOnly)
 {
     auto map = SHAMap(tnACCOUNT_STATE);
-    TestItems items;
+    TestMmapItems items;
 
     // Create two test items with different keys
     auto item1 = items.make(
@@ -100,7 +100,7 @@ TEST(ShaMapTest, AddItemOnly)
 TEST(ShaMapTest, UpdateItemOnly)
 {
     auto map = SHAMap(tnACCOUNT_STATE);
-    TestItems items;
+    TestMmapItems items;
 
     // Create two items with the same key
     auto item1 = items.make(
@@ -122,7 +122,7 @@ TEST(ShaMapTest, UpdateItemOnly)
 TEST(ShaMapTest, SetItemModes)
 {
     auto map = SHAMap(tnACCOUNT_STATE);
-    TestItems items;
+    TestMmapItems items;
 
     // Create items with the same key but different content
     auto item1 = items.make(
@@ -252,7 +252,7 @@ TEST_F(TransactionFixture, Ledger81920TransactionAddTest)
                 auto map_ = SHAMap(
                     tnTRANSACTION_MD,
                     {.tree_collapse_impl = TreeCollapseImpl::leafs_only});
-                TestItems items;  // Local items manager
+                TestMmapItems items;  // Local items manager
                 for (size_t j = 0; j < i + 1; ++j)
                 {
                     const auto& txn_ = txns[j];

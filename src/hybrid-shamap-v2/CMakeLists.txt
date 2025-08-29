@@ -13,10 +13,12 @@ add_library(
   src/hmap-pathfinder.cpp
   src/hmap-pathfinder-navigation.cpp
   src/hmap-pathfinder-materialize.cpp
+  src/hmap-pathfinder-materialize-simple.cpp
   # Main tree operations
   src/hmap.cpp
   src/hmap-set-item.cpp
-  src/hmap-remove-item.cpp)
+  src/hmap-remove-item.cpp
+  src/hmap-materialize-path.cpp)
 
 # Set up include directories
 target_include_directories(

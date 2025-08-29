@@ -17,6 +17,7 @@
 #include "catl/xdata/parser.h"
 #include "catl/xdata/protocol.h"
 #include <boost/json.hpp>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -24,9 +25,9 @@
 #include <unordered_set>
 #include <vector>
 
-#include "catl/shamap/shamap.h"
+#include "catl/hybrid-shamap-v2/hmap.h"
+#include "catl/shamap/shamap-utils.h"
 #include "catl/v1/catl-v1-ledger-info-view.h"
-// #include "catl/v2/shamap-custom-traits.h"
 
 using namespace catl::hybrid_shamap;
 
@@ -64,53 +65,67 @@ public:
     }
 };
 
-std::shared_ptr<catl::shamap::SHAMap>
-create_state_map(catl::v2::InnerNodeView state_view)
+std::unique_ptr<Hmap>
+create_hybrid_map_from_mmap(
+    const uint8_t* root_ptr,
+    std::shared_ptr<catl::v2::MmapHolder> holder)
 {
-    auto _state_map =
-        std::make_shared<catl::shamap::SHAMap>(catl::shamap::tnACCOUNT_STATE);
-    catl::v2::MemTreeOps::walk_leaves(
-        state_view, [&](const Key& k, const Slice& data) {
-            boost::intrusive_ptr<MmapItem> mmap_item(
-                new MmapItem(k.data(), data.data(), data.size()));
-            _state_map->add_item(mmap_item);
-            return true;
-        });
-    return _state_map;
+    auto hmap = std::make_unique<Hmap>(holder);
+    hmap->set_root_raw(root_ptr);
+    return hmap;
 }
 
 void
 test_diff(
     catl::v2::CatlV2Reader& reader,
-    const catl::common::LedgerInfo& ledger_info)
+    const catl::common::LedgerInfo& first_ledger_info,
+    int delta_n,
+    bool materialize_only = false)
 {
-    auto state_view =
-        catl::v2::MemTreeOps::get_inner_node(reader.current_data());
-    auto state_map = *create_state_map(state_view);
+    // Create hybrid map from the first ledger's mmap'd data
+    auto hmap = create_hybrid_map_from_mmap(
+        reader.current_data(), reader.mmap_holder());
 
-    if (ledger_info.account_hash != state_map.get_hash())
+    // Verify initial hash
+    if (first_ledger_info.account_hash != hmap->get_root_hash())
     {
-        throw std::runtime_error("Account state hash mismatch, for ledger 1");
+        LOGE("Initial hash mismatch:");
+        LOGE("  Expected: ", first_ledger_info.account_hash.hex());
+        LOGE("  Got:      ", hmap->get_root_hash().hex());
+        throw std::runtime_error(
+            "Account state hash mismatch, for first ledger");
     }
-    reader.seek_to_ledger(ledger_info.seq + 9998);
+
+    LOGI("Starting from ledger ", first_ledger_info.seq);
+    LOGI(
+        "✓ Initial hash: ",
+        first_ledger_info.account_hash.hex().substr(0, 16),
+        "...");
+
+    // Get the first ledger's state view for diffing
+    auto first_state_view =
+        catl::v2::MemTreeOps::get_inner_node(reader.current_data());
+
+    // Seek to target ledger (first + delta_n)
+    uint32_t target_seq = first_ledger_info.seq + delta_n;
+    LOGI("Seeking to ledger ", target_seq, " (delta=", delta_n, ")");
+    reader.seek_to_ledger(target_seq);
     auto second_ledger_info = reader.read_ledger_info();
     auto second_state_view =
         catl::v2::MemTreeOps::get_inner_node(reader.current_data());
-    // auto second_state_map = *create_state_map(second_state_view);
-    // confirming that our catl packs and readers are working correctly
-    // we can walk an InnerNodeView and get the hash of the state tree using our
-    // gold SHAMap impl
-    // if (second_ledger_info.account_hash != second_state_map.get_hash())
-    // {
-    //     throw std::runtime_error(
-    //         "Account state hash mismatch, for ledger 2 full rebuild");
-    // }
 
-    // This means the error must be in the diff code
+    LOGI("Applying diff: ledger ", first_ledger_info.seq, " -> ", target_seq);
+    if (materialize_only)
+    {
+        LOGI("MODE: Materialize-only (no modifications)");
+    }
 
     auto i = 0;
     size_t added = 0, modified = 0, deleted = 0;
     std::unordered_set<std::string> processed_keys;
+
+    // Log all keys to understand branch patterns
+    LOGI("Keys in diff (showing first 4 hex chars = first 2 branches):");
     auto callback = [&](const Key& key,
                         catl::v2::DiffOp op,
                         const Slice& old_data,
@@ -127,70 +142,95 @@ test_diff(
                     ? "Added"
                     : op == catl::v2::DiffOp::Modified ? "Modified"
                                                        : "Deleted");
-            // Let's check what the key looks like in both trees
-            auto check_a =
-                catl::v2::MemTreeOps::lookup_key_optional(state_view, key);
-            auto check_b = catl::v2::MemTreeOps::lookup_key_optional(
-                second_state_view, key);
-            LOGW(
-                "  -> Key in tree A: ",
-                check_a.has_value() ? "EXISTS" : "NOT FOUND");
-            LOGW(
-                "  -> Key in tree B: ",
-                check_b.has_value() ? "EXISTS" : "NOT FOUND");
         }
 
-        boost::intrusive_ptr mmap_item(
-            new MmapItem(key.data(), new_data.data(), new_data.size()));
-
-        if (op == catl::v2::DiffOp::Added)
+        // Log key with branch info (first byte = branch at depth 0, etc.)
+        std::string branches;
+        for (int d = 0; d < 4; ++d)
         {
-            added++;
-            // Use set_item with ADD_OR_UPDATE mode to handle potential
-            // duplicates
-            auto result =
-                state_map.set_item(mmap_item, catl::shamap::SetMode::ADD_ONLY);
-            if (result != catl::shamap::SetResult::ADD)
+            int branch = catl::shamap::select_branch(key, d);
+            char hex = (branch < 10) ? ('0' + branch) : ('A' + branch - 10);
+            branches += hex;
+        }
+        LOGI(
+            "  [",
+            i + 1,
+            "] Key: ",
+            key_str.substr(0, 16),
+            "... branches: ",
+            branches,
+            " (",
+            op == catl::v2::DiffOp::Added
+                ? "ADD"
+                : op == catl::v2::DiffOp::Modified ? "MOD" : "DEL",
+            ")");
+
+        if (materialize_only)
+        {
+            // Just materialize the path and check hash
+            if (op == catl::v2::DiffOp::Added)
+                added++;
+            else if (op == catl::v2::DiffOp::Modified)
+                modified++;
+            else if (op == catl::v2::DiffOp::Deleted)
+                deleted++;
+
+            hmap->materialize_path(key);
+
+            // Check hash after each materialization
+            auto current_hash = hmap->get_root_hash();
+            LOGI(
+                "  [",
+                i + 1,
+                "] After materializing key ",
+                key.hex().substr(0, 16),
+                "... (",
+                op == catl::v2::DiffOp::Added
+                    ? "ADD"
+                    : op == catl::v2::DiffOp::Modified ? "MOD" : "DEL",
+                "), hash: ",
+                current_hash.hex().substr(0, 16),
+                "...");
+        }
+        else
+        {
+            // Normal mode - apply actual modifications
+            if (op == catl::v2::DiffOp::Added)
             {
-                LOGW("Item reported as Added but already existed: ", key.hex());
-                // Debug: check if this item exists in the original tree
-                auto check =
-                    catl::v2::MemTreeOps::lookup_key_optional(state_view, key);
-                if (check)
+                added++;
+                auto result = hmap->set_item(
+                    key, new_data, catl::shamap::SetMode::ADD_ONLY);
+                if (result != catl::shamap::SetResult::ADD)
                 {
-                    LOGW("  -> This key DOES exist in original tree A!");
+                    LOGW(
+                        "Item reported as Added but already existed: ",
+                        key.hex());
                 }
             }
-        }
-        else if (op == catl::v2::DiffOp::Deleted)
-        {
-            deleted++;
-            if (!state_map.remove_item(key))
+            else if (op == catl::v2::DiffOp::Deleted)
             {
-                LOGW("Failed to delete item: ", key.hex());
+                deleted++;
+                if (!hmap->remove_item(key))
+                {
+                    LOGW("Failed to delete item: ", key.hex());
+                }
             }
-        }
-        else if (op == catl::v2::DiffOp::Modified)
-        {
-            modified++;
-            auto result = state_map.set_item(
-                mmap_item, catl::shamap::SetMode::UPDATE_ONLY);
-            if (result != catl::shamap::SetResult::UPDATE)
+            else if (op == catl::v2::DiffOp::Modified)
             {
-                LOGW("Failed to modify item: ", key.hex());
+                modified++;
+                auto result = hmap->set_item(
+                    key, new_data, catl::shamap::SetMode::UPDATE_ONLY);
+                if (result != catl::shamap::SetResult::UPDATE)
+                {
+                    LOGW("Failed to modify item: ", key.hex());
+                }
             }
         }
         i++;
         return true;
     };
-    LOGI("Pre diffing ledgers...");
-    auto cbfast = [&](const Key& key,
-                      catl::v2::DiffOp op,
-                      const Slice& old_data,
-                      const Slice& new_data) { return true; };
-    diff_memtree_nodes(state_view, second_state_view, cbfast);
-    LOGI("Done fast diff");
-    diff_memtree_nodes(state_view, second_state_view, callback);
+    // Apply the diff between the two ledgers
+    diff_memtree_nodes(first_state_view, second_state_view, callback);
     LOGI(
         "Diff complete: ",
         i,
@@ -201,34 +241,112 @@ test_diff(
         ", Deleted: ",
         deleted,
         ")");
-    auto final_hash = state_map.get_hash();
-    if (second_ledger_info.account_hash != final_hash)
+
+    // Get the final hash from the hybrid map
+    auto final_hash = hmap->get_root_hash();
+
+    if (materialize_only)
     {
-        LOGE("Hash mismatch for ledger 2:");
-        LOGE("  Expected: ", second_ledger_info.account_hash.hex());
-        LOGE("  Got:      ", final_hash.hex());
-        throw std::runtime_error("Account state hash mismatch, for ledger 2");
+        // In materialize-only mode, the hash should remain unchanged
+        LOGI("Final hash after materializing ", i, " paths:");
+        LOGI("  Initial:  ", first_ledger_info.account_hash.hex());
+        LOGI("  Current:  ", final_hash.hex());
+        if (first_ledger_info.account_hash != final_hash)
+        {
+            LOGE("ERROR: Hash changed after materialization!");
+            LOGE("  This indicates a bug in materialization");
+        }
+        else
+        {
+            LOGI("✓ Hash unchanged after materialization (as expected)");
+        }
     }
-    LOGI("✓ Hash verified successfully!");
+    else
+    {
+        // Normal mode - check against expected hash
+        if (second_ledger_info.account_hash != final_hash)
+        {
+            LOGE("Hash mismatch for ledger 2:");
+            LOGE("  Expected: ", second_ledger_info.account_hash.hex());
+            LOGE("  Got:      ", final_hash.hex());
+            throw std::runtime_error(
+                "Account state hash mismatch, for ledger 2");
+        }
+        LOGI("✓ Hash verified successfully after applying ", i, " diffs!");
+        LOGI("  Final hash: ", final_hash.hex().substr(0, 16), "...");
+    }
 }
 
 int
 main(int argc, char* argv[])
 {
-    // Set log level to DEBUG for maximum visibility
-    Logger::set_level(LogLevel::INFO);
+    // Check for LOG_LEVEL environment variable
+    const char* log_level_env = std::getenv("LOG_LEVEL");
+    if (log_level_env)
+    {
+        std::string level_str(log_level_env);
+        if (level_str == "DEBUG")
+            Logger::set_level(LogLevel::DEBUG);
+        else if (level_str == "INFO")
+            Logger::set_level(LogLevel::INFO);
+        else if (level_str == "WARN" || level_str == "WARNING")
+            Logger::set_level(LogLevel::WARNING);
+        else if (level_str == "ERROR")
+            Logger::set_level(LogLevel::ERROR);
+        else
+            Logger::set_level(LogLevel::INFO);  // Default
+    }
+    else
+    {
+        // Set log level to DEBUG for maximum visibility
+        Logger::set_level(LogLevel::DEBUG);  // Changed to DEBUG for now
+    }
 
     // Disable v2-structs partition logging
     catl::v2::get_v2_memtree_log_partition().set_level(LogLevel::NONE);
 
-    if (argc != 2)
+    // TODO: Use boost::program_options for better argument parsing
+    if (argc < 2 || argc > 4)
     {
-        LOGE("Usage: ", argv[0], " <catl-v2-file>");
+        LOGE(
+            "Usage: ",
+            argv[0],
+            " <catl-v2-file> [delta-n] [--materialize-only]");
+        LOGE("  delta-n: number of ledgers to skip (default: 1, max: 99)");
+        LOGE(
+            "  --materialize-only: just materialize paths without "
+            "modifications");
         return 1;
     }
 
     const std::string filename = argv[1];
+    int delta_n = 1;
+    bool materialize_only = false;
+
+    // Parse arguments (crude for now, use boost::program_options later)
+    for (int i = 2; i < argc; ++i)
+    {
+        std::string arg = argv[i];
+        if (arg == "--materialize-only")
+        {
+            materialize_only = true;
+        }
+        else if (std::isdigit(arg[0]))
+        {
+            delta_n = std::atoi(arg.c_str());
+            if (delta_n < 1 || delta_n > 99)
+            {
+                LOGE("Delta must be between 1 and 99");
+                return 1;
+            }
+        }
+    }
     LOGI("Starting hybrid-shamap experiment with file: ", filename);
+    LOGI("Delta: ", delta_n, " ledgers");
+    if (materialize_only)
+    {
+        LOGI("Mode: MATERIALIZE-ONLY (no modifications)");
+    }
 
     try
     {
@@ -261,7 +379,7 @@ main(int argc, char* argv[])
         LOGI("  Close time res: ", (int)ledger_info.close_time_resolution);
         LOGI("  Close flags: ", (int)ledger_info.close_flags);
 
-        test_diff(*reader, ledger_info);
+        test_diff(*reader, ledger_info, delta_n, materialize_only);
 
         return 0;
     }

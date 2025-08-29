@@ -93,6 +93,16 @@ public:
      */
     bool
     remove_item(const Key& key);
+
+    /**
+     * Materialize the path to a key without modifying anything
+     * Useful for debugging and ensuring nodes are in memory
+     *
+     * @param key The key to find and materialize path to
+     * @return true if path was materialized, false if key not found
+     */
+    bool
+    materialize_path(const Key& key);
 };
 
 }  // namespace catl::hybrid_shamap

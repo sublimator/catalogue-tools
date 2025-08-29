@@ -380,7 +380,7 @@ process_all_ledgers(
     LOGI("Network ID: ", header.network_id);
 
     // Initialize state map with CoW support (persists across ledgers)
-    SHAMapS state_map(catl::shamap::tnACCOUNT_STATE);
+    serialization::SHAMapS state_map(catl::shamap::tnACCOUNT_STATE);
     state_map.snapshot();  // Enable CoW
 
     // Create a writer for actual binary output
@@ -407,7 +407,7 @@ process_all_ledgers(
 
         // Create a FRESH transaction map for each ledger (transactions don't
         // persist)
-        SHAMapS tx_map(catl::shamap::tnTRANSACTION_MD);
+        serialization::SHAMapS tx_map(catl::shamap::tnTRANSACTION_MD);
         reader.read_map_with_shamap_owned_items(
             tx_map, catl::shamap::tnTRANSACTION_MD, true);
 

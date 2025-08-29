@@ -15,7 +15,7 @@ TEST(SHAMapDiffTest, BasicDiff)
     auto map2 = std::make_shared<SHAMap>(tnACCOUNT_STATE);
 
     // Test utilities for item creation
-    TestItems items;
+    TestMmapItems items;
 
     // Create test items
     auto item1 = items.make(
@@ -60,7 +60,7 @@ TEST(SHAMapDiffTest, ApplyDiff)
     auto map2 = std::make_shared<SHAMap>(tnACCOUNT_STATE);
 
     // Test utilities for item creation
-    TestItems items;
+    TestMmapItems items;
 
     // Create test items
     auto item1 = items.make(
@@ -137,7 +137,7 @@ TEST(SHAMapDiffTest, InvertDiff)
     auto map2 = std::make_shared<SHAMap>(tnACCOUNT_STATE);
 
     // Test utilities for item creation
-    TestItems items;
+    TestMmapItems items;
 
     // Create test items
     auto item1 = items.make(
