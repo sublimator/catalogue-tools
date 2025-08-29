@@ -20,13 +20,7 @@ HmapPathFinder::navigate_raw_inner(PolyNodePtr& current, int& depth)
         throw std::runtime_error("Invalid raw pointer in tree navigation");
     }
 
-    // Check for suspicious addresses (like our crash address)
-    if (reinterpret_cast<uintptr_t>(raw) > 0x700000000000)
-    {
-        LOGE("Suspicious raw pointer (too large): ", raw);
-        LOGE("  This indicates corrupt node data or wrong node type");
-        throw std::runtime_error("Corrupt raw pointer detected");
-    }
+    // Removed arbitrary pointer range check - high addresses are valid on Linux
 
     v2::InnerNodeView view{v2::MemPtr<v2::InnerNodeHeader>(raw)};
 
