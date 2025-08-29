@@ -379,6 +379,86 @@ public:
 };
 
 /**
+ * Leaf node - contains actual data
+ */
+class HmapLeafNode final : public HMapNode
+{
+private:
+    Key key_;
+    std::vector<uint8_t> data_;  // Owned copy of data
+
+public:
+    HmapLeafNode(const Key& key, const Slice& data)
+        : key_(key), data_(data.data(), data.data() + data.size())
+    {
+    }
+
+    Type
+    get_type() const override
+    {
+        return Type::LEAF;
+    }
+
+    [[nodiscard]] const Key&
+    get_key() const
+    {
+        return key_;
+    }
+    [[nodiscard]] Slice
+    get_data() const
+    {
+        return Slice(data_.data(), data_.size());
+    }
+
+    void
+    set_data(const Slice& data)
+    {
+        data_.assign(data.data(), data.data() + data.size());
+        invalidate_hash();
+    }
+
+    std::string
+    describe() const override
+    {
+        return "LeafNode(key=" + key_.hex().substr(0, 8) +
+            "..., size=" + std::to_string(data_.size()) + ")";
+    }
+
+    void
+    update_hash() override;
+};
+
+// Free functions for operating on PolyNodePtr
+// These keep the PolyNodePtr interface clean and focused on being a smart
+// pointer
+
+/**
+ * Get the key from a leaf node
+ * @param node The node to get the key from
+ * @return The leaf's key
+ * @throws std::runtime_error if this is not a leaf node
+ */
+inline Key
+poly_get_leaf_key(const PolyNodePtr& node)
+{
+    if (!node.is_leaf())
+    {
+        throw std::runtime_error("poly_get_leaf_key() called on non-leaf node");
+    }
+
+    if (node.is_materialized())
+    {
+        auto* leaf = node.get_materialized<HmapLeafNode>();
+        return leaf->get_key();
+    }
+    else
+    {
+        auto header = node.get_memptr<v2::LeafHeader>();
+        return Key(header->key.data());
+    }
+}
+
+/**
  * Inner node - has up to 16 children
  */
 class HmapInnerNode final : public HMapNode
@@ -526,54 +606,60 @@ public:
             ", children=" + std::to_string(count_children()) + ")";
     }
 
-    void
-    update_hash() override;
-};
-
-/**
- * Leaf node - contains actual data
- */
-class HmapLeafNode final : public HMapNode
-{
-private:
-    Key key_;
-    std::vector<uint8_t> data_;  // Owned copy of data
-
-public:
-    HmapLeafNode(const Key& key, const Slice& data)
-        : key_(key), data_(data.data(), data.data() + data.size())
+    /**
+     * Find the first leaf in depth-first order
+     * @return PolyNodePtr to the first leaf found
+     * @throws std::runtime_error if no leaf found (malformed tree)
+     */
+    [[nodiscard]] PolyNodePtr
+    first_leaf() const
     {
+        // Check each branch in order
+        for (int i = 0; i < 16; ++i)
+        {
+            auto child = get_child(i);
+            if (child.is_empty())
+                continue;
+
+            if (child.is_leaf())
+            {
+                return child;  // Found a leaf!
+            }
+
+            // It's an inner node
+            if (child.is_materialized())
+            {
+                // Recurse into materialized inner node
+                auto* inner_child = child.get_materialized<HmapInnerNode>();
+                return inner_child->first_leaf();
+            }
+            else
+            {
+                // Use MemTreeOps for mmap inner node
+                InnerNodeView view =
+                    MemTreeOps::get_inner_node(child.get_raw_memory());
+                auto leaf_view = MemTreeOps::first_leaf_depth_first(view);
+
+                // Convert LeafView to PolyNodePtr
+                // The leaf_view has the raw pointer in header_ptr
+                return PolyNodePtr::make_raw_memory(
+                    leaf_view.header_ptr.raw(), v2::ChildType::LEAF);
+            }
+        }
+
+        throw std::runtime_error(
+            "No leaf found in inner node - malformed tree");
     }
 
-    Type
-    get_type() const override
+    /**
+     * Get the key of the first leaf in depth-first order
+     * @return Key of the first leaf
+     * @throws std::runtime_error if no leaf found
+     */
+    [[nodiscard]] Key
+    first_leaf_key() const
     {
-        return Type::LEAF;
-    }
-
-    [[nodiscard]] const Key&
-    get_key() const
-    {
-        return key_;
-    }
-    [[nodiscard]] Slice
-    get_data() const
-    {
-        return Slice(data_.data(), data_.size());
-    }
-
-    void
-    set_data(const Slice& data)
-    {
-        data_.assign(data.data(), data.data() + data.size());
-        invalidate_hash();
-    }
-
-    std::string
-    describe() const override
-    {
-        return "LeafNode(key=" + key_.hex().substr(0, 8) +
-            "..., size=" + std::to_string(data_.size()) + ")";
+        return poly_get_leaf_key(first_leaf());
     }
 
     void
@@ -628,6 +714,53 @@ public:
 };
 
 /**
+ * Get the first leaf from a PolyNodePtr subtree
+ * @param node The node to search from
+ * @return PolyNodePtr to the first leaf
+ * @throws std::runtime_error if no leaf found
+ */
+inline PolyNodePtr
+poly_first_leaf(const PolyNodePtr& node)
+{
+    if (node.is_empty())
+        throw std::runtime_error("Cannot get first leaf from empty node");
+
+    if (node.is_leaf())
+        return node;
+
+    if (node.is_inner())
+    {
+        if (node.is_materialized())
+        {
+            auto* inner = node.get_materialized<HmapInnerNode>();
+            return inner->first_leaf();
+        }
+        else
+        {
+            InnerNodeView view =
+                MemTreeOps::get_inner_node(node.get_raw_memory());
+            auto leaf_view = MemTreeOps::first_leaf_depth_first(view);
+            return PolyNodePtr::make_raw_memory(
+                leaf_view.header_ptr.raw(), v2::ChildType::LEAF);
+        }
+    }
+
+    throw std::runtime_error("Cannot get first leaf from placeholder node");
+}
+
+/**
+ * Get the first leaf key from a PolyNodePtr subtree
+ * @param node The node to search from
+ * @return Key of the first leaf
+ * @throws std::runtime_error if no leaf found
+ */
+inline Key
+poly_first_leaf_key(const PolyNodePtr& node)
+{
+    return poly_get_leaf_key(poly_first_leaf(node));
+}
+
+/**
  * PathFinder for navigating hybrid SHAMap trees
  * Can traverse through both RAW_MEMORY (mmap) and MATERIALIZED (heap) nodes
  */
@@ -644,6 +777,11 @@ private:
     // Terminal node we found (if any)
     PolyNodePtr found_leaf_;
     bool key_matches_ = false;
+
+    // For handling collapsed trees and divergence
+    int divergence_depth_ = -1;
+    PolyNodePtr diverged_inner_;
+    int terminal_branch_ = -1;
 
 public:
     explicit HmapPathFinder(const Key& key) : target_key_(key)
@@ -720,7 +858,8 @@ public:
                 else
                 {
                     // It's an inner node
-                    const auto* inner = current.get_materialized<HmapInnerNode>();
+                    const auto* inner =
+                        current.get_materialized<HmapInnerNode>();
                     depth = inner->get_depth();
 
                     int branch = shamap::select_branch(target_key_, depth);
@@ -748,7 +887,8 @@ public:
                             found_leaf_ = child;
                             key_matches_ =
                                 (std::memcmp(
-                                     child.get_memptr<v2::LeafHeader>()->key.data(),
+                                     child.get_memptr<v2::LeafHeader>()
+                                         ->key.data(),
                                      target_key_.data(),
                                      32) == 0);
                         }
@@ -789,7 +929,8 @@ public:
                     auto& [parent_ptr, _] = path_[i - 1];
                     if (parent_ptr.is_materialized())
                     {
-                        auto* parent_inner = parent_ptr.get_materialized<HmapInnerNode>();
+                        auto* parent_inner =
+                            parent_ptr.get_materialized<HmapInnerNode>();
                         is_leaf =
                             (parent_inner->get_child_type(branch_taken) ==
                              v2::ChildType::LEAF);
@@ -797,7 +938,8 @@ public:
                     else
                     {
                         // Parent is still raw, check its header
-                        auto header = parent_ptr.get_memptr<v2::InnerNodeHeader>();
+                        auto header =
+                            parent_ptr.get_memptr<v2::InnerNodeHeader>();
                         const auto& header_val = *header;
                         is_leaf =
                             (header_val.get_child_type(branch_taken) ==
@@ -820,7 +962,8 @@ public:
                 {
                     auto& [parent_ptr, _] = path_[i - 1];
                     assert(parent_ptr.is_materialized());
-                    auto* parent_inner = parent_ptr.get_materialized<HmapInnerNode>();
+                    auto* parent_inner =
+                        parent_ptr.get_materialized<HmapInnerNode>();
                     // Determine child type based on whether it's a leaf
                     v2::ChildType child_type =
                         is_leaf ? v2::ChildType::LEAF : v2::ChildType::INNER;
@@ -1075,6 +1218,141 @@ private:
             return inner_ptr_managed;
         }
     }
+
+    /**
+     * Check if a key belongs in a collapsed inner node
+     * Returns: {belongs, divergence_depth}
+     * - belongs: true if key follows same path through collapsed levels
+     * - divergence_depth: depth where paths diverge (or -1 if belongs)
+     */
+    std::pair<bool, int>
+    key_belongs_in_inner(
+        const PolyNodePtr& inner,
+        const Key& key,
+        int start_depth)
+    {
+        // Get the actual depth of the inner node
+        int end_depth = 0;
+        if (inner.is_materialized())
+        {
+            auto* inner_node = inner.get_materialized<HmapInnerNode>();
+            end_depth = inner_node->get_depth();
+        }
+        else
+        {
+            auto header = inner.get_memptr<v2::InnerNodeHeader>();
+            end_depth = header->get_depth();
+        }
+
+        // Get representative key from the inner's first leaf
+        Key rep_key = poly_first_leaf_key(inner);
+
+        // Check each depth level to see if keys diverge
+        for (int depth = start_depth; depth <= end_depth; depth++)
+        {
+            int branch = shamap::select_branch(key, depth);
+            if (branch != shamap::select_branch(rep_key, depth))
+            {
+                return {false, depth};  // Keys diverge at this depth
+            }
+        }
+
+        return {true, -1};  // Key belongs in this inner node
+    }
+
+    /**
+     * Add a new inner node at the divergence point
+     * Used when inserting into a collapsed tree where paths diverge
+     */
+    void
+    add_node_at_divergence()
+    {
+        if (divergence_depth_ == -1 || !diverged_inner_)
+        {
+            return;  // No divergence to handle
+        }
+
+        if (path_.empty())
+        {
+            throw std::runtime_error(
+                "Cannot add node at divergence with empty path");
+        }
+
+        // Get the parent inner node (last inner in path)
+        PolyNodePtr parent_inner;
+        int parent_branch = -1;
+
+        for (auto it = path_.rbegin(); it != path_.rend(); ++it)
+        {
+            if (it->first.is_inner())
+            {
+                parent_inner = it->first;
+                if (it != path_.rbegin())
+                {
+                    auto prev = it;
+                    --prev;
+                    parent_branch = prev->second;
+                }
+                break;
+            }
+        }
+
+        if (!parent_inner || !parent_inner.is_materialized())
+        {
+            throw std::runtime_error(
+                "Parent must be materialized to add divergence node");
+        }
+
+        auto* parent = parent_inner.get_materialized<HmapInnerNode>();
+
+        // Create new inner node at divergence depth
+        auto* divergence_node = new HmapInnerNode(divergence_depth_);
+
+        // Get the branch where target key goes at divergence depth
+        int new_branch = shamap::select_branch(target_key_, divergence_depth_);
+
+        // Get representative key from existing subtree
+        Key existing_key = poly_first_leaf_key(diverged_inner_);
+        int existing_branch =
+            shamap::select_branch(existing_key, divergence_depth_);
+
+        // Place existing subtree under its branch
+        divergence_node->set_child(
+            existing_branch, diverged_inner_, diverged_inner_.get_type());
+
+        // Link new inner node to parent
+        parent->set_child(
+            parent_branch,
+            PolyNodePtr(divergence_node, v2::ChildType::INNER, true),
+            v2::ChildType::INNER);
+
+        // Update path with new inner node
+        path_.emplace_back(
+            PolyNodePtr(divergence_node, v2::ChildType::INNER, true),
+            parent_branch);
+
+        // Set terminal branch for insertion
+        terminal_branch_ = new_branch;
+    }
+
+    // Getters for new members
+    [[nodiscard]] int
+    get_terminal_branch() const
+    {
+        return terminal_branch_;
+    }
+
+    [[nodiscard]] int
+    get_divergence_depth() const
+    {
+        return divergence_depth_;
+    }
+
+    [[nodiscard]] bool
+    has_divergence() const
+    {
+        return divergence_depth_ != -1;
+    }
 };
 
 class Hmap
@@ -1175,8 +1453,7 @@ public:
         {
             // Create a new root at depth 0
             auto* new_root = new HmapInnerNode(0);
-            root_ = PolyNodePtr::from_intrusive(
-                boost::intrusive_ptr<HMapNode>(new_root));
+            root_ = PolyNodePtr(new_root, v2::ChildType::INNER, true);
         }
 
         // Find the path to where this key should go
@@ -1210,15 +1487,15 @@ public:
                         parent_node.is_inner() &&
                         parent_node.is_materialized());
 
-                    auto* parent = parent_node.get_materialized<HmapInnerNode>();
+                    auto* parent =
+                        parent_node.get_materialized<HmapInnerNode>();
                     int branch = path[i].second;
 
                     // Create new leaf with updated data
                     auto* new_leaf = new HmapLeafNode(key, data);
                     parent->set_child(
                         branch,
-                        PolyNodePtr::from_intrusive(
-                            boost::intrusive_ptr<HMapNode>(new_leaf)),
+                        PolyNodePtr(new_leaf, v2::ChildType::LEAF, true),
                         v2::ChildType::LEAF);
 
                     // Check mode constraints
@@ -1276,8 +1553,7 @@ public:
             auto* new_leaf = new HmapLeafNode(key, data);
             insert_parent->set_child(
                 branch,
-                PolyNodePtr::from_intrusive(
-                    boost::intrusive_ptr<HMapNode>(new_leaf)),
+                PolyNodePtr(new_leaf, v2::ChildType::LEAF, true),
                 v2::ChildType::LEAF);
             // Check mode constraints
             if (mode == shamap::SetMode::UPDATE_ONLY)
@@ -1295,12 +1571,15 @@ public:
             Key existing_key = [&]() -> Key {
                 if (existing.is_materialized())
                 {
-                    auto* existing_leaf = existing.get_materialized<HmapLeafNode>();
+                    auto* existing_leaf =
+                        existing.get_materialized<HmapLeafNode>();
                     return existing_leaf->get_key();
                 }
-                else {
+                else
+                {
                     // Read from mmap
-                    return Key(existing.get_memptr<v2::LeafHeader>()->key.data());
+                    return Key(
+                        existing.get_memptr<v2::LeafHeader>()->key.data());
                 }
             }();
 
@@ -1315,8 +1594,7 @@ public:
             auto* new_leaf = new HmapLeafNode(key, data);
             divergence_node->set_child(
                 shamap::select_branch(key, divergence_depth),
-                PolyNodePtr::from_intrusive(
-                    boost::intrusive_ptr<HMapNode>(new_leaf)),
+                PolyNodePtr(new_leaf, v2::ChildType::LEAF, true),
                 v2::ChildType::LEAF);
 
             // Add the existing leaf
@@ -1328,8 +1606,7 @@ public:
             // Replace the branch in the parent
             insert_parent->set_child(
                 branch,
-                PolyNodePtr::from_intrusive(
-                    boost::intrusive_ptr<HMapNode>(divergence_node)),
+                PolyNodePtr(divergence_node, v2::ChildType::INNER, true),
                 v2::ChildType::INNER);
 
             // Check mode constraints
@@ -1553,7 +1830,8 @@ public:
                 if (parent_entry.first.is_inner() &&
                     parent_entry.first.is_materialized())
                 {
-                    auto* parent_inner = parent_entry.first.get_materialized<HmapInnerNode>();
+                    auto* parent_inner =
+                        parent_entry.first.get_materialized<HmapInnerNode>();
                     int branch_in_parent = path[i].second;
 
                     LOGD(
@@ -1684,19 +1962,22 @@ PolyNodePtr::copy_hash_to(uint8_t* dest) const
         // Get perma-cached hash from mmap header
         if (is_inner())
         {
-            auto header = get_memptr<v2::InnerNodeHeader>();
-            std::memcpy(dest, header->hash.data(), Hash256::size());
+            std::memcpy(
+                dest,
+                get_memptr<v2::InnerNodeHeader>()->hash.data(),
+                Hash256::size());
         }
         else if (is_leaf())
         {
-            auto header = get_memptr<v2::LeafHeader>();
-            std::memcpy(dest, header->hash.data(), Hash256::size());
+            std::memcpy(
+                dest,
+                get_memptr<v2::LeafHeader>()->hash.data(),
+                Hash256::size());
         }
         else if (is_placeholder())
         {
             // Placeholder should have its hash stored
-            auto* placeholder = get_materialized<HmapPlaceholder>();
-            const auto& hash = placeholder->get_hash();
+            const auto& hash = get_materialized<HmapPlaceholder>()->get_hash();
             std::memcpy(dest, hash.data(), Hash256::size());
         }
         else
