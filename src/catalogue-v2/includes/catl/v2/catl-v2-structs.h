@@ -29,7 +29,6 @@ namespace catl::v2 {
  * Current approach:
  *   - No compiler-specific bitfields (replaced with portable getters/setters)
  *   - Explicit bit manipulation for sub-byte fields
- *   - Safe POD loading available via CATL_UNSAFE_POD_LOADS flag
  *   - Both platforms tested are little-endian
  *
  * Future considerations:

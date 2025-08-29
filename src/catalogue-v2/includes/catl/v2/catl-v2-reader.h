@@ -276,17 +276,6 @@ public:
     }
 
     /**
-     * Load a POD type from the current position
-     * Uses the safe/unsafe loading based on CATL_UNSAFE_POD_LOADS flag
-     */
-    template <typename T>
-    T
-    load_pod_at_current() const
-    {
-        return load_pod<T>(data_, current_pos_, file_size_);
-    }
-
-    /**
      * Get the file size for bounds checking
      */
     size_t
@@ -481,7 +470,7 @@ public:
      * @param sequence Ledger sequence to seek to
      * @return true if found and positioned at ledger header
      */
-    bool
+    bool  // TODO: throw errors, ffs
     seek_to_ledger(uint32_t sequence)
     {
         const auto& index = get_ledger_index();
@@ -658,7 +647,7 @@ private:
 
         // First, read the root node to get its children
         const auto& root_header =
-            MemPtr<InnerNodeHeader>(root_ptr).get_uncopyable();
+            MemPtr<InnerNodeHeader>(root_ptr).get_temporary();
 
         LOGI(
             "Root node depth: ",
@@ -773,7 +762,7 @@ private:
                             "]");
 
                         MemPtr<LeafHeader> leaf_ptr(child.ptr);
-                        const auto& leaf_header = leaf_ptr.get_uncopyable();
+                        const auto& leaf_header = *leaf_ptr;
                         Key leaf_key(leaf_header.key.data());
 
                         const uint8_t* data_ptr =

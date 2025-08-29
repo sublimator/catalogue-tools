@@ -20,25 +20,5 @@ target_link_libraries(
          Boost::iostreams
   PRIVATE OpenSSL::SSL)
 
-# Add compile features
-target_compile_features(catl_hybrid_shamap_v2 PUBLIC cxx_std_20)
-
-# Option for unsafe POD loads
-if(CATL_UNSAFE_POD_LOADS)
-  target_compile_definitions(catl_hybrid_shamap_v2 PUBLIC CATL_UNSAFE_POD_LOADS)
-endif()
-
-# Installation rules
-install(
-  TARGETS catl_hybrid_shamap_v2
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib)
-
-install(
-  DIRECTORY includes/catl
-  DESTINATION include
-  FILES_MATCHING
-  PATTERN "*.h")
-
 # Output status message
 message(STATUS "Configured Hybrid SHAMap v2 library")

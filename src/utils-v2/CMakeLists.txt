@@ -37,11 +37,6 @@ target_link_libraries(
 # Add compile features
 target_compile_features(catl1-to-catl2 PRIVATE cxx_std_20)
 
-# Option for unsafe POD loads
-if(CATL_UNSAFE_POD_LOADS)
-  target_compile_definitions(catl1-to-catl2 PRIVATE CATL_UNSAFE_POD_LOADS)
-endif()
-
 # Installation
 install(TARGETS catl1-to-catl2 RUNTIME DESTINATION bin)
 

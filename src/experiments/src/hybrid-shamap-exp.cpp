@@ -179,6 +179,12 @@ test_diff(
         return true;
     };
     LOGI("Pre diffing ledgers...");
+    auto cbfast = [&](const Key& key,
+                      catl::v2::DiffOp op,
+                      const Slice& old_data,
+                      const Slice& new_data) { return true; };
+    diff_memtree_nodes(state_view, second_state_view, cbfast);
+    LOGI("Done fast diff");
     diff_memtree_nodes(state_view, second_state_view, callback);
     LOGI(
         "Diff complete: ",
