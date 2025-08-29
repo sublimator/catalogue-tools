@@ -200,7 +200,7 @@ public:
     }
 
     [[nodiscard]] HMapNode*
-    get_materialized() const
+    get_materialized_base() const
     {
         assert(materialized_);  // Should be heap memory
         return static_cast<HMapNode*>(ptr_);
@@ -294,6 +294,21 @@ public:
         assert(!materialized_);  // Should only be used for mmap nodes
         assert(ptr_ != nullptr);
         return v2::MemPtr<T>(static_cast<const uint8_t*>(ptr_));
+    }
+
+    /**
+     * Get typed pointer to materialized node
+     * Only valid for materialized (heap) nodes
+     * @tparam T The node type to cast to (e.g., HmapLeafNode, HmapInnerNode)
+     * @return Typed pointer to the materialized node
+     */
+    template <typename T>
+    [[nodiscard]] T*
+    get_materialized() const
+    {
+        assert(materialized_);  // Should only be used for heap nodes
+        assert(ptr_ != nullptr);
+        return static_cast<T*>(ptr_);
     }
 };
 
@@ -685,13 +700,12 @@ public:
             {
                 // Navigate through materialized node
                 assert(current.is_materialized());
-                HMapNode* node = current.get_materialized();
+                HMapNode* node = current.get_materialized_base();
 
                 if (node->get_type() == HMapNode::Type::LEAF)
                 {
                     // Found a leaf
-                    const auto* leaf = static_cast<HmapLeafNode*>(
-                        node);  // NOLINT(*-pro-type-static-cast-downcast)
+                    const auto* leaf = current.get_materialized<HmapLeafNode>();
                     found_leaf_ = current;
                     key_matches_ = (leaf->get_key() == target_key_);
                     break;
@@ -706,8 +720,7 @@ public:
                 else
                 {
                     // It's an inner node
-                    const auto* inner = static_cast<HmapInnerNode*>(
-                        node);  // NOLINT(*-pro-type-static-cast-downcast)
+                    const auto* inner = current.get_materialized<HmapInnerNode>();
                     depth = inner->get_depth();
 
                     int branch = shamap::select_branch(target_key_, depth);
@@ -725,20 +738,17 @@ public:
                         // Found a leaf - check if it matches our key
                         if (child.is_materialized())
                         {
-                            auto* leaf = static_cast<HmapLeafNode*>(
-                                child.get_materialized());
+                            auto* leaf = child.get_materialized<HmapLeafNode>();
                             found_leaf_ = child;
                             key_matches_ = (leaf->get_key() == target_key_);
                         }
                         else
                         {
                             // Raw memory leaf
-                            auto leaf_header_ptr = child.get_memptr<v2::LeafHeader>();
-                            const auto& leaf_header = *leaf_header_ptr;
                             found_leaf_ = child;
                             key_matches_ =
                                 (std::memcmp(
-                                     leaf_header.key.data(),
+                                     child.get_memptr<v2::LeafHeader>()->key.data(),
                                      target_key_.data(),
                                      32) == 0);
                         }
@@ -779,8 +789,7 @@ public:
                     auto& [parent_ptr, _] = path_[i - 1];
                     if (parent_ptr.is_materialized())
                     {
-                        auto* parent_inner = static_cast<HmapInnerNode*>(
-                            parent_ptr.get_materialized());
+                        auto* parent_inner = parent_ptr.get_materialized<HmapInnerNode>();
                         is_leaf =
                             (parent_inner->get_child_type(branch_taken) ==
                              v2::ChildType::LEAF);
@@ -811,8 +820,7 @@ public:
                 {
                     auto& [parent_ptr, _] = path_[i - 1];
                     assert(parent_ptr.is_materialized());
-                    auto* parent_inner = static_cast<HmapInnerNode*>(
-                        parent_ptr.get_materialized());
+                    auto* parent_inner = parent_ptr.get_materialized<HmapInnerNode>();
                     // Determine child type based on whether it's a leaf
                     v2::ChildType child_type =
                         is_leaf ? v2::ChildType::LEAF : v2::ChildType::INNER;
@@ -896,7 +904,7 @@ public:
             }
             else
             {
-                auto* node = node_ptr.get_materialized();
+                auto* node = node_ptr.get_materialized_base();
                 ss << "MATERIALIZED " << node->describe();
 
                 // Print hash if valid
@@ -1202,8 +1210,7 @@ public:
                         parent_node.is_inner() &&
                         parent_node.is_materialized());
 
-                    auto* parent = static_cast<HmapInnerNode*>(
-                        parent_node.get_materialized());
+                    auto* parent = parent_node.get_materialized<HmapInnerNode>();
                     int branch = path[i].second;
 
                     // Create new leaf with updated data
@@ -1246,8 +1253,7 @@ public:
         {
             if (it->first.is_inner() && it->first.is_materialized())
             {
-                insert_parent =
-                    static_cast<HmapInnerNode*>(it->first.get_materialized());
+                insert_parent = it->first.get_materialized<HmapInnerNode>();
                 insert_depth = insert_parent->get_depth();
                 break;
             }
@@ -1289,15 +1295,12 @@ public:
             Key existing_key = [&]() -> Key {
                 if (existing.is_materialized())
                 {
-                    auto* existing_leaf =
-                        static_cast<HmapLeafNode*>(existing.get_materialized());
+                    auto* existing_leaf = existing.get_materialized<HmapLeafNode>();
                     return existing_leaf->get_key();
                 }
-                else
-                {
+                else {
                     // Read from mmap
-                    auto header = existing.get_memptr<v2::LeafHeader>();
-                    return Key(header->key.data());
+                    return Key(existing.get_memptr<v2::LeafHeader>()->key.data());
                 }
             }();
 
@@ -1437,8 +1440,7 @@ public:
 
                 if (parent_node.is_inner() && parent_node.is_materialized())
                 {
-                    parent = static_cast<HmapInnerNode*>(
-                        parent_node.get_materialized());
+                    parent = parent_node.get_materialized<HmapInnerNode>();
                     branch_to_remove = path[i].second;
                     leaf_index = i;
                     LOGD(
@@ -1495,8 +1497,7 @@ public:
             assert(
                 path[i].first.is_materialized() &&
                 "Inner node must be materialized for collapse");
-            auto* inner =
-                static_cast<HmapInnerNode*>(path[i].first.get_materialized());
+            auto* inner = path[i].first.get_materialized<HmapInnerNode>();
 
             // Count children and find the single child if there is one
             PolyNodePtr single_child;
@@ -1552,8 +1553,7 @@ public:
                 if (parent_entry.first.is_inner() &&
                     parent_entry.first.is_materialized())
                 {
-                    auto* parent_inner = static_cast<HmapInnerNode*>(
-                        parent_entry.first.get_materialized());
+                    auto* parent_inner = parent_entry.first.get_materialized<HmapInnerNode>();
                     int branch_in_parent = path[i].second;
 
                     LOGD(
@@ -1606,7 +1606,7 @@ PolyNodePtr::add_ref() const
 {
     if (is_materialized() && !is_empty())
     {
-        intrusive_ptr_add_ref(get_materialized());
+        intrusive_ptr_add_ref(get_materialized_base());
     }
 }
 
@@ -1615,7 +1615,7 @@ PolyNodePtr::release() const
 {
     if (is_materialized() && !is_empty())
     {
-        intrusive_ptr_release(get_materialized());
+        intrusive_ptr_release(get_materialized_base());
     }
 }
 
@@ -1659,7 +1659,7 @@ PolyNodePtr::to_intrusive() const
     }
 
     // Create intrusive_ptr which will increment ref count
-    return {get_materialized()};
+    return {get_materialized_base()};
 }
 
 inline void
@@ -1675,7 +1675,7 @@ PolyNodePtr::copy_hash_to(uint8_t* dest) const
     if (is_materialized())
     {
         // Get hash from materialized node
-        auto* node = get_materialized();
+        auto* node = get_materialized_base();
         const auto& hash = node->get_hash();
         std::memcpy(dest, hash.data(), Hash256::size());
     }
@@ -1695,8 +1695,7 @@ PolyNodePtr::copy_hash_to(uint8_t* dest) const
         else if (is_placeholder())
         {
             // Placeholder should have its hash stored
-            auto* placeholder =
-                static_cast<HmapPlaceholder*>(get_materialized());
+            auto* placeholder = get_materialized<HmapPlaceholder>();
             const auto& hash = placeholder->get_hash();
             std::memcpy(dest, hash.data(), Hash256::size());
         }
