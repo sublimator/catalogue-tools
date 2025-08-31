@@ -17,3 +17,6 @@ boost/*:shared=False
 zlib/*:shared=False
 openssl/*:shared=False
 zstd/*:shared=False
+
+[tool_requires]
+protobuf/3.21.12
