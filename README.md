@@ -78,10 +78,12 @@ make
 ## Running Tests
 
 ```bash
-# Build and run all tests
+# Run all tests using ctest
 cd build
-ninja all_tests
-./tests/all_tests
+ctest --verbose
+
+# Or simply:
+ctest
 ```
 
 ## Project Structure
