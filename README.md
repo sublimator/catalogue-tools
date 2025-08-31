@@ -38,11 +38,14 @@ These approaches together enable rapid data access, reduced memory footprint, an
 
 ### Setup Python Environment
 
-The project uses a Python virtual environment for some tooling:
+The project uses a Python virtual environment for tooling and Conan package management:
 
 ```bash
-# Create and activate the Python environment
+# Create and activate the Python environment (installs Conan 2)
 source scripts/setup-catenv.sh
+
+# Install Conan dependencies
+BUILD_TYPE=Debug scripts/conan.sh
 ```
 
 ### Building with Ninja (recommended)
@@ -52,8 +55,7 @@ source scripts/setup-catenv.sh
 mkdir -p build
 cd build
 
-# Install dependencies and configure
-BUILD_TYPE=Debug ../scripts/conan.sh
+# Configure with CMake
 cmake -G "Ninja" -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Debug ..
 
 # Build the project
@@ -67,8 +69,7 @@ ninja
 mkdir -p build
 cd build
 
-# Install dependencies and configure
-BUILD_TYPE=Debug ../scripts/conan.sh
+# Configure with CMake
 cmake -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Debug ..
 
 # Build the project
