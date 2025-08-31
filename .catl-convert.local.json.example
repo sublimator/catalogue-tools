@@ -1,0 +1,27 @@
+{
+  "xrp-test": {
+    "input": "~/data/test-slice.catl",
+    "output": "~/data/test-slice.catl2",
+    "probe_ledger": "4785076",
+    "probe_key": "0002DBD178A4A4033B016621EAA5F503DB8FA6C6B6DF0105FC5B34CC7790D07C",
+    "max_ledgers": 0,
+    "extra_args": []
+  },
+  "xrp-full": {
+    "input": "~/data/cat_all.bin",
+    "output": "~/data/cat_all.catl2",
+    "probe_ledger": "97480076",
+    "probe_key": "0002DBD178A4A4033B016621EAA5F503DB8FA6C6B6DF0105FC5B34CC7790D07C",
+    "max_ledgers": 0,
+    "extra_args": ["--use-xrpl-defs"]
+  },
+  "xahau-test": {
+    "input": "~/data/xahau-test.catl",
+    "output": "~/data/xahau-test.catl2",
+    "probe_ledger": "1000",
+    "probe_key": "0001234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABC",
+    "max_ledgers": 10000,
+    "skip_probe": true,
+    "extra_args": []
+  }
+}
