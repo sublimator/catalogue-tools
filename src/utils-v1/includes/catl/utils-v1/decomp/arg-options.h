@@ -4,7 +4,7 @@
 #include <optional>
 #include <string>
 
-namespace catl::utils::decomp {
+namespace catl::v1::utils::decomp {
 
 /**
  * Type-safe structure for command line options
@@ -46,4 +46,4 @@ struct CommandLineOptions
 CommandLineOptions
 parse_argv(int argc, char* argv[]);
 
-}  // namespace catl::utils::decomp
+}  // namespace catl::v1::utils::decomp

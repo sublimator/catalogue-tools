@@ -7,7 +7,7 @@
 #include <string>
 
 namespace po = boost::program_options;
-namespace catl::utils::decomp {
+namespace catl::v1::utils::decomp {
 
 CommandLineOptions
 parse_argv(int argc, char* argv[])
@@ -141,4 +141,4 @@ parse_argv(int argc, char* argv[])
     return options;
 }
 
-}  // namespace catl::utils::decomp
+}  // namespace catl::v1::utils::decomp

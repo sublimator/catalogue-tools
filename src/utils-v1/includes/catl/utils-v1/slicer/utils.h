@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace catl::utils::slicer {
+namespace catl::v1::utils::slicer {
 
 namespace fs = boost::filesystem;
 
@@ -74,4 +74,4 @@ copy_snapshot_to_stream(
     const fs::path& snapshot_path,
     std::ostream& output_stream);
 
-}  // namespace catl::utils::slicer
+}  // namespace catl::v1::utils::slicer

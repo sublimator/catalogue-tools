@@ -19,7 +19,7 @@ RUN pip3 install --break-system-packages conan
 WORKDIR /tmp/build-conan
 
 COPY scripts/conan.sh .
-COPY conanfile.txt .
+COPY conanfile.py .
 
 RUN mkdir -p build-ubuntu
 RUN BUILD_TYPE=Release UPDATE_BOOST_MIRROR_URL=1 CONFIGURE_GCC_13_PROFILE=1 BUILD_DIR=/tmp/build-conan/build-ubuntu ./conan.sh

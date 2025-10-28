@@ -12,7 +12,7 @@
 #include <string>
 
 using namespace catl::v1;
-using namespace catl::utils::decomp;
+using namespace catl::v1::utils::decomp;
 
 // Format file size in human-readable format
 std::string
