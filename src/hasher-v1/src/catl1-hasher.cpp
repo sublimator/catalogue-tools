@@ -39,6 +39,7 @@
 #include "hasher-impl.h"
 // TODO: this should be in the shamap library perhaps?
 #include "../../shamap/src/pretty-print-json.h"
+#include "catl/v1/catl-v1-utils.h"
 
 // Command line parsing
 namespace po = boost::program_options;
@@ -89,6 +90,7 @@ private:
         LOGI("  Version: ", (header.version & CATALOGUE_VERSION_MASK));
         LOGI("  Network ID: ", header.network_id);
         LOGI("  Header Filesize: ", header.filesize, " bytes");
+        LOGI("  Compression Level: ", catl::v1::get_compression_level(header.version));
     }
 
     // Debug helper function to print map contents as JSON

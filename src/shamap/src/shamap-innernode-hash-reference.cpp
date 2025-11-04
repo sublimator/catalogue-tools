@@ -15,7 +15,8 @@ template <typename Traits>
 void
 SHAMapInnerNodeT<Traits>::update_hash_reference(SHAMapOptions const& options)
 {
-    if (uint16_t branchMask = this->children_->get_branch_mask();
+    auto children = this->get_children();
+    if (uint16_t branchMask = children->get_branch_mask();
         branchMask == 0)
     {
         this->hash = Hash256::zero();
@@ -35,7 +36,7 @@ SHAMapInnerNodeT<Traits>::update_hash_reference(SHAMapOptions const& options)
         for (int i = 0; i < 16; i++)
         {
             const uint8_t* hashData = Hash256::zero().data();
-            if (const auto child = this->children_->get_child(i))
+            if (const auto child = children->get_child(i))
             {
                 hashData = child->get_hash(options).data();
             }
@@ -49,7 +50,10 @@ SHAMapInnerNodeT<Traits>::update_hash_reference(SHAMapOptions const& options)
 
         // Once hash is calculated, canonicalize to save memory
         // After this, the node becomes immutable until explicitly copied
-        this->children_->canonicalize();
+        if (auto canonical = children->canonicalize())
+        {
+            this->set_children(canonical);
+        }
     }
     catch (const std::exception& e)
     {

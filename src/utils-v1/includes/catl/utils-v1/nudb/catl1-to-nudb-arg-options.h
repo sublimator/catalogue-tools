@@ -42,6 +42,9 @@ struct Catl1ToNudbOptions
     /** Log level (error, warn, info, debug) */
     std::string log_level = "info";
 
+    /** Test snapshot memory usage mode */
+    bool test_snapshots = false;
+
     /** Whether to display help information */
     bool show_help = false;
 

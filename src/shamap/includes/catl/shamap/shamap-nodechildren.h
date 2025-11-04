@@ -1,6 +1,7 @@
 #pragma once
 
 #include "catl/shamap/shamap-treenode.h"
+#include <atomic>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
 #include <memory>
@@ -8,7 +9,7 @@
 namespace catl::shamap {
 /**
  * Memory-optimized container for SHAMapInnerNode children with iteration
- * support
+ * support. Uses intrusive reference counting for thread-safe shared ownership.
  */
 template <typename Traits = DefaultNodeTraits>
 class NodeChildrenT
@@ -19,6 +20,12 @@ private:
     uint8_t capacity_ = 0;              // Actual allocation size
     bool canonicalized_ = false;        // Has this been optimized?
     int8_t branch_to_index_[16] = {0};  // Maps branch to array index
+
+    // Intrusive reference counting for thread-safe shared ownership
+    mutable std::atomic<int> ref_count_{0};
+
+    // Private constructor for canonicalize() - allocates exactly capacity slots
+    explicit NodeChildrenT(uint8_t capacity);
 
 public:
     // Iterator class for iterating through valid children
@@ -143,23 +150,45 @@ public:
         return branch_mask_;
     }
 
-    // Memory optimization
-    void
-    canonicalize();
+    // Memory optimization - returns new canonicalized object or nullptr
+    boost::intrusive_ptr<NodeChildrenT<Traits>>
+    canonicalize() const;
     bool
     is_canonical() const
     {
         return canonicalized_;
     }
 
+    // Check if this NodeChildren is shared (ref_count > 1)
+    bool
+    is_shared() const
+    {
+        return ref_count_.load(std::memory_order_acquire) > 1;
+    }
+
     // For Copy-on-Write
-    std::unique_ptr<NodeChildrenT<Traits>>
+    boost::intrusive_ptr<NodeChildrenT<Traits>>
     copy() const;
 
     // No copying
     NodeChildrenT(const NodeChildrenT&) = delete;
     NodeChildrenT&
     operator=(const NodeChildrenT&) = delete;
+
+    // Intrusive reference counting support
+    friend void intrusive_ptr_add_ref(const NodeChildrenT<Traits>* p)
+    {
+        p->ref_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    friend void intrusive_ptr_release(const NodeChildrenT<Traits>* p)
+    {
+        if (p->ref_count_.fetch_sub(1, std::memory_order_release) == 1)
+        {
+            std::atomic_thread_fence(std::memory_order_acquire);
+            delete p;
+        }
+    }
 
     // Iteration support - iterates only through non-empty children
     iterator

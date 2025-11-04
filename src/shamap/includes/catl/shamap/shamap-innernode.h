@@ -31,17 +31,73 @@ template <typename Traits = DefaultNodeTraits>
 class SHAMapInnerNodeT : public SHAMapTreeNodeT<Traits>
 {
 private:
-    std::unique_ptr<NodeChildrenT<Traits>> children_;
+    NodeChildrenT<Traits>* children_;  // Plain pointer - spinlock protects it
+    mutable std::atomic_flag children_lock_ = ATOMIC_FLAG_INIT;  // Simple spinlock
     uint8_t depth_ = 0;
     static LogPartition log_partition_;
     // CoW support
     int version_{0};  // TODO: make atomic or have clear reason not to
     bool do_cow_ = false;
 
+protected:
+    // Thread-safe helpers for children access using spinlock
+    // OWNERSHIP MODEL: SHAMapInnerNode OWNS one reference to its children_
+
+    boost::intrusive_ptr<NodeChildrenT<Traits>>
+    get_children() const
+    {
+        // Acquire spinlock
+        while (children_lock_.test_and_set(std::memory_order_acquire)) {
+            // Spin - could add pause instruction for better performance
+        }
+
+        // Now safe to access plain pointer - spinlock protects it
+        auto* ptr = children_;  // Plain load
+        if (ptr) {
+            intrusive_ptr_add_ref(ptr);  // Add caller's reference
+        }
+
+        // Release spinlock
+        children_lock_.clear(std::memory_order_release);
+
+        // Return with 'false' to not add another reference
+        return boost::intrusive_ptr<NodeChildrenT<Traits>>(ptr, false);
+    }
+
+    void
+    set_children(const boost::intrusive_ptr<NodeChildrenT<Traits>>& new_children)
+    {
+        auto* new_ptr = new_children.get();
+
+        // Add OUR ownership reference to the new children
+        if (new_ptr) {
+            intrusive_ptr_add_ref(new_ptr);
+        }
+
+        // Acquire spinlock
+        while (children_lock_.test_and_set(std::memory_order_acquire)) {
+            // Spin
+        }
+
+        // Simple pointer swap while holding lock
+        auto* old_ptr = children_;
+        children_ = new_ptr;  // Plain assignment
+
+        // Release spinlock
+        children_lock_.clear(std::memory_order_release);
+
+        // Release OUR ownership reference to the old children (outside lock)
+        if (old_ptr) {
+            intrusive_ptr_release(old_ptr);
+        }
+    }
+
 public:
     explicit SHAMapInnerNodeT(uint8_t nodeDepth = 0);
 
     SHAMapInnerNodeT(bool isCopy, uint8_t nodeDepth, int initialVersion);
+
+    ~SHAMapInnerNodeT();
 
     bool
     is_leaf() const override;

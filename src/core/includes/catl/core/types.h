@@ -190,6 +190,8 @@ public:
     {
     }
 
+    virtual ~MmapItem() = default;
+
     const Key&
     key() const
     {

@@ -35,7 +35,8 @@ template <typename Traits>
 void
 SHAMapInnerNodeT<Traits>::update_hash_collapsed(SHAMapOptions const& options)
 {
-    uint16_t branch_mask = this->children_->get_branch_mask();
+    auto children = this->get_children();
+    uint16_t branch_mask = children->get_branch_mask();
 
     if (branch_mask == 0)
     {
@@ -63,7 +64,7 @@ SHAMapInnerNodeT<Traits>::update_hash_collapsed(SHAMapOptions const& options)
             // Create a local Hash256 for each branch
             Hash256 child_hash = zero_hash;
 
-            if (auto child = this->children_->get_child(i))
+            if (auto child = children->get_child(i))
             {
                 if (child->is_inner())
                 {
@@ -145,7 +146,10 @@ SHAMapInnerNodeT<Traits>::update_hash_collapsed(SHAMapOptions const& options)
         OLOGD("Hash calculation complete: ", this->hash.hex());
 
         // Once hash is calculated, canonicalize to save memory
-        this->children_->canonicalize();
+        if (auto canonical = children->canonicalize())
+        {
+            this->set_children(canonical);
+        }
     }
     catch (const std::exception& e)
     {

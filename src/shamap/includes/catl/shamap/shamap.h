@@ -106,6 +106,8 @@ public:
         SHAMapNodeType type = tnACCOUNT_STATE,
         SHAMapOptions options = SHAMapOptions());
 
+    ~SHAMapT();
+
     SetResult
     set_item(
         boost::intrusive_ptr<MmapItem>& item,
