@@ -45,7 +45,10 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
         "NuDB load factor 0.0-1.0 (default: 0.5)")(
         "log-level,l",
         po::value<std::string>()->default_value("info"),
-        "Log level (error, warn, info, debug)");
+        "Log level (error, warn, info, debug)")(
+        "test-snapshots",
+        po::bool_switch(),
+        "Test snapshot memory usage (reads file and creates snapshots without pipeline)");
 
     // Generate the help text
     std::ostringstream help_stream;
@@ -93,12 +96,18 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
             return options;
         }
 
-        // Check for required nudb path
+        // Check for test-snapshots mode
+        if (vm.count("test-snapshots"))
+        {
+            options.test_snapshots = vm["test-snapshots"].as<bool>();
+        }
+
+        // Check for required nudb path (not required in test-snapshots mode)
         if (vm.count("nudb-path"))
         {
             options.nudb_path = vm["nudb-path"].as<std::string>();
         }
-        else
+        else if (!options.test_snapshots)
         {
             options.valid = false;
             options.error_message = "No NuDB path specified (--nudb-path)";

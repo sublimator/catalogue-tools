@@ -2,10 +2,15 @@
 
 #include "catl/shamap/shamap-nodechildren.h"
 #include "catl/shamap/shamap-treenode.h"
+#include "catl/core/logger.h"
 #include <memory>
 #include <stdexcept>
 
 namespace catl::shamap {
+
+// External destructor logging partition
+extern LogPartition destructor_log;
+
 //----------------------------------------------------------
 // NodeChildrenT Implementation
 //----------------------------------------------------------
@@ -23,9 +28,31 @@ NodeChildrenT<Traits>::NodeChildrenT() : capacity_(16), canonicalized_(false)
     }
 }
 
+// Private constructor that allocates exactly capacity slots
+template <typename Traits>
+NodeChildrenT<Traits>::NodeChildrenT(uint8_t cap)
+    : capacity_(cap), canonicalized_(true)  // Always canonicalized when using this ctor
+{
+    if (cap == 0 || cap > 16)
+        throw std::invalid_argument("Invalid capacity for NodeChildrenT");
+
+    // Allocate exact size array
+    children_ = new boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>[cap]();
+
+    // Initialize branch_to_index_ to all -1 (will be set by canonicalize())
+    for (int i = 0; i < 16; i++)
+    {
+        branch_to_index_[i] = -1;
+    }
+}
+
 template <typename Traits>
 NodeChildrenT<Traits>::~NodeChildrenT()
 {
+    PLOGD(destructor_log, "~NodeChildrenT: count=", get_child_count(),
+          ", canonical=", canonicalized_,
+          ", refcount=", ref_count_.load(),
+          ", capacity=", static_cast<int>(capacity_));
     delete[] children_;
 }
 
@@ -72,27 +99,23 @@ NodeChildrenT<Traits>::set_child(
 }
 
 template <typename Traits>
-void
-NodeChildrenT<Traits>::canonicalize()
+boost::intrusive_ptr<NodeChildrenT<Traits>>
+NodeChildrenT<Traits>::canonicalize() const
 {
     if (canonicalized_ || branch_mask_ == 0)
-        return;
+        return nullptr;  // Already canonical or empty
 
     int child_count = __builtin_popcount(branch_mask_);
 
     // No need to canonicalize if nearly full
     if (child_count >= 14)
-        return;
+        return nullptr;
 
-    // Create optimally sized array
-    auto new_children =
-        new boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>[child_count];
+    // Create NEW canonicalized NodeChildrenT with exact capacity
+    auto result = boost::intrusive_ptr<NodeChildrenT<Traits>>(
+        new NodeChildrenT<Traits>(child_count));  // Uses private constructor!
 
-    // Initialize lookup table (all -1)
-    for (int i = 0; i < 16; i++)
-    {
-        branch_to_index_[i] = -1;
-    }
+    result->branch_mask_ = branch_mask_;
 
     // Copy only non-null children
     int new_index = 0;
@@ -100,23 +123,20 @@ NodeChildrenT<Traits>::canonicalize()
     {
         if (branch_mask_ & (1 << i))
         {
-            new_children[new_index] = children_[i];
-            branch_to_index_[i] = new_index++;
+            result->children_[new_index] = children_[i];
+            result->branch_to_index_[i] = new_index++;
         }
     }
 
-    // Replace storage
-    delete[] children_;
-    children_ = new_children;
-    capacity_ = child_count;
-    canonicalized_ = true;
+    return result;
 }
 
 template <typename Traits>
-std::unique_ptr<NodeChildrenT<Traits>>
+boost::intrusive_ptr<NodeChildrenT<Traits>>
 NodeChildrenT<Traits>::copy() const
 {
-    auto new_children = std::make_unique<NodeChildrenT<Traits>>();
+    auto new_children = boost::intrusive_ptr<NodeChildrenT<Traits>>(
+        new NodeChildrenT<Traits>());
 
     // Copy branch mask
     new_children->branch_mask_ = branch_mask_;
@@ -128,11 +148,24 @@ NodeChildrenT<Traits>::copy() const
         {
             if (canonicalized_)
             {
-                new_children->children_[i] = children_[branch_to_index_[i]];
+                // For canonicalized nodes, use the mapping
+                int index = branch_to_index_[i];
+                if (index >= 0 && index < capacity_ && children_)
+                {
+                    new_children->children_[i] = children_[index];
+                }
+                else
+                {
+                    // Invalid index - this shouldn't happen but be defensive
+                    continue;
+                }
             }
             else
             {
-                new_children->children_[i] = children_[i];
+                if (children_)
+                {
+                    new_children->children_[i] = children_[i];
+                }
             }
         }
     }

@@ -3,6 +3,7 @@
 #include "catl/shamap/shamap.h"
 #include "catl/test-utils/test-mmap-items.h"
 #include "catl/test-utils/test-utils.h"
+#include "catl/core/logger.h"
 
 class ShaMapFixture : public ::testing::Test
 {
@@ -11,6 +12,12 @@ protected:
 
     void
     SetUp() override;
+
+    // Enable debug logging for tests that need it
+    void
+    enable_debug_logging() {
+        Logger::set_level(LogLevel::DEBUG);
+    }
 
     // Virtual methods for customization
     virtual catl::shamap::SHAMapNodeType

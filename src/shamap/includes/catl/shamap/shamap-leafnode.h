@@ -29,6 +29,7 @@ private:
 
 public:
     SHAMapLeafNodeT(boost::intrusive_ptr<MmapItem> i, SHAMapNodeType t);
+    ~SHAMapLeafNodeT();
 
     bool
     is_leaf() const override;

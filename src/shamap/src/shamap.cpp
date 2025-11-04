@@ -23,6 +23,10 @@
 #include <utility>
 
 namespace catl::shamap {
+
+// Global partition for destructor tracking (not static, so it's visible across compilation units)
+LogPartition destructor_log("DESTRUCTOR", LogLevel::NONE);  // Start disabled
+
 //----------------------------------------------------------
 // SHAMapT Implementation
 //----------------------------------------------------------
@@ -55,6 +59,17 @@ SHAMapT<Traits>::SHAMapT(
     , cow_enabled_(true)
 {
     OLOGD("Created SHAMap snapshot with version ", version);
+}
+
+template <typename Traits>
+SHAMapT<Traits>::~SHAMapT()
+{
+    PLOGD(destructor_log, "~SHAMapT: type=", static_cast<int>(node_type_),
+          ", version=", current_version_,
+          ", cow=", cow_enabled_,
+          ", root=", (root ? "yes" : "no"),
+          ", root.refcount=", (root ? root->ref_count_.load() : 0));
+    // root intrusive_ptr will be destroyed here, should decrement refcount
 }
 
 template <typename Traits>
@@ -429,7 +444,8 @@ SHAMapT<Traits>::set_new_copied_root()
 
     // Copy children - this creates a non-canonicalized copy that shares child
     // pointers
-    new_root->children_ = root->children_->copy();
+    auto root_children = root->get_children();
+    new_root->set_children(root_children->copy());
 
     // Copy hash properties
     new_root->hash = root->hash;

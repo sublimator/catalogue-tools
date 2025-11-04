@@ -1,20 +1,28 @@
 #include "catl/core/log-macros.h"
 #include "catl/utils-v1/nudb/catl1-to-nudb-arg-options.h"
+#include "catl/utils-v1/nudb/catl1-to-nudb-pipeline.h"
 #include "catl/v1/catl-v1-reader.h"
+#include "catl/v1/catl-v1-utils.h"
+#include "catl/shamap/shamap.h"
 
 #include <boost/filesystem.hpp>
+#include <boost/lockfree/spsc_queue.hpp>
 #include <chrono>
+#include <iomanip>
 #include <iostream>
-#include <nudb/basic_store.hpp>
-#include <nudb/create.hpp>
-#include <nudb/error.hpp>
-#include <nudb/posix_file.hpp>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <vector>
 
 using namespace catl::v1;
 using namespace catl::v1::utils::nudb;
+using namespace catl::shamap;
 namespace fs = boost::filesystem;
+
+// Pipeline queue configuration constants
+static constexpr size_t SNAPSHOT_QUEUE_SIZE = 100;  // Buffer size for snapshot queue
+static constexpr size_t HASHED_QUEUE_SIZE = 100;    // Buffer size for hashed ledger queue
 
 /**
  * Catl1ToNudbConverter - Converts CATL v1 files to NuDB database format
@@ -27,34 +35,6 @@ class Catl1ToNudbConverter
 {
 private:
     const Catl1ToNudbOptions& options_;
-
-    // NuDB uses beast::hash_append
-    struct nudb_hasher
-    {
-        using result_type = std::size_t;
-
-        explicit nudb_hasher(std::size_t salt = 0) : salt_(salt)
-        {
-        }
-
-        template <class T>
-        result_type
-        operator()(T const* key, std::size_t len) const noexcept
-        {
-            result_type seed = salt_;
-            const uint8_t* data = reinterpret_cast<const uint8_t*>(key);
-            for (std::size_t i = 0; i < len; ++i)
-            {
-                seed ^= data[i] + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-            }
-            return seed;
-        }
-
-    private:
-        std::size_t salt_;
-    };
-
-    using store_type = nudb::basic_store<nudb_hasher, nudb::posix_file>;
 
 public:
     Catl1ToNudbConverter(const Catl1ToNudbOptions& options) : options_(options)
@@ -72,16 +52,27 @@ public:
     {
         try
         {
-            // Open the input CATL file
+            // Open the input CATL file to read header
             LOGI("Opening input file: ", *options_.input_file);
-            Reader reader(*options_.input_file);
-            const CatlHeader& header = reader.header();
+            Reader header_reader(*options_.input_file);
+            const CatlHeader& header = header_reader.header();
+
+            LOGI("File information:");
+            LOGI(
+                "  Ledger range: ",
+                header.min_ledger,
+                " - ",
+                header.max_ledger);
+            LOGI("  Network ID: ", header.network_id);
 
             // Determine ledger range to process
             uint32_t start_ledger =
                 options_.start_ledger.value_or(header.min_ledger);
             uint32_t end_ledger =
                 options_.end_ledger.value_or(header.max_ledger);
+
+            // Close header reader - builder thread will create its own
+            // (Reader is not thread-safe)
 
             // Validate range
             if (start_ledger < header.min_ledger ||
@@ -100,160 +91,236 @@ public:
                 return false;
             }
 
-            LOGI("File information:");
-            LOGI(
-                "  Ledger range: ",
-                header.min_ledger,
-                " - ",
-                header.max_ledger);
-            LOGI("  Network ID: ", header.network_id);
             LOGI("Processing ledgers ", start_ledger, " to ", end_ledger);
 
-            // Create or open NuDB database
-            fs::path db_path(*options_.nudb_path);
-            bool db_exists = fs::exists(db_path / "nudb.dat");
+            // Create SHAMap options for non-collapsed tree (we need inner nodes for NuDB)
+            SHAMapOptions map_options;
+            map_options.tree_collapse_impl = TreeCollapseImpl::leafs_only;
 
-            if (db_exists && !options_.force_overwrite)
-            {
-                std::cout
-                    << "Warning: Database already exists. Overwrite? (y/n): ";
-                char response;
-                std::cin >> response;
-                if (response != 'y' && response != 'Y')
+            // Create pipeline
+            CatlNudbPipeline pipeline(map_options);
+
+            // Create SPSC queues between stages
+            // Queue sizes are configured by constants for consistent reporting
+            boost::lockfree::spsc_queue<LedgerSnapshot> snapshot_queue(SNAPSHOT_QUEUE_SIZE);
+            boost::lockfree::spsc_queue<HashedLedger> hashed_queue(HASHED_QUEUE_SIZE);
+
+            // Error tracking (atomic for thread safety)
+            std::atomic<bool> error_occurred{false};
+            std::atomic<bool> builder_done{false};
+            std::atomic<bool> hasher_done{false};
+
+            // Thread 1: Build + Snapshot
+            std::thread builder_thread([&]() {
+                try
                 {
-                    std::cout << "Operation canceled by user." << std::endl;
-                    return 0;
-                }
+                    LOGI("[Builder] Starting...");
 
-                // Remove existing database files
-                fs::remove(db_path / "nudb.dat");
-                fs::remove(db_path / "nudb.key");
-                fs::remove(db_path / "nudb.log");
-                db_exists = false;
+                    // Create reader in builder thread (Reader is not thread-safe)
+                    Reader reader(*options_.input_file);
+                    SHAMap state_map(tnACCOUNT_STATE, map_options);
+
+                    // Stats tracking
+                    auto start_time = std::chrono::steady_clock::now();
+                    uint64_t total_state_nodes_added = 0;
+                    uint64_t total_state_nodes_updated = 0;
+                    uint64_t total_state_nodes_deleted = 0;
+                    uint64_t total_tx_nodes_added = 0;
+                    uint32_t last_stats_ledger = start_ledger;
+
+                    for (uint32_t ledger_seq = start_ledger; ledger_seq <= end_ledger;
+                         ++ledger_seq)
+                    {
+                        if (error_occurred.load())
+                            break;
+
+                        bool allow_deltas = (ledger_seq > start_ledger);
+                        auto snapshot = pipeline.build_and_snapshot(reader, state_map, allow_deltas);
+
+                        if (!snapshot)
+                        {
+                            LOGE("[Builder] Failed to build ledger ", ledger_seq);
+                            error_occurred.store(true);
+                            break;
+                        }
+
+                        if (snapshot->info.seq != ledger_seq)
+                        {
+                            LOGE("[Builder] Ledger sequence mismatch! Expected ", ledger_seq, " but got ", snapshot->info.seq);
+                            error_occurred.store(true);
+                            break;
+                        }
+
+                        // Track nodes for stats from the snapshot
+                        total_state_nodes_added += snapshot->state_ops.nodes_added;
+                        total_state_nodes_updated += snapshot->state_ops.nodes_updated;
+                        total_state_nodes_deleted += snapshot->state_ops.nodes_deleted;
+                        total_tx_nodes_added += snapshot->tx_ops.nodes_added;
+
+                        // Log comprehensive stats every 1000 ledgers
+                        if (ledger_seq % 1000 == 0 && ledger_seq > last_stats_ledger)
+                        {
+                            auto now = std::chrono::steady_clock::now();
+                            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
+                            uint32_t ledgers_processed = ledger_seq - start_ledger;
+                            uint64_t total_nodes = total_state_nodes_added + total_state_nodes_updated +
+                                                  total_state_nodes_deleted + total_tx_nodes_added;
+
+                            double ledgers_per_sec = elapsed > 0 ? static_cast<double>(ledgers_processed) / elapsed : 0;
+                            double nodes_per_sec = elapsed > 0 ? static_cast<double>(total_nodes) / elapsed : 0;
+
+                            size_t snapshot_depth = snapshot_queue.read_available();
+                            size_t hashed_depth = hashed_queue.read_available();
+
+                            LOGI("=====================================");
+                            LOGI("📊 PIPELINE STATS @ Ledger ", ledger_seq);
+                            LOGI("=====================================");
+                            LOGI("⏱️  Performance:");
+                            LOGI("   - Ledgers processed: ", ledgers_processed);
+                            LOGI("   - Elapsed time: ", elapsed, " seconds");
+                            LOGI("   - Throughput: ", std::fixed, std::setprecision(2),
+                                 ledgers_per_sec, " ledgers/sec, ",
+                                 nodes_per_sec, " nodes/sec");
+
+                            LOGI("📦 Queue depths:");
+                            LOGI("   - Snapshot queue: ", snapshot_depth, "/", SNAPSHOT_QUEUE_SIZE);
+                            LOGI("   - Hashed queue: ", hashed_depth, "/", HASHED_QUEUE_SIZE);
+                            LOGI("   - Total snapshots in memory: ", snapshot_depth + hashed_depth);
+
+                            LOGI("🗺️  Accumulated Node Operations:");
+                            LOGI("   - State nodes added: ", total_state_nodes_added);
+                            LOGI("   - State nodes updated: ", total_state_nodes_updated);
+                            LOGI("   - State nodes deleted: ", total_state_nodes_deleted);
+                            LOGI("   - Tx nodes added: ", total_tx_nodes_added);
+                            LOGI("   - Total operations: ", total_nodes);
+                            LOGI("=====================================");
+
+                            last_stats_ledger = ledger_seq;
+                        }
+
+                        // Push to queue (blocking if full)
+                        while (!snapshot_queue.push(*snapshot))
+                        {
+                            // Queue is full - log if we're waiting
+                            if (ledger_seq % 100 == 0)
+                            {
+                                LOGW("[Builder] Queue FULL at ledger ", ledger_seq, " - waiting for hasher...");
+                            }
+                            std::this_thread::yield();
+                        }
+                    }
+
+                    LOGI("[Builder] Done");
+                    builder_done.store(true);
+                }
+                catch (const std::exception& e)
+                {
+                    LOGE("[Builder] Exception: ", e.what());
+                    error_occurred.store(true);
+                    builder_done.store(true);
+                }
+            });
+
+            // Thread 2: Hash + Verify
+            std::thread hasher_thread([&]() {
+                try
+                {
+                    LOGI("[Hasher] Starting...");
+
+                    while (true)
+                    {
+                        if (error_occurred.load())
+                            break;
+
+                        LedgerSnapshot snapshot;
+                        if (snapshot_queue.pop(snapshot))
+                        {
+                            auto hashed = pipeline.hash_and_verify(snapshot);
+
+                            if (!hashed.verified)
+                            {
+                                LOGE("[Hasher] Hash verification failed for ledger ", hashed.info.seq);
+                                error_occurred.store(true);
+                                break;
+                            }
+
+                            // Push to next queue (blocking if full)
+                            while (!hashed_queue.push(hashed))
+                            {
+                                std::this_thread::yield();
+                            }
+                        }
+                        else if (builder_done.load())
+                        {
+                            // Builder is done and queue is empty
+                            break;
+                        }
+                        else
+                        {
+                            std::this_thread::yield();
+                        }
+                    }
+
+                    LOGI("[Hasher] Done");
+                    hasher_done.store(true);
+                }
+                catch (const std::exception& e)
+                {
+                    LOGE("[Hasher] Exception: ", e.what());
+                    error_occurred.store(true);
+                    hasher_done.store(true);
+                }
+            });
+
+            // Thread 3: Flush to NuDB (main thread does this)
+            LOGI("[Flusher] Starting...");
+            size_t flushed_count = 0;
+
+            while (true)
+            {
+                if (error_occurred.load())
+                    break;
+
+                HashedLedger hashed;
+                if (hashed_queue.pop(hashed))
+                {
+                    if (!pipeline.flush_to_nudb(hashed))
+                    {
+                        LOGE("[Flusher] Failed to flush ledger ", hashed.info.seq);
+                        error_occurred.store(true);
+                        break;
+                    }
+                    flushed_count++;
+                }
+                else if (hasher_done.load())
+                {
+                    // Hasher is done and queue is empty
+                    break;
+                }
+                else
+                {
+                    std::this_thread::yield();
+                }
             }
 
-            if (!db_exists && options_.create_database)
+            LOGI("[Flusher] Done - flushed ", flushed_count, " ledgers");
+
+            // Wait for threads to complete
+            builder_thread.join();
+            hasher_thread.join();
+
+            if (error_occurred.load())
             {
-                LOGI("Creating new NuDB database at: ", *options_.nudb_path);
-
-                // Create directory if it doesn't exist
-                if (!fs::exists(db_path))
-                {
-                    fs::create_directories(db_path);
-                }
-
-                // Calculate approximate number of records
-                uint64_t num_records = end_ledger - start_ledger + 1;
-
-                // Create the database
-                nudb::error_code nec;
-                nudb::create<nudb_hasher, nudb::posix_file>(
-                    (db_path / "nudb.dat").string(),
-                    (db_path / "nudb.key").string(),
-                    (db_path / "nudb.log").string(),
-                    1,  // appnum
-                    nudb::make_salt(),
-                    options_.key_size,
-                    options_.block_size,
-                    options_.load_factor,
-                    nec);
-
-                if (nec)
-                {
-                    LOGE("Failed to create NuDB database: ", nec.message());
-                    return false;
-                }
-            }
-
-            // Open the NuDB store
-            store_type db;
-            nudb::error_code ec;
-
-            db.open(
-                (db_path / "nudb.dat").string(),
-                (db_path / "nudb.key").string(),
-                (db_path / "nudb.log").string(),
-                ec);
-
-            if (ec)
-            {
-                LOGE("Failed to open NuDB database: ", ec.message());
+                LOGE("Pipeline error occurred");
                 return false;
             }
 
-            // Start timing
-            auto start_time = std::chrono::high_resolution_clock::now();
-
-            size_t ledgers_processed = 0;
-
-            // Process ledgers
-            // Note: This is a simplified implementation. In practice, you would
-            // need to properly parse the CATL file format and extract
-            // individual ledgers with their data.
-            LOGI("Processing ledgers...");
-
-            // TODO: Implement actual CATL file parsing and ledger extraction
-            // For now, this is just a skeleton showing the structure
-
-            /*
-            while (current_ledger <= end_ledger)
-            {
-                // Read ledger data from CATL file
-                LedgerInfo ledger_info = reader.read_ledger_info();
-
-                // Create key from ledger sequence
-                std::vector<uint8_t> key(sizeof(uint32_t));
-                std::memcpy(key.data(), &ledger_info.sequence,
-            sizeof(uint32_t));
-
-                // Read ledger data (this would need proper implementation)
-                std::vector<uint8_t> ledger_data;
-                // ... read state map and transaction map data ...
-
-                // Insert into NuDB
-                nudb::error_code nec;
-                db.insert(key.data(), key.size(),
-                         ledger_data.data(), ledger_data.size(), nec);
-
-                if (nec)
-                {
-                    LOGE("Failed to insert ledger ", ledger_info.sequence,
-                         ": ", nec.message());
-                    continue;
-                }
-
-                ledgers_processed++;
-
-                if (ledgers_processed % 1000 == 0)
-                {
-                    LOGI("Processed ", ledgers_processed, " ledgers...");
-                }
-            }
-            */
-
-            LOGW(
-                "Note: This is a skeleton implementation. Actual CATL parsing "
-                "needs to be implemented.");
-
-            // Close the database
-            nudb::error_code close_ec;
-            db.close(close_ec);
-            if (close_ec)
-            {
-                LOGW("Error closing database: ", close_ec.message());
-            }
-
-            // Calculate timing
-            auto end_time = std::chrono::high_resolution_clock::now();
-            auto duration =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    end_time - start_time);
-            double seconds = duration.count() / 1000.0;
-
-            LOGI("Conversion completed:");
-            LOGI("  Ledgers processed: ", ledgers_processed);
-            LOGI("  Time taken: ", seconds, " seconds");
-            LOGI("  Database location: ", *options_.nudb_path);
+            LOGI("\n========================================");
+            LOGI("Successfully processed ledgers ",
+                 start_ledger,
+                 " to ",
+                 end_ledger);
+            LOGI("========================================");
 
             return true;
         }
@@ -264,6 +331,108 @@ public:
         }
     }
 };
+
+/**
+ * Test snapshot memory usage by reading ledgers and creating snapshots
+ * without the full pipeline processing
+ */
+bool
+test_snapshot_memory(const Catl1ToNudbOptions& options)
+{
+    try
+    {
+        LOGI("Starting snapshot memory test mode");
+        LOGI("Reading input file: ", *options.input_file);
+
+        // Open the input CATL file
+        Reader reader(*options.input_file);
+        const CatlHeader& header = reader.header();
+
+        LOGI("File information:");
+        LOGI("  Ledger range: ", header.min_ledger, " - ", header.max_ledger);
+        LOGI("  Network ID: ", header.network_id);
+
+        // Determine ledger range to process
+        uint32_t start_ledger = options.start_ledger.value_or(header.min_ledger);
+        uint32_t end_ledger = options.end_ledger.value_or(header.max_ledger);
+
+        LOGI("Testing ledgers ", start_ledger, " to ", end_ledger);
+
+        // Create SHAMap options for non-collapsed tree
+        SHAMapOptions map_options;
+        map_options.tree_collapse_impl = TreeCollapseImpl::leafs_only;
+
+        // Create state map
+        SHAMap state_map(tnACCOUNT_STATE, map_options);
+
+        auto start_time = std::chrono::steady_clock::now();
+        uint32_t ledgers_processed = 0;
+
+        for (uint32_t ledger_seq = start_ledger; ledger_seq <= end_ledger; ++ledger_seq)
+        {
+            // Read ledger info
+            auto v1_ledger_info = reader.read_ledger_info();
+            auto canonical_info = to_canonical_ledger_info(v1_ledger_info);
+
+            // Load state map with deltas
+            bool allow_deltas = (ledger_seq > start_ledger);
+            MapOperations state_ops = reader.read_map_with_shamap_owned_items(
+                state_map, tnACCOUNT_STATE, allow_deltas);
+
+            // Create a snapshot (this is what we're testing)
+            auto snapshot = state_map.snapshot();
+
+            // Build fresh transaction map
+            SHAMap tx_map(tnTRANSACTION_MD, map_options);
+            MapOperations tx_ops = reader.read_map_with_shamap_owned_items(
+                tx_map, tnTRANSACTION_MD, false);
+
+            ledgers_processed++;
+
+            // Log progress every 1000 ledgers
+            if (ledger_seq % 1000 == 0 && ledger_seq > start_ledger)
+            {
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
+                double ledgers_per_sec = elapsed > 0 ? static_cast<double>(ledgers_processed) / elapsed : 0;
+
+                LOGI("=====================================");
+                LOGI("📊 SNAPSHOT TEST @ Ledger ", ledger_seq);
+                LOGI("=====================================");
+                LOGI("  - Ledgers processed: ", ledgers_processed);
+                LOGI("  - Elapsed time: ", elapsed, " seconds");
+                LOGI("  - Throughput: ", std::fixed, std::setprecision(2), ledgers_per_sec, " ledgers/sec");
+                LOGI("  - State ops: ", state_ops.nodes_added, " added, ",
+                     state_ops.nodes_updated, " updated, ",
+                     state_ops.nodes_deleted, " deleted");
+                LOGI("  - Tx ops: ", tx_ops.nodes_added, " added");
+                LOGI("=====================================");
+            }
+
+            // IMPORTANT: The snapshot goes out of scope here and should be destroyed
+            // If memory isn't being released, we'll see it grow continuously
+        }
+
+        auto end_time = std::chrono::steady_clock::now();
+        auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count();
+
+        LOGI("========================================");
+        LOGI("Snapshot test completed");
+        LOGI("  - Total ledgers: ", ledgers_processed);
+        LOGI("  - Total time: ", total_elapsed, " seconds");
+        LOGI("  - Average: ", std::fixed, std::setprecision(2),
+             static_cast<double>(ledgers_processed) / total_elapsed, " ledgers/sec");
+        LOGI("========================================");
+        LOGI("Check memory usage now - snapshots should have been released!");
+
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        LOGE("Snapshot test error: ", e.what());
+        return false;
+    }
+}
 
 int
 main(int argc, char* argv[])
@@ -291,6 +460,22 @@ main(int argc, char* argv[])
             Logger::set_level(LogLevel::INFO);
             std::cerr << "Unrecognized log level: " << options.log_level
                       << ", falling back to 'info'" << std::endl;
+        }
+
+        // Check if we're in test snapshot mode
+        if (options.test_snapshots)
+        {
+            LOGI("Running in snapshot test mode");
+            if (test_snapshot_memory(options))
+            {
+                LOGI("Snapshot test completed successfully");
+                return 0;
+            }
+            else
+            {
+                LOGE("Snapshot test failed");
+                return 1;
+            }
         }
 
         LOGI("Starting CATL to NuDB conversion");

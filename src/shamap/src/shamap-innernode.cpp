@@ -13,6 +13,10 @@
 #include <string>
 
 namespace catl::shamap {
+
+// External destructor logging partition
+extern LogPartition destructor_log;
+
 //----------------------------------------------------------
 // SHAMapInnerNodeT Implementation
 //----------------------------------------------------------
@@ -21,7 +25,9 @@ template <typename Traits>
 SHAMapInnerNodeT<Traits>::SHAMapInnerNodeT(uint8_t nodeDepth)
     : depth_(nodeDepth), version_(0), do_cow_(false)
 {
-    children_ = std::make_unique<NodeChildrenT<Traits>>();
+    auto* new_children = new NodeChildrenT<Traits>();
+    intrusive_ptr_add_ref(new_children);  // OUR ownership reference
+    children_ = new_children;  // Plain assignment - constructor, no concurrency
 }
 
 template <typename Traits>
@@ -31,7 +37,22 @@ SHAMapInnerNodeT<Traits>::SHAMapInnerNodeT(
     int initialVersion)
     : depth_(nodeDepth), version_(initialVersion), do_cow_(isCopy)
 {
-    children_ = std::make_unique<NodeChildrenT<Traits>>();
+    auto* new_children = new NodeChildrenT<Traits>();
+    intrusive_ptr_add_ref(new_children);  // OUR ownership reference
+    children_ = new_children;  // Plain assignment - constructor, no concurrency
+}
+
+template <typename Traits>
+SHAMapInnerNodeT<Traits>::~SHAMapInnerNodeT()
+{
+    PLOGD(destructor_log, "~SHAMapInnerNodeT: depth=", static_cast<int>(depth_),
+          ", version=", version_,
+          ", children=", (children_ ? "yes" : "no"),
+          ", this.refcount=", SHAMapTreeNodeT<Traits>::ref_count_.load());
+    // No need for lock in destructor - no concurrent access possible
+    if (children_) {
+        intrusive_ptr_release(children_);  // Release OUR ownership reference
+    }
 }
 
 template <typename Traits>
@@ -129,9 +150,10 @@ template <typename Traits>
 void
 SHAMapInnerNodeT<Traits>::invalidate_hash_recursive()
 {
+    auto children = get_children();
     for (int i = 0; i < 16; i++)
     {
-        if (auto child = children_->get_child(i))
+        if (auto child = children->get_child(i))
         {
             child->invalidate_hash();
             if (child->is_inner())
@@ -156,17 +178,20 @@ SHAMapInnerNodeT<Traits>::set_child(
         throw InvalidBranchException(branch);
     }
 
-    // it should be non-canonicalized
+    auto children = get_children();
+
     // Check if node is canonicalized - if yes, we need to make a copy first
     // When the map is mutable, with no copy-on-write, we need to make a copy
-    if (children_->is_canonical())
+    if (children->is_canonical())
     {
         // Create a non-canonicalized copy of children
-        children_ = children_->copy();
+        auto new_children = children->copy();
+        set_children(new_children);
+        children = new_children;  // Use the copy for modification
     }
 
     // Now safe to modify
-    children_->set_child(branch, child);
+    children->set_child(branch, child);
     this->invalidate_hash();  // Mark hash as invalid
     return true;
 }
@@ -180,7 +205,8 @@ SHAMapInnerNodeT<Traits>::get_child(int branch) const
         throw InvalidBranchException(branch);
     }
 
-    return children_->get_child(branch);
+    auto children = get_children();
+    return children->get_child(branch);
 }
 
 template <typename Traits>
@@ -192,36 +218,49 @@ SHAMapInnerNodeT<Traits>::has_child(int branch) const
         throw InvalidBranchException(branch);
     }
 
-    return children_->has_child(branch);
+    auto children = get_children();
+    return children->has_child(branch);
 }
 
 template <typename Traits>
 int
 SHAMapInnerNodeT<Traits>::get_branch_count() const
 {
-    return children_->get_child_count();
+    auto children = get_children();
+    return children->get_child_count();
 }
 
 template <typename Traits>
 uint16_t
 SHAMapInnerNodeT<Traits>::get_branch_mask() const
 {
-    return children_->get_branch_mask();
+    auto children = get_children();
+    return children->get_branch_mask();
 }
 
 template <typename Traits>
 boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
 SHAMapInnerNodeT<Traits>::get_only_child_leaf() const
 {
+    auto children = get_children();
+    if (!children)
+    {
+        return nullptr;  // No children object
+    }
+
     boost::intrusive_ptr<SHAMapLeafNodeT<Traits>> resultLeaf = nullptr;
     int leaf_count = 0;
 
     // Iterate through all branches
     for (int i = 0; i < 16; i++)
     {
-        if (children_->has_child(i))
+        if (children->has_child(i))
         {
-            auto child = children_->get_child(i);
+            auto child = children->get_child(i);
+            if (!child)
+            {
+                continue;  // Child was removed between has_child and get_child
+            }
             if (child->is_inner())
             {
                 return nullptr;  // Found inner node, not a leaf-only node
@@ -253,7 +292,8 @@ SHAMapInnerNodeT<Traits>::copy(int newVersion, SHAMapInnerNodeT<Traits>* parent)
         new SHAMapInnerNodeT<Traits>(true, depth_, newVersion));
 
     // Copy children - this creates a non-canonicalized copy
-    new_node->children_ = children_->copy();
+    auto children = get_children();
+    new_node->set_children(children->copy());
 
     // Copy other properties
     new_node->hash = this->hash;

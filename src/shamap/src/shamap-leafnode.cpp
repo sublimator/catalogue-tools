@@ -9,6 +9,7 @@
 #include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-innernode.h"
 #include "catl/shamap/shamap-leafnode.h"
+#include "catl/core/logger.h"
 
 #include "catl/shamap/shamap-hashprefix.h"
 #include <utility>
@@ -16,6 +17,10 @@
 using catl::crypto::Sha512HalfHasher;
 
 namespace catl::shamap {
+
+// External destructor logging partition
+extern LogPartition destructor_log;
+
 //----------------------------------------------------------
 // SHAMapLeafNodeT Implementation
 //----------------------------------------------------------
@@ -30,6 +35,16 @@ SHAMapLeafNodeT<Traits>::SHAMapLeafNodeT(
     {
         throw NullItemException();
     }
+}
+
+template <typename Traits>
+SHAMapLeafNodeT<Traits>::~SHAMapLeafNodeT()
+{
+    PLOGD(destructor_log, "~SHAMapLeafNodeT: version=", version,
+          ", type=", static_cast<int>(type),
+          ", item=", (item ? "yes" : "no"),
+          ", item.key=", (item ? item->key().hex().substr(0, 16) : "null"),
+          ", this.refcount=", SHAMapTreeNodeT<Traits>::ref_count_.load());
 }
 
 template <typename Traits>

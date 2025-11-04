@@ -114,6 +114,14 @@ public:
         if (!should_log(level))
             return;
 
+        log_internal(level, args...);
+    }
+
+    // Internal log that bypasses level check (for use by partitions)
+    template <typename... Args>
+    static void
+    log_internal(LogLevel level, const Args&... args)
+    {
         // Use a stringstream to format the message before locking
         std::ostringstream oss;
         oss << format_timestamp();
@@ -134,7 +142,7 @@ public:
                 break;
             case LogLevel::NONE:
             case LogLevel::INHERIT:
-                return;  // Should not happen due to shouldLog
+                return;  // Should not happen
         }
 
         // Use fold expression to append all arguments to the stream
@@ -230,7 +238,8 @@ log_with_partition_check(
         auto& partition = T::get_log_partition();
         if (partition.should_log(level))
         {
-            Logger::log(
+            // Use log_internal since partition already checked
+            Logger::log_internal(
                 level,
                 "[",
                 partition.name(),
@@ -256,6 +265,7 @@ log_with_partition_check(
 class LogPartition
 {
 public:
+    // Default to INHERIT so partitions follow global level unless overridden
     LogPartition(const std::string& name, LogLevel level = LogLevel::INHERIT)
         : name_(name), level_(level)
     {
@@ -277,6 +287,19 @@ public:
     set_level(LogLevel level)
     {
         level_ = level;
+    }
+
+    // Convenience methods for enabling/disabling
+    void enable(LogLevel level = LogLevel::DEBUG) {
+        level_ = level;
+    }
+
+    void disable() {
+        level_ = LogLevel::NONE;
+    }
+
+    void inherit() {
+        level_ = LogLevel::INHERIT;
     }
 
     bool
@@ -317,6 +340,25 @@ private:
 #define OLOGD(...)                    \
     detail::log_with_partition_check( \
         LogLevel::DEBUG, __RELATIVE_FILEPATH__, __LINE__, this, __VA_ARGS__)
+
+// Partition-specific logging macros - pass the partition as first arg
+// These use log_internal to bypass global level check since partition already checked
+#define PLOGE(partition, ...)                                         \
+    if ((partition).should_log(LogLevel::ERROR))                      \
+        Logger::log_internal(LogLevel::ERROR, "[", (partition).name(), "] ",   \
+                   __VA_ARGS__, " (", __RELATIVE_FILEPATH__, ":", __LINE__, ")")
+#define PLOGW(partition, ...)                                         \
+    if ((partition).should_log(LogLevel::WARNING))                    \
+        Logger::log_internal(LogLevel::WARNING, "[", (partition).name(), "] ", \
+                   __VA_ARGS__, " (", __RELATIVE_FILEPATH__, ":", __LINE__, ")")
+#define PLOGI(partition, ...)                                         \
+    if ((partition).should_log(LogLevel::INFO))                       \
+        Logger::log_internal(LogLevel::INFO, "[", (partition).name(), "] ",    \
+                   __VA_ARGS__, " (", __RELATIVE_FILEPATH__, ":", __LINE__, ")")
+#define PLOGD(partition, ...)                                         \
+    if ((partition).should_log(LogLevel::DEBUG))                      \
+        Logger::log_internal(LogLevel::DEBUG, "[", (partition).name(), "] ",   \
+                   __VA_ARGS__, " (", __RELATIVE_FILEPATH__, ":", __LINE__, ")")
 
 #define LOGE(...)              \
     Logger::log(               \

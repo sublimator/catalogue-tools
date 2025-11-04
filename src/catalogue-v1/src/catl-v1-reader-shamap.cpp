@@ -174,7 +174,7 @@ Reader::read_map_to_shamap(
     ops.nodes_processed =
         ops.nodes_added + ops.nodes_updated + ops.nodes_deleted;
 
-    LOGI(
+    LOGD(
         "Processed ",
         ops.nodes_processed,
         " nodes in SHAMap (",
@@ -532,7 +532,7 @@ Reader::read_map_with_shamap_owned_items(
     ops.nodes_processed =
         ops.nodes_added + ops.nodes_updated + ops.nodes_deleted;
 
-    LOGI(
+    LOGD(
         "Processed ",
         ops.nodes_processed,
         " nodes in SHAMap with owned items (",
