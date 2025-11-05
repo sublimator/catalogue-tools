@@ -45,12 +45,19 @@ SHAMapInnerNodeT<Traits>::SHAMapInnerNodeT(
 template <typename Traits>
 SHAMapInnerNodeT<Traits>::~SHAMapInnerNodeT()
 {
-    PLOGD(destructor_log, "~SHAMapInnerNodeT: depth=", static_cast<int>(depth_),
-          ", version=", version_,
-          ", children=", (children_ ? "yes" : "no"),
-          ", this.refcount=", SHAMapTreeNodeT<Traits>::ref_count_.load());
+    PLOGD(
+        destructor_log,
+        "~SHAMapInnerNodeT: depth=",
+        static_cast<int>(depth_),
+        ", version=",
+        version_,
+        ", children=",
+        (children_ ? "yes" : "no"),
+        ", this.refcount=",
+        SHAMapTreeNodeT<Traits>::ref_count_.load());
     // No need for lock in destructor - no concurrent access possible
-    if (children_) {
+    if (children_)
+    {
         intrusive_ptr_release(children_);  // Release OUR ownership reference
     }
 }
@@ -330,6 +337,49 @@ SHAMapInnerNodeT<Traits>::make_child(int depth) const
     }
     return boost::intrusive_ptr(
         new SHAMapInnerNodeT<Traits>(do_cow_, depth, version_));
+}
+
+template <typename Traits>
+size_t
+SHAMapInnerNodeT<Traits>::write_to_buffer(uint8_t* ptr) const
+{
+    // Inner node format: 16 concatenated hashes (32 bytes each = 512 bytes
+    // total) Empty children use zero hash
+    static const Hash256 zero_hash;  // Default constructed = all zeros
+
+    uint8_t* start = ptr;
+    auto children = get_children();
+
+    if (!children)
+    {
+        // No children - write 16 zero hashes
+        for (int i = 0; i < 16; ++i)
+        {
+            std::memcpy(ptr, zero_hash.data(), 32);
+            ptr += 32;
+        }
+        return 512;
+    }
+
+    // Write each of the 16 branch hashes
+    for (int i = 0; i < 16; ++i)
+    {
+        auto child = children->get_child(i);
+        if (child)
+        {
+            // Child exists - use its hash (must be computed already)
+            const Hash256& child_hash = child->valid_hash_or_throw();
+            std::memcpy(ptr, child_hash.data(), 32);
+        }
+        else
+        {
+            // No child - use zero hash
+            std::memcpy(ptr, zero_hash.data(), 32);
+        }
+        ptr += 32;
+    }
+
+    return ptr - start;  // Should always be 512
 }
 
 // Explicit template instantiation for default traits

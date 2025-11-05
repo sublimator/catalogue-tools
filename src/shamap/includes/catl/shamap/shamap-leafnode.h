@@ -58,6 +58,18 @@ public:
         return version;
     }
 
+    // Get serialized size - just the item data size for now
+    // TODO: May need to add metadata (type byte, varint size, etc.)
+    size_t
+    serialized_size() const override;
+
+    // Serialize leaf node to buffer for storage
+    // Format: just the raw item data for now
+    // TODO: May need to add metadata (type byte, varint size, etc.)
+    // Returns number of bytes written
+    size_t
+    write_to_buffer(uint8_t* ptr) const override;
+
 protected:
     template <typename T>
     friend class PathFinderT;

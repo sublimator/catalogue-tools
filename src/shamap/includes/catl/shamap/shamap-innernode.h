@@ -32,7 +32,8 @@ class SHAMapInnerNodeT : public SHAMapTreeNodeT<Traits>
 {
 private:
     NodeChildrenT<Traits>* children_;  // Plain pointer - spinlock protects it
-    mutable std::atomic_flag children_lock_ = ATOMIC_FLAG_INIT;  // Simple spinlock
+    mutable std::atomic_flag children_lock_ =
+        ATOMIC_FLAG_INIT;  // Simple spinlock
     uint8_t depth_ = 0;
     static LogPartition log_partition_;
     // CoW support
@@ -47,13 +48,15 @@ protected:
     get_children() const
     {
         // Acquire spinlock
-        while (children_lock_.test_and_set(std::memory_order_acquire)) {
+        while (children_lock_.test_and_set(std::memory_order_acquire))
+        {
             // Spin - could add pause instruction for better performance
         }
 
         // Now safe to access plain pointer - spinlock protects it
         auto* ptr = children_;  // Plain load
-        if (ptr) {
+        if (ptr)
+        {
             intrusive_ptr_add_ref(ptr);  // Add caller's reference
         }
 
@@ -65,17 +68,20 @@ protected:
     }
 
     void
-    set_children(const boost::intrusive_ptr<NodeChildrenT<Traits>>& new_children)
+    set_children(
+        const boost::intrusive_ptr<NodeChildrenT<Traits>>& new_children)
     {
         auto* new_ptr = new_children.get();
 
         // Add OUR ownership reference to the new children
-        if (new_ptr) {
+        if (new_ptr)
+        {
             intrusive_ptr_add_ref(new_ptr);
         }
 
         // Acquire spinlock
-        while (children_lock_.test_and_set(std::memory_order_acquire)) {
+        while (children_lock_.test_and_set(std::memory_order_acquire))
+        {
             // Spin
         }
 
@@ -87,7 +93,8 @@ protected:
         children_lock_.clear(std::memory_order_release);
 
         // Release OUR ownership reference to the old children (outside lock)
-        if (old_ptr) {
+        if (old_ptr)
+        {
             intrusive_ptr_release(old_ptr);
         }
     }
@@ -169,6 +176,25 @@ public:
     {
         return version_;  // .load(std::memory_order_acquire);
     }
+
+    // Get serialized size - inner nodes are 512 bytes (16 * 32), or 0 if empty
+    size_t
+    serialized_size() const override
+    {
+        // Empty inner nodes (no children) don't need to be stored
+        // They all hash to the same zero hash
+        if (get_branch_count() == 0)
+        {
+            return 0;
+        }
+        return 512;  // 16 hashes * 32 bytes each
+    }
+
+    // Serialize inner node to buffer for storage
+    // Format: 16 concatenated hashes (32 bytes each), using zero hash for empty
+    // children Returns number of bytes written (always 512)
+    size_t
+    write_to_buffer(uint8_t* ptr) const override;
 
 protected:
     template <typename T>

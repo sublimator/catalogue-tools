@@ -8,6 +8,9 @@
 #include "catl/xdata/protocol.h"
 #include <future>
 #include <memory>
+#include <nudb/basic_store.hpp>
+#include <nudb/posix_file.hpp>
+#include <nudb/xxhasher.hpp>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -124,6 +127,53 @@ public:
     void
     set_walk_nodes_debug_key(const std::string& key_hex);
 
+    /**
+     * Create and open the NuDB database
+     * @param path Directory path for the database files
+     * @param key_size Size of keys in bytes (default 32)
+     * @param block_size Block size for database (default 4096)
+     * @param load_factor Load factor 0.0-1.0 (default 0.5)
+     * @return true on success
+     */
+    bool
+    create_database(
+        const std::string& path,
+        uint32_t key_size = 32,
+        uint32_t block_size = 4096,
+        double load_factor = 0.5);
+
+    /**
+     * Open an existing NuDB database (does not create/remove files)
+     * @param path Directory path for the database files
+     * @return true on success
+     */
+    bool
+    open_database(const std::string& path);
+
+    /**
+     * Close the NuDB database (flushes final in-memory pool)
+     * @return true on success, false if close failed
+     */
+    bool
+    close_database();
+
+    /**
+     * Verify all inserted keys are readable from NuDB
+     * @param num_threads Number of threads to use for verification (default 8)
+     * @return true if all keys are readable, false if any are missing
+     */
+    bool
+    verify_all_keys(int num_threads = 8);
+
+    /**
+     * Get total bytes written to NuDB
+     */
+    uint64_t
+    get_total_bytes_written() const
+    {
+        return total_bytes_written_.load();
+    }
+
 private:
     shamap::SHAMapOptions map_options_;
     catl::xdata::Protocol protocol_;  // Protocol definitions for JSON parsing
@@ -134,6 +184,33 @@ private:
     std::optional<std::string>
         walk_nodes_debug_key_;  // Key prefix (hex) to debug
 
+    // NuDB store (use xxhasher like xahaud)
+    using store_type =
+        ::nudb::basic_store<::nudb::xxhasher, ::nudb::posix_file>;
+    std::unique_ptr<store_type> db_;
+    std::string db_path_;
+
+    // Track total bytes written to NuDB for stats
+    std::atomic<uint64_t> total_bytes_written_{0};
+
+    // Custom hasher for Hash256 using xxhasher (same as NuDB)
+    struct Hash256Hasher
+    {
+        std::size_t
+        operator()(const Hash256& key) const noexcept
+        {
+            // Use xxhasher to hash the 32-byte key (seed = 0)
+            ::nudb::xxhasher h(0);
+            return static_cast<std::size_t>(h(key.data(), key.size()));
+        }
+    };
+
+    // Track inserted keys with their sizes for deduplication and verification
+    // (faster than letting NuDB check for duplicates, and allows size
+    // verification)
+    std::unordered_map<Hash256, size_t, Hash256Hasher>
+        inserted_keys_with_sizes_;
+
     // Helper function to hash a SHAMap using thread pool (or direct for single
     // thread) NOTE: Performance testing revealed that single-threaded hashing
     // often outperforms multi-threaded due to thread coordination overhead
@@ -142,6 +219,10 @@ private:
     // Multi-threading is still available for experimentation.
     Hash256
     parallel_hash(const std::shared_ptr<shamap::SHAMap>& map);
+
+    // Helper to write a node to NuDB
+    void
+    flush_node(const Hash256& key, const uint8_t* data, size_t size);
 };
 
 }  // namespace catl::v1::utils::nudb

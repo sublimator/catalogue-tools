@@ -11,9 +11,11 @@
 #include "catl/xdata/parser-context.h"
 #include "catl/xdata/parser.h"
 #include "catl/xdata/protocol.h"
+#include <boost/filesystem.hpp>
 #include <boost/json.hpp>
 #include <chrono>
 #include <iostream>
+#include <nudb/create.hpp>
 #include <stdexcept>
 
 namespace catl::v1::utils::nudb {
@@ -54,6 +56,372 @@ CatlNudbPipeline::set_walk_nodes_debug_key(const std::string& key_hex)
 {
     walk_nodes_debug_key_ = key_hex;
     LOGD("Set walk_nodes_debug_key to ", key_hex);
+}
+
+bool
+CatlNudbPipeline::create_database(
+    const std::string& path,
+    uint32_t key_size,
+    uint32_t block_size,
+    double load_factor)
+{
+    namespace fs = boost::filesystem;
+
+    db_path_ = path;
+
+    // Create directory if needed
+    fs::path dir(path);
+    if (!fs::exists(dir))
+    {
+        LOGI("Creating NuDB directory: ", path);
+        fs::create_directories(dir);
+    }
+
+    // NuDB file paths
+    fs::path dat_path = dir / "nudb.dat";
+    fs::path key_path = dir / "nudb.key";
+    fs::path log_path = dir / "nudb.log";
+
+    // Remove existing database files if they exist
+    if (fs::exists(dat_path) || fs::exists(key_path) || fs::exists(log_path))
+    {
+        LOGI("Removing existing NuDB database files...");
+
+        if (fs::exists(dat_path))
+        {
+            fs::remove(dat_path);
+        }
+        if (fs::exists(key_path))
+        {
+            fs::remove(key_path);
+        }
+        if (fs::exists(log_path))
+        {
+            fs::remove(log_path);
+        }
+    }
+
+    // Create the database
+    ::nudb::error_code ec;
+    ::nudb::create<::nudb::xxhasher, ::nudb::posix_file>(
+        dat_path.string(),
+        key_path.string(),
+        log_path.string(),
+        1,           // appnum
+        0xABADCAFE,  // salt (arbitrary value for now)
+        key_size,
+        block_size,
+        load_factor,
+        ec);
+
+    if (ec)
+    {
+        LOGE("Failed to create NuDB database: ", ec.message());
+        return false;
+    }
+
+    LOGI("Created NuDB database at: ", path);
+    LOGI("  key_size: ", key_size, " bytes");
+    LOGI("  block_size: ", block_size);
+    LOGI("  load_factor: ", load_factor);
+
+    // Open the database
+    db_ = std::make_unique<
+        ::nudb::basic_store<::nudb::xxhasher, ::nudb::posix_file>>();
+    db_->open(dat_path.string(), key_path.string(), log_path.string(), ec);
+
+    if (ec)
+    {
+        LOGE("Failed to open NuDB database: ", ec.message());
+        db_.reset();
+        return false;
+    }
+
+    LOGI("Opened NuDB database successfully");
+
+    // Set a large burst size to avoid rate-limiter throttling
+    // This allows the in-memory pool to grow large before flushing to disk
+    // enabling much more efficient batched writes
+    constexpr std::size_t burst_size = 1024 * 1024 * 1024;  // 1GB
+    db_->set_burst(burst_size);
+    LOGI("Set burst size to ", burst_size / 1024 / 1024, " MB");
+
+    return true;
+}
+
+bool
+CatlNudbPipeline::open_database(const std::string& path)
+{
+    namespace fs = boost::filesystem;
+
+    db_path_ = path;
+
+    // NuDB file paths
+    fs::path dir(path);
+    fs::path dat_path = dir / "nudb.dat";
+    fs::path key_path = dir / "nudb.key";
+    fs::path log_path = dir / "nudb.log";
+
+    // Verify essential files exist (dat and key)
+    // Note: log file may not exist after clean close (it's only for crash
+    // recovery)
+    if (!fs::exists(dat_path) || !fs::exists(key_path))
+    {
+        LOGE("NuDB database files not found at: ", path);
+        LOGE("  dat exists: ", fs::exists(dat_path));
+        LOGE("  key exists: ", fs::exists(key_path));
+        LOGE("  log exists: ", fs::exists(log_path), " (optional)");
+        return false;
+    }
+
+    // Open the existing database
+    db_ = std::make_unique<
+        ::nudb::basic_store<::nudb::xxhasher, ::nudb::posix_file>>();
+    ::nudb::error_code ec;
+    db_->open(dat_path.string(), key_path.string(), log_path.string(), ec);
+
+    if (ec)
+    {
+        LOGE("Failed to open NuDB database: ", ec.message());
+        db_.reset();
+        return false;
+    }
+
+    LOGI("Opened existing NuDB database at: ", path);
+    return true;
+}
+
+bool
+CatlNudbPipeline::close_database()
+{
+    if (db_)
+    {
+        // Close database - this flushes the final in-memory pool to disk
+        LOGI("Closing NuDB database (flushing final batch)...");
+        ::nudb::error_code ec;
+        db_->close(ec);
+
+        if (ec)
+        {
+            LOGE("FATAL: Error closing NuDB database: ", ec.message());
+            LOGE("Final batch may not have been flushed to disk!");
+            db_.reset();
+            return false;
+        }
+
+        LOGI("✅ Closed NuDB database successfully (final batch flushed)");
+        db_.reset();
+        return true;
+    }
+
+    // Database was never opened
+    return true;
+}
+
+bool
+CatlNudbPipeline::verify_all_keys(int num_threads)
+{
+    if (!db_)
+    {
+        LOGE("Cannot verify - database not open");
+        return false;
+    }
+
+    size_t total_keys = inserted_keys_with_sizes_.size();
+    LOGI(
+        "Verifying all ",
+        total_keys,
+        " inserted keys with ",
+        num_threads,
+        " threads...");
+
+    // Convert unordered_map to vector of (key, size) pairs for easy
+    // partitioning
+    LOGI("Converting key map to vector for partitioning...");
+    std::vector<std::pair<Hash256, size_t>> keys_vec;
+    keys_vec.reserve(inserted_keys_with_sizes_.size());
+    for (const auto& [key, size] : inserted_keys_with_sizes_)
+    {
+        keys_vec.emplace_back(key, size);
+    }
+    LOGI("Converted ", keys_vec.size(), " keys with sizes");
+
+    // Atomic counters for thread-safe tracking
+    std::atomic<size_t> verified_count{0};
+    std::atomic<size_t> missing_count{0};
+    std::atomic<size_t> size_mismatch_count{0};
+    std::atomic<size_t> progress_count{0};
+    std::atomic<uint64_t> total_bytes_verified{0};
+
+    auto start_time = std::chrono::steady_clock::now();
+
+    // Lambda for each thread to verify its chunk
+    auto verify_chunk = [&](size_t start_idx, size_t end_idx, int thread_id) {
+        size_t local_verified = 0;
+        size_t local_missing = 0;
+        size_t local_size_mismatch = 0;
+        uint64_t local_bytes = 0;
+
+        for (size_t i = start_idx; i < end_idx; ++i)
+        {
+            const Hash256& key = keys_vec[i].first;
+            size_t expected_size = keys_vec[i].second;
+
+            // Try to fetch this key from NuDB and check size
+            ::nudb::error_code ec;
+            size_t actual_size = 0;
+            db_->fetch(
+                key.data(),
+                [&actual_size](void const* /*data*/, std::size_t size) {
+                    actual_size = size;
+                },
+                ec);
+
+            if (ec)
+            {
+                if (ec == ::nudb::error::key_not_found)
+                {
+                    LOGE(
+                        "[Thread ",
+                        thread_id,
+                        "] Key NOT FOUND: ",
+                        key.hex().substr(0, 16),
+                        "...");
+                }
+                else
+                {
+                    LOGE(
+                        "[Thread ",
+                        thread_id,
+                        "] Error fetching key ",
+                        key.hex().substr(0, 16),
+                        "...: ",
+                        ec.message());
+                }
+                local_missing++;
+            }
+            else if (actual_size != expected_size)
+            {
+                LOGE(
+                    "[Thread ",
+                    thread_id,
+                    "] SIZE MISMATCH for key ",
+                    key.hex().substr(0, 16),
+                    "... expected ",
+                    expected_size,
+                    " bytes, got ",
+                    actual_size,
+                    " bytes");
+                local_size_mismatch++;
+            }
+            else
+            {
+                local_verified++;
+                local_bytes += expected_size;
+            }
+
+            // Update progress every 50k keys per thread
+            if ((local_verified + local_missing + local_size_mismatch) %
+                    50000 ==
+                0)
+            {
+                size_t current_progress =
+                    progress_count.fetch_add(50000) + 50000;
+                if (current_progress % 100000 == 0)
+                {
+                    LOGI(
+                        "Progress: ",
+                        current_progress,
+                        " / ",
+                        total_keys,
+                        " keys verified");
+                }
+            }
+        }
+
+        // Add local counts to global atomics
+        verified_count.fetch_add(local_verified);
+        missing_count.fetch_add(local_missing);
+        size_mismatch_count.fetch_add(local_size_mismatch);
+        total_bytes_verified.fetch_add(local_bytes);
+    };
+
+    // Partition work across threads
+    std::vector<std::thread> threads;
+    size_t keys_per_thread = total_keys / num_threads;
+    size_t remainder = total_keys % num_threads;
+
+    LOGI("Launching ", num_threads, " verification threads...");
+    LOGI("  ~", keys_per_thread, " keys per thread");
+
+    for (int i = 0; i < num_threads; ++i)
+    {
+        size_t i_size = static_cast<size_t>(i);
+        size_t start_idx =
+            i_size * keys_per_thread + std::min(i_size, remainder);
+        size_t end_idx =
+            start_idx + keys_per_thread + (i_size < remainder ? 1 : 0);
+
+        threads.emplace_back(verify_chunk, start_idx, end_idx, i);
+    }
+
+    // Wait for all threads to complete
+    for (auto& thread : threads)
+    {
+        thread.join();
+    }
+
+    auto end_time = std::chrono::steady_clock::now();
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          end_time - start_time)
+                          .count();
+    double keys_per_sec = elapsed_ms > 0
+        ? static_cast<double>(total_keys) * 1000.0 / elapsed_ms
+        : 0;
+    double bytes_per_sec = elapsed_ms > 0
+        ? static_cast<double>(total_bytes_verified.load()) * 1000.0 / elapsed_ms
+        : 0;
+
+    LOGI("========================================");
+    LOGI("Verification Complete:");
+    LOGI("  - Keys verified: ", verified_count.load());
+    LOGI("  - Keys missing: ", missing_count.load());
+    LOGI("  - Size mismatches: ", size_mismatch_count.load());
+    LOGI("  - Threads used: ", num_threads);
+    LOGI(
+        "  - Time: ",
+        std::fixed,
+        std::setprecision(3),
+        elapsed_ms / 1000.0,
+        " seconds");
+    LOGI(
+        "  - Speed: ",
+        std::fixed,
+        std::setprecision(2),
+        keys_per_sec,
+        " keys/sec, ",
+        bytes_per_sec / 1024 / 1024,
+        " MB/sec");
+    LOGI("  - Total data: ", total_bytes_verified.load() / 1024 / 1024, " MB");
+    LOGI("========================================");
+
+    size_t total_errors = missing_count.load() + size_mismatch_count.load();
+    if (total_errors > 0)
+    {
+        LOGE("⚠️  VERIFICATION FAILED - ", total_errors, " errors found!");
+        if (missing_count.load() > 0)
+        {
+            LOGE("  - ", missing_count.load(), " keys missing");
+        }
+        if (size_mismatch_count.load() > 0)
+        {
+            LOGE("  - ", size_mismatch_count.load(), " size mismatches");
+        }
+        return false;
+    }
+
+    LOGI("✅ All keys verified successfully (existence + size)!");
+    return true;
 }
 
 Hash256
@@ -309,80 +677,73 @@ CatlNudbPipeline::hash_and_verify(LedgerSnapshot snapshot)
         snapshot.processing_version};
 }
 
-// Mock flush interface for now - will be replaced with actual NuDB writes
-static void
-flush_node(const Hash256& key, const std::vector<uint8_t>& value)
+// Write a node to NuDB
+void
+CatlNudbPipeline::flush_node(
+    const Hash256& key,
+    const uint8_t* data,
+    size_t size)
 {
-    // For now, just log what we would write
-    static size_t total_nodes = 0;
-    static size_t total_bytes = 0;
+    if (!db_)
+    {
+        LOGE("Cannot flush - database not open");
+        return;
+    }
 
-    total_nodes++;
-    total_bytes += value.size();
+    static size_t total_attempts = 0;
+    static size_t total_inserts = 0;
+    static size_t duplicates = 0;
 
-    // Log every 10000th node to avoid spam
-    if (total_nodes % 10000 == 0)
+    total_attempts++;
+
+    // Check if we've already inserted this key
+    auto it = inserted_keys_with_sizes_.find(key);
+    if (it != inserted_keys_with_sizes_.end())
+    {
+        // Already inserted - skip it
+        duplicates++;
+        return;
+    }
+
+    // Track for stats
+    total_bytes_written_ += size;
+
+    // Insert into NuDB with no_check_exists flag (we're deduplicating
+    // ourselves)
+    ::nudb::error_code ec;
+    db_->insert(
+        key.data(), data, size, ec, ::nudb::insert_flags::no_check_exists);
+
+    if (ec)
+    {
+        LOGE(
+            "Failed to insert node - key: ",
+            key.hex().substr(0, 16),
+            "... size: ",
+            size,
+            " error: ",
+            ec.message());
+        throw std::runtime_error("NuDB insert failed: " + ec.message());
+    }
+
+    // Success - add key and size to our tracking map
+    inserted_keys_with_sizes_[key] = size;
+    total_inserts++;
+
+    // Log progress every 10000 successful inserts
+    if (total_inserts % 10000 == 0)
     {
         LOGD(
-            "Would flush node ",
-            total_nodes,
-            " - key: ",
-            key.hex().substr(0, 16),
-            "...",
-            " value_size: ",
-            value.size(),
-            " bytes",
-            " (total: ",
-            total_bytes / 1024,
-            " KB)");
+            "Flushed ",
+            total_inserts,
+            " nodes (",
+            total_bytes_written_.load() / 1024,
+            " KB, ",
+            duplicates,
+            " dups, ",
+            (duplicates * 100 / total_attempts),
+            "%)");
     }
-}
-
-// Helper to serialize an inner node
-static std::vector<uint8_t>
-serialize_inner_node(
-    const boost::intrusive_ptr<catl::shamap::SHAMapInnerNode>& inner,
-    const catl::shamap::SHAMapOptions& options)
-{
-    std::vector<uint8_t> data;
-
-    // Simple format: [branch_mask_16bits][hash1][hash2]...[hashN]
-    // Get branch mask (which children exist)
-    uint16_t branch_mask = inner->get_branch_mask();
-    data.push_back((branch_mask >> 8) & 0xFF);
-    data.push_back(branch_mask & 0xFF);
-
-    // Add hash for each existing child
-    for (int i = 0; i < 16; ++i)
-    {
-        if (branch_mask & (1 << i))
-        {
-            auto child = inner->get_child(i);
-            if (child)
-            {
-                Hash256 child_hash = child->get_hash(options);
-                data.insert(
-                    data.end(), child_hash.data(), child_hash.data() + 32);
-            }
-        }
-    }
-
-    return data;
-}
-
-// Helper to serialize a leaf node
-static std::vector<uint8_t>
-serialize_leaf_node(
-    const boost::intrusive_ptr<catl::shamap::SHAMapLeafNode>& leaf)
-{
-    // Simple format: just the raw item data
-    auto item = leaf->get_item();
-    if (item)
-    {
-        return std::vector<uint8_t>(
-            item->slice().data(), item->slice().data() + item->slice().size());
-    }
-    return {};
 }
 
 bool
@@ -421,6 +782,7 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
     size_t state_leaf_count = 0;
     size_t tx_inner_count = 0;
     size_t tx_leaf_count = 0;
+    size_t empty_inner_count = 0;
 
     // Flush only NEW nodes from state map (nodes with processing_version)
     if (hashed.state_snapshot)
@@ -462,31 +824,49 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
                     node) {
                 if (node->is_inner())
                 {
-                    auto inner = boost::static_pointer_cast<
-                        catl::shamap::SHAMapInnerNode>(node);
-                    std::vector<uint8_t> serialized =
-                        serialize_inner_node(inner, map_options_);
+                    // Inner node: 512 bytes or 0 if empty (no children)
+                    size_t size = node->serialized_size();
+                    if (size == 0)
+                    {
+                        // Empty inner node - skip it (all empty nodes hash to
+                        // zero)
+                        empty_inner_count++;
+                        return true;
+                    }
+
+                    std::array<uint8_t, 512> buffer;
+                    size_t written = node->write_to_buffer(buffer.data());
                     state_inner_count++;
-                    flush_node(node->get_hash(map_options_), serialized);
+                    flush_node(
+                        node->get_hash(map_options_), buffer.data(), written);
                 }
                 else if (node->is_leaf())
                 {
-                    auto leaf = boost::static_pointer_cast<
-                        catl::shamap::SHAMapLeafNode>(node);
-                    std::vector<uint8_t> serialized = serialize_leaf_node(leaf);
-                    state_leaf_count++;
-                    flush_node(node->get_hash(map_options_), serialized);
-
-                    // Debug: Check if this leaf has a valid item
-                    auto item = leaf->get_item();
-                    if (!item)
+                    // Leaf node: variable size based on item data
+                    size_t size = node->serialized_size();
+                    if (size == 0)
                     {
                         LOGE(
                             "    WARNING: Leaf #",
-                            state_leaf_count,
-                            " has NULL item!");
+                            state_leaf_count + 1,
+                            " has 0 serialized size!");
+                        return true;  // Continue walking
                     }
-                    else if (walk_nodes_debug_key_)
+
+                    // Allocate and serialize
+                    std::vector<uint8_t> buffer(size);
+                    size_t written = node->write_to_buffer(buffer.data());
+                    state_leaf_count++;
+                    flush_node(
+                        node->get_hash(map_options_), buffer.data(), written);
+
+                    auto leaf = boost::static_pointer_cast<
+                        catl::shamap::SHAMapLeafNode>(node);
+                    auto item = leaf->get_item();
+
+                    // Debug: Check if this leaf's key matches the debug key
+                    // prefix
+                    if (walk_nodes_debug_key_)
                     {
                         // Check if this leaf's key matches the debug key prefix
                         std::string key_hex = item->key().hex();
@@ -552,7 +932,9 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
             state_leaf_count,
             " leaves, ",
             state_inner_count,
-            " inner nodes");
+            " inner nodes, ",
+            empty_inner_count,
+            " empty (skipped)");
 
         // Inner nodes are created/modified when leaves are added/updated
         // So we expect some inner nodes with the processing_version too
@@ -591,22 +973,33 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
                                           catl::shamap::SHAMapTreeNode>& node) {
             if (node->is_inner())
             {
-                auto inner =
-                    boost::static_pointer_cast<catl::shamap::SHAMapInnerNode>(
-                        node);
-                std::vector<uint8_t> serialized =
-                    serialize_inner_node(inner, map_options_);
-                tx_inner_count++;
-                flush_node(node->get_hash(map_options_), serialized);
+                // Inner node: 512 bytes or 0 if empty
+                size_t size = node->serialized_size();
+                if (size == 0)
+                {
+                    empty_inner_count++;
+                }
+                else
+                {
+                    std::array<uint8_t, 512> buffer;
+                    size_t written = node->write_to_buffer(buffer.data());
+                    tx_inner_count++;
+                    flush_node(
+                        node->get_hash(map_options_), buffer.data(), written);
+                }
             }
             else if (node->is_leaf())
             {
-                auto leaf =
-                    boost::static_pointer_cast<catl::shamap::SHAMapLeafNode>(
-                        node);
-                std::vector<uint8_t> serialized = serialize_leaf_node(leaf);
-                tx_leaf_count++;
-                flush_node(node->get_hash(map_options_), serialized);
+                // Leaf node: variable size
+                size_t size = node->serialized_size();
+                if (size > 0)
+                {
+                    std::vector<uint8_t> buffer(size);
+                    size_t written = node->write_to_buffer(buffer.data());
+                    tx_leaf_count++;
+                    flush_node(
+                        node->get_hash(map_options_), buffer.data(), written);
+                }
             }
             return true;  // Continue walking
         });
@@ -616,7 +1009,9 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
             tx_leaf_count,
             " leaves, ",
             tx_inner_count,
-            " inner nodes");
+            " inner nodes (+ ",
+            empty_inner_count,
+            " empty total)");
         if (tx_leaf_count != hashed.tx_ops.nodes_added)
         {
             LOGW(

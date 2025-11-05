@@ -199,6 +199,18 @@ public:
                     *options_.walk_nodes_debug_key);
             }
 
+            // Create NuDB database
+            LOGI("Creating NuDB database...");
+            if (!pipeline.create_database(
+                    *options_.nudb_path,
+                    options_.key_size,
+                    options_.block_size,
+                    options_.load_factor))
+            {
+                LOGE("Failed to create NuDB database");
+                return false;
+            }
+
             // Create SPSC queues between stages
             // Queue sizes are configured by constants for consistent reporting
             boost::lockfree::spsc_queue<LedgerSnapshot> snapshot_queue(
@@ -250,11 +262,16 @@ public:
 
                     // Stats tracking
                     auto start_time = std::chrono::steady_clock::now();
+                    auto last_stats_time = start_time;
                     uint64_t total_state_nodes_added = 0;
                     uint64_t total_state_nodes_updated = 0;
                     uint64_t total_state_nodes_deleted = 0;
                     uint64_t total_tx_nodes_added = 0;
                     uint32_t last_stats_ledger = start_ledger;
+                    uint32_t queue_full_waits = 0;
+                    uint32_t last_queue_full_waits = 0;
+                    uint64_t last_bytes_written = 0;
+                    uint64_t last_bytes_read = 0;
 
                     for (uint32_t ledger_seq = start_ledger;
                          ledger_seq <= end_ledger;
@@ -349,12 +366,28 @@ public:
                                 std::chrono::duration_cast<
                                     std::chrono::seconds>(now - start_time)
                                     .count();
+                            auto period_elapsed_ms =
+                                std::chrono::duration_cast<
+                                    std::chrono::milliseconds>(
+                                    now - last_stats_time)
+                                    .count();
                             uint32_t ledgers_processed =
                                 ledger_seq - start_ledger;
                             uint64_t total_nodes = total_state_nodes_added +
                                 total_state_nodes_updated +
                                 total_state_nodes_deleted +
                                 total_tx_nodes_added;
+
+                            // Get NuDB bytes written and CATL bytes read
+                            uint64_t current_bytes_written =
+                                pipeline.get_total_bytes_written();
+                            uint64_t period_bytes_written =
+                                current_bytes_written - last_bytes_written;
+
+                            uint64_t current_bytes_read =
+                                reader.body_bytes_consumed();
+                            uint64_t period_bytes_read =
+                                current_bytes_read - last_bytes_read;
 
                             double ledgers_per_sec = elapsed > 0
                                 ? static_cast<double>(ledgers_processed) /
@@ -363,6 +396,20 @@ public:
                             double nodes_per_sec = elapsed > 0
                                 ? static_cast<double>(total_nodes) / elapsed
                                 : 0;
+                            // Use milliseconds for period calculations to
+                            // handle fast processing
+                            double write_bytes_per_sec = period_elapsed_ms > 0
+                                ? static_cast<double>(period_bytes_written) *
+                                    1000.0 / period_elapsed_ms
+                                : 0;
+                            double read_bytes_per_sec = period_elapsed_ms > 0
+                                ? static_cast<double>(period_bytes_read) *
+                                    1000.0 / period_elapsed_ms
+                                : 0;
+
+                            last_bytes_written = current_bytes_written;
+                            last_bytes_read = current_bytes_read;
+                            last_stats_time = now;
 
                             size_t snapshot_depth =
                                 snapshot_queue.read_available();
@@ -382,6 +429,22 @@ public:
                                 " ledgers/sec, ",
                                 nodes_per_sec,
                                 " nodes/sec");
+                            LOGI(
+                                "   - CATL read: ",
+                                std::fixed,
+                                std::setprecision(2),
+                                read_bytes_per_sec / 1024 / 1024,
+                                " MB/sec (",
+                                current_bytes_read / 1024 / 1024,
+                                " MB total)");
+                            LOGI(
+                                "   - NuDB write: ",
+                                std::fixed,
+                                std::setprecision(2),
+                                write_bytes_per_sec / 1024 / 1024,
+                                " MB/sec (",
+                                current_bytes_written / 1024 / 1024,
+                                " MB total)");
 
                             LOGI("📦 Queue depths:");
                             LOGI(
@@ -397,6 +460,36 @@ public:
                             LOGI(
                                 "   - Total snapshots in memory: ",
                                 snapshot_depth + hashed_depth);
+
+                            uint32_t ledgers_in_period =
+                                ledger_seq - last_stats_ledger;
+                            uint32_t period_waits =
+                                queue_full_waits - last_queue_full_waits;
+                            uint32_t period_no_waits =
+                                ledgers_in_period - period_waits;
+
+                            // Cumulative stats
+                            uint32_t total_ledgers = ledger_seq - start_ledger;
+                            uint32_t total_no_waits =
+                                total_ledgers - queue_full_waits;
+
+                            if (period_waits > 0 || queue_full_waits > 0)
+                            {
+                                LOGI(
+                                    "⚠️  Backpressure: ",
+                                    period_waits,
+                                    " / ",
+                                    period_no_waits,
+                                    " (last ",
+                                    ledgers_in_period,
+                                    ") | ",
+                                    queue_full_waits,
+                                    " / ",
+                                    total_no_waits,
+                                    " (all)");
+                            }
+
+                            last_queue_full_waits = queue_full_waits;
 
                             LOGI("🗺️  Accumulated Node Operations:");
                             LOGI(
@@ -416,17 +509,15 @@ public:
                         }
 
                         // Push to queue (blocking if full)
+                        bool had_to_wait = false;
                         while (!snapshot_queue.push(*snapshot))
                         {
-                            // Queue is full - log if we're waiting
-                            if (ledger_seq % 100 == 0)
-                            {
-                                LOGW(
-                                    "[Builder] Queue FULL at ledger ",
-                                    ledger_seq,
-                                    " - waiting for hasher...");
-                            }
+                            had_to_wait = true;
                             std::this_thread::yield();
+                        }
+                        if (had_to_wait)
+                        {
+                            queue_full_waits++;
                         }
                     }
 
@@ -580,6 +671,34 @@ public:
                 " to ",
                 end_ledger);
             LOGI("========================================");
+
+            // Close NuDB database (this flushes final in-memory pool to disk)
+            LOGI("\nClosing database to flush final batch...");
+            if (!pipeline.close_database())
+            {
+                LOGE("Failed to close NuDB database!");
+                return false;
+            }
+
+            // Reopen database for verification
+            LOGI("Reopening database for verification...");
+            if (!pipeline.open_database(*options_.nudb_path))
+            {
+                LOGE("Failed to reopen NuDB database for verification!");
+                return false;
+            }
+
+            // Verify all keys are readable from NuDB (using 8 threads)
+            LOGI("\nVerifying NuDB database integrity...");
+            if (!pipeline.verify_all_keys(8))
+            {
+                LOGE("Database verification failed!");
+                pipeline.close_database();  // Close before returning
+                return false;
+            }
+
+            // Final close
+            pipeline.close_database();
 
             return true;
         }
