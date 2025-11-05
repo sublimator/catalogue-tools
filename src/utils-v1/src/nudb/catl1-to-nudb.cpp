@@ -199,6 +199,12 @@ public:
                     *options_.walk_nodes_debug_key);
             }
 
+            // Configure mock mode if enabled
+            if (!options_.nudb_mock.empty())
+            {
+                pipeline.set_mock_mode(options_.nudb_mock);
+            }
+
             // Create NuDB database
             LOGI("Creating NuDB database...");
             if (!pipeline.create_database(

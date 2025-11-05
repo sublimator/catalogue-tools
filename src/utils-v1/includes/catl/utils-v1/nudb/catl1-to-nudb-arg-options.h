@@ -36,7 +36,8 @@ struct Catl1ToNudbOptions
     /** NuDB block size */
     uint32_t block_size = 4096;
 
-    /** NuDB load factor (0.0 - 1.0) */
+    /** NuDB load factor (0.0 - 1.0) - lower = faster, higher = more space
+     * efficient */
     double load_factor = 0.5;
 
     /** Log level (error, warn, info, debug) */
@@ -62,6 +63,13 @@ struct Catl1ToNudbOptions
 
     /** Debug key prefix (hex) to print detailed info during walk_nodes */
     std::optional<std::string> walk_nodes_debug_key;
+
+    /** Mock NuDB mode - for performance testing. Options:
+     *  - "" (empty/disabled): Use real NuDB
+     *  - "noop" or "memory": Skip all I/O operations
+     *  - "disk": Write keys/values to buffered append-only file
+     */
+    std::string nudb_mock = "";
 
     /** Whether to display help information */
     bool show_help = false;

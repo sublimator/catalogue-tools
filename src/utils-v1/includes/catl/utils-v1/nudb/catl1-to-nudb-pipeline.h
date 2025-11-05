@@ -6,6 +6,7 @@
 #include "catl/v1/catl-v1-reader.h"
 #include "catl/v1/catl-v1-types.h"  // For MapOperations
 #include "catl/xdata/protocol.h"
+#include <fstream>
 #include <future>
 #include <memory>
 #include <nudb/basic_store.hpp>
@@ -128,6 +129,15 @@ public:
     set_walk_nodes_debug_key(const std::string& key_hex);
 
     /**
+     * Enable mock mode - skip or redirect database operations (for performance
+     * testing)
+     * @param mode "noop"/"memory" = skip all I/O, "disk" = buffered append-only
+     * file
+     */
+    void
+    set_mock_mode(const std::string& mode);
+
+    /**
      * Create and open the NuDB database
      * @param path Directory path for the database files
      * @param key_size Size of keys in bytes (default 32)
@@ -182,13 +192,17 @@ private:
     std::optional<uint32_t>
         walk_nodes_ledger_;  // Ledger to debug with walk_nodes
     std::optional<std::string>
-        walk_nodes_debug_key_;  // Key prefix (hex) to debug
+        walk_nodes_debug_key_;    // Key prefix (hex) to debug
+    std::string mock_mode_ = "";  // Mock mode: "", "noop", "memory", or "disk"
 
     // NuDB store (use xxhasher like xahaud)
     using store_type =
         ::nudb::basic_store<::nudb::xxhasher, ::nudb::posix_file>;
     std::unique_ptr<store_type> db_;
     std::string db_path_;
+
+    // Mock mode "disk" - buffered file for append-only writes
+    std::unique_ptr<std::ofstream> mock_disk_file_;
 
     // Track total bytes written to NuDB for stats
     std::atomic<uint64_t> total_bytes_written_{0};

@@ -14,6 +14,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/json.hpp>
 #include <chrono>
+#include <fstream>
 #include <iostream>
 #include <nudb/create.hpp>
 #include <stdexcept>
@@ -58,6 +59,20 @@ CatlNudbPipeline::set_walk_nodes_debug_key(const std::string& key_hex)
     LOGD("Set walk_nodes_debug_key to ", key_hex);
 }
 
+void
+CatlNudbPipeline::set_mock_mode(const std::string& mode)
+{
+    mock_mode_ = mode;
+    if (mode == "noop" || mode == "memory")
+    {
+        LOGI("Mock mode: ", mode, " - skipping all I/O operations");
+    }
+    else if (mode == "disk")
+    {
+        LOGI("Mock mode: disk - buffered append-only file writes");
+    }
+}
+
 bool
 CatlNudbPipeline::create_database(
     const std::string& path,
@@ -68,6 +83,56 @@ CatlNudbPipeline::create_database(
     namespace fs = boost::filesystem;
 
     db_path_ = path;
+
+    // Handle mock modes
+    if (!mock_mode_.empty())
+    {
+        if (mock_mode_ == "noop" || mock_mode_ == "memory")
+        {
+            LOGI("Mock mode (", mock_mode_, "): skipping database creation");
+            return true;
+        }
+        else if (mock_mode_ == "disk")
+        {
+            // Create directory if needed
+            fs::path dir(path);
+            if (!fs::exists(dir))
+            {
+                LOGI("Creating mock disk directory: ", path);
+                fs::create_directories(dir);
+            }
+
+            // Open buffered append-only file
+            fs::path mock_file = dir / "mock_disk.bin";
+            LOGI(
+                "Mock mode (disk): creating buffered file at ",
+                mock_file.string());
+
+            // Remove existing file if it exists
+            if (fs::exists(mock_file))
+            {
+                fs::remove(mock_file);
+            }
+
+            mock_disk_file_ = std::make_unique<std::ofstream>(
+                mock_file.string(), std::ios::binary | std::ios::app);
+
+            if (!mock_disk_file_->is_open())
+            {
+                LOGE("Failed to open mock disk file: ", mock_file.string());
+                return false;
+            }
+
+            // Set large buffer for better performance
+            const size_t buffer_size = 1024 * 1024;  // 1MB buffer
+            mock_disk_file_->rdbuf()->pubsetbuf(nullptr, buffer_size);
+
+            LOGI("Mock disk file opened with 1MB buffer");
+            return true;
+        }
+    }
+
+    // Real NuDB mode
 
     // Create directory if needed
     fs::path dir(path);
@@ -138,20 +203,19 @@ CatlNudbPipeline::create_database(
     }
 
     LOGI("Opened NuDB database successfully");
-
-    // Set a large burst size to avoid rate-limiter throttling
-    // This allows the in-memory pool to grow large before flushing to disk
-    // enabling much more efficient batched writes
-    constexpr std::size_t burst_size = 1024 * 1024 * 1024;  // 1GB
-    db_->set_burst(burst_size);
-    LOGI("Set burst size to ", burst_size / 1024 / 1024, " MB");
-
     return true;
 }
 
 bool
 CatlNudbPipeline::open_database(const std::string& path)
 {
+    // Skip database operations in mock mode
+    if (!mock_mode_.empty())
+    {
+        LOGI("Mock mode (", mock_mode_, "): skipping database open");
+        return true;
+    }
+
     namespace fs = boost::filesystem;
 
     db_path_ = path;
@@ -194,6 +258,24 @@ CatlNudbPipeline::open_database(const std::string& path)
 bool
 CatlNudbPipeline::close_database()
 {
+    // Handle mock mode closing
+    if (!mock_mode_.empty())
+    {
+        if (mock_mode_ == "disk" && mock_disk_file_)
+        {
+            LOGI("Mock mode (disk): closing and flushing file...");
+            mock_disk_file_->flush();
+            mock_disk_file_->close();
+            LOGI("✅ Mock disk file closed successfully");
+            return true;
+        }
+        else
+        {
+            LOGI("Mock mode (", mock_mode_, "): skipping database close");
+            return true;
+        }
+    }
+
     if (db_)
     {
         // Close database - this flushes the final in-memory pool to disk
@@ -221,6 +303,13 @@ CatlNudbPipeline::close_database()
 bool
 CatlNudbPipeline::verify_all_keys(int num_threads)
 {
+    // Skip verification in mock mode
+    if (!mock_mode_.empty())
+    {
+        LOGI("Mock mode (", mock_mode_, "): skipping key verification");
+        return true;
+    }
+
     if (!db_)
     {
         LOGE("Cannot verify - database not open");
@@ -684,7 +773,8 @@ CatlNudbPipeline::flush_node(
     const uint8_t* data,
     size_t size)
 {
-    if (!db_)
+    // In mock mode, db_ won't be initialized - this is expected
+    if (mock_mode_.empty() && !db_)
     {
         LOGE("Cannot flush - database not open");
         return;
@@ -708,23 +798,52 @@ CatlNudbPipeline::flush_node(
     // Track for stats
     total_bytes_written_ += size;
 
-    // Insert into NuDB with no_check_exists flag (we're deduplicating
-    // ourselves)
-    ::nudb::error_code ec;
-    db_->insert(
-        key.data(), data, size, ec, ::nudb::insert_flags::no_check_exists);
-
-    if (ec)
+    // Handle different modes
+    if (mock_mode_.empty())
     {
-        LOGE(
-            "Failed to insert node - key: ",
-            key.hex().substr(0, 16),
-            "... size: ",
-            size,
-            " error: ",
-            ec.message());
-        throw std::runtime_error("NuDB insert failed: " + ec.message());
+        // Real NuDB mode - insert into database
+        ::nudb::error_code ec;
+        db_->insert(
+            key.data(), data, size, ec, ::nudb::insert_flags::no_check_exists);
+
+        if (ec)
+        {
+            LOGE(
+                "Failed to insert node - key: ",
+                key.hex().substr(0, 16),
+                "... size: ",
+                size,
+                " error: ",
+                ec.message());
+            throw std::runtime_error("NuDB insert failed: " + ec.message());
+        }
     }
+    else if (mock_mode_ == "disk")
+    {
+        // Mock disk mode - write key (32 bytes) + size (4 bytes) + data to file
+        if (mock_disk_file_ && mock_disk_file_->is_open())
+        {
+            // Write key (32 bytes)
+            mock_disk_file_->write(
+                reinterpret_cast<const char*>(key.data()), 32);
+
+            // Write size (4 bytes, little-endian)
+            uint32_t size32 = static_cast<uint32_t>(size);
+            mock_disk_file_->write(
+                reinterpret_cast<const char*>(&size32), sizeof(size32));
+
+            // Write data
+            mock_disk_file_->write(reinterpret_cast<const char*>(data), size);
+
+            // Check for write errors
+            if (!mock_disk_file_->good())
+            {
+                LOGE("Failed to write to mock disk file");
+                throw std::runtime_error("Mock disk write failed");
+            }
+        }
+    }
+    // else: noop/memory mode - do nothing
 
     // Success - add key and size to our tracking map
     inserted_keys_with_sizes_[key] = size;
