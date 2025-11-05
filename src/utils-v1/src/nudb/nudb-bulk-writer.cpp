@@ -1,6 +1,7 @@
 #include "catl/utils-v1/nudb/nudb-bulk-writer.h"
 #include "catl/core/log-macros.h"
 #include <boost/filesystem.hpp>
+#include <iomanip>
 
 namespace catl::v1::utils::nudb {
 
@@ -226,6 +227,8 @@ NudbBulkWriter::close(uint64_t progress_buffer_size)
         // No-op progress callback
     };
 
+    auto rekey_start = std::chrono::steady_clock::now();
+
     ::nudb::rekey<::nudb::xxhasher, ::nudb::native_file>(
         dat_path_,
         key_path_,
@@ -237,13 +240,32 @@ NudbBulkWriter::close(uint64_t progress_buffer_size)
         ec,
         progress_callback);
 
+    auto rekey_end = std::chrono::steady_clock::now();
+    auto rekey_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        rekey_end - rekey_start)
+                        .count();
+
     if (ec)
     {
         LOGE("Failed to rekey: ", ec.message());
         return false;
     }
 
+    // Get file sizes
+    namespace fs = boost::filesystem;
+    uint64_t dat_size = fs::file_size(dat_path_);
+    uint64_t key_size = fs::file_size(key_path_);
+
     LOGI("✅ Bulk import complete - index built successfully!");
+    LOGI("");
+    LOGI("📊 REKEY STATS:");
+    LOGI("  - Time: ", rekey_ms, " ms (", std::fixed, std::setprecision(2), rekey_ms / 1000.0, " sec)");
+    LOGI("  - .dat file: ", dat_size / 1024 / 1024, " MB");
+    LOGI("  - .key file: ", key_size / 1024 / 1024, " MB");
+    LOGI("  - Total DB size: ", (dat_size + key_size) / 1024 / 1024, " MB");
+    LOGI("  - Index build speed: ", std::fixed, std::setprecision(2),
+         (unique_count_ * 1000.0) / rekey_ms, " keys/sec");
+
     return true;
 }
 
