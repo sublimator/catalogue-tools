@@ -9,6 +9,8 @@ INPUT_FILE=${INPUT_FILE:-"$HOME/projects/xahau-history/cat.4500000-5000000.compr
 END_LEDGER=${END_LEDGER:-5000000}
 LOG_LEVEL=${LOG_LEVEL:-"info"}
 NUDB_PATH=${NUDB_PATH:-"./test-nudb"}
+NUDB_FACTOR=${NUDB_FACTOR:-""} # NuDB load factor (0.0-1.0) - lower = faster, higher = more space efficient. Default: 0.5
+NUDB_MOCK=${NUDB_MOCK:-""}     # Mock mode: "noop"/"memory" (no I/O), "disk" (buffered append-only file)
 # NOTE: Single-threaded (1) often performs better than multi-threaded due to overhead
 HASHER_THREADS=${HASHER_THREADS:-1}                    # Default: 1 thread (best performance, avoids thread coordination overhead)
 ENABLE_DEBUG_PARTITIONS=${ENABLE_DEBUG_PARTITIONS:-""} # Set to any value to enable debug log partitions
@@ -49,15 +51,29 @@ if [ -n "$WALK_NODES_DEBUG_KEY" ]; then
   WALK_NODES_DEBUG_KEY_FLAG="--walk-nodes-debug-key $WALK_NODES_DEBUG_KEY"
 fi
 
+# Build nudb-factor flag if specified
+NUDB_FACTOR_FLAG=""
+if [ -n "$NUDB_FACTOR" ]; then
+  echo "⚙️  NuDB load factor: $NUDB_FACTOR"
+  NUDB_FACTOR_FLAG="--nudb-factor $NUDB_FACTOR"
+fi
+
+# Build nudb-mock flag if specified
+NUDB_MOCK_FLAG=""
+if [ -n "$NUDB_MOCK" ]; then
+  echo "🧪 NuDB mock mode: $NUDB_MOCK"
+  NUDB_MOCK_FLAG="--nudb-mock $NUDB_MOCK"
+fi
+
 # Check if we're in test snapshot mode
 if [ -n "${TEST_SNAPSHOTS:-}" ]; then
   echo "🧪 Running in snapshot test mode..."
   echo "This will test memory usage of snapshots without the pipeline."
   if [ -n "${LLDB:-}" ]; then
     echo "Running under lldb..."
-    lldb -o run -- "$CMD" --input "$INPUT_FILE" --test-snapshots --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG
+    lldb -o run -- "$CMD" --input "$INPUT_FILE" --test-snapshots --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG $NUDB_FACTOR_FLAG $NUDB_MOCK_FLAG
   else
-    "$CMD" --input "$INPUT_FILE" --test-snapshots --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG
+    "$CMD" --input "$INPUT_FILE" --test-snapshots --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG $NUDB_FACTOR_FLAG $NUDB_MOCK_FLAG
   fi
 # Normal pipeline mode
 else
@@ -65,8 +81,8 @@ else
   # Run with lldb if LLDB env var is set
   if [ -n "${LLDB:-}" ]; then
     echo "Running under lldb..."
-    lldb -o run -- "$CMD" --input "$INPUT_FILE" --nudb-path "$NUDB_PATH" --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG
+    lldb -o run -- "$CMD" --input "$INPUT_FILE" --nudb-path "$NUDB_PATH" --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG $NUDB_FACTOR_FLAG $NUDB_MOCK_FLAG
   else
-    "$CMD" --input "$INPUT_FILE" --nudb-path "$NUDB_PATH" --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG
+    "$CMD" --input "$INPUT_FILE" --nudb-path "$NUDB_PATH" --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG $NUDB_FACTOR_FLAG $NUDB_MOCK_FLAG
   fi
 fi

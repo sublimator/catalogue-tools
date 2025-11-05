@@ -40,9 +40,11 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
         "block-size",
         po::value<uint32_t>()->default_value(4096),
         "NuDB block size (default: 4096)")(
-        "load-factor",
+        "load-factor,F",
         po::value<double>()->default_value(0.5),
-        "NuDB load factor 0.0-1.0 (default: 0.5)")(
+        "NuDB load factor 0.0-1.0 (default: 0.5) - lower = faster, higher = "
+        "more space efficient")(
+        "nudb-factor", po::value<double>(), "Alias for --load-factor")(
         "log-level,l",
         po::value<std::string>()->default_value("info"),
         "Log level (error, warn, info, debug)")(
@@ -65,7 +67,11 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
         "walk-nodes-debug-key",
         po::value<std::string>(),
         "Debug key prefix (hex) to print detailed info for matching keys "
-        "during walk_nodes (e.g., '567D5DABE2E1AF17')");
+        "during walk_nodes (e.g., '567D5DABE2E1AF17')")(
+        "nudb-mock",
+        po::value<std::string>(),
+        "Mock NuDB mode for performance testing. Options: 'noop' or 'memory' "
+        "(skip all I/O), 'disk' (buffered append-only file)");
 
     // Generate the help text
     std::ostringstream help_stream;
@@ -137,6 +143,22 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
         {
             options.walk_nodes_debug_key =
                 vm["walk-nodes-debug-key"].as<std::string>();
+        }
+
+        // Check for nudb-mock mode
+        if (vm.count("nudb-mock"))
+        {
+            std::string mock_mode = vm["nudb-mock"].as<std::string>();
+            // Validate mock mode
+            if (mock_mode != "noop" && mock_mode != "memory" &&
+                mock_mode != "disk")
+            {
+                options.valid = false;
+                options.error_message =
+                    "nudb-mock must be one of: noop, memory, disk";
+                return options;
+            }
+            options.nudb_mock = mock_mode;
         }
 
         if (vm.count("hasher-threads"))
@@ -221,16 +243,21 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
             }
         }
 
-        if (vm.count("load-factor"))
+        // Support both --load-factor and --nudb-factor (alias)
+        if (vm.count("nudb-factor"))
+        {
+            options.load_factor = vm["nudb-factor"].as<double>();
+        }
+        else if (vm.count("load-factor"))
         {
             options.load_factor = vm["load-factor"].as<double>();
-            if (options.load_factor <= 0.0 || options.load_factor > 1.0)
-            {
-                options.valid = false;
-                options.error_message =
-                    "Load factor must be between 0.0 and 1.0";
-                return options;
-            }
+        }
+
+        if (options.load_factor <= 0.0 || options.load_factor > 1.0)
+        {
+            options.valid = false;
+            options.error_message = "Load factor must be between 0.0 and 1.0";
+            return options;
         }
 
         // Get log level
