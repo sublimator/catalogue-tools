@@ -178,6 +178,9 @@ NudbBulkWriter::close(uint64_t progress_buffer_size)
         return true;  // Already closed
     }
 
+    // Mark as closed immediately to prevent destructor from calling close() again
+    is_open_ = false;
+
     LOGI("Closing bulk writer...");
     LOGI("  Total unique items: ", unique_count_);
     LOGI("  Total duplicates: ", duplicate_count_);
@@ -237,7 +240,6 @@ NudbBulkWriter::close(uint64_t progress_buffer_size)
     }
 
     LOGI("✅ Bulk import complete - index built successfully!");
-    is_open_ = false;
     return true;
 }
 
