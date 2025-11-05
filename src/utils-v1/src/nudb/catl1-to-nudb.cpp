@@ -435,22 +435,34 @@ public:
                                 " ledgers/sec, ",
                                 nodes_per_sec,
                                 " nodes/sec");
+                            // Calculate total average throughput
+                            double total_write_mb_per_sec = elapsed > 0
+                                ? (static_cast<double>(current_bytes_written) / elapsed) / 1024 / 1024
+                                : 0;
+                            double total_read_mb_per_sec = elapsed > 0
+                                ? (static_cast<double>(current_bytes_read) / elapsed) / 1024 / 1024
+                                : 0;
+
                             LOGI(
                                 "   - CATL read: ",
                                 std::fixed,
                                 std::setprecision(2),
                                 read_bytes_per_sec / 1024 / 1024,
-                                " MB/sec (",
+                                " MB/sec (period), ",
+                                total_read_mb_per_sec,
+                                " MB/sec (total avg) [",
                                 current_bytes_read / 1024 / 1024,
-                                " MB total)");
+                                " MB]");
                             LOGI(
                                 "   - NuDB write: ",
                                 std::fixed,
                                 std::setprecision(2),
                                 write_bytes_per_sec / 1024 / 1024,
-                                " MB/sec (",
+                                " MB/sec (period), ",
+                                total_write_mb_per_sec,
+                                " MB/sec (total avg) [",
                                 current_bytes_written / 1024 / 1024,
-                                " MB total)");
+                                " MB]");
 
                             LOGI("📦 Queue depths:");
                             LOGI(
