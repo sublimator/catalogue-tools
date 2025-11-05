@@ -48,7 +48,24 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
         "Log level (error, warn, info, debug)")(
         "test-snapshots",
         po::bool_switch(),
-        "Test snapshot memory usage (reads file and creates snapshots without pipeline)");
+        "Test snapshot memory usage (reads file and creates snapshots without "
+        "pipeline)")(
+        "hasher-threads",
+        po::value<int>()->default_value(1),
+        "Number of threads for parallel hashing (must be power of 2: 1, 2, 4, "
+        "8, 16) - Default 1 (best performance)")(
+        "enable-debug-partitions",
+        po::bool_switch(),
+        "Enable verbose debug log partitions (MAP_OPS, WALK_NODES, "
+        "VERSION_TRACK, PIPE_VERSION)")(
+        "walk-nodes-ledger",
+        po::value<uint32_t>(),
+        "Enable WALK_NODES logging only for the specified ledger number "
+        "(useful for debugging specific ledger issues)")(
+        "walk-nodes-debug-key",
+        po::value<std::string>(),
+        "Debug key prefix (hex) to print detailed info for matching keys "
+        "during walk_nodes (e.g., '567D5DABE2E1AF17')");
 
     // Generate the help text
     std::ostringstream help_stream;
@@ -100,6 +117,40 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
         if (vm.count("test-snapshots"))
         {
             options.test_snapshots = vm["test-snapshots"].as<bool>();
+        }
+
+        // Check for debug partitions flag
+        if (vm.count("enable-debug-partitions"))
+        {
+            options.enable_debug_partitions =
+                vm["enable-debug-partitions"].as<bool>();
+        }
+
+        // Check for walk-nodes-ledger
+        if (vm.count("walk-nodes-ledger"))
+        {
+            options.walk_nodes_ledger = vm["walk-nodes-ledger"].as<uint32_t>();
+        }
+
+        // Check for walk-nodes-debug-key
+        if (vm.count("walk-nodes-debug-key"))
+        {
+            options.walk_nodes_debug_key =
+                vm["walk-nodes-debug-key"].as<std::string>();
+        }
+
+        if (vm.count("hasher-threads"))
+        {
+            int threads = vm["hasher-threads"].as<int>();
+            // Validate it's a power of 2
+            if (threads <= 0 || (threads & (threads - 1)) != 0 || threads > 16)
+            {
+                options.valid = false;
+                options.error_message =
+                    "hasher-threads must be a power of 2 (1, 2, 4, 8, or 16)";
+                return options;
+            }
+            options.hasher_threads = threads;
         }
 
         // Check for required nudb path (not required in test-snapshots mode)

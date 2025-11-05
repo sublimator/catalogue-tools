@@ -1,9 +1,10 @@
 #include "catl/core/log-macros.h"
+#include "catl/shamap/shamap.h"
 #include "catl/utils-v1/nudb/catl1-to-nudb-arg-options.h"
 #include "catl/utils-v1/nudb/catl1-to-nudb-pipeline.h"
 #include "catl/v1/catl-v1-reader.h"
 #include "catl/v1/catl-v1-utils.h"
-#include "catl/shamap/shamap.h"
+#include "catl/xdata/protocol.h"
 
 #include <boost/filesystem.hpp>
 #include <boost/lockfree/spsc_queue.hpp>
@@ -20,9 +21,47 @@ using namespace catl::v1::utils::nudb;
 using namespace catl::shamap;
 namespace fs = boost::filesystem;
 
+// LogPartition for version tracking - disabled by default
+// Enable with: version_tracking_log.enable(LogLevel::DEBUG)
+static LogPartition version_tracking_log("VERSION_TRACK", LogLevel::NONE);
+
 // Pipeline queue configuration constants
-static constexpr size_t SNAPSHOT_QUEUE_SIZE = 100;  // Buffer size for snapshot queue
-static constexpr size_t HASHED_QUEUE_SIZE = 100;    // Buffer size for hashed ledger queue
+static constexpr size_t SNAPSHOT_QUEUE_SIZE =
+    100;  // Buffer size for snapshot queue
+static constexpr size_t HASHED_QUEUE_SIZE =
+    100;  // Buffer size for hashed ledger queue
+
+/**
+ * Load protocol definitions based on network ID
+ */
+static catl::xdata::Protocol
+load_protocol_for_network(uint32_t network_id)
+{
+    if (network_id == 0)  // XRPL
+    {
+        LOGI(
+            "Auto-detected network ID ",
+            network_id,
+            " - using embedded XRPL protocol definitions");
+        return catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    }
+    else if (network_id == 21337)  // XAHAU
+    {
+        LOGI(
+            "Auto-detected network ID ",
+            network_id,
+            " - using embedded Xahau protocol definitions");
+        return catl::xdata::Protocol::load_embedded_xahau_protocol();
+    }
+    else
+    {
+        LOGW(
+            "Unknown network ID ",
+            network_id,
+            " - falling back to Xahau protocol definitions");
+        return catl::xdata::Protocol::load_embedded_xahau_protocol();
+    }
+}
 
 /**
  * Catl1ToNudbConverter - Converts CATL v1 files to NuDB database format
@@ -91,19 +130,81 @@ public:
                 return false;
             }
 
+            // Check that end >= start
+            if (end_ledger < start_ledger)
+            {
+                LOGE(
+                    "Invalid range: end_ledger (",
+                    end_ledger,
+                    ") is less than start_ledger (",
+                    start_ledger,
+                    "). Did you mean to process ",
+                    end_ledger,
+                    " ledgers starting from ",
+                    start_ledger,
+                    "?");
+                // Suggest the corrected command
+                LOGE("Try: --end-ledger ", start_ledger + end_ledger - 1);
+                return false;
+            }
+
             LOGI("Processing ledgers ", start_ledger, " to ", end_ledger);
 
-            // Create SHAMap options for non-collapsed tree (we need inner nodes for NuDB)
+            // Enable debug logging partitions if requested
+            if (options_.enable_debug_partitions)
+            {
+                catl::v1::map_ops_log.enable(LogLevel::DEBUG);
+                catl::shamap::walk_nodes_log.enable(LogLevel::DEBUG);
+                version_tracking_log.enable(LogLevel::DEBUG);
+                catl::v1::utils::nudb::pipeline_version_log.enable(
+                    LogLevel::DEBUG);
+                LOGI(
+                    "Enabled debug log partitions: MAP_OPS, WALK_NODES, "
+                    "VERSION_TRACK, and PIPE_VERSION");
+            }
+
+            // Log walk-nodes-ledger option if specified
+            if (options_.walk_nodes_ledger)
+            {
+                LOGI(
+                    "WALK_NODES logging will be enabled only for ledger ",
+                    *options_.walk_nodes_ledger);
+            }
+
+            // Load protocol definitions for JSON parsing
+            catl::xdata::Protocol protocol =
+                load_protocol_for_network(header.network_id);
+
+            // Create SHAMap options for non-collapsed tree (we need inner nodes
+            // for NuDB)
             SHAMapOptions map_options;
             map_options.tree_collapse_impl = TreeCollapseImpl::leafs_only;
 
             // Create pipeline
-            CatlNudbPipeline pipeline(map_options);
+            CatlNudbPipeline pipeline(map_options, protocol);
+
+            // Configure hasher threads
+            pipeline.set_hasher_threads(options_.hasher_threads);
+
+            // Configure walk-nodes-ledger if specified
+            if (options_.walk_nodes_ledger)
+            {
+                pipeline.set_walk_nodes_ledger(*options_.walk_nodes_ledger);
+            }
+
+            // Configure walk-nodes-debug-key if specified
+            if (options_.walk_nodes_debug_key)
+            {
+                pipeline.set_walk_nodes_debug_key(
+                    *options_.walk_nodes_debug_key);
+            }
 
             // Create SPSC queues between stages
             // Queue sizes are configured by constants for consistent reporting
-            boost::lockfree::spsc_queue<LedgerSnapshot> snapshot_queue(SNAPSHOT_QUEUE_SIZE);
-            boost::lockfree::spsc_queue<HashedLedger> hashed_queue(HASHED_QUEUE_SIZE);
+            boost::lockfree::spsc_queue<LedgerSnapshot> snapshot_queue(
+                SNAPSHOT_QUEUE_SIZE);
+            boost::lockfree::spsc_queue<HashedLedger> hashed_queue(
+                HASHED_QUEUE_SIZE);
 
             // Error tracking (atomic for thread safety)
             std::atomic<bool> error_occurred{false};
@@ -116,9 +217,36 @@ public:
                 {
                     LOGI("[Builder] Starting...");
 
-                    // Create reader in builder thread (Reader is not thread-safe)
+                    // Create reader in builder thread (Reader is not
+                    // thread-safe)
                     Reader reader(*options_.input_file);
-                    SHAMap state_map(tnACCOUNT_STATE, map_options);
+                    auto state_map =
+                        std::make_shared<SHAMap>(tnACCOUNT_STATE, map_options);
+
+                    PLOGD(
+                        version_tracking_log,
+                        "[Builder] Created state_map, initial version: ",
+                        state_map->get_version());
+
+                    // Enable CoW by taking an initial snapshot before any
+                    // processing This ensures all nodes get proper versions
+                    // instead of -1
+                    PLOGD(
+                        version_tracking_log,
+                        "[Builder] Taking initial snapshot to enable CoW");
+                    auto initial_snapshot = state_map->snapshot();
+                    PLOGD(
+                        version_tracking_log,
+                        "[Builder] Initial snapshot created with version: ",
+                        initial_snapshot->get_version(),
+                        ", state_map now has version: ",
+                        state_map->get_version());
+                    initial_snapshot.reset();  // Immediately discard it
+                    PLOGD(
+                        version_tracking_log,
+                        "[Builder] Initial snapshot discarded, state_map "
+                        "version remains: ",
+                        state_map->get_version());
 
                     // Stats tracking
                     auto start_time = std::chrono::steady_clock::now();
@@ -128,48 +256,116 @@ public:
                     uint64_t total_tx_nodes_added = 0;
                     uint32_t last_stats_ledger = start_ledger;
 
-                    for (uint32_t ledger_seq = start_ledger; ledger_seq <= end_ledger;
+                    for (uint32_t ledger_seq = start_ledger;
+                         ledger_seq <= end_ledger;
                          ++ledger_seq)
                     {
                         if (error_occurred.load())
                             break;
 
+                        PLOGD(
+                            version_tracking_log,
+                            "[Builder] ========== LEDGER ",
+                            ledger_seq,
+                            " ==========");
+                        PLOGD(
+                            version_tracking_log,
+                            "[Builder] State map version BEFORE processing: ",
+                            state_map->get_version());
+
                         bool allow_deltas = (ledger_seq > start_ledger);
-                        auto snapshot = pipeline.build_and_snapshot(reader, state_map, allow_deltas);
+                        PLOGD(
+                            version_tracking_log,
+                            "[Builder] Calling build_and_snapshot with "
+                            "allow_deltas=",
+                            allow_deltas);
+
+                        auto snapshot = pipeline.build_and_snapshot(
+                            reader, state_map, allow_deltas);
 
                         if (!snapshot)
                         {
-                            LOGE("[Builder] Failed to build ledger ", ledger_seq);
+                            LOGE(
+                                "[Builder] Failed to build ledger ",
+                                ledger_seq);
                             error_occurred.store(true);
                             break;
                         }
+
+                        PLOGD(
+                            version_tracking_log,
+                            "[Builder] Snapshot created for ledger ",
+                            snapshot->info.seq,
+                            " with processing_version: ",
+                            snapshot->processing_version,
+                            ", state_map still at version: ",
+                            state_map->get_version());
+                        PLOGD(
+                            version_tracking_log,
+                            "[Builder] Snapshot contains state_ops: ",
+                            snapshot->state_ops.nodes_added,
+                            " added, ",
+                            snapshot->state_ops.nodes_updated,
+                            " updated, ",
+                            snapshot->state_ops.nodes_deleted,
+                            " deleted");
 
                         if (snapshot->info.seq != ledger_seq)
                         {
-                            LOGE("[Builder] Ledger sequence mismatch! Expected ", ledger_seq, " but got ", snapshot->info.seq);
+                            LOGE(
+                                "[Builder] Ledger sequence mismatch! Expected ",
+                                ledger_seq,
+                                " but got ",
+                                snapshot->info.seq);
                             error_occurred.store(true);
                             break;
                         }
 
+                        // IMPORTANT: Update state_map to point to the snapshot
+                        // for next iteration This is the "snapshot chain"
+                        // approach
+                        state_map = snapshot->state_snapshot;
+                        PLOGD(
+                            version_tracking_log,
+                            "[Builder] Updated state_map to snapshot for next "
+                            "ledger, version now: ",
+                            state_map->get_version());
+
                         // Track nodes for stats from the snapshot
-                        total_state_nodes_added += snapshot->state_ops.nodes_added;
-                        total_state_nodes_updated += snapshot->state_ops.nodes_updated;
-                        total_state_nodes_deleted += snapshot->state_ops.nodes_deleted;
+                        total_state_nodes_added +=
+                            snapshot->state_ops.nodes_added;
+                        total_state_nodes_updated +=
+                            snapshot->state_ops.nodes_updated;
+                        total_state_nodes_deleted +=
+                            snapshot->state_ops.nodes_deleted;
                         total_tx_nodes_added += snapshot->tx_ops.nodes_added;
 
                         // Log comprehensive stats every 1000 ledgers
-                        if (ledger_seq % 1000 == 0 && ledger_seq > last_stats_ledger)
+                        if (ledger_seq % 1000 == 0 &&
+                            ledger_seq > last_stats_ledger)
                         {
                             auto now = std::chrono::steady_clock::now();
-                            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
-                            uint32_t ledgers_processed = ledger_seq - start_ledger;
-                            uint64_t total_nodes = total_state_nodes_added + total_state_nodes_updated +
-                                                  total_state_nodes_deleted + total_tx_nodes_added;
+                            auto elapsed =
+                                std::chrono::duration_cast<
+                                    std::chrono::seconds>(now - start_time)
+                                    .count();
+                            uint32_t ledgers_processed =
+                                ledger_seq - start_ledger;
+                            uint64_t total_nodes = total_state_nodes_added +
+                                total_state_nodes_updated +
+                                total_state_nodes_deleted +
+                                total_tx_nodes_added;
 
-                            double ledgers_per_sec = elapsed > 0 ? static_cast<double>(ledgers_processed) / elapsed : 0;
-                            double nodes_per_sec = elapsed > 0 ? static_cast<double>(total_nodes) / elapsed : 0;
+                            double ledgers_per_sec = elapsed > 0
+                                ? static_cast<double>(ledgers_processed) /
+                                    elapsed
+                                : 0;
+                            double nodes_per_sec = elapsed > 0
+                                ? static_cast<double>(total_nodes) / elapsed
+                                : 0;
 
-                            size_t snapshot_depth = snapshot_queue.read_available();
+                            size_t snapshot_depth =
+                                snapshot_queue.read_available();
                             size_t hashed_depth = hashed_queue.read_available();
 
                             LOGI("=====================================");
@@ -178,19 +374,40 @@ public:
                             LOGI("⏱️  Performance:");
                             LOGI("   - Ledgers processed: ", ledgers_processed);
                             LOGI("   - Elapsed time: ", elapsed, " seconds");
-                            LOGI("   - Throughput: ", std::fixed, std::setprecision(2),
-                                 ledgers_per_sec, " ledgers/sec, ",
-                                 nodes_per_sec, " nodes/sec");
+                            LOGI(
+                                "   - Throughput: ",
+                                std::fixed,
+                                std::setprecision(2),
+                                ledgers_per_sec,
+                                " ledgers/sec, ",
+                                nodes_per_sec,
+                                " nodes/sec");
 
                             LOGI("📦 Queue depths:");
-                            LOGI("   - Snapshot queue: ", snapshot_depth, "/", SNAPSHOT_QUEUE_SIZE);
-                            LOGI("   - Hashed queue: ", hashed_depth, "/", HASHED_QUEUE_SIZE);
-                            LOGI("   - Total snapshots in memory: ", snapshot_depth + hashed_depth);
+                            LOGI(
+                                "   - Snapshot queue: ",
+                                snapshot_depth,
+                                "/",
+                                SNAPSHOT_QUEUE_SIZE);
+                            LOGI(
+                                "   - Hashed queue: ",
+                                hashed_depth,
+                                "/",
+                                HASHED_QUEUE_SIZE);
+                            LOGI(
+                                "   - Total snapshots in memory: ",
+                                snapshot_depth + hashed_depth);
 
                             LOGI("🗺️  Accumulated Node Operations:");
-                            LOGI("   - State nodes added: ", total_state_nodes_added);
-                            LOGI("   - State nodes updated: ", total_state_nodes_updated);
-                            LOGI("   - State nodes deleted: ", total_state_nodes_deleted);
+                            LOGI(
+                                "   - State nodes added: ",
+                                total_state_nodes_added);
+                            LOGI(
+                                "   - State nodes updated: ",
+                                total_state_nodes_updated);
+                            LOGI(
+                                "   - State nodes deleted: ",
+                                total_state_nodes_deleted);
                             LOGI("   - Tx nodes added: ", total_tx_nodes_added);
                             LOGI("   - Total operations: ", total_nodes);
                             LOGI("=====================================");
@@ -204,7 +421,10 @@ public:
                             // Queue is full - log if we're waiting
                             if (ledger_seq % 100 == 0)
                             {
-                                LOGW("[Builder] Queue FULL at ledger ", ledger_seq, " - waiting for hasher...");
+                                LOGW(
+                                    "[Builder] Queue FULL at ledger ",
+                                    ledger_seq,
+                                    " - waiting for hasher...");
                             }
                             std::this_thread::yield();
                         }
@@ -235,11 +455,30 @@ public:
                         LedgerSnapshot snapshot;
                         if (snapshot_queue.pop(snapshot))
                         {
+                            PLOGD(
+                                version_tracking_log,
+                                "[Hasher] Processing ledger ",
+                                snapshot.info.seq,
+                                " with processing_version: ",
+                                snapshot.processing_version);
+
                             auto hashed = pipeline.hash_and_verify(snapshot);
+
+                            PLOGD(
+                                version_tracking_log,
+                                "[Hasher] Hashed ledger ",
+                                hashed.info.seq,
+                                ", verified: ",
+                                hashed.verified,
+                                ", processing_version carried forward: ",
+                                hashed.processing_version);
 
                             if (!hashed.verified)
                             {
-                                LOGE("[Hasher] Hash verification failed for ledger ", hashed.info.seq);
+                                LOGE(
+                                    "[Hasher] Hash verification failed for "
+                                    "ledger ",
+                                    hashed.info.seq);
                                 error_occurred.store(true);
                                 break;
                             }
@@ -284,12 +523,31 @@ public:
                 HashedLedger hashed;
                 if (hashed_queue.pop(hashed))
                 {
+                    PLOGD(
+                        version_tracking_log,
+                        "[Flusher] About to flush ledger ",
+                        hashed.info.seq,
+                        " with processing_version: ",
+                        hashed.processing_version,
+                        ", state_ops: ",
+                        hashed.state_ops.nodes_added,
+                        " added, ",
+                        hashed.state_ops.nodes_updated,
+                        " updated");
+
                     if (!pipeline.flush_to_nudb(hashed))
                     {
-                        LOGE("[Flusher] Failed to flush ledger ", hashed.info.seq);
+                        LOGE(
+                            "[Flusher] Failed to flush ledger ",
+                            hashed.info.seq);
                         error_occurred.store(true);
                         break;
                     }
+
+                    PLOGD(
+                        version_tracking_log,
+                        "[Flusher] Successfully flushed ledger ",
+                        hashed.info.seq);
                     flushed_count++;
                 }
                 else if (hasher_done.load())
@@ -316,10 +574,11 @@ public:
             }
 
             LOGI("\n========================================");
-            LOGI("Successfully processed ledgers ",
-                 start_ledger,
-                 " to ",
-                 end_ledger);
+            LOGI(
+                "Successfully processed ledgers ",
+                start_ledger,
+                " to ",
+                end_ledger);
             LOGI("========================================");
 
             return true;
@@ -353,7 +612,8 @@ test_snapshot_memory(const Catl1ToNudbOptions& options)
         LOGI("  Network ID: ", header.network_id);
 
         // Determine ledger range to process
-        uint32_t start_ledger = options.start_ledger.value_or(header.min_ledger);
+        uint32_t start_ledger =
+            options.start_ledger.value_or(header.min_ledger);
         uint32_t end_ledger = options.end_ledger.value_or(header.max_ledger);
 
         LOGI("Testing ledgers ", start_ledger, " to ", end_ledger);
@@ -363,24 +623,30 @@ test_snapshot_memory(const Catl1ToNudbOptions& options)
         map_options.tree_collapse_impl = TreeCollapseImpl::leafs_only;
 
         // Create state map
-        SHAMap state_map(tnACCOUNT_STATE, map_options);
+        auto state_map = std::make_shared<SHAMap>(tnACCOUNT_STATE, map_options);
+
+        // Enable CoW by taking an initial snapshot before any processing
+        // This ensures all nodes get proper versions instead of -1
+        auto initial_snapshot = state_map->snapshot();
+        initial_snapshot.reset();  // Immediately discard it
 
         auto start_time = std::chrono::steady_clock::now();
         uint32_t ledgers_processed = 0;
 
-        for (uint32_t ledger_seq = start_ledger; ledger_seq <= end_ledger; ++ledger_seq)
+        for (uint32_t ledger_seq = start_ledger; ledger_seq <= end_ledger;
+             ++ledger_seq)
         {
             // Read ledger info
             auto v1_ledger_info = reader.read_ledger_info();
-            auto canonical_info = to_canonical_ledger_info(v1_ledger_info);
+            // auto canonical_info = to_canonical_ledger_info(v1_ledger_info);
 
             // Load state map with deltas
             bool allow_deltas = (ledger_seq > start_ledger);
             MapOperations state_ops = reader.read_map_with_shamap_owned_items(
-                state_map, tnACCOUNT_STATE, allow_deltas);
+                *state_map, tnACCOUNT_STATE, allow_deltas);
 
             // Create a snapshot (this is what we're testing)
-            auto snapshot = state_map.snapshot();
+            auto snapshot = state_map->snapshot();
 
             // Build fresh transaction map
             SHAMap tx_map(tnTRANSACTION_MD, map_options);
@@ -393,35 +659,56 @@ test_snapshot_memory(const Catl1ToNudbOptions& options)
             if (ledger_seq % 1000 == 0 && ledger_seq > start_ledger)
             {
                 auto now = std::chrono::steady_clock::now();
-                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
-                double ledgers_per_sec = elapsed > 0 ? static_cast<double>(ledgers_processed) / elapsed : 0;
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                   now - start_time)
+                                   .count();
+                double ledgers_per_sec = elapsed > 0
+                    ? static_cast<double>(ledgers_processed) / elapsed
+                    : 0;
 
                 LOGI("=====================================");
                 LOGI("📊 SNAPSHOT TEST @ Ledger ", ledger_seq);
                 LOGI("=====================================");
                 LOGI("  - Ledgers processed: ", ledgers_processed);
                 LOGI("  - Elapsed time: ", elapsed, " seconds");
-                LOGI("  - Throughput: ", std::fixed, std::setprecision(2), ledgers_per_sec, " ledgers/sec");
-                LOGI("  - State ops: ", state_ops.nodes_added, " added, ",
-                     state_ops.nodes_updated, " updated, ",
-                     state_ops.nodes_deleted, " deleted");
+                LOGI(
+                    "  - Throughput: ",
+                    std::fixed,
+                    std::setprecision(2),
+                    ledgers_per_sec,
+                    " ledgers/sec");
+                LOGI(
+                    "  - State ops: ",
+                    state_ops.nodes_added,
+                    " added, ",
+                    state_ops.nodes_updated,
+                    " updated, ",
+                    state_ops.nodes_deleted,
+                    " deleted");
                 LOGI("  - Tx ops: ", tx_ops.nodes_added, " added");
                 LOGI("=====================================");
             }
 
-            // IMPORTANT: The snapshot goes out of scope here and should be destroyed
-            // If memory isn't being released, we'll see it grow continuously
+            // IMPORTANT: The snapshot goes out of scope here and should be
+            // destroyed If memory isn't being released, we'll see it grow
+            // continuously
         }
 
         auto end_time = std::chrono::steady_clock::now();
-        auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count();
+        auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                 end_time - start_time)
+                                 .count();
 
         LOGI("========================================");
         LOGI("Snapshot test completed");
         LOGI("  - Total ledgers: ", ledgers_processed);
         LOGI("  - Total time: ", total_elapsed, " seconds");
-        LOGI("  - Average: ", std::fixed, std::setprecision(2),
-             static_cast<double>(ledgers_processed) / total_elapsed, " ledgers/sec");
+        LOGI(
+            "  - Average: ",
+            std::fixed,
+            std::setprecision(2),
+            static_cast<double>(ledgers_processed) / total_elapsed,
+            " ledgers/sec");
         LOGI("========================================");
         LOGI("Check memory usage now - snapshots should have been released!");
 

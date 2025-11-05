@@ -138,14 +138,9 @@ SHAMapT<Traits>::set_item_reference(
                     if (this->cow_enabled_)
                     {
                         new_leaf->set_version(this->current_version_);
-                        // May need to update existing leaf version as well
-                        if (existing_leaf->get_version() !=
-                            this->current_version_)
-                        {
-                            auto copied_leaf = existing_leaf->copy(
-                                this->current_version_, current_parent.get());
-                            existing_leaf = copied_leaf;
-                        }
+                        // NOTE: existing_leaf is a different key - just
+                        // relocating it in the tree structure. Its data hasn't
+                        // changed, so it keeps its old version. Do NOT copy it.
                     }
                     current_parent->set_child(existing_branch, existing_leaf);
                     current_parent->set_child(new_branch, new_leaf);

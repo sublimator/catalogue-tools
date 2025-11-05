@@ -45,6 +45,24 @@ struct Catl1ToNudbOptions
     /** Test snapshot memory usage mode */
     bool test_snapshots = false;
 
+    /** Number of threads for parallel hashing (must be power of 2: 1, 2, 4, 8,
+     * 16) NOTE: Counterintuitively, single-threaded (1) often performs better
+     * than multi-threaded due to thread coordination overhead outweighing
+     * parallelization benefits. Default is 1 for optimal performance in most
+     * cases.
+     */
+    int hasher_threads = 1;
+
+    /** Enable verbose debug log partitions (MAP_OPS, WALK_NODES, VERSION_TRACK,
+     * PIPE_VERSION) */
+    bool enable_debug_partitions = false;
+
+    /** Enable WALK_NODES logging only for a specific ledger (for debugging) */
+    std::optional<uint32_t> walk_nodes_ledger;
+
+    /** Debug key prefix (hex) to print detailed info during walk_nodes */
+    std::optional<std::string> walk_nodes_debug_key;
+
     /** Whether to display help information */
     bool show_help = false;
 

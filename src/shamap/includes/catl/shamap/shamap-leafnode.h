@@ -25,7 +25,7 @@ class SHAMapLeafNodeT : public SHAMapTreeNodeT<Traits>
 private:
     boost::intrusive_ptr<MmapItem> item;
     SHAMapNodeType type;
-    int version = -1;  // Version for CoW tracking
+    int version = 0;  // Version for CoW tracking
 
 public:
     SHAMapLeafNodeT(boost::intrusive_ptr<MmapItem> i, SHAMapNodeType t);
