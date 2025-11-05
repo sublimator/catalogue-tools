@@ -6,10 +6,10 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstring>
 
+#include "catl/core/logger.h"
 #include "catl/shamap/shamap-errors.h"
 #include "catl/shamap/shamap-innernode.h"
 #include "catl/shamap/shamap-leafnode.h"
-#include "catl/core/logger.h"
 
 #include "catl/shamap/shamap-hashprefix.h"
 #include <utility>
@@ -40,11 +40,18 @@ SHAMapLeafNodeT<Traits>::SHAMapLeafNodeT(
 template <typename Traits>
 SHAMapLeafNodeT<Traits>::~SHAMapLeafNodeT()
 {
-    PLOGD(destructor_log, "~SHAMapLeafNodeT: version=", version,
-          ", type=", static_cast<int>(type),
-          ", item=", (item ? "yes" : "no"),
-          ", item.key=", (item ? item->key().hex().substr(0, 16) : "null"),
-          ", this.refcount=", SHAMapTreeNodeT<Traits>::ref_count_.load());
+    PLOGD(
+        destructor_log,
+        "~SHAMapLeafNodeT: version=",
+        version,
+        ", type=",
+        static_cast<int>(type),
+        ", item=",
+        (item ? "yes" : "no"),
+        ", item.key=",
+        (item ? item->key().hex().substr(0, 16) : "null"),
+        ", this.refcount=",
+        SHAMapTreeNodeT<Traits>::ref_count_.load());
 }
 
 template <typename Traits>
@@ -138,6 +145,37 @@ SHAMapLeafNodeT<Traits>::copy(int newVersion, SHAMapInnerNodeT<Traits>* parent)
     }
 
     return new_leaf;
+}
+
+template <typename Traits>
+size_t
+SHAMapLeafNodeT<Traits>::serialized_size() const
+{
+    // For now, just the item data size
+    // TODO: May need to add overhead for metadata (type byte, varint size,
+    // etc.)
+    if (!item)
+    {
+        return 0;
+    }
+    return item->slice().size();
+}
+
+template <typename Traits>
+size_t
+SHAMapLeafNodeT<Traits>::write_to_buffer(uint8_t* ptr) const
+{
+    // Leaf node format: just the raw item data for now
+    // TODO: May need to add metadata (type byte, varint size, etc.)
+    if (!item)
+    {
+        // No item - this shouldn't happen, but handle gracefully
+        return 0;
+    }
+
+    const Slice& data = item->slice();
+    std::memcpy(ptr, data.data(), data.size());
+    return data.size();
 }
 
 // Explicit template instantiations for default traits

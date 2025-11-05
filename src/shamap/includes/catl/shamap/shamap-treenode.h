@@ -48,6 +48,15 @@ public:
         return hash;
     }
 
+    // Get the serialized size of this node
+    virtual size_t
+    serialized_size() const = 0;
+
+    // Serialize node to buffer for storage
+    // Returns number of bytes written
+    virtual size_t
+    write_to_buffer(uint8_t* ptr) const = 0;
+
     // friend declarations needed for boost::intrusive_ptr
     template <typename T>
     friend void
