@@ -3,6 +3,7 @@
 #include "catl/common/ledger-info.h"
 #include "catl/core/logger.h"
 #include "catl/shamap/shamap.h"
+#include "catl/utils-v1/nudb/nudb-bulk-writer.h"  // For NudbBulkWriter
 #include "catl/v1/catl-v1-reader.h"
 #include "catl/v1/catl-v1-types.h"  // For MapOperations
 #include "catl/xdata/protocol.h"
@@ -195,7 +196,10 @@ private:
         walk_nodes_debug_key_;    // Key prefix (hex) to debug
     std::string mock_mode_ = "";  // Mock mode: "", "noop", "memory", or "disk"
 
-    // NuDB store (use xxhasher like xahaud)
+    // NuDB bulk writer for fast import
+    std::unique_ptr<NudbBulkWriter> bulk_writer_;
+
+    // NuDB store for verification after bulk import
     using store_type =
         ::nudb::basic_store<::nudb::xxhasher, ::nudb::posix_file>;
     std::unique_ptr<store_type> db_;

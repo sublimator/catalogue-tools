@@ -132,7 +132,7 @@ CatlNudbPipeline::create_database(
         }
     }
 
-    // Real NuDB mode
+    // Real NuDB mode - use bulk writer for optimal performance
 
     // Create directory if needed
     fs::path dir(path);
@@ -147,62 +147,27 @@ CatlNudbPipeline::create_database(
     fs::path key_path = dir / "nudb.key";
     fs::path log_path = dir / "nudb.log";
 
-    // Remove existing database files if they exist
-    if (fs::exists(dat_path) || fs::exists(key_path) || fs::exists(log_path))
-    {
-        LOGI("Removing existing NuDB database files...");
-
-        if (fs::exists(dat_path))
-        {
-            fs::remove(dat_path);
-        }
-        if (fs::exists(key_path))
-        {
-            fs::remove(key_path);
-        }
-        if (fs::exists(log_path))
-        {
-            fs::remove(log_path);
-        }
-    }
-
-    // Create the database
-    ::nudb::error_code ec;
-    ::nudb::create<::nudb::xxhasher, ::nudb::posix_file>(
-        dat_path.string(),
-        key_path.string(),
-        log_path.string(),
-        1,           // appnum
-        0xABADCAFE,  // salt (arbitrary value for now)
-        key_size,
-        block_size,
-        load_factor,
-        ec);
-
-    if (ec)
-    {
-        LOGE("Failed to create NuDB database: ", ec.message());
-        return false;
-    }
-
-    LOGI("Created NuDB database at: ", path);
+    LOGI("Using NuDB bulk writer (optimized for bulk import)");
     LOGI("  key_size: ", key_size, " bytes");
     LOGI("  block_size: ", block_size);
     LOGI("  load_factor: ", load_factor);
 
-    // Open the database
-    db_ = std::make_unique<
-        ::nudb::basic_store<::nudb::xxhasher, ::nudb::posix_file>>();
-    db_->open(dat_path.string(), key_path.string(), log_path.string(), ec);
+    // Create bulk writer
+    bulk_writer_ = std::make_unique<NudbBulkWriter>(
+        dat_path.string(),
+        key_path.string(),
+        log_path.string(),
+        key_size);
 
-    if (ec)
+    // Open bulk writer (this creates the files and prepares for writing)
+    if (!bulk_writer_->open(block_size, load_factor))
     {
-        LOGE("Failed to open NuDB database: ", ec.message());
-        db_.reset();
+        LOGE("Failed to open bulk writer");
+        bulk_writer_.reset();
         return false;
     }
 
-    LOGI("Opened NuDB database successfully");
+    LOGI("Bulk writer opened successfully");
     return true;
 }
 
@@ -276,22 +241,40 @@ CatlNudbPipeline::close_database()
         }
     }
 
+    // Close bulk writer (this runs rekey to build the index!)
+    if (bulk_writer_)
+    {
+        LOGI("Closing bulk writer (will run rekey to build index)...");
+
+        // This flushes .dat file and runs rekey to build .key file
+        if (!bulk_writer_->close(1024ULL * 1024 * 1024))  // 1GB buffer for rekey
+        {
+            LOGE("FATAL: Bulk writer close/rekey failed!");
+            bulk_writer_.reset();
+            return false;
+        }
+
+        LOGI("✅ Bulk import complete (index built successfully)");
+        bulk_writer_.reset();
+        return true;
+    }
+
+    // Close regular database (for verification reopens)
     if (db_)
     {
         // Close database - this flushes the final in-memory pool to disk
-        LOGI("Closing NuDB database (flushing final batch)...");
+        LOGI("Closing NuDB database...");
         ::nudb::error_code ec;
         db_->close(ec);
 
         if (ec)
         {
             LOGE("FATAL: Error closing NuDB database: ", ec.message());
-            LOGE("Final batch may not have been flushed to disk!");
             db_.reset();
             return false;
         }
 
-        LOGI("✅ Closed NuDB database successfully (final batch flushed)");
+        LOGI("✅ Closed NuDB database successfully");
         db_.reset();
         return true;
     }
@@ -773,8 +756,8 @@ CatlNudbPipeline::flush_node(
     const uint8_t* data,
     size_t size)
 {
-    // In mock mode, db_ won't be initialized - this is expected
-    if (mock_mode_.empty() && !db_)
+    // In mock mode or bulk writer mode, db_ won't be initialized - this is expected
+    if (mock_mode_.empty() && !bulk_writer_ && !db_)
     {
         LOGE("Cannot flush - database not open");
         return;
@@ -786,36 +769,46 @@ CatlNudbPipeline::flush_node(
 
     total_attempts++;
 
-    // Check if we've already inserted this key
-    auto it = inserted_keys_with_sizes_.find(key);
-    if (it != inserted_keys_with_sizes_.end())
-    {
-        // Already inserted - skip it
-        duplicates++;
-        return;
-    }
-
     // Track for stats
     total_bytes_written_ += size;
 
     // Handle different modes
     if (mock_mode_.empty())
     {
-        // Real NuDB mode - insert into database
-        ::nudb::error_code ec;
-        db_->insert(
-            key.data(), data, size, ec, ::nudb::insert_flags::no_check_exists);
-
-        if (ec)
+        // Real NuDB mode - use bulk writer for optimal performance
+        if (bulk_writer_)
         {
-            LOGE(
-                "Failed to insert node - key: ",
-                key.hex().substr(0, 16),
-                "... size: ",
-                size,
-                " error: ",
-                ec.message());
-            throw std::runtime_error("NuDB insert failed: " + ec.message());
+            bool inserted = bulk_writer_->insert(key, data, size);
+            if (inserted)
+            {
+                total_inserts++;
+                // Track for verification later
+                inserted_keys_with_sizes_[key] = size;
+            }
+            else
+            {
+                duplicates++;
+            }
+
+            // Log progress every 10000 successful inserts
+            if (total_inserts % 10000 == 0)
+            {
+                LOGD(
+                    "Bulk wrote ",
+                    total_inserts,
+                    " nodes (",
+                    total_bytes_written_.load() / 1024,
+                    " KB, ",
+                    duplicates,
+                    " dups, ",
+                    (duplicates * 100 / total_attempts),
+                    "%)");
+            }
+        }
+        else
+        {
+            LOGE("Bulk writer not initialized!");
+            throw std::runtime_error("Bulk writer not initialized");
         }
     }
     else if (mock_mode_ == "disk")
@@ -823,6 +816,14 @@ CatlNudbPipeline::flush_node(
         // Mock disk mode - write key (32 bytes) + size (4 bytes) + data to file
         if (mock_disk_file_ && mock_disk_file_->is_open())
         {
+            // Check if we've already inserted this key
+            auto it = inserted_keys_with_sizes_.find(key);
+            if (it != inserted_keys_with_sizes_.end())
+            {
+                duplicates++;
+                return;
+            }
+
             // Write key (32 bytes)
             mock_disk_file_->write(
                 reinterpret_cast<const char*>(key.data()), 32);
@@ -841,27 +842,24 @@ CatlNudbPipeline::flush_node(
                 LOGE("Failed to write to mock disk file");
                 throw std::runtime_error("Mock disk write failed");
             }
+
+            // Track this key
+            inserted_keys_with_sizes_[key] = size;
+            total_inserts++;
         }
     }
-    // else: noop/memory mode - do nothing
-
-    // Success - add key and size to our tracking map
-    inserted_keys_with_sizes_[key] = size;
-    total_inserts++;
-
-    // Log progress every 10000 successful inserts
-    if (total_inserts % 10000 == 0)
+    else
     {
-        LOGD(
-            "Flushed ",
-            total_inserts,
-            " nodes (",
-            total_bytes_written_.load() / 1024,
-            " KB, ",
-            duplicates,
-            " dups, ",
-            (duplicates * 100 / total_attempts),
-            "%)");
+        // noop/memory mode - just track for deduplication stats
+        auto it = inserted_keys_with_sizes_.find(key);
+        if (it != inserted_keys_with_sizes_.end())
+        {
+            duplicates++;
+            return;
+        }
+
+        inserted_keys_with_sizes_[key] = size;
+        total_inserts++;
     }
 }
 
