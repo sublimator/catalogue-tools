@@ -27,7 +27,8 @@ set(EXECUTABLE_CATL1_TO_NUDB catl1-to-nudb)
 set(SOURCES_CATL1_TO_NUDB
     ${UTILS_SRC_DIR}/nudb/catl1-to-nudb.cpp
     ${UTILS_SRC_DIR}/nudb/catl1-to-nudb-arg-options.cpp
-    ${UTILS_SRC_DIR}/nudb/catl1-to-nudb-pipeline.cpp)
+    ${UTILS_SRC_DIR}/nudb/catl1-to-nudb-pipeline.cpp
+    ${UTILS_SRC_DIR}/nudb/nudb-bulk-writer.cpp)
 
 # Define the nudb-exp executable and its sources
 set(EXECUTABLE_NUDB_EXP nudb-exp)
