@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catl/core/logger.h"
 #include "catl/v1/catl-v1-errors.h"
 #include "catl/v1/catl-v1-structs.h"
 #include "catl/v1/catl-v1-types.h"
@@ -16,6 +17,10 @@
 #include "catl/shamap/shamap.h"
 
 namespace catl::v1 {
+
+// LogPartition for detailed tracking of map operations in reader-shamap.cpp
+// Enable with: catl::v1::map_ops_log.enable(LogLevel::DEBUG)
+extern LogPartition map_ops_log;
 
 /**
  * Reader for CATL files with support for both compressed and uncompressed

@@ -1,9 +1,17 @@
 #include "catl/core/log-macros.h"
+#include "catl/core/logger.h"
 #include "catl/core/types.h"
 #include "catl/v1/catl-v1-errors.h"
 #include "catl/v1/catl-v1-reader.h"
 
 namespace catl::v1 {
+
+// LogPartition for detailed tracking of map operations
+// Default to NONE (disabled) - enable with map_ops_log.enable(LogLevel::DEBUG)
+// if needed To enable from debugger:
+// catl::v1::map_ops_log.enable(LogLevel::DEBUG) To enable programmatically: Add
+// map_ops_log.enable() at start of function
+LogPartition map_ops_log("MAP_OPS", LogLevel::NONE);
 
 class OwnedMmapItem : public MmapItem
 {
@@ -120,6 +128,15 @@ Reader::read_map_to_shamap(
             auto item = boost::intrusive_ptr(
                 new MmapItem(&storage[key_pos], &storage[data_pos], data_size));
 
+            // Log the operation
+            PLOGD(
+                map_ops_log,
+                "Processing item - key: ",
+                item->key().hex().substr(0, 16),
+                "..., data_size: ",
+                data_size,
+                " bytes");
+
             shamap::SetMode mode = allow_delta ? shamap::SetMode::ADD_OR_UPDATE
                                                : shamap::SetMode::ADD_ONLY;
             shamap::SetResult result = map.set_item(item, mode);
@@ -135,10 +152,28 @@ Reader::read_map_to_shamap(
             if (result == shamap::SetResult::ADD)
             {
                 ops.nodes_added++;
+                PLOGD(
+                    map_ops_log,
+                    "  -> ADDED item with key: ",
+                    item->key().hex().substr(0, 16),
+                    "...");
             }
             else if (result == shamap::SetResult::UPDATE)
             {
                 ops.nodes_updated++;
+                PLOGD(
+                    map_ops_log,
+                    "  -> UPDATED item with key: ",
+                    item->key().hex().substr(0, 16),
+                    "...");
+            }
+            else
+            {
+                PLOGD(
+                    map_ops_log,
+                    "  -> FAILED to add/update item with key: ",
+                    item->key().hex().substr(0, 16),
+                    "...");
             }
         }
         else if (current_type == shamap::tnREMOVE)
@@ -156,12 +191,32 @@ Reader::read_map_to_shamap(
             read_node_key(temp_key);
             // Allow_delta is true, so we can remove the item
             Key key(temp_key.data());
+
+            PLOGD(
+                map_ops_log,
+                "Removing item - key: ",
+                key.hex().substr(0, 16),
+                "...");
+
             bool removed = map.remove_item(key);
 
             // Track removal
             if (removed)
             {
                 ops.nodes_deleted++;
+                PLOGD(
+                    map_ops_log,
+                    "  -> DELETED item with key: ",
+                    key.hex().substr(0, 16),
+                    "...");
+            }
+            else
+            {
+                PLOGD(
+                    map_ops_log,
+                    "  -> FAILED to delete item with key: ",
+                    key.hex().substr(0, 16),
+                    "... (not found)");
             }
         }
         else
@@ -475,6 +530,15 @@ Reader::read_map_with_shamap_owned_items(
             // Create Key from the read data
             Key key(key_data.data());
 
+            // Log key and data size before creating item
+            PLOGD(
+                map_ops_log,
+                "Processing item - key: ",
+                key.hex().substr(0, 16),
+                "..., data_size: ",
+                item_data.size(),
+                " bytes");
+
             // Create OwnedMmapItem with the data
             auto item = OwnedMmapItem::create(key, std::move(item_data));
 
@@ -493,10 +557,28 @@ Reader::read_map_with_shamap_owned_items(
             if (result == shamap::SetResult::ADD)
             {
                 ops.nodes_added++;
+                PLOGD(
+                    map_ops_log,
+                    "  -> ADDED item with key: ",
+                    key.hex().substr(0, 16),
+                    "...");
             }
             else if (result == shamap::SetResult::UPDATE)
             {
                 ops.nodes_updated++;
+                PLOGD(
+                    map_ops_log,
+                    "  -> UPDATED item with key: ",
+                    key.hex().substr(0, 16),
+                    "...");
+            }
+            else
+            {
+                PLOGD(
+                    map_ops_log,
+                    "  -> FAILED to add/update item with key: ",
+                    key.hex().substr(0, 16),
+                    "...");
             }
         }
         else if (current_type == shamap::tnREMOVE)
@@ -514,12 +596,32 @@ Reader::read_map_with_shamap_owned_items(
 
             // Allow_delta is true, so we can remove the item
             Key key(temp_key.data());
+
+            PLOGD(
+                map_ops_log,
+                "Removing item - key: ",
+                key.hex().substr(0, 16),
+                "...");
+
             bool removed = map.remove_item(key);
 
             // Track removal
             if (removed)
             {
                 ops.nodes_deleted++;
+                PLOGD(
+                    map_ops_log,
+                    "  -> DELETED item with key: ",
+                    key.hex().substr(0, 16),
+                    "...");
+            }
+            else
+            {
+                PLOGD(
+                    map_ops_log,
+                    "  -> FAILED to delete item with key: ",
+                    key.hex().substr(0, 16),
+                    "... (not found)");
             }
         }
         else

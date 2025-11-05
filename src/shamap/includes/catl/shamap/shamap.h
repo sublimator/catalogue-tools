@@ -22,6 +22,10 @@
 #include "catl/shamap/shamap-treenode.h"
 
 namespace catl::shamap {
+
+// LogPartition for walk_new_nodes tracking - enable with
+// walk_nodes_log.enable(LogLevel::DEBUG)
+extern LogPartition walk_nodes_log;
 /**
  * Main SHAMap class implementing a pruned, binary prefix tree
  * with Copy-on-Write support for efficient snapshots
@@ -39,6 +43,8 @@ private:
     std::shared_ptr<std::atomic<int>> version_counter_;
     int current_version_ = 0;
     bool cow_enabled_ = false;
+    bool needs_version_bump_on_write_ =
+        false;  // For lazy version bumping after snapshot
 
     // Private methods
     void
@@ -128,6 +134,13 @@ public:
     Hash256
     get_hash() const;
 
+    // Parallel hashing support - partition work across threads
+    // threadId: 0-based thread index (0 to totalThreads-1)
+    // totalThreads: Must be power of 2 (1, 2, 4, 8, 16)
+    // Returns: function that performs this thread's portion of hashing
+    std::function<void()>
+    get_hash_job(int threadId, int totalThreads) const;
+
     // Only public CoW method - creates a snapshot
     std::shared_ptr<SHAMapT<Traits>>
     snapshot();
@@ -155,6 +168,21 @@ public:
      */
     boost::intrusive_ptr<MmapItem>
     get_item(const Key& key) const;
+
+    /**
+     * Walk only nodes that have a specific version
+     * This is useful for flushing only the delta to storage, not the entire
+     * tree.
+     *
+     * @param target_version The version to look for (use -1 for root's version)
+     * @param visitor Callback that receives each matching node. Return true to
+     * continue.
+     */
+    void
+    walk_new_nodes(
+        const std::function<bool(
+            const boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>&)>& visitor,
+        int target_version = -1) const;
 
     /**
      * Get the root node of the SHAMap

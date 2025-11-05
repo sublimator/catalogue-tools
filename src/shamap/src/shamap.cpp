@@ -24,8 +24,13 @@
 
 namespace catl::shamap {
 
-// Global partition for destructor tracking (not static, so it's visible across compilation units)
+// Global partition for destructor tracking (not static, so it's visible across
+// compilation units)
 LogPartition destructor_log("DESTRUCTOR", LogLevel::NONE);  // Start disabled
+
+// LogPartition for walk_new_nodes tracking - disabled by default
+// Enable with: catl::shamap::walk_nodes_log.enable(LogLevel::DEBUG)
+LogPartition walk_nodes_log("WALK_NODES", LogLevel::NONE);
 
 //----------------------------------------------------------
 // SHAMapT Implementation
@@ -57,6 +62,7 @@ SHAMapT<Traits>::SHAMapT(
     , version_counter_(std::move(vCounter))
     , current_version_(version)
     , cow_enabled_(true)
+    , needs_version_bump_on_write_(false)  // Snapshots don't need lazy bump
 {
     OLOGD("Created SHAMap snapshot with version ", version);
 }
@@ -64,11 +70,18 @@ SHAMapT<Traits>::SHAMapT(
 template <typename Traits>
 SHAMapT<Traits>::~SHAMapT()
 {
-    PLOGD(destructor_log, "~SHAMapT: type=", static_cast<int>(node_type_),
-          ", version=", current_version_,
-          ", cow=", cow_enabled_,
-          ", root=", (root ? "yes" : "no"),
-          ", root.refcount=", (root ? root->ref_count_.load() : 0));
+    PLOGD(
+        destructor_log,
+        "~SHAMapT: type=",
+        static_cast<int>(node_type_),
+        ", version=",
+        current_version_,
+        ", cow=",
+        cow_enabled_,
+        ", root=",
+        (root ? "yes" : "no"),
+        ", root.refcount=",
+        (root ? root->ref_count_.load() : 0));
     // root intrusive_ptr will be destroyed here, should decrement refcount
 }
 
@@ -149,13 +162,16 @@ SHAMapT<Traits>::snapshot()
         enable_cow();
     }
 
-    // Create new version for both original and snapshot
-    const int original_version = new_version(true);
-    int snapshot_version = new_version(false);
+    // ONLY create new version for the snapshot, not the original
+    // The original will lazily bump its version on first write
+    int snapshot_version = new_version(false);  // Don't update current_version_
+
+    // Mark that original needs version bump on next write
+    needs_version_bump_on_write_ = true;
 
     OLOGD(
-        "Creating snapshot: original version ",
-        original_version,
+        "Creating snapshot: original staying at version ",
+        current_version_,
         ", snapshot version ",
         snapshot_version);
 
@@ -374,15 +390,92 @@ SHAMapT<Traits>::get_hash() const
 }
 
 template <typename Traits>
+std::function<void()>
+SHAMapT<Traits>::get_hash_job(int threadId, int totalThreads) const
+{
+    // Validate parameters
+    if (threadId < 0 || threadId >= totalThreads)
+    {
+        throw std::invalid_argument(
+            "Invalid threadId: must be 0 to totalThreads-1");
+    }
+
+    // Check totalThreads is power of 2
+    if (totalThreads <= 0 || (totalThreads & (totalThreads - 1)) != 0 ||
+        totalThreads > 16)
+    {
+        throw std::invalid_argument(
+            "totalThreads must be power of 2 (1, 2, 4, 8, or 16)");
+    }
+
+    if (!root)
+    {
+        // No work to do for empty tree
+        return []() {};
+    }
+
+    // For single thread, just hash everything
+    if (totalThreads == 1)
+    {
+        return [this]() { root->get_hash(options_); };
+    }
+
+    // Calculate which branches this thread handles
+    int branchesPerThread = 16 / totalThreads;
+    int startBranch = threadId * branchesPerThread;
+    int endBranch = startBranch + branchesPerThread;
+
+    // Capture the root and options by value/shared_ptr to avoid lifetime issues
+    auto capturedRoot = root;
+    auto capturedOptions = options_;
+
+    return [capturedRoot, capturedOptions, startBranch, endBranch]() {
+        // Just hash the assigned child branches
+        // This will recursively hash those entire subtrees
+        LOGD(
+            "Hash job executing for branches ",
+            startBranch,
+            " to ",
+            endBranch - 1);
+
+        auto children = capturedRoot->get_children();
+        for (int i = startBranch; i < endBranch; ++i)
+        {
+            if (children->has_child(i))
+            {
+                auto child = children->get_child(i);
+                if (child)
+                {
+                    // This recursively hashes the entire subtree and caches the
+                    // result
+                    child->get_hash(capturedOptions);
+                }
+            }
+        }
+    };
+}
+
+template <typename Traits>
 void
 SHAMapT<Traits>::handle_path_cow(PathFinderT<Traits>& path_finder)
 {
     // If CoW is enabled, handle versioning
     if (cow_enabled_)
     {
+        // Lazy version bump: increment ONLY on first write after snapshot
+        if (needs_version_bump_on_write_)
+        {
+            current_version_ = new_version(true);
+            needs_version_bump_on_write_ = false;
+
+            OLOGD(
+                "Lazy version bump on first write after snapshot to version ",
+                current_version_);
+        }
+
         if (current_version_ == 0)
         {
-            new_version();
+            current_version_ = new_version(true);
         }
 
         // Apply CoW to path
@@ -457,6 +550,217 @@ SHAMapT<Traits>::set_new_copied_root()
     root = new_root;
 
     OLOGD("Created shallow copy of root node without CoW");
+}
+
+template <typename Traits>
+void
+SHAMapT<Traits>::walk_new_nodes(
+    const std::function<
+        bool(const boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>&)>& visitor,
+    int target_version) const
+{
+    if (!root || !visitor)
+    {
+        PLOGD(
+            walk_nodes_log,
+            "walk_new_nodes called with null root or visitor - returning "
+            "early");
+        return;
+    }
+
+    // If target_version is -1, use root's version
+    if (target_version == -1)
+    {
+        target_version = root->get_version();
+        PLOGD(
+            walk_nodes_log, "Using root's version as target: ", target_version);
+    }
+    else
+    {
+        PLOGD(
+            walk_nodes_log,
+            "Walking nodes with explicit target version: ",
+            target_version);
+    }
+
+    OLOGD("Walking nodes with version ", target_version);
+
+    // Track statistics
+    int nodes_visited = 0;
+    int nodes_with_target_version = 0;
+    int inner_nodes_visited = 0;
+    int leaf_nodes_visited = 0;
+    int target_inner_nodes = 0;  // Inner nodes with target version
+    int target_leaf_nodes = 0;   // Leaf nodes with target version
+
+    // Helper lambda for recursive walking
+    std::function<void(
+        const boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>&, int depth)>
+        walk_impl;
+
+    walk_impl = [&](const boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>& node,
+                    int depth) {
+        if (!node)
+            return;
+
+        nodes_visited++;
+
+        // Get this node's version
+        int node_version = -999;  // Invalid default
+        std::string node_type_str;
+
+        if (node->is_inner())
+        {
+            auto inner =
+                boost::static_pointer_cast<SHAMapInnerNodeT<Traits>>(node);
+            node_version = inner->get_version();
+            node_type_str = "INNER";
+            inner_nodes_visited++;
+        }
+        else if (node->is_leaf())
+        {
+            auto leaf =
+                boost::static_pointer_cast<SHAMapLeafNodeT<Traits>>(node);
+            node_version = leaf->get_version();
+            node_type_str = "LEAF";
+            leaf_nodes_visited++;
+
+            // Log leaf key for debugging
+            if (leaf->get_item())
+            {
+                PLOGD(
+                    walk_nodes_log,
+                    "  Visiting ",
+                    node_type_str,
+                    " at depth ",
+                    depth,
+                    " with version ",
+                    node_version,
+                    " (target: ",
+                    target_version,
+                    ")",
+                    " key: ",
+                    leaf->get_item()->key().hex().substr(0, 16),
+                    "...");
+            }
+            else
+            {
+                PLOGD(
+                    walk_nodes_log,
+                    "  Visiting ",
+                    node_type_str,
+                    " at depth ",
+                    depth,
+                    " with version ",
+                    node_version,
+                    " (target: ",
+                    target_version,
+                    ")",
+                    " key: NULL ITEM!");
+            }
+        }
+
+        // Log inner node visits at higher verbosity
+        if (node->is_inner())
+        {
+            auto inner =
+                boost::static_pointer_cast<SHAMapInnerNodeT<Traits>>(node);
+            PLOGD(
+                walk_nodes_log,
+                "  Visiting ",
+                node_type_str,
+                " at depth ",
+                depth,
+                " with version ",
+                node_version,
+                " (target: ",
+                target_version,
+                ")",
+                " children: ",
+                inner->get_branch_count());
+        }
+
+        // If this node has the target version, visit it
+        if (node_version == target_version)
+        {
+            nodes_with_target_version++;
+            // Track breakdown by node type
+            if (node->is_inner())
+            {
+                target_inner_nodes++;
+            }
+            else if (node->is_leaf())
+            {
+                target_leaf_nodes++;
+            }
+            PLOGD(
+                walk_nodes_log,
+                "    ✓ Version MATCHES - calling visitor for ",
+                node_type_str);
+
+            if (!visitor(node))
+            {
+                PLOGD(
+                    walk_nodes_log,
+                    "    Visitor returned false - stopping walk");
+                return;  // Visitor said stop
+            }
+
+            // Recurse into children of inner nodes
+            if (node->is_inner())
+            {
+                auto inner =
+                    boost::static_pointer_cast<SHAMapInnerNodeT<Traits>>(node);
+                PLOGD(
+                    walk_nodes_log,
+                    "    Recursing into ",
+                    inner->get_branch_count(),
+                    " children");
+
+                for (int i = 0; i < 16; ++i)
+                {
+                    if (inner->has_child(i))
+                    {
+                        walk_impl(inner->get_child(i), depth + 1);
+                    }
+                }
+            }
+        }
+        else
+        {
+            PLOGD(
+                walk_nodes_log,
+                "    ✗ Version mismatch (",
+                node_version,
+                " != ",
+                target_version,
+                ") - skipping subtree");
+        }
+    };
+
+    PLOGD(walk_nodes_log, "Starting walk from root at depth 0");
+
+    // Start walking from the root
+    walk_impl(root, 0);
+
+    // Log summary statistics
+    PLOGD(
+        walk_nodes_log,
+        "Walk complete - visited ",
+        nodes_visited,
+        " total nodes: ",
+        inner_nodes_visited,
+        " inner, ",
+        leaf_nodes_visited,
+        " leaves. ",
+        "Found ",
+        nodes_with_target_version,
+        " nodes (l=",
+        target_leaf_nodes,
+        ",i=",
+        target_inner_nodes,
+        ") with target version ",
+        target_version);
 }
 
 // Explicit template instantiations for default traits

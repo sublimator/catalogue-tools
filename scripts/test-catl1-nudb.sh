@@ -9,6 +9,11 @@ INPUT_FILE=${INPUT_FILE:-"$HOME/projects/xahau-history/cat.4500000-5000000.compr
 END_LEDGER=${END_LEDGER:-5000000}
 LOG_LEVEL=${LOG_LEVEL:-"info"}
 NUDB_PATH=${NUDB_PATH:-"./test-nudb"}
+# NOTE: Single-threaded (1) often performs better than multi-threaded due to overhead
+HASHER_THREADS=${HASHER_THREADS:-1}                    # Default: 1 thread (best performance, avoids thread coordination overhead)
+ENABLE_DEBUG_PARTITIONS=${ENABLE_DEBUG_PARTITIONS:-""} # Set to any value to enable debug log partitions
+WALK_NODES_LEDGER=${WALK_NODES_LEDGER:-""}             # Set to a ledger number to enable WALK_NODES logging for that specific ledger
+WALK_NODES_DEBUG_KEY=${WALK_NODES_DEBUG_KEY:-""}       # Set to a hex key prefix to print detailed info for matching keys
 
 # Check if input file exists
 if [ ! -f "$INPUT_FILE" ]; then
@@ -23,23 +28,45 @@ echo "Testing catl1-to-nudb tool - processing first $END_LEDGER ledgers"
 # Prepare command
 CMD="./build/src/utils-v1/catl1-to-nudb"
 
+# Build debug partitions flag if enabled
+DEBUG_FLAG=""
+if [ -n "$ENABLE_DEBUG_PARTITIONS" ]; then
+  echo "🐞 Debug log partitions ENABLED (MAP_OPS, WALK_NODES, VERSION_TRACK, PIPE_VERSION)"
+  DEBUG_FLAG="--enable-debug-partitions"
+fi
+
+# Build walk-nodes-ledger flag if specified
+WALK_NODES_FLAG=""
+if [ -n "$WALK_NODES_LEDGER" ]; then
+  echo "🔍 WALK_NODES logging enabled for ledger: $WALK_NODES_LEDGER"
+  WALK_NODES_FLAG="--walk-nodes-ledger $WALK_NODES_LEDGER"
+fi
+
+# Build walk-nodes-debug-key flag if specified
+WALK_NODES_DEBUG_KEY_FLAG=""
+if [ -n "$WALK_NODES_DEBUG_KEY" ]; then
+  echo "🔍 WALK_NODES debug key enabled: $WALK_NODES_DEBUG_KEY"
+  WALK_NODES_DEBUG_KEY_FLAG="--walk-nodes-debug-key $WALK_NODES_DEBUG_KEY"
+fi
+
 # Check if we're in test snapshot mode
 if [ -n "${TEST_SNAPSHOTS:-}" ]; then
   echo "🧪 Running in snapshot test mode..."
   echo "This will test memory usage of snapshots without the pipeline."
   if [ -n "${LLDB:-}" ]; then
     echo "Running under lldb..."
-    lldb -o run -- "$CMD" --input "$INPUT_FILE" --test-snapshots --end-ledger $END_LEDGER --log-level "$LOG_LEVEL"
+    lldb -o run -- "$CMD" --input "$INPUT_FILE" --test-snapshots --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG
   else
-    "$CMD" --input "$INPUT_FILE" --test-snapshots --end-ledger $END_LEDGER --log-level "$LOG_LEVEL"
+    "$CMD" --input "$INPUT_FILE" --test-snapshots --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG
   fi
 # Normal pipeline mode
 else
+  echo "🚀 Running with $HASHER_THREADS hasher threads..."
   # Run with lldb if LLDB env var is set
   if [ -n "${LLDB:-}" ]; then
     echo "Running under lldb..."
-    lldb -o run -- "$CMD" --input "$INPUT_FILE" --nudb-path "$NUDB_PATH" --end-ledger $END_LEDGER --log-level "$LOG_LEVEL"
+    lldb -o run -- "$CMD" --input "$INPUT_FILE" --nudb-path "$NUDB_PATH" --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG
   else
-    "$CMD" --input "$INPUT_FILE" --nudb-path "$NUDB_PATH" --end-ledger $END_LEDGER --log-level "$LOG_LEVEL"
+    "$CMD" --input "$INPUT_FILE" --nudb-path "$NUDB_PATH" --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG
   fi
 fi
