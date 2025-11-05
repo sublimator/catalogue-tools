@@ -206,9 +206,13 @@ NudbBulkWriter::close(uint64_t progress_buffer_size)
     if (unique_count_ == 0)
     {
         LOGW("No items to index - skipping rekey");
-        is_open_ = false;
         return true;
     }
+
+    // Delete existing .key and .log files (rekey creates them fresh)
+    ::nudb::native_file::erase(key_path_, ec);
+    ::nudb::native_file::erase(log_path_, ec);
+    ec = {};  // Clear any erase errors
 
     LOGI("Step 2: Building index with rekey...");
     LOGI("  Unique items: ", unique_count_);
