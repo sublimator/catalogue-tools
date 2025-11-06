@@ -529,9 +529,13 @@ log_keeper::handle_ledger_data(std::vector<std::uint8_t> const& payload)
                         4),
                     ")");
                 if (auto h = ledger_view.hash())
+                {
                     LOGI("Ledger.Hash: ", h->hex());
+                }
                 else
+                {
                     LOGI("Ledger.Hash: <not present>");
+                }
                 LOGI("Ledger.Parent Hash: ", ledger_view.parent_hash().hex());
                 LOGI("Ledger.Close Time: ", ledger_view.close_time());
                 LOGI("Ledger.Drops: ", ledger_view.drops());

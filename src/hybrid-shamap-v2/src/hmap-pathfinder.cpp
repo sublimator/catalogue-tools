@@ -184,7 +184,7 @@ HmapPathFinder::debug_path() const
                 for (int j = 0; j < 8; ++j)
                 {  // First 8 bytes
                     char buf[3];
-                    sprintf(buf, "%02x", h.hash[j]);
+                    snprintf(buf, sizeof(buf), "%02x", h.hash[j]);
                     ss << buf;
                 }
                 ss << "...";
@@ -197,7 +197,7 @@ HmapPathFinder::debug_path() const
                 for (int j = 0; j < 8; ++j)
                 {  // First 8 bytes
                     char buf[3];
-                    sprintf(buf, "%02x", h.hash[j]);
+                    snprintf(buf, sizeof(buf), "%02x", h.hash[j]);
                     ss << buf;
                 }
                 ss << "...";

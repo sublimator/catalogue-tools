@@ -154,10 +154,7 @@ CatlNudbPipeline::create_database(
 
     // Create bulk writer
     bulk_writer_ = std::make_unique<NudbBulkWriter>(
-        dat_path.string(),
-        key_path.string(),
-        log_path.string(),
-        key_size);
+        dat_path.string(), key_path.string(), log_path.string(), key_size);
 
     // Open bulk writer (this creates the files and prepares for writing)
     if (!bulk_writer_->open(block_size, load_factor))
@@ -247,12 +244,26 @@ CatlNudbPipeline::close_database()
         LOGI("Closing bulk writer (will run rekey to build index)...");
 
         // This flushes .dat file and runs rekey to build .key file
-        if (!bulk_writer_->close(1024ULL * 1024 * 1024))  // 1GB buffer for rekey
+        if (!bulk_writer_->close(
+                1024ULL * 1024 * 1024))  // 1GB buffer for rekey
         {
             LOGE("FATAL: Bulk writer close/rekey failed!");
             bulk_writer_.reset();
             return false;
         }
+
+        // Copy seen keys from bulk writer for verification
+        // (convert from KeyInfo back to just size)
+        LOGI("Copying keys for verification...");
+        inserted_keys_with_sizes_.clear();
+        for (const auto& [key, info] : bulk_writer_->get_seen_keys())
+        {
+            inserted_keys_with_sizes_[key] = info.size;
+        }
+        LOGI(
+            "  Copied ",
+            inserted_keys_with_sizes_.size(),
+            " keys for verification");
 
         LOGI("✅ Bulk import complete (index built successfully)");
         bulk_writer_.reset();
@@ -750,17 +761,19 @@ CatlNudbPipeline::hash_and_verify(LedgerSnapshot snapshot)
 }
 
 // Write a node to NuDB
-void
+bool
 CatlNudbPipeline::flush_node(
     const Hash256& key,
     const uint8_t* data,
-    size_t size)
+    size_t size,
+    uint8_t node_type)
 {
-    // In mock mode or bulk writer mode, db_ won't be initialized - this is expected
+    // In mock mode or bulk writer mode, db_ won't be initialized - this is
+    // expected
     if (mock_mode_.empty() && !bulk_writer_ && !db_)
     {
         LOGE("Cannot flush - database not open");
-        return;
+        return false;
     }
 
     static size_t total_attempts = 0;
@@ -772,13 +785,15 @@ CatlNudbPipeline::flush_node(
     // Track for stats
     total_bytes_written_ += size;
 
+    bool inserted = false;
+
     // Handle different modes
     if (mock_mode_.empty())
     {
         // Real NuDB mode - use bulk writer for optimal performance
         if (bulk_writer_)
         {
-            bool inserted = bulk_writer_->insert(key, data, size);
+            inserted = bulk_writer_->insert(key, data, size, node_type);
             if (inserted)
             {
                 total_inserts++;
@@ -821,7 +836,7 @@ CatlNudbPipeline::flush_node(
             if (it != inserted_keys_with_sizes_.end())
             {
                 duplicates++;
-                return;
+                return false;
             }
 
             // Write key (32 bytes)
@@ -846,6 +861,7 @@ CatlNudbPipeline::flush_node(
             // Track this key
             inserted_keys_with_sizes_[key] = size;
             total_inserts++;
+            inserted = true;
         }
     }
     else
@@ -855,12 +871,15 @@ CatlNudbPipeline::flush_node(
         if (it != inserted_keys_with_sizes_.end())
         {
             duplicates++;
-            return;
+            return false;
         }
 
         inserted_keys_with_sizes_[key] = size;
         total_inserts++;
+        inserted = true;
     }
+
+    return inserted;
 }
 
 bool
@@ -955,7 +974,10 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
                     size_t written = node->write_to_buffer(buffer.data());
                     state_inner_count++;
                     flush_node(
-                        node->get_hash(map_options_), buffer.data(), written);
+                        node->get_hash(map_options_),
+                        buffer.data(),
+                        written,
+                        0);  // 0 = inner node
                 }
                 else if (node->is_leaf())
                 {
@@ -974,8 +996,51 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
                     std::vector<uint8_t> buffer(size);
                     size_t written = node->write_to_buffer(buffer.data());
                     state_leaf_count++;
-                    flush_node(
-                        node->get_hash(map_options_), buffer.data(), written);
+                    bool inserted = flush_node(
+                        node->get_hash(map_options_),
+                        buffer.data(),
+                        written,
+                        1);  // 1 = leaf node
+
+                    // If duplicate leaf, save JSON for debugging
+                    if (!inserted)
+                    {
+                        static std::vector<std::string> dup_leaf_jsons;
+                        static const size_t MAX_SAMPLES = 20;
+
+                        if (dup_leaf_jsons.size() < MAX_SAMPLES)
+                        {
+                            auto leaf = boost::static_pointer_cast<
+                                catl::shamap::SHAMapLeafNode>(node);
+                            auto item = leaf->get_item();
+
+                            // Parse to JSON using xdata::JsonVisitor
+                            catl::xdata::JsonVisitor visitor(protocol_);
+                            catl::xdata::ParserContext ctx(item->slice());
+                            catl::xdata::parse_with_visitor(
+                                ctx, protocol_, visitor);
+                            std::string json_str =
+                                boost::json::serialize(visitor.get_result());
+
+                            dup_leaf_jsons.push_back(json_str);
+
+                            // Log samples at the end
+                            if (dup_leaf_jsons.size() == MAX_SAMPLES)
+                            {
+                                LOGI("");
+                                LOGI(
+                                    "📝 Sample duplicate STATE leaf JSONs "
+                                    "(first ",
+                                    MAX_SAMPLES,
+                                    "):");
+                                for (size_t i = 0; i < dup_leaf_jsons.size();
+                                     i++)
+                                {
+                                    LOGI("  [", i + 1, "] ", dup_leaf_jsons[i]);
+                                }
+                            }
+                        }
+                    }
 
                     auto leaf = boost::static_pointer_cast<
                         catl::shamap::SHAMapLeafNode>(node);
@@ -1102,7 +1167,10 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
                     size_t written = node->write_to_buffer(buffer.data());
                     tx_inner_count++;
                     flush_node(
-                        node->get_hash(map_options_), buffer.data(), written);
+                        node->get_hash(map_options_),
+                        buffer.data(),
+                        written,
+                        0);  // 0 = inner node
                 }
             }
             else if (node->is_leaf())
@@ -1114,8 +1182,54 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
                     std::vector<uint8_t> buffer(size);
                     size_t written = node->write_to_buffer(buffer.data());
                     tx_leaf_count++;
-                    flush_node(
-                        node->get_hash(map_options_), buffer.data(), written);
+                    bool inserted = flush_node(
+                        node->get_hash(map_options_),
+                        buffer.data(),
+                        written,
+                        1);  // 1 = leaf node
+
+                    // If duplicate leaf, save JSON for debugging
+                    if (!inserted)
+                    {
+                        static std::vector<std::string> dup_tx_leaf_jsons;
+                        static const size_t MAX_SAMPLES = 20;
+
+                        if (dup_tx_leaf_jsons.size() < MAX_SAMPLES)
+                        {
+                            auto leaf = boost::static_pointer_cast<
+                                catl::shamap::SHAMapLeafNode>(node);
+                            auto item = leaf->get_item();
+
+                            // Parse to JSON using xdata::JsonVisitor
+                            catl::xdata::JsonVisitor visitor(protocol_);
+                            catl::xdata::ParserContext ctx(item->slice());
+                            catl::xdata::parse_with_visitor(
+                                ctx, protocol_, visitor);
+                            std::string json_str =
+                                boost::json::serialize(visitor.get_result());
+
+                            dup_tx_leaf_jsons.push_back(json_str);
+
+                            // Log samples at the end
+                            if (dup_tx_leaf_jsons.size() == MAX_SAMPLES)
+                            {
+                                LOGI("");
+                                LOGI(
+                                    "📝 Sample duplicate TX leaf JSONs (first ",
+                                    MAX_SAMPLES,
+                                    "):");
+                                for (size_t i = 0; i < dup_tx_leaf_jsons.size();
+                                     i++)
+                                {
+                                    LOGI(
+                                        "  [",
+                                        i + 1,
+                                        "] ",
+                                        dup_tx_leaf_jsons[i]);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             return true;  // Continue walking

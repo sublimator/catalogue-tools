@@ -136,7 +136,9 @@ public:
     }
 
     void
-    visit_object_end(const FieldPath& path, const FieldSlice& fs)
+    visit_object_end(
+        const FieldPath& path,
+        [[maybe_unused]] const FieldSlice& fs)
     {
         // Track field combinations that appear together
         if (config_.track_field_pairs && !current_object_fields_.empty())
@@ -198,7 +200,9 @@ public:
     }
 
     bool
-    visit_array_start(const FieldPath& path, const FieldSlice& fs)
+    visit_array_start(
+        [[maybe_unused]] const FieldPath& path,
+        const FieldSlice& fs)
     {
         const auto& field = fs.get_field();
         array_stats_[field.name].count++;
@@ -208,7 +212,9 @@ public:
     }
 
     void
-    visit_array_end(const FieldPath& path, const FieldSlice& fs)
+    visit_array_end(
+        [[maybe_unused]] const FieldPath& path,
+        const FieldSlice& fs)
     {
         const auto& field = fs.get_field();
         // Record array size
@@ -312,7 +318,7 @@ public:
 
     // Generate JSON statistics report
     std::string
-    to_json(bool pretty = true) const
+    to_json([[maybe_unused]] bool pretty = true) const
     {
         namespace json = boost::json;
 

@@ -58,8 +58,8 @@ NudbBulkWriter::open(uint32_t block_size, double load_factor)
         ::nudb::make_uid(),
         ::nudb::make_salt(),
         key_size_,
-        4096,     // dummy block_size (rekey will use the real one)
-        0.5f,     // dummy load_factor (rekey will use the real one)
+        4096,  // dummy block_size (rekey will use the real one)
+        0.5f,  // dummy load_factor (rekey will use the real one)
         ec);
 
     if (ec)
@@ -84,9 +84,7 @@ NudbBulkWriter::open(uint32_t block_size, double load_factor)
     // Use 64MB write buffer for good sequential write performance
     const size_t write_buffer_size = 64 * 1024 * 1024;  // 64MB
     bulk_writer_ = std::make_unique<bulk_writer_t>(
-        *dat_file_,
-        ::nudb::detail::dat_file_header::size,
-        write_buffer_size);
+        *dat_file_, ::nudb::detail::dat_file_header::size, write_buffer_size);
 
     LOGI("Bulk writer opened with 64MB buffer");
     LOGI("  key_size: ", key_size_, " bytes");
@@ -98,7 +96,11 @@ NudbBulkWriter::open(uint32_t block_size, double load_factor)
 }
 
 bool
-NudbBulkWriter::insert(const Hash256& key, const uint8_t* data, size_t size)
+NudbBulkWriter::insert(
+    const Hash256& key,
+    const uint8_t* data,
+    size_t size,
+    uint8_t node_type)
 {
     if (!is_open_)
     {
@@ -110,8 +112,10 @@ NudbBulkWriter::insert(const Hash256& key, const uint8_t* data, size_t size)
     auto it = seen_keys_.find(key);
     if (it != seen_keys_.end())
     {
-        duplicate_count_++;
-        return false;  // Already seen this key
+        // Already seen this key - increment its duplicate count
+        it->second.duplicate_count++;
+        total_duplicate_attempts_++;
+        return false;
     }
 
     // Validate data size
@@ -148,8 +152,8 @@ NudbBulkWriter::insert(const Hash256& key, const uint8_t* data, size_t size)
     ::nudb::detail::write(os, key.data(), key_size_);
     ::nudb::detail::write(os, data, size);
 
-    // Track this key
-    seen_keys_[key] = size;
+    // Track this key with size, zero initial duplicate count, and node type
+    seen_keys_[key] = KeyInfo{size, 0, node_type};
     unique_count_++;
     total_bytes_written_ += size;
 
@@ -159,13 +163,11 @@ NudbBulkWriter::insert(const Hash256& key, const uint8_t* data, size_t size)
         LOGD(
             "Bulk wrote ",
             unique_count_,
-            " nodes (",
+            " unique nodes (",
             total_bytes_written_.load() / 1024,
             " KB, ",
-            duplicate_count_,
-            " dups, ",
-            (duplicate_count_ * 100 / (unique_count_ + duplicate_count_)),
-            "%)");
+            total_duplicate_attempts_,
+            " dups)");
     }
 
     return true;
@@ -179,13 +181,82 @@ NudbBulkWriter::close(uint64_t progress_buffer_size)
         return true;  // Already closed
     }
 
-    // Mark as closed immediately to prevent destructor from calling close() again
+    // Mark as closed immediately to prevent destructor from calling close()
+    // again
     is_open_ = false;
 
     LOGI("Closing bulk writer...");
-    LOGI("  Total unique items: ", unique_count_);
-    LOGI("  Total duplicates: ", duplicate_count_);
-    LOGI("  Total bytes: ", total_bytes_written_.load() / 1024 / 1024, " MB");
+    LOGI("  Total unique keys: ", unique_count_);
+    LOGI("  Total duplicate attempts: ", total_duplicate_attempts_);
+    LOGI(
+        "  Total bytes written: ",
+        total_bytes_written_.load() / 1024 / 1024,
+        " MB");
+
+    // Count how many keys were duplicated and how often, by node type
+    uint64_t keys_with_duplicates = 0;
+    uint64_t max_dup_count = 0;
+    std::unordered_map<uint8_t, uint64_t>
+        dup_count_by_type;  // node_type -> count of keys with duplicates
+    std::unordered_map<uint8_t, uint64_t>
+        dup_attempts_by_type;  // node_type -> total duplicate attempts
+
+    for (const auto& [key, info] : seen_keys_)
+    {
+        if (info.duplicate_count > 0)
+        {
+            keys_with_duplicates++;
+            if (info.duplicate_count > max_dup_count)
+            {
+                max_dup_count = info.duplicate_count;
+            }
+
+            // Track by node type
+            dup_count_by_type[info.node_type]++;
+            dup_attempts_by_type[info.node_type] += info.duplicate_count;
+        }
+    }
+
+    LOGI("");
+    LOGI("📊 DEDUPLICATION STATS:");
+    LOGI("  - Unique keys written: ", unique_count_);
+    LOGI(
+        "  - Keys that had duplicates: ",
+        keys_with_duplicates,
+        " (",
+        std::fixed,
+        std::setprecision(2),
+        (keys_with_duplicates * 100.0 / unique_count_),
+        "%)");
+    LOGI("  - Total duplicate attempts: ", total_duplicate_attempts_);
+    LOGI(
+        "  - Average duplicates per unique key: ",
+        std::fixed,
+        std::setprecision(2),
+        (static_cast<double>(total_duplicate_attempts_) / unique_count_));
+    LOGI("  - Max duplicates for a single key: ", max_dup_count);
+
+    // Break down by node type
+    if (!dup_count_by_type.empty())
+    {
+        LOGI("");
+        LOGI("  📋 Duplicates by node type:");
+        for (const auto& [node_type, count] : dup_count_by_type)
+        {
+            uint64_t attempts = dup_attempts_by_type[node_type];
+            const char* type_name = (node_type == 0)
+                ? "Inner"
+                : (node_type == 1) ? "Leaf" : "Unknown";
+            LOGI(
+                "    - ",
+                type_name,
+                " nodes: ",
+                count,
+                " keys (",
+                attempts,
+                " duplicate attempts)");
+        }
+    }
 
     // Step 1: Flush and close bulk writer
     ::nudb::error_code ec;
@@ -223,7 +294,8 @@ NudbBulkWriter::close(uint64_t progress_buffer_size)
 
     // Run rekey to build the .key file
     // Progress callback: called periodically during rekey
-    auto progress_callback = [](std::uint64_t /*amount*/, std::uint64_t /*total*/) {
+    auto progress_callback = [](std::uint64_t /*amount*/,
+                                std::uint64_t /*total*/) {
         // No-op progress callback
     };
 
@@ -259,12 +331,23 @@ NudbBulkWriter::close(uint64_t progress_buffer_size)
     LOGI("✅ Bulk import complete - index built successfully!");
     LOGI("");
     LOGI("📊 REKEY STATS:");
-    LOGI("  - Time: ", rekey_ms, " ms (", std::fixed, std::setprecision(2), rekey_ms / 1000.0, " sec)");
+    LOGI(
+        "  - Time: ",
+        rekey_ms,
+        " ms (",
+        std::fixed,
+        std::setprecision(2),
+        rekey_ms / 1000.0,
+        " sec)");
     LOGI("  - .dat file: ", dat_size / 1024 / 1024, " MB");
     LOGI("  - .key file: ", key_size / 1024 / 1024, " MB");
     LOGI("  - Total DB size: ", (dat_size + key_size) / 1024 / 1024, " MB");
-    LOGI("  - Index build speed: ", std::fixed, std::setprecision(2),
-         (unique_count_ * 1000.0) / rekey_ms, " keys/sec");
+    LOGI(
+        "  - Index build speed: ",
+        std::fixed,
+        std::setprecision(2),
+        (unique_count_ * 1000.0) / rekey_ms,
+        " keys/sec");
 
     return true;
 }

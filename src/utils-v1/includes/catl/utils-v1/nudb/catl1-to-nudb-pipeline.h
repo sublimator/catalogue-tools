@@ -239,8 +239,14 @@ private:
     parallel_hash(const std::shared_ptr<shamap::SHAMap>& map);
 
     // Helper to write a node to NuDB
-    void
-    flush_node(const Hash256& key, const uint8_t* data, size_t size);
+    // node_type: 0=inner, 1=leaf
+    // Returns true if inserted, false if duplicate
+    bool
+    flush_node(
+        const Hash256& key,
+        const uint8_t* data,
+        size_t size,
+        uint8_t node_type);
 };
 
 }  // namespace catl::v1::utils::nudb

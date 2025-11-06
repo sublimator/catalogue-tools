@@ -41,7 +41,12 @@ if(is_apple_clang)
 endif()
 
 # Define the include directory structure to be shared by all subprojects
-set(CATL_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/includes)
+# Only set if directory exists to avoid compiler warnings
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/includes)
+    set(CATL_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/includes)
+else()
+    set(CATL_INCLUDE_DIR "")
+endif()
 
 set(PROJECT_ROOT
     "${CMAKE_SOURCE_DIR}/"

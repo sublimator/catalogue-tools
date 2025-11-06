@@ -42,7 +42,7 @@ target_link_libraries(
                                     GTest::gtest_main)
 
 include(GoogleTest)
-gtest_discover_tests(sha512hasher_v1_gtest)
-gtest_discover_tests(writer_v1_gtest)
-gtest_discover_tests(reader_shamap_v1_gtest)
-gtest_discover_tests(simple_state_map_v1_gtest)
+gtest_discover_tests(sha512hasher_v1_gtest DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(writer_v1_gtest DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(reader_shamap_v1_gtest DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(simple_state_map_v1_gtest DISCOVERY_TIMEOUT 30)

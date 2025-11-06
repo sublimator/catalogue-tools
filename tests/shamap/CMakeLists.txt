@@ -19,11 +19,10 @@ add_executable(shamap_gtest ${SHAMAP_TEST_SOURCES})
 target_link_libraries(
   shamap_gtest
   PRIVATE catl::shamap
-          catl::test_utils
           catl_shamap_test_utils
           GTest::gtest_main
           OpenSSL::SSL
           Boost::json)
 
 include(GoogleTest)
-gtest_discover_tests(shamap_gtest)
+gtest_discover_tests(shamap_gtest DISCOVERY_TIMEOUT 30)

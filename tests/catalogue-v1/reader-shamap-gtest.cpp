@@ -422,11 +422,15 @@ TEST_F(ReaderShaMapTest, TeeWithReadMap)
     size_t deletions_seen = 0;
 
     // Callback for regular nodes
-    auto on_node = [&](const std::vector<uint8_t>& key,
-                       const std::vector<uint8_t>& data) { nodes_seen++; };
+    auto on_node = [&]([[maybe_unused]] const std::vector<uint8_t>& key,
+                       [[maybe_unused]] const std::vector<uint8_t>& data) {
+        nodes_seen++;
+    };
 
     // Callback for deletions
-    auto on_delete = [&](const std::vector<uint8_t>& key) { deletions_seen++; };
+    auto on_delete = [&]([[maybe_unused]] const std::vector<uint8_t>& key) {
+        deletions_seen++;
+    };
 
     // Read state map with callbacks while tee is enabled
     size_t nodes_processed =

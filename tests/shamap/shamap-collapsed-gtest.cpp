@@ -81,7 +81,7 @@ TEST(CollapseTest, BasicNoSkips)
 
     auto added_items = std::vector<boost::intrusive_ptr<MmapItem>>();
     auto add_item = [&canonical_map, &added_items, &map](
-                        const std::string& name,
+                        const std::string& /*name*/,
                         boost::intrusive_ptr<MmapItem>& item) {
         added_items.push_back(item);
         map.add_item(item);

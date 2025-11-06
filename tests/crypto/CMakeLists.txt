@@ -19,5 +19,5 @@ target_link_libraries(
           OpenSSL::SSL
           Boost::json)
 
-gtest_discover_tests(sha512hasher_gtest)
-gtest_discover_tests(sha512halfhasher_gtest)
+gtest_discover_tests(sha512hasher_gtest DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(sha512halfhasher_gtest DISCOVERY_TIMEOUT 30)
