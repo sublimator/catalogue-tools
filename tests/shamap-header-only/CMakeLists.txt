@@ -22,4 +22,4 @@ target_link_libraries(
           OpenSSL::SSL)
 
 include(GoogleTest)
-gtest_discover_tests(shamap_header_only_test)
+gtest_discover_tests(shamap_header_only_test DISCOVERY_TIMEOUT 30)

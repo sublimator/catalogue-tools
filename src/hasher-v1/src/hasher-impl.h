@@ -8,7 +8,7 @@
 #define THROW_ON_AS_HASH_MISMATCH 1     // Throw on account state hash mismatch
 
 // Mode-specific settings
-#if HASHER_DEVELOP_MODE        // Development mode
+#ifdef HASHER_DEVELOP_MODE     // Development mode
 #define DEBUG_LEDGER_TX 81920  // Enable debugging for ledger 81920
 #define STOP_AT_LEDGER 10000   // Stop processing at ledger 10000
 #else                          // Production mode

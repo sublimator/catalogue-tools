@@ -1,3 +1,6 @@
+# Note: All gtest_discover_tests() calls should use DISCOVERY_TIMEOUT 30 macOS
+# with many dylibs can take longer than the default 5 seconds
+
 add_subdirectory(crypto)
 add_subdirectory(x-data)
 add_subdirectory(test-utils)

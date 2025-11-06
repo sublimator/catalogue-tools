@@ -21,6 +21,12 @@
 #include <boost/iostreams/filtering_stream.hpp>
 #include <sstream>
 
+// Suppress warnings for legacy code we don't maintain
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#pragma GCC diagnostic ignored "-Wunused-const-variable"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+
 // Constants from the rippled code
 static constexpr uint32_t CATL = 0x4C544143UL;  // "CATL" in LE
 static constexpr uint16_t CATALOGUE_VERSION_MASK = 0x00FF;
@@ -85,7 +91,7 @@ computeSHA512(const std::string& filename)
     for (size_t i = 0; i < SHA512_DIGEST_LENGTH; i++)
     {
         char hex[3];
-        sprintf(hex, "%02x", hash[i]);
+        snprintf(hex, sizeof(hex), "%02x", hash[i]);
         result += hex;
     }
 

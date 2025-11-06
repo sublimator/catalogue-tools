@@ -437,10 +437,14 @@ public:
                                 " nodes/sec");
                             // Calculate total average throughput
                             double total_write_mb_per_sec = elapsed > 0
-                                ? (static_cast<double>(current_bytes_written) / elapsed) / 1024 / 1024
+                                ? (static_cast<double>(current_bytes_written) /
+                                   elapsed) /
+                                    1024 / 1024
                                 : 0;
                             double total_read_mb_per_sec = elapsed > 0
-                                ? (static_cast<double>(current_bytes_read) / elapsed) / 1024 / 1024
+                                ? (static_cast<double>(current_bytes_read) /
+                                   elapsed) /
+                                    1024 / 1024
                                 : 0;
 
                             LOGI(
@@ -774,7 +778,7 @@ test_snapshot_memory(const Catl1ToNudbOptions& options)
              ++ledger_seq)
         {
             // Read ledger info
-            auto v1_ledger_info = reader.read_ledger_info();
+            (void)reader.read_ledger_info();  // need to move past the ledger
             // auto canonical_info = to_canonical_ledger_info(v1_ledger_info);
 
             // Load state map with deltas

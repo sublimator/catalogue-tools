@@ -81,7 +81,7 @@ create_state_snapshot(
         // Serialize the state map to the compressed stream
         try
         {
-            size_t bytes_written =
+            [[maybe_unused]] size_t bytes_written =
                 catl::v1::write_map_to_stream(state_map, compressed_out);
 
             // Make sure to flush the stream

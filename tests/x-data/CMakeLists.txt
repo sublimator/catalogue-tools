@@ -12,4 +12,4 @@ target_link_libraries(
           OpenSSL::SSL
           Boost::json)
 
-gtest_discover_tests(xdata_gtest)
+gtest_discover_tests(xdata_gtest DISCOVERY_TIMEOUT 30)

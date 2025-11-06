@@ -49,6 +49,9 @@ target_link_libraries(
           Boost::filesystem
           Boost::iostreams
           OpenSSL::SSL)
+# TODO: Migrate from OpenSSL 1.x SHA512 API to 3.x EVP_Digest API
+target_compile_definitions(${EXECUTABLE_CATL_VALIDATOR}
+                           PRIVATE OPENSSL_SUPPRESS_DEPRECATED)
 
 # catl1-copy (with compression level support)
 add_executable(${EXECUTABLE_CATL_COPY} ${SOURCES_CATL_COPY})

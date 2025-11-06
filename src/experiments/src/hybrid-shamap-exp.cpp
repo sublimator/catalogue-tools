@@ -128,7 +128,7 @@ test_diff(
     LOGI("Keys in diff (showing first 4 hex chars = first 2 branches):");
     auto callback = [&](const Key& key,
                         catl::v2::DiffOp op,
-                        const Slice& old_data,
+                        [[maybe_unused]] const Slice& old_data,
                         const Slice& new_data) {
         // Check for duplicate processing
         auto key_str = key.hex();

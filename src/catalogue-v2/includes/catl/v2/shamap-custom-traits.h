@@ -48,9 +48,9 @@ struct SerializedNode
     // CoW hook: called after an inner node has been copied
     void
     on_inner_node_copied(
-        SHAMapInnerNodeS* this_copy,
-        const SHAMapInnerNodeS* source,
-        SHAMapInnerNodeS* parent)
+        [[maybe_unused]] SHAMapInnerNodeS* this_copy,
+        [[maybe_unused]] const SHAMapInnerNodeS* source,
+        [[maybe_unused]] SHAMapInnerNodeS* parent)
     {
         // Reset serialization state for the new copy
         this->processed = false;
@@ -62,9 +62,9 @@ struct SerializedNode
     // CoW hook: called after a leaf node has been copied
     void
     on_leaf_node_copied(
-        SHAMapLeafNodeS* this_copy,
-        const SHAMapLeafNodeS* source,
-        SHAMapInnerNodeS* parent)
+        [[maybe_unused]] SHAMapLeafNodeS* this_copy,
+        [[maybe_unused]] const SHAMapLeafNodeS* source,
+        [[maybe_unused]] SHAMapInnerNodeS* parent)
     {
         // Reset serialization state for the new copy
         this->processed = false;

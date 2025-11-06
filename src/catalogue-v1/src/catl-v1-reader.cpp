@@ -16,7 +16,8 @@ Reader::read_raw_data(uint8_t* buffer, size_t size, const std::string& context)
 {
     if (!input_stream_)
     {
-        throw CatlV1Error("Input stream is not available for raw reading");
+        throw CatlV1Error(
+            "Input stream is not available for raw reading: " + context);
     }
 
     input_stream_->read(reinterpret_cast<char*>(buffer), size);

@@ -4,8 +4,8 @@
 #include "catl/core/types.h"  // For Hash256
 #include <atomic>
 #include <nudb/create.hpp>
-#include <nudb/detail/bulkio.hpp>   // for bulk_writer
-#include <nudb/detail/format.hpp>   // for dat_file_header
+#include <nudb/detail/bulkio.hpp>  // for bulk_writer
+#include <nudb/detail/format.hpp>  // for dat_file_header
 #include <nudb/native_file.hpp>
 #include <nudb/rekey.hpp>
 #include <nudb/xxhasher.hpp>
@@ -32,6 +32,25 @@ namespace catl::v1::utils::nudb {
 class NudbBulkWriter
 {
 public:
+    // Custom hasher for Hash256 using xxhasher (same as NuDB)
+    struct Hash256Hasher
+    {
+        std::size_t
+        operator()(const Hash256& key) const noexcept
+        {
+            ::nudb::xxhasher h(0);
+            return static_cast<std::size_t>(h(key.data(), key.size()));
+        }
+    };
+
+    // Map: key -> (size, duplicate_count, node_type)
+    struct KeyInfo
+    {
+        size_t size;
+        uint64_t duplicate_count;
+        uint8_t node_type;  // First byte of serialized node data
+    };
+
     /**
      * Create a new bulk writer
      * @param dat_path Path to .dat file
@@ -62,10 +81,15 @@ public:
      * @param key 32-byte hash key
      * @param data Pointer to data
      * @param size Size of data
+     * @param node_type Node type (0=inner, 1=leaf)
      * @return true if inserted (false if duplicate)
      */
     bool
-    insert(const Hash256& key, const uint8_t* data, size_t size);
+    insert(
+        const Hash256& key,
+        const uint8_t* data,
+        size_t size,
+        uint8_t node_type);
 
     /**
      * Close the bulk writer and build the index
@@ -91,7 +115,7 @@ public:
     uint64_t
     get_duplicate_count() const
     {
-        return duplicate_count_;
+        return total_duplicate_attempts_;
     }
 
     /**
@@ -101,6 +125,16 @@ public:
     get_bytes_written() const
     {
         return total_bytes_written_.load();
+    }
+
+    /**
+     * Get the seen keys map for verification
+     * Returns map of key -> (size, duplicate_count)
+     */
+    const std::unordered_map<Hash256, KeyInfo, Hash256Hasher>&
+    get_seen_keys() const
+    {
+        return seen_keys_;
     }
 
 private:
@@ -115,25 +149,15 @@ private:
     std::unique_ptr<::nudb::native_file> dat_file_;
 
     // Bulk writer for sequential writes
-    using bulk_writer_t =
-        ::nudb::detail::bulk_writer<::nudb::native_file>;
+    using bulk_writer_t = ::nudb::detail::bulk_writer<::nudb::native_file>;
     std::unique_ptr<bulk_writer_t> bulk_writer_;
 
     // Track seen keys for deduplication
-    struct Hash256Hasher
-    {
-        std::size_t
-        operator()(const Hash256& key) const noexcept
-        {
-            ::nudb::xxhasher h(0);
-            return static_cast<std::size_t>(h(key.data(), key.size()));
-        }
-    };
-    std::unordered_map<Hash256, size_t, Hash256Hasher> seen_keys_;
+    std::unordered_map<Hash256, KeyInfo, Hash256Hasher> seen_keys_;
 
     // Stats
     uint64_t unique_count_ = 0;
-    uint64_t duplicate_count_ = 0;
+    uint64_t total_duplicate_attempts_ = 0;
     std::atomic<uint64_t> total_bytes_written_{0};
 
     bool is_open_ = false;

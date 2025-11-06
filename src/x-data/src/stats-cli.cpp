@@ -61,7 +61,8 @@ process_map_type(
             catch (const std::exception& e)
             {
                 error_count++;
-                // Optionally log errors
+                std::cerr << "Error parsing " << type_name << ": " << e.what()
+                          << "\n";
             }
         },
         [&](const Slice& key) {

@@ -231,7 +231,6 @@ process_map_type(
     size_t& error_count,
     std::set<std::string>& field_names_seen,
     std::vector<ParseError>& errors,
-    uint32_t current_ledger,
     size_t debug_n_items,
     bool debug_dev_null = true,
     size_t max_errors = 100)
@@ -364,26 +363,26 @@ TEST(XData, ParseCatlFile)
 
     auto compressed_file = TestDataPath::get_path(
         "catalogue-v1/fixture/cat.2000000-2010000.compression-9.catl");
-    
+
     // Check if we need to decompress for MmapReader
     std::string catl_file = compressed_file;
     std::string decompressed_file = TestDataPath::get_path(
         "catalogue-v1/fixture/cat.2000000-2010000.compression-0.catl");
-    
+
     // First check if compressed file exists and if decompressed doesn't
-    if (boost::filesystem::exists(compressed_file) && 
+    if (boost::filesystem::exists(compressed_file) &&
         !boost::filesystem::exists(decompressed_file))
     {
         std::cerr << "Decompressing test fixture for MmapReader...\n";
         v1::Reader compressed_reader(compressed_file);
-        
+
         // Check if it's actually compressed
         if (compressed_reader.compression_level() > 0)
         {
             compressed_reader.decompress(decompressed_file);
             std::cerr << "Decompression complete.\n";
         }
-        
+
         catl_file = decompressed_file;
     }
     else if (boost::filesystem::exists(decompressed_file))
@@ -449,7 +448,6 @@ TEST(XData, ParseCatlFile)
             account_error_count,
             field_names_seen,
             parse_errors,
-            current_ledger,
             debug_n_items,
             debug_dev_null);
 
@@ -465,7 +463,6 @@ TEST(XData, ParseCatlFile)
             tx_error_count,
             field_names_seen,
             parse_errors,
-            current_ledger,
             debug_n_items,
             debug_dev_null);
 

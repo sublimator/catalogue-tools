@@ -29,4 +29,4 @@ target_link_libraries(
           Boost::filesystem
           zstd::libzstd_static)
 
-gtest_discover_tests(hybrid_shamap_v2_tests)
+gtest_discover_tests(hybrid_shamap_v2_tests DISCOVERY_TIMEOUT 30)
