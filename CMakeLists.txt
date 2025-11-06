@@ -58,6 +58,9 @@ add_compile_definitions(PROJECT_ROOT="${PROJECT_ROOT}"
 # Add the core library
 add_subdirectory(src/core)
 
+# Add the nodestore library
+add_subdirectory(src/nodestore)
+
 # Add the base58 library
 add_subdirectory(src/base58)
 
