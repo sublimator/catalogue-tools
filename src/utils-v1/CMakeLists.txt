@@ -101,12 +101,14 @@ target_include_directories(${EXECUTABLE_CATL1_TO_NUDB}
                            PRIVATE ${UTILS_INCLUDE_DIR} ${CATL_INCLUDE_DIR})
 target_link_libraries(
   ${EXECUTABLE_CATL1_TO_NUDB}
-  PRIVATE catl_core
-          catl_shamap
-          catl_catalogue_v1
-          catl_xdata
-          catl_base58
+  PRIVATE catl::core
+          catl::shamap
+          catl::catalogue_v1
+          catl::xdata
+          catl::base58
+          catl::nodestore
           NuDB
+          LZ4::lz4_static
           Boost::filesystem
           Boost::program_options
           Boost::json

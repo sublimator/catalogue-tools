@@ -1,6 +1,8 @@
 #include "catl/utils-v1/nudb/catl1-to-nudb-pipeline.h"
 #include "catl/core/log-macros.h"
 #include "catl/core/logger.h"
+#include "catl/nodestore/node_blob.h"
+#include "catl/nodestore/node_types.h"
 #include "catl/shamap/shamap-innernode.h"
 #include "catl/shamap/shamap-leafnode.h"
 #include "catl/shamap/shamap-treenode.h"
@@ -782,8 +784,24 @@ CatlNudbPipeline::flush_node(
 
     total_attempts++;
 
-    // Track for stats
-    total_bytes_written_ += size;
+    // Map simple node_type to nodestore::node_type
+    // 0 = inner node (hot_unknown)
+    // 1 = leaf node (hot_account_node for now - TODO: distinguish account vs tx)
+    nodestore::node_type ns_type = (node_type == 0)
+        ? nodestore::node_type::hot_unknown
+        : nodestore::node_type::hot_account_node;
+
+    // Compress the serialized data using nodestore codec
+    std::span<const uint8_t> data_span(data, size);
+    nodestore::node_blob compressed_blob =
+        nodestore::nodeobject_compress(ns_type, data_span);
+
+    // The compressed blob includes 9-byte header + compressed payload
+    const uint8_t* compressed_data = compressed_blob.data.data();
+    size_t compressed_size = compressed_blob.data.size();
+
+    // Track COMPRESSED bytes for stats (this is what actually gets written)
+    total_bytes_written_ += compressed_size;
 
     bool inserted = false;
 
@@ -793,12 +811,13 @@ CatlNudbPipeline::flush_node(
         // Real NuDB mode - use bulk writer for optimal performance
         if (bulk_writer_)
         {
-            inserted = bulk_writer_->insert(key, data, size, node_type);
+            inserted = bulk_writer_->insert(
+                key, compressed_data, compressed_size, node_type);
             if (inserted)
             {
                 total_inserts++;
-                // Track for verification later
-                inserted_keys_with_sizes_[key] = size;
+                // Track for verification later (store compressed size)
+                inserted_keys_with_sizes_[key] = compressed_size;
             }
             else
             {
@@ -828,7 +847,8 @@ CatlNudbPipeline::flush_node(
     }
     else if (mock_mode_ == "disk")
     {
-        // Mock disk mode - write key (32 bytes) + size (4 bytes) + data to file
+        // Mock disk mode - write key (32 bytes) + size (4 bytes) + compressed data
+        // to file
         if (mock_disk_file_ && mock_disk_file_->is_open())
         {
             // Check if we've already inserted this key
@@ -843,13 +863,14 @@ CatlNudbPipeline::flush_node(
             mock_disk_file_->write(
                 reinterpret_cast<const char*>(key.data()), 32);
 
-            // Write size (4 bytes, little-endian)
-            uint32_t size32 = static_cast<uint32_t>(size);
+            // Write compressed size (4 bytes, little-endian)
+            uint32_t size32 = static_cast<uint32_t>(compressed_size);
             mock_disk_file_->write(
                 reinterpret_cast<const char*>(&size32), sizeof(size32));
 
-            // Write data
-            mock_disk_file_->write(reinterpret_cast<const char*>(data), size);
+            // Write compressed data
+            mock_disk_file_->write(
+                reinterpret_cast<const char*>(compressed_data), compressed_size);
 
             // Check for write errors
             if (!mock_disk_file_->good())
@@ -858,8 +879,8 @@ CatlNudbPipeline::flush_node(
                 throw std::runtime_error("Mock disk write failed");
             }
 
-            // Track this key
-            inserted_keys_with_sizes_[key] = size;
+            // Track this key (with compressed size)
+            inserted_keys_with_sizes_[key] = compressed_size;
             total_inserts++;
             inserted = true;
         }
@@ -874,7 +895,7 @@ CatlNudbPipeline::flush_node(
             return false;
         }
 
-        inserted_keys_with_sizes_[key] = size;
+        inserted_keys_with_sizes_[key] = compressed_size;
         total_inserts++;
         inserted = true;
     }
