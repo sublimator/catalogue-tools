@@ -34,13 +34,13 @@ target_link_libraries(inner_node_format_gtest
 
 gtest_discover_tests(inner_node_format_gtest DISCOVERY_TIMEOUT 30)
 
-add_executable(nodeobject_codec_gtest nodeobject-codec-gtest.cpp)
+add_executable(node_blob_gtest node-blob-gtest.cpp)
 
 target_link_libraries(
-  nodeobject_codec_gtest
+  node_blob_gtest
   PRIVATE catl::nodestore
           catl::core
           LZ4::lz4_static
           GTest::gtest_main)
 
-gtest_discover_tests(nodeobject_codec_gtest DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(node_blob_gtest DISCOVERY_TIMEOUT 30)
