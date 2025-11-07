@@ -108,6 +108,7 @@ target_link_libraries(
           catl::base58
           catl::nodestore
           NuDB
+          RocksDB::rocksdb
           LZ4::lz4_static
           Boost::filesystem
           Boost::program_options

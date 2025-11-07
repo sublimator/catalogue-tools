@@ -2,15 +2,15 @@
 
 #include "catl/core/logger.h"
 #include "catl/core/types.h"  // For Hash256
+#include "catl/utils-v1/nudb/deduplication-strategy.h"
 #include <atomic>
+#include <memory>
 #include <nudb/create.hpp>
 #include <nudb/detail/bulkio.hpp>  // for bulk_writer
 #include <nudb/detail/format.hpp>  // for dat_file_header
 #include <nudb/native_file.hpp>
 #include <nudb/rekey.hpp>
-#include <nudb/xxhasher.hpp>
 #include <string>
-#include <unordered_map>
 
 namespace catl::v1::utils::nudb {
 
@@ -19,7 +19,7 @@ namespace catl::v1::utils::nudb {
  *
  * Step 1: Build .dat file sequentially using bulk_writer
  *   - Write all items as [size][key][data] records
- *   - Skip duplicates using in-memory tracking
+ *   - Skip duplicates using pluggable deduplication strategy
  *   - No index building, just sequential writes
  *
  * Step 2: Rekey to build index
@@ -28,41 +28,47 @@ namespace catl::v1::utils::nudb {
  *
  * This approach bypasses NuDB's insert rate limiter and should be
  * significantly faster for bulk imports.
+ *
+ * Deduplication Strategies:
+ *   - NoDeduplicationStrategy: No tracking (max speed)
+ *   - FullKeyDeduplicationStrategy: Track all Hash256 keys (~3.2GB for 79M)
+ *   - HybridXxHashDeduplicationStrategy: Track xxhash + collisions (~650MB for
+ * 79M)
  */
 class NudbBulkWriter
 {
 public:
-    // Custom hasher for Hash256 using xxhasher (same as NuDB)
-    struct Hash256Hasher
-    {
-        std::size_t
-        operator()(const Hash256& key) const noexcept
-        {
-            ::nudb::xxhasher h(0);
-            return static_cast<std::size_t>(h(key.data(), key.size()));
-        }
-    };
-
-    // Map: key -> (size, duplicate_count, node_type)
-    struct KeyInfo
-    {
-        size_t size;
-        uint64_t duplicate_count;
-        uint8_t node_type;  // First byte of serialized node data
-    };
-
     /**
-     * Create a new bulk writer
+     * Create a new bulk writer with custom deduplication strategy
      * @param dat_path Path to .dat file
      * @param key_path Path to .key file
      * @param log_path Path to .log file
      * @param key_size Key size in bytes (default 32 for Hash256)
+     * @param strategy Deduplication strategy (default:
+     * HybridXxHashDeduplicationStrategy)
      */
     NudbBulkWriter(
         const std::string& dat_path,
         const std::string& key_path,
         const std::string& log_path,
-        uint32_t key_size = 32);
+        uint32_t key_size = 32,
+        std::unique_ptr<DeduplicationStrategy> strategy = nullptr);
+
+    /**
+     * Legacy constructor for backwards compatibility
+     * @param dat_path Path to .dat file
+     * @param key_path Path to .key file
+     * @param log_path Path to .log file
+     * @param key_size Key size in bytes (default 32 for Hash256)
+     * @param no_dedupe If true, use NoDeduplicationStrategy; else
+     * HybridXxHashDeduplicationStrategy
+     */
+    NudbBulkWriter(
+        const std::string& dat_path,
+        const std::string& key_path,
+        const std::string& log_path,
+        uint32_t key_size,
+        bool no_dedupe);
 
     ~NudbBulkWriter();
 
@@ -115,7 +121,7 @@ public:
     uint64_t
     get_duplicate_count() const
     {
-        return total_duplicate_attempts_;
+        return dedupe_strategy_->get_duplicate_count();
     }
 
     /**
@@ -125,16 +131,6 @@ public:
     get_bytes_written() const
     {
         return total_bytes_written_.load();
-    }
-
-    /**
-     * Get the seen keys map for verification
-     * Returns map of key -> (size, duplicate_count)
-     */
-    const std::unordered_map<Hash256, KeyInfo, Hash256Hasher>&
-    get_seen_keys() const
-    {
-        return seen_keys_;
     }
 
 private:
@@ -152,12 +148,11 @@ private:
     using bulk_writer_t = ::nudb::detail::bulk_writer<::nudb::native_file>;
     std::unique_ptr<bulk_writer_t> bulk_writer_;
 
-    // Track seen keys for deduplication
-    std::unordered_map<Hash256, KeyInfo, Hash256Hasher> seen_keys_;
+    // Pluggable deduplication strategy
+    std::unique_ptr<DeduplicationStrategy> dedupe_strategy_;
 
     // Stats
     uint64_t unique_count_ = 0;
-    uint64_t total_duplicate_attempts_ = 0;
     std::atomic<uint64_t> total_bytes_written_{0};
 
     bool is_open_ = false;

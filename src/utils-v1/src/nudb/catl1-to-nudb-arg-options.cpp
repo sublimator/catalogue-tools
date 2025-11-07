@@ -56,6 +56,12 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
         po::value<int>()->default_value(1),
         "Number of threads for parallel hashing (must be power of 2: 1, 2, 4, "
         "8, 16) - Default 1 (best performance)")(
+        "compressor-threads",
+        po::value<int>()->default_value(2),
+        "Number of threads for parallel compression (default: 2)")(
+        "max-write-queue-mb",
+        po::value<uint32_t>()->default_value(2048),
+        "Max write queue size in megabytes (default: 2048 MB = 2 GB)")(
         "enable-debug-partitions",
         po::bool_switch(),
         "Enable verbose debug log partitions (MAP_OPS, WALK_NODES, "
@@ -71,7 +77,15 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
         "nudb-mock",
         po::value<std::string>(),
         "Mock NuDB mode for performance testing. Options: 'noop' or 'memory' "
-        "(skip all I/O), 'disk' (buffered append-only file)");
+        "(skip all I/O), 'disk' (buffered append-only file), 'nudb' (regular "
+        "NuDB inserts, no bulk writer)")(
+        "verify-keys",
+        po::bool_switch(),
+        "Verify all inserted keys are readable after import (8 threads)")(
+        "no-dedupe",
+        po::bool_switch(),
+        "Skip deduplication tracking for faster writes (disables "
+        "verification)");
 
     // Generate the help text
     std::ostringstream help_stream;
@@ -151,14 +165,26 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
             std::string mock_mode = vm["nudb-mock"].as<std::string>();
             // Validate mock mode
             if (mock_mode != "noop" && mock_mode != "memory" &&
-                mock_mode != "disk")
+                mock_mode != "disk" && mock_mode != "nudb")
             {
                 options.valid = false;
                 options.error_message =
-                    "nudb-mock must be one of: noop, memory, disk";
+                    "nudb-mock must be one of: noop, memory, disk, nudb";
                 return options;
             }
             options.nudb_mock = mock_mode;
+        }
+
+        // Check for verify-keys flag
+        if (vm.count("verify-keys"))
+        {
+            options.verify_keys = vm["verify-keys"].as<bool>();
+        }
+
+        // Check for no-dedupe flag
+        if (vm.count("no-dedupe"))
+        {
+            options.no_dedupe = vm["no-dedupe"].as<bool>();
         }
 
         if (vm.count("hasher-threads"))
@@ -173,6 +199,32 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
                 return options;
             }
             options.hasher_threads = threads;
+        }
+
+        if (vm.count("compressor-threads"))
+        {
+            int threads = vm["compressor-threads"].as<int>();
+            if (threads <= 0 || threads > 32)
+            {
+                options.valid = false;
+                options.error_message =
+                    "compressor-threads must be between 1 and 32";
+                return options;
+            }
+            options.compressor_threads = threads;
+        }
+
+        if (vm.count("max-write-queue-mb"))
+        {
+            options.max_write_queue_mb =
+                vm["max-write-queue-mb"].as<uint32_t>();
+            if (options.max_write_queue_mb == 0)
+            {
+                options.valid = false;
+                options.error_message =
+                    "max-write-queue-mb must be greater than 0";
+                return options;
+            }
         }
 
         // Check for required nudb path (not required in test-snapshots mode)

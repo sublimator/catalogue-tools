@@ -16,13 +16,17 @@ file(GLOB SHAMAP_TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*-gtest.cpp")
 
 add_executable(shamap_gtest ${SHAMAP_TEST_SOURCES})
 
+target_include_directories(shamap_gtest
+                           PRIVATE ${CMAKE_SOURCE_DIR}/src/nodestore/includes)
+
 target_link_libraries(
   shamap_gtest
   PRIVATE catl::shamap
           catl_shamap_test_utils
           GTest::gtest_main
           OpenSSL::SSL
-          Boost::json)
+          Boost::json
+          LZ4::lz4_static)
 
 include(GoogleTest)
 gtest_discover_tests(shamap_gtest DISCOVERY_TIMEOUT 30)

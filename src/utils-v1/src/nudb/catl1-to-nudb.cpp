@@ -7,7 +7,6 @@
 #include "catl/xdata/protocol.h"
 
 #include <boost/filesystem.hpp>
-#include <boost/lockfree/spsc_queue.hpp>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
@@ -24,12 +23,6 @@ namespace fs = boost::filesystem;
 // LogPartition for version tracking - disabled by default
 // Enable with: version_tracking_log.enable(LogLevel::DEBUG)
 static LogPartition version_tracking_log("VERSION_TRACK", LogLevel::NONE);
-
-// Pipeline queue configuration constants
-static constexpr size_t SNAPSHOT_QUEUE_SIZE =
-    100;  // Buffer size for snapshot queue
-static constexpr size_t HASHED_QUEUE_SIZE =
-    100;  // Buffer size for hashed ledger queue
 
 /**
  * Load protocol definitions based on network ID
@@ -186,6 +179,12 @@ public:
             // Configure hasher threads
             pipeline.set_hasher_threads(options_.hasher_threads);
 
+            // Configure compressor threads
+            pipeline.set_compression_threads(options_.compressor_threads);
+
+            // Configure max write queue size
+            pipeline.set_max_write_queue_mb(options_.max_write_queue_mb);
+
             // Configure walk-nodes-ledger if specified
             if (options_.walk_nodes_ledger)
             {
@@ -205,6 +204,12 @@ public:
                 pipeline.set_mock_mode(options_.nudb_mock);
             }
 
+            // Configure no-dedupe if enabled
+            if (options_.no_dedupe)
+            {
+                pipeline.set_no_dedupe(true);
+            }
+
             // Create NuDB database
             LOGI("Creating NuDB database...");
             if (!pipeline.create_database(
@@ -217,17 +222,9 @@ public:
                 return false;
             }
 
-            // Create SPSC queues between stages
-            // Queue sizes are configured by constants for consistent reporting
-            boost::lockfree::spsc_queue<LedgerSnapshot> snapshot_queue(
-                SNAPSHOT_QUEUE_SIZE);
-            boost::lockfree::spsc_queue<HashedLedger> hashed_queue(
-                HASHED_QUEUE_SIZE);
-
             // Error tracking (atomic for thread safety)
             std::atomic<bool> error_occurred{false};
             std::atomic<bool> builder_done{false};
-            std::atomic<bool> hasher_done{false};
 
             // Thread 1: Build + Snapshot
             std::thread builder_thread([&]() {
@@ -368,9 +365,13 @@ public:
                             ledger_seq > last_stats_ledger)
                         {
                             auto now = std::chrono::steady_clock::now();
-                            auto elapsed =
+                            auto elapsed_sec =
                                 std::chrono::duration_cast<
                                     std::chrono::seconds>(now - start_time)
+                                    .count();
+                            auto elapsed_ms =
+                                std::chrono::duration_cast<
+                                    std::chrono::milliseconds>(now - start_time)
                                     .count();
                             auto period_elapsed_ms =
                                 std::chrono::duration_cast<
@@ -384,23 +385,28 @@ public:
                                 total_state_nodes_deleted +
                                 total_tx_nodes_added;
 
-                            // Get NuDB bytes written and CATL bytes read
+                            // Get NuDB bytes written (compressed) and CATL
+                            // bytes read
                             uint64_t current_bytes_written =
                                 pipeline.get_total_bytes_written();
                             uint64_t period_bytes_written =
                                 current_bytes_written - last_bytes_written;
+
+                            uint64_t current_bytes_uncompressed =
+                                pipeline.get_total_bytes_uncompressed();
 
                             uint64_t current_bytes_read =
                                 reader.body_bytes_consumed();
                             uint64_t period_bytes_read =
                                 current_bytes_read - last_bytes_read;
 
-                            double ledgers_per_sec = elapsed > 0
-                                ? static_cast<double>(ledgers_processed) /
-                                    elapsed
+                            double ledgers_per_sec = elapsed_ms > 0
+                                ? static_cast<double>(ledgers_processed) *
+                                    1000.0 / elapsed_ms
                                 : 0;
-                            double nodes_per_sec = elapsed > 0
-                                ? static_cast<double>(total_nodes) / elapsed
+                            double nodes_per_sec = elapsed_ms > 0
+                                ? static_cast<double>(total_nodes) * 1000.0 /
+                                    elapsed_ms
                                 : 0;
                             // Use milliseconds for period calculations to
                             // handle fast processing
@@ -417,16 +423,18 @@ public:
                             last_bytes_read = current_bytes_read;
                             last_stats_time = now;
 
-                            size_t snapshot_depth =
-                                snapshot_queue.read_available();
-                            size_t hashed_depth = hashed_queue.read_available();
+                            size_t hasher_depth =
+                                pipeline.get_hasher_queue_depth();
+                            size_t compression_depth =
+                                pipeline.get_compression_queue_depth();
 
                             LOGI("=====================================");
                             LOGI("📊 PIPELINE STATS @ Ledger ", ledger_seq);
                             LOGI("=====================================");
                             LOGI("⏱️  Performance:");
                             LOGI("   - Ledgers processed: ", ledgers_processed);
-                            LOGI("   - Elapsed time: ", elapsed, " seconds");
+                            LOGI(
+                                "   - Elapsed time: ", elapsed_sec, " seconds");
                             LOGI(
                                 "   - Throughput: ",
                                 std::fixed,
@@ -435,15 +443,16 @@ public:
                                 " ledgers/sec, ",
                                 nodes_per_sec,
                                 " nodes/sec");
-                            // Calculate total average throughput
-                            double total_write_mb_per_sec = elapsed > 0
-                                ? (static_cast<double>(current_bytes_written) /
-                                   elapsed) /
+                            // Calculate total average throughput (use
+                            // milliseconds for precision)
+                            double total_write_mb_per_sec = elapsed_ms > 0
+                                ? (static_cast<double>(current_bytes_written) *
+                                   1000.0 / elapsed_ms) /
                                     1024 / 1024
                                 : 0;
-                            double total_read_mb_per_sec = elapsed > 0
-                                ? (static_cast<double>(current_bytes_read) /
-                                   elapsed) /
+                            double total_read_mb_per_sec = elapsed_ms > 0
+                                ? (static_cast<double>(current_bytes_read) *
+                                   1000.0 / elapsed_ms) /
                                     1024 / 1024
                                 : 0;
 
@@ -457,8 +466,14 @@ public:
                                 " MB/sec (total avg) [",
                                 current_bytes_read / 1024 / 1024,
                                 " MB]");
+                            double compression_ratio =
+                                current_bytes_uncompressed > 0
+                                ? static_cast<double>(current_bytes_written) /
+                                    current_bytes_uncompressed
+                                : 1.0;
+
                             LOGI(
-                                "   - NuDB write: ",
+                                "   - NuDB write (compressed): ",
                                 std::fixed,
                                 std::setprecision(2),
                                 write_bytes_per_sec / 1024 / 1024,
@@ -467,21 +482,35 @@ public:
                                 " MB/sec (total avg) [",
                                 current_bytes_written / 1024 / 1024,
                                 " MB]");
+                            LOGI(
+                                "   - Uncompressed: ",
+                                current_bytes_uncompressed / 1024 / 1024,
+                                " MB, ratio: ",
+                                std::fixed,
+                                std::setprecision(3),
+                                compression_ratio,
+                                " (",
+                                std::setprecision(1),
+                                (1.0 - compression_ratio) * 100,
+                                "% saved)");
+                            LOGI(
+                                "   - Nodes written: ",
+                                pipeline.get_total_inner_nodes(),
+                                " inner, ",
+                                pipeline.get_total_leaf_nodes(),
+                                " leaf");
 
                             LOGI("📦 Queue depths:");
+                            LOGI("   - Hasher queue (ledgers): ", hasher_depth);
                             LOGI(
-                                "   - Snapshot queue: ",
-                                snapshot_depth,
-                                "/",
-                                SNAPSHOT_QUEUE_SIZE);
+                                "   - Compression queue (ledgers): ",
+                                compression_depth);
                             LOGI(
-                                "   - Hashed queue: ",
-                                hashed_depth,
-                                "/",
-                                HASHED_QUEUE_SIZE);
+                                "   - Write queue (nodes): ",
+                                pipeline.get_write_queue_depth());
                             LOGI(
-                                "   - Total snapshots in memory: ",
-                                snapshot_depth + hashed_depth);
+                                "   - Total ledgers in pipeline: ",
+                                hasher_depth + compression_depth);
 
                             uint32_t ledgers_in_period =
                                 ledger_seq - last_stats_ledger;
@@ -530,17 +559,9 @@ public:
                             last_stats_ledger = ledger_seq;
                         }
 
-                        // Push to queue (blocking if full)
-                        bool had_to_wait = false;
-                        while (!snapshot_queue.push(*snapshot))
-                        {
-                            had_to_wait = true;
-                            std::this_thread::yield();
-                        }
-                        if (had_to_wait)
-                        {
-                            queue_full_waits++;
-                        }
+                        // Enqueue to pipeline hasher (blocks with backpressure
+                        // if queue full)
+                        pipeline.enqueue_to_hasher(std::move(*snapshot));
                     }
 
                     LOGI("[Builder] Done");
@@ -554,131 +575,8 @@ public:
                 }
             });
 
-            // Thread 2: Hash + Verify
-            std::thread hasher_thread([&]() {
-                try
-                {
-                    LOGI("[Hasher] Starting...");
-
-                    while (true)
-                    {
-                        if (error_occurred.load())
-                            break;
-
-                        LedgerSnapshot snapshot;
-                        if (snapshot_queue.pop(snapshot))
-                        {
-                            PLOGD(
-                                version_tracking_log,
-                                "[Hasher] Processing ledger ",
-                                snapshot.info.seq,
-                                " with processing_version: ",
-                                snapshot.processing_version);
-
-                            auto hashed = pipeline.hash_and_verify(snapshot);
-
-                            PLOGD(
-                                version_tracking_log,
-                                "[Hasher] Hashed ledger ",
-                                hashed.info.seq,
-                                ", verified: ",
-                                hashed.verified,
-                                ", processing_version carried forward: ",
-                                hashed.processing_version);
-
-                            if (!hashed.verified)
-                            {
-                                LOGE(
-                                    "[Hasher] Hash verification failed for "
-                                    "ledger ",
-                                    hashed.info.seq);
-                                error_occurred.store(true);
-                                break;
-                            }
-
-                            // Push to next queue (blocking if full)
-                            while (!hashed_queue.push(hashed))
-                            {
-                                std::this_thread::yield();
-                            }
-                        }
-                        else if (builder_done.load())
-                        {
-                            // Builder is done and queue is empty
-                            break;
-                        }
-                        else
-                        {
-                            std::this_thread::yield();
-                        }
-                    }
-
-                    LOGI("[Hasher] Done");
-                    hasher_done.store(true);
-                }
-                catch (const std::exception& e)
-                {
-                    LOGE("[Hasher] Exception: ", e.what());
-                    error_occurred.store(true);
-                    hasher_done.store(true);
-                }
-            });
-
-            // Thread 3: Flush to NuDB (main thread does this)
-            LOGI("[Flusher] Starting...");
-            size_t flushed_count = 0;
-
-            while (true)
-            {
-                if (error_occurred.load())
-                    break;
-
-                HashedLedger hashed;
-                if (hashed_queue.pop(hashed))
-                {
-                    PLOGD(
-                        version_tracking_log,
-                        "[Flusher] About to flush ledger ",
-                        hashed.info.seq,
-                        " with processing_version: ",
-                        hashed.processing_version,
-                        ", state_ops: ",
-                        hashed.state_ops.nodes_added,
-                        " added, ",
-                        hashed.state_ops.nodes_updated,
-                        " updated");
-
-                    if (!pipeline.flush_to_nudb(hashed))
-                    {
-                        LOGE(
-                            "[Flusher] Failed to flush ledger ",
-                            hashed.info.seq);
-                        error_occurred.store(true);
-                        break;
-                    }
-
-                    PLOGD(
-                        version_tracking_log,
-                        "[Flusher] Successfully flushed ledger ",
-                        hashed.info.seq);
-                    flushed_count++;
-                }
-                else if (hasher_done.load())
-                {
-                    // Hasher is done and queue is empty
-                    break;
-                }
-                else
-                {
-                    std::this_thread::yield();
-                }
-            }
-
-            LOGI("[Flusher] Done - flushed ", flushed_count, " ledgers");
-
-            // Wait for threads to complete
+            // Wait for builder to complete
             builder_thread.join();
-            hasher_thread.join();
 
             if (error_occurred.load())
             {
@@ -702,25 +600,29 @@ public:
                 return false;
             }
 
-            // Reopen database for verification
-            LOGI("Reopening database for verification...");
-            if (!pipeline.open_database(*options_.nudb_path))
+            // Optionally verify all keys are readable
+            if (options_.verify_keys)
             {
-                LOGE("Failed to reopen NuDB database for verification!");
-                return false;
-            }
+                // Reopen database for verification
+                LOGI("Reopening database for verification...");
+                if (!pipeline.open_database(*options_.nudb_path))
+                {
+                    LOGE("Failed to reopen NuDB database for verification!");
+                    return false;
+                }
 
-            // Verify all keys are readable from NuDB (using 8 threads)
-            LOGI("\nVerifying NuDB database integrity...");
-            if (!pipeline.verify_all_keys(8))
-            {
-                LOGE("Database verification failed!");
-                pipeline.close_database();  // Close before returning
-                return false;
-            }
+                // Verify all keys are readable from NuDB (using 8 threads)
+                LOGI("\nVerifying NuDB database integrity...");
+                if (!pipeline.verify_all_keys(8))
+                {
+                    LOGE("Database verification failed!");
+                    pipeline.close_database();  // Close before returning
+                    return false;
+                }
 
-            // Final close
-            pipeline.close_database();
+                // Final close
+                pipeline.close_database();
+            }
 
             return true;
         }

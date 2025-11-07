@@ -44,3 +44,20 @@ target_link_libraries(
           GTest::gtest_main)
 
 gtest_discover_tests(node_blob_gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(
+  nudb_bulk_duplicates_gtest nudb-bulk-duplicates-gtest.cpp
+                             ../../src/utils-v1/src/nudb/nudb-bulk-writer.cpp)
+
+target_include_directories(nudb_bulk_duplicates_gtest
+                           PRIVATE ../../src/utils-v1/includes)
+
+target_link_libraries(
+  nudb_bulk_duplicates_gtest
+  PRIVATE catl::nodestore
+          catl::core
+          NuDB
+          Boost::filesystem
+          GTest::gtest_main)
+
+gtest_discover_tests(nudb_bulk_duplicates_gtest DISCOVERY_TIMEOUT 30)

@@ -7,13 +7,16 @@
 #include "catl/v1/catl-v1-reader.h"
 #include "catl/v1/catl-v1-types.h"  // For MapOperations
 #include "catl/xdata/protocol.h"
+#include <condition_variable>
 #include <fstream>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <nudb/basic_store.hpp>
 #include <nudb/posix_file.hpp>
 #include <nudb/xxhasher.hpp>
 #include <optional>
+#include <queue>
 #include <thread>
 #include <vector>
 
@@ -48,6 +51,24 @@ struct HashedLedger
     catl::v1::MapOperations state_ops;  // Carry forward from snapshot
     catl::v1::MapOperations tx_ops;     // Carry forward from snapshot
     int processing_version;  // Version when we started processing this ledger
+
+    // Comparison for priority queue (oldest ledger = highest priority)
+    bool
+    operator<(const HashedLedger& other) const
+    {
+        return info.seq >
+            other.info.seq;  // Reverse: lower seq = higher priority
+    }
+};
+
+// Compressed node blob ready for writing
+struct CompressedNode
+{
+    uint32_t ledger_seq;  // For ordering
+    Hash256 hash;
+    std::vector<uint8_t> blob;  // Compressed data
+    size_t uncompressed_size;   // Original size before compression
+    uint8_t node_type;          // 0=inner, 1=leaf
 };
 
 /**
@@ -107,12 +128,52 @@ public:
     flush_to_nudb(HashedLedger hashed);
 
     /**
+     * Enqueue a snapshot to the hasher thread
+     * This is the entry point for the pipeline when using internal hasher
+     * Blocks if hasher queue is full (backpressure)
+     *
+     * @param snapshot Snapshot from stage 1
+     */
+    void
+    enqueue_to_hasher(LedgerSnapshot snapshot);
+
+    /**
      * Set the number of threads to use for parallel hashing
      * Must be a power of 2 (1, 2, 4, 8, or 16)
-     * Default is 2
+     * Default is 1
      */
     void
     set_hasher_threads(int threads);
+
+    /**
+     * Set the number of threads to use for parallel compression
+     * Default is 2
+     * Must be called before create_database()
+     */
+    void
+    set_compression_threads(int threads);
+
+    /**
+     * Set the max write queue size in megabytes
+     * Default is 2048 MB (2 GB)
+     * Must be called before start_compression_pipeline()
+     */
+    void
+    set_max_write_queue_mb(uint32_t mb);
+
+    /**
+     * Start the compression thread pool and writer thread
+     * Called automatically by create_database()
+     */
+    void
+    start_compression_pipeline();
+
+    /**
+     * Stop the compression thread pool and writer thread
+     * Called automatically by close_database()
+     */
+    void
+    stop_compression_pipeline();
 
     /**
      * Set the ledger to enable walk_nodes debugging for
@@ -137,6 +198,13 @@ public:
      */
     void
     set_mock_mode(const std::string& mode);
+
+    /**
+     * Disable deduplication tracking for faster writes
+     * @param no_dedupe true to skip hash map tracking
+     */
+    void
+    set_no_dedupe(bool no_dedupe);
 
     /**
      * Create and open the NuDB database
@@ -177,12 +245,79 @@ public:
     verify_all_keys(int num_threads = 8);
 
     /**
-     * Get total bytes written to NuDB
+     * Get total bytes written to NuDB (compressed)
      */
     uint64_t
     get_total_bytes_written() const
     {
         return total_bytes_written_.load();
+    }
+
+    /**
+     * Get total uncompressed bytes
+     */
+    uint64_t
+    get_total_bytes_uncompressed() const
+    {
+        return total_bytes_uncompressed_.load();
+    }
+
+    /**
+     * Get total inner nodes written
+     */
+    uint64_t
+    get_total_inner_nodes() const
+    {
+        return total_inner_nodes_.load();
+    }
+
+    /**
+     * Get total leaf nodes written
+     */
+    uint64_t
+    get_total_leaf_nodes() const
+    {
+        return total_leaf_nodes_.load();
+    }
+
+    /**
+     * Get hasher queue depth (ledgers waiting to be hashed)
+     */
+    size_t
+    get_hasher_queue_depth() const
+    {
+        std::lock_guard<std::mutex> lock(
+            const_cast<std::mutex&>(hasher_queue_mutex_));
+        return hasher_queue_.size();
+    }
+
+    /**
+     * Get compression queue depth (ledgers waiting to be compressed)
+     */
+    size_t
+    get_compression_queue_depth() const
+    {
+        std::lock_guard<std::mutex> lock(
+            const_cast<std::mutex&>(compression_queue_mutex_));
+        return compression_queue_.size();
+    }
+
+    /**
+     * Get write queue depth (compressed nodes waiting to be written)
+     */
+    size_t
+    get_write_queue_depth() const
+    {
+        return write_queue_nodes_.load();
+    }
+
+    /**
+     * Get write queue bytes (total compressed bytes waiting to be written)
+     */
+    uint64_t
+    get_write_queue_bytes() const
+    {
+        return write_queue_bytes_.load();
     }
 
 private:
@@ -195,6 +330,12 @@ private:
     std::optional<std::string>
         walk_nodes_debug_key_;    // Key prefix (hex) to debug
     std::string mock_mode_ = "";  // Mock mode: "", "noop", "memory", or "disk"
+    bool no_dedupe_ = false;  // Skip deduplication tracking for faster writes
+
+    // NuDB configuration parameters
+    uint32_t key_size_ = 32;
+    uint32_t block_size_ = 4096;
+    double load_factor_ = 0.5;
 
     // NuDB bulk writer for fast import
     std::unique_ptr<NudbBulkWriter> bulk_writer_;
@@ -209,7 +350,10 @@ private:
     std::unique_ptr<std::ofstream> mock_disk_file_;
 
     // Track total bytes written to NuDB for stats
-    std::atomic<uint64_t> total_bytes_written_{0};
+    std::atomic<uint64_t> total_bytes_written_{0};       // Compressed bytes
+    std::atomic<uint64_t> total_bytes_uncompressed_{0};  // Uncompressed bytes
+    std::atomic<uint64_t> total_inner_nodes_{0};         // Count of inner nodes
+    std::atomic<uint64_t> total_leaf_nodes_{0};          // Count of leaf nodes
 
     // Custom hasher for Hash256 using xxhasher (same as NuDB)
     struct Hash256Hasher
@@ -247,6 +391,55 @@ private:
         const uint8_t* data,
         size_t size,
         uint8_t node_type);
+
+    // ===== Compression Pipeline =====
+
+    int compression_threads_ = 2;  // Default compression thread count
+    uint64_t max_write_queue_bytes_ = 2048ULL * 1024 * 1024;  // Default 2GB
+
+    // ===== Pipeline Queues =====
+
+    // Queue for unhashed ledgers (FIFO from builder)
+    std::queue<LedgerSnapshot> hasher_queue_;
+    std::mutex hasher_queue_mutex_;
+    std::condition_variable hasher_queue_cv_;
+
+    // Priority queue for compression jobs (ordered by ledger_seq)
+    std::priority_queue<HashedLedger> compression_queue_;
+    std::mutex compression_queue_mutex_;
+    std::condition_variable compression_queue_cv_;
+
+    // Output queue for compressed node BATCHES (FIFO, maintains ledger order)
+    // Each batch contains all nodes from one ledger
+    std::queue<std::vector<CompressedNode>> write_queue_;
+    std::mutex write_queue_mutex_;
+    std::condition_variable write_queue_cv_;
+
+    // ===== Worker Threads =====
+
+    std::thread hasher_thread_;
+    std::vector<std::thread> compression_workers_;
+    std::thread writer_thread_;
+
+    // Shutdown flags
+    std::atomic<bool> shutdown_{false};
+    std::atomic<bool> pipeline_stopped_{false};
+
+    // Track write queue size for stats and backpressure
+    std::atomic<uint64_t> write_queue_bytes_{0};  // Total compressed bytes
+    std::atomic<uint64_t> write_queue_nodes_{0};  // Total node count
+
+    // Worker thread functions
+    void
+    hasher_worker();
+    void
+    compression_worker();
+    void
+    writer_worker();
+
+    // Helper: enqueue compressed node with backpressure
+    void
+    enqueue_compressed_batch(std::vector<CompressedNode>&& batch);
 };
 
 }  // namespace catl::v1::utils::nudb
