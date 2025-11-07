@@ -2,9 +2,11 @@
 
 #include "catl/core/logger.h"
 #include "catl/core/types.h"  // For Hash256
+#include <atomic>
 #include <boost/filesystem.hpp>
 #include <nudb/create.hpp>
 #include <nudb/native_file.hpp>
+#include <nudb/posix_file.hpp>
 #include <nudb/store.hpp>
 #include <nudb/verify.hpp>
 #include <nudb/xxhasher.hpp>
@@ -655,7 +657,7 @@ public:
 
         LOGI("NuDB dedup database created successfully");
 
-        // Open database
+        // Open database (use nudb::store like rippled does)
         db_ = std::make_unique<::nudb::store>();
         db_->open(dat_path_, key_path_, log_path_, ec);
 
@@ -676,10 +678,32 @@ public:
             db_->close(ec);
             db_.reset();
 
-            // Clean up temp dedup database
-            ::nudb::native_file::erase(dat_path_, ec);
-            ::nudb::native_file::erase(key_path_, ec);
-            ::nudb::native_file::erase(log_path_, ec);
+            // Keep dedup database for inspection (no cleanup)
+            namespace fs = boost::filesystem;
+
+            LOGI("Dedup database kept at: ", db_path_);
+
+            // Log file sizes
+            if (fs::exists(dat_path_) && fs::exists(key_path_))
+            {
+                uint64_t dat_size = fs::file_size(dat_path_);
+                uint64_t key_size = fs::file_size(key_path_);
+                uint64_t log_size =
+                    fs::exists(log_path_) ? fs::file_size(log_path_) : 0;
+                uint64_t total_size = dat_size + key_size + log_size;
+
+                LOGI("  - dedup.dat: ", dat_size / 1024 / 1024, " MB");
+                LOGI("  - dedup.key: ", key_size / 1024 / 1024, " MB");
+                if (log_size > 0)
+                {
+                    LOGI("  - dedup.log: ", log_size / 1024 / 1024, " MB");
+                }
+                LOGI("  - Total: ", total_size / 1024 / 1024, " MB");
+            }
+            else
+            {
+                LOGW("Dedup database files not found!");
+            }
         }
     }
 
@@ -710,10 +734,21 @@ public:
         }
 
         // New key - insert marker (1 byte)
+        // IMPORTANT: Clear error code from fetch before insert!
+        ec = {};
         static const char seen_marker = 1;
         db_->insert(key.data(), &seen_marker, 1, ec);
 
-        if (!ec)
+        if (ec)
+        {
+            // Log first error, then stop spamming
+            static std::atomic<uint64_t> insert_errors{0};
+            if (insert_errors.fetch_add(1) < 10)
+            {
+                LOGE("Dedup insert failed: ", ec.message());
+            }
+        }
+        else
         {
             unique_keys_++;
         }

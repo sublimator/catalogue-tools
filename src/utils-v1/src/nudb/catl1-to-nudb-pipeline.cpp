@@ -590,13 +590,6 @@ CatlNudbPipeline::close_database()
             return false;
         }
 
-        // Note: inserted_keys_with_sizes_ is already populated during
-        // processing No need to copy from bulk_writer (and with strategy
-        // pattern, we can't!)
-        LOGI(
-            "Keys tracked for verification: ",
-            inserted_keys_with_sizes_.size());
-
         LOGI("✅ Bulk import complete (index built successfully)");
         bulk_writer_.reset();
         return true;
@@ -623,219 +616,6 @@ CatlNudbPipeline::close_database()
     }
 
     // Database was never opened
-    return true;
-}
-
-bool
-CatlNudbPipeline::verify_all_keys(int num_threads)
-{
-    // Skip verification in mock mode
-    if (!mock_mode_.empty())
-    {
-        LOGI("Mock mode (", mock_mode_, "): skipping key verification");
-        return true;
-    }
-
-    if (!db_)
-    {
-        LOGE("Cannot verify - database not open");
-        return false;
-    }
-
-    size_t total_keys = inserted_keys_with_sizes_.size();
-    LOGI(
-        "Verifying all ",
-        total_keys,
-        " inserted keys with ",
-        num_threads,
-        " threads...");
-
-    // Convert unordered_map to vector of (key, size) pairs for easy
-    // partitioning
-    LOGI("Converting key map to vector for partitioning...");
-    std::vector<std::pair<Hash256, size_t>> keys_vec;
-    keys_vec.reserve(inserted_keys_with_sizes_.size());
-    for (const auto& [key, size] : inserted_keys_with_sizes_)
-    {
-        keys_vec.emplace_back(key, size);
-    }
-    LOGI("Converted ", keys_vec.size(), " keys with sizes");
-
-    // Atomic counters for thread-safe tracking
-    std::atomic<size_t> verified_count{0};
-    std::atomic<size_t> missing_count{0};
-    std::atomic<size_t> size_mismatch_count{0};
-    std::atomic<size_t> progress_count{0};
-    std::atomic<uint64_t> total_bytes_verified{0};
-
-    auto start_time = std::chrono::steady_clock::now();
-
-    // Lambda for each thread to verify its chunk
-    auto verify_chunk = [&](size_t start_idx, size_t end_idx, int thread_id) {
-        size_t local_verified = 0;
-        size_t local_missing = 0;
-        size_t local_size_mismatch = 0;
-        uint64_t local_bytes = 0;
-
-        for (size_t i = start_idx; i < end_idx; ++i)
-        {
-            const Hash256& key = keys_vec[i].first;
-            size_t expected_size = keys_vec[i].second;
-
-            // Try to fetch this key from NuDB and check size
-            ::nudb::error_code ec;
-            size_t actual_size = 0;
-            db_->fetch(
-                key.data(),
-                [&actual_size](void const* /*data*/, std::size_t size) {
-                    actual_size = size;
-                },
-                ec);
-
-            if (ec)
-            {
-                if (ec == ::nudb::error::key_not_found)
-                {
-                    LOGE(
-                        "[Thread ",
-                        thread_id,
-                        "] Key NOT FOUND: ",
-                        key.hex().substr(0, 16),
-                        "...");
-                }
-                else
-                {
-                    LOGE(
-                        "[Thread ",
-                        thread_id,
-                        "] Error fetching key ",
-                        key.hex().substr(0, 16),
-                        "...: ",
-                        ec.message());
-                }
-                local_missing++;
-            }
-            else if (actual_size != expected_size)
-            {
-                LOGE(
-                    "[Thread ",
-                    thread_id,
-                    "] SIZE MISMATCH for key ",
-                    key.hex().substr(0, 16),
-                    "... expected ",
-                    expected_size,
-                    " bytes, got ",
-                    actual_size,
-                    " bytes");
-                local_size_mismatch++;
-            }
-            else
-            {
-                local_verified++;
-                local_bytes += expected_size;
-            }
-
-            // Update progress every 50k keys per thread
-            if ((local_verified + local_missing + local_size_mismatch) %
-                    50000 ==
-                0)
-            {
-                size_t current_progress =
-                    progress_count.fetch_add(50000) + 50000;
-                if (current_progress % 100000 == 0)
-                {
-                    LOGI(
-                        "Progress: ",
-                        current_progress,
-                        " / ",
-                        total_keys,
-                        " keys verified");
-                }
-            }
-        }
-
-        // Add local counts to global atomics
-        verified_count.fetch_add(local_verified);
-        missing_count.fetch_add(local_missing);
-        size_mismatch_count.fetch_add(local_size_mismatch);
-        total_bytes_verified.fetch_add(local_bytes);
-    };
-
-    // Partition work across threads
-    std::vector<std::thread> threads;
-    size_t keys_per_thread = total_keys / num_threads;
-    size_t remainder = total_keys % num_threads;
-
-    LOGI("Launching ", num_threads, " verification threads...");
-    LOGI("  ~", keys_per_thread, " keys per thread");
-
-    for (int i = 0; i < num_threads; ++i)
-    {
-        size_t i_size = static_cast<size_t>(i);
-        size_t start_idx =
-            i_size * keys_per_thread + std::min(i_size, remainder);
-        size_t end_idx =
-            start_idx + keys_per_thread + (i_size < remainder ? 1 : 0);
-
-        threads.emplace_back(verify_chunk, start_idx, end_idx, i);
-    }
-
-    // Wait for all threads to complete
-    for (auto& thread : threads)
-    {
-        thread.join();
-    }
-
-    auto end_time = std::chrono::steady_clock::now();
-    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          end_time - start_time)
-                          .count();
-    double keys_per_sec = elapsed_ms > 0
-        ? static_cast<double>(total_keys) * 1000.0 / elapsed_ms
-        : 0;
-    double bytes_per_sec = elapsed_ms > 0
-        ? static_cast<double>(total_bytes_verified.load()) * 1000.0 / elapsed_ms
-        : 0;
-
-    LOGI("========================================");
-    LOGI("Verification Complete:");
-    LOGI("  - Keys verified: ", verified_count.load());
-    LOGI("  - Keys missing: ", missing_count.load());
-    LOGI("  - Size mismatches: ", size_mismatch_count.load());
-    LOGI("  - Threads used: ", num_threads);
-    LOGI(
-        "  - Time: ",
-        std::fixed,
-        std::setprecision(3),
-        elapsed_ms / 1000.0,
-        " seconds");
-    LOGI(
-        "  - Speed: ",
-        std::fixed,
-        std::setprecision(2),
-        keys_per_sec,
-        " keys/sec, ",
-        bytes_per_sec / 1024 / 1024,
-        " MB/sec");
-    LOGI("  - Total data: ", total_bytes_verified.load() / 1024 / 1024, " MB");
-    LOGI("========================================");
-
-    size_t total_errors = missing_count.load() + size_mismatch_count.load();
-    if (total_errors > 0)
-    {
-        LOGE("⚠️  VERIFICATION FAILED - ", total_errors, " errors found!");
-        if (missing_count.load() > 0)
-        {
-            LOGE("  - ", missing_count.load(), " keys missing");
-        }
-        if (size_mismatch_count.load() > 0)
-        {
-            LOGE("  - ", size_mismatch_count.load(), " size mismatches");
-        }
-        return false;
-    }
-
-    LOGI("✅ All keys verified successfully (existence + size)!");
     return true;
 }
 
@@ -1154,12 +934,6 @@ CatlNudbPipeline::flush_node(
             if (inserted)
             {
                 total_inserts++;
-                // Track for verification later (only if no dedup - otherwise
-                // dedup strategy tracks it)
-                if (no_dedupe_)
-                {
-                    inserted_keys_with_sizes_[key] = compressed_size;
-                }
             }
             else
             {
@@ -1233,17 +1007,9 @@ CatlNudbPipeline::flush_node(
     else if (mock_mode_ == "disk")
     {
         // Mock disk mode - write key (32 bytes) + size (4 bytes) + compressed
-        // data to file
+        // data to file (no dedup tracking - handled by dedup marker thread)
         if (mock_disk_file_ && mock_disk_file_->is_open())
         {
-            // Check if we've already inserted this key
-            auto it = inserted_keys_with_sizes_.find(key);
-            if (it != inserted_keys_with_sizes_.end())
-            {
-                duplicates++;
-                return false;
-            }
-
             // Write key (32 bytes)
             mock_disk_file_->write(
                 reinterpret_cast<const char*>(key.data()), 32);
@@ -1265,29 +1031,13 @@ CatlNudbPipeline::flush_node(
                 throw std::runtime_error("Mock disk write failed");
             }
 
-            // Track this key (only if no dedup)
-            if (no_dedupe_)
-            {
-                inserted_keys_with_sizes_[key] = compressed_size;
-            }
             total_inserts++;
             inserted = true;
         }
     }
     else
     {
-        // noop/memory mode - track for deduplication stats (only if no_dedupe)
-        if (no_dedupe_)
-        {
-            auto it = inserted_keys_with_sizes_.find(key);
-            if (it != inserted_keys_with_sizes_.end())
-            {
-                duplicates++;
-                return false;
-            }
-
-            inserted_keys_with_sizes_[key] = compressed_size;
-        }
+        // noop/memory mode - no tracking needed
         total_inserts++;
         inserted = true;
     }
@@ -1971,15 +1721,11 @@ CatlNudbPipeline::writer_worker()
                         node.blob.data(),
                         node.blob.size(),
                         node.node_type);
-                    if (inserted && !no_dedupe_)
-                    {
-                        inserted_keys_with_sizes_[node.hash] = node.blob.size();
-                    }
                 }
             }
             else if (mock_mode_ == "nudb" && db_)
             {
-                // Mock NuDB mode - use regular NuDB inserts
+                // Mock NuDB mode - use regular NuDB inserts (no dedup tracking)
                 ::nudb::error_code ec;
                 db_->insert(
                     node.hash.data(), node.blob.data(), node.blob.size(), ec);
@@ -1987,10 +1733,6 @@ CatlNudbPipeline::writer_worker()
                 if (!ec)
                 {
                     inserted = true;
-                    if (!no_dedupe_)
-                    {
-                        inserted_keys_with_sizes_[node.hash] = node.blob.size();
-                    }
                 }
                 else if (ec == ::nudb::error::key_exists)
                 {
@@ -2007,47 +1749,27 @@ CatlNudbPipeline::writer_worker()
                 mock_mode_ == "disk" && mock_disk_file_ &&
                 mock_disk_file_->is_open())
             {
-                // Mock disk mode
-                auto it = inserted_keys_with_sizes_.find(node.hash);
-                if (it == inserted_keys_with_sizes_.end())
+                // Mock disk mode - just write (dedup handled by dedup marker)
+                mock_disk_file_->write(
+                    reinterpret_cast<const char*>(node.hash.data()), 32);
+                uint32_t size32 = static_cast<uint32_t>(node.blob.size());
+                mock_disk_file_->write(
+                    reinterpret_cast<const char*>(&size32), sizeof(size32));
+                mock_disk_file_->write(
+                    reinterpret_cast<const char*>(node.blob.data()),
+                    node.blob.size());
+
+                if (!mock_disk_file_->good())
                 {
-                    // Write key + size + data
-                    mock_disk_file_->write(
-                        reinterpret_cast<const char*>(node.hash.data()), 32);
-                    uint32_t size32 = static_cast<uint32_t>(node.blob.size());
-                    mock_disk_file_->write(
-                        reinterpret_cast<const char*>(&size32), sizeof(size32));
-                    mock_disk_file_->write(
-                        reinterpret_cast<const char*>(node.blob.data()),
-                        node.blob.size());
-
-                    if (!mock_disk_file_->good())
-                    {
-                        LOGE("Failed to write to mock disk file");
-                        throw std::runtime_error("Mock disk write failed");
-                    }
-
-                    if (!no_dedupe_)
-                    {
-                        inserted_keys_with_sizes_[node.hash] = node.blob.size();
-                    }
-                    inserted = true;
+                    LOGE("Failed to write to mock disk file");
+                    throw std::runtime_error("Mock disk write failed");
                 }
+
+                inserted = true;
             }
             else
             {
-                // noop/memory mode
-                if (!no_dedupe_)
-                {
-                    auto it = inserted_keys_with_sizes_.find(node.hash);
-                    if (it != inserted_keys_with_sizes_.end())
-                    {
-                        // Duplicate
-                        inserted = false;
-                        continue;
-                    }
-                    inserted_keys_with_sizes_[node.hash] = node.blob.size();
-                }
+                // noop/memory mode - no tracking needed
                 inserted = true;
             }
         }

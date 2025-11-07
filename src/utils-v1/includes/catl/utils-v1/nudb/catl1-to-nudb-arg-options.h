@@ -78,11 +78,8 @@ struct Catl1ToNudbOptions
      */
     std::string nudb_mock = "";
 
-    /** Whether to verify all inserted keys after import */
-    bool verify_keys = false;
-
-    /** Skip deduplication tracking (faster writes, but no verification
-     * possible) */
+    /** Skip deduplication tracking (no dedup = faster, but duplicates written
+     * to .dat and handled by rekey) */
     bool no_dedupe = false;
 
     /** Whether to display help information */

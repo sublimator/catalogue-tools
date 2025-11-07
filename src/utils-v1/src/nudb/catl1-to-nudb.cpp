@@ -600,30 +600,6 @@ public:
                 return false;
             }
 
-            // Optionally verify all keys are readable
-            if (options_.verify_keys)
-            {
-                // Reopen database for verification
-                LOGI("Reopening database for verification...");
-                if (!pipeline.open_database(*options_.nudb_path))
-                {
-                    LOGE("Failed to reopen NuDB database for verification!");
-                    return false;
-                }
-
-                // Verify all keys are readable from NuDB (using 8 threads)
-                LOGI("\nVerifying NuDB database integrity...");
-                if (!pipeline.verify_all_keys(8))
-                {
-                    LOGE("Database verification failed!");
-                    pipeline.close_database();  // Close before returning
-                    return false;
-                }
-
-                // Final close
-                pipeline.close_database();
-            }
-
             return true;
         }
         catch (const std::exception& e)

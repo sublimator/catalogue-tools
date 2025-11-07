@@ -264,14 +264,6 @@ public:
     close_database();
 
     /**
-     * Verify all inserted keys are readable from NuDB
-     * @param num_threads Number of threads to use for verification (default 8)
-     * @return true if all keys are readable, false if any are missing
-     */
-    bool
-    verify_all_keys(int num_threads = 8);
-
-    /**
      * Get total bytes written to NuDB (compressed)
      */
     uint64_t
@@ -403,12 +395,6 @@ private:
     std::atomic<uint64_t> total_bytes_uncompressed_{0};  // Uncompressed bytes
     std::atomic<uint64_t> total_inner_nodes_{0};         // Count of inner nodes
     std::atomic<uint64_t> total_leaf_nodes_{0};          // Count of leaf nodes
-
-    // Track inserted keys with their sizes for deduplication and verification
-    // (faster than letting NuDB check for duplicates, and allows size
-    // verification)
-    std::unordered_map<Hash256, size_t, Hash256Hasher>
-        inserted_keys_with_sizes_;
 
     // Helper function to hash a SHAMap using thread pool (or direct for single
     // thread) NOTE: Performance testing revealed that single-threaded hashing
