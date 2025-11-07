@@ -18,7 +18,7 @@ NudbBulkWriter::NudbBulkWriter(
     , key_size_(key_size)
     , dedupe_strategy_(
           strategy ? std::move(strategy)
-                   : std::make_unique<HybridXxHashDeduplicationStrategy>())
+                   : std::make_unique<NoDeduplicationStrategy>())
 {
     LOGI(
         "Bulk writer created with ",
@@ -44,8 +44,7 @@ NudbBulkWriter::NudbBulkWriter(
     }
     else
     {
-        dedupe_strategy_ =
-            std::make_unique<HybridXxHashDeduplicationStrategy>();
+        dedupe_strategy_ = std::make_unique<NoDeduplicationStrategy>();
     }
 
     LOGI(
