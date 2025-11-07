@@ -12,6 +12,8 @@
 // Initialize static members
 LogLevel Logger::current_level_ = LogLevel::ERROR;  // Default log level
 std::mutex Logger::log_mutex_;
+std::ostream* Logger::output_stream_ = nullptr;  // nullptr = use std::cout
+std::ostream* Logger::error_stream_ = nullptr;   // nullptr = use std::cerr
 
 bool
 Logger::should_log(LogLevel level)
@@ -92,4 +94,26 @@ LogLevel
 Logger::get_level()
 {
     return current_level_;
+}
+
+void
+Logger::set_output_stream(std::ostream* output_stream)
+{
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    output_stream_ = output_stream;
+}
+
+void
+Logger::set_error_stream(std::ostream* error_stream)
+{
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    error_stream_ = error_stream;
+}
+
+void
+Logger::reset_streams()
+{
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    output_stream_ = nullptr;
+    error_stream_ = nullptr;
 }

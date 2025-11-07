@@ -65,6 +65,9 @@ class Logger
 private:
     static LogLevel current_level_;
     static std::mutex log_mutex_;
+    static std::ostream* output_stream_;  // For INFO/DEBUG (default: std::cout)
+    static std::ostream*
+        error_stream_;  // For ERROR/WARNING (default: std::cerr)
 
     // Fast level check method
     static bool
@@ -104,6 +107,18 @@ public:
 
     static LogLevel
     get_level();
+
+    // Redirect logger output streams
+    // Pass nullptr to reset to default (std::cout/std::cerr)
+    static void
+    set_output_stream(std::ostream* output_stream);  // For INFO/DEBUG
+
+    static void
+    set_error_stream(std::ostream* error_stream);  // For ERROR/WARNING
+
+    // Reset both streams to defaults
+    static void
+    reset_streams();
 
     // Log with efficient formatting using variadic templates
     template <typename... Args>
@@ -150,8 +165,9 @@ public:
 
         // Lock only for the actual output operation
         std::lock_guard<std::mutex> lock(log_mutex_);
-        std::ostream& out =
-            (level <= LogLevel::WARNING) ? std::cerr : std::cout;
+        std::ostream& out = (level <= LogLevel::WARNING)
+            ? (error_stream_ ? *error_stream_ : std::cerr)
+            : (output_stream_ ? *output_stream_ : std::cout);
         out << oss.str() << std::endl;
     }
 
@@ -193,8 +209,9 @@ public:
 
         // Lock only for the actual output operation
         std::lock_guard<std::mutex> lock(log_mutex_);
-        std::ostream& out =
-            (level <= LogLevel::WARNING) ? std::cerr : std::cout;
+        std::ostream& out = (level <= LogLevel::WARNING)
+            ? (error_stream_ ? *error_stream_ : std::cerr)
+            : (output_stream_ ? *output_stream_ : std::cout);
         out << oss.str() << std::endl;
     }
 };
@@ -290,15 +307,21 @@ public:
     }
 
     // Convenience methods for enabling/disabling
-    void enable(LogLevel level = LogLevel::DEBUG) {
+    void
+    enable(LogLevel level = LogLevel::DEBUG)
+    {
         level_ = level;
     }
 
-    void disable() {
+    void
+    disable()
+    {
         level_ = LogLevel::NONE;
     }
 
-    void inherit() {
+    void
+    inherit()
+    {
         level_ = LogLevel::INHERIT;
     }
 
@@ -342,23 +365,60 @@ private:
         LogLevel::DEBUG, __RELATIVE_FILEPATH__, __LINE__, this, __VA_ARGS__)
 
 // Partition-specific logging macros - pass the partition as first arg
-// These use log_internal to bypass global level check since partition already checked
-#define PLOGE(partition, ...)                                         \
-    if ((partition).should_log(LogLevel::ERROR))                      \
-        Logger::log_internal(LogLevel::ERROR, "[", (partition).name(), "] ",   \
-                   __VA_ARGS__, " (", __RELATIVE_FILEPATH__, ":", __LINE__, ")")
-#define PLOGW(partition, ...)                                         \
-    if ((partition).should_log(LogLevel::WARNING))                    \
-        Logger::log_internal(LogLevel::WARNING, "[", (partition).name(), "] ", \
-                   __VA_ARGS__, " (", __RELATIVE_FILEPATH__, ":", __LINE__, ")")
-#define PLOGI(partition, ...)                                         \
-    if ((partition).should_log(LogLevel::INFO))                       \
-        Logger::log_internal(LogLevel::INFO, "[", (partition).name(), "] ",    \
-                   __VA_ARGS__, " (", __RELATIVE_FILEPATH__, ":", __LINE__, ")")
-#define PLOGD(partition, ...)                                         \
-    if ((partition).should_log(LogLevel::DEBUG))                      \
-        Logger::log_internal(LogLevel::DEBUG, "[", (partition).name(), "] ",   \
-                   __VA_ARGS__, " (", __RELATIVE_FILEPATH__, ":", __LINE__, ")")
+// These use log_internal to bypass global level check since partition already
+// checked
+#define PLOGE(partition, ...)                    \
+    if ((partition).should_log(LogLevel::ERROR)) \
+    Logger::log_internal(                        \
+        LogLevel::ERROR,                         \
+        "[",                                     \
+        (partition).name(),                      \
+        "] ",                                    \
+        __VA_ARGS__,                             \
+        " (",                                    \
+        __RELATIVE_FILEPATH__,                   \
+        ":",                                     \
+        __LINE__,                                \
+        ")")
+#define PLOGW(partition, ...)                      \
+    if ((partition).should_log(LogLevel::WARNING)) \
+    Logger::log_internal(                          \
+        LogLevel::WARNING,                         \
+        "[",                                       \
+        (partition).name(),                        \
+        "] ",                                      \
+        __VA_ARGS__,                               \
+        " (",                                      \
+        __RELATIVE_FILEPATH__,                     \
+        ":",                                       \
+        __LINE__,                                  \
+        ")")
+#define PLOGI(partition, ...)                   \
+    if ((partition).should_log(LogLevel::INFO)) \
+    Logger::log_internal(                       \
+        LogLevel::INFO,                         \
+        "[",                                    \
+        (partition).name(),                     \
+        "] ",                                   \
+        __VA_ARGS__,                            \
+        " (",                                   \
+        __RELATIVE_FILEPATH__,                  \
+        ":",                                    \
+        __LINE__,                               \
+        ")")
+#define PLOGD(partition, ...)                    \
+    if ((partition).should_log(LogLevel::DEBUG)) \
+    Logger::log_internal(                        \
+        LogLevel::DEBUG,                         \
+        "[",                                     \
+        (partition).name(),                      \
+        "] ",                                    \
+        __VA_ARGS__,                             \
+        " (",                                    \
+        __RELATIVE_FILEPATH__,                   \
+        ":",                                     \
+        __LINE__,                                \
+        ")")
 
 #define LOGE(...)              \
     Logger::log(               \
