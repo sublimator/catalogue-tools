@@ -425,6 +425,10 @@ public:
                                 pipeline.get_hasher_queue_depth();
                             size_t compression_depth =
                                 pipeline.get_compression_queue_depth();
+                            size_t dedupe_depth =
+                                pipeline.get_dedupe_queue_depth();
+                            size_t assembly_depth =
+                                pipeline.get_assembly_station_depth();
 
                             LOGI("=====================================");
                             LOGI("📊 PIPELINE STATS @ Ledger ", ledger_seq);
@@ -499,16 +503,30 @@ public:
                                 " leaf");
 
                             LOGI("📦 Queue depths:");
-                            LOGI("   - Hasher queue (ledgers): ", hasher_depth);
                             LOGI(
-                                "   - Compression queue (ledgers): ",
-                                compression_depth);
+                                "   - Hasher queue: ",
+                                hasher_depth,
+                                " ledgers");
                             LOGI(
-                                "   - Write queue (nodes): ",
-                                pipeline.get_write_queue_depth());
+                                "   - Compression queue: ",
+                                compression_depth,
+                                " ledgers");
                             LOGI(
-                                "   - Total ledgers in pipeline: ",
-                                hasher_depth + compression_depth);
+                                "   - Dedupe queue: ",
+                                dedupe_depth,
+                                " jobs (hash lists)");
+                            LOGI(
+                                "   - Assembly station: ",
+                                assembly_depth,
+                                " jobs (waiting for compression+dedupe)");
+                            LOGI(
+                                "   - Write queue: ",
+                                pipeline.get_write_queue_depth(),
+                                " batches (compressed nodes)");
+                            LOGI(
+                                "   - Ledgers in flight: ",
+                                hasher_depth + compression_depth,
+                                " (hasher + compression)");
 
                             uint32_t ledgers_in_period =
                                 ledger_seq - last_stats_ledger;
@@ -597,6 +615,9 @@ public:
                 LOGE("Failed to close NuDB database!");
                 return false;
             }
+
+            // Print deduplication stats (if using parallel dedupe thread)
+            pipeline.print_dedup_stats();
 
             return true;
         }

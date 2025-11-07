@@ -146,6 +146,17 @@ public:
         }
     }
 
+    /**
+     * Suppress stats printing at close
+     * Use when deduplication is handled externally (e.g., parallel dedupe
+     * thread)
+     */
+    void
+    set_suppress_stats(bool suppress)
+    {
+        suppress_stats_ = suppress;
+    }
+
 private:
     std::string dat_path_;
     std::string key_path_;
@@ -167,6 +178,7 @@ private:
     // Stats
     uint64_t unique_count_ = 0;
     std::atomic<uint64_t> total_bytes_written_{0};
+    bool suppress_stats_ = false;  // Suppress stats printing at close
 
     bool is_open_ = false;
 };

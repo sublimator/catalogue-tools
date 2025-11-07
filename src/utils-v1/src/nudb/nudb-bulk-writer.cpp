@@ -218,17 +218,23 @@ NudbBulkWriter::close(uint64_t progress_buffer_size)
     is_open_ = false;
 
     LOGI("Closing bulk writer...");
-    LOGI("  Total unique keys: ", unique_count_);
-    LOGI(
-        "  Total duplicate attempts: ",
-        dedupe_strategy_->get_duplicate_count());
-    LOGI(
-        "  Total bytes written: ",
-        total_bytes_written_.load() / 1024 / 1024,
-        " MB");
 
-    // Print strategy-specific deduplication stats
-    dedupe_strategy_->print_stats(unique_count_);
+    // Only print stats if not suppressed (e.g., when using parallel dedupe
+    // thread)
+    if (!suppress_stats_)
+    {
+        LOGI("  Total unique keys: ", unique_count_);
+        LOGI(
+            "  Total duplicate attempts: ",
+            dedupe_strategy_->get_duplicate_count());
+        LOGI(
+            "  Total bytes written: ",
+            total_bytes_written_.load() / 1024 / 1024,
+            " MB");
+
+        // Print strategy-specific deduplication stats
+        dedupe_strategy_->print_stats(unique_count_);
+    }
 
     // Step 1: Flush and close bulk writer
     ::nudb::error_code ec;
