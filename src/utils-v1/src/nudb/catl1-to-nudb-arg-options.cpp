@@ -79,13 +79,10 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
         "Mock NuDB mode for performance testing. Options: 'noop' or 'memory' "
         "(skip all I/O), 'disk' (buffered append-only file), 'nudb' (regular "
         "NuDB inserts, no bulk writer)")(
-        "verify-keys",
-        po::bool_switch(),
-        "Verify all inserted keys are readable after import (8 threads)")(
         "no-dedupe",
         po::bool_switch(),
-        "Skip deduplication tracking for faster writes (disables "
-        "verification)");
+        "Disable deduplication (writes all nodes, duplicates handled by "
+        "rekey)");
 
     // Generate the help text
     std::ostringstream help_stream;
@@ -173,12 +170,6 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
                 return options;
             }
             options.nudb_mock = mock_mode;
-        }
-
-        // Check for verify-keys flag
-        if (vm.count("verify-keys"))
-        {
-            options.verify_keys = vm["verify-keys"].as<bool>();
         }
 
         // Check for no-dedupe flag
