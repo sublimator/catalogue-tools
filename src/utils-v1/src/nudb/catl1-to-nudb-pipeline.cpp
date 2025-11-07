@@ -337,6 +337,8 @@ CatlNudbPipeline::create_database(
     {
         LOGI("Deduplication: Cuckoo+Rocks (hybrid filter + disk-backed)");
         fs::path rocks_dedup_path = dir / "dedup-rocks";
+        LOGI("  💾 RocksDB path: ", fs::absolute(rocks_dedup_path).string());
+        LOGI("     (You can monitor this directory during import!)");
         // CuckooRocksStrategy: Fast in-memory cuckoo filter + RocksDB ground
         // truth Default: 100M expected items, ~150MB cuckoo + 1GB RocksDB cache
         // = ~1.3GB RAM
@@ -394,6 +396,13 @@ CatlNudbPipeline::create_database(
         log_path.string(),
         key_size,
         std::move(bulk_writer_dedupe_strategy));
+
+    // Suppress bulk_writer stats if using parallel dedupe mode
+    // (the pipeline will print stats from the real strategy instead)
+    if (use_dedupe_thread_)
+    {
+        bulk_writer_->set_suppress_stats(true);
+    }
 
     // Open bulk writer (this creates the files and prepares for writing)
     if (!bulk_writer_->open(block_size, load_factor))
@@ -1290,9 +1299,43 @@ CatlNudbPipeline::hasher_worker()
                 hashed.tx_map->walk_new_nodes(extract_hash);
             }
 
-            // Enqueue dedupe work (memory-safe: just hashes, not trees)
+            // Enqueue dedupe work with backpressure (memory-safe: just hashes,
+            // not trees)
             {
-                std::lock_guard<std::mutex> lock(dedupe_queue_mutex_);
+                std::unique_lock<std::mutex> lock(dedupe_queue_mutex_);
+
+                const size_t MAX_DEDUPE_QUEUE = 500;  // Same as compression
+
+                // Apply backpressure if dedupe queue is too deep
+                if (dedupe_queue_.size() > MAX_DEDUPE_QUEUE)
+                {
+                    static std::atomic<size_t> dedupe_backpressure_count{0};
+                    dedupe_backpressure_count++;
+
+                    // Only log every 100 times to avoid spam
+                    if (dedupe_backpressure_count % 100 == 1)
+                    {
+                        LOGW(
+                            "Dedupe queue deep (",
+                            dedupe_queue_.size(),
+                            "), waiting for dedupe worker... (logged ",
+                            dedupe_backpressure_count.load(),
+                            " times)");
+                    }
+
+                    // Wait until queue has space
+                    dedupe_queue_cv_.wait(lock, [this]() {
+                        return dedupe_queue_.size() <=
+                            250;  // MAX_DEDUPE_QUEUE / 2
+                    });
+
+                    // Only log resolution occasionally
+                    if (dedupe_backpressure_count % 100 == 1)
+                    {
+                        LOGI("Dedupe queue drained, continuing");
+                    }
+                }
+
                 dedupe_queue_.push(std::move(dedupe_work));
             }
             dedupe_queue_cv_.notify_one();
@@ -1709,6 +1752,10 @@ CatlNudbPipeline::dedupe_worker()
 {
     LOGI("Dedupe worker thread started");
 
+    uint64_t ledgers_processed = 0;
+    uint64_t total_hashes_checked = 0;
+    uint64_t total_duplicates_found = 0;
+
     while (!shutdown_.load())
     {
         DedupeWork work;
@@ -1735,10 +1782,14 @@ CatlNudbPipeline::dedupe_worker()
             dedupe_queue_.pop();
         }
 
+        // Notify hasher that we made space (for backpressure)
+        dedupe_queue_cv_.notify_all();
+
         // 2. Prepare duplicate set for this ledger
         std::unordered_set<Hash256, Hash256Hasher> duplicates_for_this_ledger;
 
         // 3. Run the "brain" - check each hash
+        size_t hashes_in_this_ledger = work.hashes.size();
         for (const auto& hash : work.hashes)
         {
             // Use the pipeline's strategy (CuckooRocks, etc.)
@@ -1758,7 +1809,34 @@ CatlNudbPipeline::dedupe_worker()
         // This calls db->Write(), committing all RocksDB Puts at once
         pipeline_dedup_strategy_->flush_batch();
 
-        // 5. Deliver the result to the "assembly station"
+        // 5. Update stats
+        ledgers_processed++;
+        total_hashes_checked += hashes_in_this_ledger;
+        total_duplicates_found += duplicates_for_this_ledger.size();
+
+        // 6. Periodic logging (commented out - use assembly station depth
+        // instead) if (ledgers_processed % 1000 == 0)
+        // {
+        //     uint64_t dup_count =
+        //     pipeline_dedup_strategy_->get_duplicate_count(); double dup_rate
+        //     = total_hashes_checked > 0
+        //         ? (dup_count * 100.0 / total_hashes_checked)
+        //         : 0.0;
+        //     LOGI(
+        //         "📊 Dedupe worker: ",
+        //         ledgers_processed,
+        //         " ledgers, ",
+        //         total_hashes_checked,
+        //         " hashes checked, ",
+        //         dup_count,
+        //         " duplicates (",
+        //         std::fixed,
+        //         std::setprecision(2),
+        //         dup_rate,
+        //         "%)");
+        // }
+
+        // 7. Deliver the result to the "assembly station"
         {
             std::lock_guard<std::mutex> lock(writer_assembly_mutex_);
             auto& writer_job = writer_assembly_map_[work.ledger_seq];
@@ -1769,6 +1847,12 @@ CatlNudbPipeline::dedupe_worker()
     }
 
     LOGI("Dedupe worker thread stopped");
+    LOGI(
+        "  Final: ",
+        ledgers_processed,
+        " ledgers processed, ",
+        total_hashes_checked,
+        " hashes checked");
 }
 
 void
@@ -2293,6 +2377,22 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
     }
 
     return true;
+}
+
+void
+CatlNudbPipeline::print_dedup_stats() const
+{
+    if (!pipeline_dedup_strategy_)
+    {
+        LOGI("📊 Deduplication stats: N/A (sequential mode or no dedup)");
+        return;
+    }
+
+    // Print stats from the pipeline's dedup strategy
+    // This will call CuckooRocksStrategy::print_stats() or similar
+    uint64_t unique_written =
+        total_inner_nodes_.load() + total_leaf_nodes_.load();
+    pipeline_dedup_strategy_->print_stats(unique_written);
 }
 
 }  // namespace catl::v1::utils::nudb

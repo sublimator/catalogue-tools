@@ -354,6 +354,37 @@ public:
         return write_queue_bytes_.load();
     }
 
+    /**
+     * Get dedupe queue depth (ledgers waiting for deduplication)
+     * Only meaningful when use_dedupe_thread_ is true
+     */
+    size_t
+    get_dedupe_queue_depth() const
+    {
+        std::lock_guard<std::mutex> lock(
+            const_cast<std::mutex&>(dedupe_queue_mutex_));
+        return dedupe_queue_.size();
+    }
+
+    /**
+     * Get assembly station depth (ledgers waiting at writer assembly)
+     * Only meaningful when use_dedupe_thread_ is true
+     */
+    size_t
+    get_assembly_station_depth() const
+    {
+        std::lock_guard<std::mutex> lock(
+            const_cast<std::mutex&>(writer_assembly_mutex_));
+        return writer_assembly_map_.size();
+    }
+
+    /**
+     * Print deduplication statistics from the pipeline strategy
+     * (Only useful when use_dedupe_thread_ is true)
+     */
+    void
+    print_dedup_stats() const;
+
 private:
     shamap::SHAMapOptions map_options_;
     catl::xdata::Protocol protocol_;  // Protocol definitions for JSON parsing
