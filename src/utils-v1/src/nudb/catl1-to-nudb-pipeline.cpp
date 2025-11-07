@@ -323,14 +323,15 @@ CatlNudbPipeline::create_database(
     LOGI("  block_size: ", block_size);
     LOGI("  load_factor: ", load_factor);
 
-    // Create deduplication strategy for bulk writer based on user choice
-    std::unique_ptr<DeduplicationStrategy> bulk_writer_dedupe_strategy;
+    // Create deduplication strategy based on user choice
+    // The "brain" strategy is created first, then assigned based on threading
+    // mode
+    std::unique_ptr<DeduplicationStrategy> dedupe_brain_strategy;
 
     if (dedupe_strategy_ == "none")
     {
         LOGI("Deduplication: NONE (fastest, duplicates written to .dat)");
-        bulk_writer_dedupe_strategy =
-            std::make_unique<NoDeduplicationStrategy>();
+        dedupe_brain_strategy = std::make_unique<NoDeduplicationStrategy>();
     }
     else if (dedupe_strategy_ == "cuckoo-rocks")
     {
@@ -339,27 +340,26 @@ CatlNudbPipeline::create_database(
         // CuckooRocksStrategy: Fast in-memory cuckoo filter + RocksDB ground
         // truth Default: 100M expected items, ~150MB cuckoo + 1GB RocksDB cache
         // = ~1.3GB RAM
-        bulk_writer_dedupe_strategy = std::make_unique<CuckooRocksStrategy>(
+        dedupe_brain_strategy = std::make_unique<CuckooRocksStrategy>(
             rocks_dedup_path.string(), false);
     }
     else if (dedupe_strategy_ == "nudb")
     {
         LOGI("Deduplication: NuDB (disk-backed)");
         fs::path nudb_dedup_path = dir / "dedup";
-        bulk_writer_dedupe_strategy =
-            std::make_unique<NuDBDeduplicationStrategy>(
-                nudb_dedup_path.string());
+        dedupe_brain_strategy = std::make_unique<NuDBDeduplicationStrategy>(
+            nudb_dedup_path.string());
     }
     else if (dedupe_strategy_ == "memory-full")
     {
         LOGI("Deduplication: Full in-memory (~3.2GB for 79M keys)");
-        bulk_writer_dedupe_strategy =
+        dedupe_brain_strategy =
             std::make_unique<FullKeyDeduplicationStrategy>();
     }
     else if (dedupe_strategy_ == "memory-xxhash")
     {
         LOGI("Deduplication: xxhash in-memory (~650MB for 79M keys)");
-        bulk_writer_dedupe_strategy =
+        dedupe_brain_strategy =
             std::make_unique<HybridXxHashDeduplicationStrategy>();
     }
     else
@@ -367,6 +367,24 @@ CatlNudbPipeline::create_database(
         LOGE("Unknown dedupe strategy: ", dedupe_strategy_);
         throw std::runtime_error(
             "Unknown dedupe strategy: " + dedupe_strategy_);
+    }
+
+    // Assign strategy based on threading mode
+    std::unique_ptr<DeduplicationStrategy> bulk_writer_dedupe_strategy;
+
+    if (use_dedupe_thread_)
+    {
+        // PARALLEL MODE: Pipeline owns the "brain", bulk_writer gets no-op
+        LOGI("🔀 Parallel dedupe mode: dedupe runs in separate thread");
+        pipeline_dedup_strategy_ = std::move(dedupe_brain_strategy);
+        bulk_writer_dedupe_strategy =
+            std::make_unique<NoDeduplicationStrategy>();
+    }
+    else
+    {
+        // SEQUENTIAL MODE: bulk_writer owns the "brain" (current behavior)
+        LOGI("🔁 Sequential dedupe mode: dedupe runs in writer thread");
+        bulk_writer_dedupe_strategy = std::move(dedupe_brain_strategy);
     }
 
     // Create bulk writer
@@ -1078,6 +1096,13 @@ CatlNudbPipeline::start_compression_pipeline()
         compression_workers_.emplace_back([this]() { compression_worker(); });
     }
 
+    // Start dedupe worker (if parallel mode enabled)
+    if (use_dedupe_thread_)
+    {
+        LOGI("Starting parallel dedupe worker thread");
+        dedupe_worker_ = std::thread([this]() { dedupe_worker(); });
+    }
+
     // Start writer thread
     LOGI("Starting writer thread");
     writer_thread_ = std::thread([this]() { writer_worker(); });
@@ -1165,6 +1190,8 @@ CatlNudbPipeline::stop_compression_pipeline()
     hasher_queue_cv_.notify_all();
     compression_queue_cv_.notify_all();
     write_queue_cv_.notify_all();
+    dedupe_queue_cv_.notify_all();     // Wake up dedupe worker
+    writer_assembly_cv_.notify_all();  // Wake up writer (assembly mode)
 
     // Wait for hasher thread
     if (hasher_thread_.joinable())
@@ -1181,6 +1208,12 @@ CatlNudbPipeline::stop_compression_pipeline()
         }
     }
     compression_workers_.clear();
+
+    // Wait for dedupe worker (if running)
+    if (dedupe_worker_.joinable())
+    {
+        dedupe_worker_.join();
+    }
 
     // Wait for writer thread
     if (writer_thread_.joinable())
@@ -1228,6 +1261,42 @@ CatlNudbPipeline::hasher_worker()
         // Hash the ledger (may use multiple threads if hasher_threads_ > 1)
         LOGD("Hashing ledger ", snapshot.info.seq);
         HashedLedger hashed = hash_and_verify(std::move(snapshot));
+
+        // FORK: If parallel dedupe mode, extract hashes and send to dedupe
+        // worker
+        if (use_dedupe_thread_)
+        {
+            DedupeWork dedupe_work;
+            dedupe_work.ledger_seq = hashed.info.seq;
+
+            // Reusable lambda to extract hash from any node
+            auto extract_hash =
+                [&](const boost::intrusive_ptr<catl::shamap::SHAMapTreeNode>&
+                        node) {
+                    dedupe_work.hashes.push_back(node->get_hash(map_options_));
+                    return true;  // Continue walking
+                };
+
+            // Extract hashes from state_snapshot
+            if (hashed.state_snapshot)
+            {
+                hashed.state_snapshot->walk_new_nodes(
+                    extract_hash, hashed.processing_version);
+            }
+
+            // Extract hashes from tx_map
+            if (hashed.tx_map)
+            {
+                hashed.tx_map->walk_new_nodes(extract_hash);
+            }
+
+            // Enqueue dedupe work (memory-safe: just hashes, not trees)
+            {
+                std::lock_guard<std::mutex> lock(dedupe_queue_mutex_);
+                dedupe_queue_.push(std::move(dedupe_work));
+            }
+            dedupe_queue_cv_.notify_one();
+        }
 
         // Enqueue to compression queue with backpressure
         {
@@ -1411,12 +1480,28 @@ CatlNudbPipeline::compression_worker()
         LOGD(
             "Finished compressing ledger ",
             job.info.seq,
-            " - enqueuing batch of ",
+            " - batch of ",
             batch.size(),
             " nodes");
 
-        // Enqueue entire batch with ONE lock operation
-        enqueue_compressed_batch(std::move(batch));
+        // Deliver results based on threading mode
+        if (use_dedupe_thread_)
+        {
+            // PARALLEL MODE: Deliver to assembly station
+            // NOTE: Dedupe worker is processing the SAME ledger in parallel!
+            {
+                std::lock_guard<std::mutex> lock(writer_assembly_mutex_);
+                auto& writer_job = writer_assembly_map_[job.info.seq];
+                writer_job.compressed_batch = std::move(batch);
+                writer_job.compression_done = true;
+            }
+            writer_assembly_cv_.notify_one();  // Wake up writer
+        }
+        else
+        {
+            // SEQUENTIAL MODE: Enqueue to write queue (current behavior)
+            enqueue_compressed_batch(std::move(batch));
+        }
 
         // job goes out of scope → maps destruct → nodes cleanup
     }
@@ -1427,130 +1512,263 @@ CatlNudbPipeline::writer_worker()
 {
     while (!shutdown_.load())
     {
-        std::vector<CompressedNode> batch;
+        WriterJob current_job;
 
-        // Pull ONE batch from queue (each batch contains all nodes from one
-        // ledger)
+        if (use_dedupe_thread_)
         {
-            std::unique_lock<std::mutex> lock(write_queue_mutex_);
-            write_queue_cv_.wait(lock, [this]() {
-                return !write_queue_.empty() || shutdown_.load();
+            // PARALLEL MODE: Wait for assembly station
+            // Wait for BOTH compression AND dedupe to complete for the next
+            // ledger
+            {
+                std::unique_lock<std::mutex> lock(writer_assembly_mutex_);
+                writer_assembly_cv_.wait(lock, [this]() {
+                    if (shutdown_.load())
+                        return true;
+                    auto it = writer_assembly_map_.find(next_ledger_to_write_);
+                    // Wait if job not found, or if it's not fully done
+                    return it != writer_assembly_map_.end() &&
+                        it->second.compression_done && it->second.dedupe_done;
+                });
+
+                if (shutdown_.load())
+                    break;
+
+                // We have the complete job for the next ledger, pull it
+                current_job =
+                    std::move(writer_assembly_map_[next_ledger_to_write_]);
+                writer_assembly_map_.erase(next_ledger_to_write_);
+                next_ledger_to_write_++;
+            }  // Lock released
+
+            // Process the job (NO RocksDB I/O - dedupe already done!)
+            for (auto& node : current_job.compressed_batch)
+            {
+                // Track bytes for stats
+                total_bytes_written_ += node.blob.size();
+                total_bytes_uncompressed_ += node.uncompressed_size;
+
+                // Track node counts
+                if (node.node_type == 0)
+                    total_inner_nodes_++;
+                else
+                    total_leaf_nodes_++;
+
+                // Fast in-memory check against duplicate set
+                if (current_job.duplicate_set.find(node.hash) ==
+                    current_job.duplicate_set.end())
+                {
+                    // Not a duplicate, write it
+                    // bulk_writer_ is in "NoDedupe" mode, so this is just a raw
+                    // write
+                    if (bulk_writer_)
+                    {
+                        bulk_writer_->insert(
+                            node.hash,
+                            node.blob.data(),
+                            node.blob.size(),
+                            node.node_type);
+                    }
+                }
+            }
+        }
+        else
+        {
+            // SEQUENTIAL MODE: Use write queue (current behavior)
+            std::vector<CompressedNode> batch;
+
+            // Pull ONE batch from queue
+            {
+                std::unique_lock<std::mutex> lock(write_queue_mutex_);
+                write_queue_cv_.wait(lock, [this]() {
+                    return !write_queue_.empty() || shutdown_.load();
+                });
+
+                if (shutdown_.load() && write_queue_.empty())
+                {
+                    break;
+                }
+
+                if (write_queue_.empty())
+                {
+                    continue;
+                }
+
+                // Move entire batch out of queue
+                batch = std::move(write_queue_.front());
+                write_queue_.pop();
+
+                // Decrement counters for entire batch
+                uint64_t batch_bytes = 0;
+                for (const auto& node : batch)
+                {
+                    batch_bytes += node.blob.size();
+                }
+                write_queue_bytes_ -= batch_bytes;
+                write_queue_nodes_ -= batch.size();
+            }
+
+            // Notify that we made space
+            write_queue_cv_.notify_all();
+
+            // Process batch WITHOUT holding lock
+            for (auto& node : batch)
+            {
+                // Track bytes for stats
+                total_bytes_written_ += node.blob.size();  // Compressed
+                total_bytes_uncompressed_ +=
+                    node.uncompressed_size;  // Uncompressed
+
+                // Track node counts
+                if (node.node_type == 0)
+                    total_inner_nodes_++;
+                else
+                    total_leaf_nodes_++;
+
+                bool inserted = false;
+
+                // Handle different modes
+                if (mock_mode_.empty())
+                {
+                    // Real NuDB mode
+                    if (bulk_writer_)
+                    {
+                        inserted = bulk_writer_->insert(
+                            node.hash,
+                            node.blob.data(),
+                            node.blob.size(),
+                            node.node_type);
+                    }
+                }
+                else if (mock_mode_ == "nudb" && db_)
+                {
+                    // Mock NuDB mode - use regular NuDB inserts (no dedup
+                    // tracking)
+                    ::nudb::error_code ec;
+                    db_->insert(
+                        node.hash.data(),
+                        node.blob.data(),
+                        node.blob.size(),
+                        ec);
+
+                    if (!ec)
+                    {
+                        inserted = true;
+                    }
+                    else if (ec == ::nudb::error::key_exists)
+                    {
+                        inserted = false;  // Duplicate
+                    }
+                    else
+                    {
+                        LOGE("NuDB insert failed: ", ec.message());
+                        throw std::runtime_error(
+                            "NuDB insert failed: " + ec.message());
+                    }
+                }
+                else if (
+                    mock_mode_ == "disk" && mock_disk_file_ &&
+                    mock_disk_file_->is_open())
+                {
+                    // Mock disk mode - just write
+                    mock_disk_file_->write(
+                        reinterpret_cast<const char*>(node.hash.data()), 32);
+                    uint32_t size32 = static_cast<uint32_t>(node.blob.size());
+                    mock_disk_file_->write(
+                        reinterpret_cast<const char*>(&size32), sizeof(size32));
+                    mock_disk_file_->write(
+                        reinterpret_cast<const char*>(node.blob.data()),
+                        node.blob.size());
+
+                    if (!mock_disk_file_->good())
+                    {
+                        LOGE("Failed to write to mock disk file");
+                        throw std::runtime_error("Mock disk write failed");
+                    }
+
+                    inserted = true;
+                }
+                else
+                {
+                    // noop/memory mode - no tracking needed
+                    inserted = true;
+                }
+            }
+
+            // Flush deduplication strategy batch after processing each ledger
+            // This commits all the RocksDB Puts from this ledger in one write
+            if (bulk_writer_)
+            {
+                bulk_writer_->flush_dedupe_batch();
+            }
+        }  // End sequential mode
+    }      // End while loop
+}
+
+void
+CatlNudbPipeline::dedupe_worker()
+{
+    LOGI("Dedupe worker thread started");
+
+    while (!shutdown_.load())
+    {
+        DedupeWork work;
+
+        // 1. Pull a DedupeWork job from dedupe_queue_
+        {
+            std::unique_lock<std::mutex> lock(dedupe_queue_mutex_);
+            dedupe_queue_cv_.wait(lock, [this]() {
+                return !dedupe_queue_.empty() || shutdown_.load();
             });
 
-            if (shutdown_.load() && write_queue_.empty())
+            if (shutdown_.load() && dedupe_queue_.empty())
             {
                 break;
             }
 
-            if (write_queue_.empty())
+            if (dedupe_queue_.empty())
             {
                 continue;
             }
 
-            // Move entire batch out of queue
-            batch = std::move(write_queue_.front());
-            write_queue_.pop();
-
-            // Decrement counters for entire batch
-            uint64_t batch_bytes = 0;
-            for (const auto& node : batch)
-            {
-                batch_bytes += node.blob.size();
-            }
-            write_queue_bytes_ -= batch_bytes;
-            write_queue_nodes_ -= batch.size();
+            // Move work out of queue
+            work = std::move(dedupe_queue_.front());
+            dedupe_queue_.pop();
         }
 
-        // Notify that we made space
-        write_queue_cv_.notify_all();
+        // 2. Prepare duplicate set for this ledger
+        std::unordered_set<Hash256, Hash256Hasher> duplicates_for_this_ledger;
 
-        // Process batch WITHOUT holding lock
-        for (auto& node : batch)
+        // 3. Run the "brain" - check each hash
+        for (const auto& hash : work.hashes)
         {
-            // Track bytes for stats
-            total_bytes_written_ += node.blob.size();  // Compressed
-            total_bytes_uncompressed_ +=
-                node.uncompressed_size;  // Uncompressed
+            // Use the pipeline's strategy (CuckooRocks, etc.)
+            // This calls WriteBatch.Put() internally for new keys
+            // Note: We use dummy values for size and node_type since they're
+            // not used by the strategy
+            bool is_duplicate =
+                pipeline_dedup_strategy_->check_and_mark(hash, 0, 0);
 
-            // Track node counts
-            if (node.node_type == 0)
-                total_inner_nodes_++;
-            else
-                total_leaf_nodes_++;
-
-            bool inserted = false;
-
-            // Handle different modes
-            if (mock_mode_.empty())
+            if (is_duplicate)
             {
-                // Real NuDB mode
-                if (bulk_writer_)
-                {
-                    inserted = bulk_writer_->insert(
-                        node.hash,
-                        node.blob.data(),
-                        node.blob.size(),
-                        node.node_type);
-                }
-            }
-            else if (mock_mode_ == "nudb" && db_)
-            {
-                // Mock NuDB mode - use regular NuDB inserts (no dedup tracking)
-                ::nudb::error_code ec;
-                db_->insert(
-                    node.hash.data(), node.blob.data(), node.blob.size(), ec);
-
-                if (!ec)
-                {
-                    inserted = true;
-                }
-                else if (ec == ::nudb::error::key_exists)
-                {
-                    inserted = false;  // Duplicate
-                }
-                else
-                {
-                    LOGE("NuDB insert failed: ", ec.message());
-                    throw std::runtime_error(
-                        "NuDB insert failed: " + ec.message());
-                }
-            }
-            else if (
-                mock_mode_ == "disk" && mock_disk_file_ &&
-                mock_disk_file_->is_open())
-            {
-                // Mock disk mode - just write (dedup handled by dedup marker)
-                mock_disk_file_->write(
-                    reinterpret_cast<const char*>(node.hash.data()), 32);
-                uint32_t size32 = static_cast<uint32_t>(node.blob.size());
-                mock_disk_file_->write(
-                    reinterpret_cast<const char*>(&size32), sizeof(size32));
-                mock_disk_file_->write(
-                    reinterpret_cast<const char*>(node.blob.data()),
-                    node.blob.size());
-
-                if (!mock_disk_file_->good())
-                {
-                    LOGE("Failed to write to mock disk file");
-                    throw std::runtime_error("Mock disk write failed");
-                }
-
-                inserted = true;
-            }
-            else
-            {
-                // noop/memory mode - no tracking needed
-                inserted = true;
+                duplicates_for_this_ledger.insert(hash);
             }
         }
 
-        // Flush deduplication strategy batch after processing each ledger
-        // This commits all the RocksDB Puts from this ledger in one write
-        if (bulk_writer_)
+        // 4. Commit the batch - ONE big I/O write for this ledger
+        // This calls db->Write(), committing all RocksDB Puts at once
+        pipeline_dedup_strategy_->flush_batch();
+
+        // 5. Deliver the result to the "assembly station"
         {
-            bulk_writer_->flush_dedupe_batch();
+            std::lock_guard<std::mutex> lock(writer_assembly_mutex_);
+            auto& writer_job = writer_assembly_map_[work.ledger_seq];
+            writer_job.duplicate_set = std::move(duplicates_for_this_ledger);
+            writer_job.dedupe_done = true;
+            writer_assembly_cv_.notify_one();  // Wake up the writer
         }
     }
+
+    LOGI("Dedupe worker thread stopped");
 }
 
 void
@@ -1604,6 +1822,13 @@ CatlNudbPipeline::enqueue_compressed_batch(std::vector<CompressedNode>&& batch)
 void
 CatlNudbPipeline::enqueue_to_hasher(LedgerSnapshot snapshot)
 {
+    // Initialize next_ledger_to_write_ with the first ledger (for parallel
+    // mode)
+    if (use_dedupe_thread_ && next_ledger_to_write_ == 0)
+    {
+        next_ledger_to_write_ = snapshot.info.seq;
+    }
+
     const size_t MAX_HASHER_QUEUE =
         500;  // Backpressure threshold (same as compression)
     static std::atomic<size_t> backpressure_count{0};

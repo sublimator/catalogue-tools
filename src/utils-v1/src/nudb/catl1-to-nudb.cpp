@@ -206,6 +206,7 @@ public:
 
             // Configure deduplication strategy
             pipeline.set_dedupe_strategy(options_.dedupe_strategy);
+            pipeline.set_use_dedupe_thread(options_.use_dedupe_thread);
 
             // Create NuDB database
             LOGI("Creating NuDB database...");

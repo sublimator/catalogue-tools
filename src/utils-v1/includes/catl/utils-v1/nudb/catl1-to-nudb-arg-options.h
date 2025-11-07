@@ -88,6 +88,14 @@ struct Catl1ToNudbOptions
      */
     std::string dedupe_strategy = "cuckoo-rocks";
 
+    /**
+     * Run deduplication in a separate parallel thread
+     * When enabled, all RocksDB I/O happens in dedupe_worker, freeing the
+     * writer_worker to focus on .dat writes. This creates a 3-stage pipeline:
+     * hasher → [compression + dedupe] → writer (assembly station)
+     */
+    bool use_dedupe_thread = false;
+
     /** Whether to display help information */
     bool show_help = false;
 
