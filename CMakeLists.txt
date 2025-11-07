@@ -16,6 +16,14 @@ include(cmake/StrictIncludes.cmake)
 include(cmake/Protobuf.cmake)
 include(cmake/Secp256k1.cmake)
 
+# Fetch FTXUI for terminal dashboards
+include(FetchContent)
+FetchContent_Declare(ftxui
+  GIT_REPOSITORY https://github.com/ArthurSonzogni/ftxui
+  GIT_TAG v6.1.9
+)
+FetchContent_MakeAvailable(ftxui)
+
 # include(cmake/IncludeWhatYouUse.cmake) # WIP - too slow/pedantic for regular use
 
 # Requires passing -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
