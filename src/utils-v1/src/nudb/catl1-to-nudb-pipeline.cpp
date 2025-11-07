@@ -102,13 +102,10 @@ CatlNudbPipeline::set_walk_nodes_debug_key(const std::string& key_hex)
 }
 
 void
-CatlNudbPipeline::set_no_dedupe(bool no_dedupe)
+CatlNudbPipeline::set_dedupe_strategy(const std::string& strategy)
 {
-    no_dedupe_ = no_dedupe;
-    if (no_dedupe)
-    {
-        LOGI("Deduplication tracking DISABLED - maximum write speed");
-    }
+    dedupe_strategy_ = strategy;
+    LOGI("Deduplication strategy set to: ", strategy);
 }
 
 void
@@ -326,39 +323,51 @@ CatlNudbPipeline::create_database(
     LOGI("  block_size: ", block_size);
     LOGI("  load_factor: ", load_factor);
 
-    // Create deduplication strategies
-    // NOTE: With the new dedup marker thread architecture:
-    // - Bulk writer ALWAYS uses NoDeduplicationStrategy (just writes what we
-    // tell it)
-    // - Dedup marker thread (if enabled) uses NuDBDeduplicationStrategy to
-    // track hashes
-    // - Writer thread skips duplicates based on DedupResult from dedup marker
+    // Create deduplication strategy for bulk writer based on user choice
+    std::unique_ptr<DeduplicationStrategy> bulk_writer_dedupe_strategy;
 
-    if (no_dedupe_)
+    if (dedupe_strategy_ == "none")
     {
-        LOGI("Deduplication: DISABLED (no_dedupe mode)");
-        LOGI("  - Bulk writer: NoDeduplicationStrategy");
-        LOGI("  - Dedup marker thread: NOT started");
-        LOGI("  - Writer: writes all nodes (no skipping)");
+        LOGI("Deduplication: NONE (fastest, duplicates written to .dat)");
+        bulk_writer_dedupe_strategy =
+            std::make_unique<NoDeduplicationStrategy>();
+    }
+    else if (dedupe_strategy_ == "cuckoo-rocks")
+    {
+        LOGI("Deduplication: Cuckoo+Rocks (hybrid filter + disk-backed)");
+        fs::path rocks_dedup_path = dir / "dedup-rocks";
+        // CuckooRocksStrategy: Fast in-memory cuckoo filter + RocksDB ground
+        // truth Default: 100M expected items, ~150MB cuckoo + 1GB RocksDB cache
+        // = ~1.3GB RAM
+        bulk_writer_dedupe_strategy = std::make_unique<CuckooRocksStrategy>(
+            rocks_dedup_path.string(), false);
+    }
+    else if (dedupe_strategy_ == "nudb")
+    {
+        LOGI("Deduplication: NuDB (disk-backed)");
+        fs::path nudb_dedup_path = dir / "dedup";
+        bulk_writer_dedupe_strategy =
+            std::make_unique<NuDBDeduplicationStrategy>(
+                nudb_dedup_path.string());
+    }
+    else if (dedupe_strategy_ == "memory-full")
+    {
+        LOGI("Deduplication: Full in-memory (~3.2GB for 79M keys)");
+        bulk_writer_dedupe_strategy =
+            std::make_unique<FullKeyDeduplicationStrategy>();
+    }
+    else if (dedupe_strategy_ == "memory-xxhash")
+    {
+        LOGI("Deduplication: xxhash in-memory (~650MB for 79M keys)");
+        bulk_writer_dedupe_strategy =
+            std::make_unique<HybridXxHashDeduplicationStrategy>();
     }
     else
     {
-        // Create NuDB deduplication database for the dedup marker thread
-        fs::path nudb_dedup_path = dir / "dedup";
-        LOGI("Deduplication: NuDB (disk-backed, parallel dedup marker)");
-        LOGI("  - Bulk writer: NoDeduplicationStrategy");
-        LOGI("  - Dedup marker thread: NuDB at ", nudb_dedup_path.string());
-        LOGI("  - Writer: skips duplicates based on DedupResult");
-
-        // Create the dedup strategy for the dedup marker thread
-        dedup_strategy_ = std::make_unique<NuDBDeduplicationStrategy>(
-            nudb_dedup_path.string());
+        LOGE("Unknown dedupe strategy: ", dedupe_strategy_);
+        throw std::runtime_error(
+            "Unknown dedupe strategy: " + dedupe_strategy_);
     }
-
-    // Always use NoDeduplicationStrategy for bulk writer - we handle dedup in
-    // the pipeline
-    std::unique_ptr<DeduplicationStrategy> bulk_writer_dedupe_strategy =
-        std::make_unique<NoDeduplicationStrategy>();
 
     // Create bulk writer
     bulk_writer_ = std::make_unique<NudbBulkWriter>(
@@ -1062,17 +1071,6 @@ CatlNudbPipeline::start_compression_pipeline()
     LOGI("Starting hasher thread");
     hasher_thread_ = std::thread([this]() { hasher_worker(); });
 
-    // Start dedup marker thread (only if dedup is enabled)
-    if (!no_dedupe_)
-    {
-        LOGI("Starting dedup marker thread");
-        dedup_marker_thread_ = std::thread([this]() { dedup_marker_worker(); });
-    }
-    else
-    {
-        LOGI("Dedup disabled - skipping dedup marker thread");
-    }
-
     // Start compression workers
     LOGI("Starting ", compression_threads_, " compression worker threads");
     for (int i = 0; i < compression_threads_; ++i)
@@ -1117,28 +1115,9 @@ CatlNudbPipeline::stop_compression_pipeline()
     }
 
     // Wait for BOTH parallel branches to complete:
-    // 1. Dedup marker: hashes → dedup results
-    // 2. Compression: nodes → compressed batches
-
-    // Wait for dedup queue to drain (if dedup is enabled)
-    if (!no_dedupe_)
-    {
-        std::unique_lock<std::mutex> lock(dedup_queue_mutex_);
-        size_t queue_depth = dedup_queue_.size();
-
-        if (queue_depth > 0)
-        {
-            LOGI(
-                "Waiting for dedup queue to drain (",
-                queue_depth,
-                " ledgers remaining)...");
-
-            dedup_queue_cv_.wait(
-                lock, [this]() { return dedup_queue_.empty(); });
-
-            LOGI("Dedup queue drained");
-        }
-    }
+    // Pipeline draining order:
+    // 1. Compression: nodes → compressed batches
+    // 2. Writer: compressed batches → NuDB
 
     // Wait for compression queue to drain
     {
@@ -1160,7 +1139,6 @@ CatlNudbPipeline::stop_compression_pipeline()
     }
 
     // Wait for write queue to drain
-    // (Writer consumes both compressed batches AND dedup results)
     if (mock_mode_.empty() || mock_mode_ == "disk")
     {
         std::unique_lock<std::mutex> lock(write_queue_mutex_);
@@ -1180,33 +1158,11 @@ CatlNudbPipeline::stop_compression_pipeline()
         }
     }
 
-    // Sanity check: dedup result map should be empty now (if dedup was enabled)
-    if (!no_dedupe_)
-    {
-        std::lock_guard<std::mutex> lock(dedup_result_map_mutex_);
-        size_t map_size = dedup_result_map_.size();
-
-        if (map_size > 0)
-        {
-            LOGW(
-                "WARNING: Dedup result map still has ",
-                map_size,
-                " entries after write queue drained! "
-                "(Writer should have consumed all DedupResults)");
-        }
-        else
-        {
-            LOGI("Dedup result map is empty (all DedupResults consumed)");
-        }
-    }
-
     // NOW signal shutdown
     shutdown_.store(true);
 
     // Wake up all threads so they see the shutdown signal
     hasher_queue_cv_.notify_all();
-    dedup_queue_cv_.notify_all();
-    dedup_result_map_cv_.notify_all();
     compression_queue_cv_.notify_all();
     write_queue_cv_.notify_all();
 
@@ -1214,12 +1170,6 @@ CatlNudbPipeline::stop_compression_pipeline()
     if (hasher_thread_.joinable())
     {
         hasher_thread_.join();
-    }
-
-    // Wait for dedup marker thread (if it was started)
-    if (dedup_marker_thread_.joinable())
-    {
-        dedup_marker_thread_.join();
     }
 
     // Wait for compression workers
@@ -1279,50 +1229,6 @@ CatlNudbPipeline::hasher_worker()
         LOGD("Hashing ledger ", snapshot.info.seq);
         HashedLedger hashed = hash_and_verify(std::move(snapshot));
 
-        // Extract hashes and send to dedup marker (if dedup is enabled)
-        if (!no_dedupe_)
-        {
-            DedupBatch batch;
-            batch.ledger_seq = hashed.info.seq;
-
-            // Extract hashes from state_snapshot (only NEW nodes from this
-            // ledger)
-            if (hashed.state_snapshot)
-            {
-                hashed.state_snapshot->walk_new_nodes(
-                    [&](const boost::intrusive_ptr<
-                        catl::shamap::SHAMapTreeNode>& node) {
-                        batch.hashes.push_back(node->get_hash(map_options_));
-                        return true;  // Continue walking
-                    },
-                    hashed.processing_version);
-            }
-
-            // Extract hashes from tx_map (all nodes - it's fresh)
-            if (hashed.tx_map)
-            {
-                hashed.tx_map->walk_new_nodes(
-                    [&](const boost::intrusive_ptr<
-                        catl::shamap::SHAMapTreeNode>& node) {
-                        batch.hashes.push_back(node->get_hash(map_options_));
-                        return true;  // Continue walking
-                    });
-            }
-
-            LOGD(
-                "Extracted ",
-                batch.hashes.size(),
-                " hashes for ledger ",
-                batch.ledger_seq);
-
-            // Enqueue to dedup marker
-            {
-                std::unique_lock<std::mutex> lock(dedup_queue_mutex_);
-                dedup_queue_.push(std::move(batch));
-            }
-            dedup_queue_cv_.notify_one();
-        }
-
         // Enqueue to compression queue with backpressure
         {
             std::unique_lock<std::mutex> lock(compression_queue_mutex_);
@@ -1363,80 +1269,6 @@ CatlNudbPipeline::hasher_worker()
             compression_queue_.push(std::move(hashed));
         }
         compression_queue_cv_.notify_all();
-    }
-}
-
-void
-CatlNudbPipeline::dedup_marker_worker()
-{
-    while (!shutdown_.load())
-    {
-        DedupBatch batch;
-
-        // Pull batch from dedup queue
-        {
-            std::unique_lock<std::mutex> lock(dedup_queue_mutex_);
-            dedup_queue_cv_.wait(lock, [this]() {
-                return !dedup_queue_.empty() || shutdown_.load();
-            });
-
-            if (shutdown_.load() && dedup_queue_.empty())
-            {
-                break;
-            }
-
-            if (dedup_queue_.empty())
-            {
-                continue;
-            }
-
-            batch = std::move(dedup_queue_.front());
-            dedup_queue_.pop();
-        }
-
-        // Notify that we made space
-        dedup_queue_cv_.notify_all();
-
-        LOGD(
-            "Dedup marking ledger ",
-            batch.ledger_seq,
-            " (",
-            batch.hashes.size(),
-            " hashes)");
-
-        // Check each hash and mark as seen using the dedup strategy
-        DedupResult result;
-        result.ledger_seq = batch.ledger_seq;
-
-        for (const auto& hash : batch.hashes)
-        {
-            // check_and_mark returns true if duplicate (was already there)
-            // Note: We pass dummy size and node_type since NuDB dedup only
-            // cares about the hash
-            bool is_duplicate = dedup_strategy_->check_and_mark(hash, 0, 0);
-
-            if (is_duplicate)
-            {
-                // This hash was seen in a PREVIOUS ledger - add to duplicates
-                result.duplicate_hashes.insert(hash);
-            }
-        }
-
-        LOGD(
-            "Dedup marked ledger ",
-            batch.ledger_seq,
-            " - ",
-            result.duplicate_hashes.size(),
-            " duplicates found (out of ",
-            batch.hashes.size(),
-            " hashes)");
-
-        // Store result in map for writer to lookup by ledger_seq
-        {
-            std::unique_lock<std::mutex> lock(dedup_result_map_mutex_);
-            dedup_result_map_[result.ledger_seq] = std::move(result);
-        }
-        dedup_result_map_cv_.notify_all();
     }
 }
 
@@ -1632,71 +1464,9 @@ CatlNudbPipeline::writer_worker()
         // Notify that we made space
         write_queue_cv_.notify_all();
 
-        // Get DedupResult for this ledger (if dedup is enabled)
-        std::unordered_set<Hash256, Hash256Hasher> duplicate_hashes;
-        if (!no_dedupe_ && !batch.empty())
-        {
-            uint32_t ledger_seq = batch[0].ledger_seq;
-
-            // Wait for and retrieve DedupResult for this specific ledger from
-            // map
-            DedupResult result;
-            {
-                std::unique_lock<std::mutex> lock(dedup_result_map_mutex_);
-
-                // Wait until this specific ledger's result is available
-                dedup_result_map_cv_.wait(lock, [this, ledger_seq]() {
-                    return dedup_result_map_.count(ledger_seq) > 0 ||
-                        shutdown_.load();
-                });
-
-                if (shutdown_.load())
-                {
-                    LOGW(
-                        "Shutdown during dedup result wait for ledger ",
-                        ledger_seq);
-                    break;
-                }
-
-                // Lookup and remove result for this ledger
-                auto it = dedup_result_map_.find(ledger_seq);
-                if (it != dedup_result_map_.end())
-                {
-                    result = std::move(it->second);
-                    dedup_result_map_.erase(it);
-
-                    duplicate_hashes = std::move(result.duplicate_hashes);
-                    LOGD(
-                        "Writer got DedupResult for ledger ",
-                        ledger_seq,
-                        " - ",
-                        duplicate_hashes.size(),
-                        " duplicates to skip");
-                }
-                else
-                {
-                    LOGE("DedupResult not found for ledger ", ledger_seq);
-                    throw std::runtime_error("DedupResult missing for ledger");
-                }
-            }
-        }
-
         // Process batch WITHOUT holding lock
-        size_t skipped_count = 0;
         for (auto& node : batch)
         {
-            // Skip this node if it's in the duplicate set
-            if (!duplicate_hashes.empty())
-            {
-                auto it = duplicate_hashes.find(node.hash);
-                if (it != duplicate_hashes.end())
-                {
-                    // This is a duplicate - skip writing
-                    skipped_count++;
-                    continue;
-                }
-            }
-
             // Track bytes for stats
             total_bytes_written_ += node.blob.size();  // Compressed
             total_bytes_uncompressed_ +=
@@ -1774,17 +1544,11 @@ CatlNudbPipeline::writer_worker()
             }
         }
 
-        // Log skipped duplicates
-        if (skipped_count > 0 && !batch.empty())
+        // Flush deduplication strategy batch after processing each ledger
+        // This commits all the RocksDB Puts from this ledger in one write
+        if (bulk_writer_)
         {
-            LOGD(
-                "Writer skipped ",
-                skipped_count,
-                " duplicates for ledger ",
-                batch[0].ledger_seq,
-                " (wrote ",
-                batch.size() - skipped_count,
-                " nodes)");
+            bulk_writer_->flush_dedupe_batch();
         }
     }
 }

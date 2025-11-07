@@ -78,9 +78,15 @@ struct Catl1ToNudbOptions
      */
     std::string nudb_mock = "";
 
-    /** Skip deduplication tracking (no dedup = faster, but duplicates written
-     * to .dat and handled by rekey) */
-    bool no_dedupe = false;
+    /**
+     * Deduplication strategy:
+     *  - "none": No deduplication (fastest, duplicates written to .dat)
+     *  - "cuckoo-rocks": Cuckoo filter + RocksDB (default, hybrid approach)
+     *  - "nudb": NuDB-backed deduplication
+     *  - "memory-full": Full in-memory hash tracking (~3.2GB for 79M keys)
+     *  - "memory-xxhash": xxhash-based in-memory (~650MB for 79M keys)
+     */
+    std::string dedupe_strategy = "cuckoo-rocks";
 
     /** Whether to display help information */
     bool show_help = false;

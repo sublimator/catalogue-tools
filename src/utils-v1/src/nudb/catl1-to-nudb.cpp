@@ -204,11 +204,8 @@ public:
                 pipeline.set_mock_mode(options_.nudb_mock);
             }
 
-            // Configure no-dedupe if enabled
-            if (options_.no_dedupe)
-            {
-                pipeline.set_no_dedupe(true);
-            }
+            // Configure deduplication strategy
+            pipeline.set_dedupe_strategy(options_.dedupe_strategy);
 
             // Create NuDB database
             LOGI("Creating NuDB database...");
