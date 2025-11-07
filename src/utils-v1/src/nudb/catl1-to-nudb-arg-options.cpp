@@ -79,10 +79,11 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
         "Mock NuDB mode for performance testing. Options: 'noop' or 'memory' "
         "(skip all I/O), 'disk' (buffered append-only file), 'nudb' (regular "
         "NuDB inserts, no bulk writer)")(
-        "no-dedupe",
-        po::bool_switch(),
-        "Disable deduplication (writes all nodes, duplicates handled by "
-        "rekey)");
+        "dedupe-strategy",
+        po::value<std::string>()->default_value("cuckoo-rocks"),
+        "Deduplication strategy: 'none' (no dedup), 'cuckoo-rocks' (default: "
+        "Cuckoo filter + RocksDB), 'nudb' (NuDB-backed), 'memory-full' (full "
+        "in-memory), 'memory-xxhash' (xxhash in-memory)");
 
     // Generate the help text
     std::ostringstream help_stream;
@@ -172,10 +173,22 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
             options.nudb_mock = mock_mode;
         }
 
-        // Check for no-dedupe flag
-        if (vm.count("no-dedupe"))
+        // Check for dedupe-strategy option
+        if (vm.count("dedupe-strategy"))
         {
-            options.no_dedupe = vm["no-dedupe"].as<bool>();
+            std::string strategy = vm["dedupe-strategy"].as<std::string>();
+            // Validate strategy
+            if (strategy != "none" && strategy != "cuckoo-rocks" &&
+                strategy != "nudb" && strategy != "memory-full" &&
+                strategy != "memory-xxhash")
+            {
+                std::cerr << "Error: Invalid dedupe-strategy '" << strategy
+                          << "'. Valid options: none, cuckoo-rocks, nudb, "
+                             "memory-full, memory-xxhash\n";
+                options.show_help = true;
+                return options;
+            }
+            options.dedupe_strategy = strategy;
         }
 
         if (vm.count("hasher-threads"))

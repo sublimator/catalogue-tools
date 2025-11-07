@@ -133,6 +133,19 @@ public:
         return total_bytes_written_.load();
     }
 
+    /**
+     * Flush pending batched operations in the deduplication strategy
+     * Call this periodically (e.g., after each ledger) to commit batched writes
+     */
+    void
+    flush_dedupe_batch()
+    {
+        if (dedupe_strategy_)
+        {
+            dedupe_strategy_->flush_batch();
+        }
+    }
+
 private:
     std::string dat_path_;
     std::string key_path_;

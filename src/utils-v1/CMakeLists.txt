@@ -107,6 +107,7 @@ target_link_libraries(
           catl::xdata
           catl::base58
           catl::nodestore
+          catl::cuckoofilter
           NuDB
           RocksDB::rocksdb
           LZ4::lz4_static

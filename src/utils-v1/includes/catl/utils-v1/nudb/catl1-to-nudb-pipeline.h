@@ -83,21 +83,6 @@ struct CompressedNode
     uint8_t node_type;          // 0=inner, 1=leaf
 };
 
-// Batch of hashes to check for deduplication
-struct DedupBatch
-{
-    uint32_t ledger_seq;
-    std::vector<Hash256> hashes;
-};
-
-// Result from dedup checking - SMALL subset of duplicate hashes
-struct DedupResult
-{
-    uint32_t ledger_seq;
-    std::unordered_set<Hash256, Hash256Hasher>
-        duplicate_hashes;  // Only the duplicates!
-};
-
 /**
  * Three-stage pipeline for CATL to NuDB conversion
  *
@@ -227,11 +212,12 @@ public:
     set_mock_mode(const std::string& mode);
 
     /**
-     * Disable deduplication tracking for faster writes
-     * @param no_dedupe true to skip hash map tracking
+     * Set deduplication strategy
+     * @param strategy Strategy name: "none", "cuckoo-rocks", "nudb",
+     * "memory-full", "memory-xxhash"
      */
     void
-    set_no_dedupe(bool no_dedupe);
+    set_dedupe_strategy(const std::string& strategy);
 
     /**
      * Create and open the NuDB database
@@ -311,28 +297,6 @@ public:
     }
 
     /**
-     * Get dedup queue depth (ledgers waiting for dedup marking)
-     */
-    size_t
-    get_dedup_queue_depth() const
-    {
-        std::lock_guard<std::mutex> lock(
-            const_cast<std::mutex&>(dedup_queue_mutex_));
-        return dedup_queue_.size();
-    }
-
-    /**
-     * Get dedup result map size (DedupResults cached for writer)
-     */
-    size_t
-    get_dedup_result_map_size() const
-    {
-        std::lock_guard<std::mutex> lock(
-            const_cast<std::mutex&>(dedup_result_map_mutex_));
-        return dedup_result_map_.size();
-    }
-
-    /**
      * Get compression queue depth (ledgers waiting to be compressed)
      */
     size_t
@@ -371,7 +335,7 @@ private:
     std::optional<std::string>
         walk_nodes_debug_key_;    // Key prefix (hex) to debug
     std::string mock_mode_ = "";  // Mock mode: "", "noop", "memory", or "disk"
-    bool no_dedupe_ = false;  // Skip deduplication tracking for faster writes
+    std::string dedupe_strategy_ = "cuckoo-rocks";  // Deduplication strategy
 
     // NuDB configuration parameters
     uint32_t key_size_ = 32;
@@ -427,17 +391,6 @@ private:
     std::mutex hasher_queue_mutex_;
     std::condition_variable hasher_queue_cv_;
 
-    // Dedup marker queues (input: hash batches, output: duplicate subsets)
-    std::queue<DedupBatch> dedup_queue_;
-    std::mutex dedup_queue_mutex_;
-    std::condition_variable dedup_queue_cv_;
-
-    // Dedup results stored by ledger_seq for random access by writer
-    // (Writer needs to lookup by ledger_seq since compression reorders ledgers)
-    std::unordered_map<uint32_t, DedupResult> dedup_result_map_;
-    std::mutex dedup_result_map_mutex_;
-    std::condition_variable dedup_result_map_cv_;
-
     // Priority queue for compression jobs (ordered by ledger_seq)
     std::priority_queue<HashedLedger> compression_queue_;
     std::mutex compression_queue_mutex_;
@@ -452,17 +405,12 @@ private:
     // ===== Worker Threads =====
 
     std::thread hasher_thread_;
-    std::thread dedup_marker_thread_;
     std::vector<std::thread> compression_workers_;
     std::thread writer_thread_;
 
     // Shutdown flags
     std::atomic<bool> shutdown_{false};
     std::atomic<bool> pipeline_stopped_{false};
-
-    // Dedup strategy for the dedup marker thread
-    // (separate from bulk_writer's strategy - this tracks across ledgers)
-    std::unique_ptr<DeduplicationStrategy> dedup_strategy_;
 
     // Track write queue size for stats and backpressure
     std::atomic<uint64_t> write_queue_bytes_{0};  // Total compressed bytes
@@ -471,8 +419,6 @@ private:
     // Worker thread functions
     void
     hasher_worker();
-    void
-    dedup_marker_worker();
     void
     compression_worker();
     void
