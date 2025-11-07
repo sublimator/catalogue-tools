@@ -26,6 +26,18 @@ namespace catl::v1::utils::nudb {
 // pipeline_version_log.enable(LogLevel::DEBUG)
 extern LogPartition pipeline_version_log;
 
+// Custom hasher for Hash256 using xxhasher (same as NuDB)
+struct Hash256Hasher
+{
+    std::size_t
+    operator()(const Hash256& key) const noexcept
+    {
+        // Use xxhasher to hash the 32-byte key (seed = 0)
+        ::nudb::xxhasher h(0);
+        return static_cast<std::size_t>(h(key.data(), key.size()));
+    }
+};
+
 /**
  * Data passed between pipeline stages
  */
@@ -69,6 +81,21 @@ struct CompressedNode
     std::vector<uint8_t> blob;  // Compressed data
     size_t uncompressed_size;   // Original size before compression
     uint8_t node_type;          // 0=inner, 1=leaf
+};
+
+// Batch of hashes to check for deduplication
+struct DedupBatch
+{
+    uint32_t ledger_seq;
+    std::vector<Hash256> hashes;
+};
+
+// Result from dedup checking - SMALL subset of duplicate hashes
+struct DedupResult
+{
+    uint32_t ledger_seq;
+    std::unordered_set<Hash256, Hash256Hasher>
+        duplicate_hashes;  // Only the duplicates!
 };
 
 /**
@@ -292,6 +319,28 @@ public:
     }
 
     /**
+     * Get dedup queue depth (ledgers waiting for dedup marking)
+     */
+    size_t
+    get_dedup_queue_depth() const
+    {
+        std::lock_guard<std::mutex> lock(
+            const_cast<std::mutex&>(dedup_queue_mutex_));
+        return dedup_queue_.size();
+    }
+
+    /**
+     * Get dedup result map size (DedupResults cached for writer)
+     */
+    size_t
+    get_dedup_result_map_size() const
+    {
+        std::lock_guard<std::mutex> lock(
+            const_cast<std::mutex&>(dedup_result_map_mutex_));
+        return dedup_result_map_.size();
+    }
+
+    /**
      * Get compression queue depth (ledgers waiting to be compressed)
      */
     size_t
@@ -355,18 +404,6 @@ private:
     std::atomic<uint64_t> total_inner_nodes_{0};         // Count of inner nodes
     std::atomic<uint64_t> total_leaf_nodes_{0};          // Count of leaf nodes
 
-    // Custom hasher for Hash256 using xxhasher (same as NuDB)
-    struct Hash256Hasher
-    {
-        std::size_t
-        operator()(const Hash256& key) const noexcept
-        {
-            // Use xxhasher to hash the 32-byte key (seed = 0)
-            ::nudb::xxhasher h(0);
-            return static_cast<std::size_t>(h(key.data(), key.size()));
-        }
-    };
-
     // Track inserted keys with their sizes for deduplication and verification
     // (faster than letting NuDB check for duplicates, and allows size
     // verification)
@@ -404,6 +441,17 @@ private:
     std::mutex hasher_queue_mutex_;
     std::condition_variable hasher_queue_cv_;
 
+    // Dedup marker queues (input: hash batches, output: duplicate subsets)
+    std::queue<DedupBatch> dedup_queue_;
+    std::mutex dedup_queue_mutex_;
+    std::condition_variable dedup_queue_cv_;
+
+    // Dedup results stored by ledger_seq for random access by writer
+    // (Writer needs to lookup by ledger_seq since compression reorders ledgers)
+    std::unordered_map<uint32_t, DedupResult> dedup_result_map_;
+    std::mutex dedup_result_map_mutex_;
+    std::condition_variable dedup_result_map_cv_;
+
     // Priority queue for compression jobs (ordered by ledger_seq)
     std::priority_queue<HashedLedger> compression_queue_;
     std::mutex compression_queue_mutex_;
@@ -418,12 +466,17 @@ private:
     // ===== Worker Threads =====
 
     std::thread hasher_thread_;
+    std::thread dedup_marker_thread_;
     std::vector<std::thread> compression_workers_;
     std::thread writer_thread_;
 
     // Shutdown flags
     std::atomic<bool> shutdown_{false};
     std::atomic<bool> pipeline_stopped_{false};
+
+    // Dedup strategy for the dedup marker thread
+    // (separate from bulk_writer's strategy - this tracks across ledgers)
+    std::unique_ptr<DeduplicationStrategy> dedup_strategy_;
 
     // Track write queue size for stats and backpressure
     std::atomic<uint64_t> write_queue_bytes_{0};  // Total compressed bytes
@@ -432,6 +485,8 @@ private:
     // Worker thread functions
     void
     hasher_worker();
+    void
+    dedup_marker_worker();
     void
     compression_worker();
     void
