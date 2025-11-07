@@ -16,6 +16,7 @@ HASHER_THREADS=${HASHER_THREADS:-1}                    # Default: 1 thread (best
 COMPRESSOR_THREADS=${COMPRESSOR_THREADS:-2}            # Default: 2 threads (compression worker threads)
 VERIFY_KEYS=${VERIFY_KEYS:-""}                         # Set to any value to enable key verification after import
 DEDUPE_STRATEGY=${DEDUPE_STRATEGY:-"cuckoo-rocks"}     # Deduplication strategy: none, cuckoo-rocks (default), nudb, memory-full, memory-xxhash
+USE_DEDUPE_THREAD=${USE_DEDUPE_THREAD:-""}             # Set to any value to run deduplication in a separate parallel thread
 ENABLE_DEBUG_PARTITIONS=${ENABLE_DEBUG_PARTITIONS:-""} # Set to any value to enable debug log partitions
 WALK_NODES_LEDGER=${WALK_NODES_LEDGER:-""}             # Set to a ledger number to enable WALK_NODES logging for that specific ledger
 WALK_NODES_DEBUG_KEY=${WALK_NODES_DEBUG_KEY:-""}       # Set to a hex key prefix to print detailed info for matching keys
@@ -79,15 +80,22 @@ fi
 DEDUPE_STRATEGY_FLAG="--dedupe-strategy $DEDUPE_STRATEGY"
 echo "📊 Deduplication strategy: $DEDUPE_STRATEGY"
 
+# Build use-dedupe-thread flag if specified
+USE_DEDUPE_THREAD_FLAG=""
+if [ -n "$USE_DEDUPE_THREAD" ]; then
+  echo "🔀 Parallel dedupe thread ENABLED (RocksDB I/O runs in separate thread)"
+  USE_DEDUPE_THREAD_FLAG="--use-dedupe-thread"
+fi
+
 # Check if we're in test snapshot mode
 if [ -n "${TEST_SNAPSHOTS:-}" ]; then
   echo "🧪 Running in snapshot test mode..."
   echo "This will test memory usage of snapshots without the pipeline."
   if [ -n "${LLDB:-}" ]; then
     echo "Running under lldb..."
-    lldb -o run -- "$CMD" --input "$INPUT_FILE" --test-snapshots --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS --compressor-threads $COMPRESSOR_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG $NUDB_FACTOR_FLAG $NUDB_MOCK_FLAG $VERIFY_KEYS_FLAG $DEDUPE_STRATEGY_FLAG
+    lldb -o run -- "$CMD" --input "$INPUT_FILE" --test-snapshots --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS --compressor-threads $COMPRESSOR_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG $NUDB_FACTOR_FLAG $NUDB_MOCK_FLAG $VERIFY_KEYS_FLAG $DEDUPE_STRATEGY_FLAG $USE_DEDUPE_THREAD_FLAG
   else
-    "$CMD" --input "$INPUT_FILE" --test-snapshots --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS --compressor-threads $COMPRESSOR_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG $NUDB_FACTOR_FLAG $NUDB_MOCK_FLAG $VERIFY_KEYS_FLAG $DEDUPE_STRATEGY_FLAG
+    "$CMD" --input "$INPUT_FILE" --test-snapshots --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS --compressor-threads $COMPRESSOR_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG $NUDB_FACTOR_FLAG $NUDB_MOCK_FLAG $VERIFY_KEYS_FLAG $DEDUPE_STRATEGY_FLAG $USE_DEDUPE_THREAD_FLAG
   fi
 # Normal pipeline mode
 else
@@ -95,8 +103,8 @@ else
   # Run with lldb if LLDB env var is set
   if [ -n "${LLDB:-}" ]; then
     echo "Running under lldb..."
-    lldb -o run -- "$CMD" --input "$INPUT_FILE" --nudb-path "$NUDB_PATH" --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS --compressor-threads $COMPRESSOR_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG $NUDB_FACTOR_FLAG $NUDB_MOCK_FLAG $VERIFY_KEYS_FLAG $DEDUPE_STRATEGY_FLAG
+    lldb -o run -- "$CMD" --input "$INPUT_FILE" --nudb-path "$NUDB_PATH" --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS --compressor-threads $COMPRESSOR_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG $NUDB_FACTOR_FLAG $NUDB_MOCK_FLAG $VERIFY_KEYS_FLAG $DEDUPE_STRATEGY_FLAG $USE_DEDUPE_THREAD_FLAG
   else
-    "$CMD" --input "$INPUT_FILE" --nudb-path "$NUDB_PATH" --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS --compressor-threads $COMPRESSOR_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG $NUDB_FACTOR_FLAG $NUDB_MOCK_FLAG $VERIFY_KEYS_FLAG $DEDUPE_STRATEGY_FLAG
+    "$CMD" --input "$INPUT_FILE" --nudb-path "$NUDB_PATH" --end-ledger $END_LEDGER --log-level "$LOG_LEVEL" --hasher-threads $HASHER_THREADS --compressor-threads $COMPRESSOR_THREADS $DEBUG_FLAG $WALK_NODES_FLAG $WALK_NODES_DEBUG_KEY_FLAG $NUDB_FACTOR_FLAG $NUDB_MOCK_FLAG $VERIFY_KEYS_FLAG $DEDUPE_STRATEGY_FLAG $USE_DEDUPE_THREAD_FLAG
   fi
 fi

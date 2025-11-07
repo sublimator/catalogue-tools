@@ -83,7 +83,13 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
         po::value<std::string>()->default_value("cuckoo-rocks"),
         "Deduplication strategy: 'none' (no dedup), 'cuckoo-rocks' (default: "
         "Cuckoo filter + RocksDB), 'nudb' (NuDB-backed), 'memory-full' (full "
-        "in-memory), 'memory-xxhash' (xxhash in-memory)");
+        "in-memory), 'memory-xxhash' (xxhash in-memory)")(
+        "use-dedupe-thread",
+        po::bool_switch(),
+        "Run deduplication in a separate parallel thread. Moves all RocksDB "
+        "I/O "
+        "off the writer thread, creating a 3-stage pipeline: hasher → "
+        "[compression + dedupe] → writer");
 
     // Generate the help text
     std::ostringstream help_stream;
@@ -189,6 +195,12 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
                 return options;
             }
             options.dedupe_strategy = strategy;
+        }
+
+        // Check for use-dedupe-thread option
+        if (vm.count("use-dedupe-thread"))
+        {
+            options.use_dedupe_thread = vm["use-dedupe-thread"].as<bool>();
         }
 
         if (vm.count("hasher-threads"))

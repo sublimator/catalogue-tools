@@ -83,6 +83,25 @@ struct CompressedNode
     uint8_t node_type;          // 0=inner, 1=leaf
 };
 
+// Deduplication work item (for parallel dedupe thread)
+// Memory-safe: only passes hashes, not full tree structures
+struct DedupeWork
+{
+    uint32_t ledger_seq;
+    std::vector<Hash256> hashes;  // Just the hashes to check
+};
+
+// Writer job assembly (solves out-of-order problem)
+// Waits for BOTH compression AND dedupe results before writing
+struct WriterJob
+{
+    std::vector<CompressedNode> compressed_batch;
+    std::unordered_set<Hash256, Hash256Hasher>
+        duplicate_set;  // Result from dedupe
+    bool compression_done = false;
+    bool dedupe_done = false;
+};
+
 /**
  * Three-stage pipeline for CATL to NuDB conversion
  *
@@ -220,6 +239,16 @@ public:
     set_dedupe_strategy(const std::string& strategy);
 
     /**
+     * Enable/disable parallel dedupe thread
+     * @param use_thread If true, run dedupe in separate thread
+     */
+    void
+    set_use_dedupe_thread(bool use_thread)
+    {
+        use_dedupe_thread_ = use_thread;
+    }
+
+    /**
      * Create and open the NuDB database
      * @param path Directory path for the database files
      * @param key_size Size of keys in bytes (default 32)
@@ -336,6 +365,7 @@ private:
         walk_nodes_debug_key_;    // Key prefix (hex) to debug
     std::string mock_mode_ = "";  // Mock mode: "", "noop", "memory", or "disk"
     std::string dedupe_strategy_ = "cuckoo-rocks";  // Deduplication strategy
+    bool use_dedupe_thread_ = false;  // Run dedupe in separate parallel thread
 
     // NuDB configuration parameters
     uint32_t key_size_ = 32;
@@ -344,6 +374,11 @@ private:
 
     // NuDB bulk writer for fast import
     std::unique_ptr<NudbBulkWriter> bulk_writer_;
+
+    // Pipeline-level deduplication strategy (the "brain")
+    // When use_dedupe_thread_ is true, this is used by dedupe_worker
+    // When false, bulk_writer_ uses its own strategy
+    std::unique_ptr<DeduplicationStrategy> pipeline_dedup_strategy_;
 
     // NuDB store for verification after bulk import
     using store_type =
@@ -402,11 +437,26 @@ private:
     std::mutex write_queue_mutex_;
     std::condition_variable write_queue_cv_;
 
+    // ===== Parallel Dedupe Thread (optional) =====
+
+    // Dedupe work queue (receives hash lists from hasher)
+    std::queue<DedupeWork> dedupe_queue_;
+    std::mutex dedupe_queue_mutex_;
+    std::condition_variable dedupe_queue_cv_;
+
+    // Writer assembly station (solves out-of-order problem)
+    // Maps ledger_seq → WriterJob (compression + dedupe results)
+    std::map<uint32_t, WriterJob> writer_assembly_map_;
+    std::mutex writer_assembly_mutex_;
+    std::condition_variable writer_assembly_cv_;
+    uint32_t next_ledger_to_write_ = 0;  // Next expected ledger in sequence
+
     // ===== Worker Threads =====
 
     std::thread hasher_thread_;
     std::vector<std::thread> compression_workers_;
     std::thread writer_thread_;
+    std::thread dedupe_worker_;  // Optional parallel dedupe thread
 
     // Shutdown flags
     std::atomic<bool> shutdown_{false};
@@ -423,6 +473,8 @@ private:
     compression_worker();
     void
     writer_worker();
+    void
+    dedupe_worker();  // Optional parallel dedupe thread worker
 
     // Helper: enqueue compressed node with backpressure
     void
