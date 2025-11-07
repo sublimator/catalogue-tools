@@ -28,12 +28,19 @@ set(SOURCES_CATL1_TO_NUDB
     ${UTILS_SRC_DIR}/nudb/catl1-to-nudb.cpp
     ${UTILS_SRC_DIR}/nudb/catl1-to-nudb-arg-options.cpp
     ${UTILS_SRC_DIR}/nudb/catl1-to-nudb-pipeline.cpp
-    ${UTILS_SRC_DIR}/nudb/nudb-bulk-writer.cpp)
+    ${UTILS_SRC_DIR}/nudb/nudb-bulk-writer.cpp
+    ${UTILS_SRC_DIR}/nudb/pipeline-dashboard.cpp)
 
 # Define the nudb-exp executable and its sources
 set(EXECUTABLE_NUDB_EXP nudb-exp)
 set(SOURCES_NUDB_EXP ${UTILS_SRC_DIR}/nudb/nudb-exp.cpp
                      ${UTILS_SRC_DIR}/nudb/nudb-exp-arg-options.cpp)
+
+# Define the dashboard-demo executable and its sources
+set(EXECUTABLE_DASHBOARD_DEMO dashboard-demo)
+set(SOURCES_DASHBOARD_DEMO
+    ${UTILS_SRC_DIR}/nudb/dashboard-demo.cpp
+    ${UTILS_SRC_DIR}/nudb/pipeline-dashboard.cpp)
 
 # Create the executables
 
@@ -114,7 +121,10 @@ target_link_libraries(
           Boost::filesystem
           Boost::program_options
           Boost::json
-          OpenSSL::SSL)
+          OpenSSL::SSL
+          ftxui::screen
+          ftxui::dom
+          ftxui::component)
 
 # nudb-exp
 add_executable(${EXECUTABLE_NUDB_EXP} ${SOURCES_NUDB_EXP})
@@ -128,6 +138,17 @@ target_link_libraries(
           lz4::lz4
           Boost::filesystem
           Boost::program_options)
+
+# dashboard-demo
+add_executable(${EXECUTABLE_DASHBOARD_DEMO} ${SOURCES_DASHBOARD_DEMO})
+target_include_directories(${EXECUTABLE_DASHBOARD_DEMO}
+                           PRIVATE ${UTILS_INCLUDE_DIR} ${CATL_INCLUDE_DIR})
+target_link_libraries(
+  ${EXECUTABLE_DASHBOARD_DEMO}
+  PRIVATE catl::core
+          ftxui::screen
+          ftxui::dom
+          ftxui::component)
 
 # Install all executables
 install(
