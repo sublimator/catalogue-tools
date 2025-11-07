@@ -345,25 +345,6 @@ CatlNudbPipeline::create_database(
         dedupe_brain_strategy = std::make_unique<CuckooRocksStrategy>(
             rocks_dedup_path.string(), false);
     }
-    else if (dedupe_strategy_ == "nudb")
-    {
-        LOGI("Deduplication: NuDB (disk-backed)");
-        fs::path nudb_dedup_path = dir / "dedup";
-        dedupe_brain_strategy = std::make_unique<NuDBDeduplicationStrategy>(
-            nudb_dedup_path.string());
-    }
-    else if (dedupe_strategy_ == "memory-full")
-    {
-        LOGI("Deduplication: Full in-memory (~3.2GB for 79M keys)");
-        dedupe_brain_strategy =
-            std::make_unique<FullKeyDeduplicationStrategy>();
-    }
-    else if (dedupe_strategy_ == "memory-xxhash")
-    {
-        LOGI("Deduplication: xxhash in-memory (~650MB for 79M keys)");
-        dedupe_brain_strategy =
-            std::make_unique<HybridXxHashDeduplicationStrategy>();
-    }
     else
     {
         LOGE("Unknown dedupe strategy: ", dedupe_strategy_);
