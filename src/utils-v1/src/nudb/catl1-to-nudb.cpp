@@ -2,12 +2,14 @@
 #include "catl/shamap/shamap.h"
 #include "catl/utils-v1/nudb/catl1-to-nudb-arg-options.h"
 #include "catl/utils-v1/nudb/catl1-to-nudb-pipeline.h"
+#include "catl/utils-v1/nudb/dashboard-stats-sink.h"
 #include "catl/v1/catl-v1-reader.h"
 #include "catl/v1/catl-v1-utils.h"
 #include "catl/xdata/protocol.h"
 
 #include <boost/filesystem.hpp>
 #include <chrono>
+#include <csignal>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
@@ -82,6 +84,9 @@ public:
     bool
     convert()
     {
+        // Log file for dashboard mode (must be outside try/catch for cleanup)
+        std::ofstream log_file;
+
         try
         {
             // Open the input CATL file to read header
@@ -208,6 +213,37 @@ public:
             pipeline.set_dedupe_strategy(options_.dedupe_strategy);
             pipeline.set_use_dedupe_thread(options_.use_dedupe_thread);
 
+            // Setup dashboard if enabled
+            std::shared_ptr<StatsReportSink> stats_sink;
+
+            if (options_.enable_dashboard)
+            {
+                std::cout << "\n🎨 Starting dashboard..." << std::endl;
+                std::cout << "   Redirecting logs to file" << std::endl;
+                std::cout << "   Press 'q' in dashboard to quit\n" << std::endl;
+
+                // Give user a moment to see the message
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+
+                // Clear the screen for dashboard
+                std::cout << "\033[2J\033[H" << std::flush;
+
+                // Redirect logs to file so they don't interfere with dashboard
+                // (FTXUI needs stdout/stderr for rendering)
+                fs::path log_path =
+                    fs::path(*options_.nudb_path) / "import.log";
+                log_file.open(
+                    log_path.string(), std::ios::out | std::ios::trunc);
+                if (log_file.is_open())
+                {
+                    Logger::set_output_stream(&log_file);  // INFO/DEBUG logs
+                    Logger::set_error_stream(&log_file);   // ERROR/WARNING logs
+                }
+
+                stats_sink = std::make_shared<DashboardStatsReportSink>();
+                pipeline.set_stats_sink(stats_sink);
+            }
+
             // Create NuDB database
             LOGI("Creating NuDB database...");
             if (!pipeline.create_database(
@@ -223,6 +259,10 @@ public:
             // Error tracking (atomic for thread safety)
             std::atomic<bool> error_occurred{false};
             std::atomic<bool> builder_done{false};
+
+            // Shared start time for accurate elapsed time across builder +
+            // drain
+            auto import_start_time = std::chrono::steady_clock::now();
 
             // Thread 1: Build + Snapshot
             std::thread builder_thread([&]() {
@@ -262,8 +302,8 @@ public:
                         state_map->get_version());
 
                     // Stats tracking
-                    auto start_time = std::chrono::steady_clock::now();
-                    auto last_stats_time = start_time;
+                    auto last_stats_time = import_start_time;
+                    auto last_dashboard_report_time = import_start_time;
                     uint64_t total_state_nodes_added = 0;
                     uint64_t total_state_nodes_updated = 0;
                     uint64_t total_state_nodes_deleted = 0;
@@ -363,14 +403,14 @@ public:
                             ledger_seq > last_stats_ledger)
                         {
                             auto now = std::chrono::steady_clock::now();
-                            auto elapsed_sec =
-                                std::chrono::duration_cast<
-                                    std::chrono::seconds>(now - start_time)
-                                    .count();
-                            auto elapsed_ms =
-                                std::chrono::duration_cast<
-                                    std::chrono::milliseconds>(now - start_time)
-                                    .count();
+                            auto elapsed_sec = std::chrono::duration_cast<
+                                                   std::chrono::seconds>(
+                                                   now - import_start_time)
+                                                   .count();
+                            auto elapsed_ms = std::chrono::duration_cast<
+                                                  std::chrono::milliseconds>(
+                                                  now - import_start_time)
+                                                  .count();
                             auto period_elapsed_ms =
                                 std::chrono::duration_cast<
                                     std::chrono::milliseconds>(
@@ -575,6 +615,116 @@ public:
                             last_stats_ledger = ledger_seq;
                         }
 
+                        // Report to stats sink (dashboard) - throttle to 5 Hz
+                        // (200ms) to avoid mutex contention on hot path
+                        if (stats_sink)
+                        {
+                            auto now = std::chrono::steady_clock::now();
+                            auto ms_since_last_report =
+                                std::chrono::duration_cast<
+                                    std::chrono::milliseconds>(
+                                    now - last_dashboard_report_time)
+                                    .count();
+
+                            if (ms_since_last_report >= 200)
+                            {
+                                auto elapsed_ms =
+                                    std::chrono::duration_cast<
+                                        std::chrono::milliseconds>(
+                                        now - import_start_time)
+                                        .count();
+                                uint64_t current_bytes_written =
+                                    pipeline.get_total_bytes_written();
+                                uint64_t current_bytes_read =
+                                    reader.body_bytes_consumed();
+                                uint64_t current_bytes_uncompressed =
+                                    pipeline.get_total_bytes_uncompressed();
+
+                                StatsReportSink::QueueDepths queues;
+                                queues.hasher_queue =
+                                    pipeline.get_hasher_queue_depth();
+                                queues.compression_queue =
+                                    pipeline.get_compression_queue_depth();
+                                queues.dedupe_queue =
+                                    pipeline.get_dedupe_queue_depth();
+                                queues.assembly_queue =
+                                    pipeline.get_assembly_station_depth();
+                                queues.write_queue =
+                                    pipeline.get_write_queue_depth();
+
+                                StatsReportSink::ProgressCounters progress;
+                                progress.start_ledger = start_ledger;
+                                progress.end_ledger = end_ledger;
+                                progress.current_ledger = ledger_seq;
+                                progress.ledgers_processed =
+                                    ledger_seq - start_ledger;
+                                progress.inner_nodes =
+                                    pipeline.get_total_inner_nodes();
+                                progress.leaf_nodes =
+                                    pipeline.get_total_leaf_nodes();
+                                progress.duplicates =
+                                    pipeline.get_duplicate_count();
+
+                                StatsReportSink::PerformanceMetrics perf;
+                                perf.elapsed_sec = elapsed_ms / 1000.0;
+                                perf.ledgers_per_sec = elapsed_ms > 0
+                                    ? static_cast<double>(
+                                          progress.ledgers_processed) *
+                                        1000.0 / elapsed_ms
+                                    : 0;
+                                perf.nodes_per_sec = elapsed_ms > 0
+                                    ? static_cast<double>(
+                                          progress.inner_nodes +
+                                          progress.leaf_nodes) *
+                                        1000.0 / elapsed_ms
+                                    : 0;
+                                perf.catl_read_mb_per_sec = elapsed_ms > 0
+                                    ? (static_cast<double>(current_bytes_read) *
+                                       1000.0 / elapsed_ms) /
+                                        1024 / 1024
+                                    : 0;
+                                perf.nudb_write_mb_per_sec = elapsed_ms > 0
+                                    ? (static_cast<double>(
+                                           current_bytes_written) *
+                                       1000.0 / elapsed_ms) /
+                                        1024 / 1024
+                                    : 0;
+                                perf.bytes_read = current_bytes_read;
+                                perf.bytes_written = current_bytes_written;
+                                perf.bytes_uncompressed =
+                                    current_bytes_uncompressed;
+                                perf.compression_ratio =
+                                    current_bytes_uncompressed > 0
+                                    ? static_cast<double>(
+                                          current_bytes_written) /
+                                        current_bytes_uncompressed
+                                    : 1.0;
+
+                                StatsReportSink::NodeOperations ops;
+                                ops.state_added = total_state_nodes_added;
+                                ops.state_updated = total_state_nodes_updated;
+                                ops.state_deleted = total_state_nodes_deleted;
+                                ops.tx_added = total_tx_nodes_added;
+
+                                StatsReportSink::DeduplicationStats dedup_stats;
+                                // TODO: Wire up actual RocksDB stats from
+                                // pipeline
+
+                                stats_sink->report_stats(
+                                    queues, progress, perf, ops, dedup_stats);
+
+                                // Check if dashboard signaled shutdown (user
+                                // pressed 'q')
+                                if (!stats_sink->is_active())
+                                {
+                                    LOGI("User pressed 'q' - sending SIGINT");
+                                    std::raise(SIGINT);
+                                }
+
+                                last_dashboard_report_time = now;
+                            }
+                        }
+
                         // Enqueue to pipeline hasher (blocks with backpressure
                         // if queue full)
                         pipeline.enqueue_to_hasher(std::move(*snapshot));
@@ -608,21 +758,205 @@ public:
                 end_ledger);
             LOGI("========================================");
 
-            // Close NuDB database (this flushes final in-memory pool to disk)
-            LOGI("\nClosing database to flush final batch...");
-            if (!pipeline.close_database())
+            // Wait for pipeline to drain, updating dashboard and checking for
+            // early quit
+            bool user_quit_early = false;
+            if (stats_sink)
             {
-                LOGE("Failed to close NuDB database!");
-                return false;
+                // Dashboard will show "Draining" status, no need to log
+                while (true)
+                {
+                    // Check queue depths
+                    size_t hasher_depth = pipeline.get_hasher_queue_depth();
+                    size_t compression_depth =
+                        pipeline.get_compression_queue_depth();
+                    size_t dedupe_depth = pipeline.get_dedupe_queue_depth();
+                    size_t assembly_depth =
+                        pipeline.get_assembly_station_depth();
+                    size_t write_depth = pipeline.get_write_queue_depth();
+
+                    // Calculate elapsed time (total import time, not drain
+                    // time)
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - import_start_time)
+                            .count();
+
+                    // Update dashboard
+                    StatsReportSink::QueueDepths queues;
+                    queues.hasher_queue = hasher_depth;
+                    queues.compression_queue = compression_depth;
+                    queues.dedupe_queue = dedupe_depth;
+                    queues.assembly_queue = assembly_depth;
+                    queues.write_queue = write_depth;
+
+                    StatsReportSink::ProgressCounters progress;
+                    progress.start_ledger = start_ledger;
+                    progress.end_ledger = end_ledger;
+                    progress.current_ledger =
+                        end_ledger;  // All built, draining queues
+                    progress.ledgers_processed = end_ledger - start_ledger;
+                    progress.inner_nodes = pipeline.get_total_inner_nodes();
+                    progress.leaf_nodes = pipeline.get_total_leaf_nodes();
+                    progress.duplicates = pipeline.get_duplicate_count();
+                    progress.status = "Draining";
+
+                    StatsReportSink::PerformanceMetrics perf;
+                    uint64_t current_bytes_written =
+                        pipeline.get_total_bytes_written();
+                    uint64_t current_bytes_uncompressed =
+                        pipeline.get_total_bytes_uncompressed();
+                    perf.elapsed_sec = elapsed_ms / 1000.0;
+                    perf.ledgers_per_sec = elapsed_ms > 0
+                        ? static_cast<double>(progress.ledgers_processed) *
+                            1000.0 / elapsed_ms
+                        : 0;
+                    perf.nodes_per_sec = elapsed_ms > 0
+                        ? static_cast<double>(
+                              progress.inner_nodes + progress.leaf_nodes) *
+                            1000.0 / elapsed_ms
+                        : 0;
+                    perf.nudb_write_mb_per_sec = elapsed_ms > 0
+                        ? (static_cast<double>(current_bytes_written) * 1000.0 /
+                           elapsed_ms) /
+                            1024 / 1024
+                        : 0;
+                    perf.bytes_written = current_bytes_written;
+                    perf.bytes_uncompressed = current_bytes_uncompressed;
+                    perf.compression_ratio = current_bytes_uncompressed > 0
+                        ? static_cast<double>(current_bytes_written) /
+                            current_bytes_uncompressed
+                        : 1.0;
+                    // Note: can't update bytes_read or catl_read_mb_per_sec
+                    // during drain (reader closed)
+
+                    StatsReportSink::NodeOperations ops;
+                    // TODO: Save these from builder thread before drain
+
+                    StatsReportSink::DeduplicationStats dedup_stats;
+                    // TODO: Wire up actual RocksDB stats
+
+                    stats_sink->report_stats(
+                        queues, progress, perf, ops, dedup_stats);
+
+                    // Check if user pressed 'q'
+                    if (!stats_sink->is_active())
+                    {
+                        LOGI("User pressed 'q' during drain - sending SIGINT");
+                        std::raise(SIGINT);
+                    }
+
+                    // Check if all queues drained
+                    if (hasher_depth == 0 && compression_depth == 0 &&
+                        dedupe_depth == 0 && assembly_depth == 0 &&
+                        write_depth == 0)
+                    {
+                        LOGI("All pipeline queues drained");
+                        break;
+                    }
+
+                    // Sleep briefly before next poll
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+
+                // Send final update showing "Rekeying" status
+                if (stats_sink)
+                {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - import_start_time)
+                            .count();
+
+                    StatsReportSink::QueueDepths queues;  // All zeros
+
+                    StatsReportSink::ProgressCounters progress;
+                    progress.start_ledger = start_ledger;
+                    progress.end_ledger = end_ledger;
+                    progress.current_ledger = end_ledger;
+                    progress.ledgers_processed = end_ledger - start_ledger;
+                    progress.inner_nodes = pipeline.get_total_inner_nodes();
+                    progress.leaf_nodes = pipeline.get_total_leaf_nodes();
+                    progress.duplicates = pipeline.get_duplicate_count();
+                    progress.status = "Rekeying";
+
+                    StatsReportSink::PerformanceMetrics perf;
+                    uint64_t current_bytes_written =
+                        pipeline.get_total_bytes_written();
+                    uint64_t current_bytes_uncompressed =
+                        pipeline.get_total_bytes_uncompressed();
+                    perf.elapsed_sec = elapsed_ms / 1000.0;
+                    perf.ledgers_per_sec = elapsed_ms > 0
+                        ? static_cast<double>(progress.ledgers_processed) *
+                            1000.0 / elapsed_ms
+                        : 0;
+                    perf.nodes_per_sec = elapsed_ms > 0
+                        ? static_cast<double>(
+                              progress.inner_nodes + progress.leaf_nodes) *
+                            1000.0 / elapsed_ms
+                        : 0;
+                    perf.nudb_write_mb_per_sec = elapsed_ms > 0
+                        ? (static_cast<double>(current_bytes_written) * 1000.0 /
+                           elapsed_ms) /
+                            1024 / 1024
+                        : 0;
+                    perf.bytes_written = current_bytes_written;
+                    perf.bytes_uncompressed = current_bytes_uncompressed;
+                    perf.compression_ratio = current_bytes_uncompressed > 0
+                        ? static_cast<double>(current_bytes_written) /
+                            current_bytes_uncompressed
+                        : 1.0;
+
+                    StatsReportSink::NodeOperations ops;
+                    StatsReportSink::DeduplicationStats dedup_stats;
+
+                    stats_sink->report_stats(
+                        queues, progress, perf, ops, dedup_stats);
+                }
+            }
+
+            // Close NuDB database (this flushes final in-memory pool to disk)
+            if (!user_quit_early)
+            {
+                LOGI("\nClosing database to flush final batch...");
+                if (!pipeline.close_database())
+                {
+                    LOGE("Failed to close NuDB database!");
+                    return false;
+                }
+            }
+            else
+            {
+                LOGI("\nUser quit early - exiting immediately");
+                // Don't call close_database() - it will block waiting for drain
+                // Just exit and let OS clean up
+                return true;  // Exit successfully
             }
 
             // Print deduplication stats (if using parallel dedupe thread)
             pipeline.print_dedup_stats();
 
+            // Restore logger streams to defaults and close log file
+            if (log_file.is_open())
+            {
+                Logger::reset_streams();
+                log_file.close();
+                std::cout << "\n✅ Import completed - logs saved to: "
+                          << *options_.nudb_path << "/import.log" << std::endl;
+            }
+
             return true;
         }
         catch (const std::exception& e)
         {
+            // Restore logger streams to defaults even on error
+            if (log_file.is_open())
+            {
+                Logger::reset_streams();
+                log_file.close();
+            }
+
             LOGE("Error during conversion: ", e.what());
             return false;
         }

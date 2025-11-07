@@ -28,14 +28,14 @@ PipelineDashboard::start()
 void
 PipelineDashboard::stop()
 {
-    if (!running_.exchange(false))
-    {
-        return;  // Not running
-    }
+    // Signal the UI thread to stop
+    running_ = false;
 
+    // Always join if thread exists, regardless of running state
     if (ui_thread_ && ui_thread_->joinable())
     {
         ui_thread_->join();
+        ui_thread_.reset();
     }
 }
 
@@ -48,10 +48,33 @@ PipelineDashboard::update_stats(const Stats& stats)
     assembly_queue_ = stats.assembly_queue;
     write_queue_ = stats.write_queue;
 
+    start_ledger_ = stats.start_ledger;
+    end_ledger_ = stats.end_ledger;
+    current_ledger_ = stats.current_ledger;
     ledgers_processed_ = stats.ledgers_processed;
     inner_nodes_ = stats.inner_nodes;
     leaf_nodes_ = stats.leaf_nodes;
     duplicates_ = stats.duplicates;
+
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        status_ = stats.status;
+    }
+
+    elapsed_sec_ = stats.elapsed_sec;
+    ledgers_per_sec_ = stats.ledgers_per_sec;
+    nodes_per_sec_ = stats.nodes_per_sec;
+    catl_read_mb_per_sec_ = stats.catl_read_mb_per_sec;
+    nudb_write_mb_per_sec_ = stats.nudb_write_mb_per_sec;
+    bytes_read_ = stats.bytes_read;
+    bytes_written_ = stats.bytes_written;
+    bytes_uncompressed_ = stats.bytes_uncompressed;
+    compression_ratio_ = stats.compression_ratio;
+
+    state_added_ = stats.state_added;
+    state_updated_ = stats.state_updated;
+    state_deleted_ = stats.state_deleted;
+    tx_added_ = stats.tx_added;
 
     rocks_fast_path_ = stats.rocks_fast_path;
     rocks_slow_path_ = stats.rocks_slow_path;
@@ -66,8 +89,10 @@ PipelineDashboard::update_stats(const Stats& stats)
         throughput_history_.push_back(
             {now, stats.ledgers_processed, total_nodes});
 
-        // Keep only last 60 seconds of samples
-        while (throughput_history_.size() > 60)
+        // Keep only last 60 seconds of samples (based on timestamp)
+        auto cutoff_time = now - std::chrono::seconds(60);
+        while (!throughput_history_.empty() &&
+               throughput_history_.front().timestamp < cutoff_time)
         {
             throughput_history_.pop_front();
         }
@@ -84,10 +109,33 @@ PipelineDashboard::get_stats() const
     stats.assembly_queue = assembly_queue_;
     stats.write_queue = write_queue_;
 
+    stats.start_ledger = start_ledger_;
+    stats.end_ledger = end_ledger_;
+    stats.current_ledger = current_ledger_;
     stats.ledgers_processed = ledgers_processed_;
     stats.inner_nodes = inner_nodes_;
     stats.leaf_nodes = leaf_nodes_;
     stats.duplicates = duplicates_;
+
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        stats.status = status_;
+    }
+
+    stats.elapsed_sec = elapsed_sec_;
+    stats.ledgers_per_sec = ledgers_per_sec_;
+    stats.nodes_per_sec = nodes_per_sec_;
+    stats.catl_read_mb_per_sec = catl_read_mb_per_sec_;
+    stats.nudb_write_mb_per_sec = nudb_write_mb_per_sec_;
+    stats.bytes_read = bytes_read_;
+    stats.bytes_written = bytes_written_;
+    stats.bytes_uncompressed = bytes_uncompressed_;
+    stats.compression_ratio = compression_ratio_;
+
+    stats.state_added = state_added_;
+    stats.state_updated = state_updated_;
+    stats.state_deleted = state_deleted_;
+    stats.tx_added = tx_added_;
 
     stats.rocks_fast_path = rocks_fast_path_;
     stats.rocks_slow_path = rocks_slow_path_;
@@ -109,16 +157,33 @@ PipelineDashboard::run_ui()
         return ss.str();
     };
 
-    // Helper: Format throughput
+    // Helper: Format throughput with commas
     auto format_rate = [](double rate) -> std::string {
-        std::stringstream ss;
-        ss << std::fixed << std::setprecision(1) << rate;
-        return ss.str();
+        // Round to 1 decimal place first
+        double rounded = std::round(rate * 10.0) / 10.0;
+
+        // Extract whole and fractional parts
+        uint64_t whole = static_cast<uint64_t>(rounded);
+        int decimal_digit = static_cast<int>((rounded - whole) * 10.0 + 0.5);
+
+        // Format whole part with commas
+        std::string whole_str;
+        std::string num_str = std::to_string(whole);
+        int len = num_str.length();
+        for (int i = 0; i < len; i++)
+        {
+            if (i > 0 && (len - i) % 3 == 0)
+                whole_str += ',';
+            whole_str += num_str[i];
+        }
+
+        return whole_str + "." + std::to_string(decimal_digit);
     };
 
     // Helper: Queue gauge with color coding
-    auto queue_gauge_colored = [](size_t depth, size_t max_depth,
-                                   const std::string& label) -> Element {
+    auto queue_gauge_colored = [](size_t depth,
+                                  size_t max_depth,
+                                  const std::string& label) -> Element {
         float progress =
             max_depth > 0 ? static_cast<float>(depth) / max_depth : 0.0f;
 
@@ -141,8 +206,8 @@ PipelineDashboard::run_ui()
     };
 
     // Helper: Throughput graph
-    auto throughput_graph = [this](int width, int height,
-                                   bool show_ledgers) -> std::vector<int> {
+    auto throughput_graph =
+        [this](int width, int height, bool show_ledgers) -> std::vector<int> {
         std::lock_guard<std::mutex> lock(throughput_mutex_);
 
         std::vector<int> output(width, 0);
@@ -168,13 +233,13 @@ PipelineDashboard::run_ui()
                 {
                     rate = (throughput_history_[i].ledgers -
                             throughput_history_[i - 1].ledgers) *
-                           1000.0 / dt;
+                        1000.0 / dt;
                 }
                 else
                 {
                     rate = (throughput_history_[i].nodes -
                             throughput_history_[i - 1].nodes) *
-                           1000.0 / dt;
+                        1000.0 / dt;
                 }
                 rates.push_back(rate);
             }
@@ -196,8 +261,9 @@ PipelineDashboard::run_ui()
         }
 
         // Map rates to output array
-        size_t start_idx =
-            rates.size() > static_cast<size_t>(width) ? rates.size() - width : 0;
+        size_t start_idx = rates.size() > static_cast<size_t>(width)
+            ? rates.size() - width
+            : 0;
         for (int i = 0; i < width && (start_idx + i) < rates.size(); ++i)
         {
             double normalized = rates[start_idx + i] / max_rate;
@@ -209,6 +275,13 @@ PipelineDashboard::run_ui()
 
     // Main render component
     auto component = Renderer([&]() -> Element {
+        // Get current status
+        std::string current_status;
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            current_status = status_;
+        }
+
         // Calculate current throughput
         double ledgers_per_sec = 0.0;
         double nodes_per_sec = 0.0;
@@ -222,13 +295,12 @@ PipelineDashboard::run_ui()
                               .count();
                 if (dt > 0)
                 {
-                    ledgers_per_sec =
-                        (throughput_history_.back().ledgers -
-                         throughput_history_.front().ledgers) *
+                    ledgers_per_sec = (throughput_history_.back().ledgers -
+                                       throughput_history_.front().ledgers) *
                         1000.0 / dt;
                     nodes_per_sec = (throughput_history_.back().nodes -
                                      throughput_history_.front().nodes) *
-                                    1000.0 / dt;
+                        1000.0 / dt;
                 }
             }
         }
@@ -237,24 +309,35 @@ PipelineDashboard::run_ui()
         auto queues_section = vbox({
             text("📦 QUEUE DEPTHS") | bold | color(Color::Cyan),
             separator(),
-            queue_gauge_colored(
-                hasher_queue_.load(), 500, "Hasher (ledgers)"),
+            queue_gauge_colored(hasher_queue_.load(), 500, "Hasher (ledgers)"),
             queue_gauge_colored(
                 compression_queue_.load(), 500, "Compression (ledgers)"),
             queue_gauge_colored(dedupe_queue_.load(), 500, "Dedupe (jobs)"),
-            queue_gauge_colored(
-                assembly_queue_.load(), 500, "Assembly (jobs)"),
+            queue_gauge_colored(assembly_queue_.load(), 500, "Assembly (jobs)"),
             queue_gauge_colored(write_queue_.load(), 100, "Write (batches)"),
         });
 
         // Progress stats section
         auto stats_section = vbox({
-            text("📊 PROGRESS STATS") | bold | color(Color::Cyan),
+            text("📊 PROGRESS") | bold | color(Color::Cyan),
             separator(),
             hbox({
-                text("Ledgers:     "),
+                text("Range:       "),
+                text(
+                    format_number(start_ledger_.load()) + " → " +
+                    format_number(end_ledger_.load())) |
+                    bold,
+            }),
+            hbox({
+                text("Current:     "),
+                text(format_number(current_ledger_.load())) | bold |
+                    color(Color::GreenLight),
+            }),
+            hbox({
+                text("Processed:   "),
                 text(format_number(ledgers_processed_.load())) | bold,
             }),
+            separator(),
             hbox({
                 text("Inner nodes: "),
                 text(format_number(inner_nodes_.load())) | bold,
@@ -267,6 +350,44 @@ PipelineDashboard::run_ui()
                 text("Duplicates:  "),
                 text(format_number(duplicates_.load())) | bold |
                     color(Color::Red),
+            }),
+            separator(),
+            text("💾 I/O (avg since start)") | bold | color(Color::Cyan),
+            separator(),
+            hbox({
+                text("CATL read:   "),
+                text(format_rate(catl_read_mb_per_sec_.load()) + " MB/s") |
+                    bold | color(Color::GreenLight),
+            }),
+            hbox({
+                text("NuDB write:  "),
+                text(format_rate(nudb_write_mb_per_sec_.load()) + " MB/s") |
+                    bold | color(Color::GreenLight),
+            }),
+            hbox({
+                text("Compression: "),
+                text(format_rate(compression_ratio_.load() * 100.0) + "%") |
+                    bold | color(Color::Yellow),
+                text(" saved"),
+            }),
+            separator(),
+            text("🗺️  NODE OPERATIONS") | bold | color(Color::Cyan),
+            separator(),
+            hbox({
+                text("State added: "),
+                text(format_number(state_added_.load())) | bold,
+            }),
+            hbox({
+                text("State upd:   "),
+                text(format_number(state_updated_.load())) | bold,
+            }),
+            hbox({
+                text("State del:   "),
+                text(format_number(state_deleted_.load())) | bold,
+            }),
+            hbox({
+                text("Tx added:    "),
+                text(format_number(tx_added_.load())) | bold,
             }),
         });
 
@@ -281,21 +402,29 @@ PipelineDashboard::run_ui()
         auto throughput_section = vbox({
             text("⚡ THROUGHPUT") | bold | color(Color::Cyan),
             separator(),
+            text("Ledgers/sec:") | bold,
             hbox({
-                text("Ledgers/sec: "),
+                text("  Total avg:  "),
+                text(format_rate(ledgers_per_sec_.load())) | bold |
+                    color(Color::Cyan),
+            }),
+            hbox({
+                text("  Recent 60s: "),
                 text(format_rate(ledgers_per_sec)) | bold |
                     color(Color::GreenLight),
             }),
+            separator(),
+            text("Nodes/sec (recent 60s):") | bold,
             hbox({
-                text("Nodes/sec:   "),
+                text("  "),
                 text(format_rate(nodes_per_sec)) | bold |
                     color(Color::GreenLight),
             }),
             separator(),
-            text("Ledgers/sec (last 60s)") | hcenter,
+            text("Ledgers/sec (last 60s)") | hcenter | dim,
             graph(std::ref(ledgers_graph_fn)) | color(Color::Yellow) | flex,
             separator(),
-            text("Nodes/sec (last 60s)") | hcenter,
+            text("Nodes/sec (last 60s)") | hcenter | dim,
             graph(std::ref(nodes_graph_fn)) | color(Color::BlueLight) | flex,
         });
 
@@ -305,10 +434,9 @@ PipelineDashboard::run_ui()
         {
             uint64_t total_checks =
                 rocks_fast_path_.load() + rocks_slow_path_.load();
-            double fast_path_pct =
-                total_checks > 0
-                    ? (rocks_fast_path_.load() * 100.0 / total_checks)
-                    : 0.0;
+            double fast_path_pct = total_checks > 0
+                ? (rocks_fast_path_.load() * 100.0 / total_checks)
+                : 0.0;
 
             rocksdb_section = vbox({
                 text("🗄️  ROCKSDB DEDUP") | bold | color(Color::Cyan),
@@ -331,10 +459,24 @@ PipelineDashboard::run_ui()
             });
         }
 
+        // Status color coding
+        Color status_color = Color::GreenLight;
+        if (current_status == "Draining")
+            status_color = Color::Yellow;
+        else if (current_status == "Rekeying")
+            status_color = Color::Magenta;
+        else if (current_status == "Complete")
+            status_color = Color::Cyan;
+
         // Layout: 2 columns
         return vbox({
                    text("CATL1-to-NUDB Pipeline Monitor") | bold | hcenter |
                        color(Color::MagentaLight),
+                   separator(),
+                   hbox({
+                       text("Status: "),
+                       text(current_status) | bold | color(status_color),
+                   }) | hcenter,
                    separator(),
                    hbox({
                        vbox({
@@ -351,15 +493,20 @@ PipelineDashboard::run_ui()
                    separator(),
                    text("Press 'q' to quit") | hcenter | dim,
                }) |
-               border;
+            border;
     });
 
-    // Add quit on 'q' key
+    // Add quit on 'q' key and ignore mouse events
     component |= CatchEvent([&](Event event) {
         if (event.is_character() && event.character() == "q")
         {
             screen.Exit();
             return true;
+        }
+        // Ignore all mouse events to prevent stalling
+        if (event.is_mouse())
+        {
+            return true;  // Consume the event but do nothing
         }
         return false;
     });
@@ -372,6 +519,9 @@ PipelineDashboard::run_ui()
         loop.RunOnce();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+
+    // Mark as stopped so demo loop knows we've exited
+    running_ = false;
 }
 
 }  // namespace catl::v1::utils::nudb

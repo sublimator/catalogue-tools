@@ -2360,6 +2360,24 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
     return true;
 }
 
+uint64_t
+CatlNudbPipeline::get_duplicate_count() const
+{
+    // If using parallel dedupe thread, return count from pipeline strategy
+    if (use_dedupe_thread_ && pipeline_dedup_strategy_)
+    {
+        return pipeline_dedup_strategy_->get_duplicate_count();
+    }
+
+    // Otherwise, return count from bulk writer's strategy
+    if (bulk_writer_)
+    {
+        return bulk_writer_->get_duplicate_count();
+    }
+
+    return 0;
+}
+
 void
 CatlNudbPipeline::print_dedup_stats() const
 {

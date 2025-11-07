@@ -96,6 +96,12 @@ struct Catl1ToNudbOptions
      */
     bool use_dedupe_thread = false;
 
+    /**
+     * Enable real-time FTXUI dashboard
+     * Shows live queue depths, throughput graphs, and deduplication stats
+     */
+    bool enable_dashboard = false;
+
     /** Whether to display help information */
     bool show_help = false;
 

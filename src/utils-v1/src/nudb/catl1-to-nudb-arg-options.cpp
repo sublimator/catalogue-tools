@@ -89,7 +89,11 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
         "Run deduplication in a separate parallel thread. Moves all RocksDB "
         "I/O "
         "off the writer thread, creating a 3-stage pipeline: hasher → "
-        "[compression + dedupe] → writer");
+        "[compression + dedupe] → writer")(
+        "dashboard",
+        po::bool_switch(),
+        "Enable real-time FTXUI dashboard showing queue depths, throughput "
+        "graphs, and dedup stats");
 
     // Generate the help text
     std::ostringstream help_stream;
@@ -201,6 +205,12 @@ parse_catl1_to_nudb_argv(int argc, char* argv[])
         if (vm.count("use-dedupe-thread"))
         {
             options.use_dedupe_thread = vm["use-dedupe-thread"].as<bool>();
+        }
+
+        // Check for dashboard option
+        if (vm.count("dashboard"))
+        {
+            options.enable_dashboard = vm["dashboard"].as<bool>();
         }
 
         if (vm.count("hasher-threads"))

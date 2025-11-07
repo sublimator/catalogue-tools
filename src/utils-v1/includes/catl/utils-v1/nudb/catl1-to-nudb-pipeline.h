@@ -4,6 +4,7 @@
 #include "catl/core/logger.h"
 #include "catl/shamap/shamap.h"
 #include "catl/utils-v1/nudb/nudb-bulk-writer.h"  // For NudbBulkWriter
+#include "catl/utils-v1/nudb/stats-report-sink.h"
 #include "catl/v1/catl-v1-reader.h"
 #include "catl/v1/catl-v1-types.h"  // For MapOperations
 #include "catl/xdata/protocol.h"
@@ -249,6 +250,16 @@ public:
     }
 
     /**
+     * Set stats report sink for real-time monitoring
+     * @param sink Shared pointer to sink
+     */
+    void
+    set_stats_sink(std::shared_ptr<StatsReportSink> sink)
+    {
+        stats_sink_ = sink;
+    }
+
+    /**
      * Create and open the NuDB database
      * @param path Directory path for the database files
      * @param key_size Size of keys in bytes (default 32)
@@ -315,6 +326,12 @@ public:
     }
 
     /**
+     * Get total duplicate count (from deduplication strategy)
+     */
+    uint64_t
+    get_duplicate_count() const;
+
+    /**
      * Get hasher queue depth (ledgers waiting to be hashed)
      */
     size_t
@@ -361,6 +378,10 @@ public:
     size_t
     get_dedupe_queue_depth() const
     {
+        if (!use_dedupe_thread_)
+        {
+            return 0;  // Not using dedupe thread
+        }
         std::lock_guard<std::mutex> lock(
             const_cast<std::mutex&>(dedupe_queue_mutex_));
         return dedupe_queue_.size();
@@ -373,6 +394,10 @@ public:
     size_t
     get_assembly_station_depth() const
     {
+        if (!use_dedupe_thread_)
+        {
+            return 0;  // Not using dedupe thread
+        }
         std::lock_guard<std::mutex> lock(
             const_cast<std::mutex&>(writer_assembly_mutex_));
         return writer_assembly_map_.size();
@@ -397,6 +422,9 @@ private:
     std::string mock_mode_ = "";  // Mock mode: "", "noop", "memory", or "disk"
     std::string dedupe_strategy_ = "cuckoo-rocks";  // Deduplication strategy
     bool use_dedupe_thread_ = false;  // Run dedupe in separate parallel thread
+
+    // Stats reporting (optional, for dashboard or metrics export)
+    std::shared_ptr<StatsReportSink> stats_sink_;
 
     // NuDB configuration parameters
     uint32_t key_size_ = 32;
