@@ -56,6 +56,9 @@ string(LENGTH "${PROJECT_ROOT}" PROJECT_ROOT_LENGTH)
 add_compile_definitions(PROJECT_ROOT="${PROJECT_ROOT}"
                         PROJECT_ROOT_LENGTH=${PROJECT_ROOT_LENGTH})
 
+# Add the cuckoofilter library
+add_subdirectory(src/cuckoofilter)
+
 # Add the core library
 add_subdirectory(src/core)
 
