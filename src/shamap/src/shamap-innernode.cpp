@@ -246,6 +246,29 @@ SHAMapInnerNodeT<Traits>::get_branch_mask() const
 }
 
 template <typename Traits>
+Hash256 const&
+SHAMapInnerNodeT<Traits>::get_node_source_child_hash(int branch) const
+{
+    if (branch < 0 || branch >= 16)
+    {
+        throw InvalidBranchException(branch);
+    }
+
+    auto children = get_children();
+    auto child = children->get_child(branch);
+
+    if (child)
+    {
+        return child->valid_hash_or_throw();
+    }
+    else
+    {
+        static const Hash256 zero_hash;  // All zeros
+        return zero_hash;
+    }
+}
+
+template <typename Traits>
 boost::intrusive_ptr<SHAMapLeafNodeT<Traits>>
 SHAMapInnerNodeT<Traits>::get_only_child_leaf() const
 {

@@ -39,7 +39,7 @@ public:
     get_hash(const SHAMapOptions& options);
 
     const Hash256&
-    valid_hash_or_throw()
+    valid_hash_or_throw() const
     {
         if (!hash_valid_)
         {

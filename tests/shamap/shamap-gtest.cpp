@@ -13,7 +13,16 @@
 
 #include "shamap-test-utils.h"
 
+// Include nodestore headers to verify concept satisfaction
+#include "catl/nodestore/inner_node_source.h"
+#include "catl/nodestore/node_blob.h"
+
 using namespace catl::shamap;
+
+// Verify at compile-time that SHAMapInnerNodeT satisfies the concept
+static_assert(
+    catl::nodestore::inner_node_source<SHAMapInnerNodeT<>>,
+    "SHAMapInnerNodeT must satisfy inner_node_source concept");
 
 // Test using the fixture with source-relative paths
 TEST_F(AccountStateFixture, JsonFileOperations)

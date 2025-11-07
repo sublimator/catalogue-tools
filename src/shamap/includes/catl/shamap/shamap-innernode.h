@@ -196,6 +196,39 @@ public:
     size_t
     write_to_buffer(uint8_t* ptr) const override;
 
+    // nodestore::inner_node_source concept methods
+    // These enable direct concept-based compression, eliminating the
+    // serialize→compress step for inner nodes
+
+    /**
+     * Get child hash by branch index for nodestore compression.
+     * Returns child's hash if present, or zero hash if no child.
+     * Required by inner_node_source concept.
+     */
+    Hash256 const&
+    get_node_source_child_hash(int branch) const;
+
+    /**
+     * Get bitmask of populated branches for nodestore compression.
+     * Bit N set means branch N has a child.
+     * Required by inner_node_source concept.
+     */
+    uint16_t
+    get_node_source_branch_mask() const
+    {
+        return get_branch_mask();
+    }
+
+    /**
+     * Get this node's hash for use as nodestore key.
+     * Required by inner_node_source concept.
+     */
+    Hash256 const&
+    get_node_source_hash() const
+    {
+        return this->valid_hash_or_throw();
+    }
+
 protected:
     template <typename T>
     friend class PathFinderT;

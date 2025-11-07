@@ -54,6 +54,12 @@ struct Catl1ToNudbOptions
      */
     int hasher_threads = 1;
 
+    /** Number of threads for parallel compression (default: 2) */
+    int compressor_threads = 2;
+
+    /** Max write queue size in megabytes (default: 2048 MB = 2 GB) */
+    uint32_t max_write_queue_mb = 2048;
+
     /** Enable verbose debug log partitions (MAP_OPS, WALK_NODES, VERSION_TRACK,
      * PIPE_VERSION) */
     bool enable_debug_partitions = false;
@@ -65,11 +71,19 @@ struct Catl1ToNudbOptions
     std::optional<std::string> walk_nodes_debug_key;
 
     /** Mock NuDB mode - for performance testing. Options:
-     *  - "" (empty/disabled): Use real NuDB
+     *  - "" (empty/disabled): Use bulk writer (optimized)
      *  - "noop" or "memory": Skip all I/O operations
      *  - "disk": Write keys/values to buffered append-only file
+     *  - "nudb": Use regular NuDB inserts (not bulk writer, for comparison)
      */
     std::string nudb_mock = "";
+
+    /** Whether to verify all inserted keys after import */
+    bool verify_keys = false;
+
+    /** Skip deduplication tracking (faster writes, but no verification
+     * possible) */
+    bool no_dedupe = false;
 
     /** Whether to display help information */
     bool show_help = false;

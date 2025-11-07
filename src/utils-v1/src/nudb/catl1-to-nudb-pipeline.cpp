@@ -48,6 +48,45 @@ CatlNudbPipeline::set_hasher_threads(int threads)
 }
 
 void
+CatlNudbPipeline::set_compression_threads(int threads)
+{
+    if (threads <= 0 || threads > 32)
+    {
+        throw std::invalid_argument(
+            "Compression threads must be between 1 and 32");
+    }
+    if (!compression_workers_.empty())
+    {
+        throw std::runtime_error(
+            "Cannot change compression threads after pipeline started");
+    }
+    compression_threads_ = threads;
+    LOGI("Set compression threads to ", threads);
+}
+
+void
+CatlNudbPipeline::set_max_write_queue_mb(uint32_t mb)
+{
+    if (mb == 0)
+    {
+        throw std::invalid_argument(
+            "Max write queue MB must be greater than 0");
+    }
+    if (!compression_workers_.empty())
+    {
+        throw std::runtime_error(
+            "Cannot change max write queue size after pipeline started");
+    }
+    max_write_queue_bytes_ = static_cast<uint64_t>(mb) * 1024 * 1024;
+    LOGI(
+        "Set max write queue size to ",
+        mb,
+        " MB (",
+        max_write_queue_bytes_,
+        " bytes)");
+}
+
+void
 CatlNudbPipeline::set_walk_nodes_ledger(uint32_t ledger_seq)
 {
     walk_nodes_ledger_ = ledger_seq;
@@ -59,6 +98,16 @@ CatlNudbPipeline::set_walk_nodes_debug_key(const std::string& key_hex)
 {
     walk_nodes_debug_key_ = key_hex;
     LOGD("Set walk_nodes_debug_key to ", key_hex);
+}
+
+void
+CatlNudbPipeline::set_no_dedupe(bool no_dedupe)
+{
+    no_dedupe_ = no_dedupe;
+    if (no_dedupe)
+    {
+        LOGI("Deduplication tracking DISABLED - maximum write speed");
+    }
 }
 
 void
@@ -86,12 +135,21 @@ CatlNudbPipeline::create_database(
 
     db_path_ = path;
 
+    // Store parameters for later use (e.g., in open_database for verification)
+    key_size_ = key_size;
+    block_size_ = block_size;
+    load_factor_ = load_factor;
+
     // Handle mock modes
     if (!mock_mode_.empty())
     {
         if (mock_mode_ == "noop" || mock_mode_ == "memory")
         {
             LOGI("Mock mode (", mock_mode_, "): skipping database creation");
+
+            // Start compression pipeline
+            start_compression_pipeline();
+
             return true;
         }
         else if (mock_mode_ == "disk")
@@ -130,6 +188,119 @@ CatlNudbPipeline::create_database(
             mock_disk_file_->rdbuf()->pubsetbuf(nullptr, buffer_size);
 
             LOGI("Mock disk file opened with 1MB buffer");
+
+            // Start compression pipeline
+            start_compression_pipeline();
+
+            return true;
+        }
+        else if (mock_mode_ == "nudb")
+        {
+            // Use regular NuDB (not bulk writer) for testing
+            LOGI(
+                "Mock mode (nudb): using regular NuDB inserts (no bulk "
+                "writer)");
+
+            fs::path dir(path);
+
+            // Create directory if needed
+            if (!fs::exists(dir))
+            {
+                LOGI("Creating directory: ", dir.string());
+                boost::system::error_code fs_ec;
+                fs::create_directories(dir, fs_ec);
+                if (fs_ec)
+                {
+                    LOGE("Failed to create directory: ", fs_ec.message());
+                    return false;
+                }
+            }
+
+            // Get absolute paths and normalize (remove ./ and other cruft)
+            fs::path abs_dat =
+                fs::absolute(dir / "nudb.dat").lexically_normal();
+            fs::path abs_key =
+                fs::absolute(dir / "nudb.key").lexically_normal();
+            fs::path abs_log =
+                fs::absolute(dir / "nudb.log").lexically_normal();
+
+            std::string dat_path = abs_dat.string();
+            std::string key_path = abs_key.string();
+            std::string log_path = abs_log.string();
+
+            // Delete existing database
+            ::nudb::error_code ec;
+            ::nudb::native_file::erase(dat_path, ec);
+            if (ec)
+                LOGI(
+                    "Erase dat: ", ec.message(), " (ok if file doesn't exist)");
+            ec = {};
+            ::nudb::native_file::erase(key_path, ec);
+            if (ec)
+                LOGI(
+                    "Erase key: ", ec.message(), " (ok if file doesn't exist)");
+            ec = {};
+            ::nudb::native_file::erase(log_path, ec);
+            if (ec)
+                LOGI(
+                    "Erase log: ", ec.message(), " (ok if file doesn't exist)");
+            ec = {};
+
+            // Verify directory exists
+            if (!fs::exists(dir))
+            {
+                LOGE("ERROR: Directory disappeared! ", dir.string());
+                return false;
+            }
+            LOGI("Directory verified: ", dir.string());
+
+            // Create new NuDB database
+            LOGI("Creating NuDB database:");
+            LOGI("  dat: ", dat_path);
+            LOGI("  key: ", key_path);
+            LOGI("  log: ", log_path);
+            LOGI("  key_size: ", key_size);
+            LOGI("  block_size: ", block_size);
+            LOGI("  load_factor: ", load_factor);
+
+            ::nudb::create<::nudb::xxhasher>(
+                dat_path,
+                key_path,
+                log_path,
+                1,  // appnum
+                ::nudb::make_uid(),
+                ::nudb::make_salt(),
+                key_size,
+                block_size,
+                load_factor,
+                ec);
+
+            if (ec)
+            {
+                LOGE("Failed to create NuDB: ", ec.message());
+                LOGE("Error code: ", ec.value());
+                LOGE("Error category: ", ec.category().name());
+
+                // Clean up any partial files
+                ::nudb::native_file::erase(dat_path, ec);
+                ::nudb::native_file::erase(key_path, ec);
+                ::nudb::native_file::erase(log_path, ec);
+
+                return false;
+            }
+
+            // Open database for regular inserts
+            db_ = std::make_unique<::nudb::store>();
+            db_->open(dat_path, key_path, log_path, ec);
+
+            if (ec)
+            {
+                LOGE("Failed to open NuDB: ", ec.message());
+                return false;
+            }
+
+            LOGI("NuDB opened successfully (regular insert mode)");
+            start_compression_pipeline();
             return true;
         }
     }
@@ -154,9 +325,31 @@ CatlNudbPipeline::create_database(
     LOGI("  block_size: ", block_size);
     LOGI("  load_factor: ", load_factor);
 
+    // Create deduplication strategy
+    std::unique_ptr<DeduplicationStrategy> dedupe_strategy;
+
+    if (no_dedupe_)
+    {
+        LOGI("Deduplication: DISABLED (no_dedupe mode)");
+        dedupe_strategy = std::make_unique<NoDeduplicationStrategy>();
+    }
+    else
+    {
+        // Use NuDB for disk-backed deduplication (unlimited keys!)
+        fs::path nudb_dedup_path = dir / "dedup";
+        LOGI("Deduplication: NuDB (disk-backed, unlimited capacity)");
+        LOGI("  NuDB dedup path: ", nudb_dedup_path.string());
+        dedupe_strategy = std::make_unique<NuDBDeduplicationStrategy>(
+            nudb_dedup_path.string());
+    }
+
     // Create bulk writer
     bulk_writer_ = std::make_unique<NudbBulkWriter>(
-        dat_path.string(), key_path.string(), log_path.string(), key_size);
+        dat_path.string(),
+        key_path.string(),
+        log_path.string(),
+        key_size,
+        std::move(dedupe_strategy));
 
     // Open bulk writer (this creates the files and prepares for writing)
     if (!bulk_writer_->open(block_size, load_factor))
@@ -167,20 +360,128 @@ CatlNudbPipeline::create_database(
     }
 
     LOGI("Bulk writer opened successfully");
+
+    // Start compression pipeline
+    start_compression_pipeline();
+
     return true;
 }
 
 bool
 CatlNudbPipeline::open_database(const std::string& path)
 {
-    // Skip database operations in mock mode
+    namespace fs = boost::filesystem;
+
+    // For nudb mock mode, we need to delete old files and reopen for
+    // verification
+    if (mock_mode_ == "nudb")
+    {
+        LOGI("Mock mode (nudb): deleting old database files and reopening...");
+
+        db_path_ = path;
+        fs::path dir(path);
+
+        // Ensure directory exists
+        if (!fs::exists(dir))
+        {
+            LOGI("Creating directory for verification: ", dir.string());
+            boost::system::error_code fs_ec;
+            fs::create_directories(dir, fs_ec);
+            if (fs_ec)
+            {
+                LOGE("Failed to create directory: ", fs_ec.message());
+                return false;
+            }
+        }
+
+        // Get absolute paths and normalize (remove ./ and other cruft)
+        fs::path abs_dat = fs::absolute(dir / "nudb.dat").lexically_normal();
+        fs::path abs_key = fs::absolute(dir / "nudb.key").lexically_normal();
+        fs::path abs_log = fs::absolute(dir / "nudb.log").lexically_normal();
+
+        std::string dat_path = abs_dat.string();
+        std::string key_path = abs_key.string();
+        std::string log_path = abs_log.string();
+
+        // Delete old files
+        ::nudb::error_code ec;
+        ::nudb::native_file::erase(dat_path, ec);
+        if (ec)
+            LOGI("Erase dat: ", ec.message(), " (ok if file doesn't exist)");
+        ec = {};
+        ::nudb::native_file::erase(key_path, ec);
+        if (ec)
+            LOGI("Erase key: ", ec.message(), " (ok if file doesn't exist)");
+        ec = {};
+        ::nudb::native_file::erase(log_path, ec);
+        if (ec)
+            LOGI("Erase log: ", ec.message(), " (ok if file doesn't exist)");
+        ec = {};
+
+        // Verify directory exists
+        if (!fs::exists(dir))
+        {
+            LOGE("ERROR: Directory disappeared! ", dir.string());
+            return false;
+        }
+        LOGI("Directory verified: ", dir.string());
+
+        LOGI("Creating fresh NuDB for verification:");
+        LOGI("  dat: ", dat_path);
+        LOGI("  key: ", key_path);
+        LOGI("  log: ", log_path);
+        LOGI("  key_size: ", key_size_);
+        LOGI("  block_size: ", block_size_);
+        LOGI("  load_factor: ", load_factor_);
+
+        // Create new database
+        ::nudb::create<::nudb::xxhasher>(
+            dat_path,
+            key_path,
+            log_path,
+            1,  // appnum
+            ::nudb::make_uid(),
+            ::nudb::make_salt(),
+            key_size_,
+            block_size_,
+            load_factor_,
+            ec);
+
+        if (ec)
+        {
+            LOGE("Failed to create NuDB for verification: ", ec.message());
+            LOGE("Error code: ", ec.value());
+            LOGE("Error category: ", ec.category().name());
+
+            // Clean up any partial files
+            ::nudb::native_file::erase(dat_path, ec);
+            ::nudb::native_file::erase(key_path, ec);
+            ::nudb::native_file::erase(log_path, ec);
+
+            return false;
+        }
+
+        // Open it
+        db_ = std::make_unique<::nudb::store>();
+        db_->open(dat_path, key_path, log_path, ec);
+
+        if (ec)
+        {
+            LOGE("Failed to open NuDB for verification: ", ec.message());
+            db_.reset();
+            return false;
+        }
+
+        LOGI("Created and opened fresh NuDB database for verification");
+        return true;
+    }
+
+    // Skip database operations in other mock modes
     if (!mock_mode_.empty())
     {
         LOGI("Mock mode (", mock_mode_, "): skipping database open");
         return true;
     }
-
-    namespace fs = boost::filesystem;
 
     db_path_ = path;
 
@@ -222,10 +523,28 @@ CatlNudbPipeline::open_database(const std::string& path)
 bool
 CatlNudbPipeline::close_database()
 {
+    // Stop compression pipeline first (wait for all workers to finish)
+    stop_compression_pipeline();
+
     // Handle mock mode closing
     if (!mock_mode_.empty())
     {
-        if (mock_mode_ == "disk" && mock_disk_file_)
+        if (mock_mode_ == "nudb" && db_)
+        {
+            LOGI("Mock mode (nudb): closing NuDB database...");
+            ::nudb::error_code ec;
+            db_->close(ec);
+
+            if (ec)
+            {
+                LOGE("Failed to close NuDB: ", ec.message());
+                return false;
+            }
+
+            LOGI("✅ NuDB closed successfully");
+            return true;
+        }
+        else if (mock_mode_ == "disk" && mock_disk_file_)
         {
             LOGI("Mock mode (disk): closing and flushing file...");
             mock_disk_file_->flush();
@@ -254,18 +573,12 @@ CatlNudbPipeline::close_database()
             return false;
         }
 
-        // Copy seen keys from bulk writer for verification
-        // (convert from KeyInfo back to just size)
-        LOGI("Copying keys for verification...");
-        inserted_keys_with_sizes_.clear();
-        for (const auto& [key, info] : bulk_writer_->get_seen_keys())
-        {
-            inserted_keys_with_sizes_[key] = info.size;
-        }
+        // Note: inserted_keys_with_sizes_ is already populated during
+        // processing No need to copy from bulk_writer (and with strategy
+        // pattern, we can't!)
         LOGI(
-            "  Copied ",
-            inserted_keys_with_sizes_.size(),
-            " keys for verification");
+            "Keys tracked for verification: ",
+            inserted_keys_with_sizes_.size());
 
         LOGI("✅ Bulk import complete (index built successfully)");
         bulk_writer_.reset();
@@ -786,7 +1099,8 @@ CatlNudbPipeline::flush_node(
 
     // Map simple node_type to nodestore::node_type
     // 0 = inner node (hot_unknown)
-    // 1 = leaf node (hot_account_node for now - TODO: distinguish account vs tx)
+    // 1 = leaf node (hot_account_node for now - TODO: distinguish account vs
+    // tx)
     nodestore::node_type ns_type = (node_type == 0)
         ? nodestore::node_type::hot_unknown
         : nodestore::node_type::hot_account_node;
@@ -800,8 +1114,15 @@ CatlNudbPipeline::flush_node(
     const uint8_t* compressed_data = compressed_blob.data.data();
     size_t compressed_size = compressed_blob.data.size();
 
-    // Track COMPRESSED bytes for stats (this is what actually gets written)
-    total_bytes_written_ += compressed_size;
+    // Track bytes for stats
+    total_bytes_written_ += compressed_size;  // Compressed
+    total_bytes_uncompressed_ += size;        // Uncompressed (input size)
+
+    // Track node counts
+    if (node_type == 0)
+        total_inner_nodes_++;
+    else
+        total_leaf_nodes_++;
 
     bool inserted = false;
 
@@ -816,8 +1137,12 @@ CatlNudbPipeline::flush_node(
             if (inserted)
             {
                 total_inserts++;
-                // Track for verification later (store compressed size)
-                inserted_keys_with_sizes_[key] = compressed_size;
+                // Track for verification later (only if no dedup - otherwise
+                // dedup strategy tracks it)
+                if (no_dedupe_)
+                {
+                    inserted_keys_with_sizes_[key] = compressed_size;
+                }
             }
             else
             {
@@ -845,10 +1170,53 @@ CatlNudbPipeline::flush_node(
             throw std::runtime_error("Bulk writer not initialized");
         }
     }
+    else if (mock_mode_ == "nudb")
+    {
+        // Mock NuDB mode - use regular NuDB inserts (not bulk writer)
+        if (db_)
+        {
+            ::nudb::error_code ec;
+            db_->insert(key.data(), compressed_data, compressed_size, ec);
+
+            if (!ec)
+            {
+                total_inserts++;
+                inserted = true;
+            }
+            else if (ec == ::nudb::error::key_exists)
+            {
+                duplicates++;
+                inserted = false;
+            }
+            else
+            {
+                LOGE("NuDB insert failed: ", ec.message());
+                throw std::runtime_error("NuDB insert failed: " + ec.message());
+            }
+
+            // Log progress
+            if (total_inserts % 10000 == 0)
+            {
+                LOGD(
+                    "NuDB wrote ",
+                    total_inserts,
+                    " nodes (",
+                    total_bytes_written_.load() / 1024,
+                    " KB, ",
+                    duplicates,
+                    " dups)");
+            }
+        }
+        else
+        {
+            LOGE("NuDB database not initialized!");
+            throw std::runtime_error("NuDB database not initialized");
+        }
+    }
     else if (mock_mode_ == "disk")
     {
-        // Mock disk mode - write key (32 bytes) + size (4 bytes) + compressed data
-        // to file
+        // Mock disk mode - write key (32 bytes) + size (4 bytes) + compressed
+        // data to file
         if (mock_disk_file_ && mock_disk_file_->is_open())
         {
             // Check if we've already inserted this key
@@ -870,7 +1238,8 @@ CatlNudbPipeline::flush_node(
 
             // Write compressed data
             mock_disk_file_->write(
-                reinterpret_cast<const char*>(compressed_data), compressed_size);
+                reinterpret_cast<const char*>(compressed_data),
+                compressed_size);
 
             // Check for write errors
             if (!mock_disk_file_->good())
@@ -879,28 +1248,642 @@ CatlNudbPipeline::flush_node(
                 throw std::runtime_error("Mock disk write failed");
             }
 
-            // Track this key (with compressed size)
-            inserted_keys_with_sizes_[key] = compressed_size;
+            // Track this key (only if no dedup)
+            if (no_dedupe_)
+            {
+                inserted_keys_with_sizes_[key] = compressed_size;
+            }
             total_inserts++;
             inserted = true;
         }
     }
     else
     {
-        // noop/memory mode - just track for deduplication stats
-        auto it = inserted_keys_with_sizes_.find(key);
-        if (it != inserted_keys_with_sizes_.end())
+        // noop/memory mode - track for deduplication stats (only if no_dedupe)
+        if (no_dedupe_)
         {
-            duplicates++;
-            return false;
-        }
+            auto it = inserted_keys_with_sizes_.find(key);
+            if (it != inserted_keys_with_sizes_.end())
+            {
+                duplicates++;
+                return false;
+            }
 
-        inserted_keys_with_sizes_[key] = compressed_size;
+            inserted_keys_with_sizes_[key] = compressed_size;
+        }
         total_inserts++;
         inserted = true;
     }
 
     return inserted;
+}
+
+// ===== Compression Pipeline Implementation =====
+
+void
+CatlNudbPipeline::start_compression_pipeline()
+{
+    if (!compression_workers_.empty())
+    {
+        LOGW("Compression pipeline already started");
+        return;
+    }
+
+    shutdown_.store(false);
+
+    // Start hasher thread
+    LOGI("Starting hasher thread");
+    hasher_thread_ = std::thread([this]() { hasher_worker(); });
+
+    // Start compression workers
+    LOGI("Starting ", compression_threads_, " compression worker threads");
+    for (int i = 0; i < compression_threads_; ++i)
+    {
+        compression_workers_.emplace_back([this]() { compression_worker(); });
+    }
+
+    // Start writer thread
+    LOGI("Starting writer thread");
+    writer_thread_ = std::thread([this]() { writer_worker(); });
+}
+
+void
+CatlNudbPipeline::stop_compression_pipeline()
+{
+    // Check if already stopped (idempotent)
+    if (pipeline_stopped_.load())
+    {
+        LOGI("Pipeline already stopped, skipping");
+        return;
+    }
+
+    LOGI("Stopping compression pipeline");
+
+    // Wait for hasher queue to drain
+    {
+        std::unique_lock<std::mutex> lock(hasher_queue_mutex_);
+        size_t queue_depth = hasher_queue_.size();
+
+        if (queue_depth > 0)
+        {
+            LOGI(
+                "Waiting for hasher queue to drain (",
+                queue_depth,
+                " ledgers remaining)...");
+
+            hasher_queue_cv_.wait(
+                lock, [this]() { return hasher_queue_.empty(); });
+
+            LOGI("Hasher queue drained");
+        }
+    }
+
+    // Wait for compression queue to drain
+    {
+        std::unique_lock<std::mutex> lock(compression_queue_mutex_);
+        size_t queue_depth = compression_queue_.size();
+
+        if (queue_depth > 0)
+        {
+            LOGI(
+                "Waiting for compression queue to drain (",
+                queue_depth,
+                " ledgers remaining)...");
+
+            compression_queue_cv_.wait(
+                lock, [this]() { return compression_queue_.empty(); });
+
+            LOGI("Compression queue drained");
+        }
+    }
+
+    // Wait for write queue to drain
+    // Wait for write queue to drain (only if using bulk writer - not in
+    // nudb/noop mock modes)
+    if (mock_mode_.empty() || mock_mode_ == "disk")
+    {
+        std::unique_lock<std::mutex> lock(write_queue_mutex_);
+        size_t write_depth = write_queue_.size();
+
+        if (write_depth > 0)
+        {
+            LOGI(
+                "Waiting for write queue to drain (",
+                write_depth,
+                " batches remaining)...");
+
+            write_queue_cv_.wait(
+                lock, [this]() { return write_queue_.empty(); });
+
+            LOGI("Write queue drained");
+        }
+    }
+
+    // NOW signal shutdown
+    shutdown_.store(true);
+
+    // Wake up all threads so they see the shutdown signal
+    hasher_queue_cv_.notify_all();
+    compression_queue_cv_.notify_all();
+    write_queue_cv_.notify_all();
+
+    // Wait for hasher thread
+    if (hasher_thread_.joinable())
+    {
+        hasher_thread_.join();
+    }
+
+    // Wait for compression workers
+    for (auto& worker : compression_workers_)
+    {
+        if (worker.joinable())
+        {
+            worker.join();
+        }
+    }
+    compression_workers_.clear();
+
+    // Wait for writer thread
+    if (writer_thread_.joinable())
+    {
+        writer_thread_.join();
+    }
+
+    // Mark pipeline as stopped
+    pipeline_stopped_.store(true);
+
+    LOGI("Compression pipeline stopped");
+}
+
+void
+CatlNudbPipeline::hasher_worker()
+{
+    while (!shutdown_.load())
+    {
+        LedgerSnapshot snapshot;
+
+        // Pull snapshot from hasher queue
+        {
+            std::unique_lock<std::mutex> lock(hasher_queue_mutex_);
+            hasher_queue_cv_.wait(lock, [this]() {
+                return !hasher_queue_.empty() || shutdown_.load();
+            });
+
+            if (shutdown_.load() && hasher_queue_.empty())
+            {
+                break;
+            }
+
+            if (hasher_queue_.empty())
+            {
+                continue;
+            }
+
+            snapshot = std::move(hasher_queue_.front());
+            hasher_queue_.pop();
+        }
+
+        // Notify that we made space
+        hasher_queue_cv_.notify_all();
+
+        // Hash the ledger (may use multiple threads if hasher_threads_ > 1)
+        LOGD("Hashing ledger ", snapshot.info.seq);
+        HashedLedger hashed = hash_and_verify(std::move(snapshot));
+
+        // Enqueue to compression queue with backpressure
+        {
+            std::unique_lock<std::mutex> lock(compression_queue_mutex_);
+
+            const size_t MAX_COMPRESSION_QUEUE = 500;  // Backpressure threshold
+
+            // Apply backpressure if queue is too deep
+            if (compression_queue_.size() > MAX_COMPRESSION_QUEUE)
+            {
+                static std::atomic<size_t> compression_backpressure_count{0};
+                compression_backpressure_count++;
+
+                // Only log every 100 times to avoid spam
+                if (compression_backpressure_count % 100 == 1)
+                {
+                    LOGW(
+                        "Compression queue deep (",
+                        compression_queue_.size(),
+                        "), waiting for space... (logged ",
+                        compression_backpressure_count.load(),
+                        " times)");
+                }
+
+                // Wait until queue has space (uses condition variable
+                // efficiently)
+                compression_queue_cv_.wait(lock, [this]() {
+                    return compression_queue_.size() <=
+                        250;  // MAX_COMPRESSION_QUEUE / 2
+                });
+
+                // Only log resolution occasionally
+                if (compression_backpressure_count % 100 == 1)
+                {
+                    LOGI("Compression queue drained, continuing");
+                }
+            }
+
+            compression_queue_.push(std::move(hashed));
+        }
+        compression_queue_cv_.notify_all();
+    }
+}
+
+void
+CatlNudbPipeline::compression_worker()
+{
+    while (!shutdown_.load())
+    {
+        HashedLedger job;
+
+        // Pull job from priority queue
+        {
+            std::unique_lock<std::mutex> lock(compression_queue_mutex_);
+            compression_queue_cv_.wait(lock, [this]() {
+                return !compression_queue_.empty() || shutdown_.load();
+            });
+
+            if (shutdown_.load() && compression_queue_.empty())
+            {
+                break;
+            }
+
+            if (compression_queue_.empty())
+            {
+                continue;
+            }
+
+            job =
+                std::move(const_cast<HashedLedger&>(compression_queue_.top()));
+            compression_queue_.pop();
+        }
+
+        // Notify that we made space in the queue (for backpressure)
+        compression_queue_cv_.notify_all();
+
+        // Process the entire ledger - accumulate all nodes into a batch
+        LOGD("Compressing ledger ", job.info.seq);
+
+        // Accumulate all compressed nodes for this ledger (no locking during
+        // walk)
+        std::vector<CompressedNode> batch;
+
+        // Compress and collect state_snapshot nodes
+        if (job.state_snapshot)
+        {
+            job.state_snapshot->walk_new_nodes(
+                [&](const boost::intrusive_ptr<catl::shamap::SHAMapTreeNode>&
+                        node) {
+                    if (node->is_inner())
+                    {
+                        auto inner = boost::static_pointer_cast<
+                            catl::shamap::SHAMapInnerNode>(node);
+
+                        // Use concept-based compression for inner nodes
+                        auto blob = nodestore::nodeobject_compress(*inner);
+
+                        batch.push_back(CompressedNode{
+                            job.info.seq,
+                            inner->get_node_source_hash(),
+                            std::move(blob.data),
+                            512,  // Inner nodes are always 512 bytes (16 * 32)
+                            0     // inner = 0
+                        });
+                    }
+                    else
+                    {
+                        auto leaf = boost::static_pointer_cast<
+                            catl::shamap::SHAMapLeafNode>(node);
+
+                        // Serialize leaf data
+                        size_t size = leaf->serialized_size();
+                        std::vector<uint8_t> data(size);
+                        leaf->write_to_buffer(data.data());
+
+                        // Compress using LZ4
+                        std::span<const uint8_t> data_span(data.data(), size);
+                        auto blob = nodestore::nodeobject_compress(
+                            nodestore::node_type::hot_account_node, data_span);
+
+                        batch.push_back(CompressedNode{
+                            job.info.seq,
+                            leaf->get_hash(map_options_),
+                            std::move(blob.data),
+                            size,  // Uncompressed leaf data size
+                            1      // leaf = 1
+                        });
+                    }
+
+                    return true;  // Continue walking
+                },
+                job.processing_version);
+        }
+
+        // Compress and collect tx_map nodes (if present)
+        if (job.tx_map)
+        {
+            job.tx_map->walk_new_nodes(
+                [&](const boost::intrusive_ptr<catl::shamap::SHAMapTreeNode>&
+                        node) {
+                    if (node->is_inner())
+                    {
+                        auto inner = boost::static_pointer_cast<
+                            catl::shamap::SHAMapInnerNode>(node);
+
+                        auto blob = nodestore::nodeobject_compress(*inner);
+
+                        batch.push_back(CompressedNode{
+                            job.info.seq,
+                            inner->get_node_source_hash(),
+                            std::move(blob.data),
+                            512,  // Inner nodes are always 512 bytes
+                            0});
+                    }
+                    else
+                    {
+                        auto leaf = boost::static_pointer_cast<
+                            catl::shamap::SHAMapLeafNode>(node);
+
+                        size_t size = leaf->serialized_size();
+                        std::vector<uint8_t> data(size);
+                        leaf->write_to_buffer(data.data());
+
+                        std::span<const uint8_t> data_span(data.data(), size);
+                        auto blob = nodestore::nodeobject_compress(
+                            nodestore::node_type::hot_transaction_node,
+                            data_span);
+
+                        batch.push_back(CompressedNode{
+                            job.info.seq,
+                            leaf->get_hash(map_options_),
+                            std::move(blob.data),
+                            size,  // Uncompressed leaf data size
+                            1});
+                    }
+
+                    return true;  // Continue walking
+                });
+        }
+
+        LOGD(
+            "Finished compressing ledger ",
+            job.info.seq,
+            " - enqueuing batch of ",
+            batch.size(),
+            " nodes");
+
+        // Enqueue entire batch with ONE lock operation
+        enqueue_compressed_batch(std::move(batch));
+
+        // job goes out of scope → maps destruct → nodes cleanup
+    }
+}
+
+void
+CatlNudbPipeline::writer_worker()
+{
+    while (!shutdown_.load())
+    {
+        std::vector<CompressedNode> batch;
+
+        // Pull ONE batch from queue (each batch contains all nodes from one
+        // ledger)
+        {
+            std::unique_lock<std::mutex> lock(write_queue_mutex_);
+            write_queue_cv_.wait(lock, [this]() {
+                return !write_queue_.empty() || shutdown_.load();
+            });
+
+            if (shutdown_.load() && write_queue_.empty())
+            {
+                break;
+            }
+
+            if (write_queue_.empty())
+            {
+                continue;
+            }
+
+            // Move entire batch out of queue
+            batch = std::move(write_queue_.front());
+            write_queue_.pop();
+
+            // Decrement counters for entire batch
+            uint64_t batch_bytes = 0;
+            for (const auto& node : batch)
+            {
+                batch_bytes += node.blob.size();
+            }
+            write_queue_bytes_ -= batch_bytes;
+            write_queue_nodes_ -= batch.size();
+        }
+
+        // Notify that we made space
+        write_queue_cv_.notify_all();
+
+        // Process batch WITHOUT holding lock
+        for (auto& node : batch)
+        {
+            // Track bytes for stats
+            total_bytes_written_ += node.blob.size();  // Compressed
+            total_bytes_uncompressed_ +=
+                node.uncompressed_size;  // Uncompressed
+
+            // Track node counts
+            if (node.node_type == 0)
+                total_inner_nodes_++;
+            else
+                total_leaf_nodes_++;
+
+            bool inserted = false;
+
+            // Handle different modes
+            if (mock_mode_.empty())
+            {
+                // Real NuDB mode
+                if (bulk_writer_)
+                {
+                    inserted = bulk_writer_->insert(
+                        node.hash,
+                        node.blob.data(),
+                        node.blob.size(),
+                        node.node_type);
+                    if (inserted && !no_dedupe_)
+                    {
+                        inserted_keys_with_sizes_[node.hash] = node.blob.size();
+                    }
+                }
+            }
+            else if (mock_mode_ == "nudb" && db_)
+            {
+                // Mock NuDB mode - use regular NuDB inserts
+                ::nudb::error_code ec;
+                db_->insert(
+                    node.hash.data(), node.blob.data(), node.blob.size(), ec);
+
+                if (!ec)
+                {
+                    inserted = true;
+                    if (!no_dedupe_)
+                    {
+                        inserted_keys_with_sizes_[node.hash] = node.blob.size();
+                    }
+                }
+                else if (ec == ::nudb::error::key_exists)
+                {
+                    inserted = false;  // Duplicate
+                }
+                else
+                {
+                    LOGE("NuDB insert failed: ", ec.message());
+                    throw std::runtime_error(
+                        "NuDB insert failed: " + ec.message());
+                }
+            }
+            else if (
+                mock_mode_ == "disk" && mock_disk_file_ &&
+                mock_disk_file_->is_open())
+            {
+                // Mock disk mode
+                auto it = inserted_keys_with_sizes_.find(node.hash);
+                if (it == inserted_keys_with_sizes_.end())
+                {
+                    // Write key + size + data
+                    mock_disk_file_->write(
+                        reinterpret_cast<const char*>(node.hash.data()), 32);
+                    uint32_t size32 = static_cast<uint32_t>(node.blob.size());
+                    mock_disk_file_->write(
+                        reinterpret_cast<const char*>(&size32), sizeof(size32));
+                    mock_disk_file_->write(
+                        reinterpret_cast<const char*>(node.blob.data()),
+                        node.blob.size());
+
+                    if (!mock_disk_file_->good())
+                    {
+                        LOGE("Failed to write to mock disk file");
+                        throw std::runtime_error("Mock disk write failed");
+                    }
+
+                    if (!no_dedupe_)
+                    {
+                        inserted_keys_with_sizes_[node.hash] = node.blob.size();
+                    }
+                    inserted = true;
+                }
+            }
+            else
+            {
+                // noop/memory mode
+                if (!no_dedupe_)
+                {
+                    auto it = inserted_keys_with_sizes_.find(node.hash);
+                    if (it != inserted_keys_with_sizes_.end())
+                    {
+                        // Duplicate
+                        inserted = false;
+                        continue;
+                    }
+                    inserted_keys_with_sizes_[node.hash] = node.blob.size();
+                }
+                inserted = true;
+            }
+        }
+    }
+}
+
+void
+CatlNudbPipeline::enqueue_compressed_batch(std::vector<CompressedNode>&& batch)
+{
+    if (batch.empty())
+    {
+        return;  // Nothing to enqueue
+    }
+
+    // Calculate total bytes in batch
+    uint64_t batch_bytes = 0;
+    for (const auto& node : batch)
+    {
+        batch_bytes += node.blob.size();
+    }
+
+    // Apply backpressure if write queue exceeds byte limit
+    {
+        std::unique_lock<std::mutex> lock(write_queue_mutex_);
+        uint64_t queue_bytes = write_queue_bytes_.load();
+
+        if (queue_bytes > max_write_queue_bytes_)
+        {
+            LOGW(
+                "Write queue full (",
+                queue_bytes / 1024 / 1024,
+                " MB / ",
+                max_write_queue_bytes_ / 1024 / 1024,
+                " MB), waiting for writer...");
+
+            write_queue_cv_.wait(lock, [this]() {
+                return write_queue_bytes_.load() <= max_write_queue_bytes_ / 2;
+            });
+
+            LOGI(
+                "Write queue drained (",
+                write_queue_bytes_.load() / 1024 / 1024,
+                " MB), compression can continue");
+        }
+
+        // Push entire batch as one item
+        size_t batch_size = batch.size();
+        write_queue_.push(std::move(batch));
+        write_queue_bytes_ += batch_bytes;
+        write_queue_nodes_ += batch_size;
+    }
+    write_queue_cv_.notify_one();
+}
+
+void
+CatlNudbPipeline::enqueue_to_hasher(LedgerSnapshot snapshot)
+{
+    const size_t MAX_HASHER_QUEUE =
+        500;  // Backpressure threshold (same as compression)
+    static std::atomic<size_t> backpressure_count{0};
+
+    {
+        std::unique_lock<std::mutex> lock(hasher_queue_mutex_);
+
+        // Apply backpressure if queue is too deep
+        if (hasher_queue_.size() > MAX_HASHER_QUEUE)
+        {
+            backpressure_count++;
+
+            // Only log every 100 times to avoid spam
+            if (backpressure_count % 100 == 1)
+            {
+                LOGW(
+                    "Hasher queue deep (",
+                    hasher_queue_.size(),
+                    "), waiting for space... (logged ",
+                    backpressure_count.load(),
+                    " times)");
+            }
+
+            // Wait until queue has space
+            hasher_queue_cv_.wait(lock, [this]() {
+                return hasher_queue_.size() <= MAX_HASHER_QUEUE / 2;
+            });
+
+            // Only log resolution occasionally
+            if (backpressure_count % 100 == 1)
+            {
+                LOGI("Hasher queue drained, continuing");
+            }
+        }
+
+        hasher_queue_.push(std::move(snapshot));
+    }
+    hasher_queue_cv_.notify_one();
 }
 
 bool
@@ -912,7 +1895,49 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
         return false;
     }
 
-    LOGD("Flushing ledger ", hashed.info.seq, " to NuDB");
+    // If compression pipeline is running, queue the job
+    if (!compression_workers_.empty())
+    {
+        const size_t MAX_COMPRESSION_QUEUE = 500;  // Backpressure threshold
+
+        LOGD("Queueing ledger ", hashed.info.seq, " for compression");
+
+        {
+            std::unique_lock<std::mutex> lock(compression_queue_mutex_);
+
+            // Apply backpressure if queue is too deep
+            if (compression_queue_.size() > MAX_COMPRESSION_QUEUE)
+            {
+                LOGW(
+                    "Compression queue deep (",
+                    compression_queue_.size(),
+                    "), waiting for space...");
+
+                // Wait until queue has space (uses condition variable
+                // efficiently)
+                compression_queue_cv_.wait(lock, [this]() {
+                    return compression_queue_.size() <=
+                        250;  // MAX_COMPRESSION_QUEUE / 2
+                });
+
+                LOGI("Compression queue drained, continuing");
+            }
+
+            compression_queue_.push(std::move(hashed));
+        }
+        compression_queue_cv_.notify_one();
+
+        return true;
+    }
+
+    // Synchronous path disabled - should never reach here!
+    LOGE("FATAL: Compression pipeline not running! Ledger ", hashed.info.seq);
+    throw std::runtime_error(
+        "Synchronous flush path disabled - pipeline not started");
+
+    // Otherwise fall back to synchronous processing (for backwards
+    // compatibility)
+    LOGD("Flushing ledger ", hashed.info.seq, " to NuDB (synchronous)");
 
     // Check if we should enable walk_nodes logging for this specific ledger
     bool should_enable_walk_nodes =

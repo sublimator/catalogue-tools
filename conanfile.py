@@ -16,6 +16,7 @@ class CatalogueToolsConan(ConanFile):
         self.requires("libsodium/1.0.20")
         self.requires("nudb/2.0.9")
         self.requires("lz4/1.9.4")
+        self.requires("rocksdb/10.5.1")
 
     def build_requirements(self):
         self.tool_requires("protobuf/3.21.12")

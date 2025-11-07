@@ -2,6 +2,7 @@
 #include "catl/core/log-macros.h"
 #include <boost/filesystem.hpp>
 #include <iomanip>
+#include <typeinfo>
 
 namespace catl::v1::utils::nudb {
 
@@ -9,12 +10,48 @@ NudbBulkWriter::NudbBulkWriter(
     const std::string& dat_path,
     const std::string& key_path,
     const std::string& log_path,
-    uint32_t key_size)
+    uint32_t key_size,
+    std::unique_ptr<DeduplicationStrategy> strategy)
+    : dat_path_(dat_path)
+    , key_path_(key_path)
+    , log_path_(log_path)
+    , key_size_(key_size)
+    , dedupe_strategy_(
+          strategy ? std::move(strategy)
+                   : std::make_unique<HybridXxHashDeduplicationStrategy>())
+{
+    LOGI(
+        "Bulk writer created with ",
+        typeid(*dedupe_strategy_).name(),
+        " strategy");
+}
+
+// Legacy constructor for backwards compatibility
+NudbBulkWriter::NudbBulkWriter(
+    const std::string& dat_path,
+    const std::string& key_path,
+    const std::string& log_path,
+    uint32_t key_size,
+    bool no_dedupe)
     : dat_path_(dat_path)
     , key_path_(key_path)
     , log_path_(log_path)
     , key_size_(key_size)
 {
+    if (no_dedupe)
+    {
+        dedupe_strategy_ = std::make_unique<NoDeduplicationStrategy>();
+    }
+    else
+    {
+        dedupe_strategy_ =
+            std::make_unique<HybridXxHashDeduplicationStrategy>();
+    }
+
+    LOGI(
+        "Bulk writer created with ",
+        typeid(*dedupe_strategy_).name(),
+        " strategy");
 }
 
 NudbBulkWriter::~NudbBulkWriter()
@@ -108,13 +145,10 @@ NudbBulkWriter::insert(
         return false;
     }
 
-    // Deduplication check
-    auto it = seen_keys_.find(key);
-    if (it != seen_keys_.end())
+    // Check for duplicates using the configured strategy
+    if (dedupe_strategy_->check_and_mark(key, size, node_type))
     {
-        // Already seen this key - increment its duplicate count
-        it->second.duplicate_count++;
-        total_duplicate_attempts_++;
+        // Duplicate detected - skip write
         return false;
     }
 
@@ -152,8 +186,6 @@ NudbBulkWriter::insert(
     ::nudb::detail::write(os, key.data(), key_size_);
     ::nudb::detail::write(os, data, size);
 
-    // Track this key with size, zero initial duplicate count, and node type
-    seen_keys_[key] = KeyInfo{size, 0, node_type};
     unique_count_++;
     total_bytes_written_ += size;
 
@@ -166,7 +198,7 @@ NudbBulkWriter::insert(
             " unique nodes (",
             total_bytes_written_.load() / 1024,
             " KB, ",
-            total_duplicate_attempts_,
+            dedupe_strategy_->get_duplicate_count(),
             " dups)");
     }
 
@@ -187,76 +219,16 @@ NudbBulkWriter::close(uint64_t progress_buffer_size)
 
     LOGI("Closing bulk writer...");
     LOGI("  Total unique keys: ", unique_count_);
-    LOGI("  Total duplicate attempts: ", total_duplicate_attempts_);
+    LOGI(
+        "  Total duplicate attempts: ",
+        dedupe_strategy_->get_duplicate_count());
     LOGI(
         "  Total bytes written: ",
         total_bytes_written_.load() / 1024 / 1024,
         " MB");
 
-    // Count how many keys were duplicated and how often, by node type
-    uint64_t keys_with_duplicates = 0;
-    uint64_t max_dup_count = 0;
-    std::unordered_map<uint8_t, uint64_t>
-        dup_count_by_type;  // node_type -> count of keys with duplicates
-    std::unordered_map<uint8_t, uint64_t>
-        dup_attempts_by_type;  // node_type -> total duplicate attempts
-
-    for (const auto& [key, info] : seen_keys_)
-    {
-        if (info.duplicate_count > 0)
-        {
-            keys_with_duplicates++;
-            if (info.duplicate_count > max_dup_count)
-            {
-                max_dup_count = info.duplicate_count;
-            }
-
-            // Track by node type
-            dup_count_by_type[info.node_type]++;
-            dup_attempts_by_type[info.node_type] += info.duplicate_count;
-        }
-    }
-
-    LOGI("");
-    LOGI("📊 DEDUPLICATION STATS:");
-    LOGI("  - Unique keys written: ", unique_count_);
-    LOGI(
-        "  - Keys that had duplicates: ",
-        keys_with_duplicates,
-        " (",
-        std::fixed,
-        std::setprecision(2),
-        (keys_with_duplicates * 100.0 / unique_count_),
-        "%)");
-    LOGI("  - Total duplicate attempts: ", total_duplicate_attempts_);
-    LOGI(
-        "  - Average duplicates per unique key: ",
-        std::fixed,
-        std::setprecision(2),
-        (static_cast<double>(total_duplicate_attempts_) / unique_count_));
-    LOGI("  - Max duplicates for a single key: ", max_dup_count);
-
-    // Break down by node type
-    if (!dup_count_by_type.empty())
-    {
-        LOGI("");
-        LOGI("  📋 Duplicates by node type:");
-        for (const auto& [node_type, count] : dup_count_by_type)
-        {
-            uint64_t attempts = dup_attempts_by_type[node_type];
-            const char* type_name = (node_type == 0)
-                ? "Inner"
-                : (node_type == 1) ? "Leaf" : "Unknown";
-            LOGI(
-                "    - ",
-                type_name,
-                " nodes: ",
-                count,
-                " keys (",
-                attempts,
-                " duplicate attempts)");
-        }
-    }
+    // Print strategy-specific deduplication stats
+    dedupe_strategy_->print_stats(unique_count_);
 
     // Step 1: Flush and close bulk writer
     ::nudb::error_code ec;
