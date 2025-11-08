@@ -36,6 +36,9 @@ parse_nudb_exp_argv(int argc, char* argv[])
         "walk-state",
         po::bool_switch(),
         "Walk all account states in the state tree (depth-first)")(
+        "parallel",
+        po::bool_switch(),
+        "Use parallel processing for tree walking (8 threads)")(
         "format,f",
         po::value<std::string>()->default_value("hex"),
         "Output format: hex, binary, info, json")(
@@ -134,6 +137,12 @@ parse_nudb_exp_argv(int argc, char* argv[])
         if (vm.count("walk-state"))
         {
             options.walk_state = vm["walk-state"].as<bool>();
+        }
+
+        // Check parallel flag
+        if (vm.count("parallel"))
+        {
+            options.parallel = vm["parallel"].as<bool>();
         }
 
         // Check output format

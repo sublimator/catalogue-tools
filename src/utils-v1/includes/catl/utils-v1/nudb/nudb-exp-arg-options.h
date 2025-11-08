@@ -32,6 +32,9 @@ struct NudbExpOptions
     /** Walk all account states in the state tree (depth-first) */
     bool walk_state = false;
 
+    /** Use parallel processing for tree walking (8 threads) */
+    bool parallel = false;
+
     /** Output format (hex, binary, info) */
     std::string output_format = "hex";
 
