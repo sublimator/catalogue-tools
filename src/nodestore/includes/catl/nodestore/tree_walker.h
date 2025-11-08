@@ -5,7 +5,10 @@
 #include "catl/nodestore/backend.h"
 #include "catl/nodestore/inner_node_format.h"
 #include "catl/nodestore/node_blob.h"
+#include <atomic>
+#include <mutex>
 #include <optional>
+#include <thread>
 #include <vector>
 
 namespace catl::nodestore {
@@ -26,6 +29,37 @@ struct WalkResult
 
     /** Depth reached (0 = root, increments for each inner node descended) */
     int depth;
+};
+
+/**
+ * Options for controlling tree traversal behavior
+ */
+struct WalkOptions
+{
+    bool parallel;       // Use parallel processing with thread pool
+    size_t num_threads;  // Number of worker threads for parallel mode
+
+    // Default constructor - sequential mode
+    WalkOptions() : parallel(false), num_threads(8)
+    {
+    }
+
+    // Constructor for custom settings
+    WalkOptions(bool p, size_t nt) : parallel(p), num_threads(nt)
+    {
+    }
+
+    // Convenience constructors
+    static WalkOptions
+    sequential()
+    {
+        return WalkOptions();
+    }
+    static WalkOptions
+    parallel_with_threads(size_t nt = 8)
+    {
+        return WalkOptions(true, nt);
+    }
 };
 
 /**
@@ -252,19 +286,41 @@ public:
      * @param root_hash Hash of the root node
      * @param visitor Function called for each leaf: visitor(hash,
      * decompressed_blob)
+     * @param options Controls traversal behavior (parallel, num_threads)
      */
     template <typename Visitor>
     void
-    walk_all(Hash256 const& root_hash, Visitor&& visitor)
+    walk_all(
+        Hash256 const& root_hash,
+        Visitor&& visitor,
+        const WalkOptions& options = {})
     {
-        PLOGD(
-            log_partition_,
-            "Starting depth-first walk from root: ",
-            root_hash.hex());
+        if (!options.parallel)
+        {
+            PLOGD(
+                log_partition_,
+                "Starting sequential depth-first walk from root: ",
+                root_hash.hex());
 
-        walk_all_recursive(root_hash, std::forward<Visitor>(visitor), 0);
+            walk_all_recursive(root_hash, std::forward<Visitor>(visitor), 0);
 
-        PLOGD(log_partition_, "Depth-first walk completed");
+            PLOGD(log_partition_, "Sequential walk completed");
+        }
+        else
+        {
+            PLOGD(
+                log_partition_,
+                "Starting parallel depth-first walk from root: ",
+                root_hash.hex(),
+                " with ",
+                options.num_threads,
+                " threads");
+
+            walk_all_parallel(
+                root_hash, std::forward<Visitor>(visitor), options);
+
+            PLOGD(log_partition_, "Parallel walk completed");
+        }
     }
 
 private:
@@ -325,6 +381,175 @@ private:
                     depth + 1);
             }
         }
+    }
+
+    /**
+     * Parallel helper for depth-first tree traversal.
+     * Distributes root's 16 branches to worker threads.
+     */
+    template <typename Visitor>
+    void
+    walk_all_parallel(
+        Hash256 const& root_hash,
+        Visitor&& visitor,
+        const WalkOptions& options)
+    {
+        // Fetch root node (compressed)
+        auto compressed_opt = backend_.get(root_hash);
+        if (!compressed_opt)
+        {
+            PLOGE(
+                log_partition_, "Missing root node at hash ", root_hash.hex());
+            throw std::runtime_error(
+                "TreeWalker: missing root node at hash " + root_hash.hex());
+        }
+
+        node_blob const& compressed = compressed_opt.value();
+        auto node_type = compressed.get_type();
+
+        // Handle special case: root is a leaf (very small tree)
+        if (node_type == node_type::hot_account_node ||
+            node_type == node_type::hot_transaction_node)
+        {
+            PLOGD(
+                log_partition_,
+                "Root is a leaf - using sequential walk instead");
+            node_blob decompressed = nodeobject_decompress(compressed);
+            visitor(root_hash, decompressed);
+            return;
+        }
+
+        // Must be an inner node
+        if (node_type != node_type::hot_unknown)
+        {
+            PLOGE(
+                log_partition_,
+                "Unexpected root node type: ",
+                static_cast<int>(node_type));
+            throw std::runtime_error(
+                "TreeWalker: unexpected root node type " +
+                std::to_string(static_cast<int>(node_type)));
+        }
+
+        // Collect all branch hashes from root
+        struct BranchInfo
+        {
+            Hash256 hash;
+            int branch;
+        };
+        std::vector<BranchInfo> branches;
+
+        compressed_inner_node_view view(compressed);
+        for (int branch = 0; branch < 16; ++branch)
+        {
+            auto branch_hash_opt = view.get_child_hash(branch);
+            if (branch_hash_opt)
+            {
+                branches.push_back({branch_hash_opt.value(), branch});
+                PLOGD(
+                    log_partition_,
+                    "Root branch[",
+                    branch,
+                    "]: ",
+                    branch_hash_opt.value().hex());
+            }
+        }
+
+        PLOGD(
+            log_partition_,
+            "Root has ",
+            branches.size(),
+            " branches, distributing to ",
+            options.num_threads,
+            " threads");
+
+        // Parallel visitor - no lock! If you want ordered output, use
+        // sequential mode
+        std::atomic<bool> should_stop{false};
+
+        auto parallel_visitor = [&](Hash256 const& hash,
+                                    node_blob const& blob) {
+            if (should_stop.load())
+                return;
+
+            visitor(hash, blob);
+        };
+
+        // Work queue for branches to process
+        std::mutex work_mutex;
+        size_t next_branch_idx = 0;
+
+        // Worker function
+        auto worker = [&]() {
+            while (true)
+            {
+                // Get next branch to process
+                BranchInfo my_branch;
+                {
+                    std::lock_guard<std::mutex> lock(work_mutex);
+                    if (next_branch_idx >= branches.size())
+                        break;
+
+                    my_branch = branches[next_branch_idx];
+                    ++next_branch_idx;
+
+                    PLOGD(
+                        log_partition_,
+                        "Thread ",
+                        std::this_thread::get_id(),
+                        " took branch[",
+                        my_branch.branch,
+                        "]");
+                }
+
+                // Walk this branch's subtree
+                try
+                {
+                    walk_all_recursive(my_branch.hash, parallel_visitor, 1);
+
+                    PLOGD(
+                        log_partition_,
+                        "Thread ",
+                        std::this_thread::get_id(),
+                        " completed branch[",
+                        my_branch.branch,
+                        "]");
+                }
+                catch (const std::exception& e)
+                {
+                    PLOGE(
+                        log_partition_,
+                        "Thread error in branch[",
+                        my_branch.branch,
+                        "]: ",
+                        e.what());
+                    should_stop.store(true);
+                }
+            }
+
+            PLOGD(
+                log_partition_,
+                "Worker thread ",
+                std::this_thread::get_id(),
+                " finished");
+        };
+
+        // Create and start worker threads
+        std::vector<std::thread> threads;
+        threads.reserve(options.num_threads);
+
+        for (size_t i = 0; i < options.num_threads; ++i)
+        {
+            threads.emplace_back(worker);
+        }
+
+        // Wait for all threads to complete
+        for (auto& thread : threads)
+        {
+            thread.join();
+        }
+
+        PLOGD(log_partition_, "All worker threads completed");
     }
 };
 

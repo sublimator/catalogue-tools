@@ -676,6 +676,11 @@ private:
             // Counter for account states
             size_t state_count = 0;
 
+            // Configure walk options
+            catl::nodestore::WalkOptions walk_opts;
+            walk_opts.parallel = options_.parallel;
+            walk_opts.num_threads = 8;
+
             // Walk all account states
             walker.walk_all(
                 account_hash,
@@ -683,12 +688,11 @@ private:
                     catl::nodestore::node_blob const& blob) {
                     ++state_count;
 
-                    std::cout << "Account State #" << state_count << "\n";
-                    std::cout << "  Hash: " << hash.hex() << "\n";
-                    std::cout << "  Payload size: " << blob.payload().size()
-                              << " bytes\n";
+                    LOGD("Account State #", state_count);
+                    LOGD("  Hash: ", hash.hex());
+                    LOGD("  Payload size: ", blob.payload().size(), " bytes");
 
-                    // Output JSON if requested
+                    // Parse JSON if requested (to test speed)
                     if (options_.output_format == "json")
                     {
                         try
@@ -699,19 +703,21 @@ private:
                             auto json_result = catl::xdata::json::parse_leaf(
                                 payload_slice, protocol_);
 
+                            // Pretty print to string first, then log
+                            std::ostringstream json_stream;
                             catl::xdata::json::pretty_print(
-                                std::cout, json_result);
+                                json_stream, json_result);
+                            LOGD(json_stream.str());
                         }
                         catch (const std::exception& e)
                         {
-                            std::cout
-                                << "  Failed to parse as JSON: " << e.what()
-                                << "\n";
+                            LOGD("  Failed to parse as JSON: ", e.what());
                         }
                     }
 
-                    std::cout << "\n";
-                });
+                    LOGD("");
+                },
+                walk_opts);
 
             std::cout << "Total account states: " << state_count << "\n";
         }
@@ -774,6 +780,11 @@ private:
             // Counter for transactions
             size_t tx_count = 0;
 
+            // Configure walk options
+            catl::nodestore::WalkOptions walk_opts;
+            walk_opts.parallel = options_.parallel;
+            walk_opts.num_threads = 8;
+
             // Walk all transactions
             walker.walk_all(
                 tx_hash,
@@ -781,12 +792,11 @@ private:
                     catl::nodestore::node_blob const& blob) {
                     ++tx_count;
 
-                    std::cout << "Transaction #" << tx_count << "\n";
-                    std::cout << "  Hash: " << hash.hex() << "\n";
-                    std::cout << "  Payload size: " << blob.payload().size()
-                              << " bytes\n";
+                    LOGD("Transaction #", tx_count);
+                    LOGD("  Hash: ", hash.hex());
+                    LOGD("  Payload size: ", blob.payload().size(), " bytes");
 
-                    // Output JSON if requested
+                    // Parse JSON if requested (to test speed)
                     if (options_.output_format == "json")
                     {
                         try
@@ -798,19 +808,21 @@ private:
                                 catl::xdata::json::parse_transaction(
                                     payload_slice, protocol_);
 
+                            // Pretty print to string first, then log
+                            std::ostringstream json_stream;
                             catl::xdata::json::pretty_print(
-                                std::cout, json_result);
+                                json_stream, json_result);
+                            LOGD(json_stream.str());
                         }
                         catch (const std::exception& e)
                         {
-                            std::cout
-                                << "  Failed to parse as JSON: " << e.what()
-                                << "\n";
+                            LOGD("  Failed to parse as JSON: ", e.what());
                         }
                     }
 
-                    std::cout << "\n";
-                });
+                    LOGD("");
+                },
+                walk_opts);
 
             std::cout << "Total transactions: " << tx_count << "\n";
         }
