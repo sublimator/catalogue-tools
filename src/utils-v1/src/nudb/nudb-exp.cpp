@@ -196,12 +196,12 @@ private:
         return bytes;
     }
 
-    // Convert bytes to hex string
+    // Convert bytes to hex string (uppercase)
     std::string
     bytes_to_hex(const uint8_t* data, size_t size)
     {
         std::stringstream ss;
-        ss << std::hex << std::setfill('0');
+        ss << std::hex << std::uppercase << std::setfill('0');
         for (size_t i = 0; i < size; ++i)
         {
             ss << std::setw(2) << static_cast<int>(data[i]);
@@ -246,10 +246,44 @@ private:
     void
     analyze_node_data(const uint8_t* compressed_data, size_t compressed_size)
     {
-        // Read compression type varint
+        // Skip 9-byte header (8 unused + 1 node type)
+        if (compressed_size < 9)
+        {
+            std::cout << "Data too small (< 9 bytes for header)\n";
+            return;
+        }
+
+        // Extract node type from byte 8
+        uint8_t node_type = compressed_data[8];
+        std::cout << "Node type: " << static_cast<int>(node_type) << " (";
+        switch (node_type)
+        {
+            case 0:
+                std::cout << "hot_unknown";
+                break;
+            case 1:
+                std::cout << "hot_ledger";
+                break;
+            case 3:
+                std::cout << "hot_account_node";
+                break;
+            case 4:
+                std::cout << "hot_transaction_node";
+                break;
+            default:
+                std::cout << "unknown";
+                break;
+        }
+        std::cout << ")\n";
+
+        // Skip to payload (after 9-byte header)
+        const uint8_t* payload = compressed_data + 9;
+        size_t payload_size = compressed_size - 9;
+
+        // Read compression type varint from payload
         size_t compression_type = 0;
         size_t varint_size =
-            read_varint(compressed_data, compressed_size, compression_type);
+            read_varint(payload, payload_size, compression_type);
 
         if (varint_size == 0)
         {
@@ -278,8 +312,9 @@ private:
         }
         std::cout << ")\n";
 
-        const uint8_t* payload = compressed_data + varint_size;
-        size_t payload_size = compressed_size - varint_size;
+        // Move past compression type varint to actual compressed data
+        payload += varint_size;
+        payload_size -= varint_size;
 
         if (compression_type == 1)  // LZ4 compressed
         {
@@ -332,33 +367,9 @@ private:
 
             std::cout << "Decompression successful\n\n";
 
-            // Analyze decompressed data
+            // Analyze decompressed data (skip 9-byte header that was already shown above)
             if (decompressed_size >= 9)
             {
-                // Skip first 8 bytes (unused)
-                uint8_t node_type = decompressed[8];
-                std::cout << "Node type: " << static_cast<int>(node_type)
-                          << " (";
-                switch (node_type)
-                {
-                    case 0:
-                        std::cout << "hotUNKNOWN";
-                        break;
-                    case 1:
-                        std::cout << "hotLEDGER";
-                        break;
-                    case 3:
-                        std::cout << "hotACCOUNT_NODE";
-                        break;
-                    case 4:
-                        std::cout << "hotTRANSACTION_NODE";
-                        break;
-                    default:
-                        std::cout << "unknown";
-                        break;
-                }
-                std::cout << ")\n";
-
                 // Create a Slice for the actual data (skip 9-byte header)
                 size_t data_size = decompressed_size - 9;
                 Slice data_slice(decompressed.data() + 9, data_size);
