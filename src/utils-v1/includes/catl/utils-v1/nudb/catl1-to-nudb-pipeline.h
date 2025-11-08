@@ -214,7 +214,7 @@ public:
      * @return Hashed ledger with verification status
      */
     HashedLedger
-    hash_and_verify(LedgerSnapshot snapshot);
+    hash_and_verify(const LedgerSnapshot& snapshot);
 
     /**
      * Stage 3: Flush to NuDB

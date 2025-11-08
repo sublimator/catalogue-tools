@@ -18,8 +18,10 @@
 #include <boost/json.hpp>
 #include <chrono>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <nudb/create.hpp>
+#include <sstream>
 #include <stdexcept>
 
 namespace catl::v1::utils::nudb {
@@ -27,6 +29,10 @@ namespace catl::v1::utils::nudb {
 // LogPartition for pipeline version tracking - disabled by default
 // Enable with: pipeline_version_log.enable(LogLevel::DEBUG)
 LogPartition pipeline_version_log("PIPE_VERSION", LogLevel::NONE);
+
+// LogPartition for ledger header serialization/compression tracking
+// Enable with: ledger_header_log.enable(LogLevel::INFO)
+LogPartition ledger_header_log("LEDGER_HDR", LogLevel::INFO);
 
 CatlNudbPipeline::CatlNudbPipeline(
     const shamap::SHAMapOptions& map_options,
@@ -854,7 +860,7 @@ CatlNudbPipeline::build_and_snapshot(
 }
 
 HashedLedger
-CatlNudbPipeline::hash_and_verify(LedgerSnapshot snapshot)
+CatlNudbPipeline::hash_and_verify(const LedgerSnapshot& snapshot)
 {
     LOGD(
         "Hashing ledger ",
@@ -1506,6 +1512,9 @@ CatlNudbPipeline::compression_worker()
 
         // Serialize and compress the ledger header
         {
+            PLOGI(ledger_header_log, "=== Ledger Header Processing ===");
+            PLOGI(ledger_header_log, job.info.to_string());
+
             // Create buffer with "LWR\0" prefix + 118-byte canonical format
             // (XRPL/Xahau ledger header format)
             std::vector<uint8_t> header_with_prefix(4 + 118);
@@ -1519,18 +1528,74 @@ CatlNudbPipeline::compression_worker()
             // Serialize canonical LedgerInfo after prefix
             job.info.serialize_canonical(header_with_prefix.data() + 4);
 
-            // Compute hash using SHA512-half on canonical part only (no prefix)
+            PLOGI(
+                ledger_header_log,
+                "Header buffer size: ",
+                header_with_prefix.size(),
+                " bytes");
+
+            // Output entire buffer as hex for debugging
+            {
+                std::stringstream hex_stream;
+                for (size_t i = 0; i < header_with_prefix.size(); ++i)
+                {
+                    hex_stream << std::hex << std::setfill('0') << std::setw(2)
+                               << static_cast<int>(header_with_prefix[i]);
+                }
+                PLOGI(
+                    ledger_header_log,
+                    "Full buffer (122 bytes hex): ",
+                    hex_stream.str());
+            }
+
+            // Compute hash using SHA512-half on ENTIRE buffer (prefix +
+            // canonical) The prefix MUST be included in the hash (matches
+            // rippled's calculateLedgerHash)
             catl::crypto::Sha512HalfHasher hasher;
-            hasher.update(header_with_prefix.data() + 4, 118);
+            hasher.update(
+                header_with_prefix.data(),
+                122);  // 4-byte prefix + 118-byte canonical
             Hash256 ledger_hash = hasher.finalize();
+
+            PLOGI(
+                ledger_header_log, "Computed ledger hash: ", ledger_hash.hex());
+
+            // Verify computed hash matches the hash from CATL file (if present)
+            if (job.info.hash.has_value())
+            {
+                if (ledger_hash != *job.info.hash)
+                {
+                    LOGE("❌ Ledger hash mismatch for seq ", job.info.seq, "!");
+                    LOGE("  Computed: ", ledger_hash.hex());
+                    LOGE("  Expected: ", job.info.hash->hex());
+                    throw std::runtime_error(
+                        "Ledger hash mismatch for seq " +
+                        std::to_string(job.info.seq));
+                }
+                PLOGI(ledger_header_log, "✅ Hash verified against CATL file");
+            }
+            else
+            {
+                PLOGI(
+                    ledger_header_log,
+                    "⚠️  No hash in CATL file to verify against");
+            }
 
             // Compress entire buffer (prefix + canonical) with LZ4
             std::span<const uint8_t> header_span(
                 header_with_prefix.data(), header_with_prefix.size());
             auto blob = nodestore::nodeobject_compress(
-                nodestore::node_type::hot_account_node,  // Use same compression
-                                                         // as leaves
+                nodestore::node_type::hot_ledger,  // hotLEDGER type for ledger
+                                                   // headers
                 header_span);
+
+            PLOGI(
+                ledger_header_log,
+                "Compressed blob size BEFORE move: ",
+                blob.data.size(),
+                " bytes");
+
+            size_t compressed_size = blob.data.size();
 
             // Add to batch with ledger hash as key
             batch.push_back(CompressedNode{
@@ -1540,11 +1605,15 @@ CatlNudbPipeline::compression_worker()
                 122,  // Uncompressed size (4 + 118)
                 PipelineNodeType::LedgerHeader});
 
-            LOGD(
-                "Serialized ledger header for seq ",
+            PLOGI(
+                ledger_header_log,
+                "💾 Ledger header ",
                 job.info.seq,
                 " hash: ",
-                ledger_hash.hex());
+                ledger_hash.hex(),
+                " (compressed: ",
+                compressed_size,
+                " bytes)");
         }
 
         // Compress and collect state_snapshot nodes

@@ -17,6 +17,15 @@ struct NudbExpOptions
     /** Key to lookup (in hex) */
     std::optional<std::string> key_hex;
 
+    /** Ledger hash for tree walking (in hex) */
+    std::optional<std::string> ledger_hash;
+
+    /** State key to lookup in account tree (in hex) */
+    std::optional<std::string> state_key;
+
+    /** Transaction key to lookup in tx tree (in hex) */
+    std::optional<std::string> tx_key;
+
     /** Output format (hex, binary, info) */
     std::string output_format = "hex";
 
@@ -28,6 +37,9 @@ struct NudbExpOptions
 
     /** Log level (error, warn, info, debug) */
     std::string log_level = "info";
+
+    /** Network ID for protocol definitions (0=XRPL, 21337=Xahau) */
+    uint32_t network_id = 21337;
 
     /** Whether to display help information */
     bool show_help = false;

@@ -101,6 +101,9 @@ add_subdirectory(src/utils-v2)
 # Add the x-data module
 add_subdirectory(src/x-data)
 
+# Add the xdata-json module (JSON helpers for xdata)
+add_subdirectory(src/xdata-json)
+
 # Add the experiments module
 add_subdirectory(src/experiments)
 

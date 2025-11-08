@@ -38,9 +38,8 @@ set(SOURCES_NUDB_EXP ${UTILS_SRC_DIR}/nudb/nudb-exp.cpp
 
 # Define the dashboard-demo executable and its sources
 set(EXECUTABLE_DASHBOARD_DEMO dashboard-demo)
-set(SOURCES_DASHBOARD_DEMO
-    ${UTILS_SRC_DIR}/nudb/dashboard-demo.cpp
-    ${UTILS_SRC_DIR}/nudb/pipeline-dashboard.cpp)
+set(SOURCES_DASHBOARD_DEMO ${UTILS_SRC_DIR}/nudb/dashboard-demo.cpp
+                           ${UTILS_SRC_DIR}/nudb/pipeline-dashboard.cpp)
 
 # Create the executables
 
@@ -134,6 +133,8 @@ target_link_libraries(
   ${EXECUTABLE_NUDB_EXP}
   PRIVATE catl_core
           catl_catalogue_common
+          catl_nodestore
+          catl_xdata_json
           NuDB
           lz4::lz4
           Boost::filesystem

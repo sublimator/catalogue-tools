@@ -1,9 +1,17 @@
 #include "catl/common/ledger-info.h"
 #include "catl/core/log-macros.h"
 #include "catl/core/types.h"
+#include "catl/nodestore/backend.h"
+#include "catl/nodestore/node_blob.h"
+#include "catl/nodestore/tree_walker.h"
 #include "catl/utils-v1/nudb/nudb-exp-arg-options.h"
+#include "catl/xdata-json/parse_leaf.h"
+#include "catl/xdata-json/parse_transaction.h"
+#include "catl/xdata-json/pretty_print.h"
+#include "catl/xdata/protocol.h"
 
 #include <boost/filesystem.hpp>
+#include <boost/json.hpp>
 #include <iomanip>
 #include <iostream>
 #include <lz4.h>
@@ -12,12 +20,45 @@
 #include <nudb/posix_file.hpp>
 #include <nudb/visit.hpp>
 #include <nudb/xxhasher.hpp>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 using namespace catl::v1::utils::nudb;
 namespace fs = boost::filesystem;
+
+/**
+ * Load protocol definitions based on network ID
+ */
+catl::xdata::Protocol
+load_protocol(uint32_t network_id)
+{
+    if (network_id == 0)  // XRPL
+    {
+        LOGI(
+            "Using embedded XRPL protocol definitions (network ID ",
+            network_id,
+            ")");
+        return catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    }
+    else if (network_id == 21337)  // XAHAU
+    {
+        LOGI(
+            "Using embedded Xahau protocol definitions (network ID ",
+            network_id,
+            ")");
+        return catl::xdata::Protocol::load_embedded_xahau_protocol();
+    }
+    else
+    {
+        LOGW(
+            "Unknown network ID ",
+            network_id,
+            " - using Xahau protocol definitions");
+        return catl::xdata::Protocol::load_embedded_xahau_protocol();
+    }
+}
 
 /**
  * Sparse representation of a SHAMap inner node
@@ -150,6 +191,55 @@ public:
 };
 
 /**
+ * NuDB Backend implementation for nodestore::Backend interface.
+ * Wraps a NuDB store for tree walking operations.
+ */
+class NudbBackend : public catl::nodestore::Backend
+{
+private:
+    using store_type = nudb::basic_store<nudb::xxhasher, nudb::posix_file>;
+    store_type& db_;
+
+public:
+    explicit NudbBackend(store_type& db) : db_(db)
+    {
+    }
+
+    std::optional<catl::nodestore::node_blob>
+    get(Hash256 const& key) override
+    {
+        nudb::error_code ec;
+        catl::nodestore::node_blob compressed;
+        bool found = false;
+
+        db_.fetch(
+            key.data(),
+            [&](void const* data, std::size_t size) {
+                compressed.data.assign(
+                    static_cast<uint8_t const*>(data),
+                    static_cast<uint8_t const*>(data) + size);
+                found = true;
+            },
+            ec);
+
+        if (ec || !found)
+        {
+            return std::nullopt;  // Key not found
+        }
+
+        return compressed;
+    }
+
+    void
+    store(Hash256 const& /*key*/, catl::nodestore::node_blob const& /*blob*/)
+        override
+    {
+        // Not implemented for read-only exploration
+        throw std::runtime_error("NudbBackend: store() not implemented");
+    }
+};
+
+/**
  * NudbExplorer - Tool for exploring and querying NuDB databases
  *
  * This tool provides various ways to examine NuDB databases:
@@ -161,6 +251,7 @@ class NudbExplorer
 {
 private:
     const NudbExpOptions& options_;
+    catl::xdata::Protocol protocol_;
 
     // Use xxhasher by default (what xahaud uses)
     using store_type = nudb::basic_store<nudb::xxhasher, nudb::posix_file>;
@@ -242,274 +333,117 @@ private:
         return 0;  // Invalid varint
     }
 
-    // Decompress and analyze node data
+    // Decompress and analyze node data using node_blob helpers
     void
     analyze_node_data(const uint8_t* compressed_data, size_t compressed_size)
     {
-        // Skip 9-byte header (8 unused + 1 node type)
         if (compressed_size < 9)
         {
             std::cout << "Data too small (< 9 bytes for header)\n";
             return;
         }
 
-        // Extract node type from byte 8
-        uint8_t node_type = compressed_data[8];
-        std::cout << "Node type: " << static_cast<int>(node_type) << " (";
-        switch (node_type)
+        try
         {
-            case 0:
-                std::cout << "hot_unknown";
-                break;
-            case 1:
-                std::cout << "hot_ledger";
-                break;
-            case 3:
-                std::cout << "hot_account_node";
-                break;
-            case 4:
-                std::cout << "hot_transaction_node";
-                break;
-            default:
-                std::cout << "unknown";
-                break;
-        }
-        std::cout << ")\n";
+            // Create compressed blob from NuDB data
+            catl::nodestore::node_blob compressed_blob;
+            compressed_blob.data.assign(
+                compressed_data, compressed_data + compressed_size);
 
-        // Skip to payload (after 9-byte header)
-        const uint8_t* payload = compressed_data + 9;
-        size_t payload_size = compressed_size - 9;
+            // Get node type from compressed blob
+            auto node_type = compressed_blob.get_type();
+            std::cout << "Node type: " << static_cast<int>(node_type) << " ("
+                      << catl::nodestore::node_type_to_string(node_type)
+                      << ")\n";
 
-        // Read compression type varint from payload
-        size_t compression_type = 0;
-        size_t varint_size =
-            read_varint(payload, payload_size, compression_type);
+            // Decompress using node_blob helper
+            catl::nodestore::node_blob decompressed_blob =
+                catl::nodestore::nodeobject_decompress(compressed_blob);
 
-        if (varint_size == 0)
-        {
-            std::cout << "Failed to read compression type varint\n";
-            return;
-        }
+            // Get the decompressed payload (after 9-byte header)
+            auto payload = decompressed_blob.payload();
+            std::cout << "Decompressed payload size: " << payload.size()
+                      << " bytes\n\n";
 
-        std::cout << "Compression type: " << compression_type << " (";
-        switch (compression_type)
-        {
-            case 0:
-                std::cout << "uncompressed";
-                break;
-            case 1:
-                std::cout << "lz4";
-                break;
-            case 2:
-                std::cout << "compressed v1 inner node";
-                break;
-            case 3:
-                std::cout << "full v1 inner node";
-                break;
-            default:
-                std::cout << "unknown";
-                break;
-        }
-        std::cout << ")\n";
-
-        // Move past compression type varint to actual compressed data
-        payload += varint_size;
-        payload_size -= varint_size;
-
-        if (compression_type == 1)  // LZ4 compressed
-        {
-            // Read decompressed size varint
-            size_t decompressed_size = 0;
-            size_t size_varint_len =
-                read_varint(payload, payload_size, decompressed_size);
-
-            if (size_varint_len == 0)
+            // Check if this is a ledger header (hot_ledger type)
+            if (node_type == catl::nodestore::node_type::hot_ledger)
             {
-                std::cout << "Failed to read decompressed size varint\n";
-                return;
-            }
-
-            std::cout << "Decompressed size: " << decompressed_size
-                      << " bytes\n";
-            std::cout << "Compressed payload size: "
-                      << (payload_size - size_varint_len) << " bytes\n";
-
-            // Allocate buffer for decompressed data
-            std::vector<uint8_t> decompressed(decompressed_size);
-
-            // Decompress
-            int result = LZ4_decompress_safe(
-                reinterpret_cast<const char*>(payload + size_varint_len),
-                reinterpret_cast<char*>(decompressed.data()),
-                static_cast<int>(payload_size - size_varint_len),
-                static_cast<int>(decompressed_size));
-
-            if (result < 0)
-            {
-                std::cout << "LZ4 decompression failed with error: " << result
-                          << "\n";
-                std::cout << "Expected " << decompressed_size
-                          << " bytes but got error\n";
-
-                // Show first few bytes of compressed data
-                std::cout << "First 16 compressed bytes: ";
-                for (size_t i = 0;
-                     i < 16 && i < (payload_size - size_varint_len);
-                     ++i)
+                // Ledger headers are 122 bytes: 4-byte LWR prefix + 118-byte
+                // canonical
+                if (payload.size() == 122)
                 {
-                    std::cout << std::hex << std::setw(2) << std::setfill('0')
-                              << static_cast<int>(payload[size_varint_len + i])
-                              << " ";
-                }
-                std::cout << std::dec << "\n";
-                return;
-            }
+                    // Check for LWR prefix
+                    if (payload[0] == 'L' && payload[1] == 'W' &&
+                        payload[2] == 'R' && payload[3] == 0)
+                    {
+                        std::cout << "Found 'LWR\\0' prefix - XRPL ledger "
+                                     "header format\n\n";
 
-            std::cout << "Decompression successful\n\n";
+                        // Parse the canonical ledger info (skip 4-byte prefix)
+                        Slice ledger_data_slice(
+                            payload.data() + 4,
+                            catl::common::LedgerInfoView::
+                                HEADER_SIZE_WITHOUT_HASH);
 
-            // Analyze decompressed data (skip 9-byte header that was already shown above)
-            if (decompressed_size >= 9)
-            {
-                // Create a Slice for the actual data (skip 9-byte header)
-                size_t data_size = decompressed_size - 9;
-                Slice data_slice(decompressed.data() + 9, data_size);
+                        catl::common::LedgerInfoView ledger_view(
+                            ledger_data_slice.data(), ledger_data_slice.size());
+                        catl::common::LedgerInfo ledger_info =
+                            ledger_view.to_ledger_info();
 
-                std::cout << "Data size (after header): " << data_size
-                          << " bytes\n";
-
-                // Check if it's the right size for a LedgerInfo
-                if (data_size ==
-                    catl::common::LedgerInfoView::HEADER_SIZE_WITHOUT_HASH)
-                {
-                    std::cout << "\nData matches LedgerInfo size! Parsing as "
-                                 "LedgerInfo:\n";
-
-                    catl::common::LedgerInfoView ledger_view(
-                        data_slice.data(), data_slice.size());
-                    catl::common::LedgerInfo ledger_info =
-                        ledger_view.to_ledger_info();
-
-                    std::cout << ledger_info.to_string() << std::endl;
+                        std::cout << "Parsed LedgerInfo:\n";
+                        std::cout << ledger_info.to_string() << std::endl;
+                    }
+                    else
+                    {
+                        std::cout << "Expected LWR prefix but got: " << std::hex
+                                  << std::setw(2) << std::setfill('0')
+                                  << static_cast<int>(payload[0]) << " "
+                                  << static_cast<int>(payload[1]) << " "
+                                  << static_cast<int>(payload[2]) << " "
+                                  << static_cast<int>(payload[3]) << std::dec
+                                  << "\n";
+                    }
                 }
                 else
                 {
-                    std::cout << "\nNot a LedgerInfo (expected 118 bytes, got "
-                              << data_size << ")\n";
+                    std::cout
+                        << "Unexpected ledger header size: " << payload.size()
+                        << " bytes (expected 122)\n";
 
-                    // Show first few bytes
-                    std::cout << "First 32 bytes of data: ";
-                    for (size_t i = 0; i < 32 && i < data_size; ++i)
+                    // Show first 32 bytes
+                    std::cout << "First 32 bytes: ";
+                    for (size_t i = 0; i < 32 && i < payload.size(); ++i)
                     {
-                        std::cout
-                            << std::hex << std::setw(2) << std::setfill('0')
-                            << static_cast<int>(data_slice.data()[i]) << " ";
+                        std::cout << std::hex << std::setw(2)
+                                  << std::setfill('0')
+                                  << static_cast<int>(payload[i]) << " ";
                     }
                     std::cout << std::dec << "\n";
-
-                    // Check for LWR prefix (XRPL ledger header format)
-                    if (data_size >= 4 && data_slice.data()[0] == 'L' &&
-                        data_slice.data()[1] == 'W' &&
-                        data_slice.data()[2] == 'R')
-                    {
-                        std::cout << "\nFound 'LWR' prefix - likely XRPL "
-                                     "ledger header format\n";
-                        std::cout << "After 4-byte prefix, have "
-                                  << (data_size - 4) << " bytes\n";
-
-                        // The LedgerInfo should start right after "LWR\0"
-                        // And there might be a suffix byte
-                        if (data_size - 4 >= catl::common::LedgerInfoView::
-                                                 HEADER_SIZE_WITHOUT_HASH)
-                        {
-                            std::cout
-                                << "Enough data for LedgerInfo after prefix\n";
-                            // Skip the 4-byte prefix
-                            Slice ledger_data_slice(
-                                data_slice.data() + 4,
-                                catl::common::LedgerInfoView::
-                                    HEADER_SIZE_WITHOUT_HASH);
-
-                            catl::common::LedgerInfoView ledger_view(
-                                ledger_data_slice.data(),
-                                ledger_data_slice.size());
-                            catl::common::LedgerInfo ledger_info =
-                                ledger_view.to_ledger_info();
-
-                            std::cout << "\nParsed as LedgerInfo:\n";
-                            std::cout << ledger_info.to_string() << std::endl;
-
-                            // Check if there's a suffix
-                            size_t expected_size = 4 +
-                                catl::common::LedgerInfoView::
-                                    HEADER_SIZE_WITHOUT_HASH;
-                            if (data_size > expected_size)
-                            {
-                                std::cout << "\nFound "
-                                          << (data_size - expected_size)
-                                          << " extra byte(s) at end:\n";
-                                for (size_t i = expected_size; i < data_size;
-                                     ++i)
-                                {
-                                    std::cout << "Byte " << (i - expected_size)
-                                              << ": 0x" << std::hex
-                                              << std::setw(2)
-                                              << std::setfill('0')
-                                              << static_cast<int>(
-                                                     data_slice.data()[i])
-                                              << std::dec << "\n";
-                                }
-                            }
-                        }
-                    }
                 }
             }
-        }
-        else if (compression_type == 2)  // compressed v1 inner node
-        {
-            std::cout << "Type 2: Compressed inner node\n";
-            std::cout << "Payload size: " << payload_size << " bytes\n";
-
-            try
+            else
             {
-                InnerNode node =
-                    InnerNode::from_compressed(payload, payload_size);
-                node.display();
-            }
-            catch (const std::exception& e)
-            {
-                std::cout << "Error parsing compressed inner node: " << e.what()
-                          << "\n";
-            }
-        }
-        else if (compression_type == 3)  // full v1 inner node
-        {
-            std::cout << "Type 3: Full inner node (uncompressed)\n";
-            std::cout << "Payload size: " << payload_size << " bytes\n";
-
-            if (payload_size == 512)
-            {
-                try
+                // Not a ledger header - just show hex dump
+                std::cout << "First 64 bytes of payload:\n";
+                for (size_t i = 0; i < 64 && i < payload.size(); ++i)
                 {
-                    InnerNode node =
-                        InnerNode::from_full(payload, payload_size);
-                    node.display();
+                    if (i > 0 && i % 32 == 0)
+                        std::cout << "\n";
+                    std::cout << std::hex << std::setw(2) << std::setfill('0')
+                              << static_cast<int>(payload[i]) << " ";
                 }
-                catch (const std::exception& e)
-                {
-                    std::cout << "Error parsing full inner node: " << e.what()
-                              << "\n";
-                }
+                std::cout << std::dec << "\n";
             }
         }
-        else
+        catch (const std::exception& e)
         {
-            std::cout << "Compression type " << compression_type
-                      << " not implemented\n";
+            std::cout << "Error decompressing node: " << e.what() << "\n";
         }
     }
 
 public:
-    NudbExplorer(const NudbExpOptions& options) : options_(options)
+    NudbExplorer(const NudbExpOptions& options)
+        : options_(options), protocol_(load_protocol(options.network_id))
     {
         // Validate NuDB path exists
         if (!fs::exists(*options_.nudb_path))
@@ -558,6 +492,25 @@ public:
                 fetch_key(db, *options_.key_hex);
             }
 
+            // Tree walking operations
+            if (options_.ledger_hash)
+            {
+                if (options_.state_key)
+                {
+                    walk_to_state_key(
+                        db, *options_.ledger_hash, *options_.state_key);
+                }
+                else if (options_.tx_key)
+                {
+                    walk_to_tx_key(db, *options_.ledger_hash, *options_.tx_key);
+                }
+                else
+                {
+                    std::cout << "Error: --ledger-hash requires either "
+                                 "--state-key or --tx-key\n";
+                }
+            }
+
             if (options_.list_keys)
             {
                 list_all_keys(db);
@@ -586,6 +539,238 @@ public:
     }
 
 private:
+    void
+    walk_to_state_key(
+        store_type& db,
+        const std::string& ledger_hash_hex,
+        const std::string& state_key_hex)
+    {
+        try
+        {
+            std::vector<uint8_t> ledger_hash_bytes =
+                hex_to_bytes(ledger_hash_hex);
+            std::vector<uint8_t> state_key_bytes = hex_to_bytes(state_key_hex);
+
+            if (ledger_hash_bytes.size() != 32 || state_key_bytes.size() != 32)
+            {
+                std::cout << "Error: hashes must be 32 bytes (64 hex chars)\n";
+                return;
+            }
+
+            Hash256 ledger_hash(ledger_hash_bytes.data());
+            Hash256 state_key(state_key_bytes.data());
+
+            std::cout << "Walking account tree for ledger: "
+                      << ledger_hash.hex() << "\n";
+            std::cout << "Looking for state key: " << state_key.hex() << "\n\n";
+
+            // Fetch ledger header
+            auto ledger_blob_opt = fetch_ledger_header(db, ledger_hash);
+            if (!ledger_blob_opt)
+            {
+                std::cout << "Ledger header not found\n";
+                return;
+            }
+
+            // Parse ledger header to get account_hash
+            auto payload = ledger_blob_opt->payload();
+            if (payload.size() != 122)
+            {
+                std::cout << "Invalid ledger header size: " << payload.size()
+                          << "\n";
+                return;
+            }
+
+            // Use LedgerInfoView to parse the canonical format (skip 4-byte
+            // "LWR\0" prefix)
+            catl::common::LedgerInfoView ledger_view(
+                payload.data() + 4,
+                catl::common::LedgerInfoView::HEADER_SIZE_WITHOUT_HASH);
+            Hash256 account_hash = ledger_view.account_hash();
+            std::cout << "Account tree root hash: " << account_hash.hex()
+                      << "\n\n";
+
+            // Create backend and walker
+            NudbBackend backend(db);
+            catl::nodestore::TreeWalker walker(backend);
+
+            // Walk the tree
+            auto result = walker.walk(account_hash, state_key);
+
+            std::cout << "Tree walk result:\n";
+            std::cout << "  Found: " << (result.found ? "YES" : "NO") << "\n";
+            std::cout << "  Depth: " << result.depth << "\n";
+            std::cout << "  Path length: " << result.path.size() << "\n";
+
+            if (result.found)
+            {
+                std::cout << "\nLeaf node found!\n";
+                std::cout << "Node type: "
+                          << static_cast<int>(result.blob.get_type()) << "\n";
+                std::cout << "Payload size: " << result.blob.payload().size()
+                          << " bytes\n";
+
+                // Output JSON if requested
+                if (options_.output_format == "json")
+                {
+                    try
+                    {
+                        auto payload_span = result.blob.payload();
+                        Slice payload_slice(
+                            payload_span.data(), payload_span.size());
+                        auto json_result = catl::xdata::json::parse_leaf(
+                            payload_slice, protocol_);
+
+                        std::cout << "\nParsed JSON:\n";
+                        catl::xdata::json::pretty_print(std::cout, json_result);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        std::cout << "Failed to parse as JSON: " << e.what()
+                                  << "\n";
+                    }
+                }
+            }
+            else
+            {
+                std::cout << "\nKey not found in tree\n";
+            }
+        }
+        catch (const std::exception& e)
+        {
+            std::cout << "Error during tree walk: " << e.what() << "\n";
+        }
+    }
+
+    void
+    walk_to_tx_key(
+        store_type& db,
+        const std::string& ledger_hash_hex,
+        const std::string& tx_key_hex)
+    {
+        try
+        {
+            std::vector<uint8_t> ledger_hash_bytes =
+                hex_to_bytes(ledger_hash_hex);
+            std::vector<uint8_t> tx_key_bytes = hex_to_bytes(tx_key_hex);
+
+            if (ledger_hash_bytes.size() != 32 || tx_key_bytes.size() != 32)
+            {
+                std::cout << "Error: hashes must be 32 bytes (64 hex chars)\n";
+                return;
+            }
+
+            Hash256 ledger_hash(ledger_hash_bytes.data());
+            Hash256 tx_key(tx_key_bytes.data());
+
+            std::cout << "Walking transaction tree for ledger: "
+                      << ledger_hash.hex() << "\n";
+            std::cout << "Looking for tx key: " << tx_key.hex() << "\n\n";
+
+            // Fetch ledger header
+            auto ledger_blob_opt = fetch_ledger_header(db, ledger_hash);
+            if (!ledger_blob_opt)
+            {
+                std::cout << "Ledger header not found\n";
+                return;
+            }
+
+            // Parse ledger header to get tx_hash
+            auto payload = ledger_blob_opt->payload();
+            if (payload.size() != 122)
+            {
+                std::cout << "Invalid ledger header size: " << payload.size()
+                          << "\n";
+                return;
+            }
+
+            // Use LedgerInfoView to parse the canonical format (skip 4-byte
+            // "LWR\0" prefix)
+            catl::common::LedgerInfoView ledger_view(
+                payload.data() + 4,
+                catl::common::LedgerInfoView::HEADER_SIZE_WITHOUT_HASH);
+            Hash256 tx_hash = ledger_view.tx_hash();
+            std::cout << "Transaction tree root hash: " << tx_hash.hex()
+                      << "\n\n";
+
+            // Create backend and walker
+            NudbBackend backend(db);
+            catl::nodestore::TreeWalker walker(backend);
+
+            // Walk the tree
+            auto result = walker.walk(tx_hash, tx_key);
+
+            std::cout << "Tree walk result:\n";
+            std::cout << "  Found: " << (result.found ? "YES" : "NO") << "\n";
+            std::cout << "  Depth: " << result.depth << "\n";
+            std::cout << "  Path length: " << result.path.size() << "\n";
+
+            if (result.found)
+            {
+                std::cout << "\nLeaf node found!\n";
+                std::cout << "Node type: "
+                          << static_cast<int>(result.blob.get_type()) << "\n";
+                std::cout << "Payload size: " << result.blob.payload().size()
+                          << " bytes\n";
+
+                // Output JSON if requested
+                if (options_.output_format == "json")
+                {
+                    try
+                    {
+                        auto payload_span = result.blob.payload();
+                        Slice payload_slice(
+                            payload_span.data(), payload_span.size());
+                        auto json_result = catl::xdata::json::parse_transaction(
+                            payload_slice, protocol_);
+
+                        std::cout << "\nParsed JSON:\n";
+                        catl::xdata::json::pretty_print(std::cout, json_result);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        std::cout << "Failed to parse as JSON: " << e.what()
+                                  << "\n";
+                    }
+                }
+            }
+            else
+            {
+                std::cout << "\nKey not found in tree\n";
+            }
+        }
+        catch (const std::exception& e)
+        {
+            std::cout << "Error during tree walk: " << e.what() << "\n";
+        }
+    }
+
+    std::optional<catl::nodestore::node_blob>
+    fetch_ledger_header(store_type& db, Hash256 const& ledger_hash)
+    {
+        nudb::error_code ec;
+        catl::nodestore::node_blob compressed;
+        bool found = false;
+
+        db.fetch(
+            ledger_hash.data(),
+            [&](void const* data, std::size_t size) {
+                compressed.data.assign(
+                    static_cast<uint8_t const*>(data),
+                    static_cast<uint8_t const*>(data) + size);
+                found = true;
+            },
+            ec);
+
+        if (ec || !found)
+        {
+            return std::nullopt;
+        }
+
+        // Decompress
+        return catl::nodestore::nodeobject_decompress(compressed);
+    }
+
     void
     fetch_key(store_type& db, const std::string& key_hex)
     {
@@ -761,6 +946,10 @@ main(int argc, char* argv[])
             std::cerr << "Unrecognized log level: " << options.log_level
                       << ", falling back to 'info'" << std::endl;
         }
+
+        // Enable TREE_WALK partition for debugging tree operations
+        catl::nodestore::TreeWalker::get_log_partition().set_level(
+            LogLevel::DEBUG);
 
         NudbExplorer explorer(options);
         if (explorer.explore())
