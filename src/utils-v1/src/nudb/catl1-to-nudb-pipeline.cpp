@@ -932,11 +932,22 @@ CatlNudbPipeline::flush_node(
     total_bytes_written_ += compressed_size;  // Compressed
     total_bytes_uncompressed_ += size;        // Uncompressed (input size)
 
-    // Track node counts
-    if (node_type == 0)
-        total_inner_nodes_++;
-    else
-        total_leaf_nodes_++;
+    // Track node counts by type
+    switch (node_type)
+    {
+        case 0:  // StateInner
+            total_state_inner_++;
+            break;
+        case 1:  // TxInner
+            total_tx_inner_++;
+            break;
+        case 2:  // StateLeaf
+            total_state_leaf_++;
+            break;
+        case 3:  // TxLeaf
+            total_tx_leaf_++;
+            break;
+    }
 
     bool inserted = false;
 
@@ -1240,9 +1251,10 @@ CatlNudbPipeline::hasher_worker()
             }
 
             std::unique_lock<std::mutex> lock(hasher_queue_cv_mutex_);
-            hasher_queue_cv_.wait_for(lock, std::chrono::milliseconds(100), [this]() {
-                return hasher_queue_depth_.load() > 0 || shutdown_.load();
-            });
+            hasher_queue_cv_.wait_for(
+                lock, std::chrono::milliseconds(100), [this]() {
+                    return hasher_queue_depth_.load() > 0 || shutdown_.load();
+                });
         }
 
         if (shutdown_.load() && !got_snapshot)
@@ -1272,10 +1284,58 @@ CatlNudbPipeline::hasher_worker()
             DedupeWork dedupe_work;
             dedupe_work.ledger_seq = hashed.info.seq;
 
-            // Reusable lambda to extract hash from any node
-            auto extract_hash =
+            // Lambda to extract hash from state tree nodes
+            // (always dedupe state nodes regardless of strategy)
+            auto extract_state_hash =
                 [&](const boost::intrusive_ptr<catl::shamap::SHAMapTreeNode>&
                         node) {
+                    // Skip empty inner nodes
+                    if (node->is_inner())
+                    {
+                        auto inner = boost::static_pointer_cast<
+                            catl::shamap::SHAMapInnerNode>(node);
+                        if (inner->get_branch_count() == 0)
+                        {
+                            return true;  // Skip
+                        }
+                    }
+                    dedupe_work.hashes.push_back(node->get_hash(map_options_));
+                    return true;  // Continue walking
+                };
+
+            // Lambda to extract hash from tx tree nodes
+            // (may skip based on strategy)
+            auto extract_tx_hash =
+                [&](const boost::intrusive_ptr<catl::shamap::SHAMapTreeNode>&
+                        node) {
+                    // Skip empty inner nodes
+                    if (node->is_inner())
+                    {
+                        auto inner = boost::static_pointer_cast<
+                            catl::shamap::SHAMapInnerNode>(node);
+                        if (inner->get_branch_count() == 0)
+                        {
+                            return true;  // Skip
+                        }
+
+                        // Skip TxInner if strategy is TxAll
+                        if (node_dedupe_strategy_ == NodeDedupeStrategy::TxAll)
+                        {
+                            return true;  // Skip deduping this node
+                        }
+                    }
+                    else
+                    {
+                        // Leaf node - skip TxLeaf if strategy is TxLeaves or
+                        // TxAll
+                        if (node_dedupe_strategy_ ==
+                                NodeDedupeStrategy::TxLeaves ||
+                            node_dedupe_strategy_ == NodeDedupeStrategy::TxAll)
+                        {
+                            return true;  // Skip deduping this node
+                        }
+                    }
+
                     dedupe_work.hashes.push_back(node->get_hash(map_options_));
                     return true;  // Continue walking
                 };
@@ -1284,13 +1344,13 @@ CatlNudbPipeline::hasher_worker()
             if (hashed.state_snapshot)
             {
                 hashed.state_snapshot->walk_new_nodes(
-                    extract_hash, hashed.processing_version);
+                    extract_state_hash, hashed.processing_version);
             }
 
             // Extract hashes from tx_map
             if (hashed.tx_map)
             {
-                hashed.tx_map->walk_new_nodes(extract_hash);
+                hashed.tx_map->walk_new_nodes(extract_tx_hash);
             }
 
             // Enqueue dedupe work with backpressure (memory-safe: just hashes,
@@ -1437,6 +1497,13 @@ CatlNudbPipeline::compression_worker()
                         auto inner = boost::static_pointer_cast<
                             catl::shamap::SHAMapInnerNode>(node);
 
+                        // Skip empty inner nodes - they all hash to the same
+                        // null hash
+                        if (inner->get_branch_count() == 0)
+                        {
+                            return true;  // Skip this node
+                        }
+
                         // Use concept-based compression for inner nodes
                         auto blob = nodestore::nodeobject_compress(*inner);
 
@@ -1445,8 +1512,7 @@ CatlNudbPipeline::compression_worker()
                             inner->get_node_source_hash(),
                             std::move(blob.data),
                             512,  // Inner nodes are always 512 bytes (16 * 32)
-                            0     // inner = 0
-                        });
+                            PipelineNodeType::StateInner});
                     }
                     else
                     {
@@ -1468,8 +1534,7 @@ CatlNudbPipeline::compression_worker()
                             leaf->get_hash(map_options_),
                             std::move(blob.data),
                             size,  // Uncompressed leaf data size
-                            1      // leaf = 1
-                        });
+                            PipelineNodeType::StateLeaf});
                     }
 
                     return true;  // Continue walking
@@ -1488,6 +1553,14 @@ CatlNudbPipeline::compression_worker()
                         auto inner = boost::static_pointer_cast<
                             catl::shamap::SHAMapInnerNode>(node);
 
+                        // Skip empty inner nodes - they all hash to the same
+                        // null hash (common for depth 0 tx tree when ledger has
+                        // 0 txs)
+                        if (inner->get_branch_count() == 0)
+                        {
+                            return true;  // Skip this node
+                        }
+
                         auto blob = nodestore::nodeobject_compress(*inner);
 
                         batch.push_back(CompressedNode{
@@ -1495,7 +1568,7 @@ CatlNudbPipeline::compression_worker()
                             inner->get_node_source_hash(),
                             std::move(blob.data),
                             512,  // Inner nodes are always 512 bytes
-                            0});
+                            PipelineNodeType::TxInner});
                     }
                     else
                     {
@@ -1516,7 +1589,7 @@ CatlNudbPipeline::compression_worker()
                             leaf->get_hash(map_options_),
                             std::move(blob.data),
                             size,  // Uncompressed leaf data size
-                            1});
+                            PipelineNodeType::TxLeaf});
                     }
 
                     return true;  // Continue walking
@@ -1599,17 +1672,72 @@ CatlNudbPipeline::writer_worker()
                 total_bytes_written_ += node.blob.size();
                 total_bytes_uncompressed_ += node.uncompressed_size;
 
-                // Track node counts
-                if (node.node_type == 0)
-                    total_inner_nodes_++;
-                else
-                    total_leaf_nodes_++;
-
-                // Fast in-memory check against duplicate set
-                if (current_job.duplicate_set.find(node.hash) ==
-                    current_job.duplicate_set.end())
+                // Track total nodes by type
+                switch (node.node_type)
                 {
-                    // Not a duplicate, write it
+                    case PipelineNodeType::StateInner:
+                        total_state_inner_++;
+                        break;
+                    case PipelineNodeType::TxInner:
+                        total_tx_inner_++;
+                        break;
+                    case PipelineNodeType::StateLeaf:
+                        total_state_leaf_++;
+                        break;
+                    case PipelineNodeType::TxLeaf:
+                        total_tx_leaf_++;
+                        break;
+                }
+
+                // Check if this is a duplicate based on strategy
+                bool is_duplicate = false;
+
+                // Determine if we should check for duplicates based on strategy
+                bool should_check_dedupe = false;
+                switch (node_dedupe_strategy_)
+                {
+                    case NodeDedupeStrategy::All:
+                        should_check_dedupe = true;  // Check all types
+                        break;
+                    case NodeDedupeStrategy::TxLeaves:
+                        should_check_dedupe =
+                            (node.node_type != PipelineNodeType::TxLeaf);
+                        break;
+                    case NodeDedupeStrategy::TxAll:
+                        should_check_dedupe =
+                            (node.node_type != PipelineNodeType::TxLeaf &&
+                             node.node_type != PipelineNodeType::TxInner);
+                        break;
+                }
+
+                if (should_check_dedupe)
+                {
+                    is_duplicate = current_job.duplicate_set.find(node.hash) !=
+                        current_job.duplicate_set.end();
+
+                    if (is_duplicate)
+                    {
+                        // Track duplicates by type
+                        switch (node.node_type)
+                        {
+                            case PipelineNodeType::StateInner:
+                                duplicates_state_inner_++;
+                                break;
+                            case PipelineNodeType::TxInner:
+                                duplicates_tx_inner_++;
+                                break;
+                            case PipelineNodeType::StateLeaf:
+                                duplicates_state_leaf_++;
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                }
+
+                // Write non-duplicates (includes ALL tx_leaf + unique others)
+                if (!is_duplicate)
+                {
                     // bulk_writer_ is in "NoDedupe" mode, so this is just a raw
                     // write
                     if (bulk_writer_)
@@ -1618,7 +1746,7 @@ CatlNudbPipeline::writer_worker()
                             node.hash,
                             node.blob.data(),
                             node.blob.size(),
-                            node.node_type);
+                            static_cast<uint8_t>(node.node_type));
                     }
                 }
             }
@@ -1648,7 +1776,8 @@ CatlNudbPipeline::writer_worker()
                 std::unique_lock<std::mutex> lock(write_queue_cv_mutex_);
                 write_queue_cv_.wait_for(
                     lock, std::chrono::milliseconds(100), [this]() {
-                        return write_queue_nodes_.load() > 0 || shutdown_.load();
+                        return write_queue_nodes_.load() > 0 ||
+                            shutdown_.load();
                     });
             }
 
@@ -1685,23 +1814,37 @@ CatlNudbPipeline::writer_worker()
                 total_bytes_uncompressed_ +=
                     node.uncompressed_size;  // Uncompressed
 
-                // Track node counts
-                if (node.node_type == 0)
-                    total_inner_nodes_++;
-                else
-                    total_leaf_nodes_++;
+                // Track total nodes by type
+                switch (node.node_type)
+                {
+                    case PipelineNodeType::StateInner:
+                        total_state_inner_++;
+                        break;
+                    case PipelineNodeType::TxInner:
+                        total_tx_inner_++;
+                        break;
+                    case PipelineNodeType::StateLeaf:
+                        total_state_leaf_++;
+                        break;
+                    case PipelineNodeType::TxLeaf:
+                        total_tx_leaf_++;
+                        break;
+                }
 
                 // Handle different modes
                 if (mock_mode_.empty())
                 {
                     // Real NuDB mode
+                    // Note: Bulk writer's dedupe strategy tracks duplicates by
+                    // type OPTIMIZATION: Skip deduplication ONLY for tx_leaf
+                    // (always unique)
                     if (bulk_writer_)
                     {
                         bulk_writer_->insert(
                             node.hash,
                             node.blob.data(),
                             node.blob.size(),
-                            node.node_type);
+                            static_cast<uint8_t>(node.node_type));
                     }
                 }
                 else if (mock_mode_ == "nudb" && db_)
@@ -1790,9 +1933,10 @@ CatlNudbPipeline::dedupe_worker()
             }
 
             std::unique_lock<std::mutex> lock(dedupe_queue_cv_mutex_);
-            dedupe_queue_cv_.wait_for(lock, std::chrono::milliseconds(100), [this]() {
-                return dedupe_queue_depth_.load() > 0 || shutdown_.load();
-            });
+            dedupe_queue_cv_.wait_for(
+                lock, std::chrono::milliseconds(100), [this]() {
+                    return dedupe_queue_depth_.load() > 0 || shutdown_.load();
+                });
         }
 
         if (shutdown_.load() && !got_work)
@@ -2138,7 +2282,8 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
                         node->get_hash(map_options_),
                         buffer.data(),
                         written,
-                        0);  // 0 = inner node
+                        static_cast<uint8_t>(
+                            PipelineNodeType::StateInner));  // StateInner = 0
                 }
                 else if (node->is_leaf())
                 {
@@ -2161,7 +2306,8 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
                         node->get_hash(map_options_),
                         buffer.data(),
                         written,
-                        1);  // 1 = leaf node
+                        static_cast<uint8_t>(
+                            PipelineNodeType::StateLeaf));  // StateLeaf = 2
 
                     // If duplicate leaf, save JSON for debugging
                     if (!inserted)
@@ -2331,7 +2477,8 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
                         node->get_hash(map_options_),
                         buffer.data(),
                         written,
-                        0);  // 0 = inner node
+                        static_cast<uint8_t>(
+                            PipelineNodeType::TxInner));  // TxInner = 1
                 }
             }
             else if (node->is_leaf())
@@ -2347,7 +2494,8 @@ CatlNudbPipeline::flush_to_nudb(HashedLedger hashed)
                         node->get_hash(map_options_),
                         buffer.data(),
                         written,
-                        1);  // 1 = leaf node
+                        static_cast<uint8_t>(
+                            PipelineNodeType::TxLeaf));  // TxLeaf = 3
 
                     // If duplicate leaf, save JSON for debugging
                     if (!inserted)
@@ -2445,6 +2593,57 @@ CatlNudbPipeline::get_duplicate_count() const
     return 0;
 }
 
+uint64_t
+CatlNudbPipeline::get_duplicate_state_inner_count() const
+{
+    // Parallel mode tracks in atomic counters
+    uint64_t parallel_count = duplicates_state_inner_.load();
+
+    // Sequential mode tracks in bulk writer's dedupe strategy
+    uint64_t sequential_count = 0;
+    if (bulk_writer_)
+    {
+        sequential_count = bulk_writer_->get_duplicate_count_by_type(
+            static_cast<uint8_t>(PipelineNodeType::StateInner));
+    }
+
+    return parallel_count + sequential_count;
+}
+
+uint64_t
+CatlNudbPipeline::get_duplicate_tx_inner_count() const
+{
+    // Parallel mode tracks in atomic counters
+    uint64_t parallel_count = duplicates_tx_inner_.load();
+
+    // Sequential mode tracks in bulk writer's dedupe strategy
+    uint64_t sequential_count = 0;
+    if (bulk_writer_)
+    {
+        sequential_count = bulk_writer_->get_duplicate_count_by_type(
+            static_cast<uint8_t>(PipelineNodeType::TxInner));
+    }
+
+    return parallel_count + sequential_count;
+}
+
+uint64_t
+CatlNudbPipeline::get_duplicate_state_leaf_count() const
+{
+    // Parallel mode tracks in atomic counters
+    uint64_t parallel_count = duplicates_state_leaf_.load();
+
+    // Sequential mode tracks in bulk writer's dedupe strategy
+    uint64_t sequential_count = 0;
+    if (bulk_writer_)
+    {
+        sequential_count = bulk_writer_->get_duplicate_count_by_type(
+            static_cast<uint8_t>(PipelineNodeType::StateLeaf));
+    }
+
+    return parallel_count + sequential_count;
+}
+
 void
 CatlNudbPipeline::print_dedup_stats() const
 {
@@ -2456,8 +2655,9 @@ CatlNudbPipeline::print_dedup_stats() const
 
     // Print stats from the pipeline's dedup strategy
     // This will call CuckooRocksStrategy::print_stats() or similar
-    uint64_t unique_written =
-        total_inner_nodes_.load() + total_leaf_nodes_.load();
+    uint64_t unique_written = total_state_inner_.load() +
+        total_tx_inner_.load() + total_state_leaf_.load() +
+        total_tx_leaf_.load();
     pipeline_dedup_strategy_->print_stats(unique_written);
 }
 

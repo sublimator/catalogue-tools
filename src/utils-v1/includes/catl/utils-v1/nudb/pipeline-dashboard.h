@@ -50,9 +50,20 @@ public:
         uint32_t end_ledger = 0;
         uint32_t current_ledger = 0;
         uint64_t ledgers_processed = 0;
-        uint64_t inner_nodes = 0;
-        uint64_t leaf_nodes = 0;
-        uint64_t duplicates = 0;
+        uint64_t inner_nodes = 0;  // Total inner (state + tx)
+        uint64_t leaf_nodes = 0;   // Total leaf (state + tx)
+        uint64_t duplicates = 0;   // Total duplicates
+
+        // Total nodes by type
+        uint64_t total_state_inner = 0;
+        uint64_t total_tx_inner = 0;
+        uint64_t total_state_leaf = 0;
+        uint64_t total_tx_leaf = 0;
+
+        // Duplicates by type
+        uint64_t duplicates_state_inner = 0;
+        uint64_t duplicates_tx_inner = 0;
+        uint64_t duplicates_state_leaf = 0;
 
         // Status
         std::string status =
@@ -134,9 +145,20 @@ private:
     std::atomic<uint32_t> end_ledger_{0};
     std::atomic<uint32_t> current_ledger_{0};
     std::atomic<uint64_t> ledgers_processed_{0};
-    std::atomic<uint64_t> inner_nodes_{0};
-    std::atomic<uint64_t> leaf_nodes_{0};
-    std::atomic<uint64_t> duplicates_{0};
+    std::atomic<uint64_t> inner_nodes_{0};  // Total inner (state + tx)
+    std::atomic<uint64_t> leaf_nodes_{0};   // Total leaf (state + tx)
+    std::atomic<uint64_t> duplicates_{0};   // Total duplicates
+
+    // Total nodes by type
+    std::atomic<uint64_t> total_state_inner_{0};
+    std::atomic<uint64_t> total_tx_inner_{0};
+    std::atomic<uint64_t> total_state_leaf_{0};
+    std::atomic<uint64_t> total_tx_leaf_{0};
+
+    // Duplicates by type
+    std::atomic<uint64_t> duplicates_state_inner_{0};
+    std::atomic<uint64_t> duplicates_tx_inner_{0};
+    std::atomic<uint64_t> duplicates_state_leaf_{0};
 
     // Status (protected by mutex since it's a string)
     std::string status_{"Processing"};

@@ -1,6 +1,6 @@
 #include "catl/utils-v1/nudb/pipeline-dashboard.h"
-#include <ftxui/screen/color.hpp>
 #include <cmath>
+#include <ftxui/screen/color.hpp>
 #include <iomanip>
 #include <sstream>
 
@@ -56,6 +56,17 @@ PipelineDashboard::update_stats(const Stats& stats)
     inner_nodes_ = stats.inner_nodes;
     leaf_nodes_ = stats.leaf_nodes;
     duplicates_ = stats.duplicates;
+
+    // Total nodes by type
+    total_state_inner_ = stats.total_state_inner;
+    total_tx_inner_ = stats.total_tx_inner;
+    total_state_leaf_ = stats.total_state_leaf;
+    total_tx_leaf_ = stats.total_tx_leaf;
+
+    // Duplicates by type
+    duplicates_state_inner_ = stats.duplicates_state_inner;
+    duplicates_tx_inner_ = stats.duplicates_tx_inner;
+    duplicates_state_leaf_ = stats.duplicates_state_leaf;
 
     {
         std::lock_guard<std::mutex> lock(status_mutex_);
@@ -117,6 +128,17 @@ PipelineDashboard::get_stats() const
     stats.inner_nodes = inner_nodes_;
     stats.leaf_nodes = leaf_nodes_;
     stats.duplicates = duplicates_;
+
+    // Total nodes by type
+    stats.total_state_inner = total_state_inner_;
+    stats.total_tx_inner = total_tx_inner_;
+    stats.total_state_leaf = total_state_leaf_;
+    stats.total_tx_leaf = total_tx_leaf_;
+
+    // Duplicates by type
+    stats.duplicates_state_inner = duplicates_state_inner_;
+    stats.duplicates_tx_inner = duplicates_tx_inner_;
+    stats.duplicates_state_leaf = duplicates_state_leaf_;
 
     {
         std::lock_guard<std::mutex> lock(status_mutex_);
@@ -366,18 +388,34 @@ PipelineDashboard::run_ui()
                     color(Color::Yellow),
             }),
             separator(),
+            text("📦 Nodes (Total / Duplicates)") | bold | color(Color::Cyan),
+            separator(),
             hbox({
-                text("Inner nodes: "),
-                text(format_number(inner_nodes_.load())) | bold,
-            }),
-            hbox({
-                text("Leaf nodes:  "),
-                text(format_number(leaf_nodes_.load())) | bold,
-            }),
-            hbox({
-                text("Duplicates:  "),
-                text(format_number(duplicates_.load())) | bold |
+                text("State Inner: "),
+                text(format_number(total_state_inner_.load())) | bold,
+                text(" / "),
+                text(format_number(duplicates_state_inner_.load())) |
                     color(Color::Red),
+            }),
+            hbox({
+                text("Tx Inner:    "),
+                text(format_number(total_tx_inner_.load())) | bold,
+                text(" / "),
+                text(format_number(duplicates_tx_inner_.load())) |
+                    color(Color::Red),
+            }),
+            hbox({
+                text("State Leaf:  "),
+                text(format_number(total_state_leaf_.load())) | bold,
+                text(" / "),
+                text(format_number(duplicates_state_leaf_.load())) |
+                    color(Color::Red),
+            }),
+            hbox({
+                text("Tx Leaf:     "),
+                text(format_number(total_tx_leaf_.load())) | bold,
+                text(" / "),
+                text("0") | dim,  // Never deduplicated
             }),
             separator(),
             text("💾 I/O (avg since start)") | bold | color(Color::Cyan),
