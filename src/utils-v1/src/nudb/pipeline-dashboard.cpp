@@ -273,6 +273,28 @@ PipelineDashboard::run_ui()
         return output;
     };
 
+    // Helper: Format elapsed time as HH:MM:SS
+    auto format_elapsed = [](double seconds) -> std::string {
+        int total_sec = static_cast<int>(seconds);
+        int hours = total_sec / 3600;
+        int minutes = (total_sec % 3600) / 60;
+        int secs = total_sec % 60;
+
+        std::stringstream ss;
+        ss << std::setfill('0') << std::setw(2) << hours << ":"
+           << std::setfill('0') << std::setw(2) << minutes << ":"
+           << std::setfill('0') << std::setw(2) << secs;
+        return ss.str();
+    };
+
+    // Spinner animation state
+    static int spinner_frame = 0;
+    auto get_spinner = [&]() -> std::string {
+        const std::vector<std::string> frames = {"|", "/", "-", "\\"};
+        spinner_frame = (spinner_frame + 1) % frames.size();
+        return frames[spinner_frame];
+    };
+
     // Main render component
     auto component = Renderer([&]() -> Element {
         // Get current status
@@ -336,6 +358,11 @@ PipelineDashboard::run_ui()
             hbox({
                 text("Processed:   "),
                 text(format_number(ledgers_processed_.load())) | bold,
+            }),
+            hbox({
+                text("Elapsed:     "),
+                text(format_elapsed(elapsed_sec_.load())) | bold |
+                    color(Color::Yellow),
             }),
             separator(),
             hbox({
@@ -459,12 +486,17 @@ PipelineDashboard::run_ui()
             });
         }
 
-        // Status color coding
+        // Status color coding and spinner
         Color status_color = Color::GreenLight;
+        std::string status_display = current_status;
+
         if (current_status == "Draining")
             status_color = Color::Yellow;
         else if (current_status == "Rekeying")
+        {
             status_color = Color::Magenta;
+            status_display = current_status + " " + get_spinner();
+        }
         else if (current_status == "Complete")
             status_color = Color::Cyan;
 
@@ -475,7 +507,7 @@ PipelineDashboard::run_ui()
                    separator(),
                    hbox({
                        text("Status: "),
-                       text(current_status) | bold | color(status_color),
+                       text(status_display) | bold | color(status_color),
                    }) | hcenter,
                    separator(),
                    hbox({
