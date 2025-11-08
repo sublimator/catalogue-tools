@@ -1,0 +1,4 @@
+sources:
+  "0.6.0":
+    url: "https://github.com/bitcoin-core/secp256k1/archive/v0.6.0.tar.gz"
+    sha256: "785bb98e7d6705c51c8dfa8ac3af6aa2ccfa3774714d51c0b9e28fac1146e9f1"
