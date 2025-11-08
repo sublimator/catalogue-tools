@@ -1,4 +1,5 @@
 #include "catl/xdata-json/parse_transaction.h"
+#include "catl/core/types.h"
 #include "catl/xdata/json-visitor.h"
 #include "catl/xdata/parser-context.h"
 #include "catl/xdata/parser.h"
@@ -16,10 +17,16 @@ parse_transaction(Slice const& data, Protocol const& protocol)
             std::to_string(data.size()) + " bytes, need at least 36)");
     }
 
+    // Extract the 32-byte key from the end
+    Hash256 key(data.data() + data.size() - 32);
+
     Slice remaining(data.data() + 4, data.size() - 4 - 32);
     ParserContext ctx(remaining);
 
     boost::json::object root;
+
+    // Add "hash" field with the key (lowercase, not a serialized field)
+    root["hash"] = key.hex();
 
     // First: Parse VL-encoded transaction
     size_t tx_vl_length = read_vl_length(ctx.cursor);
