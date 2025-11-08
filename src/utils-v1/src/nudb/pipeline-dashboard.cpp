@@ -1,5 +1,6 @@
 #include "catl/utils-v1/nudb/pipeline-dashboard.h"
 #include <ftxui/screen/color.hpp>
+#include <cmath>
 #include <iomanip>
 #include <sstream>
 
