@@ -1,5 +1,5 @@
-add_library(catl_catalogue_common src/catalogue-common.cpp src/utils.cpp
-                                  src/ledger-info.cpp)
+add_library(catl_catalogue_common STATIC src/catalogue-common.cpp src/utils.cpp
+                                         src/ledger-info.cpp)
 
 target_include_directories(catl_catalogue_common
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/includes)

@@ -254,18 +254,16 @@ SHAMapInnerNodeT<Traits>::get_node_source_child_hash(int branch) const
         throw InvalidBranchException(branch);
     }
 
-    auto children = get_children();
-    auto child = children->get_child(branch);
+    // auto children = get_children();
+    // auto child = children->get_child(branch);
 
-    if (child)
+    if (auto child = get_child(branch))
     {
         return child->valid_hash_or_throw();
     }
-    else
-    {
-        static const Hash256 zero_hash;  // All zeros
-        return zero_hash;
-    }
+
+    static const Hash256 zero_hash;  // All zeros
+    return zero_hash;
 }
 
 template <typename Traits>

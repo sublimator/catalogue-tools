@@ -74,6 +74,7 @@ decode_compressed(
         return false;
 
     // Decode branches
+    // Canonical format: branch i = bit (15 - i)
     auto const* hash_data = bytes + 2;
     std::size_t hash_index = 0;
 
@@ -112,6 +113,7 @@ encode_compressed(
     auto* bytes = static_cast<std::uint8_t*>(buffer);
 
     // Build bitmask
+    // Canonical format: branch i = bit (15 - i)
     std::uint16_t mask = 0;
     for (std::size_t i = 0; i < format::INNER_NODE_BRANCH_COUNT; ++i)
     {
@@ -124,12 +126,13 @@ encode_compressed(
     bytes[1] = static_cast<std::uint8_t>(mask & 0xFF);
 
     // Write non-zero hashes
+    // Canonical format: branch i = bit (15 - i)
     auto* hash_data = bytes + 2;
     std::size_t hash_index = 0;
 
     for (std::size_t i = 0; i < format::INNER_NODE_BRANCH_COUNT; ++i)
     {
-        if (branches[i] != Hash256::zero())
+        if (mask & (1u << (15 - i)))
         {
             std::memcpy(
                 hash_data + (hash_index * format::INNER_NODE_HASH_SIZE),

@@ -1,4 +1,4 @@
-add_library(catl_base58 src/base58.cpp)
+add_library(catl_base58 STATIC src/base58.cpp)
 
 target_include_directories(catl_base58
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/includes)

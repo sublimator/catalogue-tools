@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # Library target
-add_library(cuckoofilter src/hashutil.cc)
+add_library(cuckoofilter STATIC src/hashutil.cc)
 
 # Public include directory
 target_include_directories(

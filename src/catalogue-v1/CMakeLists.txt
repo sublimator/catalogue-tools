@@ -8,7 +8,7 @@ file(
   "")
 
 # Create the catalogue-v1 library
-add_library(catl_catalogue_v1 ${CATALOGUE_V1_SOURCES})
+add_library(catl_catalogue_v1 STATIC ${CATALOGUE_V1_SOURCES})
 
 # Set up include directories
 target_include_directories(

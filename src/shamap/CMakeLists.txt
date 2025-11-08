@@ -2,7 +2,7 @@
 file(GLOB SHAMAP_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 
 # Create the shamap library
-add_library(catl_shamap ${SHAMAP_SOURCES})
+add_library(catl_shamap STATIC ${SHAMAP_SOURCES})
 
 # Set up include directories
 target_include_directories(

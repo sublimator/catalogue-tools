@@ -1,4 +1,4 @@
-add_library(catl_crypto src/sha512-hasher.cpp src/sha512-half-hasher.cpp)
+add_library(catl_crypto STATIC src/sha512-hasher.cpp src/sha512-half-hasher.cpp)
 
 target_include_directories(catl_crypto
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/includes)

@@ -42,7 +42,7 @@ add_custom_target(generate_xdata_definitions DEPENDS ${GENERATED_XAHAU_HEADER}
                                                      ${GENERATED_XRPL_HEADER})
 
 add_library(
-  catl_xdata
+  catl_xdata STATIC
   src/protocol.cpp
   src/embedded_protocol.cpp
   ${GENERATED_XAHAU_HEADER}

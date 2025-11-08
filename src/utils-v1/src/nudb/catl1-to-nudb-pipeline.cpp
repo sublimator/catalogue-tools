@@ -638,17 +638,29 @@ CatlNudbPipeline::close_database()
     return true;
 }
 
+// Compute and cache hashes for all nodes in the map.
+//
+// IMPORTANT: Despite the name "parallel_hash", this function is SYNCHRONOUS:
+// - Default: hasher_threads_ = 1 → single-threaded, no parallelism
+// - Multi-threaded: Spawns worker threads BUT WAITS for all to complete (joins)
+// - By the time this returns, ALL node hashes are computed and cached
+//
+// Why "parallel"? It CAN use multiple threads for large maps, but the hasher
+// thread BLOCKS until hashing is complete. The parallelism is internal, not
+// async.
 Hash256
 CatlNudbPipeline::parallel_hash(const std::shared_ptr<shamap::SHAMap>& map)
 {
     if (hasher_threads_ == 1)
     {
         // Single threaded - just hash directly, no thread pool overhead
+        // This recursively walks the tree and computes/caches ALL node hashes
         LOGD("Using single-threaded hashing");
         return map->get_hash();
     }
 
     // Multi-threaded hashing using thread pool
+    // NOTE: We WAIT for all threads to complete before returning!
     std::vector<std::future<void>> futures;
     futures.reserve(hasher_threads_);
 
@@ -662,7 +674,7 @@ CatlNudbPipeline::parallel_hash(const std::shared_ptr<shamap::SHAMap>& map)
         futures.push_back(std::async(std::launch::async, job));
     }
 
-    // Wait for all workers to complete
+    // Wait for all workers to complete (BLOCKING - this is synchronous!)
     for (auto& future : futures)
     {
         future.wait();
@@ -671,6 +683,7 @@ CatlNudbPipeline::parallel_hash(const std::shared_ptr<shamap::SHAMap>& map)
     auto parallel_time = std::chrono::steady_clock::now();
 
     // Now do the final hash from the main thread (should be very fast)
+    // All child hashes are already cached from the parallel workers above
     Hash256 result = map->get_hash();
 
     auto finish_time = std::chrono::steady_clock::now();
@@ -1276,11 +1289,16 @@ CatlNudbPipeline::hasher_worker()
         hasher_queue_cv_.notify_all();
 
         // Hash the ledger (may use multiple threads if hasher_threads_ > 1)
+        // IMPORTANT: hash_and_verify() is SYNCHRONOUS - it blocks until ALL
+        // node hashes are computed and cached. By the time we reach the next
+        // line, every node in the tree has a valid cached hash.
         LOGD("Hashing ledger ", snapshot.info.seq);
         HashedLedger hashed = hash_and_verify(std::move(snapshot));
 
         // FORK: If parallel dedupe mode, extract hashes and send to dedupe
         // worker
+        // NOTE: We can safely extract hashes here - they're all cached from
+        // hash_and_verify() above
         if (use_dedupe_thread_)
         {
             DedupeWork dedupe_work;
