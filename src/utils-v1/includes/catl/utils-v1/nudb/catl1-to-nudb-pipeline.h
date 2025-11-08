@@ -8,6 +8,8 @@
 #include "catl/v1/catl-v1-reader.h"
 #include "catl/v1/catl-v1-types.h"  // For MapOperations
 #include "catl/xdata/protocol.h"
+#include <boost/lockfree/queue.hpp>
+#include <boost/lockfree/spsc_queue.hpp>
 #include <condition_variable>
 #include <fstream>
 #include <future>
@@ -337,9 +339,7 @@ public:
     size_t
     get_hasher_queue_depth() const
     {
-        std::lock_guard<std::mutex> lock(
-            const_cast<std::mutex&>(hasher_queue_mutex_));
-        return hasher_queue_.size();
+        return hasher_queue_depth_.load();
     }
 
     /**
@@ -348,9 +348,7 @@ public:
     size_t
     get_compression_queue_depth() const
     {
-        std::lock_guard<std::mutex> lock(
-            const_cast<std::mutex&>(compression_queue_mutex_));
-        return compression_queue_.size();
+        return compression_queue_depth_.load();
     }
 
     /**
@@ -382,9 +380,7 @@ public:
         {
             return 0;  // Not using dedupe thread
         }
-        std::lock_guard<std::mutex> lock(
-            const_cast<std::mutex&>(dedupe_queue_mutex_));
-        return dedupe_queue_.size();
+        return dedupe_queue_depth_.load();
     }
 
     /**
@@ -398,9 +394,7 @@ public:
         {
             return 0;  // Not using dedupe thread
         }
-        std::lock_guard<std::mutex> lock(
-            const_cast<std::mutex&>(writer_assembly_mutex_));
-        return writer_assembly_map_.size();
+        return assembly_station_depth_.load();
     }
 
     /**
@@ -481,9 +475,12 @@ private:
     // ===== Pipeline Queues =====
 
     // Queue for unhashed ledgers (FIFO from builder)
-    std::queue<LedgerSnapshot> hasher_queue_;
-    std::mutex hasher_queue_mutex_;
+    // Lock-free SPSC: main thread -> hasher thread
+    boost::lockfree::spsc_queue<LedgerSnapshot, boost::lockfree::capacity<512>>
+        hasher_queue_;
+    // Note: No mutex/cv needed for lock-free queue, but keep cv for wait/notify
     std::condition_variable hasher_queue_cv_;
+    std::mutex hasher_queue_cv_mutex_;  // Only for cv wait
 
     // Priority queue for compression jobs (ordered by ledger_seq)
     std::priority_queue<HashedLedger> compression_queue_;
@@ -492,16 +489,19 @@ private:
 
     // Output queue for compressed node BATCHES (FIFO, maintains ledger order)
     // Each batch contains all nodes from one ledger
-    std::queue<std::vector<CompressedNode>> write_queue_;
-    std::mutex write_queue_mutex_;
+    // Lock-free MPSC: compression workers -> writer thread
+    boost::lockfree::queue<std::vector<CompressedNode>*> write_queue_{512};
     std::condition_variable write_queue_cv_;
+    std::mutex write_queue_cv_mutex_;  // Only for cv wait
 
     // ===== Parallel Dedupe Thread (optional) =====
 
     // Dedupe work queue (receives hash lists from hasher)
-    std::queue<DedupeWork> dedupe_queue_;
-    std::mutex dedupe_queue_mutex_;
+    // Lock-free SPSC: hasher thread -> dedupe thread
+    boost::lockfree::spsc_queue<DedupeWork, boost::lockfree::capacity<512>>
+        dedupe_queue_;
     std::condition_variable dedupe_queue_cv_;
+    std::mutex dedupe_queue_cv_mutex_;  // Only for cv wait
 
     // Writer assembly station (solves out-of-order problem)
     // Maps ledger_seq → WriterJob (compression + dedupe results)
@@ -524,6 +524,12 @@ private:
     // Track write queue size for stats and backpressure
     std::atomic<uint64_t> write_queue_bytes_{0};  // Total compressed bytes
     std::atomic<uint64_t> write_queue_nodes_{0};  // Total node count
+
+    // Atomic queue depth counters (for lock-free stats reading)
+    std::atomic<size_t> hasher_queue_depth_{0};
+    std::atomic<size_t> compression_queue_depth_{0};
+    std::atomic<size_t> dedupe_queue_depth_{0};
+    std::atomic<size_t> assembly_station_depth_{0};
 
     // Worker thread functions
     void
