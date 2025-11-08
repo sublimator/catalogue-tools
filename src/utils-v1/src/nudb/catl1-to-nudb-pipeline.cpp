@@ -1307,40 +1307,38 @@ CatlNudbPipeline::hasher_worker()
 
             // Lambda to extract hash from tx tree nodes
             // (may skip based on strategy)
-            auto extract_tx_hash =
-                [&](const boost::intrusive_ptr<catl::shamap::SHAMapTreeNode>&
-                        node) {
-                    // Skip empty inner nodes
-                    if (node->is_inner())
+            auto extract_tx_hash = [&](const boost::intrusive_ptr<
+                                       catl::shamap::SHAMapTreeNode>& node) {
+                // Skip empty inner nodes
+                if (node->is_inner())
+                {
+                    auto inner = boost::static_pointer_cast<
+                        catl::shamap::SHAMapInnerNode>(node);
+                    if (inner->get_branch_count() == 0)
                     {
-                        auto inner = boost::static_pointer_cast<
-                            catl::shamap::SHAMapInnerNode>(node);
-                        if (inner->get_branch_count() == 0)
-                        {
-                            return true;  // Skip
-                        }
-
-                        // Skip TxInner if strategy is TxAll
-                        if (node_dedupe_strategy_ == NodeDedupeStrategy::TxAll)
-                        {
-                            return true;  // Skip deduping this node
-                        }
-                    }
-                    else
-                    {
-                        // Leaf node - skip TxLeaf if strategy is TxLeaves or
-                        // TxAll
-                        if (node_dedupe_strategy_ ==
-                                NodeDedupeStrategy::TxLeaves ||
-                            node_dedupe_strategy_ == NodeDedupeStrategy::TxAll)
-                        {
-                            return true;  // Skip deduping this node
-                        }
+                        return true;  // Skip
                     }
 
-                    dedupe_work.hashes.push_back(node->get_hash(map_options_));
-                    return true;  // Continue walking
-                };
+                    // Skip if dedupe mask says to skip TxInner
+                    if (dedupe_skip_mask_ &
+                        (1 << static_cast<uint8_t>(PipelineNodeType::TxInner)))
+                    {
+                        return true;  // Skip deduping this node
+                    }
+                }
+                else
+                {
+                    // Leaf node - skip if dedupe mask says to skip TxLeaf
+                    if (dedupe_skip_mask_ &
+                        (1 << static_cast<uint8_t>(PipelineNodeType::TxLeaf)))
+                    {
+                        return true;  // Skip deduping this node
+                    }
+                }
+
+                dedupe_work.hashes.push_back(node->get_hash(map_options_));
+                return true;  // Continue walking
+            };
 
             // Extract hashes from state_snapshot
             if (hashed.state_snapshot)
@@ -1487,6 +1485,49 @@ CatlNudbPipeline::compression_worker()
         // Accumulate all compressed nodes for this ledger (no locking during
         // walk)
         std::vector<CompressedNode> batch;
+
+        // Serialize and compress the ledger header
+        {
+            // Create buffer with "LWR\0" prefix + 118-byte canonical format
+            // (XRPL/Xahau ledger header format)
+            std::vector<uint8_t> header_with_prefix(4 + 118);
+
+            // Add "LWR\0" prefix
+            header_with_prefix[0] = 'L';
+            header_with_prefix[1] = 'W';
+            header_with_prefix[2] = 'R';
+            header_with_prefix[3] = 0;
+
+            // Serialize canonical LedgerInfo after prefix
+            job.info.serialize_canonical(header_with_prefix.data() + 4);
+
+            // Compute hash using SHA512-half on canonical part only (no prefix)
+            catl::crypto::Sha512HalfHasher hasher;
+            hasher.update(header_with_prefix.data() + 4, 118);
+            Hash256 ledger_hash = hasher.finalize();
+
+            // Compress entire buffer (prefix + canonical) with LZ4
+            std::span<const uint8_t> header_span(
+                header_with_prefix.data(), header_with_prefix.size());
+            auto blob = nodestore::nodeobject_compress(
+                nodestore::node_type::hot_account_node,  // Use same compression
+                                                         // as leaves
+                header_span);
+
+            // Add to batch with ledger hash as key
+            batch.push_back(CompressedNode{
+                job.info.seq,
+                ledger_hash,
+                std::move(blob.data),
+                122,  // Uncompressed size (4 + 118)
+                PipelineNodeType::LedgerHeader});
+
+            LOGD(
+                "Serialized ledger header for seq ",
+                job.info.seq,
+                " hash: ",
+                ledger_hash.hex());
+        }
 
         // Compress and collect state_snapshot nodes
         if (job.state_snapshot)
@@ -1689,28 +1730,18 @@ CatlNudbPipeline::writer_worker()
                     case PipelineNodeType::TxLeaf:
                         total_tx_leaf_++;
                         break;
+                    case PipelineNodeType::LedgerHeader:
+                        total_ledger_headers_++;
+                        break;
                 }
 
                 // Check if this is a duplicate based on strategy
                 bool is_duplicate = false;
 
-                // Determine if we should check for duplicates based on strategy
-                bool should_check_dedupe = false;
-                switch (node_dedupe_strategy_)
-                {
-                    case NodeDedupeStrategy::All:
-                        should_check_dedupe = true;  // Check all types
-                        break;
-                    case NodeDedupeStrategy::TxLeaves:
-                        should_check_dedupe =
-                            (node.node_type != PipelineNodeType::TxLeaf);
-                        break;
-                    case NodeDedupeStrategy::TxAll:
-                        should_check_dedupe =
-                            (node.node_type != PipelineNodeType::TxLeaf &&
-                             node.node_type != PipelineNodeType::TxInner);
-                        break;
-                }
+                // Check if we should skip deduplication for this node type
+                // Use bitset: if bit N is set, skip deduplication for type N
+                uint8_t type_bit = (1 << static_cast<uint8_t>(node.node_type));
+                bool should_check_dedupe = !(dedupe_skip_mask_ & type_bit);
 
                 if (should_check_dedupe)
                 {
@@ -1830,6 +1861,9 @@ CatlNudbPipeline::writer_worker()
                         break;
                     case PipelineNodeType::TxLeaf:
                         total_tx_leaf_++;
+                        break;
+                    case PipelineNodeType::LedgerHeader:
+                        total_ledger_headers_++;
                         break;
                 }
 

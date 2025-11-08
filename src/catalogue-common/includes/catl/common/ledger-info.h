@@ -59,6 +59,19 @@ struct LedgerInfo  // NOLINT(*-pro-type-member-init)
      */
     std::string
     to_string() const;
+
+    /**
+     * Serialize to canonical big-endian format (118 bytes, no hash)
+     *
+     * This produces the standard network protocol format for ledger headers:
+     * - All multi-byte integers are in big-endian (network byte order)
+     * - Hash fields are written as raw bytes
+     * - The optional hash field is NOT included
+     *
+     * @param buffer Output buffer (must be at least 118 bytes)
+     */
+    void
+    serialize_canonical(uint8_t* buffer) const;
 };
 #pragma pack(pop)
 
