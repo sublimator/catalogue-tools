@@ -281,10 +281,10 @@ TEST(NudbBulkDuplicates, WriteAndVerify)
     ::nudb::visit(
         dat_path.string(),
         [&](void const* key_data,
-            std::size_t key_size,
-            void const* value_data,
-            std::size_t value_size,
-            ::nudb::error_code& visit_ec) {
+            [[maybe_unused]] std::size_t key_size,
+            [[maybe_unused]] void const* value_data,
+            [[maybe_unused]] std::size_t value_size,
+            [[maybe_unused]] ::nudb::error_code& visit_ec) {
             visit_count++;
 
             // Track this key
