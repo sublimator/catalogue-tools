@@ -130,10 +130,13 @@ nodeobject_compress(inner_node_source auto const& node)
         out[1] = static_cast<std::uint8_t>(mask & 0xFF);
         out += 2;
 
-        // Branch i uses bit (15 - i)
+        // NOTE: mask is already in rippled/xahaud canonical format from
+        // get_node_source_branch_mask() Canonical format: branch i = bit (15 -
+        // i) Write hashes in branch order (0, 1, 2, ...) but check canonical
+        // bit (15-i)
         for (int i = 0; i < 16; ++i)
         {
-            if (mask & (1 << (15 - i)))
+            if (mask & (1 << (15 - i)))  // Check canonical bit for branch i
             {
                 auto const& hash = node.get_node_source_child_hash(i);
                 std::memcpy(out, hash.data(), format::INNER_NODE_HASH_SIZE);

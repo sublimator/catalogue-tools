@@ -210,13 +210,31 @@ public:
 
     /**
      * Get bitmask of populated branches for nodestore compression.
-     * Bit N set means branch N has a child.
      * Required by inner_node_source concept.
+     *
+     * IMPORTANT: Converts from SHAMap internal format to rippled/xahaud
+     * canonical format!
+     * - SHAMap internal: branch i = bit i
+     * - Rippled/xahaud canonical: branch i = bit (15 - i)
+     *
+     * This matches the reference implementation in rippled where the serializer
+     * iterates: for (unsigned bit = 0x8000; bit; bit >>= 1)  // bits 15, 14,
+     * 13, ..., 0 read hash for branch 0, 1, 2, ..., 15
      */
     uint16_t
     get_node_source_branch_mask() const
     {
-        return get_branch_mask();
+        uint16_t shamap_mask = get_branch_mask();
+        uint16_t canonical_mask = 0;
+
+        // Convert: branch i (bit i in SHAMap) → bit (15-i) in canonical format
+        for (int i = 0; i < 16; ++i)
+        {
+            if (shamap_mask & (1 << i))
+                canonical_mask |= (1 << (15 - i));
+        }
+
+        return canonical_mask;
     }
 
     /**
