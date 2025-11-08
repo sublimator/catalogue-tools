@@ -88,6 +88,9 @@ struct Catl1ToNudbOptions
      */
     std::string dedupe_strategy = "cuckoo-rocks";
 
+    // TODO: Add CLI arg for cuckoo filter expected_items
+    // (e.g., --expected-keys <count> to size the filter appropriately)
+
     /**
      * Run deduplication in a separate parallel thread
      * When enabled, all RocksDB I/O happens in dedupe_worker, freeing the

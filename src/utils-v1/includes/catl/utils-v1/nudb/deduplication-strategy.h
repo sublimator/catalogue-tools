@@ -142,12 +142,14 @@ public:
     explicit CuckooRocksStrategy(
         const std::string& db_path,
         bool resume = false,
-        size_t expected_items = 100000000)  // Default: 100M items
+        size_t expected_items =
+            100000000)  // TODO: make configurable via pipeline setter/CLI arg
         : db_path_(db_path), resume_(resume)
     {
         // ===== 1. Initialize Cuckoo Filter (Fast Path) =====
         // Use 12 bits per item → ~0.1% false positive rate
         // Memory: ~1.5 bytes per item → 100M items = ~150MB
+        // TODO: expected_items should be configurable based on dataset size
         LOGI("Initializing Cuckoo filter for ", expected_items, " items...");
         cuckoo_filter_ =
             std::make_unique<cuckoofilter::CuckooFilter<uint64_t, 12>>(
