@@ -52,6 +52,59 @@ def get_all_files_by_type(root_dir: Path) -> Dict[str, List[Path]]:
     return files
 
 
+def _filter_files_by_type(root_dir: Path, files: Set[str]) -> Dict[str, List[Path]]:
+    """Helper function to filter files by type."""
+    filtered_files: Dict[str, List[Path]] = {
+        "cpp": [],
+        "shell": [],
+        "python": [],
+        "cmake": [],
+    }
+
+    search_dirs = ["src/", "tests/", "scripts/", "cmake/"]
+
+    for filename in files:
+        file_path = root_dir / filename
+        if not file_path.exists():
+            continue
+
+        # Check if file is in one of our target directories
+        if not any(filename.startswith(dir) for dir in search_dirs):
+            continue
+
+        # Categorize by file type
+        if filename.endswith(".h") or filename.endswith(".cpp"):
+            filtered_files["cpp"].append(file_path)
+        elif filename.endswith(".sh"):
+            filtered_files["shell"].append(file_path)
+        elif filename.endswith(".py"):
+            filtered_files["python"].append(file_path)
+        elif filename.endswith("CMakeLists.txt") or filename.endswith(".cmake"):
+            filtered_files["cmake"].append(file_path)
+
+    return filtered_files
+
+
+def get_git_last_commit_files(root_dir: Path) -> Dict[str, List[Path]]:
+    """Get all files changed in the last commit by file type."""
+    os.chdir(root_dir)
+
+    files: Set[str] = set()
+
+    # Get files from last commit
+    result = subprocess.run(
+        ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    if result.stdout.strip():
+        files.update(result.stdout.strip().split("\n"))
+
+    # Filter files by type (reuse the filtering logic below)
+    return _filter_files_by_type(root_dir, files)
+
+
 def get_git_dirty_files(root_dir: Path) -> Dict[str, List[Path]]:
     """Get all dirty files (staged, unstaged, and untracked) in git by file type."""
     os.chdir(root_dir)
@@ -86,35 +139,7 @@ def get_git_dirty_files(root_dir: Path) -> Dict[str, List[Path]]:
         files.update(result.stdout.strip().split("\n"))
 
     # Filter files by type
-    filtered_files: Dict[str, List[Path]] = {
-        "cpp": [],
-        "shell": [],
-        "python": [],
-        "cmake": [],
-    }
-
-    search_dirs = ["src/", "tests/", "scripts/", "cmake/"]
-
-    for filename in files:
-        file_path = root_dir / filename
-        if not file_path.exists():
-            continue
-
-        # Check if file is in one of our target directories
-        if not any(filename.startswith(dir) for dir in search_dirs):
-            continue
-
-        # Categorize by file type
-        if filename.endswith(".h") or filename.endswith(".cpp"):
-            filtered_files["cpp"].append(file_path)
-        elif filename.endswith(".sh"):
-            filtered_files["shell"].append(file_path)
-        elif filename.endswith(".py"):
-            filtered_files["python"].append(file_path)
-        elif filename.endswith("CMakeLists.txt") or filename.endswith(".cmake"):
-            filtered_files["cmake"].append(file_path)
-
-    return filtered_files
+    return _filter_files_by_type(root_dir, files)
 
 
 def format_cpp_file(file_path: Path) -> bool:
@@ -213,6 +238,7 @@ def main() -> None:
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description="Format C++, shell, and Python files")
     parser.add_argument("--all", action="store_true", help="Format all files")
+    parser.add_argument("--last-commit", action="store_true", help="Format files from last commit")
     parser.add_argument("--cpp-only", action="store_true", help="Format only C++ files")
     parser.add_argument(
         "--shell-only", action="store_true", help="Format only shell files"
@@ -240,6 +266,20 @@ def main() -> None:
         # Explicit request for all files
         files_by_type = get_all_files_by_type(root_dir)
         print("Formatting mode: all files")
+    elif args.last_commit:
+        # Format files from last commit
+        files_by_type = get_git_last_commit_files(root_dir)
+        cpp_count = len(files_by_type["cpp"]) if format_cpp else 0
+        shell_count = len(files_by_type["shell"]) if format_shell else 0
+        python_count = len(files_by_type["python"]) if format_python else 0
+        cmake_count = len(files_by_type["cmake"]) if format_cmake else 0
+        total_count = cpp_count + shell_count + python_count + cmake_count
+
+        if total_count > 0:
+            print(f"Formatting mode: last commit ({total_count} files found)")
+        else:
+            print("No files in last commit to format")
+            return
     else:
         # Default behavior: format dirty files only
         files_by_type = get_git_dirty_files(root_dir)
