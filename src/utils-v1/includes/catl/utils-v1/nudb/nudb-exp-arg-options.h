@@ -26,6 +26,12 @@ struct NudbExpOptions
     /** Transaction key to lookup in tx tree (in hex) */
     std::optional<std::string> tx_key;
 
+    /** Walk all transactions in the tx tree (depth-first) */
+    bool walk_tx = false;
+
+    /** Walk all account states in the state tree (depth-first) */
+    bool walk_state = false;
+
     /** Output format (hex, binary, info) */
     std::string output_format = "hex";
 

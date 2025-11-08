@@ -11,79 +11,6 @@
 namespace catl::nodestore {
 
 /**
- * Lazy view wrapper for a decompressed inner node blob.
- * Provides easy access to branch hashes for tree walking.
- * Does NOT copy data - just references the blob.
- *
- * Usage:
- *   node_blob decompressed = nodeobject_decompress(compressed);
- *   inner_node_view view(decompressed);
- *   Hash256 branch3 = view.get_branch(3);
- */
-class inner_node_view
-{
-private:
-    node_blob const* blob_;
-
-public:
-    /**
-     * Construct from decompressed node_blob.
-     * The payload must be 512 bytes (16 * 32-byte hashes).
-     * Does NOT copy - caller must keep blob alive.
-     */
-    explicit inner_node_view(node_blob const& decompressed)
-        : blob_(&decompressed)
-    {
-        auto payload = blob_->payload();
-        if (payload.size() != format::INNER_NODE_HASH_ARRAY_SIZE)
-        {
-            throw std::runtime_error(
-                "inner_node_view: expected 512-byte payload, got " +
-                std::to_string(payload.size()));
-        }
-    }
-
-    /**
-     * Get branch hash by index (0-15).
-     * Returns zero hash if branch is empty.
-     */
-    Hash256
-    get_branch(int index) const
-    {
-        if (index < 0 ||
-            static_cast<std::size_t>(index) >= format::INNER_NODE_BRANCH_COUNT)
-        {
-            throw std::runtime_error(
-                "inner_node_view: branch index out of range: " +
-                std::to_string(index));
-        }
-
-        auto payload = blob_->payload();
-        return Hash256(
-            payload.data() +
-            (static_cast<std::size_t>(index) * format::INNER_NODE_HASH_SIZE));
-    }
-
-    /**
-     * Check if branch exists (non-zero hash).
-     */
-    bool
-    has_branch(int index) const
-    {
-        return get_branch(index) != Hash256::zero();
-    }
-
-    /**
-     * Get payload span (all 16 hashes as raw bytes).
-     */
-    std::span<std::uint8_t const>
-    payload() const
-    {
-        return blob_->payload();
-    }
-};
-
-/**
  * Result of a tree walk operation.
  */
 struct WalkResult
@@ -167,7 +94,7 @@ public:
                 ": Fetching node ",
                 current_hash.hex());
 
-            // Fetch current node
+            // Fetch current node (compressed)
             auto compressed_opt = backend_.get(current_hash);
             if (!compressed_opt)
             {
@@ -180,10 +107,8 @@ public:
                     "TreeWalker: missing node at hash " + current_hash.hex());
             }
 
-            // Decompress the node
-            node_blob decompressed =
-                nodeobject_decompress(compressed_opt.value());
-            auto node_type = decompressed.get_type();
+            node_blob const& compressed = compressed_opt.value();
+            auto node_type = compressed.get_type();
 
             PLOGD(
                 log_partition_,
@@ -195,9 +120,10 @@ public:
             if (node_type == node_type::hot_account_node ||
                 node_type == node_type::hot_transaction_node)
             {
-                // Reached a leaf - verify it's the right key by checking
-                // last 32 bytes of payload
+                // Reached a leaf - need to decompress to verify key
+                node_blob decompressed = nodeobject_decompress(compressed);
                 auto payload = decompressed.payload();
+
                 PLOGD(
                     log_partition_,
                     "Reached leaf node, payload size: ",
@@ -224,7 +150,7 @@ public:
                 return result;
             }
 
-            // Must be an inner node
+            // Must be an inner node - validate type
             if (node_type != node_type::hot_unknown)
             {
                 PLOGE(
@@ -268,21 +194,24 @@ public:
                 std::dec,
                 ")");
 
-            // Get branch hash from inner node
-            inner_node_view view(decompressed);
-            Hash256 branch_hash = view.get_branch(branch);
+            // Get branch hash from compressed inner node (zero-copy!)
+            compressed_inner_node_view view(compressed);
+            auto branch_hash_opt = view.get_child_hash(branch);
 
-            if (branch_hash == Hash256::zero())
+            if (!branch_hash_opt)
             {
                 // Branch doesn't exist - key not in tree
                 PLOGD(
                     log_partition_,
                     "Branch ",
                     branch,
-                    " is empty (zero hash) - key not in tree");
-                result.blob = std::move(decompressed);
+                    " is empty - key not in tree");
+                // Return decompressed version for consistency
+                result.blob = nodeobject_decompress(compressed);
                 return result;
             }
+
+            Hash256 branch_hash = branch_hash_opt.value();
 
             PLOGD(
                 log_partition_,
@@ -314,6 +243,88 @@ public:
             return std::move(result.blob);
         }
         return std::nullopt;
+    }
+
+    /**
+     * Walk all leaves in a tree (depth-first traversal).
+     * Calls the visitor function for each leaf node found.
+     *
+     * @param root_hash Hash of the root node
+     * @param visitor Function called for each leaf: visitor(hash,
+     * decompressed_blob)
+     */
+    template <typename Visitor>
+    void
+    walk_all(Hash256 const& root_hash, Visitor&& visitor)
+    {
+        PLOGD(
+            log_partition_,
+            "Starting depth-first walk from root: ",
+            root_hash.hex());
+
+        walk_all_recursive(root_hash, std::forward<Visitor>(visitor), 0);
+
+        PLOGD(log_partition_, "Depth-first walk completed");
+    }
+
+private:
+    /**
+     * Recursive helper for depth-first tree traversal.
+     */
+    template <typename Visitor>
+    void
+    walk_all_recursive(
+        Hash256 const& current_hash,
+        Visitor&& visitor,
+        int depth)
+    {
+        // Fetch current node (compressed)
+        auto compressed_opt = backend_.get(current_hash);
+        if (!compressed_opt)
+        {
+            PLOGE(log_partition_, "Missing node at hash ", current_hash.hex());
+            throw std::runtime_error(
+                "TreeWalker: missing node at hash " + current_hash.hex());
+        }
+
+        node_blob const& compressed = compressed_opt.value();
+        auto node_type = compressed.get_type();
+
+        // Check if we've reached a leaf
+        if (node_type == node_type::hot_account_node ||
+            node_type == node_type::hot_transaction_node)
+        {
+            // Decompress leaf and call visitor
+            node_blob decompressed = nodeobject_decompress(compressed);
+            visitor(current_hash, decompressed);
+            return;
+        }
+
+        // Must be an inner node
+        if (node_type != node_type::hot_unknown)
+        {
+            PLOGE(
+                log_partition_,
+                "Unexpected node type: ",
+                static_cast<int>(node_type));
+            throw std::runtime_error(
+                "TreeWalker: unexpected node type " +
+                std::to_string(static_cast<int>(node_type)));
+        }
+
+        // Visit all branches (depth-first)
+        compressed_inner_node_view view(compressed);
+        for (int branch = 0; branch < 16; ++branch)
+        {
+            auto branch_hash_opt = view.get_child_hash(branch);
+            if (branch_hash_opt)
+            {
+                walk_all_recursive(
+                    branch_hash_opt.value(),
+                    std::forward<Visitor>(visitor),
+                    depth + 1);
+            }
+        }
     }
 };
 

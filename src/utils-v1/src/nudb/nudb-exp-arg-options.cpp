@@ -30,6 +30,12 @@ parse_nudb_exp_argv(int argc, char* argv[])
         "tx-key",
         po::value<std::string>(),
         "Transaction key to lookup in tx tree (in hex)")(
+        "walk-tx",
+        po::bool_switch(),
+        "Walk all transactions in the tx tree (depth-first)")(
+        "walk-state",
+        po::bool_switch(),
+        "Walk all account states in the state tree (depth-first)")(
         "format,f",
         po::value<std::string>()->default_value("hex"),
         "Output format: hex, binary, info, json")(
@@ -54,6 +60,14 @@ parse_nudb_exp_argv(int argc, char* argv[])
                 << "Examples:" << std::endl
                 << "  Get a specific key:" << std::endl
                 << "    nudb-exp -n /path/to/db -k 00000001" << std::endl
+                << "  Walk all transactions in a ledger:" << std::endl
+                << "    nudb-exp -n /path/to/db --ledger-hash HASH --walk-tx "
+                   "--format json"
+                << std::endl
+                << "  Walk all account states in a ledger:" << std::endl
+                << "    nudb-exp -n /path/to/db --ledger-hash HASH "
+                   "--walk-state --format json"
+                << std::endl
                 << "  List all keys:" << std::endl
                 << "    nudb-exp -n /path/to/db --list-keys" << std::endl
                 << "  Show database stats:" << std::endl
@@ -110,6 +124,18 @@ parse_nudb_exp_argv(int argc, char* argv[])
             options.tx_key = vm["tx-key"].as<std::string>();
         }
 
+        // Check walk-tx flag
+        if (vm.count("walk-tx"))
+        {
+            options.walk_tx = vm["walk-tx"].as<bool>();
+        }
+
+        // Check walk-state flag
+        if (vm.count("walk-state"))
+        {
+            options.walk_state = vm["walk-state"].as<bool>();
+        }
+
         // Check output format
         if (vm.count("format"))
         {
@@ -161,15 +187,17 @@ parse_nudb_exp_argv(int argc, char* argv[])
         }
 
         // Validate that at least one action is specified
-        bool has_tree_walk =
-            options.ledger_hash && (options.state_key || options.tx_key);
+        bool has_tree_walk = options.ledger_hash &&
+            (options.state_key || options.tx_key || options.walk_tx ||
+             options.walk_state);
         if (!options.key_hex && !options.list_keys && !options.show_stats &&
             !has_tree_walk)
         {
             options.valid = false;
             options.error_message =
                 "Must specify an action: --key, --list-keys, --stats, or "
-                "--ledger-hash with --state-key/--tx-key";
+                "--ledger-hash with "
+                "--state-key/--tx-key/--walk-tx/--walk-state";
             return options;
         }
     }

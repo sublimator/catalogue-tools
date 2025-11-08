@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <lz4.h>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -319,5 +320,196 @@ nodeobject_decompress(node_blob const& compressed_blob)
 
     return decompressed;
 }
+
+/**
+ * Zero-copy view over a compressed inner node blob.
+ *
+ * Works directly with RAW compressed bytes from storage - no decompression!
+ * Handles both compression formats:
+ * - Type 2 (inner_node_compressed): [2-byte mask][N * 32-byte hashes]
+ * - Type 3 (inner_node_full): [16 * 32-byte hashes]
+ *
+ * Usage:
+ *   node_blob compressed = backend.get(hash).value();
+ *   compressed_inner_node_view view(compressed);
+ *   Hash256 branch3 = view.get_child_hash(3).value_or(Hash256::zero());
+ */
+class compressed_inner_node_view
+{
+private:
+    compression_type comp_type_;
+    std::uint16_t branch_mask_;
+    std::uint8_t const* hash_data_;
+    std::size_t hash_data_size_;
+
+public:
+    /**
+     * Construct from compressed node_blob.
+     * Throws if not an inner node (hot_unknown type).
+     * Does NOT copy - caller must keep blob alive.
+     */
+    explicit compressed_inner_node_view(node_blob const& compressed)
+    {
+        // Validate it's an inner node
+        auto node_type = compressed.get_type();
+        if (node_type != node_type::hot_unknown)
+        {
+            throw std::runtime_error(
+                std::string(
+                    "compressed_inner_node_view: expected hot_unknown (inner "
+                    "node), got ") +
+                node_type_to_string(node_type));
+        }
+
+        // Get payload (after 9-byte header)
+        auto payload = compressed.payload();
+        if (payload.size() < 1)
+        {
+            throw std::runtime_error(
+                "compressed_inner_node_view: payload too small");
+        }
+
+        // Read compression type varint
+        std::uint8_t const* p = payload.data();
+        std::size_t remaining = payload.size();
+        std::size_t comp_type_value;
+
+        // Simple varint read (assumes single byte for compression type)
+        if (p[0] < 128)
+        {
+            comp_type_value = p[0];
+            p += 1;
+            remaining -= 1;
+        }
+        else
+        {
+            throw std::runtime_error(
+                "compressed_inner_node_view: multi-byte varint not supported "
+                "for compression type");
+        }
+
+        comp_type_ = static_cast<compression_type>(comp_type_value);
+
+        // Parse based on compression type
+        switch (comp_type_)
+        {
+            case compression_type::inner_node_compressed: {
+                // Type 2: [2-byte mask][N * 32-byte hashes]
+                if (remaining < 2)
+                {
+                    throw std::runtime_error(
+                        "compressed_inner_node_view: compressed format too "
+                        "small for bitmask");
+                }
+
+                // Read bitmask (big-endian)
+                branch_mask_ = (static_cast<std::uint16_t>(p[0]) << 8) | p[1];
+
+                // Verify hash count matches mask
+                auto expected_hashes = __builtin_popcount(branch_mask_);
+                auto expected_size =
+                    2 + (expected_hashes * format::INNER_NODE_HASH_SIZE);
+                if (remaining != expected_size)
+                {
+                    throw std::runtime_error(
+                        "compressed_inner_node_view: size mismatch for "
+                        "compressed format");
+                }
+
+                hash_data_ = p + 2;
+                hash_data_size_ = remaining - 2;
+                break;
+            }
+
+            case compression_type::inner_node_full: {
+                // Type 3: [16 * 32-byte hashes]
+                if (remaining != format::INNER_NODE_HASH_ARRAY_SIZE)
+                {
+                    throw std::runtime_error(
+                        "compressed_inner_node_view: full format must be 512 "
+                        "bytes");
+                }
+
+                // Synthesize full bitmask
+                branch_mask_ = 0xFFFF;
+                hash_data_ = p;
+                hash_data_size_ = remaining;
+                break;
+            }
+
+            default:
+                throw std::runtime_error(
+                    "compressed_inner_node_view: unsupported compression "
+                    "type " +
+                    std::to_string(comp_type_value));
+        }
+    }
+
+    /**
+     * Get branch mask.
+     * For full nodes, returns synthesized 0xFFFF.
+     * For compressed nodes, returns actual stored mask.
+     */
+    std::uint16_t
+    get_branch_mask() const
+    {
+        return branch_mask_;
+    }
+
+    /**
+     * Check if branch exists (bit set in mask).
+     */
+    bool
+    has_branch(int branch) const
+    {
+        if (branch < 0 || branch >= 16)
+            return false;
+
+        // Canonical format: branch i = bit (15 - i)
+        return (branch_mask_ & (1u << (15 - branch))) != 0;
+    }
+
+    /**
+     * Get child hash for a branch (0-15).
+     * Returns nullopt if branch doesn't exist (bit not set).
+     * For compressed format, calculates offset using popcount.
+     * For full format, uses direct indexing.
+     */
+    std::optional<Hash256>
+    get_child_hash(int branch) const
+    {
+        if (branch < 0 || branch >= 16)
+            return std::nullopt;
+
+        if (!has_branch(branch))
+            return std::nullopt;
+
+        if (comp_type_ == compression_type::inner_node_full)
+        {
+            // Direct indexing for full format
+            return Hash256(
+                hash_data_ + (branch * format::INNER_NODE_HASH_SIZE));
+        }
+        else  // compression_type::inner_node_compressed
+        {
+            // Calculate storage index using popcount
+            // Count how many bits are set before this branch
+            std::uint16_t mask_before = branch_mask_ >> (16 - branch);
+            std::size_t storage_index = __builtin_popcount(mask_before);
+
+            return Hash256(
+                hash_data_ + (storage_index * format::INNER_NODE_HASH_SIZE));
+        }
+    }
+
+    /**
+     * Get compression type.
+     */
+    compression_type
+    get_compression_type() const
+    {
+        return comp_type_;
+    }
+};
 
 }  // namespace catl::nodestore

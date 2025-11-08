@@ -61,136 +61,6 @@ load_protocol(uint32_t network_id)
 }
 
 /**
- * Sparse representation of a SHAMap inner node
- * Only stores non-empty branches
- */
-class InnerNode
-{
-private:
-    std::vector<Hash256> branches_;
-    uint16_t branch_mask_;
-
-    // Get the storage index for a branch index using popcount
-    size_t
-    get_storage_index(size_t branch_index) const
-    {
-        if (branch_index >= 16 || !(branch_mask_ & (1u << (15 - branch_index))))
-            return std::numeric_limits<size_t>::max();
-
-        // Count bits set before this position
-        uint16_t mask_before = branch_mask_ >> (16 - branch_index);
-        return __builtin_popcount(mask_before);
-    }
-
-public:
-    InnerNode(uint16_t mask) : branch_mask_(mask)
-    {
-        // Allocate exactly the number of branches we need
-        size_t branch_count = __builtin_popcount(mask);
-        branches_.reserve(branch_count);
-    }
-
-    // Factory method for compressed inner node (type 2)
-    static InnerNode
-    from_compressed(const uint8_t* data, size_t size)
-    {
-        if (size < 2)
-            throw std::runtime_error("Compressed inner node too small");
-
-        // Read the bitmask
-        uint16_t mask = (static_cast<uint16_t>(data[0]) << 8) | data[1];
-
-        InnerNode node(mask);
-
-        const uint8_t* hash_ptr = data + 2;
-        size_t remaining = size - 2;
-        size_t expected_hashes = __builtin_popcount(mask);
-
-        if (remaining != expected_hashes * 32)
-            throw std::runtime_error("Size mismatch in compressed inner node");
-
-        // Add only the present hashes
-        for (size_t i = 0; i < expected_hashes; ++i)
-        {
-            node.branches_.emplace_back(hash_ptr);
-            hash_ptr += 32;
-        }
-
-        return node;
-    }
-
-    // Factory method for full inner node (type 3)
-    static InnerNode
-    from_full(const uint8_t* data, size_t size)
-    {
-        if (size != 512)
-            throw std::runtime_error("Full inner node must be 512 bytes");
-
-        // Check which branches are non-zero to build mask
-        uint16_t mask = 0;
-        for (int i = 0; i < 16; ++i)
-        {
-            Hash256 h(data + (i * 32));
-            if (h != Hash256::zero())
-                mask |= (1u << (15 - i));
-        }
-
-        InnerNode node(mask);
-
-        // Add only non-zero hashes
-        for (int i = 0; i < 16; ++i)
-        {
-            Hash256 h(data + (i * 32));
-            if (h != Hash256::zero())
-                node.branches_.push_back(h);
-        }
-
-        return node;
-    }
-
-    // Get branch by index (returns zero hash if not present)
-    Hash256
-    get_branch(size_t index) const
-    {
-        if (index >= 16)
-            return Hash256();
-
-        size_t storage_idx = get_storage_index(index);
-        if (storage_idx == std::numeric_limits<size_t>::max())
-            return Hash256();  // Empty branch
-
-        return branches_[storage_idx];
-    }
-
-    void
-    display() const
-    {
-        std::cout << "\nInner node (mask: 0x" << std::hex << std::uppercase
-                  << std::setw(4) << std::setfill('0') << branch_mask_
-                  << std::dec << std::nouppercase << "):\n";
-
-        std::cout << "Stored branches: " << branches_.size()
-                  << " (popcount: " << __builtin_popcount(branch_mask_)
-                  << ")\n\n";
-
-        for (int i = 0; i < 16; ++i)
-        {
-            std::cout << std::setw(2) << i << ": ";
-
-            Hash256 branch = get_branch(i);
-            if (branch == Hash256::zero())
-            {
-                std::cout << "(empty)\n";
-            }
-            else
-            {
-                std::cout << branch.hex() << "\n";
-            }
-        }
-    }
-};
-
-/**
  * NuDB Backend implementation for nodestore::Backend interface.
  * Wraps a NuDB store for tree walking operations.
  */
@@ -504,10 +374,19 @@ public:
                 {
                     walk_to_tx_key(db, *options_.ledger_hash, *options_.tx_key);
                 }
+                else if (options_.walk_tx)
+                {
+                    walk_all_tx(db, *options_.ledger_hash);
+                }
+                else if (options_.walk_state)
+                {
+                    walk_all_state(db, *options_.ledger_hash);
+                }
                 else
                 {
                     std::cout << "Error: --ledger-hash requires either "
-                                 "--state-key or --tx-key\n";
+                                 "--state-key, --tx-key, --walk-tx, or "
+                                 "--walk-state\n";
                 }
             }
 
@@ -742,6 +621,202 @@ private:
         catch (const std::exception& e)
         {
             std::cout << "Error during tree walk: " << e.what() << "\n";
+        }
+    }
+
+    void
+    walk_all_state(store_type& db, const std::string& ledger_hash_hex)
+    {
+        try
+        {
+            std::vector<uint8_t> ledger_hash_bytes =
+                hex_to_bytes(ledger_hash_hex);
+
+            if (ledger_hash_bytes.size() != 32)
+            {
+                std::cout
+                    << "Error: ledger hash must be 32 bytes (64 hex chars)\n";
+                return;
+            }
+
+            Hash256 ledger_hash(ledger_hash_bytes.data());
+
+            std::cout << "Walking all account states for ledger: "
+                      << ledger_hash.hex() << "\n\n";
+
+            // Fetch ledger header
+            auto ledger_blob_opt = fetch_ledger_header(db, ledger_hash);
+            if (!ledger_blob_opt)
+            {
+                std::cout << "Ledger header not found\n";
+                return;
+            }
+
+            // Parse ledger header to get account_hash
+            auto payload = ledger_blob_opt->payload();
+            if (payload.size() != 122)
+            {
+                std::cout << "Invalid ledger header size: " << payload.size()
+                          << "\n";
+                return;
+            }
+
+            // Use LedgerInfoView to parse the canonical format
+            catl::common::LedgerInfoView ledger_view(
+                payload.data() + 4,
+                catl::common::LedgerInfoView::HEADER_SIZE_WITHOUT_HASH);
+            Hash256 account_hash = ledger_view.account_hash();
+            std::cout << "Account state tree root hash: " << account_hash.hex()
+                      << "\n\n";
+
+            // Create backend and walker
+            NudbBackend backend(db);
+            catl::nodestore::TreeWalker walker(backend);
+
+            // Counter for account states
+            size_t state_count = 0;
+
+            // Walk all account states
+            walker.walk_all(
+                account_hash,
+                [&](Hash256 const& hash,
+                    catl::nodestore::node_blob const& blob) {
+                    ++state_count;
+
+                    std::cout << "Account State #" << state_count << "\n";
+                    std::cout << "  Hash: " << hash.hex() << "\n";
+                    std::cout << "  Payload size: " << blob.payload().size()
+                              << " bytes\n";
+
+                    // Output JSON if requested
+                    if (options_.output_format == "json")
+                    {
+                        try
+                        {
+                            auto payload_span = blob.payload();
+                            Slice payload_slice(
+                                payload_span.data(), payload_span.size());
+                            auto json_result = catl::xdata::json::parse_leaf(
+                                payload_slice, protocol_);
+
+                            catl::xdata::json::pretty_print(
+                                std::cout, json_result);
+                        }
+                        catch (const std::exception& e)
+                        {
+                            std::cout
+                                << "  Failed to parse as JSON: " << e.what()
+                                << "\n";
+                        }
+                    }
+
+                    std::cout << "\n";
+                });
+
+            std::cout << "Total account states: " << state_count << "\n";
+        }
+        catch (const std::exception& e)
+        {
+            std::cout << "Error during account state walk: " << e.what()
+                      << "\n";
+        }
+    }
+
+    void
+    walk_all_tx(store_type& db, const std::string& ledger_hash_hex)
+    {
+        try
+        {
+            std::vector<uint8_t> ledger_hash_bytes =
+                hex_to_bytes(ledger_hash_hex);
+
+            if (ledger_hash_bytes.size() != 32)
+            {
+                std::cout
+                    << "Error: ledger hash must be 32 bytes (64 hex chars)\n";
+                return;
+            }
+
+            Hash256 ledger_hash(ledger_hash_bytes.data());
+
+            std::cout << "Walking all transactions for ledger: "
+                      << ledger_hash.hex() << "\n\n";
+
+            // Fetch ledger header
+            auto ledger_blob_opt = fetch_ledger_header(db, ledger_hash);
+            if (!ledger_blob_opt)
+            {
+                std::cout << "Ledger header not found\n";
+                return;
+            }
+
+            // Parse ledger header to get tx_hash
+            auto payload = ledger_blob_opt->payload();
+            if (payload.size() != 122)
+            {
+                std::cout << "Invalid ledger header size: " << payload.size()
+                          << "\n";
+                return;
+            }
+
+            // Use LedgerInfoView to parse the canonical format
+            catl::common::LedgerInfoView ledger_view(
+                payload.data() + 4,
+                catl::common::LedgerInfoView::HEADER_SIZE_WITHOUT_HASH);
+            Hash256 tx_hash = ledger_view.tx_hash();
+            std::cout << "Transaction tree root hash: " << tx_hash.hex()
+                      << "\n\n";
+
+            // Create backend and walker
+            NudbBackend backend(db);
+            catl::nodestore::TreeWalker walker(backend);
+
+            // Counter for transactions
+            size_t tx_count = 0;
+
+            // Walk all transactions
+            walker.walk_all(
+                tx_hash,
+                [&](Hash256 const& hash,
+                    catl::nodestore::node_blob const& blob) {
+                    ++tx_count;
+
+                    std::cout << "Transaction #" << tx_count << "\n";
+                    std::cout << "  Hash: " << hash.hex() << "\n";
+                    std::cout << "  Payload size: " << blob.payload().size()
+                              << " bytes\n";
+
+                    // Output JSON if requested
+                    if (options_.output_format == "json")
+                    {
+                        try
+                        {
+                            auto payload_span = blob.payload();
+                            Slice payload_slice(
+                                payload_span.data(), payload_span.size());
+                            auto json_result =
+                                catl::xdata::json::parse_transaction(
+                                    payload_slice, protocol_);
+
+                            catl::xdata::json::pretty_print(
+                                std::cout, json_result);
+                        }
+                        catch (const std::exception& e)
+                        {
+                            std::cout
+                                << "  Failed to parse as JSON: " << e.what()
+                                << "\n";
+                        }
+                    }
+
+                    std::cout << "\n";
+                });
+
+            std::cout << "Total transactions: " << tx_count << "\n";
+        }
+        catch (const std::exception& e)
+        {
+            std::cout << "Error during transaction walk: " << e.what() << "\n";
         }
     }
 
