@@ -20,10 +20,8 @@ NudbBulkWriter::NudbBulkWriter(
           strategy ? std::move(strategy)
                    : std::make_unique<NoDeduplicationStrategy>())
 {
-    LOGI(
-        "Bulk writer created with ",
-        typeid(*dedupe_strategy_).name(),
-        " strategy");
+    const auto& strategy_ref = *dedupe_strategy_;
+    LOGI("Bulk writer created with ", typeid(strategy_ref).name(), " strategy");
 }
 
 // Legacy constructor for backwards compatibility
@@ -47,10 +45,8 @@ NudbBulkWriter::NudbBulkWriter(
         dedupe_strategy_ = std::make_unique<NoDeduplicationStrategy>();
     }
 
-    LOGI(
-        "Bulk writer created with ",
-        typeid(*dedupe_strategy_).name(),
-        " strategy");
+    const auto& strategy_ref = *dedupe_strategy_;
+    LOGI("Bulk writer created with ", typeid(strategy_ref).name(), " strategy");
 }
 
 NudbBulkWriter::~NudbBulkWriter()

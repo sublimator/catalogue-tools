@@ -12,7 +12,7 @@
         c -= b;  c ^= rot(b, 4);  b += a;       \
     }
 
-#define final(a,b,c)                            \
+#define hash_final(a,b,c)                       \
     {                                           \
         c ^= b; c -= rot(b,14);                 \
         a ^= c; a -= rot(c,11);                 \
@@ -302,7 +302,7 @@ uint32_t HashUtil::BobHash(const void *buf, size_t length, uint32_t seed) {
     }
   }
 
-  final(a, b, c);
+  hash_final(a, b, c);
   return c;
 }
 
@@ -571,7 +571,7 @@ void HashUtil::BobHash(const void *buf, size_t length, uint32_t *idx1,
     }
   }
 
-  final(a, b, c);
+  hash_final(a, b, c);
   *idx1 = c;
   *idx2 = b;
 }

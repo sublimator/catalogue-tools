@@ -56,7 +56,9 @@ target_link_libraries(
   nudb_bulk_duplicates_gtest
   PRIVATE catl::nodestore
           catl::core
+          catl::cuckoofilter
           NuDB
+          RocksDB::rocksdb
           Boost::filesystem
           GTest::gtest_main)
 

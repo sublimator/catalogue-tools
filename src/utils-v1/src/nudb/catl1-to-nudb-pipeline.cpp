@@ -1648,15 +1648,13 @@ CatlNudbPipeline::writer_worker()
                 else
                     total_leaf_nodes_++;
 
-                bool inserted = false;
-
                 // Handle different modes
                 if (mock_mode_.empty())
                 {
                     // Real NuDB mode
                     if (bulk_writer_)
                     {
-                        inserted = bulk_writer_->insert(
+                        bulk_writer_->insert(
                             node.hash,
                             node.blob.data(),
                             node.blob.size(),
@@ -1674,15 +1672,8 @@ CatlNudbPipeline::writer_worker()
                         node.blob.size(),
                         ec);
 
-                    if (!ec)
-                    {
-                        inserted = true;
-                    }
-                    else if (ec == ::nudb::error::key_exists)
-                    {
-                        inserted = false;  // Duplicate
-                    }
-                    else
+                    // Only error if it's not a duplicate
+                    if (ec && ec != ::nudb::error::key_exists)
                     {
                         LOGE("NuDB insert failed: ", ec.message());
                         throw std::runtime_error(
@@ -1708,14 +1699,8 @@ CatlNudbPipeline::writer_worker()
                         LOGE("Failed to write to mock disk file");
                         throw std::runtime_error("Mock disk write failed");
                     }
-
-                    inserted = true;
                 }
-                else
-                {
-                    // noop/memory mode - no tracking needed
-                    inserted = true;
-                }
+                // else: noop/memory mode - no tracking needed
             }
 
             // Flush deduplication strategy batch after processing each ledger
@@ -1735,7 +1720,6 @@ CatlNudbPipeline::dedupe_worker()
 
     uint64_t ledgers_processed = 0;
     uint64_t total_hashes_checked = 0;
-    uint64_t total_duplicates_found = 0;
 
     while (!shutdown_.load())
     {
@@ -1793,7 +1777,6 @@ CatlNudbPipeline::dedupe_worker()
         // 5. Update stats
         ledgers_processed++;
         total_hashes_checked += hashes_in_this_ledger;
-        total_duplicates_found += duplicates_for_this_ledger.size();
 
         // 6. Periodic logging (commented out - use assembly station depth
         // instead) if (ledgers_processed % 1000 == 0)
