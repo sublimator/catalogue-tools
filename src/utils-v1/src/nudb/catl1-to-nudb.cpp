@@ -259,10 +259,49 @@ public:
             // Error tracking (atomic for thread safety)
             std::atomic<bool> error_occurred{false};
             std::atomic<bool> builder_done{false};
+            std::atomic<uint64_t> final_bytes_read{
+                0};  // Set when builder finishes
+
+            // Final node operation counts (captured when builder finishes)
+            std::atomic<uint64_t> final_state_added{0};
+            std::atomic<uint64_t> final_state_updated{0};
+            std::atomic<uint64_t> final_state_deleted{0};
+            std::atomic<uint64_t> final_tx_added{0};
 
             // Shared start time for accurate elapsed time across builder +
             // drain
             auto import_start_time = std::chrono::steady_clock::now();
+
+            // Helper to populate progress counters from pipeline (DRY)
+            auto populate_progress =
+                [&](StatsReportSink::ProgressCounters& progress,
+                    uint32_t current_ledger,
+                    const std::string& status) {
+                    progress.start_ledger = start_ledger;
+                    progress.end_ledger = end_ledger;
+                    progress.current_ledger = current_ledger;
+                    progress.ledgers_processed = current_ledger - start_ledger;
+                    progress.inner_nodes = pipeline.get_total_inner_nodes();
+                    progress.leaf_nodes = pipeline.get_total_leaf_nodes();
+                    progress.duplicates = pipeline.get_duplicate_count();
+
+                    // Total nodes by type
+                    progress.total_state_inner =
+                        pipeline.get_total_state_inner();
+                    progress.total_tx_inner = pipeline.get_total_tx_inner();
+                    progress.total_state_leaf = pipeline.get_total_state_leaf();
+                    progress.total_tx_leaf = pipeline.get_total_tx_leaf();
+
+                    // Duplicates by type
+                    progress.duplicates_state_inner =
+                        pipeline.get_duplicate_state_inner_count();
+                    progress.duplicates_tx_inner =
+                        pipeline.get_duplicate_tx_inner_count();
+                    progress.duplicates_state_leaf =
+                        pipeline.get_duplicate_state_leaf_count();
+
+                    progress.status = status;
+                };
 
             // Thread 1: Build + Snapshot
             std::thread builder_thread([&]() {
@@ -653,17 +692,8 @@ public:
                                     pipeline.get_write_queue_depth();
 
                                 StatsReportSink::ProgressCounters progress;
-                                progress.start_ledger = start_ledger;
-                                progress.end_ledger = end_ledger;
-                                progress.current_ledger = ledger_seq;
-                                progress.ledgers_processed =
-                                    ledger_seq - start_ledger;
-                                progress.inner_nodes =
-                                    pipeline.get_total_inner_nodes();
-                                progress.leaf_nodes =
-                                    pipeline.get_total_leaf_nodes();
-                                progress.duplicates =
-                                    pipeline.get_duplicate_count();
+                                populate_progress(
+                                    progress, ledger_seq, "Processing");
 
                                 StatsReportSink::PerformanceMetrics perf;
                                 perf.elapsed_sec = elapsed_ms / 1000.0;
@@ -731,11 +761,17 @@ public:
                     }
 
                     LOGI("[Builder] Done");
+                    final_bytes_read.store(reader.body_bytes_consumed());
+                    final_state_added.store(total_state_nodes_added);
+                    final_state_updated.store(total_state_nodes_updated);
+                    final_state_deleted.store(total_state_nodes_deleted);
+                    final_tx_added.store(total_tx_nodes_added);
                     builder_done.store(true);
                 }
                 catch (const std::exception& e)
                 {
                     LOGE("[Builder] Exception: ", e.what());
+                    // Can't get stats from builder scope here (out of scope)
                     error_occurred.store(true);
                     builder_done.store(true);
                 }
@@ -792,15 +828,7 @@ public:
                     queues.write_queue = write_depth;
 
                     StatsReportSink::ProgressCounters progress;
-                    progress.start_ledger = start_ledger;
-                    progress.end_ledger = end_ledger;
-                    progress.current_ledger =
-                        end_ledger;  // All built, draining queues
-                    progress.ledgers_processed = end_ledger - start_ledger;
-                    progress.inner_nodes = pipeline.get_total_inner_nodes();
-                    progress.leaf_nodes = pipeline.get_total_leaf_nodes();
-                    progress.duplicates = pipeline.get_duplicate_count();
-                    progress.status = "Draining";
+                    populate_progress(progress, end_ledger, "Draining");
 
                     StatsReportSink::PerformanceMetrics perf;
                     uint64_t current_bytes_written =
@@ -822,17 +850,25 @@ public:
                            elapsed_ms) /
                             1024 / 1024
                         : 0;
+                    uint64_t bytes_read = final_bytes_read.load();
+                    perf.catl_read_mb_per_sec = elapsed_ms > 0
+                        ? (static_cast<double>(bytes_read) * 1000.0 /
+                           elapsed_ms) /
+                            1024 / 1024
+                        : 0;
+                    perf.bytes_read = bytes_read;
                     perf.bytes_written = current_bytes_written;
                     perf.bytes_uncompressed = current_bytes_uncompressed;
                     perf.compression_ratio = current_bytes_uncompressed > 0
                         ? static_cast<double>(current_bytes_written) /
                             current_bytes_uncompressed
                         : 1.0;
-                    // Note: can't update bytes_read or catl_read_mb_per_sec
-                    // during drain (reader closed)
 
                     StatsReportSink::NodeOperations ops;
-                    // TODO: Save these from builder thread before drain
+                    ops.state_added = final_state_added.load();
+                    ops.state_updated = final_state_updated.load();
+                    ops.state_deleted = final_state_deleted.load();
+                    ops.tx_added = final_tx_added.load();
 
                     StatsReportSink::DeduplicationStats dedup_stats;
                     // TODO: Wire up actual RocksDB stats
@@ -872,14 +908,7 @@ public:
                     StatsReportSink::QueueDepths queues;  // All zeros
 
                     StatsReportSink::ProgressCounters progress;
-                    progress.start_ledger = start_ledger;
-                    progress.end_ledger = end_ledger;
-                    progress.current_ledger = end_ledger;
-                    progress.ledgers_processed = end_ledger - start_ledger;
-                    progress.inner_nodes = pipeline.get_total_inner_nodes();
-                    progress.leaf_nodes = pipeline.get_total_leaf_nodes();
-                    progress.duplicates = pipeline.get_duplicate_count();
-                    progress.status = "Rekeying";
+                    populate_progress(progress, end_ledger, "Rekeying");
 
                     StatsReportSink::PerformanceMetrics perf;
                     uint64_t current_bytes_written =
@@ -901,6 +930,13 @@ public:
                            elapsed_ms) /
                             1024 / 1024
                         : 0;
+                    uint64_t bytes_read = final_bytes_read.load();
+                    perf.catl_read_mb_per_sec = elapsed_ms > 0
+                        ? (static_cast<double>(bytes_read) * 1000.0 /
+                           elapsed_ms) /
+                            1024 / 1024
+                        : 0;
+                    perf.bytes_read = bytes_read;
                     perf.bytes_written = current_bytes_written;
                     perf.bytes_uncompressed = current_bytes_uncompressed;
                     perf.compression_ratio = current_bytes_uncompressed > 0
@@ -909,6 +945,11 @@ public:
                         : 1.0;
 
                     StatsReportSink::NodeOperations ops;
+                    ops.state_added = final_state_added.load();
+                    ops.state_updated = final_state_updated.load();
+                    ops.state_deleted = final_state_deleted.load();
+                    ops.tx_added = final_tx_added.load();
+
                     StatsReportSink::DeduplicationStats dedup_stats;
 
                     stats_sink->report_stats(

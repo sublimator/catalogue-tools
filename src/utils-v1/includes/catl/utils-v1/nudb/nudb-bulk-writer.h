@@ -125,6 +125,15 @@ public:
     }
 
     /**
+     * Get duplicate count by type
+     */
+    uint64_t
+    get_duplicate_count_by_type(uint8_t node_type) const
+    {
+        return dedupe_strategy_->get_duplicate_count_by_type(node_type);
+    }
+
+    /**
      * Get total bytes written (excluding duplicates)
      */
     uint64_t

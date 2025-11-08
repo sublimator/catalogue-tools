@@ -76,14 +76,31 @@ struct HashedLedger
     }
 };
 
+// Node type enumeration for tracking
+enum class PipelineNodeType : uint8_t {
+    StateInner = 0,  // State tree inner node
+    TxInner = 1,     // Transaction tree inner node
+    StateLeaf = 2,   // Account state leaf
+    TxLeaf = 3       // Transaction leaf
+};
+
+/**
+ * Deduplication strategy for different node types
+ */
+enum class NodeDedupeStrategy {
+    All,       // Dedupe all node types (StateInner, TxInner, StateLeaf, TxLeaf)
+    TxLeaves,  // Skip TxLeaf deduplication
+    TxAll      // Skip both TxInner and TxLeaf deduplication (default - fastest)
+};
+
 // Compressed node blob ready for writing
 struct CompressedNode
 {
     uint32_t ledger_seq;  // For ordering
     Hash256 hash;
-    std::vector<uint8_t> blob;  // Compressed data
-    size_t uncompressed_size;   // Original size before compression
-    uint8_t node_type;          // 0=inner, 1=leaf
+    std::vector<uint8_t> blob;   // Compressed data
+    size_t uncompressed_size;    // Original size before compression
+    PipelineNodeType node_type;  // Inner, StateLeaf, or TxLeaf
 };
 
 // Deduplication work item (for parallel dedupe thread)
@@ -252,6 +269,16 @@ public:
     }
 
     /**
+     * Set node deduplication strategy
+     * @param strategy Which node types to deduplicate
+     */
+    void
+    set_node_dedupe_strategy(NodeDedupeStrategy strategy)
+    {
+        node_dedupe_strategy_ = strategy;
+    }
+
+    /**
      * Set stats report sink for real-time monitoring
      * @param sink Shared pointer to sink
      */
@@ -310,21 +337,48 @@ public:
     }
 
     /**
-     * Get total inner nodes written
+     * Get total inner nodes written (state + tx)
      */
     uint64_t
     get_total_inner_nodes() const
     {
-        return total_inner_nodes_.load();
+        return total_state_inner_.load() + total_tx_inner_.load();
     }
 
     /**
-     * Get total leaf nodes written
+     * Get total leaf nodes written (state + tx)
      */
     uint64_t
     get_total_leaf_nodes() const
     {
-        return total_leaf_nodes_.load();
+        return total_state_leaf_.load() + total_tx_leaf_.load();
+    }
+
+    /**
+     * Get total nodes by type
+     */
+    uint64_t
+    get_total_state_inner() const
+    {
+        return total_state_inner_.load();
+    }
+
+    uint64_t
+    get_total_tx_inner() const
+    {
+        return total_tx_inner_.load();
+    }
+
+    uint64_t
+    get_total_state_leaf() const
+    {
+        return total_state_leaf_.load();
+    }
+
+    uint64_t
+    get_total_tx_leaf() const
+    {
+        return total_tx_leaf_.load();
     }
 
     /**
@@ -332,6 +386,24 @@ public:
      */
     uint64_t
     get_duplicate_count() const;
+
+    /**
+     * Get state inner duplicate count
+     */
+    uint64_t
+    get_duplicate_state_inner_count() const;
+
+    /**
+     * Get tx inner duplicate count
+     */
+    uint64_t
+    get_duplicate_tx_inner_count() const;
+
+    /**
+     * Get state leaf duplicate count
+     */
+    uint64_t
+    get_duplicate_state_leaf_count() const;
 
     /**
      * Get hasher queue depth (ledgers waiting to be hashed)
@@ -416,6 +488,8 @@ private:
     std::string mock_mode_ = "";  // Mock mode: "", "noop", "memory", or "disk"
     std::string dedupe_strategy_ = "cuckoo-rocks";  // Deduplication strategy
     bool use_dedupe_thread_ = false;  // Run dedupe in separate parallel thread
+    NodeDedupeStrategy node_dedupe_strategy_ =
+        NodeDedupeStrategy::TxAll;  // Which node types to deduplicate
 
     // Stats reporting (optional, for dashboard or metrics export)
     std::shared_ptr<StatsReportSink> stats_sink_;
@@ -445,8 +519,18 @@ private:
     // Track total bytes written to NuDB for stats
     std::atomic<uint64_t> total_bytes_written_{0};       // Compressed bytes
     std::atomic<uint64_t> total_bytes_uncompressed_{0};  // Uncompressed bytes
-    std::atomic<uint64_t> total_inner_nodes_{0};         // Count of inner nodes
-    std::atomic<uint64_t> total_leaf_nodes_{0};          // Count of leaf nodes
+
+    // Track total nodes by type
+    std::atomic<uint64_t> total_state_inner_{0};  // State inner nodes
+    std::atomic<uint64_t> total_tx_inner_{0};     // Tx inner nodes
+    std::atomic<uint64_t> total_state_leaf_{0};   // State leaf nodes
+    std::atomic<uint64_t> total_tx_leaf_{0};      // Tx leaf nodes
+
+    // Track duplicates by node type (TxLeaf is never deduplicated)
+    std::atomic<uint64_t> duplicates_state_inner_{0};  // State inner duplicates
+    std::atomic<uint64_t> duplicates_tx_inner_{0};     // Tx inner duplicates
+    std::atomic<uint64_t> duplicates_state_leaf_{0};   // State leaf duplicates
+    // Note: TxLeaf is never deduplicated (always 0 duplicates)
 
     // Helper function to hash a SHAMap using thread pool (or direct for single
     // thread) NOTE: Performance testing revealed that single-threaded hashing

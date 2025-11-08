@@ -31,9 +31,21 @@ public:
         uint32_t end_ledger = 0;
         uint32_t current_ledger = 0;
         uint64_t ledgers_processed = 0;
-        uint64_t inner_nodes = 0;
-        uint64_t leaf_nodes = 0;
-        uint64_t duplicates = 0;
+        uint64_t inner_nodes = 0;  // Total inner (state + tx)
+        uint64_t leaf_nodes = 0;   // Total leaf (state + tx)
+        uint64_t duplicates = 0;   // Total duplicates
+
+        // Total nodes by type
+        uint64_t total_state_inner = 0;
+        uint64_t total_tx_inner = 0;
+        uint64_t total_state_leaf = 0;
+        uint64_t total_tx_leaf = 0;
+
+        // Duplicates by type
+        uint64_t duplicates_state_inner = 0;
+        uint64_t duplicates_tx_inner = 0;
+        uint64_t duplicates_state_leaf = 0;
+
         std::string status =
             "Processing";  // "Processing", "Draining", "Rekeying", "Complete"
     };

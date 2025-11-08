@@ -58,6 +58,12 @@ public:
     get_duplicate_count() const = 0;
 
     /**
+     * Get duplicate count by type
+     */
+    virtual uint64_t
+    get_duplicate_count_by_type(uint8_t node_type) const = 0;
+
+    /**
      * Print strategy-specific statistics
      * @param unique_count Total unique keys written
      */
@@ -81,6 +87,11 @@ public:
 
     uint64_t
     get_duplicate_count() const override
+    {
+        return 0;
+    }
+
+    uint64_t get_duplicate_count_by_type(uint8_t) const override
     {
         return 0;
     }
@@ -232,7 +243,7 @@ public:
     }
 
     bool
-    check_and_mark(const Hash256& key, size_t, uint8_t) override
+    check_and_mark(const Hash256& key, size_t, uint8_t node_type) override
     {
         if (!db_ || !cuckoo_filter_)
         {
@@ -277,8 +288,30 @@ public:
         if (status.ok())
         {
             // Key exists in RocksDB → True duplicate!
+
+            // TxLeaf: Never deduplicate, always write
+            if (node_type == 3)
+            {
+                return false;  // Not a duplicate, write it anyway
+            }
+
             duplicate_count_++;
             true_duplicates_++;
+
+            // Track duplicates by type (StateInner=0, TxInner=1, StateLeaf=2)
+            switch (node_type)
+            {
+                case 0:  // StateInner
+                    duplicates_state_inner_++;
+                    break;
+                case 1:  // TxInner
+                    duplicates_tx_inner_++;
+                    break;
+                case 2:  // StateLeaf
+                    duplicates_state_leaf_++;
+                    break;
+            }
+
             return true;  // Skip write
         }
 
@@ -336,7 +369,25 @@ public:
     uint64_t
     get_duplicate_count() const override
     {
-        return duplicate_count_;
+        return duplicate_count_.load();
+    }
+
+    uint64_t
+    get_duplicate_count_by_type(uint8_t node_type) const override
+    {
+        switch (node_type)
+        {
+            case 0:  // StateInner
+                return duplicates_state_inner_.load();
+            case 1:  // TxInner
+                return duplicates_tx_inner_.load();
+            case 2:  // StateLeaf
+                return duplicates_state_leaf_.load();
+            case 3:        // TxLeaf
+                return 0;  // Never deduplicated
+            default:
+                return 0;
+        }
     }
 
     void
@@ -345,7 +396,8 @@ public:
         LOGI("");
         LOGI("📊 DEDUPLICATION STATS (Cuckoo+RocksDB Hybrid Strategy):");
         LOGI("  - Unique keys written: ", unique_count);
-        LOGI("  - Total duplicate attempts: ", duplicate_count_);
+        uint64_t dup_count = duplicate_count_.load();
+        LOGI("  - Total duplicate attempts: ", dup_count);
 
         if (unique_count > 0)
         {
@@ -353,49 +405,53 @@ public:
                 "  - Average duplicates per unique key: ",
                 std::fixed,
                 std::setprecision(2),
-                (static_cast<double>(duplicate_count_) / unique_count));
+                (static_cast<double>(dup_count) / unique_count));
         }
 
         LOGI("");
         LOGI("  🚀 Performance Breakdown:");
-        uint64_t total_checks = fast_path_hits_ + slow_path_hits_;
+        uint64_t fast_hits = fast_path_hits_.load();
+        uint64_t slow_hits = slow_path_hits_.load();
+        uint64_t total_checks = fast_hits + slow_hits;
         if (total_checks > 0)
         {
             LOGI(
                 "  - Fast path hits (cuckoo only): ",
-                fast_path_hits_,
+                fast_hits,
                 " (",
                 std::fixed,
                 std::setprecision(2),
-                (fast_path_hits_ * 100.0 / total_checks),
+                (fast_hits * 100.0 / total_checks),
                 "%)");
             LOGI(
                 "  - Slow path hits (RocksDB query): ",
-                slow_path_hits_,
+                slow_hits,
                 " (",
                 std::fixed,
                 std::setprecision(2),
-                (slow_path_hits_ * 100.0 / total_checks),
+                (slow_hits * 100.0 / total_checks),
                 "%)");
         }
 
-        if (slow_path_hits_ > 0)
+        if (slow_hits > 0)
         {
+            uint64_t false_pos = cuckoo_false_positives_.load();
+            uint64_t true_dups = true_duplicates_.load();
             LOGI(
                 "  - Cuckoo false positives: ",
-                cuckoo_false_positives_,
+                false_pos,
                 " (",
                 std::fixed,
                 std::setprecision(2),
-                (cuckoo_false_positives_ * 100.0 / slow_path_hits_),
+                (false_pos * 100.0 / slow_hits),
                 "% of slow path)");
             LOGI(
                 "  - True duplicates: ",
-                true_duplicates_,
+                true_dups,
                 " (",
                 std::fixed,
                 std::setprecision(2),
-                (true_duplicates_ * 100.0 / slow_path_hits_),
+                (true_dups * 100.0 / slow_hits),
                 "% of slow path)");
         }
 
@@ -431,13 +487,22 @@ private:
     ::rocksdb::WriteBatch write_batch_;
     size_t batch_size_ = 0;
 
-    // Counters
-    uint64_t duplicate_count_ = 0;
-    uint64_t unique_keys_ = 0;
-    uint64_t fast_path_hits_ = 0;  // Cuckoo said "not present"
-    uint64_t slow_path_hits_ = 0;  // Cuckoo said "maybe", checked RocksDB
-    uint64_t cuckoo_false_positives_ = 0;  // Slow path, but not in RocksDB
-    uint64_t true_duplicates_ = 0;         // Slow path, confirmed in RocksDB
+    // Counters (atomic for thread-safe reads from stats thread)
+    std::atomic<uint64_t> duplicate_count_{0};
+    std::atomic<uint64_t> unique_keys_{0};
+    std::atomic<uint64_t> fast_path_hits_{0};  // Cuckoo said "not present"
+    std::atomic<uint64_t> slow_path_hits_{
+        0};  // Cuckoo said "maybe", checked RocksDB
+    std::atomic<uint64_t> cuckoo_false_positives_{
+        0};  // Slow path, but not in RocksDB
+    std::atomic<uint64_t> true_duplicates_{
+        0};  // Slow path, confirmed in RocksDB
+
+    // Per-type duplicate counters (atomic for thread-safe reads)
+    std::atomic<uint64_t> duplicates_state_inner_{0};  // State inner duplicates
+    std::atomic<uint64_t> duplicates_tx_inner_{0};     // Tx inner duplicates
+    std::atomic<uint64_t> duplicates_state_leaf_{0};   // State leaf duplicates
+    // Note: TxLeaf is never deduplicated
 };
 
 }  // namespace catl::v1::utils::nudb

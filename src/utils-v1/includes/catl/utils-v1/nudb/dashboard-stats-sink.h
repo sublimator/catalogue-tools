@@ -54,6 +54,18 @@ public:
         stats.inner_nodes = progress.inner_nodes;
         stats.leaf_nodes = progress.leaf_nodes;
         stats.duplicates = progress.duplicates;
+
+        // Total nodes by type
+        stats.total_state_inner = progress.total_state_inner;
+        stats.total_tx_inner = progress.total_tx_inner;
+        stats.total_state_leaf = progress.total_state_leaf;
+        stats.total_tx_leaf = progress.total_tx_leaf;
+
+        // Duplicates by type
+        stats.duplicates_state_inner = progress.duplicates_state_inner;
+        stats.duplicates_tx_inner = progress.duplicates_tx_inner;
+        stats.duplicates_state_leaf = progress.duplicates_state_leaf;
+
         stats.status = progress.status;
 
         stats.elapsed_sec = perf.elapsed_sec;
