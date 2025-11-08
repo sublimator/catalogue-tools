@@ -291,6 +291,8 @@ public:
                     progress.total_tx_inner = pipeline.get_total_tx_inner();
                     progress.total_state_leaf = pipeline.get_total_state_leaf();
                     progress.total_tx_leaf = pipeline.get_total_tx_leaf();
+                    progress.total_ledger_headers =
+                        pipeline.get_total_ledger_headers();
 
                     // Duplicates by type
                     progress.duplicates_state_inner =

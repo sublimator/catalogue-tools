@@ -62,6 +62,7 @@ PipelineDashboard::update_stats(const Stats& stats)
     total_tx_inner_ = stats.total_tx_inner;
     total_state_leaf_ = stats.total_state_leaf;
     total_tx_leaf_ = stats.total_tx_leaf;
+    total_ledger_headers_ = stats.total_ledger_headers;
 
     // Duplicates by type
     duplicates_state_inner_ = stats.duplicates_state_inner;
@@ -416,6 +417,11 @@ PipelineDashboard::run_ui()
                 text(format_number(total_tx_leaf_.load())) | bold,
                 text(" / "),
                 text("0") | dim,  // Never deduplicated
+            }),
+            hbox({
+                text("Ledger Hdr:  "),
+                text(format_number(total_ledger_headers_.load())) | bold |
+                    color(Color::Cyan),
             }),
             separator(),
             text("💾 I/O (avg since start)") | bold | color(Color::Cyan),

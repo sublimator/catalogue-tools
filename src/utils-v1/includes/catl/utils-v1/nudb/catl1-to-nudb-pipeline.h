@@ -2,6 +2,7 @@
 
 #include "catl/common/ledger-info.h"
 #include "catl/core/logger.h"
+#include "catl/crypto/sha512-half-hasher.h"
 #include "catl/shamap/shamap.h"
 #include "catl/utils-v1/nudb/nudb-bulk-writer.h"  // For NudbBulkWriter
 #include "catl/utils-v1/nudb/stats-report-sink.h"
@@ -78,20 +79,69 @@ struct HashedLedger
 
 // Node type enumeration for tracking
 enum class PipelineNodeType : uint8_t {
-    StateInner = 0,  // State tree inner node
-    TxInner = 1,     // Transaction tree inner node
-    StateLeaf = 2,   // Account state leaf
-    TxLeaf = 3       // Transaction leaf
+    StateInner = 0,   // State tree inner node
+    TxInner = 1,      // Transaction tree inner node
+    StateLeaf = 2,    // Account state leaf
+    TxLeaf = 3,       // Transaction leaf
+    LedgerHeader = 4  // Ledger header (canonical 118-byte format)
 };
 
 /**
- * Deduplication strategy for different node types
+ * Deduplication skip mask - bitset where each bit represents a PipelineNodeType
+ * If bit N is set, skip deduplication for PipelineNodeType(N)
+ *
+ * Common patterns:
+ * - 0x00 = dedupe all types
+ * - 0x08 = skip TxLeaf only (1 << 3)
+ * - 0x0A = skip TxInner and TxLeaf (1 << 1 | 1 << 3) [default - fastest]
+ * - 0x10 = skip LedgerHeader only (1 << 4) [always set]
  */
-enum class NodeDedupeStrategy {
-    All,       // Dedupe all node types (StateInner, TxInner, StateLeaf, TxLeaf)
-    TxLeaves,  // Skip TxLeaf deduplication
-    TxAll      // Skip both TxInner and TxLeaf deduplication (default - fastest)
-};
+using DedupeSkipMask = uint8_t;
+
+// Common deduplication patterns
+namespace DedupePatterns {
+constexpr DedupeSkipMask DEDUPE_ALL = 0x00;        // Dedupe everything
+constexpr DedupeSkipMask SKIP_TX_LEAF = (1 << 3);  // Skip TxLeaf
+constexpr DedupeSkipMask SKIP_TX_ALL =
+    (1 << 1) | (1 << 3);  // Skip TxInner + TxLeaf (default)
+constexpr DedupeSkipMask SKIP_LEDGER_HEADER =
+    (1 << 4);  // Skip LedgerHeader (always set)
+};             // namespace DedupePatterns
+
+/**
+ * Convert dedupe skip mask to human-readable string
+ * e.g., "TxInner,TxLeaf,LedgerHeader" or "All" if 0x00
+ */
+inline std::string
+dedupe_skip_mask_to_string(DedupeSkipMask mask)
+{
+    if (mask == 0x00)
+        return "All";
+
+    std::vector<std::string> skipped;
+    if (mask & (1 << 0))
+        skipped.push_back("StateInner");
+    if (mask & (1 << 1))
+        skipped.push_back("TxInner");
+    if (mask & (1 << 2))
+        skipped.push_back("StateLeaf");
+    if (mask & (1 << 3))
+        skipped.push_back("TxLeaf");
+    if (mask & (1 << 4))
+        skipped.push_back("LedgerHeader");
+
+    if (skipped.empty())
+        return "None";
+
+    std::string result;
+    for (size_t i = 0; i < skipped.size(); ++i)
+    {
+        result += skipped[i];
+        if (i < skipped.size() - 1)
+            result += ",";
+    }
+    return result;
+}
 
 // Compressed node blob ready for writing
 struct CompressedNode
@@ -269,13 +319,14 @@ public:
     }
 
     /**
-     * Set node deduplication strategy
-     * @param strategy Which node types to deduplicate
+     * Set node deduplication skip mask
+     * @param mask Bitset where bit N = skip deduplication for
+     * PipelineNodeType(N)
      */
     void
-    set_node_dedupe_strategy(NodeDedupeStrategy strategy)
+    set_dedupe_skip_mask(DedupeSkipMask mask)
     {
-        node_dedupe_strategy_ = strategy;
+        dedupe_skip_mask_ = mask;
     }
 
     // TODO: Add setter for cuckoo filter expected_items size
@@ -382,6 +433,21 @@ public:
     get_total_tx_leaf() const
     {
         return total_tx_leaf_.load();
+    }
+
+    uint64_t
+    get_total_ledger_headers() const
+    {
+        return total_ledger_headers_.load();
+    }
+
+    /**
+     * Get dedupe skip mask (for stats display)
+     */
+    DedupeSkipMask
+    get_dedupe_skip_mask() const
+    {
+        return dedupe_skip_mask_;
     }
 
     /**
@@ -491,8 +557,10 @@ private:
     std::string mock_mode_ = "";  // Mock mode: "", "noop", "memory", or "disk"
     std::string dedupe_strategy_ = "cuckoo-rocks";  // Deduplication strategy
     bool use_dedupe_thread_ = false;  // Run dedupe in separate parallel thread
-    NodeDedupeStrategy node_dedupe_strategy_ =
-        NodeDedupeStrategy::TxAll;  // Which node types to deduplicate
+
+    // Default: skip TxInner, TxLeaf, and LedgerHeader deduplication
+    DedupeSkipMask dedupe_skip_mask_ =
+        DedupePatterns::SKIP_TX_ALL | DedupePatterns::SKIP_LEDGER_HEADER;
 
     // Stats reporting (optional, for dashboard or metrics export)
     std::shared_ptr<StatsReportSink> stats_sink_;
@@ -528,6 +596,8 @@ private:
     std::atomic<uint64_t> total_tx_inner_{0};     // Tx inner nodes
     std::atomic<uint64_t> total_state_leaf_{0};   // State leaf nodes
     std::atomic<uint64_t> total_tx_leaf_{0};      // Tx leaf nodes
+    std::atomic<uint64_t> total_ledger_headers_{
+        0};  // Ledger headers (one per ledger)
 
     // Track duplicates by node type (TxLeaf is never deduplicated)
     std::atomic<uint64_t> duplicates_state_inner_{0};  // State inner duplicates

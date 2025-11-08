@@ -31,6 +31,54 @@ LedgerInfo::to_string() const
     return oss.str();
 }
 
+void
+LedgerInfo::serialize_canonical(uint8_t* buffer) const
+{
+    // Canonical format is 118 bytes WITHOUT the hash field
+    // All multi-byte integers are big-endian (network byte order)
+    // Uses platform-independent serialization functions
+
+    size_t offset = 0;
+
+    // seq: 4 bytes (big-endian)
+    put_uint32_be(buffer + offset, seq);
+    offset += 4;
+
+    // drops: 8 bytes (big-endian)
+    put_uint64_be(buffer + offset, drops);
+    offset += 8;
+
+    // parent_hash: 32 bytes (raw)
+    std::memcpy(buffer + offset, parent_hash.data(), 32);
+    offset += 32;
+
+    // tx_hash: 32 bytes (raw)
+    std::memcpy(buffer + offset, tx_hash.data(), 32);
+    offset += 32;
+
+    // account_hash: 32 bytes (raw)
+    std::memcpy(buffer + offset, account_hash.data(), 32);
+    offset += 32;
+
+    // parent_close_time: 4 bytes (big-endian)
+    put_uint32_be(buffer + offset, parent_close_time);
+    offset += 4;
+
+    // close_time: 4 bytes (big-endian)
+    put_uint32_be(buffer + offset, close_time);
+    offset += 4;
+
+    // close_time_resolution: 1 byte
+    buffer[offset] = close_time_resolution;
+    offset += 1;
+
+    // close_flags: 1 byte
+    buffer[offset] = close_flags;
+    offset += 1;
+
+    // Total: 4 + 8 + 32 + 32 + 32 + 4 + 4 + 1 + 1 = 118 bytes
+}
+
 // -------------------- LedgerInfoView implementation --------------------
 
 LedgerInfoView::LedgerInfoView(const uint8_t* header_data, size_t size)
@@ -42,19 +90,13 @@ LedgerInfoView::LedgerInfoView(const uint8_t* header_data, size_t size)
 uint32_t
 LedgerInfoView::seq() const
 {
-    uint32_t result;
-    std::memcpy(&result, data + offsetof(LedgerInfo, seq), sizeof(uint32_t));
-    // Convert from big-endian (network byte order) to host byte order
-    return __builtin_bswap32(result);
+    return get_uint32_be(data + offsetof(LedgerInfo, seq));
 }
 
 uint64_t
 LedgerInfoView::drops() const
 {
-    uint64_t result;
-    std::memcpy(&result, data + offsetof(LedgerInfo, drops), sizeof(uint64_t));
-    // Convert from big-endian (network byte order) to host byte order
-    return __builtin_bswap64(result);
+    return get_uint64_be(data + offsetof(LedgerInfo, drops));
 }
 
 Hash256
@@ -78,23 +120,13 @@ LedgerInfoView::account_hash() const
 uint32_t
 LedgerInfoView::parent_close_time() const
 {
-    uint32_t result;
-    std::memcpy(
-        &result,
-        data + offsetof(LedgerInfo, parent_close_time),
-        sizeof(uint32_t));
-    // Convert from big-endian (network byte order) to host byte order
-    return __builtin_bswap32(result);
+    return get_uint32_be(data + offsetof(LedgerInfo, parent_close_time));
 }
 
 uint32_t
 LedgerInfoView::close_time() const
 {
-    uint32_t result;
-    std::memcpy(
-        &result, data + offsetof(LedgerInfo, close_time), sizeof(uint32_t));
-    // Convert from big-endian (network byte order) to host byte order
-    return __builtin_bswap32(result);
+    return get_uint32_be(data + offsetof(LedgerInfo, close_time));
 }
 
 uint8_t

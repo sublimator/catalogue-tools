@@ -60,6 +60,7 @@ public:
         stats.total_tx_inner = progress.total_tx_inner;
         stats.total_state_leaf = progress.total_state_leaf;
         stats.total_tx_leaf = progress.total_tx_leaf;
+        stats.total_ledger_headers = progress.total_ledger_headers;
 
         // Duplicates by type
         stats.duplicates_state_inner = progress.duplicates_state_inner;

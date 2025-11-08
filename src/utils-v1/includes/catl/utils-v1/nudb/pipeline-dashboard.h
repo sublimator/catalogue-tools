@@ -59,6 +59,7 @@ public:
         uint64_t total_tx_inner = 0;
         uint64_t total_state_leaf = 0;
         uint64_t total_tx_leaf = 0;
+        uint64_t total_ledger_headers = 0;
 
         // Duplicates by type
         uint64_t duplicates_state_inner = 0;
@@ -154,6 +155,7 @@ private:
     std::atomic<uint64_t> total_tx_inner_{0};
     std::atomic<uint64_t> total_state_leaf_{0};
     std::atomic<uint64_t> total_tx_leaf_{0};
+    std::atomic<uint64_t> total_ledger_headers_{0};
 
     // Duplicates by type
     std::atomic<uint64_t> duplicates_state_inner_{0};
