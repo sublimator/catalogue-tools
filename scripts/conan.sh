@@ -56,6 +56,11 @@ EOF
   fi
 fi
 
+# Export local recipes
+echo "Exporting local recipes..."
+conan export external/ftxui/all --name=ftxui --version=6.1.9 --user=catalogue-tools --channel=stable
+conan export external/libsecp256k1/all --name=libsecp256k1 --version=0.6.0 --user=catalogue-tools --channel=stable
+
 conan install $ROOT_DIR \
   --build=missing \
   --output-folder="$BUILD_DIR" \
