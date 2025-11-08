@@ -21,6 +21,28 @@ namespace catl::shamap {
 // External destructor logging partition
 extern LogPartition destructor_log;
 
+namespace {
+// Helper to get hash prefix for a node type
+std::array<unsigned char, 4>
+get_node_prefix(SHAMapNodeType type)
+{
+    switch (type)
+    {
+        case tnINNER:
+            return HashPrefix::inner_node;
+        case tnTRANSACTION_NM:
+        case tnTRANSACTION_MD:
+            return HashPrefix::tx_node;
+        case tnACCOUNT_STATE:
+            return HashPrefix::leaf_node;
+        default:
+            throw std::runtime_error(
+                "get_node_prefix: unsupported node type " +
+                std::to_string(static_cast<int>(type)));
+    }
+}
+}  // anonymous namespace
+
 //----------------------------------------------------------
 // SHAMapLeafNodeT Implementation
 //----------------------------------------------------------
@@ -72,21 +94,7 @@ template <typename Traits>
 void
 SHAMapLeafNodeT<Traits>::update_hash(SHAMapOptions const&)
 {
-    std::array<unsigned char, 4> prefix = {0, 0, 0, 0};
-    auto set = [&prefix](auto& from) {
-        std::memcpy(prefix.data(), from.data(), 4);
-    };
-    switch (type)
-    {
-        case tnTRANSACTION_NM:
-        case tnTRANSACTION_MD:
-            set(HashPrefix::tx_node);
-            break;
-        case tnACCOUNT_STATE:
-        default:
-            set(HashPrefix::leaf_node);
-            break;
-    }
+    auto prefix = get_node_prefix(type);
 
     try
     {
@@ -151,31 +159,44 @@ template <typename Traits>
 size_t
 SHAMapLeafNodeT<Traits>::serialized_size() const
 {
-    // For now, just the item data size
-    // TODO: May need to add overhead for metadata (type byte, varint size,
-    // etc.)
+    // Leaf node format matches hash calculation:
+    // 4-byte prefix + item data + 32-byte key
     if (!item)
     {
         return 0;
     }
-    return item->slice().size();
+    return 4 + item->slice().size() + Key::size();
 }
 
 template <typename Traits>
 size_t
 SHAMapLeafNodeT<Traits>::write_to_buffer(uint8_t* ptr) const
 {
-    // Leaf node format: just the raw item data for now
-    // TODO: May need to add metadata (type byte, varint size, etc.)
+    // Leaf node format matches hash calculation:
+    // 4-byte prefix + item data + 32-byte key
+    // This ensures the key can be extracted from the last 32 bytes for tree
+    // walking
     if (!item)
     {
         // No item - this shouldn't happen, but handle gracefully
         return 0;
     }
 
+    auto prefix = get_node_prefix(type);
+
+    // Write prefix
+    std::memcpy(ptr, prefix.data(), 4);
+    ptr += 4;
+
+    // Write item data
     const Slice& data = item->slice();
     std::memcpy(ptr, data.data(), data.size());
-    return data.size();
+    ptr += data.size();
+
+    // Write key (32 bytes)
+    std::memcpy(ptr, item->key().data(), Key::size());
+
+    return 4 + data.size() + Key::size();
 }
 
 // Explicit template instantiations for default traits

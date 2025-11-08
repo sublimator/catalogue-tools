@@ -21,14 +21,26 @@ parse_nudb_exp_argv(int argc, char* argv[])
         po::value<std::string>(),
         "Path to the NuDB database directory")(
         "key,k", po::value<std::string>(), "Key to lookup (in hex)")(
+        "ledger-hash",
+        po::value<std::string>(),
+        "Ledger hash for tree walking (in hex)")(
+        "state-key",
+        po::value<std::string>(),
+        "State key to lookup in account tree (in hex)")(
+        "tx-key",
+        po::value<std::string>(),
+        "Transaction key to lookup in tx tree (in hex)")(
         "format,f",
         po::value<std::string>()->default_value("hex"),
-        "Output format: hex, binary, info")(
+        "Output format: hex, binary, info, json")(
         "list-keys", po::bool_switch(), "List all keys in the database")(
         "stats", po::bool_switch(), "Show database statistics")(
         "log-level,l",
         po::value<std::string>()->default_value("info"),
-        "Log level (error, warn, info, debug)");
+        "Log level (error, warn, info, debug)")(
+        "network-id",
+        po::value<uint32_t>()->default_value(21337),
+        "Network ID for protocol definitions (0=XRPL, 21337=Xahau)");
 
     // Generate the help text
     std::ostringstream help_stream;
@@ -80,15 +92,35 @@ parse_nudb_exp_argv(int argc, char* argv[])
             options.key_hex = vm["key"].as<std::string>();
         }
 
+        // Check for ledger hash
+        if (vm.count("ledger-hash"))
+        {
+            options.ledger_hash = vm["ledger-hash"].as<std::string>();
+        }
+
+        // Check for state key
+        if (vm.count("state-key"))
+        {
+            options.state_key = vm["state-key"].as<std::string>();
+        }
+
+        // Check for tx key
+        if (vm.count("tx-key"))
+        {
+            options.tx_key = vm["tx-key"].as<std::string>();
+        }
+
         // Check output format
         if (vm.count("format"))
         {
             std::string format = vm["format"].as<std::string>();
-            if (format != "hex" && format != "binary" && format != "info")
+            if (format != "hex" && format != "binary" && format != "info" &&
+                format != "json")
             {
                 options.valid = false;
                 options.error_message =
-                    "Invalid output format. Must be: hex, binary, or info";
+                    "Invalid output format. Must be: hex, binary, info, or "
+                    "json";
                 return options;
             }
             options.output_format = format;
@@ -122,12 +154,22 @@ parse_nudb_exp_argv(int argc, char* argv[])
             options.log_level = level;
         }
 
+        // Get network ID
+        if (vm.count("network-id"))
+        {
+            options.network_id = vm["network-id"].as<uint32_t>();
+        }
+
         // Validate that at least one action is specified
-        if (!options.key_hex && !options.list_keys && !options.show_stats)
+        bool has_tree_walk =
+            options.ledger_hash && (options.state_key || options.tx_key);
+        if (!options.key_hex && !options.list_keys && !options.show_stats &&
+            !has_tree_walk)
         {
             options.valid = false;
             options.error_message =
-                "Must specify an action: --key, --list-keys, or --stats";
+                "Must specify an action: --key, --list-keys, --stats, or "
+                "--ledger-hash with --state-key/--tx-key";
             return options;
         }
     }

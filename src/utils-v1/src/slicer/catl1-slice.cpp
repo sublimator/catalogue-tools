@@ -230,7 +230,10 @@ public:
         {
             // Read ledger info
             LedgerInfo ledger_info = reader.read_ledger_info();
-            LOGI("Read ledger info for ledger: ", ledger_info.sequence);
+            if (ledger_info.sequence % 10000 == 0)
+            {
+                LOGI("Read ledger info for ledger: ", ledger_info.sequence);
+            }
             LOGD(
                 "process_pre_slice_ledgers: Body bytes read after header: ",
                 reader.body_bytes_consumed());
@@ -272,9 +275,12 @@ public:
                     reader.body_bytes_consumed());
             }
 
-            LOGI(
-                "Finished processing initial state for ledger ",
-                current_ledger);
+            if (current_ledger % 10000 == 0)
+            {
+                LOGI(
+                    "Finished processing initial state for ledger ",
+                    current_ledger);
+            }
             current_ledger =
                 ledger_info.sequence + 1;  // increment so loop guard works
         }
@@ -305,11 +311,14 @@ public:
             [this](const std::vector<uint8_t>& key) {
                 state_map_->remove_item(vector_to_hash256(key));
             });
-        LOGI("Finished processing state map for ledger: ", current_ledger);
-        LOGD("  Sets: ", stats.nodes_added);
-        LOGD("  Deletes: ", stats.nodes_deleted);
-        LOGD("  Total operations: ", stats.nodes_processed);
-        LOGD("  Current state map size: ", state_map_->size());
+        if (current_ledger % 10000 == 0)
+        {
+            LOGI("Finished processing state map for ledger: ", current_ledger);
+            LOGD("  Sets: ", stats.nodes_added);
+            LOGD("  Deletes: ", stats.nodes_deleted);
+            LOGD("  Total operations: ", stats.nodes_processed);
+            LOGD("  Current state map size: ", state_map_->size());
+        }
     }
 
     /**

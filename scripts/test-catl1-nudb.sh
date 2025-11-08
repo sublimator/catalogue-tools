@@ -5,7 +5,7 @@ set -ex
 ninja -C build src/utils-v1/catl1-to-nudb
 
 # Parameters for testing
-INPUT_FILE=${INPUT_FILE:-"$HOME/projects/xahau-history/cat.4500000-5000000.compression-0.catl"}
+INPUT_FILE=${INPUT_FILE:-"$HOME/projects/xahau-history/cat.4500000-5000000-nov-25.catl"}
 END_LEDGER=${END_LEDGER:-5000000}
 LOG_LEVEL=${LOG_LEVEL:-"info"}
 NUDB_PATH=${NUDB_PATH:-"./test-nudb"}
