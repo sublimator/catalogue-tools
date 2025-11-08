@@ -17,8 +17,11 @@ target_link_libraries(cuckoofilter PUBLIC OpenSSL::Crypto)
 # Compiler flags
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(
-    cuckoofilter PRIVATE -fno-strict-aliasing # Required for SIMD
-                                              # reinterpret_casts
+    cuckoofilter
+    PRIVATE -fno-strict-aliasing # Required for SIMD reinterpret_casts
+            -Wno-pedantic # Disable __int128 warnings (vendored code)
+            -Wno-implicit-fallthrough # Disable fallthrough warnings in Bob hash
+                                      # (vendored code)
   )
 
   # Only enable AVX2 on x86_64 (not available on ARM/Apple Silicon)
