@@ -94,6 +94,11 @@ jobs:
           echo "Default conan profile:"
           conan profile show -pr default
 
+      - name: Export local recipes
+        run: |
+          conan export external/ftxui/all --name=ftxui --version=6.1.9 --user=catalogue-tools --channel=stable
+          conan export external/libsecp256k1/all --name=libsecp256k1 --version=0.6.0 --user=catalogue-tools --channel=stable
+
       - name: Install dependencies
         id: conan-install
         run: |
