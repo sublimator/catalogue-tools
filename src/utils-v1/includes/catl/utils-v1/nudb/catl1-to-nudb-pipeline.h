@@ -278,6 +278,9 @@ public:
         node_dedupe_strategy_ = strategy;
     }
 
+    // TODO: Add setter for cuckoo filter expected_items size
+    // void set_expected_unique_keys(size_t expected_items);
+
     /**
      * Set stats report sink for real-time monitoring
      * @param sink Shared pointer to sink

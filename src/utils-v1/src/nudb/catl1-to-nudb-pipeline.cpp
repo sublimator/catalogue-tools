@@ -342,6 +342,8 @@ CatlNudbPipeline::create_database(
         // CuckooRocksStrategy: Fast in-memory cuckoo filter + RocksDB ground
         // truth Default: 100M expected items, ~150MB cuckoo + 1GB RocksDB cache
         // = ~1.3GB RAM
+        // TODO: Pass expected_items as third parameter based on dataset size
+        // (e.g., from CLI arg or auto-estimation)
         dedupe_brain_strategy = std::make_unique<CuckooRocksStrategy>(
             rocks_dedup_path.string(), false);
     }
