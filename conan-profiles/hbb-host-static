@@ -1,0 +1,35 @@
+[settings]
+os=Linux
+arch=x86_64
+compiler=gcc
+compiler.version=11
+compiler.libcxx=libstdc++11
+compiler.cppstd=20
+build_type=Release
+
+[options]
+*:shared=False
+*:fPIC=True
+
+[conf]
+# Use Ninja for speed
+tools.cmake.cmaketoolchain:generator=Ninja
+
+# Compile flags
+tools.build:cflags=["-O2", "-fPIC", "-fno-plt", "-fvisibility=hidden"]
+tools.build:cxxflags=["-O2", "-fPIC", "-fno-plt", "-fvisibility=hidden"]
+
+# Linker flags (static libstdc++/libgcc, dynamic glibc)
+tools.build:exelinkflags=["-Wl,--as-needed", "-static-libstdc++", "-static-libgcc"]
+tools.build:sharedlinkflags=["-Wl,--as-needed", "-static-libstdc++", "-static-libgcc"]
+
+# Also set via CMake variables for extra coverage
+tools.cmake.cmaketoolchain:extra_variables={"CMAKE_EXE_LINKER_FLAGS_INIT":"-Wl,--as-needed -static-libstdc++ -static-libgcc", "CMAKE_SHARED_LINKER_FLAGS_INIT":"-Wl,--as-needed -static-libstdc++ -static-libgcc"}
+
+tools.system.package_manager:mode=build
+
+[buildenv]
+# Help non-CMake builds inside HBB prefer static from pkg-config
+PKG_CONFIG=pkg-config --static
+# Linker flags for non-CMake builds
+LDFLAGS=-Wl,--as-needed -static-libstdc++ -static-libgcc
