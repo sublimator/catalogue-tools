@@ -11,6 +11,15 @@ else()
   message(STATUS "No .local.cmake file found in the root directory")
 endif()
 
+# Force static linking of C++ runtime for portable binaries (HBB builds)
+option(APP_FORCE_STATIC_CXX "Link libstdc++/libgcc statically for executables" ON)
+
+if (APP_FORCE_STATIC_CXX AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  set(CMAKE_CXX_STANDARD_LIBRARIES
+          "${CMAKE_CXX_STANDARD_LIBRARIES} -Wl,--start-group -Wl,-Bstatic -lstdc++ -lgcc -Wl,-Bdynamic -Wl,--end-group")
+  message(STATUS "Forcing static libstdc++/libgcc for executables")
+endif()
+
 include(cmake/CheckCompiler.cmake)
 include(cmake/StrictIncludes.cmake)
 include(cmake/Protobuf.cmake)

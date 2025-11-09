@@ -20,4 +20,8 @@ tests/catalogue-v1/fixture/cat.2000000-2010000.compression-0.catl
 bla.txt
 CLAUDE.local.md
 .catl-convert.local.json
+test-nudbbuild-hbb/
+.hbb-cache/
+
+build-hbb
 test-nudb

@@ -22,6 +22,7 @@ class CatalogueToolsConan(ConanFile):
 
     def build_requirements(self):
         self.tool_requires("protobuf/3.21.12")
+        self.tool_requires("b2/5.3.3")  # Match boost's b2 requirement, built with gcc-11 toolchain
 
     def configure(self):
         self.options["gtest"].shared = False
