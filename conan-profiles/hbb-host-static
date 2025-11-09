@@ -14,3 +14,6 @@ build_type=Release
 [conf]
 # Use Ninja for speed
 tools.cmake.cmaketoolchain:generator=Ninja
+
+# Inject static linking flags into our CMake build via conan_toolchain.cmake
+tools.cmake.cmaketoolchain:extra_variables={"CMAKE_EXE_LINKER_FLAGS_INIT":"-static-libstdc++ -static-libgcc"}

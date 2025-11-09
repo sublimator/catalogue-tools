@@ -67,16 +67,16 @@ if [ "$DIAGNOSTICS" = "1" ]; then
   echo ''
 
   echo '>>> Include search paths'
-  echo "CPATH=$CPATH"
-  echo "C_INCLUDE_PATH=$C_INCLUDE_PATH"
-  echo "CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH"
+  echo "CPATH=${CPATH:-}"
+  echo "C_INCLUDE_PATH=${C_INCLUDE_PATH:-}"
+  echo "CPLUS_INCLUDE_PATH=${CPLUS_INCLUDE_PATH:-}"
   echo ''
 
   echo '>>> Compiler flags'
-  echo "CFLAGS=$CFLAGS"
-  echo "CXXFLAGS=$CXXFLAGS"
-  echo "CPPFLAGS=$CPPFLAGS"
-  echo "LDFLAGS=$LDFLAGS"
+  echo "CFLAGS=${CFLAGS:-}"
+  echo "CXXFLAGS=${CXXFLAGS:-}"
+  echo "CPPFLAGS=${CPPFLAGS:-}"
+  echo "LDFLAGS=${LDFLAGS:-}"
   echo ''
 
   echo '========================================='
@@ -137,7 +137,6 @@ export CXX='ccache g++'
 if ! cmake -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake \
-  -DAPP_FORCE_STATIC_CXX=ON \
   ..; then
   echo 'ERROR: CMake configuration failed!'
   exit 1
@@ -169,7 +168,7 @@ for binary in $(find build-hbb/src -type f -executable); do
     echo '=== Full ldd output ==='
     ldd $binary || echo 'ldd failed (static binary?)'
 
-    if command -v libcheck &> /dev/null; then
+    if command -v libcheck &>/dev/null; then
       echo '=== Running libcheck ==='
       libcheck $binary || echo 'libcheck not available'
     fi

@@ -1,4 +1,9 @@
 # Holy Build Box environment for creating portable static binaries
+# NOTE: Using 4.0.1 (last GHCR release) which has GCC 9. The HBB repo has GCC 14
+# support but no new tags released. We install gcc-toolset-11 below and unset HBB's
+# gcc-9 environment to avoid linking issues with non-PIC libraries.
+# TODO: Consider forking HBB, building GCC 14 image, and pushing to our own GHCR
+# to eliminate the environment sanitization hacks.
 FROM ghcr.io/phusion/holy-build-box:4.0.1-amd64
 
 ARG BUILD_CORES=8

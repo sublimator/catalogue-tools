@@ -61,7 +61,7 @@ def _filter_files_by_type(root_dir: Path, files: Set[str]) -> Dict[str, List[Pat
         "cmake": [],
     }
 
-    search_dirs = ["src/", "tests/", "scripts/", "cmake/"]
+    search_dirs = ["src/", "tests/", "scripts/", "cmake/", "builds/", "CMakeLists.txt"]
 
     for filename in files:
         file_path = root_dir / filename
