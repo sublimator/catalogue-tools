@@ -45,6 +45,10 @@ RUN /hbb_exe/activate-exec bash -c "mkdir -p /cache/ccache && \
     ccache -o cache_dir=/cache/ccache && \
     ccache -o compiler_check=content"
 
+# Copy and install build script
+COPY builds/hbb/build-inside.sh /usr/local/bin/hbb-build
+RUN chmod +x /usr/local/bin/hbb-build
+
 WORKDIR /workspace
 
 # Default command drops into shell with gcc-11 environment active
