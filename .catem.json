@@ -17,8 +17,10 @@
     },
     "cmake" : {
       "include": [
-          "**/*/CMakeLists.txt"
-      ]  
+          "src/**/CMakeLists.txt",
+          "tests/**/CMakeLists.txt",
+          "cmake/**/*.cmake"
+      ]
     },
     "all": {
         "include": [

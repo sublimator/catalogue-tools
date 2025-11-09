@@ -11,10 +11,8 @@ target_include_directories(catl1-hasher
 # Link with required dependencies
 target_link_libraries(
   catl1-hasher
-  PRIVATE catl_core
-          catl_shamap
-          catl_catalogue_common
-          catl_catalogue_v1
+  PRIVATE catl_catalogue_v1 # Brings in catl_core, catl_shamap,
+                            # catl_catalogue_common
           Boost::filesystem
           Boost::iostreams
           Boost::program_options

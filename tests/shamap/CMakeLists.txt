@@ -21,8 +21,7 @@ target_include_directories(shamap_gtest
 
 target_link_libraries(
   shamap_gtest
-  PRIVATE catl::shamap
-          catl_shamap_test_utils
+  PRIVATE catl_shamap_test_utils # Brings in catl::shamap
           GTest::gtest_main
           OpenSSL::SSL
           Boost::json

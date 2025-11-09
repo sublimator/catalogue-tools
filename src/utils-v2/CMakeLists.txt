@@ -19,13 +19,10 @@ target_precompile_headers(
 # Link with required dependencies
 target_link_libraries(
   catl1-to-catl2
-  PRIVATE catl_catalogue_v2
-          catl_hybrid_shamap_v2
-          catl_core
-          catl::crypto
-          catl_catalogue_common
+  PRIVATE catl_hybrid_shamap_v2 # Brings in catl_catalogue_v2 →
+                                # catl_catalogue_v1 → catl_catalogue_common,
+                                # catl::crypto, catl_core
           catl::xdata
-          catl_catalogue_v1
           catl::base58
           Boost::filesystem
           Boost::iostreams

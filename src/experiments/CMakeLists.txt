@@ -44,12 +44,9 @@ foreach(EXECUTABLE ${EXECUTABLES})
   # Link with required dependencies for executable
   target_link_libraries(
     ${EXECUTABLE}
-    PRIVATE catl_core
-            catl::crypto
-            catl_catalogue_common
-            catl_catalogue_v1
-            catl_catalogue_v2
-            catl_hybrid_shamap_v2
+    PRIVATE catl_hybrid_shamap_v2 # Brings in catl_catalogue_v2 →
+                                  # catl_catalogue_v1 → catl_catalogue_common,
+                                  # catl::crypto, catl_core
             catl::xdata
             catl::base58
             Boost::filesystem

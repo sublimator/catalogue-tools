@@ -252,6 +252,7 @@ verify_normal(
     float sum = 0;
     for(size_t i = 0; i < info.hist.size(); ++i)
         sum += info.hist[i] * (i + 1);
+    (void)sum;  // Computed for debugging but unused
     if(info.value_count)
         info.avg_fetch =
             float(fetches) / info.value_count;
@@ -509,6 +510,7 @@ verify_fast(
     float sum = 0;
     for(std::size_t i = 0; i < info.hist.size(); ++i)
         sum += info.hist[i] * (i + 1);
+    (void)sum;  // Computed for debugging but unused
     if(info.value_count)
         info.avg_fetch =
             float(fetches) / info.value_count;

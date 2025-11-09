@@ -15,8 +15,7 @@ target_include_directories(
 # Link against just the required dependencies for testing
 target_link_libraries(
   shamap_header_only_test
-  PRIVATE catl::core
-          catl::crypto
+  PRIVATE catl::crypto # Brings in catl::core
           Boost::json
           GTest::gtest_main
           OpenSSL::SSL)

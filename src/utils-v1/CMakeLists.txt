@@ -49,9 +49,7 @@ target_include_directories(${EXECUTABLE_CATL_VALIDATOR}
                            PRIVATE ${UTILS_INCLUDE_DIR} ${CATL_INCLUDE_DIR})
 target_link_libraries(
   ${EXECUTABLE_CATL_VALIDATOR}
-  PRIVATE catl_core
-          catl_shamap
-          catl_catalogue_v1
+  PRIVATE catl_catalogue_v1 # Brings in catl_core, catl_shamap
           Boost::filesystem
           Boost::iostreams
           OpenSSL::SSL)
@@ -65,9 +63,7 @@ target_include_directories(${EXECUTABLE_CATL_COPY} PRIVATE ${UTILS_INCLUDE_DIR}
                                                            ${CATL_INCLUDE_DIR})
 target_link_libraries(
   ${EXECUTABLE_CATL_COPY}
-  PRIVATE catl_core
-          catl_shamap
-          catl_catalogue_v1
+  PRIVATE catl_catalogue_v1 # Brings in catl_core, catl_shamap
           Boost::filesystem
           Boost::program_options
           Boost::iostreams
@@ -79,9 +75,7 @@ target_include_directories(${EXECUTABLE_CATL_SLICE} PRIVATE ${UTILS_INCLUDE_DIR}
                                                             ${CATL_INCLUDE_DIR})
 target_link_libraries(
   ${EXECUTABLE_CATL_SLICE}
-  PRIVATE catl_core
-          catl_shamap
-          catl_catalogue_v1
+  PRIVATE catl_catalogue_v1 # Brings in catl_core, catl_shamap
           Boost::filesystem
           Boost::program_options
           Boost::iostreams
@@ -93,9 +87,7 @@ target_include_directories(${EXECUTABLE_NUDB_TO_CATL1}
                            PRIVATE ${UTILS_INCLUDE_DIR} ${CATL_INCLUDE_DIR})
 target_link_libraries(
   ${EXECUTABLE_NUDB_TO_CATL1}
-  PRIVATE catl_core
-          catl_shamap
-          catl_catalogue_v1
+  PRIVATE catl_catalogue_v1 # Brings in catl_core, catl_shamap
           NuDB
           Boost::filesystem
           Boost::program_options
@@ -107,9 +99,7 @@ target_include_directories(${EXECUTABLE_CATL1_TO_NUDB}
                            PRIVATE ${UTILS_INCLUDE_DIR} ${CATL_INCLUDE_DIR})
 target_link_libraries(
   ${EXECUTABLE_CATL1_TO_NUDB}
-  PRIVATE catl::core
-          catl::shamap
-          catl::catalogue_v1
+  PRIVATE catl::catalogue_v1 # Brings in catl::core, catl::shamap
           catl::xdata
           catl::base58
           catl::nodestore
@@ -131,8 +121,7 @@ target_include_directories(${EXECUTABLE_NUDB_EXP} PRIVATE ${UTILS_INCLUDE_DIR}
                                                           ${CATL_INCLUDE_DIR})
 target_link_libraries(
   ${EXECUTABLE_NUDB_EXP}
-  PRIVATE catl_core
-          catl_catalogue_common
+  PRIVATE catl_catalogue_common # Brings in catl_core
           catl_nodestore
           catl_xdata_json
           NuDB
