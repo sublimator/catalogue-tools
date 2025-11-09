@@ -68,6 +68,9 @@ add_subdirectory(src/core)
 # Add the nodestore library
 add_subdirectory(src/nodestore)
 
+# Add the nudbview library (fork of NuDB)
+add_subdirectory(src/nudbview)
+
 # Add the base58 library
 add_subdirectory(src/base58)
 
