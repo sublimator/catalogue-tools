@@ -11,15 +11,6 @@ else()
   message(STATUS "No .local.cmake file found in the root directory")
 endif()
 
-# Force static linking of C++ runtime for portable binaries (HBB builds)
-option(APP_FORCE_STATIC_CXX "Link libstdc++/libgcc statically for executables" ON)
-
-if (APP_FORCE_STATIC_CXX AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  set(CMAKE_CXX_STANDARD_LIBRARIES
-          "${CMAKE_CXX_STANDARD_LIBRARIES} -Wl,--start-group -Wl,-Bstatic -lstdc++ -lgcc -Wl,-Bdynamic -Wl,--end-group")
-  message(STATUS "Forcing static libstdc++/libgcc for executables")
-endif()
-
 include(cmake/CheckCompiler.cmake)
 include(cmake/StrictIncludes.cmake)
 include(cmake/Protobuf.cmake)
@@ -28,7 +19,8 @@ include(cmake/Secp256k1.cmake)
 # FTXUI for terminal dashboards (provided by Conan)
 find_package(ftxui REQUIRED)
 
-# include(cmake/IncludeWhatYouUse.cmake) # WIP - too slow/pedantic for regular use
+# include(cmake/IncludeWhatYouUse.cmake) # WIP - too slow/pedantic for regular
+# use
 
 # Requires passing -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
 find_package(Boost REQUIRED)
@@ -39,8 +31,8 @@ find_package(nudb REQUIRED)
 find_package(lz4 REQUIRED)
 find_package(RocksDB REQUIRED)
 
-# Set C++ standard for all targets
-# Using C++20 since Apple Clang doesn't have full C++23 support yet (no std::generator)
+# Set C++ standard for all targets Using C++20 since Apple Clang doesn't have
+# full C++23 support yet (no std::generator)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF) # This is optional but recommended to ensure
@@ -53,12 +45,12 @@ if(is_apple_clang)
   add_compile_options(-Werror=reorder-init-list)
 endif()
 
-# Define the include directory structure to be shared by all subprojects
-# Only set if directory exists to avoid compiler warnings
+# Define the include directory structure to be shared by all subprojects Only
+# set if directory exists to avoid compiler warnings
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/includes)
-    set(CATL_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/includes)
+  set(CATL_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/includes)
 else()
-    set(CATL_INCLUDE_DIR "")
+  set(CATL_INCLUDE_DIR "")
 endif()
 
 set(PROJECT_ROOT
