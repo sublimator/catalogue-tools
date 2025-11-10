@@ -27,9 +27,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     export PATH="/root/.local/bin:${PATH}" && \
     uv python install 3.14 && \
     uv venv /opt/py-venv -p 3.14 && \
-    uv pip install --python /opt/py-venv/bin/python "conan>=2.0,<3.0" && \
-    /opt/py-venv/bin/python -V && \
-    /opt/py-venv/bin/conan --version
+    uv pip install --python /opt/py-venv/bin/python "conan>=2.0,<3.0"
 
 # Make conan and python3 available at runtime
 RUN ln -sf /opt/py-venv/bin/python /usr/local/bin/python3 && \
