@@ -2,23 +2,7 @@
 # Build script that runs inside the HBB Docker container
 set -euo pipefail
 
-# Source gcc-toolset-11 environment
-source /opt/rh/gcc-toolset-11/enable
-
-# Scrub HBB environment that breaks linking order/selection
-unset LDFLAGS SHLIB_LDFLAGS LIBRARY_PATH CFLAGS CXXFLAGS CPPFLAGS C_INCLUDE_PATH CPLUS_INCLUDE_PATH
-unset SHLIB_CFLAGS SHLIB_CXXFLAGS STATICLIB_CFLAGS STATICLIB_CXXFLAGS
-
-# Set clean flags without HBB paths
-export CFLAGS="-O2 -fPIC -fvisibility=hidden"
-export CXXFLAGS="-O2 -fPIC -fvisibility=hidden"
-export CPPFLAGS=""
-
-# Prefer gcc-toolset-11's libs/includes
-export LIBRARY_PATH="/opt/rh/gcc-toolset-11/root/usr/lib/gcc/x86_64-redhat-linux/11:/opt/rh/gcc-toolset-11/root/usr/lib64"
-export CPATH="/opt/rh/gcc-toolset-11/root/usr/include"
-
-echo '>>> Environment after sanitization'
+echo '>>> Build environment'
 env | sort
 echo ''
 
@@ -28,8 +12,8 @@ if [ "$DIAGNOSTICS" = "1" ]; then
   echo '========================================='
   echo ''
 
-  echo '>>> Contents of gcc-toolset-11 enable script'
-  cat /opt/rh/gcc-toolset-11/enable
+  echo '>>> Contents of gcc-toolset-14 enable script (if exists)'
+  cat /opt/rh/gcc-toolset-14/enable 2>/dev/null || echo 'Not found (HBB may use different setup)'
   echo ''
 
   set -x
@@ -89,11 +73,11 @@ fi
 mkdir -p /cache/conan2 /cache/ccache
 
 echo '>>> Conan configuration'
-echo '=== Build profile (conan-profiles/hbb-build-gcc11) ==='
-cat conan-profiles/hbb-build-gcc11
+echo '=== Build profile (conan-profiles/hbb-build-gcc14) ==='
+cat conan-profiles/hbb-build-gcc14
 echo ''
-echo '=== Host profile (conan-profiles/hbb-host-static) ==='
-cat conan-profiles/hbb-host-static
+echo '=== Host profile (conan-profiles/hbb-host-gcc14) ==='
+cat conan-profiles/hbb-host-gcc14
 echo ''
 echo '=== Conan global.conf ==='
 cat ~/.conan2/global.conf
@@ -115,8 +99,8 @@ echo ">>> Running conan install (--build=$CONAN_DEPS)"
 mkdir -p build-hbb
 cd build-hbb
 if ! conan install --output-folder . \
-  -pr:h=../conan-profiles/hbb-host-static \
-  -pr:b=../conan-profiles/hbb-build-gcc11 \
+  -pr:h=../conan-profiles/hbb-host-gcc14 \
+  -pr:b=../conan-profiles/hbb-build-gcc14 \
   --build=$CONAN_DEPS ..; then
   echo 'ERROR: conan install failed!'
   exit 1
