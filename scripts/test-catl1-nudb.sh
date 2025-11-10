@@ -21,12 +21,20 @@ DASHBOARD=${DASHBOARD:-""}                             # Set to any value to ena
 ENABLE_DEBUG_PARTITIONS=${ENABLE_DEBUG_PARTITIONS:-""} # Set to any value to enable debug log partitions
 WALK_NODES_LEDGER=${WALK_NODES_LEDGER:-""}             # Set to a ledger number to enable WALK_NODES logging for that specific ledger
 WALK_NODES_DEBUG_KEY=${WALK_NODES_DEBUG_KEY:-""}       # Set to a hex key prefix to print detailed info for matching keys
+PRIME_CACHE=${PRIME_CACHE:-"1"}                        # Set to empty to skip cache priming (default: enabled)
 
 # Check if input file exists
 if [ ! -f "$INPUT_FILE" ]; then
   echo "❌ Error: Input file does not exist: $INPUT_FILE"
   echo "Please check the file path and try again."
   exit 1
+fi
+
+# Prime OS page cache by reading the input file
+if [ -n "$PRIME_CACHE" ]; then
+  echo "📖 Priming OS cache for input file ($(du -h "$INPUT_FILE" | cut -f1))..."
+  time cat "$INPUT_FILE" >/dev/null
+  echo "✅ Cache primed"
 fi
 
 # Run with actual input file - process first $END_LEDGER ledgers

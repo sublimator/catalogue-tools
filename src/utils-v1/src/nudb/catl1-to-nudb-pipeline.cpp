@@ -32,7 +32,7 @@ LogPartition pipeline_version_log("PIPE_VERSION", LogLevel::NONE);
 
 // LogPartition for ledger header serialization/compression tracking
 // Enable with: ledger_header_log.enable(LogLevel::INFO)
-LogPartition ledger_header_log("LEDGER_HDR", LogLevel::INFO);
+LogPartition ledger_header_log("LEDGER_HDR", LogLevel::NONE);
 
 CatlNudbPipeline::CatlNudbPipeline(
     const shamap::SHAMapOptions& map_options,
@@ -1513,7 +1513,8 @@ CatlNudbPipeline::compression_worker()
         // Serialize and compress the ledger header
         {
             PLOGI(ledger_header_log, "=== Ledger Header Processing ===");
-            PLOGI(ledger_header_log, job.info.to_string());
+            PLOGI_LAZY(
+                ledger_header_log, [&]() { return job.info.to_string(); });
 
             // Create buffer with "LWR\0" prefix + 118-byte canonical format
             // (XRPL/Xahau ledger header format)
@@ -1534,7 +1535,9 @@ CatlNudbPipeline::compression_worker()
                 header_with_prefix.size(),
                 " bytes");
 
-            // Output entire buffer as hex for debugging
+            // Output entire buffer as hex for debugging (EXPENSIVE - only if
+            // logging enabled!)
+            if (ledger_header_log.should_log(LogLevel::INFO))
             {
                 std::stringstream hex_stream;
                 for (size_t i = 0; i < header_with_prefix.size(); ++i)
@@ -1548,38 +1551,19 @@ CatlNudbPipeline::compression_worker()
                     hex_stream.str());
             }
 
-            // Compute hash using SHA512-half on ENTIRE buffer (prefix +
-            // canonical) The prefix MUST be included in the hash (matches
-            // rippled's calculateLedgerHash)
-            catl::crypto::Sha512HalfHasher hasher;
-            hasher.update(
-                header_with_prefix.data(),
-                122);  // 4-byte prefix + 118-byte canonical
-            Hash256 ledger_hash = hasher.finalize();
+            // Use hash from CATL file (REQUIRED - throw if missing)
+            if (!job.info.hash.has_value())
+            {
+                throw std::runtime_error(
+                    "Ledger hash missing from CATL file for seq " +
+                    std::to_string(job.info.seq));
+            }
 
+            Hash256 ledger_hash = *job.info.hash;
             PLOGI(
-                ledger_header_log, "Computed ledger hash: ", ledger_hash.hex());
-
-            // Verify computed hash matches the hash from CATL file (if present)
-            if (job.info.hash.has_value())
-            {
-                if (ledger_hash != *job.info.hash)
-                {
-                    LOGE("❌ Ledger hash mismatch for seq ", job.info.seq, "!");
-                    LOGE("  Computed: ", ledger_hash.hex());
-                    LOGE("  Expected: ", job.info.hash->hex());
-                    throw std::runtime_error(
-                        "Ledger hash mismatch for seq " +
-                        std::to_string(job.info.seq));
-                }
-                PLOGI(ledger_header_log, "✅ Hash verified against CATL file");
-            }
-            else
-            {
-                PLOGI(
-                    ledger_header_log,
-                    "⚠️  No hash in CATL file to verify against");
-            }
+                ledger_header_log,
+                "Using ledger hash from CATL file: ",
+                ledger_hash.hex());
 
             // Compress entire buffer (prefix + canonical) with LZ4
             std::span<const uint8_t> header_span(

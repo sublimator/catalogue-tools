@@ -364,6 +364,38 @@ private:
     detail::log_with_partition_check( \
         LogLevel::DEBUG, __RELATIVE_FILEPATH__, __LINE__, this, __VA_ARGS__)
 
+// Lazy evaluation macros for expensive log operations
+// Use these when log arguments are expensive to compute (e.g., string
+// formatting) Usage: PLOGI_LAZY(partition, []() { return expensive_operation();
+// });
+#define PLOGI_LAZY(partition, lambda)           \
+    if ((partition).should_log(LogLevel::INFO)) \
+    Logger::log_internal(                       \
+        LogLevel::INFO,                         \
+        "[",                                    \
+        (partition).name(),                     \
+        "] ",                                   \
+        lambda(),                               \
+        " (",                                   \
+        __RELATIVE_FILEPATH__,                  \
+        ":",                                    \
+        __LINE__,                               \
+        ")")
+
+#define PLOGD_LAZY(partition, lambda)            \
+    if ((partition).should_log(LogLevel::DEBUG)) \
+    Logger::log_internal(                        \
+        LogLevel::DEBUG,                         \
+        "[",                                     \
+        (partition).name(),                      \
+        "] ",                                    \
+        lambda(),                                \
+        " (",                                    \
+        __RELATIVE_FILEPATH__,                   \
+        ":",                                     \
+        __LINE__,                                \
+        ")")
+
 // Partition-specific logging macros - pass the partition as first arg
 // These use log_internal to bypass global level check since partition already
 // checked
