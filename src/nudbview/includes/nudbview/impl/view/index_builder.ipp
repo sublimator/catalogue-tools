@@ -415,11 +415,15 @@ IndexBuilder::create_slice_from_index(
     // rekey_slice expects [start, end] INCLUSIVE, so subtract 1
     nudbview::noff_t end_offset = end_boundary - 1;
 
+    // Calculate exact record count - we already have this from the index!
+    std::uint64_t record_count = end_record - start_record;
+
     // TODO: Read block_size and load_factor from original .dat file header!
     // These should match the original database settings, not use hardcoded defaults.
     // For now using sensible defaults: 4096 block size, 0.5 load factor
 
     // Create the slice using low-level rekey_slice
+    // OPTIMIZATION: Pass record_count to skip Pass 1 (we already scanned to build the index!)
     nudbview::view::rekey_slice<nudbview::xxhasher, nudbview::native_file>(
         dat_path,
         start_offset,
@@ -431,7 +435,8 @@ IndexBuilder::create_slice_from_index(
         interval,  // Use same interval as the index
         8192,      // buffer_size
         ec,
-        [](std::uint64_t, std::uint64_t) {}  // no-op progress callback
+        [](std::uint64_t, std::uint64_t) {},  // no-op progress callback
+        record_count  // Skip counting pass - we know the count!
     );
 
     return !ec;

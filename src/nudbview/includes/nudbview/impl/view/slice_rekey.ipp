@@ -39,6 +39,7 @@ rekey_slice(
     std::size_t bufferSize,
     error_code& ec,
     Progress&& progress,
+    std::uint64_t expected_record_count,
     Args&&... args)
 {
     static_assert(is_File<File>::value,
@@ -103,6 +104,12 @@ rekey_slice(
     // PASS 1: Scan slice range to count keys and collect index offsets
     // =========================================================================
     //
+    // OPTIMIZATION: Skip if expected_record_count provided
+    // -----------------------------------------------------
+    // If caller already has an index and knows the exact record count (common case
+    // when using IndexBuilder), they can pass expected_record_count to skip this pass.
+    // We'll validate the count during Pass 2.
+    //
     // IMPORTANT: Handling partial records at tail (live .dat files)
     // --------------------------------------------------------------
     // We use memory-mapped I/O (mmap) to scan the .dat file, same approach as
@@ -149,29 +156,41 @@ rekey_slice(
 
     progress(0, 2 * (end_offset - start_offset));  // 2 passes total
 
-    // Scan records using mmap
-    itemCount = nudbutil::scan_dat_records(
-        dat_mmap,
-        dh.key_size,
-        [&](std::uint64_t record_num, std::uint64_t offset, std::uint64_t size) {
-            // Check if we've passed the end
-            if (offset > end_offset)
-                return;
+    if (expected_record_count > 0)
+    {
+        // OPTIMIZATION: Skip counting pass, use provided count
+        itemCount = expected_record_count;
 
-            // Record index entry if this is an interval boundary
-            if (record_num % index_interval == 0)
-            {
-                index_entry ie;
-                ie.record_number = record_num;
-                ie.dat_offset = offset;
-                index_entries.push_back(ie);
-            }
+        // Pre-allocate index entries based on expected count
+        std::uint64_t expected_entries = (itemCount + index_interval - 1) / index_interval;
+        index_entries.reserve(expected_entries);
+    }
+    else
+    {
+        // Scan records using mmap to count and build index
+        itemCount = nudbutil::scan_dat_records(
+            dat_mmap,
+            dh.key_size,
+            [&](std::uint64_t record_num, std::uint64_t offset, std::uint64_t size) {
+                // Check if we've passed the end
+                if (offset > end_offset)
+                    return;
 
-            progress(offset - start_offset, 2 * (end_offset - start_offset));
-        },
-        start_offset,
-        0
-    );
+                // Record index entry if this is an interval boundary
+                if (record_num % index_interval == 0)
+                {
+                    index_entry ie;
+                    ie.record_number = record_num;
+                    ie.dat_offset = offset;
+                    index_entries.push_back(ie);
+                }
+
+                progress(offset - start_offset, 2 * (end_offset - start_offset));
+            },
+            start_offset,
+            0
+        );
+    }
 
     if(itemCount == 0)
     {
@@ -318,12 +337,19 @@ rekey_slice(
                 buf.get() + i * kh.block_size, empty};
 
         // Insert all keys into buckets using mmap
+        // If expected_record_count was provided, we also validate the actual count
+        std::uint64_t actual_count = 0;
+
         nudbutil::scan_dat_records(
             dat_mmap,
             dh.key_size,
             [&](std::uint64_t record_num, std::uint64_t record_offset, std::uint64_t size) {
                 if (record_offset > end_offset)
                     return;
+
+                // Count records if we need to validate
+                if (expected_record_count > 0)
+                    ++actual_count;
 
                 progress((end_offset - start_offset) +
                     (b0 / chunkSize) * (end_offset - start_offset) /
@@ -338,6 +364,15 @@ rekey_slice(
 
                 if(n < b0 || n >= b1)
                     return;
+
+                // Collect index entries if we skipped Pass 1
+                if (expected_record_count > 0 && record_num % index_interval == 0)
+                {
+                    index_entry ie;
+                    ie.record_number = record_num;
+                    ie.dat_offset = record_offset;
+                    index_entries.push_back(ie);
+                }
 
                 bucket b{kh.block_size, buf.get() + (n - b0) * kh.block_size};
 
@@ -369,6 +404,13 @@ rekey_slice(
             start_offset,
             0
         );
+
+        // CRITICAL: Validate expected count matches actual
+        if (expected_record_count > 0 && actual_count != expected_record_count)
+        {
+            ec = error::invalid_key_size;  // VFALCO: Need better error for count mismatch
+            return;
+        }
 
         // Check for errors that may have occurred in the callback
         if (ec)

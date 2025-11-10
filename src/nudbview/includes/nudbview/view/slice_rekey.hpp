@@ -93,6 +93,11 @@ namespace view {
     );
     @endcode
 
+    @param expected_record_count Optional expected number of records in the slice.
+    If provided (non-zero), skips Pass 1 (counting scan) and uses this count directly.
+    During Pass 2, validates that actual record count matches. Use when you already
+    have an index and know the exact record count. Errors if mismatch detected.
+
     @param args Optional arguments passed to @b File constructors.
 */
 template<
@@ -114,6 +119,7 @@ rekey_slice(
     std::size_t bufferSize,
     error_code& ec,
     Progress&& progress,
+    std::uint64_t expected_record_count = 0,
     Args&&... args);
 
 } // view
