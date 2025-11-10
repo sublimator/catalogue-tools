@@ -33,7 +33,7 @@ def get_all_files_by_type(root_dir: Path) -> Dict[str, List[Path]]:
 
     # File patterns by type
     patterns = {
-        "cpp": [".h", ".cpp"],
+        "cpp": [".h", ".cpp", ".hpp", ".ipp"],
         "shell": [".sh"],
         "python": [".py"],
         "cmake": ["CMakeLists.txt", ".cmake"],
@@ -73,7 +73,7 @@ def _filter_files_by_type(root_dir: Path, files: Set[str]) -> Dict[str, List[Pat
             continue
 
         # Categorize by file type
-        if filename.endswith(".h") or filename.endswith(".cpp"):
+        if filename.endswith((".h", ".cpp", ".hpp", ".ipp")):
             filtered_files["cpp"].append(file_path)
         elif filename.endswith(".sh"):
             filtered_files["shell"].append(file_path)

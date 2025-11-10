@@ -18,16 +18,16 @@
 #ifndef NUDBVIEW_VIEW_SLICE_STORE_HPP
 #define NUDBVIEW_VIEW_SLICE_STORE_HPP
 
-#include <nudbview/error.hpp>
-#include <nudbview/file.hpp>
-#include <nudbview/type_traits.hpp>
-#include <nudbview/detail/bucket.hpp>
-#include <nudbview/detail/buffer.hpp>
-#include <nudbview/detail/format.hpp>
-#include <nudbview/view/format.hpp>
 #include <boost/iostreams/device/mapped_file.hpp>
 #include <cstddef>
 #include <cstdint>
+#include <nudbview/detail/bucket.hpp>
+#include <nudbview/detail/buffer.hpp>
+#include <nudbview/detail/format.hpp>
+#include <nudbview/error.hpp>
+#include <nudbview/file.hpp>
+#include <nudbview/type_traits.hpp>
+#include <nudbview/view/format.hpp>
 
 namespace nudbview {
 namespace view {
@@ -63,7 +63,7 @@ namespace view {
     @tparam File The type of File object to use. This type
     must meet the requirements of @b File.
 */
-template<class Hasher, class File>
+template <class Hasher, class File>
 class slice_store
 {
 public:
@@ -71,10 +71,10 @@ public:
     using file_type = File;
 
 private:
-    // Opened files
-    boost::iostreams::mapped_file_source dat_mmap_;  // mmap for .dat
-    File kf_;                                         // Slice key file
-    boost::iostreams::mapped_file_source meta_mmap_; // mmap for .meta
+    // Opened files (all mmap for performance and consistency)
+    boost::iostreams::mapped_file_source dat_mmap_;   // mmap for .dat
+    boost::iostreams::mapped_file_source key_mmap_;   // mmap for .key
+    boost::iostreams::mapped_file_source meta_mmap_;  // mmap for .meta
 
     // Headers
     detail::dat_file_header dh_;
@@ -97,8 +97,7 @@ public:
 
         @param salt The salt value to initialize the hasher
     */
-    explicit slice_store(std::uint64_t salt)
-        : hasher_(salt)
+    explicit slice_store(std::uint64_t salt) : hasher_(salt)
     {
     }
 
@@ -106,7 +105,8 @@ public:
     slice_store(slice_store const&) = delete;
 
     /// Copy assignment (disallowed)
-    slice_store& operator=(slice_store const&) = delete;
+    slice_store&
+    operator=(slice_store const&) = delete;
 
     /** Destroy the slice store.
 
@@ -305,7 +305,7 @@ public:
 
         @param args Optional arguments passed to @b File constructors.
     */
-    template<class... Args>
+    template <class... Args>
     void
     open(
         path_type const& dat_path,
@@ -348,13 +348,13 @@ public:
 
         @param ec Set to the error, if any occurred.
     */
-    template<class Callback>
+    template <class Callback>
     void
     fetch(void const* key, Callback&& callback, error_code& ec);
 
 private:
     // Fetch key in loaded bucket b or its spills (in meta file!)
-    template<class Callback>
+    template <class Callback>
     void
     fetch(
         detail::nhash_t h,
@@ -364,8 +364,8 @@ private:
         error_code& ec);
 };
 
-} // view
-} // nudbview
+}  // namespace view
+}  // namespace nudbview
 
 #include <nudbview/impl/view/slice_store.ipp>
 
