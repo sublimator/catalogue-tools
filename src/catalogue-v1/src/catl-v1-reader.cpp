@@ -1,4 +1,5 @@
 #include "catl/v1/catl-v1-reader.h"
+#include "catl/v1/async-readahead-filter.h"
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -145,8 +146,18 @@ Reader::Reader(std::string filename) : filename_(std::move(filename))
 
         try
         {
+            // Filter chain (applied in order):
+            // 1. Main thread reads from async_readahead_filter
+            // 2. Background thread in filter reads from zlib_decompressor
+            // 3. Decompressor reads from file_
+
+            temp_decompressed_stream->push(async_readahead_filter(
+                4 * 1024 * 1024,  // 4MB chunk size
+                4));              // 4 chunks buffered (16MB total)
+
             temp_decompressed_stream->push(
                 boost::iostreams::zlib_decompressor(params));
+
             temp_decompressed_stream->push(file_);
         }
         catch (const std::exception& e)
