@@ -12,6 +12,8 @@
 #include <nudbview/detail/bulkio.hpp>
 #include <nudbview/detail/format.hpp>
 #include <nudbview/view/format.hpp>
+#include <nudbview/view/dat_scanner.hpp>
+#include <boost/iostreams/device/mapped_file.hpp>
 #include <cmath>
 #include <vector>
 
@@ -60,10 +62,10 @@ rekey_slice(
         return;
     }
 
-    auto const readSize = 1024 * block_size(dat_path);
     auto const writeSize = 16 * blockSize;
 
-    // Open data file for reading (read-only!)
+    // Open data file briefly to read header
+    // (we'll use mmap for actual data reading)
     File df{args...};
     df.open(file_mode::read, dat_path, ec);
     if(ec)
@@ -81,6 +83,9 @@ rekey_slice(
     auto const dataFileSize = df.size(ec);
     if(ec)
         return;
+
+    // Close file - we'll use mmap for reading data
+    df.close();
 
     // Validate slice boundaries
     if(start_offset < dat_file_header::size)
@@ -100,84 +105,73 @@ rekey_slice(
     //
     // IMPORTANT: Handling partial records at tail (live .dat files)
     // --------------------------------------------------------------
-    // The bulk_reader wraps the byte range [start_offset, end_offset+1).
-    // If end_offset points into a PARTIAL record (incomplete write), the
-    // bulk_reader::prepare() call will fail with error::short_read when it
-    // tries to read past the actual valid data.
-    //
-    // This happens in bulkio.hpp:72-75:
-    //   if(offset_ + needed - avail_ > last_) {
-    //       ec = error::short_read;
-    //       return {};
-    //   }
+    // We use memory-mapped I/O (mmap) to scan the .dat file, same approach as
+    // IndexBuilder. If end_offset points into a PARTIAL record (incomplete write),
+    // scan_dat_records will stop early when it detects the record extends beyond
+    // end_offset.
     //
     // The caller is responsible for ensuring end_offset points to a complete
     // record boundary. Use IndexBuilder to scan the file first and determine
-    // safe bounds. If you get short_read here, your end_offset is wrong!
+    // safe bounds. If the scan stops early, your end_offset is wrong!
     //
     // For stress testing concurrent writes, see tests/nudbview/slice-stress-gtest.cpp
 
     std::uint64_t itemCount = 0;
     std::vector<index_entry> index_entries;
 
+    // Memory-map the dat file
+    boost::iostreams::mapped_file_source dat_mmap;
+    try
     {
-        bulk_reader<File> r{df, start_offset, end_offset + 1, readSize};
-        progress(0, 2 * (end_offset - start_offset));  // 2 passes total
-
-        while(! r.eof())
-        {
-            auto const record_offset = r.offset();
-
-            // Check if we've passed the end
-            if(record_offset > end_offset)
-                break;
-
-            // Data Record or Spill Record
-            nsize_t size;
-            auto is = r.prepare(field<uint48_t>::size, ec); // Size
-            if(ec)
-                return;  // SHORT READ will propagate here!
-
-            read_size48(is, size);
-
-            if(size > 0)
-            {
-                // Data Record - count it
-                // Record index entry if this is an interval boundary
-                if(itemCount % index_interval == 0)
-                {
-                    index_entry ie;
-                    ie.record_number = itemCount;
-                    ie.dat_offset = record_offset;
-                    index_entries.push_back(ie);
-                }
-
-                ++itemCount;
-
-                // Skip key + data
-                is = r.prepare(dh.key_size + size, ec);
-                if(ec)
-                    return;
-
-                progress(record_offset - start_offset, 2 * (end_offset - start_offset));
-            }
-            else
-            {
-                // Spill Record in source .dat - skip it
-                // (We'll create new spills if needed in our key file)
-                is = r.prepare(field<std::uint16_t>::size, ec);
-                if(ec)
-                    return;
-
-                std::uint16_t bucket_size;
-                read<std::uint16_t>(is, bucket_size);
-
-                r.prepare(bucket_size, ec); // Skip bucket data
-                if(ec)
-                    return;
-            }
-        }
+        dat_mmap.open(dat_path);
     }
+    catch (const std::exception& e)
+    {
+        ec = error::short_read;  // VFALCO: Need better error for mmap failure
+        return;
+    }
+
+    if (!dat_mmap.is_open())
+    {
+        ec = error::short_read;  // VFALCO: Need better error for mmap failure
+        return;
+    }
+
+    auto const* dat_data = reinterpret_cast<const std::uint8_t*>(dat_mmap.data());
+    std::uint64_t dat_file_size = dat_mmap.size();
+
+    // Validate end_offset doesn't exceed file
+    if (end_offset >= dat_file_size)
+    {
+        ec = error::invalid_key_size;  // VFALCO: Need better error
+        return;
+    }
+
+    progress(0, 2 * (end_offset - start_offset));  // 2 passes total
+
+    // Scan records using mmap
+    itemCount = nudbutil::scan_dat_records(
+        dat_mmap,
+        dh.key_size,
+        [&](std::uint64_t record_num, std::uint64_t offset, std::uint64_t size) {
+            // Check if we've passed the end
+            if (offset > end_offset)
+                return;
+
+            // Record index entry if this is an interval boundary
+            if (record_num % index_interval == 0)
+            {
+                index_entry ie;
+                ie.record_number = record_num;
+                ie.dat_offset = offset;
+                index_entries.push_back(ie);
+            }
+
+            progress(offset - start_offset, 2 * (end_offset - start_offset));
+        },
+        start_offset,
+        0
+    );
 
     if(itemCount == 0)
     {
@@ -323,46 +317,27 @@ rekey_slice(
             bucket b{kh.block_size,
                 buf.get() + i * kh.block_size, empty};
 
-        // Insert all keys into buckets
-        bulk_reader<File> r{df, start_offset, end_offset + 1, readSize};
-
-        while(! r.eof())
-        {
-            auto const record_offset = r.offset();
-
-            if(record_offset > end_offset)
-                break;
-
-            // Data Record or Spill Record
-            nsize_t size;
-            auto is = r.prepare(field<uint48_t>::size, ec);
-            if(ec)
-                return;
-
-            progress((end_offset - start_offset) +
-                (b0 / chunkSize) * (end_offset - start_offset) /
-                ((kh.buckets + chunkSize - 1) / chunkSize),
-                2 * (end_offset - start_offset));
-
-            read_size48(is, size);
-
-            if(size > 0)
-            {
-                // Data Record
-                is = r.prepare(
-                    dh.key_size +           // Key
-                    size, ec);              // Data
-                if(ec)
+        // Insert all keys into buckets using mmap
+        nudbutil::scan_dat_records(
+            dat_mmap,
+            dh.key_size,
+            [&](std::uint64_t record_num, std::uint64_t record_offset, std::uint64_t size) {
+                if (record_offset > end_offset)
                     return;
 
-                std::uint8_t const* const key = is.data(dh.key_size);
-                is.data(size);  // Skip data
+                progress((end_offset - start_offset) +
+                    (b0 / chunkSize) * (end_offset - start_offset) /
+                    ((kh.buckets + chunkSize - 1) / chunkSize),
+                    2 * (end_offset - start_offset));
+
+                // Read key directly from mmap (skip 6-byte size field)
+                std::uint8_t const* const key = dat_data + record_offset + field<uint48_t>::size;
 
                 auto const h = hash<Hasher>(key, dh.key_size, kh.salt);
                 auto const n = bucket_index(h, kh.buckets, kh.modulus);
 
                 if(n < b0 || n >= b1)
-                    continue;
+                    return;
 
                 bucket b{kh.block_size, buf.get() + (n - b0) * kh.block_size};
 
@@ -390,21 +365,14 @@ rekey_slice(
                 }
 
                 b.insert(record_offset, size, h);
-            }
-            else
-            {
-                // Source spill record - skip it
-                is = r.prepare(field<std::uint16_t>::size, ec);
-                if(ec)
-                    return;
+            },
+            start_offset,
+            0
+        );
 
-                std::uint16_t bucket_size;
-                read<std::uint16_t>(is, bucket_size);
-                r.prepare(bucket_size, ec);
-                if(ec)
-                    return;
-            }
-        }
+        // Check for errors that may have occurred in the callback
+        if (ec)
+            return;
 
         // Write buckets to key file
         kf.write((b0 + 1) * kh.block_size, buf.get(),
