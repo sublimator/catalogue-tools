@@ -1,23 +1,15 @@
 # Holy Build Box environment for creating portable static binaries
-# NOTE: Using 4.0.1 (last GHCR release) which has GCC 9. The HBB repo has GCC 14
-# support but no new tags released. We install gcc-toolset-11 below and unset HBB's
-# gcc-9 environment to avoid linking issues with non-PIC libraries.
-# TODO: Consider forking HBB, building GCC 14 image, and pushing to our own GHCR
-# to eliminate the environment sanitization hacks.
-FROM ghcr.io/phusion/holy-build-box:4.0.1-amd64
+# Using our custom-built 4.0.2 image with GCC 14 toolchain
+FROM docker.io/sublimator/holy-build-box:4.0.2-amd64
 
 ARG BUILD_CORES=8
 
-# Install build dependencies
-RUN /hbb_exe/activate-exec bash -c "dnf install -y epel-release && \
+# Install build dependencies (outside HBB environment to avoid static lib issues)
+RUN dnf install -y epel-release && \
     (dnf config-manager --set-enabled powertools || dnf config-manager --set-enabled crb) && \
     dnf install -y --enablerepo=devel \
-        gcc-toolset-11-gcc-c++ \
-        gcc-toolset-11-binutils \
-        gcc-toolset-11-libatomic-devel \
-        openssl-devel \
-        zlib-devel \
-        python3-pip \
+        curl \
+        ca-certificates \
         ninja-build \
         ccache \
         git \
@@ -28,13 +20,31 @@ RUN /hbb_exe/activate-exec bash -c "dnf install -y epel-release && \
         libtool \
         texinfo \
         perl-Digest-SHA && \
-    dnf clean all"
+    dnf clean all
 
-# Install Conan 2 and modern CMake
-RUN /hbb_exe/activate-exec bash -c "pip3 install 'conan>=2.0,<3.0' && \
-    wget -q https://github.com/Kitware/CMake/releases/download/v3.23.1/cmake-3.23.1-linux-x86_64.tar.gz -O /tmp/cmake.tar.gz && \
+# Install uv (Python package manager) and Python 3.14 via prebuilt binaries
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    export PATH="/root/.local/bin:${PATH}" && \
+    uv python install 3.14 && \
+    uv venv /opt/py-venv -p 3.14 && \
+    uv pip install --python /opt/py-venv/bin/python "conan>=2.0,<3.0" && \
+    /opt/py-venv/bin/python -V && \
+    /opt/py-venv/bin/conan --version
+
+# Make Python/pip/conan available for subsequent layers and runtime
+ENV VIRTUAL_ENV=/opt/py-venv
+ENV PATH="/opt/py-venv/bin:/root/.local/bin:${PATH}"
+RUN ln -sf /opt/py-venv/bin/python /usr/local/bin/python3 && \
+    ln -sf /opt/py-venv/bin/pip    /usr/local/bin/pip3 && \
+    ln -sf /opt/py-venv/bin/conan  /usr/local/bin/conan
+
+# Sanity checks
+RUN python -c 'import sys; print(sys.version)' && conan --version
+
+# Install modern CMake
+RUN wget -q https://github.com/Kitware/CMake/releases/download/v3.23.1/cmake-3.23.1-linux-x86_64.tar.gz -O /tmp/cmake.tar.gz && \
     tar -xzf /tmp/cmake.tar.gz -C /usr/local --strip-components=1 && \
-    rm /tmp/cmake.tar.gz"
+    rm /tmp/cmake.tar.gz
 
 # Configure Conan to use cache volume at /cache and force building from source
 RUN /hbb_exe/activate-exec bash -c "mkdir -p ~/.conan2 && { \
@@ -56,5 +66,5 @@ RUN chmod +x /usr/local/bin/hbb-build
 
 WORKDIR /workspace
 
-# Default command drops into shell with gcc-11 environment active
-CMD ["/hbb_exe/activate-exec", "bash", "-c", "source /opt/rh/gcc-toolset-11/enable && bash"]
+# Default command drops into shell with HBB environment active
+CMD ["/hbb_exe/activate-exec", "bash"]

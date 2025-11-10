@@ -9,7 +9,7 @@ else
   BUILD_CORES=${BUILD_CORES:-$(nproc)}
 fi
 
-IMAGE_NAME="catalogue-tools-hbb"
+IMAGE_NAME="catalogue-tools-hbb-402"
 CONAN_DEPS="${CONAN_DEPS:-missing}"
 DIAGNOSTICS="${DIAGNOSTICS:-0}"
 
@@ -52,7 +52,7 @@ echo "  docker run --rm -v catalogue-hbb-cache:/cache $IMAGE_NAME ccache -s"
 echo ""
 echo "To run tests:"
 echo "  docker run --rm -v \$(pwd):/workspace $IMAGE_NAME \\"
-echo "    /hbb_exe/activate-exec bash -c 'source /opt/rh/gcc-toolset-11/enable && cd build-hbb && ctest --output-on-failure'"
+echo "    /hbb_exe/activate-exec bash -c 'cd build-hbb && ctest --output-on-failure'"
 echo ""
 echo "To clean build-hbb directory:"
 echo "  rm -rf build-hbb"
