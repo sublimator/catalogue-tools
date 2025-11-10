@@ -25,3 +25,6 @@ target_link_libraries(
 
 # Require C++14 minimum (NuDB's requirement)
 target_compile_features(nudbview INTERFACE cxx_std_14)
+
+# Add nudb-util executable
+add_subdirectory(nudb-util)
