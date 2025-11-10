@@ -10,11 +10,21 @@ else
 fi
 
 IMAGE_NAME="catalogue-tools-hbb-402"
+CACHE_NAME="${IMAGE_NAME}-cache"
 CONAN_DEPS="${CONAN_DEPS:-missing}"
 DIAGNOSTICS="${DIAGNOSTICS:-0}"
+FORCE_CLEAR_CACHE="${FORCE_CLEAR_CACHE:-0}"
 
 # Change to repo root (script is in scripts/ subdirectory)
 cd "$(dirname "$0")/.."
+
+# Force clear cache if requested
+if [ "$FORCE_CLEAR_CACHE" = "1" ]; then
+  echo "=== Force clearing cache volume: $CACHE_NAME ==="
+  docker ps -a --filter volume="$CACHE_NAME" --format "{{.ID}}" | xargs -r docker rm -f 2>/dev/null || true
+  docker volume rm "$CACHE_NAME" 2>/dev/null || true
+  echo ""
+fi
 
 echo "=== Building HBB Docker image ==="
 docker build --platform linux/amd64 -f builds/hbb/Dockerfile --build-arg BUILD_CORES="$BUILD_CORES" -t "$IMAGE_NAME" .
@@ -26,7 +36,7 @@ echo "=== Building project in HBB container ==="
 if [ -n "${CI:-}" ]; then
   CACHE_MOUNT="-v $(pwd)/.hbb-cache:/cache"
 else
-  CACHE_MOUNT="-v catalogue-hbb-cache:/cache"
+  CACHE_MOUNT="-v $CACHE_NAME:/cache"
 fi
 
 if ! docker run --rm --platform linux/amd64 \
@@ -48,7 +58,7 @@ echo "=== Done! ==="
 echo "Binaries are in: build-hbb/src/"
 echo ""
 echo "Cache stats:"
-echo "  docker run --rm -v catalogue-hbb-cache:/cache $IMAGE_NAME ccache -s"
+echo "  docker run --rm -v $CACHE_NAME:/cache $IMAGE_NAME ccache -s"
 echo ""
 echo "To run tests:"
 echo "  docker run --rm -v \$(pwd):/workspace $IMAGE_NAME \\"
@@ -57,5 +67,5 @@ echo ""
 echo "To clean build-hbb directory:"
 echo "  rm -rf build-hbb"
 echo ""
-echo "To clean all caches (conan + ccache):"
-echo "  docker volume rm catalogue-hbb-cache"
+echo "To force clear all caches (conan + ccache) on next build:"
+echo "  FORCE_CLEAR_CACHE=1 ./scripts/build-hbb.sh"

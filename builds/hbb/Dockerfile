@@ -31,15 +31,13 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     /opt/py-venv/bin/python -V && \
     /opt/py-venv/bin/conan --version
 
-# Make Python/pip/conan available for subsequent layers and runtime
-ENV VIRTUAL_ENV=/opt/py-venv
-ENV PATH="/opt/py-venv/bin:/root/.local/bin:${PATH}"
+# Make conan and python3 available at runtime
 RUN ln -sf /opt/py-venv/bin/python /usr/local/bin/python3 && \
-    ln -sf /opt/py-venv/bin/pip    /usr/local/bin/pip3 && \
     ln -sf /opt/py-venv/bin/conan  /usr/local/bin/conan
 
 # Sanity checks
-RUN python -c 'import sys; print(sys.version)' && conan --version
+RUN /opt/py-venv/bin/python -c 'import sys; print(sys.version)' && \
+    /opt/py-venv/bin/conan --version
 
 # Install modern CMake
 RUN wget -q https://github.com/Kitware/CMake/releases/download/v3.23.1/cmake-3.23.1-linux-x86_64.tar.gz -O /tmp/cmake.tar.gz && \
