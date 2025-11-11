@@ -39,7 +39,7 @@
 #include <nudbview/nudb.hpp>
 #include <nudbview/view/index_builder.hpp>
 #include <nudbview/view/index_reader.hpp>
-#include <nudbview/view/slice_rekey.hpp>
+#include <nudbview/view/rekey_slice.hpp>
 #include <nudbview/view/slice_store.hpp>
 #include <random>
 #include <thread>
@@ -261,7 +261,7 @@ TEST_P(SliceConcurrentInserts, IndexAndSliceWhileInserting)
         // Find byte offsets for slice range
         nudbview::noff_t start_offset;
         std::uint64_t records_to_skip_start;
-        ASSERT_TRUE(index_reader.lookup_record(
+        ASSERT_TRUE(index_reader.lookup_record_start_offset(
             params.slice_start_record, start_offset, records_to_skip_start));
 
         // Scan forward if needed to reach exact start record
@@ -284,7 +284,7 @@ TEST_P(SliceConcurrentInserts, IndexAndSliceWhileInserting)
         // Find end offset (last record we want is slice_end_record - 1)
         nudbview::noff_t end_offset;
         std::uint64_t records_to_skip_end;
-        ASSERT_TRUE(index_reader.lookup_record(
+        ASSERT_TRUE(index_reader.lookup_record_start_offset(
             params.slice_end_record - 1, end_offset, records_to_skip_end));
 
         // Calculate the last byte of the end record
@@ -759,7 +759,7 @@ TEST_P(FuzzParams, GenerateRandomConfigs)
 
     nudbview::noff_t start_offset;
     std::uint64_t records_to_skip_start;
-    ASSERT_TRUE(index_reader.lookup_record(
+    ASSERT_TRUE(index_reader.lookup_record_start_offset(
         params.slice_start_record, start_offset, records_to_skip_start));
     ASSERT_EQ(records_to_skip_start, 0)
         << "At boundary - should get exact offset!";
@@ -767,7 +767,7 @@ TEST_P(FuzzParams, GenerateRandomConfigs)
     // Look up the NEXT boundary to get where our slice ends
     nudbview::noff_t end_boundary;
     std::uint64_t records_to_skip_end;
-    ASSERT_TRUE(index_reader.lookup_record(
+    ASSERT_TRUE(index_reader.lookup_record_start_offset(
         safe_slice_end, end_boundary, records_to_skip_end));
     ASSERT_EQ(records_to_skip_end, 0)
         << "At boundary - should get exact offset!";

@@ -38,3 +38,30 @@ target_link_libraries(
           GTest::gtest_main)
 
 gtest_discover_tests(slice_stress_gtest DISCOVERY_TIMEOUT 60)
+
+# Spill record tests (using JSON fixtures from find-collisions)
+add_executable(spill_record_gtest spill-record-gtest.cpp)
+
+target_link_libraries(
+  spill_record_gtest
+  PRIVATE catl::nudbview
+          catl::crypto
+          Boost::filesystem
+          Boost::iostreams
+          GTest::gtest_main)
+
+gtest_discover_tests(spill_record_gtest DISCOVERY_TIMEOUT 30)
+
+# Slice spill tests (testing .meta file spill handling)
+add_executable(slice_spill_gtest slice-spill-gtest.cpp)
+
+target_link_libraries(
+  slice_spill_gtest
+  PRIVATE catl::nudbview
+          catl::crypto
+          catl::core
+          Boost::filesystem
+          Boost::iostreams
+          GTest::gtest_main)
+
+gtest_discover_tests(slice_spill_gtest DISCOVERY_TIMEOUT 30)

@@ -6,11 +6,11 @@
 #ifndef NUDBVIEW_VIEW_SLICE_REKEY_HPP
 #define NUDBVIEW_VIEW_SLICE_REKEY_HPP
 
+#include <cstddef>
+#include <cstdint>
 #include <nudbview/error.hpp>
 #include <nudbview/file.hpp>
 #include <nudbview/type_traits.hpp>
-#include <cstddef>
-#include <cstdint>
 
 namespace nudbview {
 namespace view {
@@ -55,10 +55,10 @@ namespace view {
 
     @param dat_path The path to the data file (read-only).
 
-    @param start_offset Byte offset of first record in slice
+    @param start_offset_incl Byte offset of first record in slice
     (typically after dat_file_header for first slice).
 
-    @param end_offset Byte offset of last byte in slice (inclusive).
+    @param end_offset_incl Byte offset of last byte in slice (inclusive).
     Must be at a record boundary.
 
     @param slice_key_path The path to the slice key file to create.
@@ -93,24 +93,20 @@ namespace view {
     );
     @endcode
 
-    @param expected_record_count Optional expected number of records in the slice.
-    If provided (non-zero), skips Pass 1 (counting scan) and uses this count directly.
-    During Pass 2, validates that actual record count matches. Use when you already
-    have an index and know the exact record count. Errors if mismatch detected.
+    @param expected_record_count Optional expected number of records in the
+   slice. If provided (non-zero), skips Pass 1 (counting scan) and uses this
+   count directly. During Pass 2, validates that actual record count matches.
+   Use when you already have an index and know the exact record count. Errors if
+   mismatch detected.
 
     @param args Optional arguments passed to @b File constructors.
 */
-template<
-    class Hasher,
-    class File,
-    class Progress,
-    class... Args
->
+template <class Hasher, class File, class Progress, class... Args>
 void
 rekey_slice(
     path_type const& dat_path,
-    noff_t start_offset,
-    noff_t end_offset,
+    noff_t start_offset_incl,
+    noff_t end_offset_incl,
     path_type const& slice_key_path,
     path_type const& slice_meta_path,
     std::size_t blockSize,
@@ -122,9 +118,9 @@ rekey_slice(
     std::uint64_t expected_record_count = 0,
     Args&&... args);
 
-} // view
-} // nudbview
+}  // namespace view
+}  // namespace nudbview
 
-#include <nudbview/impl/view/slice_rekey.ipp>
+#include <nudbview/impl/view/rekey_slice.ipp>
 
 #endif

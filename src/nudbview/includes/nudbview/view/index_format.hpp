@@ -4,11 +4,12 @@
 //
 // IMPORTANT: Record numbering reflects physical file order, not insertion order
 // ----------------------------------------------------------------------------
-// Record numbers in the index are based on sequential scan order through the .dat file.
-// "Record N" = the Nth DATA RECORD encountered when scanning the file.
+// Record numbers in the index are based on sequential scan order through the
+// .dat file. "Record N" = the Nth DATA RECORD encountered when scanning the
+// file.
 //
-// NuDB writes records in SORTED KEY ORDER (lexicographic memcmp), not insertion order,
-// because it commits from a std::map sorted by key bytes. This means:
+// NuDB writes records in SORTED KEY ORDER (lexicographic memcmp), not insertion
+// order, because it commits from a std::map sorted by key bytes. This means:
 // - Record 0 = first data record in the file (smallest key lexicographically)
 // - Record N ≠ the Nth inserted record
 // - The index maps these physical record numbers to byte offsets
@@ -17,14 +18,14 @@
 #ifndef NUDBVIEW_VIEW_INDEX_FORMAT_HPP
 #define NUDBVIEW_VIEW_INDEX_FORMAT_HPP
 
-#include <nudbview/error.hpp>
-#include <nudbview/type_traits.hpp>
-#include <nudbview/detail/field.hpp>
-#include <nudbview/detail/stream.hpp>
-#include <nudbview/detail/format.hpp>
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <nudbview/detail/field.hpp>
+#include <nudbview/detail/format.hpp>
+#include <nudbview/detail/stream.hpp>
+#include <nudbview/error.hpp>
+#include <nudbview/type_traits.hpp>
 #include <string>
 
 namespace nudbview {
@@ -59,18 +60,18 @@ struct index_file_header
     static std::size_t constexpr size = 68;  // 8+2+8+8+2+8+8+8+16
 
     // File identification
-    char magic[8];                      // "nudb.idx"
-    std::size_t version;                // Version = 1
+    char magic[8];        // "nudb.idx"
+    std::size_t version;  // Version = 1
 
     // Must match source .dat file
-    std::uint64_t uid;                  // Database UID
-    std::uint64_t appnum;               // Application number
-    nsize_t key_size;                   // Key size in bytes
+    std::uint64_t uid;     // Database UID
+    std::uint64_t appnum;  // Application number
+    nsize_t key_size;      // Key size in bytes
 
     // Index configuration
-    std::uint64_t total_records;        // Total data records in .dat file
-    std::uint64_t index_interval;       // Index every N records
-    std::uint64_t entry_count;          // Number of offset entries in array
+    std::uint64_t total_records_indexed;  // Total data records in .dat file
+    std::uint64_t index_interval;         // Index every N records
+    std::uint64_t entry_count;            // Number of offset entries in array
 
     // Reserved for future expansion
     char reserved[16];
@@ -83,7 +84,7 @@ struct index_file_header
 /**
  * Read index file header from stream
  */
-template<class = void>
+template <class = void>
 void
 read(detail::istream& is, index_file_header& ifh)
 {
@@ -92,7 +93,7 @@ read(detail::istream& is, index_file_header& ifh)
     detail::read<std::uint64_t>(is, ifh.uid);
     detail::read<std::uint64_t>(is, ifh.appnum);
     detail::read<std::uint16_t>(is, ifh.key_size);
-    detail::read<std::uint64_t>(is, ifh.total_records);
+    detail::read<std::uint64_t>(is, ifh.total_records_indexed);
     detail::read<std::uint64_t>(is, ifh.index_interval);
     detail::read<std::uint64_t>(is, ifh.entry_count);
     std::array<std::uint8_t, 16> reserved;
@@ -102,13 +103,13 @@ read(detail::istream& is, index_file_header& ifh)
 /**
  * Read index file header from file
  */
-template<class File>
+template <class File>
 void
 read(File& f, index_file_header& ifh, error_code& ec)
 {
     std::array<std::uint8_t, index_file_header::size> buf;
     f.read(0, buf.data(), buf.size(), ec);
-    if(ec)
+    if (ec)
         return;
     detail::istream is{buf};
     read(is, ifh);
@@ -117,7 +118,7 @@ read(File& f, index_file_header& ifh, error_code& ec)
 /**
  * Write index file header to stream
  */
-template<class = void>
+template <class = void>
 void
 write(detail::ostream& os, index_file_header const& ifh)
 {
@@ -126,7 +127,7 @@ write(detail::ostream& os, index_file_header const& ifh)
     detail::write<std::uint64_t>(os, ifh.uid);
     detail::write<std::uint64_t>(os, ifh.appnum);
     detail::write<std::uint16_t>(os, ifh.key_size);
-    detail::write<std::uint64_t>(os, ifh.total_records);
+    detail::write<std::uint64_t>(os, ifh.total_records_indexed);
     detail::write<std::uint64_t>(os, ifh.index_interval);
     detail::write<std::uint64_t>(os, ifh.entry_count);
     std::array<std::uint8_t, 16> reserved;
@@ -137,7 +138,7 @@ write(detail::ostream& os, index_file_header const& ifh)
 /**
  * Write index file header to file
  */
-template<class File>
+template <class File>
 void
 write(File& f, index_file_header const& ifh, error_code& ec)
 {
@@ -154,7 +155,7 @@ write(File& f, index_file_header const& ifh, error_code& ec)
 /**
  * Write offset entry to stream (8 bytes, big-endian)
  */
-template<class = void>
+template <class = void>
 void
 write_offset(detail::ostream& os, noff_t offset)
 {
@@ -164,7 +165,7 @@ write_offset(detail::ostream& os, noff_t offset)
 /**
  * Read offset entry from stream (8 bytes, big-endian)
  */
-template<class = void>
+template <class = void>
 void
 read_offset(detail::istream& is, noff_t& offset)
 {
@@ -178,37 +179,37 @@ read_offset(detail::istream& is, noff_t& offset)
 /**
  * Verify index file header contents
  */
-template<class = void>
+template <class = void>
 void
 verify(index_file_header const& ifh, error_code& ec)
 {
     std::string const magic{ifh.magic, 8};
-    if(magic != "nudb.idx")
+    if (magic != "nudb.idx")
     {
         ec = error::not_data_file;  // VFALCO: Add index-specific error codes?
         return;
     }
-    if(ifh.version != index_file_version)
+    if (ifh.version != index_file_version)
     {
         ec = error::different_version;
         return;
     }
-    if(ifh.key_size < 1)
+    if (ifh.key_size < 1)
     {
         ec = error::invalid_key_size;
         return;
     }
-    if(ifh.total_records < 1)
+    if (ifh.total_records_indexed < 1)
     {
         ec = error::invalid_key_size;  // VFALCO: Better error code
         return;
     }
-    if(ifh.index_interval < 1)
+    if (ifh.index_interval < 1)
     {
         ec = error::invalid_key_size;  // VFALCO: Better error code
         return;
     }
-    if(ifh.entry_count < 1)
+    if (ifh.entry_count < 1)
     {
         ec = error::invalid_key_size;  // VFALCO: Better error code
         return;
@@ -218,25 +219,27 @@ verify(index_file_header const& ifh, error_code& ec)
 /**
  * Verify index file header matches dat file header
  */
-template<class = void>
+template <class = void>
 void
-verify(detail::dat_file_header const& dh,
-    index_file_header const& ifh, error_code& ec)
+verify(
+    detail::dat_file_header const& dh,
+    index_file_header const& ifh,
+    error_code& ec)
 {
     verify(ifh, ec);
-    if(ec)
+    if (ec)
         return;
-    if(ifh.uid != dh.uid)
+    if (ifh.uid != dh.uid)
     {
         ec = error::uid_mismatch;
         return;
     }
-    if(ifh.appnum != dh.appnum)
+    if (ifh.appnum != dh.appnum)
     {
         ec = error::appnum_mismatch;
         return;
     }
-    if(ifh.key_size != dh.key_size)
+    if (ifh.key_size != dh.key_size)
     {
         ec = error::key_size_mismatch;
         return;
@@ -254,9 +257,10 @@ verify(detail::dat_file_header const& dh,
  * @param index_interval Interval between indexed records
  * @param record_number The data record number to look up
  * @param[out] closest_offset Byte offset of closest indexed record
- * @param[out] records_to_skip Number of records to scan forward from closest_offset
+ * @param[out] records_to_skip Number of records to scan forward from
+ * closest_offset
  */
-template<class = void>
+template <class = void>
 void
 lookup_record_offset(
     noff_t const* index_array,
@@ -270,7 +274,7 @@ lookup_record_offset(
     std::uint64_t array_index = record_number / index_interval;
 
     // Clamp to array bounds
-    if(array_index >= entry_count)
+    if (array_index >= entry_count)
         array_index = entry_count - 1;
 
     // Get offset from array
@@ -281,7 +285,7 @@ lookup_record_offset(
     records_to_skip = record_number - indexed_record;
 }
 
-} // view
-} // nudbview
+}  // namespace view
+}  // namespace nudbview
 
 #endif

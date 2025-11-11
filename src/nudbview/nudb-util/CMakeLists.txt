@@ -11,6 +11,7 @@ target_link_libraries(
   nudb-util
   PRIVATE catl::nudbview
           catl::core
+          catl::crypto
           Boost::filesystem
           Boost::program_options
           Boost::iostreams)

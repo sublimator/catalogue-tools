@@ -5,14 +5,14 @@
 #ifndef NUDB_UTIL_INDEX_BUILDER_HPP
 #define NUDB_UTIL_INDEX_BUILDER_HPP
 
-#include <nudbview/view/index_format.hpp>
-#include <nudbview/detail/format.hpp>
-#include <nudbview/native_file.hpp>
-#include <boost/iostreams/device/mapped_file.hpp>
 #include <boost/filesystem.hpp>
-#include <vector>
+#include <boost/iostreams/device/mapped_file.hpp>
 #include <cstdint>
 #include <functional>
+#include <nudbview/detail/format.hpp>
+#include <nudbview/native_file.hpp>
+#include <nudbview/view/index_format.hpp>
+#include <vector>
 
 namespace nudbutil {
 
@@ -55,7 +55,8 @@ struct IndexBuildResult
  * IMPORTANT: Handling live .dat files (concurrent writes)
  * --------------------------------------------------------
  * IndexBuilder can be used on LIVE .dat files that are being actively written
- * by another process. This is critical for creating slices of running databases.
+ * by another process. This is critical for creating slices of running
+ * databases.
  *
  * The challenge: NuDB record writes have intermediate states:
  *   1. Write size header (6 bytes)
@@ -84,7 +85,8 @@ public:
      * @param options Build options (interval, progress, etc)
      * @return Build result with statistics
      */
-    static IndexBuildResult build(
+    static IndexBuildResult
+    build(
         std::string const& dat_path,
         std::string const& index_path,
         IndexBuildOptions const& options = IndexBuildOptions{});
@@ -99,7 +101,8 @@ public:
      * @param options Build options (must match existing interval!)
      * @return Build result with statistics (only NEW records counted)
      */
-    static IndexBuildResult extend(
+    static IndexBuildResult
+    extend(
         std::string const& dat_path,
         std::string const& index_path,
         IndexBuildOptions const& options = IndexBuildOptions{});
@@ -118,7 +121,8 @@ public:
      * @param ec Error code output
      * @return true if valid
      */
-    static bool verify(
+    static bool
+    verify(
         std::string const& dat_path,
         std::string const& index_path,
         nudbview::error_code& ec);
@@ -139,33 +143,45 @@ public:
      *
      * @param dat_path Path to the .dat file (read-only)
      * @param index_path Path to the .index file (must exist)
-     * @param start_record First record in slice (must be multiple of interval)
-     * @param end_record One past last record (must be multiple of interval)
+     * @param start_record_incl First record in slice (must be multiple of
+     * interval)
+     * @param end_record_excl One past last record (must be multiple of
+     * interval, <= last indexed record + interval)
      * @param slice_key_path Output path for slice .key file
      * @param slice_meta_path Output path for slice .meta file
-     * @param ec Error code output (returns error::invalid_key_size if not at boundaries)
+     * @param ec Error code output (returns error::invalid_slice_boundary for
+     * invalid boundaries)
      * @return true if successful, false on error
+     *
+     * Example: With 142 records, interval=10:
+     *   - Index has 14 entries (0-13) at records [0, 10, 20, ..., 130]
+     * (total_records rounded to 140)
+     *   - Last indexed record = (14-1) * 10 = 130
+     *   - Max end_record = 130 + 10 = 140 (one past last indexed record)
+     *   - Valid slices: [0, 10), [0, 130), [0, 140), [10, 130), etc.
+     *   - INVALID: [0, 150) - exceeds max_end_record
      */
-    static bool create_slice_from_index(
+    static bool
+    create_slice_from_index(
         std::string const& dat_path,
         std::string const& index_path,
-        std::uint64_t start_record,
-        std::uint64_t end_record,
+        std::uint64_t start_record_incl,
+        std::uint64_t end_record_excl,
         std::string const& slice_key_path,
         std::string const& slice_meta_path,
         nudbview::error_code& ec);
 
 private:
     // Internal implementation shared by build() and extend()
-    static IndexBuildResult build_internal(
+    static IndexBuildResult
+    build_internal(
         std::string const& dat_path,
         std::string const& index_path,
         IndexBuildOptions const& options,
         bool extend_mode);
 };
 
-} // namespace nudbutil
-
+}  // namespace nudbutil
 
 #include <nudbview/impl/view/index_builder.ipp>
 

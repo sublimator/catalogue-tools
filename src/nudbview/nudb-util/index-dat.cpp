@@ -249,7 +249,7 @@ run_index_dat(int argc, char* argv[])
                 return 1;
             }
 
-            existing_total_records = existing_ifh.total_records;
+            existing_total_records = existing_ifh.total_records_indexed;
 
             PLOGI(index_log, "  Existing records: ", existing_total_records);
             PLOGI(index_log, "  Existing entries: ", existing_ifh.entry_count);
@@ -386,7 +386,7 @@ run_index_dat(int argc, char* argv[])
         ifh.uid = dh.uid;
         ifh.appnum = dh.appnum;
         ifh.key_size = dh.key_size;
-        ifh.total_records = total_records;
+        ifh.total_records_indexed = total_records;
         ifh.index_interval = index_interval;
         ifh.entry_count = offsets.size();
 

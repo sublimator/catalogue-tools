@@ -6,7 +6,7 @@
 #include <nudbview/view/dat_scanner.hpp>
 #include <nudbview/view/index_builder.hpp>
 #include <nudbview/view/index_reader.hpp>
-#include <nudbview/view/slice_rekey.hpp>
+#include <nudbview/view/rekey_slice.hpp>
 #include <nudbview/view/slice_store.hpp>
 
 using namespace nudbview_test;
@@ -52,8 +52,8 @@ TEST(SliceE2E, CreateIndexSliceAndQuery)
     // Find offset for record 0 (start)
     nudbview::noff_t start_offset;
     std::uint64_t records_to_skip_start;
-    ASSERT_TRUE(
-        index_reader.lookup_record(0, start_offset, records_to_skip_start));
+    ASSERT_TRUE(index_reader.lookup_record_start_offset(
+        0, start_offset, records_to_skip_start));
 
     // Scan forward if needed
     if (records_to_skip_start > 0)
@@ -75,8 +75,8 @@ TEST(SliceE2E, CreateIndexSliceAndQuery)
     // Find offset for record 499 (last record we want in slice)
     nudbview::noff_t end_offset;
     std::uint64_t records_to_skip_end;
-    ASSERT_TRUE(
-        index_reader.lookup_record(499, end_offset, records_to_skip_end));
+    ASSERT_TRUE(index_reader.lookup_record_start_offset(
+        499, end_offset, records_to_skip_end));
 
     // Scan forward to find record 499, then calculate its last byte
     {

@@ -1,15 +1,15 @@
 #ifndef NUDBVIEW_IMPL_VIEW_INDEX_BUILDER_IPP
 #define NUDBVIEW_IMPL_VIEW_INDEX_BUILDER_IPP
 
+#include <boost/filesystem.hpp>
+#include <boost/iostreams/device/mapped_file.hpp>
+#include <chrono>
+#include <nudbview/detail/format.hpp>
+#include <nudbview/native_file.hpp>
 #include <nudbview/view/dat_scanner.hpp>
 #include <nudbview/view/index_format.hpp>
 #include <nudbview/view/index_reader.hpp>
-#include <nudbview/view/slice_rekey.hpp>
-#include <nudbview/detail/format.hpp>
-#include <nudbview/native_file.hpp>
-#include <boost/iostreams/device/mapped_file.hpp>
-#include <boost/filesystem.hpp>
-#include <chrono>
+#include <nudbview/view/rekey_slice.hpp>
 #include <vector>
 
 namespace fs = boost::filesystem;
@@ -71,7 +71,8 @@ IndexBuilder::build_internal(
     }
     catch (const std::exception& e)
     {
-        result.error_message = std::string("Failed to mmap dat file: ") + e.what();
+        result.error_message =
+            std::string("Failed to mmap dat file: ") + e.what();
         return result;
     }
 
@@ -81,7 +82,8 @@ IndexBuilder::build_internal(
         return result;
     }
 
-    auto const* dat_data = reinterpret_cast<const std::uint8_t*>(dat_mmap.data());
+    auto const* dat_data =
+        reinterpret_cast<const std::uint8_t*>(dat_mmap.data());
     std::uint64_t file_size = dat_mmap.size();
 
     // Read dat file header
@@ -92,7 +94,8 @@ IndexBuilder::build_internal(
     }
 
     nudbview::detail::dat_file_header dh;
-    nudbview::detail::istream is{dat_data, nudbview::detail::dat_file_header::size};
+    nudbview::detail::istream is{
+        dat_data, nudbview::detail::dat_file_header::size};
     nudbview::detail::read(is, dh);
 
     nudbview::error_code ec;
@@ -122,11 +125,13 @@ IndexBuilder::build_internal(
         }
         catch (const std::exception& e)
         {
-            result.error_message = std::string("Failed to mmap existing index: ") + e.what();
+            result.error_message =
+                std::string("Failed to mmap existing index: ") + e.what();
             return result;
         }
 
-        auto const* index_data = reinterpret_cast<const std::uint8_t*>(index_mmap.data());
+        auto const* index_data =
+            reinterpret_cast<const std::uint8_t*>(index_mmap.data());
         std::uint64_t index_file_size = index_mmap.size();
 
         if (index_file_size < nudbview::view::index_file_header::size)
@@ -136,13 +141,15 @@ IndexBuilder::build_internal(
         }
 
         nudbview::view::index_file_header existing_ifh;
-        nudbview::detail::istream ifh_is{index_data, nudbview::view::index_file_header::size};
+        nudbview::detail::istream ifh_is{
+            index_data, nudbview::view::index_file_header::size};
         nudbview::view::read(ifh_is, existing_ifh);
 
         nudbview::view::verify(dh, existing_ifh, ec);
         if (ec)
         {
-            result.error_message = "Existing index doesn't match dat file: " + ec.message();
+            result.error_message =
+                "Existing index doesn't match dat file: " + ec.message();
             return result;
         }
 
@@ -152,11 +159,12 @@ IndexBuilder::build_internal(
             return result;
         }
 
-        existing_total_records = existing_ifh.total_records;
+        existing_total_records = existing_ifh.total_records_indexed;
 
         // Read existing offsets
         offsets.reserve(existing_ifh.entry_count + 100000);
-        std::uint64_t offset_array_offset = nudbview::view::index_file_header::size;
+        std::uint64_t offset_array_offset =
+            nudbview::view::index_file_header::size;
 
         for (std::uint64_t i = 0; i < existing_ifh.entry_count; ++i)
         {
@@ -166,7 +174,8 @@ IndexBuilder::build_internal(
                 return result;
             }
 
-            nudbview::detail::istream offset_is{index_data + offset_array_offset, 8};
+            nudbview::detail::istream offset_is{
+                index_data + offset_array_offset, 8};
             nudbview::noff_t offset;
             nudbview::view::read_offset(offset_is, offset);
             offsets.push_back(offset);
@@ -186,12 +195,15 @@ IndexBuilder::build_internal(
     auto scan_start = std::chrono::high_resolution_clock::now();
 
     std::uint64_t total_records = scan_dat_records(
-        dat_mmap, dh.key_size,
-        [&](std::uint64_t record_num, std::uint64_t offset, std::uint64_t /* size */)
-        {
+        dat_mmap,
+        dh.key_size,
+        [&](std::uint64_t record_num,
+            std::uint64_t offset,
+            std::uint64_t /* size */) {
             // In extend mode, skip records that were already indexed
             bool should_index = (record_num % options.index_interval == 0);
-            if (extend_mode && should_index && record_num < existing_total_records)
+            if (extend_mode && should_index &&
+                record_num < existing_total_records)
             {
                 should_index = false;  // Already indexed in original
             }
@@ -203,7 +215,8 @@ IndexBuilder::build_internal(
 
             if (options.progress_callback)
             {
-                options.progress_callback(offset - start_offset, file_size - start_offset);
+                options.progress_callback(
+                    offset - start_offset, file_size - start_offset);
             }
         },
         start_offset,
@@ -211,19 +224,27 @@ IndexBuilder::build_internal(
 
     auto scan_end = std::chrono::high_resolution_clock::now();
     result.scan_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        scan_end - scan_start).count();
+                              scan_end - scan_start)
+                              .count();
 
     // CRITICAL: Truncate offsets to only include complete interval boundaries!
-    // If we scanned 105 records with interval=26, we collected offsets for: 0, 26, 52, 78, 104
-    // But we should only report up to the last complete interval: (105/26)*26 = 104 records (0-103)
-    // So we can only keep offsets for records: 0, 26, 52, 78 (NOT 104!)
-    std::uint64_t rounded_total_records = (total_records / options.index_interval) * options.index_interval;
-    std::size_t expected_entries = rounded_total_records / options.index_interval;
+    // If we scanned 105 records with interval=26, we collected offsets for: 0,
+    // 26, 52, 78, 104 But we should only report up to the last complete
+    // interval: (105/26)*26 = 104 records (0-103) So we can only keep offsets
+    // for records: 0, 26, 52, 78 (NOT 104!)
+    std::uint64_t rounded_total_records =
+        (total_records / options.index_interval) * options.index_interval;
+    std::size_t expected_entries =
+        rounded_total_records / options.index_interval;
 
     if (offsets.size() > expected_entries)
     {
         offsets.resize(expected_entries);
     }
+
+    // CRITICAL: Use the ROUNDED total_records for consistency!
+    // We can only index/slice at interval boundaries, so report that
+    std::uint64_t rounded_total_records_for_header = rounded_total_records;
 
     // Write index file
     auto write_start = std::chrono::high_resolution_clock::now();
@@ -248,7 +269,8 @@ IndexBuilder::build_internal(
     ifh.uid = dh.uid;
     ifh.appnum = dh.appnum;
     ifh.key_size = dh.key_size;
-    ifh.total_records = total_records;
+    ifh.total_records_indexed =
+        rounded_total_records_for_header;  // Use ROUNDED count!
     ifh.index_interval = options.index_interval;
     ifh.entry_count = offsets.size();
 
@@ -272,7 +294,8 @@ IndexBuilder::build_internal(
             f.write(file_offset, batch_buf.data(), batch_offset, ec);
             if (ec)
             {
-                result.error_message = "Failed to write offset batch: " + ec.message();
+                result.error_message =
+                    "Failed to write offset batch: " + ec.message();
                 return result;
             }
             file_offset += batch_offset;
@@ -287,7 +310,8 @@ IndexBuilder::build_internal(
         f.write(file_offset, batch_buf.data(), batch_offset, ec);
         if (ec)
         {
-            result.error_message = "Failed to write final batch: " + ec.message();
+            result.error_message =
+                "Failed to write final batch: " + ec.message();
             return result;
         }
     }
@@ -308,14 +332,13 @@ IndexBuilder::build_internal(
     }
 
     auto write_end = std::chrono::high_resolution_clock::now();
-    result.write_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        write_end - write_start).count();
+    result.write_time_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            write_end - write_start)
+            .count();
 
-    // CRITICAL: Only report complete interval boundaries!
-    // We may have scanned additional records beyond the last interval boundary,
-    // but since we can only slice at interval boundaries, we should only report
-    // records up to the last complete interval.
-    result.total_records = (total_records / options.index_interval) * options.index_interval;
+    // Report the same rounded count we wrote to the header
+    result.total_records = rounded_total_records_for_header;
     result.entry_count = offsets.size();
     result.success = true;
 
@@ -339,8 +362,8 @@ bool
 IndexBuilder::create_slice_from_index(
     std::string const& dat_path,
     std::string const& index_path,
-    std::uint64_t start_record,
-    std::uint64_t end_record,
+    std::uint64_t start_record_incl,
+    std::uint64_t end_record_excl,
     std::string const& slice_key_path,
     std::string const& slice_meta_path,
     nudbview::error_code& ec)
@@ -352,38 +375,59 @@ IndexBuilder::create_slice_from_index(
 
     std::uint64_t interval = index_reader.index_interval();
     std::uint64_t total_records = index_reader.total_records();
+    std::uint64_t entry_count = index_reader.entry_count();
+
+    // Calculate the last indexed record number
+    // With N entries at interval I, we have entries for records: 0, I, 2I, ...,
+    // (N-1)*I The last indexed record is (N-1) * I
+    std::uint64_t last_indexed_record =
+        (entry_count > 0) ? (entry_count - 1) * interval : 0;
+    std::uint64_t max_end_record = last_indexed_record + interval;
 
     // CRITICAL: Validate boundaries are at interval multiples!
     // You CANNOT slice to arbitrary record numbers on live files.
-    if (start_record % interval != 0)
+    if (start_record_incl % interval != 0)
     {
-        ec = nudbview::make_error_code(nudbview::error::invalid_key_size);
+        ec = nudbview::make_error_code(nudbview::error::invalid_slice_boundary);
         return false;
     }
 
-    if (end_record % interval != 0)
+    if (end_record_excl % interval != 0)
     {
-        ec = nudbview::make_error_code(nudbview::error::invalid_key_size);
+        ec = nudbview::make_error_code(nudbview::error::invalid_slice_boundary);
         return false;
     }
 
-    // Validate range is within indexed records
-    if (end_record > total_records)
+    // Validate range
+    if (start_record_incl >= end_record_excl)
     {
-        ec = nudbview::make_error_code(nudbview::error::invalid_key_size);
+        ec = nudbview::make_error_code(nudbview::error::invalid_slice_boundary);
         return false;
     }
 
-    if (start_record >= end_record)
+    // CRITICAL: Can only slice up to last INDEXED record!
+    // With N entries, we can lookup records 0, I, 2I, ..., (N-1)*I
+    // To slice [start, end), we need to lookup BOTH start and end in the index
+    // So end must be <= (N-1)*I + I (one past the last indexed record)
+    if (end_record_excl > max_end_record)
     {
-        ec = nudbview::make_error_code(nudbview::error::invalid_key_size);
+        ec = nudbview::make_error_code(nudbview::error::invalid_slice_boundary);
+        return false;
+    }
+
+    // Also check against total_records (though max_end_record check is
+    // stricter)
+    if (end_record_excl > total_records)
+    {
+        ec = nudbview::make_error_code(nudbview::error::invalid_slice_boundary);
         return false;
     }
 
     // Get exact byte offsets from index (no scanning needed at boundaries!)
     nudbview::noff_t start_offset;
     std::uint64_t records_to_skip_start;
-    if (!index_reader.lookup_record(start_record, start_offset, records_to_skip_start))
+    if (!index_reader.lookup_record_start_offset(
+            start_record_incl, start_offset, records_to_skip_start))
     {
         ec = nudbview::make_error_code(nudbview::error::short_read);
         return false;
@@ -392,55 +436,201 @@ IndexBuilder::create_slice_from_index(
     // Should be zero since we're at a boundary
     if (records_to_skip_start != 0)
     {
-        ec = nudbview::make_error_code(nudbview::error::invalid_key_size);
+        ec = nudbview::make_error_code(nudbview::error::invalid_slice_boundary);
         return false;
     }
 
-    // Get end boundary (start of next record after our range)
-    nudbview::noff_t end_boundary;
-    std::uint64_t records_to_skip_end;
-    if (!index_reader.lookup_record(end_record, end_boundary, records_to_skip_end))
+    // Get end boundary
+    nudbview::noff_t end_offset;
+
+    // Special case: if slicing to total_records (end of indexed range), find
+    // actual end
+    if (end_record_excl == total_records)
     {
-        ec = nudbview::make_error_code(nudbview::error::short_read);
-        return false;
-    }
+        // We need to find the END of the last indexed record
+        // Get the last index entry position
+        std::uint64_t last_entry = entry_count - 1;
+        std::uint64_t last_entry_record = last_entry * interval;
 
-    // Should be zero since we're at a boundary
-    if (records_to_skip_end != 0)
+        // Get offset of the last index entry
+        nudbview::noff_t last_entry_offset;
+        std::uint64_t dummy;
+        if (!index_reader.lookup_record_start_offset(
+                last_entry_record, last_entry_offset, dummy))
+        {
+            ec = nudbview::make_error_code(
+                nudbview::error::invalid_slice_boundary);
+            return false;
+        }
+
+        // Now scan forward to find the end of the last record in the interval
+        boost::iostreams::mapped_file_source dat_mmap(dat_path);
+
+        // Read dat header to get key_size
+        auto const* dat_data =
+            reinterpret_cast<const std::uint8_t*>(dat_mmap.data());
+        nudbview::detail::dat_file_header dh;
+        std::memcpy(&dh, dat_data, sizeof(dh));
+
+        // Use dat_scanner to scan the last interval and find the last record
+        nudbview::noff_t last_record_end = last_entry_offset;
+        std::uint64_t records_found = 0;
+
+        // We want records [0, end_record_excl) so the LAST record is
+        // end_record_excl - 1
+        std::uint64_t last_record_we_want = end_record_excl - 1;
+
+        nudbutil::scan_dat_records(
+            dat_mmap,
+            dh.key_size,
+            [&](std::uint64_t record_num,
+                std::uint64_t offset,
+                std::uint64_t size) {
+                // We only care about records in our last interval
+                if (record_num < last_entry_record)
+                    return;  // Skip records before our interval
+
+                if (record_num > last_record_we_want)
+                    return;  // Stop - we've gone past the last record we want
+
+                // Keep updating until we find the END of the last record we
+                // want
+                std::uint64_t this_end;
+                if (nudbutil::get_record_end_offset_incl(
+                        dat_mmap, dh.key_size, offset, this_end))
+                {
+                    last_record_end = this_end;  // Update to this record's end
+                    records_found++;
+
+                    // If we found the exact record we want, we can stop
+                    if (record_num == last_record_we_want)
+                        return;
+                }
+            },
+            last_entry_offset,
+            last_entry_record);
+
+        if (records_found == 0)
+        {
+            // No records found in the last interval?
+            ec = nudbview::make_error_code(
+                nudbview::error::invalid_slice_boundary);
+            return false;
+        }
+
+        end_offset =
+            last_record_end;  // Already inclusive from get_record_end_offset
+    }
+    else
     {
-        ec = nudbview::make_error_code(nudbview::error::invalid_key_size);
-        return false;
+        // Normal case: We want records [0, end_record_excl) so last record is
+        // end_record_excl - 1 We need to find the END of that last record
+        std::uint64_t last_record_we_want = end_record_excl - 1;
+
+        // Find which interval contains this record
+        std::uint64_t interval_for_last =
+            (last_record_we_want / interval) * interval;
+
+        nudbview::noff_t interval_offset;
+        std::uint64_t records_to_skip;
+        if (!index_reader.lookup_record_start_offset(
+                interval_for_last, interval_offset, records_to_skip))
+        {
+            ec = nudbview::make_error_code(
+                nudbview::error::invalid_slice_boundary);
+            return false;
+        }
+
+        // Now scan forward to find the END of last_record_we_want
+        boost::iostreams::mapped_file_source dat_mmap(dat_path);
+        auto const* dat_data =
+            reinterpret_cast<const std::uint8_t*>(dat_mmap.data());
+        nudbview::detail::dat_file_header dh;
+        std::memcpy(&dh, dat_data, sizeof(dh));
+
+        nudbview::noff_t last_record_end = interval_offset;
+
+        nudbutil::scan_dat_records(
+            dat_mmap,
+            dh.key_size,
+            [&](std::uint64_t record_num,
+                std::uint64_t offset,
+                std::uint64_t size) {
+                if (record_num > last_record_we_want)
+                    return;  // Stop - we've gone past the last record we want
+
+                // Update the end offset for each record until we hit our target
+                std::uint64_t this_end;
+                if (nudbutil::get_record_end_offset_incl(
+                        dat_mmap, dh.key_size, offset, this_end))
+                {
+                    last_record_end = this_end;
+
+                    if (record_num == last_record_we_want)
+                        return;  // Found it!
+                }
+            },
+            interval_offset,
+            interval_for_last);
+
+        end_offset = last_record_end;  // Already inclusive
     }
 
-    // rekey_slice expects [start, end] INCLUSIVE, so subtract 1
-    nudbview::noff_t end_offset = end_boundary - 1;
+    // Now we have the correct byte range [start_offset, end_offset] that
+    // contains exactly the records we want [start_record_incl, end_record_excl)
 
-    // Calculate exact record count - we already have this from the index!
-    std::uint64_t record_count = end_record - start_record;
+    // Read block_size and salt from key file
+    std::uint64_t salt = 1;
+    float load_factor = 0.5f;
+    std::size_t block_size = 4096;
 
-    // TODO: Read block_size and load_factor from original .dat file header!
-    // These should match the original database settings, not use hardcoded defaults.
-    // For now using sensible defaults: 4096 block size, 0.5 load factor
+    {
+        // Need to get salt from the .key file for proper hashing
+        std::string key_path = dat_path;
+        size_t pos = key_path.rfind(".dat");
+        if (pos != std::string::npos)
+        {
+            key_path.replace(pos, 4, ".key");
+        }
+
+        nudbview::native_file kf;
+        nudbview::error_code kf_ec;
+        kf.open(nudbview::file_mode::read, key_path, kf_ec);
+        if (!kf_ec)
+        {
+            nudbview::detail::key_file_header kfh;
+            nudbview::detail::read(kf, kfh, kf_ec);
+            if (!kf_ec)
+            {
+                salt = kfh.salt;
+                // load_factor is stored as uint16_t normalized to [0, 65536]
+                load_factor = static_cast<float>(kfh.load_factor) / 65536.0f;
+                block_size = kfh.block_size;
+            }
+            kf.close();
+        }
+    }
 
     // Create the slice using low-level rekey_slice
-    // OPTIMIZATION: Pass record_count to skip Pass 1 (we already scanned to build the index!)
+    // DON'T pass expected record count - let it scan and count actual records
+    // in the range
     nudbview::view::rekey_slice<nudbview::xxhasher, nudbview::native_file>(
         dat_path,
         start_offset,
         end_offset,
         slice_key_path,
         slice_meta_path,
-        4096,      // TODO: Read from dat_file_header
-        0.5f,      // TODO: Read from key_file_header
+        block_size,
+        load_factor,
         interval,  // Use same interval as the index
         8192,      // buffer_size
         ec,
-        [](std::uint64_t, std::uint64_t) {},  // no-op progress callback
-        record_count  // Skip counting pass - we know the count!
+        [](std::uint64_t, std::uint64_t) {}  // no-op progress callback
+        // NO expected_record_count - let it scan!
     );
 
     return !ec;
 }
 
-} // namespace nudbutil
+}  // namespace nudbutil
 #endif

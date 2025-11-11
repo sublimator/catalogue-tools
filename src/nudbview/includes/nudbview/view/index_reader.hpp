@@ -5,12 +5,12 @@
 #ifndef NUDB_UTIL_INDEX_READER_HPP
 #define NUDB_UTIL_INDEX_READER_HPP
 
-#include <nudbview/view/index_format.hpp>
-#include <nudbview/detail/format.hpp>
-#include <boost/iostreams/device/mapped_file.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/iostreams/device/mapped_file.hpp>
 #include <catl/core/logger.h>
 #include <cstdint>
+#include <nudbview/detail/format.hpp>
+#include <nudbview/view/index_format.hpp>
 #include <string>
 
 namespace nudbutil {
@@ -32,9 +32,7 @@ private:
     bool loaded_;
 
 public:
-    IndexReader()
-        : offset_array_(nullptr)
-        , loaded_(false)
+    IndexReader() : offset_array_(nullptr), loaded_(false)
     {
     }
 
@@ -50,7 +48,8 @@ public:
      * @param ec Error code output
      * @return true if loaded successfully
      */
-    bool load(std::string const& index_path, nudbview::error_code& ec)
+    bool
+    load(std::string const& index_path, nudbview::error_code& ec)
     {
         namespace fs = boost::filesystem;
 
@@ -89,7 +88,8 @@ public:
             return false;
         }
 
-        nudbview::detail::istream is{data, nudbview::view::index_file_header::size};
+        nudbview::detail::istream is{
+            data, nudbview::view::index_file_header::size};
         nudbview::view::read(is, header_);
 
         // Verify header
@@ -98,8 +98,8 @@ public:
             return false;
 
         // Verify file size matches header
-        std::uint64_t expected_size = nudbview::view::index_file_header::size +
-                                       (header_.entry_count * 8);
+        std::uint64_t expected_size =
+            nudbview::view::index_file_header::size + (header_.entry_count * 8);
         if (file_size < expected_size)
         {
             ec = nudbview::error_code{nudbview::error::short_read};
@@ -117,8 +117,10 @@ public:
     /**
      * Verify this index matches a dat file header
      */
-    bool verify_match(nudbview::detail::dat_file_header const& dh,
-                     nudbview::error_code& ec) const
+    bool
+    verify_match(
+        nudbview::detail::dat_file_header const& dh,
+        nudbview::error_code& ec) const
     {
         if (!loaded_)
         {
@@ -141,9 +143,11 @@ public:
      * @param[out] records_to_skip How many records to scan from byte_offset
      * @return true if successful
      */
-    bool lookup_record(std::uint64_t record_num,
-                      nudbview::noff_t& byte_offset,
-                      std::uint64_t& records_to_skip) const
+    bool
+    lookup_record_start_offset(
+        std::uint64_t record_num,
+        nudbview::noff_t& byte_offset,
+        std::uint64_t& records_to_skip) const
     {
         if (!loaded_)
             return false;
@@ -156,11 +160,10 @@ public:
             array_index = header_.entry_count - 1;
 
         // Read 8-byte big-endian offset
-        auto const* offset_bytes = reinterpret_cast<std::uint8_t const*>(
-            offset_array_ + array_index);
+        auto const* offset_bytes =
+            reinterpret_cast<std::uint8_t const*>(offset_array_ + array_index);
 
-        byte_offset =
-            (static_cast<std::uint64_t>(offset_bytes[0]) << 56) |
+        byte_offset = (static_cast<std::uint64_t>(offset_bytes[0]) << 56) |
             (static_cast<std::uint64_t>(offset_bytes[1]) << 48) |
             (static_cast<std::uint64_t>(offset_bytes[2]) << 40) |
             (static_cast<std::uint64_t>(offset_bytes[3]) << 32) |
@@ -175,7 +178,8 @@ public:
         return true;
     }
 
-    void close()
+    void
+    close()
     {
         if (mmap_.is_open())
             mmap_.close();
@@ -184,14 +188,35 @@ public:
     }
 
     // Accessors
-    bool is_loaded() const { return loaded_; }
-    nudbview::view::index_file_header const& header() const { return header_; }
-    std::uint64_t total_records() const { return header_.total_records; }
-    std::uint64_t index_interval() const { return header_.index_interval; }
-    std::uint64_t entry_count() const { return header_.entry_count; }
+    bool
+    is_loaded() const
+    {
+        return loaded_;
+    }
+    nudbview::view::index_file_header const&
+    header() const
+    {
+        return header_;
+    }
+    std::uint64_t
+    total_records() const
+    {
+        return header_.total_records_indexed;
+    }
+    std::uint64_t
+    index_interval() const
+    {
+        return header_.index_interval;
+    }
+    std::uint64_t
+    entry_count() const
+    {
+        return header_.entry_count;
+    }
 
     // Debug helpers
-    void dump_entries(std::ostream& os, std::size_t max_entries = 100) const
+    void
+    dump_entries(std::ostream& os, std::size_t max_entries = 100) const
     {
         if (!loaded_)
         {
@@ -199,14 +224,17 @@ public:
             return;
         }
 
-        os << "Index: " << header_.entry_count << " entries, interval="
-           << header_.index_interval << ", total_records=" << header_.total_records << std::endl;
+        os << "Index: " << header_.entry_count
+           << " entries, interval=" << header_.index_interval
+           << ", total_records=" << header_.total_records_indexed << std::endl;
 
-        std::size_t to_print = std::min(static_cast<std::size_t>(header_.entry_count), max_entries);
+        std::size_t to_print = std::min(
+            static_cast<std::size_t>(header_.entry_count), max_entries);
         for (std::size_t i = 0; i < to_print; ++i)
         {
             // Read big-endian offset
-            auto const* offset_bytes = reinterpret_cast<std::uint8_t const*>(offset_array_ + i);
+            auto const* offset_bytes =
+                reinterpret_cast<std::uint8_t const*>(offset_array_ + i);
             std::uint64_t offset =
                 (static_cast<std::uint64_t>(offset_bytes[0]) << 56) |
                 (static_cast<std::uint64_t>(offset_bytes[1]) << 48) |
@@ -218,15 +246,17 @@ public:
                 static_cast<std::uint64_t>(offset_bytes[7]);
 
             std::uint64_t record_num = i * header_.index_interval;
-            os << "  [" << i << "] record " << record_num << " -> offset " << offset << std::endl;
+            os << "  [" << i << "] record " << record_num << " -> offset "
+               << offset << std::endl;
         }
         if (header_.entry_count > to_print)
         {
-            os << "  ... (" << (header_.entry_count - to_print) << " more entries)" << std::endl;
+            os << "  ... (" << (header_.entry_count - to_print)
+               << " more entries)" << std::endl;
         }
     }
 };
 
-} // namespace nudbutil
+}  // namespace nudbutil
 
 #endif

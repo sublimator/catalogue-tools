@@ -82,7 +82,7 @@ noff_t
 slice_store<Hasher, File>::slice_start_offset() const
 {
     BOOST_ASSERT(is_open());
-    return smh_.slice_start_offset;
+    return smh_.start_byte_offset_incl;
 }
 
 template <class Hasher, class File>
@@ -90,7 +90,7 @@ noff_t
 slice_store<Hasher, File>::slice_end_offset() const
 {
     BOOST_ASSERT(is_open());
-    return smh_.slice_end_offset;
+    return smh_.end_byte_offset_incl;
 }
 
 template <class Hasher, class File>
@@ -312,12 +312,14 @@ slice_store<Hasher, File>::fetch(
             noff_t const record_offset = item.offset;
 
             // Validate offset is in bounds
-            if (record_offset < smh_.slice_start_offset ||
-                record_offset > smh_.slice_end_offset)
+            // Note: For entries from spill buckets, the offset might be outside
+            // the slice boundaries if the spill contains entries from across
+            // the entire database. We should skip entries outside our slice.
+            if (record_offset < smh_.start_byte_offset_incl ||
+                record_offset > smh_.end_byte_offset_incl)
             {
-                // This shouldn't happen - indicates corruption
-                ec = error::invalid_key_size;  // VFALCO: Better error
-                return;
+                // Skip this entry - it's outside our slice boundaries
+                continue;
             }
 
             // Calculate offset in mmap
@@ -351,7 +353,8 @@ slice_store<Hasher, File>::fetch(
         // Spill records are in the META file, not DAT file!
         // Read spill bucket from meta mmap
 
-        // Spill offset is relative to start of spill section
+        // Spill offset is already absolute position in meta file
+        // (rekey_slice stores absolute offsets, not relative)
         noff_t const spill_offset = spill;
 
         // Validate spill offset
@@ -374,8 +377,9 @@ slice_store<Hasher, File>::fetch(
         read_size48(is, spill_size);
         if (spill_size != 0)
         {
-            // Not a spill record!
-            ec = error::invalid_key_size;  // VFALCO: Better error
+            // Not a spill record! Spills must have size=0
+            ec = error::invalid_spill_record;  // Better error than
+                                               // "invalid_key_size"
             return;
         }
 
@@ -383,10 +387,24 @@ slice_store<Hasher, File>::fetch(
         read<std::uint16_t>(is, bucket_size);
 
         // Load spill bucket
-        buf1.reserve(bucket_size);
+        // The spill data contains a compact bucket (without padding)
+        // We need to copy it to our buffer with proper padding for block_size
+        buf1.reserve(kh_.block_size);  // Reserve full block size
+
+        // Clear the buffer first (important for padding)
+        std::memset(buf1.get(), 0, kh_.block_size);
+
+        // Copy the compact bucket data
         std::memcpy(buf1.get(), is.data(bucket_size), bucket_size);
 
+        // Create bucket - the constructor will parse count and spill from the
+        // data This includes parsing the next spill offset if this bucket has
+        // one
         b = bucket{kh_.block_size, buf1.get()};
+
+        // The loop will continue if b.spill() != 0, following the spill chain
+        // Each spill record can point to another spill record, forming a linked
+        // list
     }
 
     // Key not found

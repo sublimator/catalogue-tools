@@ -4,7 +4,7 @@
 
 #include <catl/core/logger.h>
 #include <nudbview/native_file.hpp>
-#include <nudbview/view/slice_rekey.hpp>
+#include <nudbview/view/rekey_slice.hpp>
 #include <nudbview/xxhasher.hpp>
 
 #include <boost/filesystem.hpp>
@@ -226,7 +226,7 @@ run_make_slice(int argc, char* argv[])
             // Translate start record to byte offset
             nudbview::noff_t start_byte_offset;
             std::uint64_t start_records_to_skip;
-            if (!index.lookup_record(
+            if (!index.lookup_record_start_offset(
                     start_record, start_byte_offset, start_records_to_skip))
             {
                 LOGE("Failed to lookup start record in index");
@@ -247,7 +247,7 @@ run_make_slice(int argc, char* argv[])
             // the END of our last record!
             nudbview::noff_t end_byte_offset;
             std::uint64_t end_records_to_skip;
-            if (!index.lookup_record(
+            if (!index.lookup_record_start_offset(
                     exclusive_end_record, end_byte_offset, end_records_to_skip))
             {
                 LOGE("Failed to lookup end record in index");

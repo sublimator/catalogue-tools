@@ -8,14 +8,16 @@
 #ifndef NUDB_ERROR_HPP
 #define NUDB_ERROR_HPP
 
-#include <boost/system/system_error.hpp>
 #include <boost/system/error_code.hpp>
+#include <boost/system/system_error.hpp>
 
 namespace nudbview {
 
 /// The type of system-specific error code returned by the implementation
 #if GENERATING_DOCS
-class error_code{};
+class error_code
+{
+};
 
 #else
 using boost::system::error_code;
@@ -24,7 +26,9 @@ using boost::system::error_code;
 
 /// The type of cross-platform error code used by the implementation
 #if GENERATING_DOCS
-class error_condition{};
+class error_condition
+{
+};
 
 #else
 using boost::system::error_condition;
@@ -33,7 +37,9 @@ using boost::system::error_condition;
 
 /// The type of system-specific exception used when throwing
 #if GENERATING_DOCS
-class system_error{};
+class system_error
+{
+};
 
 #else
 using boost::system::system_error;
@@ -62,7 +68,9 @@ using boost::system::generic_category;
 
 /// The base class used for error categories
 #if GENERATING_DOCS
-class error_category{};
+class error_category
+{
+};
 
 #else
 using boost::system::error_category;
@@ -71,7 +79,7 @@ using boost::system::error_category;
 
 /// The set of constants used for cross-platform error codes
 #if GENERATING_DOCS
-enum errc{};
+enum errc {};
 
 #else
 namespace errc = boost::system::errc;
@@ -79,8 +87,7 @@ namespace errc = boost::system::errc;
 #endif
 
 /// Database error codes.
-enum class error
-{
+enum class error {
     /** Operation succeeded
 
         Default error_code value.
@@ -144,6 +151,9 @@ enum class error
 
     /// Invalid key size
     invalid_key_size,
+
+    /// Invalid spill record format
+    invalid_spill_record,
 
     /// Invalid block size
     invalid_block_size,
@@ -227,7 +237,28 @@ enum class error
     size_mismatch,
 
     /// duplicate value
-    duplicate_value
+    duplicate_value,
+
+    /// Invalid slice boundary (not at index interval or exceeds indexed range)
+    invalid_slice_boundary,
+
+    /// Slice start offset is before end of header
+    slice_start_before_header,
+
+    /// Slice end offset exceeds file size
+    slice_end_exceeds_file,
+
+    /// Slice end offset is before or at start offset
+    slice_invalid_range,
+
+    /// Slice has no records (empty slice)
+    slice_empty,
+
+    /// Slice index interval is invalid (< 1)
+    slice_invalid_interval,
+
+    /// Slice expected record count doesn't match actual
+    slice_record_count_mismatch
 };
 
 /// Returns the error category used for database error codes.
@@ -239,24 +270,23 @@ nudb_category();
     This function is used by the implementation to convert
     @ref error values into @ref error_code objects.
 */
-inline
-error_code
+inline error_code
 make_error_code(error ev)
 {
     return error_code{static_cast<int>(ev), nudb_category()};
 }
 
-} // nudb
+}  // namespace nudbview
 
 namespace boost {
 namespace system {
-template<>
+template <>
 struct is_error_code_enum<nudbview::error>
 {
     static bool const value = true;
 };
-} // system
-} // boost
+}  // namespace system
+}  // namespace boost
 
 #include <nudbview/impl/error.ipp>
 
