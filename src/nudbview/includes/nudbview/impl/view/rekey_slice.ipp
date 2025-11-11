@@ -54,12 +54,12 @@ rekey_slice(
     // Validate inputs
     if(end_offset <= start_offset)
     {
-        ec = error::invalid_key_size;  // VFALCO: Need better error code
+        ec = error::slice_invalid_range;
         return;
     }
     if(index_interval < 1)
     {
-        ec = error::invalid_key_size;  // VFALCO: Need better error code
+        ec = error::slice_invalid_interval;
         return;
     }
 
@@ -91,12 +91,12 @@ rekey_slice(
     // Validate slice boundaries
     if(start_offset < dat_file_header::size)
     {
-        ec = error::invalid_key_size;  // VFALCO: Need better error
+        ec = error::slice_start_before_header;
         return;
     }
     if(end_offset >= dataFileSize)
     {
-        ec = error::invalid_key_size;  // VFALCO: Need better error
+        ec = error::slice_end_exceeds_file;
         return;
     }
 
@@ -150,7 +150,7 @@ rekey_slice(
     // Validate end_offset doesn't exceed file
     if (end_offset >= dat_file_size)
     {
-        ec = error::invalid_key_size;  // VFALCO: Need better error
+        ec = error::slice_end_exceeds_file;
         return;
     }
 
@@ -194,7 +194,7 @@ rekey_slice(
 
     if(itemCount == 0)
     {
-        ec = error::invalid_key_size;  // VFALCO: Need better error - empty slice
+        ec = error::slice_empty;
         return;
     }
 
@@ -408,7 +408,7 @@ rekey_slice(
         // CRITICAL: Validate expected count matches actual
         if (expected_record_count > 0 && actual_count != expected_record_count)
         {
-            ec = error::invalid_key_size;  // VFALCO: Need better error for count mismatch
+            ec = error::slice_record_count_mismatch;
             return;
         }
 
