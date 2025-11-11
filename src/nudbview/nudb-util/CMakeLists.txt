@@ -4,7 +4,8 @@ add_executable(
   main.cpp
   count-keys.cpp
   index-dat.cpp
-  make-slice.cpp)
+  make-slice.cpp
+  find-collisions.cpp)
 
 target_link_libraries(
   nudb-util
