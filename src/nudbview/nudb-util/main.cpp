@@ -31,9 +31,11 @@ print_usage(const char* program_name)
               << "Usage: " << program_name << " <subcommand> [options]\n\n"
               << "Subcommands:\n"
               << "  count-keys       Fast counting of keys in database\n"
-              << "  index-dat        Build global index for .dat file (record → byte offset)\n"
+              << "  index-dat        Build global index for .dat file (record "
+                 "→ byte offset)\n"
               << "  make-slice       Create optimized slice from .dat range\n"
-              << "  find-collisions  Find hash bucket collisions for testing spill records\n"
+              << "  find-collisions  Find hash bucket collisions for testing "
+                 "spill records\n"
               << "\n"
               << "Examples:\n"
               << "  " << program_name << " count-keys --nudb-path /path/to/db\n"
@@ -42,9 +44,11 @@ print_usage(const char* program_name)
               << "  " << program_name
               << " index-dat --nudb-path /path/to/db -o xahau.dat.index\n"
               << "  " << program_name
-              << " make-slice --nudb-path /path/to/db --start-offset 92 --end-offset 5000000 -o slice-0001\n"
+              << " make-slice --nudb-path /path/to/db --start-offset 92 "
+                 "--end-offset 5000000 -o slice-0001\n"
               << "  " << program_name
-              << " find-collisions --start-seed 0 --end-seed 100000 --bucket-count 100\n"
+              << " find-collisions --start-seed 0 --end-seed 100000 "
+                 "--bucket-count 100\n"
               << "\n"
               << "For subcommand-specific help:\n"
               << "  " << program_name << " <subcommand> --help\n";

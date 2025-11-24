@@ -1,18 +1,18 @@
 #pragma once
 
-#include <nudbview/nudb.hpp>
-#include <nudbview/xxhasher.hpp>
-#include <catl/crypto/sha512-hasher.h>
-#include <nudbview/view/index_builder.hpp>
-#include <nudbview/view/index_reader.hpp>
-#include <nudbview/view/dat_scanner.hpp>
+#include <array>
 #include <boost/filesystem.hpp>
 #include <boost/iostreams/device/mapped_file.hpp>
-#include <vector>
+#include <catl/crypto/sha512-hasher.h>
 #include <cstdint>
 #include <cstring>
-#include <array>
+#include <nudbview/nudb.hpp>
+#include <nudbview/view/dat_scanner.hpp>
+#include <nudbview/view/index_builder.hpp>
+#include <nudbview/view/index_reader.hpp>
+#include <nudbview/xxhasher.hpp>
 #include <span>
+#include <vector>
 
 namespace nudbview_test {
 
@@ -85,7 +85,7 @@ create_test_database(
 
     // Create unique temp directory
     db->dir = boost::filesystem::temp_directory_path() /
-              boost::filesystem::unique_path(prefix + "-%%%%-%%%%-%%%%-%%%%");
+        boost::filesystem::unique_path(prefix + "-%%%%-%%%%-%%%%-%%%%");
     boost::filesystem::create_directories(db->dir);
 
     db->dat_path = db->dir / "nudb.dat";
@@ -116,7 +116,8 @@ create_test_database(
         ec);
 
     if (ec)
-        throw std::runtime_error("Failed to create test database: " + ec.message());
+        throw std::runtime_error(
+            "Failed to create test database: " + ec.message());
 
     // Open database for writing
     nudbview::basic_store<nudbview::xxhasher, nudbview::native_file> db_store;
@@ -127,20 +128,23 @@ create_test_database(
         ec);
 
     if (ec)
-        throw std::runtime_error("Failed to open test database: " + ec.message());
+        throw std::runtime_error(
+            "Failed to open test database: " + ec.message());
 
     // Insert all records
     for (auto const& rec : db->records)
     {
         db_store.insert(rec.key.data(), &rec.value, sizeof(rec.value), ec);
         if (ec)
-            throw std::runtime_error("Failed to insert record: " + ec.message());
+            throw std::runtime_error(
+                "Failed to insert record: " + ec.message());
     }
 
     // Close and commit
     db_store.close(ec);
     if (ec)
-        throw std::runtime_error("Failed to close test database: " + ec.message());
+        throw std::runtime_error(
+            "Failed to close test database: " + ec.message());
 
     return db;
 }
@@ -149,7 +153,8 @@ create_test_database(
  * Append additional records to an existing database
  *
  * @param db Database to append to
- * @param start_value Starting value for new records (e.g., 500 to add records 500-999)
+ * @param start_value Starting value for new records (e.g., 500 to add records
+ * 500-999)
  * @param count Number of records to add
  */
 inline void
@@ -173,26 +178,26 @@ append_to_database(
     nudbview::basic_store<nudbview::xxhasher, nudbview::native_file> db_store;
     nudbview::error_code ec;
     db_store.open(
-        db.dat_path.string(),
-        db.key_path.string(),
-        db.log_path.string(),
-        ec);
+        db.dat_path.string(), db.key_path.string(), db.log_path.string(), ec);
 
     if (ec)
-        throw std::runtime_error("Failed to open database for append: " + ec.message());
+        throw std::runtime_error(
+            "Failed to open database for append: " + ec.message());
 
     // Insert new records
     for (auto const& rec : new_records)
     {
         db_store.insert(rec.key.data(), &rec.value, sizeof(rec.value), ec);
         if (ec)
-            throw std::runtime_error("Failed to insert record during append: " + ec.message());
+            throw std::runtime_error(
+                "Failed to insert record during append: " + ec.message());
     }
 
     // Close and commit
     db_store.close(ec);
     if (ec)
-        throw std::runtime_error("Failed to close database after append: " + ec.message());
+        throw std::runtime_error(
+            "Failed to close database after append: " + ec.message());
 
     // Add new records to our tracking list
     db.records.insert(db.records.end(), new_records.begin(), new_records.end());
@@ -241,7 +246,8 @@ read_record_at_offset(
 
     // Point to key and value
     rec.key = std::span<const std::uint8_t>(dat_data + offset + 6, key_size);
-    rec.value = std::span<const std::uint8_t>(dat_data + offset + 6 + key_size, size);
+    rec.value =
+        std::span<const std::uint8_t>(dat_data + offset + 6 + key_size, size);
     rec.valid = true;
 
     return rec;
@@ -259,7 +265,8 @@ verify_record(
 {
     nudbview::basic_store<nudbview::xxhasher, nudbview::native_file> db_store;
     // Generate log path from dat_path
-    std::string log_path = dat_path.substr(0, dat_path.find_last_of('/')) + "/nudb.log";
+    std::string log_path =
+        dat_path.substr(0, dat_path.find_last_of('/')) + "/nudb.log";
     db_store.open(dat_path, key_path, log_path, ec);
     if (ec)
         return false;
@@ -288,4 +295,4 @@ verify_record(
     return value_out == rec.value && size_out == sizeof(rec.value);
 }
 
-} // namespace nudbview_test
+}  // namespace nudbview_test
