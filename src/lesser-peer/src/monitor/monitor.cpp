@@ -1,6 +1,10 @@
+#include <boost/filesystem.hpp>
 #include <catl/core/logger.h>
 #include <catl/peer/monitor/monitor.h>
+#include <chrono>
+#include <fstream>
 #include <iostream>
+#include <thread>
 
 namespace catl::peer::monitor {
 
@@ -8,14 +12,38 @@ peer_monitor::peer_monitor(monitor_config config)
     : config_(std::move(config))
     , ssl_context_(
           std::make_unique<asio::ssl::context>(asio::ssl::context::tlsv12))
-    , processor_(std::make_unique<packet_processor>(config_))
 {
+    // Force no_dump when using dashboard to prevent output interference
+    if (config_.display.use_dashboard)
+    {
+        config_.display.no_dump = true;
+    }
+
+    // When querying transactions, use special query mode
+    if (!config_.query_tx_hashes.empty())
+    {
+        config_.display.query_mode =
+            true;  // Special query mode - only show transaction results
+        config_.display.no_stats = true;  // No packet statistics
+        config_.display.no_dump = true;   // No packet dumps
+        config_.display.no_hex = true;    // No hex dumps
+        config_.display.no_json = true;   // No JSON dumps
+    }
+
+    // Create the packet processor with the updated config
+    processor_ = std::make_unique<packet_processor>(config_);
+
     setup_ssl_context();
-    
+
+    // Create dashboard only if enabled
+    if (config_.display.use_dashboard)
+    {
+        dashboard_ = std::make_shared<PeerDashboard>();
+        processor_->set_dashboard(dashboard_);
+    }
+
     // Set shutdown callback for manifests-only mode
-    processor_->set_shutdown_callback([this]() {
-        request_stop();
-    });
+    processor_->set_shutdown_callback([this]() { request_stop(); });
 }
 
 peer_monitor::~peer_monitor()
@@ -62,6 +90,35 @@ void
 peer_monitor::run()
 {
     running_ = true;
+
+    // Set up log redirection and start dashboard if enabled
+    if (config_.display.use_dashboard)
+    {
+        std::cout << "\n🎨 Starting dashboard..." << std::endl;
+        std::cout << "   Redirecting logs to peermon.log" << std::endl;
+        std::cout << "   Press 'q' in dashboard to quit\n" << std::endl;
+
+        // Give user a moment to see the message
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+
+        // Clear the screen for dashboard
+        std::cout << "\033[2J\033[H" << std::flush;
+
+        // Open log file for redirecting output
+        namespace fs = boost::filesystem;
+        fs::path log_path = fs::current_path() / "peermon.log";
+        log_file_.open(log_path.string(), std::ios::out | std::ios::trunc);
+
+        if (log_file_.is_open())
+        {
+            // Redirect Logger output and error streams to the log file
+            Logger::set_output_stream(&log_file_);  // INFO/DEBUG logs
+            Logger::set_error_stream(&log_file_);   // ERROR/WARNING logs
+        }
+
+        // Start the dashboard UI
+        dashboard_->start();
+    }
 
     // Create work guard to keep io_context alive
     work_guard_ = std::make_unique<
@@ -178,6 +235,25 @@ peer_monitor::stop()
     // Request stop first
     request_stop();
 
+    // Stop the dashboard
+    if (dashboard_)
+    {
+        dashboard_->stop();
+    }
+
+    // Restore logger streams to defaults and close log file
+    if (log_file_.is_open())
+    {
+        Logger::reset_streams();
+        log_file_.close();
+
+        if (config_.display.use_dashboard)
+        {
+            std::cout << "\n✅ Dashboard stopped - logs saved to peermon.log"
+                      << std::endl;
+        }
+    }
+
     // Use a lock to ensure we only join threads once
     std::lock_guard<std::mutex> lock(shutdown_mutex_);
 
@@ -254,12 +330,34 @@ peer_monitor::handle_accept(
 void
 peer_monitor::handle_connection(std::shared_ptr<peer_connection> connection)
 {
-    // Start reading packets
+    // Start reading packets first
     connection->start_read([this, connection](
                                packet_header const& header,
                                std::vector<std::uint8_t> const& payload) {
         processor_->process_packet(connection, header, payload);
     });
+
+    // Send transaction queries after a short delay to ensure connection is
+    // ready
+    if (!config_.query_tx_hashes.empty())
+    {
+        // Silently schedule queries after a delay
+
+        // Schedule the queries after a delay
+        auto timer = std::make_shared<asio::steady_timer>(io_context_);
+        timer->expires_after(std::chrono::seconds(2));
+        timer->async_wait(
+            [this, connection, timer](boost::system::error_code ec) {
+                if (!ec)
+                {
+                    // Query user's transactions
+                    for (const auto& tx_hash : config_.query_tx_hashes)
+                    {
+                        connection->send_transaction_query(tx_hash);
+                    }
+                }
+            });
+    }
 }
 
 }  // namespace catl::peer::monitor

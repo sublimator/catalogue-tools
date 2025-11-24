@@ -43,6 +43,9 @@ command_line_parser::command_line_parser()
         "Path to XRPL protocol definitions JSON file");
 
     display_desc_.add_options()(
+        "dashboard",
+        po::bool_switch(),
+        "Enable FTXUI dashboard with log redirection")(
         "no-cls", po::bool_switch(), "Don't clear screen between updates")(
         "no-dump", po::bool_switch(), "Don't dump packet contents")(
         "no-stats", po::bool_switch(), "Don't show statistics")(
@@ -65,7 +68,10 @@ command_line_parser::command_line_parser()
         "Show only these packet types (comma-separated)")(
         "hide",
         po::value<std::string>(),
-        "Hide these packet types (comma-separated)");
+        "Hide these packet types (comma-separated)")(
+        "query-tx",
+        po::value<std::vector<std::string>>()->multitoken(),
+        "Query specific transactions by hash (can specify multiple)");
 
     // Positional arguments for host and port
     pos_desc_.add("host", 1);
@@ -119,6 +125,7 @@ command_line_parser::parse(int argc, char* argv[])
             vm["protocol-definitions"].as<std::string>();
 
         // Populate display config
+        config.display.use_dashboard = vm["dashboard"].as<bool>();
         config.display.use_cls = !vm["no-cls"].as<bool>();
         config.display.no_dump = vm["no-dump"].as<bool>();
         config.display.no_stats = vm["no-stats"].as<bool>();
@@ -150,6 +157,32 @@ command_line_parser::parse(int argc, char* argv[])
 
         // Copy filter to config
         config.filter = filter_;
+
+        // Parse transaction query hashes (supports both space and comma
+        // separation)
+        if (vm.count("query-tx"))
+        {
+            auto hashes = vm["query-tx"].as<std::vector<std::string>>();
+            config.query_tx_hashes.clear();
+
+            // Process each hash, splitting on commas if present
+            for (const auto& hash_str : hashes)
+            {
+                // Split on commas
+                std::vector<std::string> items;
+                boost::split(items, hash_str, boost::is_any_of(","));
+
+                for (auto& item : items)
+                {
+                    // Trim whitespace
+                    boost::trim(item);
+                    if (!item.empty())
+                    {
+                        config.query_tx_hashes.push_back(item);
+                    }
+                }
+            }
+        }
 
         return config;
     }

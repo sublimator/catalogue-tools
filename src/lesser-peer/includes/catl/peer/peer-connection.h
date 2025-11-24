@@ -4,9 +4,12 @@
 #include <catl/core/logger.h>
 
 #include <array>
+#include <atomic>
 #include <boost/beast.hpp>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace catl::peer {
@@ -47,6 +50,52 @@ public:
     // Get remote endpoint info
     std::string
     remote_endpoint() const;
+
+    // Connection state
+    bool
+    is_connected() const
+    {
+        return connected_;
+    }
+
+    // Get server info
+    std::string
+    server_version() const
+    {
+        return server_version_;
+    }
+
+    std::string
+    protocol_version() const
+    {
+        return protocol_version_;
+    }
+
+    std::string
+    network_id() const
+    {
+        return network_id_;
+    }
+
+    // Send transaction query
+    void
+    send_transaction_query(
+        const std::string& tx_hash,
+        const std::string& ledger_hash = "");
+
+    // Get the transaction hash for a given sequence number
+    std::string
+    get_query_hash(uint32_t seq) const;
+
+    // Request a candidate transaction set (root node only)
+    void
+    request_transaction_set(const std::string& tx_set_hash);
+
+    // Request specific nodes from a transaction set
+    void
+    request_transaction_set_nodes(
+        const std::string& tx_set_hash,
+        const std::vector<std::string>& node_ids_wire);
 
     // Close connection
     void
@@ -110,11 +159,21 @@ private:
     bool connected_ = false;
     tcp::endpoint remote_endpoint_;
 
+    // Server info
+    std::string server_version_;
+    std::string protocol_version_;
+    std::string network_id_;
+
     // HTTP upgrade
     std::string session_signature_;
     boost::beast::http::request<boost::beast::http::string_body> http_request_;
     boost::beast::http::response<boost::beast::http::string_body>
         http_response_;
+
+    // Transaction query tracking
+    std::atomic<uint32_t> query_seq_{1};  // Start at 1
+    mutable std::mutex query_map_mutex_;
+    std::map<uint32_t, std::string> query_map_;  // seq -> tx_hash
 
     // Helper methods
     void

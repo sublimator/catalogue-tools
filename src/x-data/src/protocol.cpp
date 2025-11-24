@@ -55,7 +55,11 @@ Protocol::load_from_json_value(
     }
 
     Protocol protocol;
-    protocol.network_id_ = opts.network_id;
+    // Translate network variants to base network immediately at API surface
+    protocol.network_id_ = opts.network_id.has_value()
+        ? std::optional<uint32_t>(
+              Networks::find_base_network_id(opts.network_id.value()))
+        : std::nullopt;
     const auto& obj = json_value.as_object();
 
     // Parse TYPES mapping first (but don't validate yet)
@@ -135,9 +139,13 @@ Protocol::load_from_json_value(
     protocol.build_fast_lookup();
 
     // Now validate all types after fields are loaded
+    // Use normalized opts with base network_id
+    ProtocolOptions normalized_opts = opts;
+    normalized_opts.network_id = protocol.network_id_;
+
     for (const auto& [code, name] : protocol.typeCodeToName_)
     {
-        protocol.validate_type(code, opts);
+        protocol.validate_type(code, normalized_opts);
     }
 
     // Parse LEDGER_ENTRY_TYPES mapping
@@ -201,6 +209,8 @@ Protocol::validate_type(uint16_t type_code, const ProtocolOptions& opts)
     else if (opts.network_id.has_value())
     {
         // Known type - verify network compatibility
+        // Note: network_id is already normalized to base in
+        // load_from_json_value
         if (!known_type->matches_network(opts.network_id.value()))
         {
             throw std::runtime_error(

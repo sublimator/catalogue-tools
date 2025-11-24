@@ -53,4 +53,40 @@ parse_transaction(Slice const& data, Protocol const& protocol)
     return boost::json::value(root);
 }
 
+boost::json::value
+parse_txset_transaction(
+    Slice const& data,
+    Protocol const& protocol,
+    bool includes_prefix)
+{
+    // Transaction set leaf format:
+    // Wire format: raw STObject
+    // Prefixed format: 4-byte HashPrefix::transactionID + raw STObject
+
+    if (data.size() == 0)
+    {
+        throw std::runtime_error("parse_txset_transaction: empty data");
+    }
+
+    // Skip prefix if present
+    Slice tx_data = data;
+    if (includes_prefix)
+    {
+        if (data.size() < 4)
+        {
+            throw std::runtime_error(
+                "parse_txset_transaction: data too small for prefix (" +
+                std::to_string(data.size()) + " bytes)");
+        }
+        tx_data = Slice(data.data() + 4, data.size() - 4);
+    }
+
+    // Parse the raw transaction STObject
+    JsonVisitor tx_visitor(protocol);
+    ParserContext tx_ctx(tx_data);
+    parse_with_visitor(tx_ctx, protocol, tx_visitor);
+
+    return tx_visitor.get_result();
+}
+
 }  // namespace catl::xdata::json

@@ -16,6 +16,9 @@ struct display_config
     bool no_json = false;
     bool manifests_only = false;
     bool no_http = false;
+    bool use_dashboard = false;  // Enable FTXUI dashboard with log redirection
+    bool query_mode =
+        false;  // Special mode for transaction queries - only show results
 };
 
 struct packet_filter
@@ -29,6 +32,10 @@ struct monitor_config
     peer::peer_config peer;
     display_config display;
     packet_filter filter;
+
+    // Transaction queries
+    std::vector<std::string>
+        query_tx_hashes;  // List of transaction hashes to query
 };
 
 }  // namespace catl::peer::monitor

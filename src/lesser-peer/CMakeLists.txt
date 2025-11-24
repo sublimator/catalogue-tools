@@ -1,5 +1,11 @@
-add_library(catl_lesser_peer src/crypto-utils.cpp src/packet-names.cpp
-                             src/peer-connection.cpp)
+add_library(
+  catl_lesser_peer
+  src/crypto-utils.cpp
+  src/packet-names.cpp
+  src/peer-connection.cpp
+  src/wire-format.cpp
+  src/txset-acquirer.cpp
+  src/manifest-tracker.cpp)
 
 target_include_directories(
   catl_lesser_peer
@@ -18,7 +24,8 @@ target_link_libraries(
          catl::base58
          catl::core
          catl::catalogue_common
-         catl::xdata)
+         catl::xdata
+         catl::xdata_json)
 
 # Link secp256k1 - either from system or built from source
 if(SECP256K1_FOUND)
@@ -43,9 +50,16 @@ add_executable(
   src/monitor/main.cpp
   src/monitor/monitor.cpp
   src/monitor/packet-processor.cpp
-  src/monitor/command-line.cpp)
+  src/monitor/command-line.cpp
+  src/monitor/peer-dashboard.cpp)
 
-target_link_libraries(peermon PRIVATE catl_lesser_peer)
+target_link_libraries(
+  peermon
+  PRIVATE catl_lesser_peer
+          ftxui::screen
+          ftxui::dom
+          ftxui::component
+          Boost::filesystem)
 
 # peermon needs access to generated protobuf headers and src directory
 target_include_directories(

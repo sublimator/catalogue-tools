@@ -11,9 +11,30 @@ namespace catl::xdata {
 
 // Network identifiers
 namespace Networks {
+// Base network IDs (used in type definitions)
 inline constexpr uint32_t XRPL = 0;
 inline constexpr uint32_t XAHAU = 21337;
-// Add more networks as needed
+
+// Network variants (map to base via find_base_network_id)
+inline constexpr uint32_t XRPL_TESTNET = 1;       // s.altnet.rippletest.net
+inline constexpr uint32_t XRPL_DEVNET = 2;        // s.devnet.rippletest.net
+inline constexpr uint32_t XAHAU_TESTNET = 21338;  // Xahau testnet
+
+// Map network variants to their base network for type compatibility
+inline constexpr uint32_t
+find_base_network_id(uint32_t net_id)
+{
+    // XRPL variants → XRPL base
+    if (net_id == XRPL || net_id == XRPL_TESTNET || net_id == XRPL_DEVNET)
+        return XRPL;
+
+    // Xahau variants → Xahau base
+    if (net_id == XAHAU || net_id == XAHAU_TESTNET)
+        return XAHAU;
+
+    // Unknown network - return as-is
+    return net_id;
+}
 }  // namespace Networks
 
 struct FieldType
@@ -52,8 +73,8 @@ inline const FieldType Unknown{"Unknown", 65534, std::nullopt, 0};
 inline const FieldType Done{
     "Done",
     65535,
-    {{Networks::XRPL}},
-    0};  // XRPL specific
+    std::nullopt,  // Universal - used as terminator in all networks
+    0};
 
 // Common types (1-8) - Universal by default
 inline const FieldType UInt16{"UInt16", 1, std::nullopt, 2};

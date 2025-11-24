@@ -2,9 +2,11 @@
 
 #include "catl/peer/monitor/command-line.h"
 #include "catl/peer/monitor/packet-processor.h"
+#include "catl/peer/monitor/peer-dashboard.h"
 #include "catl/peer/monitor/types.h"
 #include "catl/peer/peer-connection.h"
 
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -51,6 +53,10 @@ private:
 
     std::vector<std::thread> io_threads_;
     std::unique_ptr<packet_processor> processor_;
+    std::shared_ptr<PeerDashboard> dashboard_;
+
+    // Log file for dashboard mode
+    std::ofstream log_file_;
 
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};

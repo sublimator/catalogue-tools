@@ -1,9 +1,11 @@
+#include "ripple.pb.h"
 #include <catl/core/logger.h>
 #include <catl/peer/crypto-utils.h>
 #include <catl/peer/peer-connection.h>
 
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+#include <chrono>
 #include <openssl/ssl.h>
 #include <utility>
 
@@ -218,11 +220,24 @@ peer_connection::send_http_request(const connection_handler& handler)
 {
     auto req = std::make_shared<http::request<http::string_body>>(
         http::verb::get, "/", 11);
-    req->set(http::field::user_agent, "rippled-2.2.2");
+    req->set(http::field::user_agent, "xahaud-2025.11.4-HEAD+2427");
     req->set(http::field::upgrade, "XRPL/2.2");
     req->set(http::field::connection, "Upgrade");
     req->set("Connect-As", "Peer");
     req->set("Crawl", "private");
+
+    // Network ID for Xahau Testnet (port 21338)
+    req->set("Network-ID", "21338");
+
+    // Add network time (seconds since Ripple epoch - Jan 1, 2000)
+    // Ripple epoch is Unix timestamp 946684800
+    static constexpr uint32_t RIPPLE_EPOCH = 946684800;
+    auto unix_now = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+    uint32_t ripple_time = unix_now - RIPPLE_EPOCH;
+    req->set("Network-Time", std::to_string(ripple_time));
+
     req->set("Session-Signature", session_signature_);
     req->set("Public-Key", node_public_key_b58_);
 
@@ -270,7 +285,7 @@ peer_connection::handle_http_request(const connection_handler& handler)
     res->set(http::field::connection, "Upgrade");
     res->set(http::field::upgrade, http_request_["Upgrade"]);
     res->set("Connect-As", "Peer");
-    res->set(http::field::server, "rippled-2.2.2");
+    res->set(http::field::server, "xahaud-2025.11.4-HEAD+2427");
     res->set("Crawl", "private");
     res->set("Public-Key", node_public_key_b58_);
     res->set("Session-Signature", session_signature_);
@@ -319,12 +334,14 @@ peer_connection::handle_http_response(const connection_handler& handler)
     if (auto it = http_response_.find("Upgrade"); it != http_response_.end())
     {
         LOGI("  Protocol version: ", it->value());
+        protocol_version_ = std::string(it->value());
     }
 
     // Check server version
     if (auto it = http_response_.find("Server"); it != http_response_.end())
     {
         LOGI("  Server: ", it->value());
+        server_version_ = std::string(it->value());
     }
 
     // Check feature support (X-Protocol-Ctl)
@@ -339,6 +356,7 @@ peer_connection::handle_http_response(const connection_handler& handler)
     if (auto it = http_response_.find("Network-ID"); it != http_response_.end())
     {
         LOGI("  Network ID: ", it->value());
+        network_id_ = std::string(it->value());
     }
 
     // Check public key
@@ -603,6 +621,332 @@ peer_connection::remote_endpoint() const
             std::to_string(remote_endpoint_.port());
     }
     return "not connected";
+}
+
+std::string
+peer_connection::get_query_hash(uint32_t seq) const
+{
+    std::lock_guard<std::mutex> lock(query_map_mutex_);
+    auto it = query_map_.find(seq);
+    if (it != query_map_.end())
+    {
+        return it->second;
+    }
+    return "";
+}
+
+void
+peer_connection::send_transaction_query(
+    const std::string& tx_hash,
+    const std::string& ledger_hash)
+{
+    if (!connected_ || !socket_)
+    {
+        LOGE("Cannot send transaction query: not connected");
+        return;
+    }
+
+    // Convert hex string to bytes
+    std::vector<uint8_t> hash_bytes;
+    for (size_t i = 0; i < tx_hash.length(); i += 2)
+    {
+        if (i + 1 < tx_hash.length())
+        {
+            std::string byte_str = tx_hash.substr(i, 2);
+            hash_bytes.push_back(static_cast<uint8_t>(
+                std::strtol(byte_str.c_str(), nullptr, 16)));
+        }
+    }
+
+    // Get a unique sequence number for this query
+    uint32_t seq = query_seq_.fetch_add(1);
+
+    // Store the mapping of seq -> tx_hash
+    {
+        std::lock_guard<std::mutex> lock(query_map_mutex_);
+        query_map_[seq] = tx_hash;
+    }
+
+    // Only log if not in query mode
+    if (!tx_hash.empty())
+    {
+        LOGD(
+            "Sending query for tx ",
+            tx_hash.substr(0, 16),
+            "... with seq=",
+            seq);
+    }
+
+    // Create TMGetObjectByHash message
+    protocol::TMGetObjectByHash query;
+    // Try both types: first as transaction, then add a duplicate query for
+    // transaction_node
+    query.set_type(protocol::TMGetObjectByHash::otTRANSACTION);
+    query.set_query(true);
+    query.set_seq(seq);  // Include the sequence number
+
+    // Add ledger hash if specified
+    if (!ledger_hash.empty())
+    {
+        std::vector<uint8_t> ledger_bytes;
+        for (size_t i = 0; i < ledger_hash.length(); i += 2)
+        {
+            if (i + 1 < ledger_hash.length())
+            {
+                std::string byte_str = ledger_hash.substr(i, 2);
+                ledger_bytes.push_back(static_cast<uint8_t>(
+                    std::strtol(byte_str.c_str(), nullptr, 16)));
+            }
+        }
+        query.set_ledgerhash(ledger_bytes.data(), ledger_bytes.size());
+        LOGD("  Including ledger hash: ", ledger_hash.substr(0, 16), "...");
+    }
+
+    // Add the transaction hash to query
+    protocol::TMIndexedObject* obj = query.add_objects();
+    obj->set_hash(hash_bytes.data(), hash_bytes.size());
+
+    // Serialize the message
+    std::string serialized;
+    if (!query.SerializeToString(&serialized))
+    {
+        LOGE("Failed to serialize transaction query");
+        return;
+    }
+
+    // Send the query using async_send_packet
+    LOGD("  Serialized size: ", serialized.size(), " bytes");
+
+    async_send_packet(
+        packet_type::get_objects,
+        std::vector<uint8_t>(serialized.begin(), serialized.end()),
+        [tx_hash, seq](boost::system::error_code ec) {
+            if (ec)
+            {
+                LOGE(
+                    "Failed to send query for tx ",
+                    tx_hash.substr(0, 16),
+                    "... (seq=",
+                    seq,
+                    "): ",
+                    ec.message());
+            }
+            else
+            {
+                LOGD(
+                    "Successfully sent query for tx ",
+                    tx_hash.substr(0, 16),
+                    "... (seq=",
+                    seq,
+                    ")");
+            }
+        });
+
+    // Also try querying as TRANSACTION_NODE
+    uint32_t seq2 = query_seq_.fetch_add(1);
+    {
+        std::lock_guard<std::mutex> lock(query_map_mutex_);
+        query_map_[seq2] = tx_hash + " (node)";
+    }
+
+    protocol::TMGetObjectByHash query2;
+    query2.set_type(protocol::TMGetObjectByHash::otTRANSACTION_NODE);
+    query2.set_query(true);
+    query2.set_seq(seq2);
+
+    // Add ledger hash if specified for node query too
+    if (!ledger_hash.empty())
+    {
+        std::vector<uint8_t> ledger_bytes;
+        for (size_t i = 0; i < ledger_hash.length(); i += 2)
+        {
+            if (i + 1 < ledger_hash.length())
+            {
+                std::string byte_str = ledger_hash.substr(i, 2);
+                ledger_bytes.push_back(static_cast<uint8_t>(
+                    std::strtol(byte_str.c_str(), nullptr, 16)));
+            }
+        }
+        query2.set_ledgerhash(ledger_bytes.data(), ledger_bytes.size());
+    }
+
+    protocol::TMIndexedObject* obj2 = query2.add_objects();
+    obj2->set_hash(hash_bytes.data(), hash_bytes.size());
+
+    std::string serialized2;
+    if (query2.SerializeToString(&serialized2))
+    {
+        LOGD("Also trying as TRANSACTION_NODE (seq=", seq2, ")");
+        async_send_packet(
+            packet_type::get_objects,
+            std::vector<uint8_t>(serialized2.begin(), serialized2.end()),
+            [tx_hash, seq2](boost::system::error_code ec) {
+                if (ec)
+                {
+                    LOGE(
+                        "Failed to send node query for tx ",
+                        tx_hash.substr(0, 16),
+                        "... (seq=",
+                        seq2,
+                        "): ",
+                        ec.message());
+                }
+                else
+                {
+                    LOGD(
+                        "Successfully sent node query for tx ",
+                        tx_hash.substr(0, 16),
+                        "... (seq=",
+                        seq2,
+                        ")");
+                }
+            });
+    }
+}
+
+void
+peer_connection::request_transaction_set(const std::string& tx_set_hash)
+{
+    if (!connected_ || !socket_)
+    {
+        LOGE("Cannot request transaction set: not connected");
+        return;
+    }
+
+    // Convert hex string to bytes
+    std::vector<uint8_t> hash_bytes;
+    for (size_t i = 0; i < tx_set_hash.length(); i += 2)
+    {
+        if (i + 1 < tx_set_hash.length())
+        {
+            std::string byte_str = tx_set_hash.substr(i, 2);
+            hash_bytes.push_back(static_cast<uint8_t>(
+                std::strtol(byte_str.c_str(), nullptr, 16)));
+        }
+    }
+
+    // Create TMGetLedger message for candidate transaction set
+    protocol::TMGetLedger request;
+    request.set_itype(
+        protocol::liTS_CANDIDATE);  // Request candidate transaction set
+    request.set_ledgerhash(hash_bytes.data(), hash_bytes.size());
+    request.set_querydepth(
+        3);  // Request up to 3 levels deep (should get whole set)
+    request.set_querytype(
+        protocol::qtINDIRECT);  // Match rippled's request format
+
+    // Add root node ID - tells peer to start from the root of the SHAMap
+    // Format: 32 bytes of zeros (root node ID) + 1 byte depth (0 for root)
+    std::string root_node_id(32, '\0');  // 32 zero bytes
+    root_node_id += '\0';                // depth = 0 (root)
+    *(request.add_nodeids()) = root_node_id;
+
+    LOGI("🔍 Requesting transaction set: ", tx_set_hash.substr(0, 16), "...");
+    LOGI("  Full hash: ", tx_set_hash);
+    LOGI("  Using itype=", protocol::liTS_CANDIDATE, " (TS_CANDIDATE)");
+    LOGI("  Query depth: 3");
+    LOGI("  Starting from: ROOT node");
+
+    // Serialize the message
+    std::string serialized;
+    if (!request.SerializeToString(&serialized))
+    {
+        LOGE("Failed to serialize TMGetLedger request");
+        return;
+    }
+
+    LOGI("🔍 Requesting transaction set: ", tx_set_hash.substr(0, 16), "...");
+    LOGI("  itype=", protocol::liTS_CANDIDATE, " querydepth=3 root_node=yes");
+
+    // Send the request
+    async_send_packet(
+        packet_type::get_ledger,
+        std::vector<uint8_t>(serialized.begin(), serialized.end()),
+        [tx_set_hash](boost::system::error_code ec) {
+            if (ec)
+            {
+                LOGE(
+                    "Failed to request transaction set ",
+                    tx_set_hash.substr(0, 16),
+                    "...: ",
+                    ec.message());
+            }
+            else
+            {
+                LOGD(
+                    "Successfully requested transaction set ",
+                    tx_set_hash.substr(0, 16),
+                    "...");
+            }
+        });
+}
+
+void
+peer_connection::request_transaction_set_nodes(
+    const std::string& tx_set_hash,
+    const std::vector<std::string>& node_ids_wire)
+{
+    if (!connected_ || !socket_)
+    {
+        LOGE("Cannot request transaction set nodes: not connected");
+        return;
+    }
+
+    if (node_ids_wire.empty())
+    {
+        LOGW("request_transaction_set_nodes called with empty node list");
+        return;
+    }
+
+    // Convert hex string to bytes
+    std::vector<uint8_t> hash_bytes;
+    for (size_t i = 0; i < tx_set_hash.length(); i += 2)
+    {
+        if (i + 1 < tx_set_hash.length())
+        {
+            std::string byte_str = tx_set_hash.substr(i, 2);
+            hash_bytes.push_back(static_cast<uint8_t>(
+                std::strtol(byte_str.c_str(), nullptr, 16)));
+        }
+    }
+
+    // Create TMGetLedger message for multiple nodes
+    protocol::TMGetLedger request;
+    request.set_itype(protocol::liTS_CANDIDATE);
+    request.set_ledgerhash(hash_bytes.data(), hash_bytes.size());
+    request.set_querydepth(3);  // Request up to 3 levels deep
+    request.set_querytype(protocol::qtINDIRECT);
+
+    // Add all node IDs (each is 33 bytes: 32-byte id + 1-byte depth)
+    for (auto const& node_id_wire : node_ids_wire)
+    {
+        *(request.add_nodeids()) = node_id_wire;
+    }
+
+    LOGD(
+        "Requesting ",
+        node_ids_wire.size(),
+        " nodes from tx set ",
+        tx_set_hash.substr(0, 16),
+        "...");
+
+    // Serialize and send
+    std::string serialized;
+    if (!request.SerializeToString(&serialized))
+    {
+        LOGE("Failed to serialize TMGetLedger nodes request");
+        return;
+    }
+
+    async_send_packet(
+        packet_type::get_ledger,
+        std::vector<uint8_t>(serialized.begin(), serialized.end()),
+        [](boost::system::error_code ec) {
+            if (ec)
+            {
+                LOGE("Failed to request transaction set nodes: ", ec.message());
+            }
+        });
 }
 
 void

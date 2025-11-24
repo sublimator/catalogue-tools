@@ -1,9 +1,14 @@
 #pragma once
 
+#include "catl/peer/manifest-tracker.h"
+#include "catl/peer/monitor/peer-dashboard.h"
 #include "catl/peer/monitor/types.h"
 #include "catl/peer/peer-connection.h"
+#include "catl/peer/txset-acquirer.h"
 #include <functional>
+#include <map>
 #include <memory>
+#include <string>
 
 namespace catl::peer::monitor {
 
@@ -40,6 +45,13 @@ public:
         shutdown_callback_ = std::move(callback);
     }
 
+    // Set dashboard for clean UI
+    void
+    set_dashboard(std::shared_ptr<PeerDashboard> dashboard)
+    {
+        dashboard_ = dashboard;
+    }
+
 private:
     void
     handle_ping(
@@ -52,11 +64,19 @@ private:
     void
     handle_get_ledger(std::vector<std::uint8_t> const& payload);
     void
-    handle_propose_ledger(std::vector<std::uint8_t> const& payload);
+    handle_ledger_data(std::vector<std::uint8_t> const& payload);
+    void
+    handle_propose_ledger(
+        std::shared_ptr<peer_connection> connection,
+        std::vector<std::uint8_t> const& payload);
     void
     handle_status_change(std::vector<std::uint8_t> const& payload);
     void
     handle_validation(std::vector<std::uint8_t> const& payload);
+    void
+    handle_get_objects(
+        std::shared_ptr<peer_connection> connection,
+        std::vector<std::uint8_t> const& payload);
     void
     update_stats(packet_type type, std::size_t bytes);
     bool
@@ -78,9 +98,17 @@ private:
     packet_counters counters_;
     std::map<packet_type, custom_handler> custom_handlers_;
     shutdown_callback shutdown_callback_;
+    std::shared_ptr<PeerDashboard> dashboard_;
 
     std::chrono::steady_clock::time_point start_time_;
     std::chrono::steady_clock::time_point last_display_time_;
+
+    // Transaction set acquirers keyed by set hash
+    std::map<std::string, std::unique_ptr<TransactionSetAcquirer>>
+        txset_acquirers_;
+
+    // Manifest tracker for mapping ephemeral keys to master validator keys
+    ManifestTracker manifest_tracker_;
 };
 
 }  // namespace catl::peer::monitor
