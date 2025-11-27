@@ -61,6 +61,11 @@ public:
     PeerDashboard();
     ~PeerDashboard();
 
+    // Restore terminal state (cursor, alternate screen, mouse modes)
+    // Safe to call multiple times. Use as safety net on abnormal exit.
+    static void
+    restore_terminal();
+
     void
     start();
     void
@@ -105,6 +110,10 @@ public:
 
     std::atomic<uint64_t> ui_render_counter_{0};  // UI thread heartbeat
 
+    // Request UI thread to exit (thread-safe)
+    void
+    request_exit();
+
 private:
     void
     run_ui();
@@ -112,6 +121,7 @@ private:
     // UI thread
     std::unique_ptr<std::thread> ui_thread_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> exit_requested_{false};
 
     // Multi-peer tracking
     mutable std::mutex peers_mutex_;

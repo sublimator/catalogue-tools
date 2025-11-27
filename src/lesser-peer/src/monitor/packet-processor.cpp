@@ -18,9 +18,8 @@ namespace catl::peer::monitor {
 
 packet_processor::packet_processor(monitor_config const& config)
     : config_(config)
-    , manifest_tracker_(config_.peer.network_id)
     , start_time_(std::chrono::steady_clock::now())
-    , last_dashboard_update_(start_time_)
+    , manifest_tracker_(config_.peer.network_id)
 {
 }
 
@@ -31,50 +30,11 @@ packet_processor::process_packet(
     packet_header const& header,
     std::vector<std::uint8_t> const& payload)
 {
+    // peer_id is used for routing but stats tracking moved to monitor
+    (void)peer_id;
+
     auto type = static_cast<packet_type>(header.type);
     update_stats(type, header.payload_size);
-
-    // Update dashboard if we have one
-    if (dashboard_)
-    {
-        auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - last_dashboard_update_)
-                .count() >= 500)
-        {
-            last_dashboard_update_ = now;
-
-            PeerDashboard::Stats stats;
-            stats.peer_id = peer_id;
-            stats.peer_address = connection->remote_endpoint();
-            stats.connected = connection->is_connected();
-            stats.peer_version = connection->server_version();
-            stats.protocol_version = connection->protocol_version();
-            stats.network_id = connection->network_id();
-
-            // Convert packet counters to dashboard format
-            for (auto const& [type_val, counter] : counters_)
-            {
-                auto type_name = packet_type_to_string(
-                    static_cast<packet_type>(type_val), false);
-                stats.packet_counts[std::string(type_name)] =
-                    counter.packet_count;
-                stats.packet_bytes[std::string(type_name)] =
-                    counter.total_bytes;
-                stats.total_packets += counter.packet_count;
-                stats.total_bytes += counter.total_bytes;
-            }
-
-            stats.elapsed_seconds =
-                std::chrono::duration_cast<std::chrono::seconds>(
-                    now - start_time_)
-                    .count();
-            stats.last_packet_time = now;
-            stats.connection_state = "Connected";
-
-            dashboard_->update_peer_stats(peer_id, stats);
-        }
-    }
 
     // Handle PINGs always (critical for liveness)
     if (type == packet_type::ping)
@@ -377,8 +337,8 @@ packet_processor::handle_endpoints(std::vector<std::uint8_t> const& payload)
 
 void
 packet_processor::handle_get_objects(
-    std::shared_ptr<peer_connection> connection,
-    std::vector<std::uint8_t> const& payload)
+    std::shared_ptr<peer_connection> /* connection */,
+    std::vector<std::uint8_t> const& /* payload */)
 {
     // Only relevant for logic if we need to process responses programmatically
     // For now, this is mostly a logging concern, handled by PacketLogger

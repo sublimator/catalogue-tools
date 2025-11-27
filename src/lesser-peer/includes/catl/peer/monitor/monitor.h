@@ -65,6 +65,14 @@ private:
     schedule_heartbeat(
         std::string const& peer_id,
         std::shared_ptr<peer_connection> connection);
+    void
+    update_dashboard_state(
+        std::string const& peer_id,
+        PeerStateEvent const& state);
+    void
+    update_dashboard_stats(
+        std::string const& peer_id,
+        PeerStatsEvent const& stats);
 
 private:
     monitor_config config_;
@@ -113,6 +121,11 @@ private:
     std::thread diagnostic_thread_;
     void
     run_diagnostics();
+
+    // Per-peer connection start times for elapsed calculation
+    std::mutex peer_start_mutex_;
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point>
+        peer_start_times_;
 };
 
 }  // namespace catl::peer::monitor

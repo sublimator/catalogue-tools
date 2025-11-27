@@ -47,7 +47,8 @@ public:
         shutdown_callback_ = std::move(callback);
     }
 
-    // Set dashboard for clean UI
+    // Set dashboard for ledger/validation updates
+    // Note: Per-peer stats are handled separately by monitor via events
     void
     set_dashboard(std::shared_ptr<PeerDashboard> dashboard)
     {
@@ -105,8 +106,6 @@ private:
     std::shared_ptr<PeerDashboard> dashboard_;
 
     std::chrono::steady_clock::time_point start_time_;
-    std::chrono::steady_clock::time_point last_display_time_;
-    std::chrono::steady_clock::time_point last_dashboard_update_;
 
     // Transaction set acquirers keyed by set hash
     // Use shared_ptr so callbacks cannot invalidate current stack frames while

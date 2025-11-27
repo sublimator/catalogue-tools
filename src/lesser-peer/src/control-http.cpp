@@ -14,6 +14,9 @@ using tcp = boost::asio::ip::tcp;
 
 namespace {
 
+// Session timeout for HTTP requests (prevents slow clients from blocking)
+constexpr auto SESSION_TIMEOUT = std::chrono::seconds(5);
+
 peer_config
 config_from_json(json::object const& obj)
 {
@@ -46,6 +49,10 @@ config_from_json(json::object const& obj)
     {
         cfg.node_private_key = std::string(it->as_string().c_str());
     }
+    if (auto it = obj.if_contains("network_id"))
+    {
+        cfg.network_id = static_cast<std::uint32_t>(it->as_int64());
+    }
     return cfg;
 }
 
@@ -66,7 +73,7 @@ write_response(
     http::request<Body, http::basic_fields<Allocator>>&& req,
     http::status status,
     json::value const& body,
-    tcp::socket& socket)
+    beast::tcp_stream& stream)
 {
     http::response<http::string_body> res{status, req.version()};
     res.set(http::field::server, "catl-peers");
@@ -74,7 +81,8 @@ write_response(
     res.keep_alive(req.keep_alive());
     res.body() = json::serialize(body);
     res.prepare_payload();
-    http::write(socket, res);
+    stream.expires_after(SESSION_TIMEOUT);
+    http::write(stream, res);
 }
 
 void
@@ -82,14 +90,25 @@ write_error(
     http::request<http::string_body>&& req,
     http::status status,
     std::string const& message,
-    tcp::socket& socket)
+    beast::tcp_stream& stream)
 {
     json::object obj;
     obj["error"] = message;
-    write_response(std::move(req), status, obj, socket);
+    write_response(std::move(req), status, obj, stream);
 }
 
 }  // namespace
+
+std::shared_ptr<ControlHttpServer>
+ControlHttpServer::create(
+    boost::asio::io_context& io_context,
+    PeerManager& manager,
+    std::uint16_t port)
+{
+    // Can't use make_shared with private constructor
+    return std::shared_ptr<ControlHttpServer>(
+        new ControlHttpServer(io_context, manager, port));
+}
 
 ControlHttpServer::ControlHttpServer(
     boost::asio::io_context& io_context,
@@ -147,110 +166,132 @@ ControlHttpServer::stop()
 }
 
 void
+ControlHttpServer::handle_session(tcp::socket socket)
+{
+    // Check if server is stopping before doing any work
+    if (!running_)
+        return;
+
+    try
+    {
+        // Wrap socket in tcp_stream for timeout support
+        beast::tcp_stream stream(std::move(socket));
+        stream.expires_after(SESSION_TIMEOUT);
+
+        beast::flat_buffer buffer;
+        http::request<http::string_body> req;
+        http::read(stream, buffer, req);
+
+        if (req.method() == http::verb::get && req.target() == "/peers")
+        {
+            json::object obj;
+            json::array arr;
+            for (auto const& id : manager_.peer_ids())
+            {
+                arr.emplace_back(id);
+            }
+            obj["peers"] = std::move(arr);
+            write_response(std::move(req), http::status::ok, obj, stream);
+        }
+        else if (req.method() == http::verb::post && req.target() == "/peers")
+        {
+            boost::system::error_code jec;
+            auto parsed = json::parse(req.body(), jec);
+            if (jec || !parsed.is_object())
+            {
+                write_error(
+                    std::move(req),
+                    http::status::bad_request,
+                    "invalid json body",
+                    stream);
+            }
+            else
+            {
+                auto cfg = config_from_json(parsed.as_object());
+                if (cfg.host.empty() || cfg.port == 0)
+                {
+                    write_error(
+                        std::move(req),
+                        http::status::bad_request,
+                        "host and port required",
+                        stream);
+                }
+                else
+                {
+                    auto id = manager_.add_peer(cfg);
+                    json::object obj;
+                    obj["id"] = id;
+                    write_response(
+                        std::move(req), http::status::ok, obj, stream);
+                }
+            }
+        }
+        else if (
+            req.method() == http::verb::delete_ &&
+            req.target().starts_with("/peers/"))
+        {
+            auto id = peer_id_from_target(std::string(req.target()));
+            if (id.empty())
+            {
+                write_error(
+                    std::move(req),
+                    http::status::bad_request,
+                    "missing peer id",
+                    stream);
+            }
+            else
+            {
+                manager_.remove_peer(id);
+                json::object obj;
+                obj["ok"] = true;
+                write_response(std::move(req), http::status::ok, obj, stream);
+            }
+        }
+        else
+        {
+            write_error(
+                std::move(req),
+                http::status::not_found,
+                "unknown endpoint",
+                stream);
+        }
+    }
+    catch (std::exception const& e)
+    {
+        LOGD("HTTP control session error: ", e.what());
+    }
+}
+
+void
 ControlHttpServer::do_accept()
 {
     if (!running_)
         return;
 
-    acceptor_->async_accept([this](beast::error_code ec, tcp::socket socket) {
+    // Capture shared_ptr to keep server alive during accept
+    auto self = shared_from_this();
+    acceptor_->async_accept([self](beast::error_code ec, tcp::socket socket) {
         if (!ec)
         {
-            try
-            {
-                beast::flat_buffer buffer;
-                http::request<http::string_body> req;
-                http::read(socket, buffer, req);
-
-                if (req.method() == http::verb::get && req.target() == "/peers")
-                {
-                    json::object obj;
-                    json::array arr;
-                    for (auto const& id : manager_.peer_ids())
+            // Capture weak_ptr for session - allows server destruction to
+            // cancel
+            auto weak_self = self->weak_from_this();
+            boost::asio::post(
+                self->io_context_,
+                [weak_self, s = std::move(socket)]() mutable {
+                    if (auto server = weak_self.lock())
                     {
-                        arr.emplace_back(id);
+                        server->handle_session(std::move(s));
                     }
-                    obj["peers"] = std::move(arr);
-                    write_response(
-                        std::move(req), http::status::ok, obj, socket);
-                }
-                else if (
-                    req.method() == http::verb::post &&
-                    req.target() == "/peers")
-                {
-                    boost::system::error_code jec;
-                    auto parsed = json::parse(req.body(), jec);
-                    if (jec || !parsed.is_object())
-                    {
-                        write_error(
-                            std::move(req),
-                            http::status::bad_request,
-                            "invalid json body",
-                            socket);
-                    }
-                    else
-                    {
-                        auto cfg = config_from_json(parsed.as_object());
-                        if (cfg.host.empty() || cfg.port == 0)
-                        {
-                            write_error(
-                                std::move(req),
-                                http::status::bad_request,
-                                "host and port required",
-                                socket);
-                        }
-                        else
-                        {
-                            auto id = manager_.add_peer(cfg);
-                            json::object obj;
-                            obj["id"] = id;
-                            write_response(
-                                std::move(req), http::status::ok, obj, socket);
-                        }
-                    }
-                }
-                else if (
-                    req.method() == http::verb::delete_ &&
-                    req.target().starts_with("/peers/"))
-                {
-                    auto id = peer_id_from_target(std::string(req.target()));
-                    if (id.empty())
-                    {
-                        write_error(
-                            std::move(req),
-                            http::status::bad_request,
-                            "missing peer id",
-                            socket);
-                    }
-                    else
-                    {
-                        manager_.remove_peer(id);
-                        json::object obj;
-                        obj["ok"] = true;
-                        write_response(
-                            std::move(req), http::status::ok, obj, socket);
-                    }
-                }
-                else
-                {
-                    write_error(
-                        std::move(req),
-                        http::status::not_found,
-                        "unknown endpoint",
-                        socket);
-                }
-            }
-            catch (std::exception const& e)
-            {
-                LOGE("HTTP control session error: ", e.what());
-            }
+                });
         }
-        else
+        else if (self->running_)
         {
             LOGD("HTTP control accept error: ", ec.message());
         }
 
-        // Accept next
-        do_accept();
+        // Accept next immediately (don't wait for session to complete)
+        self->do_accept();
     });
 }
 

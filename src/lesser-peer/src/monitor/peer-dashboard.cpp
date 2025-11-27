@@ -1,4 +1,5 @@
 #include <catl/peer/monitor/peer-dashboard.h>
+#include <cstdio>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/loop.hpp>
 #include <ftxui/component/screen_interactive.hpp>
@@ -14,9 +15,26 @@ using namespace ftxui;
 
 PeerDashboard::PeerDashboard() = default;
 
+void
+PeerDashboard::restore_terminal()
+{
+    // Show cursor, exit alternate screen, disable all mouse modes
+    std::fputs(
+        "\033[?25h"     // Show cursor
+        "\033[?1049l"   // Exit alternate screen
+        "\033[?1000l"   // Disable basic mouse
+        "\033[?1002l"   // Disable button-event mouse
+        "\033[?1003l"   // Disable any-event mouse
+        "\033[?1006l",  // Disable SGR mouse extension
+        stdout);
+    std::fflush(stdout);
+}
+
 PeerDashboard::~PeerDashboard()
 {
     stop();
+    // Ensure terminal is restored even if FTXUI didn't clean up properly
+    restore_terminal();
 }
 
 void
@@ -33,6 +51,8 @@ PeerDashboard::start()
 void
 PeerDashboard::stop()
 {
+    // Signal UI thread to exit cleanly
+    exit_requested_ = true;
     running_ = false;
 
     if (ui_thread_ && ui_thread_->joinable())
@@ -257,11 +277,18 @@ PeerDashboard::get_stats() const
 }
 
 void
+PeerDashboard::request_exit()
+{
+    exit_requested_ = true;
+}
+
+void
 PeerDashboard::run_ui()
 {
     try
     {
         auto screen = ScreenInteractive::Fullscreen();
+        screen.TrackMouse(false);  // Disable mouse capture
 
         // Helpers
         auto format_number = [](uint64_t num) -> std::string {
@@ -803,24 +830,36 @@ PeerDashboard::run_ui()
 
         // Run loop at 10 FPS
         Loop loop(&screen, component);
-        while (!loop.HasQuitted() && running_)
+        while (!loop.HasQuitted() && running_ && !exit_requested_)
         {
             screen.RequestAnimationFrame();
             loop.RunOnce();
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
+        // Ensure terminal is restored by calling Exit() if we fell out
+        // due to running_=false or exit_requested_ (not user 'q' key)
+        if (!loop.HasQuitted())
+        {
+            screen.Exit();
+        }
+
         running_ = false;
+        exit_requested_ = false;
+
+        // Belt-and-suspenders: restore terminal after FTXUI cleanup
+        restore_terminal();
     }
     catch (std::exception const& e)
     {
-        // We need to use the global logger here, which should be redirected to
-        // file Use fprintf/stderr as fallback if logger is borked
+        // Restore terminal before logging - screen may be in bad state
+        restore_terminal();
         std::cerr << "CRITICAL DASHBOARD ERROR: " << e.what() << std::endl;
         running_ = false;
     }
     catch (...)
     {
+        restore_terminal();
         std::cerr << "CRITICAL DASHBOARD ERROR: Unknown exception" << std::endl;
         running_ = false;
     }

@@ -20,11 +20,15 @@ namespace catl::peer {
  *
  * Host/port fields are required; optional fields match peer_config keys like
  * cert_path/key_path/node_private_key.
+ *
+ * Must be managed via shared_ptr for safe async lifetime management.
  */
-class ControlHttpServer
+class ControlHttpServer : public std::enable_shared_from_this<ControlHttpServer>
 {
 public:
-    ControlHttpServer(
+    // Factory method - enforces shared_ptr ownership for safe async lifetime
+    static std::shared_ptr<ControlHttpServer>
+    create(
         boost::asio::io_context& io_context,
         PeerManager& manager,
         std::uint16_t port);
@@ -36,8 +40,15 @@ public:
     stop();
 
 private:
+    ControlHttpServer(
+        boost::asio::io_context& io_context,
+        PeerManager& manager,
+        std::uint16_t port);
+
     void
     do_accept();
+    void
+    handle_session(boost::asio::ip::tcp::socket socket);
 
 private:
     boost::asio::io_context& io_context_;

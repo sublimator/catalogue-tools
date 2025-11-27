@@ -3,6 +3,7 @@
 #include <catl/core/logger.h>
 #include <catl/peer/monitor/monitor.h>
 #include <catl/peer/monitor/packet-logger.h>
+#include <catl/peer/packet-names.h>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -50,6 +51,7 @@ peer_monitor::peer_monitor(monitor_config config)
     if (config_.view == ViewMode::Dashboard)
     {
         dashboard_ = std::make_shared<PeerDashboard>();
+        // Set dashboard on processor for ledger/validation updates
         processor_->set_dashboard(dashboard_);
         // Register shutdown callback so 'q' in dashboard stops the monitor
         dashboard_->set_shutdown_callback([this]() { request_stop(); });
@@ -421,17 +423,59 @@ peer_monitor::handle_event(PeerEvent const& event)
         logger_->on_event(event);
     }
 
-    // 3. Monitor Logic (Connection State)
+    // 3. Dashboard Updates (State and Stats)
+    if (dashboard_)
+    {
+        switch (event.type)
+        {
+            case PeerEventType::State: {
+                auto const& st = std::get<PeerStateEvent>(event.data);
+                update_dashboard_state(event.peer_id, st);
+                break;
+            }
+            case PeerEventType::Stats: {
+                auto const& stats = std::get<PeerStatsEvent>(event.data);
+                update_dashboard_stats(event.peer_id, stats);
+                break;
+            }
+            case PeerEventType::Lifecycle: {
+                auto const& lc = std::get<PeerLifecycleEvent>(event.data);
+                if (lc.action == PeerLifecycleEvent::Action::Removed)
+                {
+                    dashboard_->remove_peer(event.peer_id);
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    // 4. Monitor Logic (Connection State)
     switch (event.type)
     {
         case PeerEventType::State: {
             auto const& st = std::get<PeerStateEvent>(event.data);
             if (st.state == PeerStateEvent::State::Connected && st.connection)
             {
+                // Track start time for this peer
+                {
+                    std::lock_guard<std::mutex> lock(peer_start_mutex_);
+                    peer_start_times_[event.peer_id] =
+                        std::chrono::steady_clock::now();
+                }
                 schedule_queries(event.peer_id, st.connection);
                 send_empty_endpoints(event.peer_id, st.connection);
                 send_status(event.peer_id, st.connection);
                 schedule_heartbeat(event.peer_id, st.connection);
+            }
+            else if (
+                st.state == PeerStateEvent::State::Disconnected ||
+                st.state == PeerStateEvent::State::Error)
+            {
+                // Clean up heartbeat timer for this peer
+                std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+                heartbeat_timers_.erase(event.peer_id);
             }
             break;
         }
@@ -479,7 +523,9 @@ peer_monitor::send_empty_endpoints(
 {
     {
         std::lock_guard<std::mutex> lock(endpoints_mutex_);
-        if (!endpoints_sent_.insert(peer_id).second)
+        // Track by connection address to handle reconnects properly
+        std::string key = peer_id + ":" + connection->remote_endpoint();
+        if (!endpoints_sent_.insert(key).second)
         {
             return;  // already sent
         }
@@ -508,7 +554,7 @@ peer_monitor::send_empty_endpoints(
 
 void
 peer_monitor::send_status(
-    std::string const& peer_id,
+    std::string const& /* peer_id */,
     std::shared_ptr<peer_connection> connection)
 {
     protocol::TMStatusChange status;
@@ -585,6 +631,119 @@ peer_monitor::schedule_heartbeat(
 
     timer->expires_after(std::chrono::seconds(10));
     timer->async_wait(*send_ping);
+}
+
+void
+peer_monitor::update_dashboard_state(
+    std::string const& peer_id,
+    PeerStateEvent const& state)
+{
+    if (!dashboard_)
+        return;
+
+    PeerDashboard::Stats stats;
+    stats.peer_id = peer_id;
+
+    if (state.connection)
+    {
+        stats.peer_address = state.connection->remote_endpoint();
+        stats.peer_version = state.connection->server_version();
+        stats.protocol_version = state.connection->protocol_version();
+        stats.network_id = state.connection->network_id();
+    }
+
+    switch (state.state)
+    {
+        case PeerStateEvent::State::Connecting:
+            stats.connected = false;
+            stats.connection_state = "Connecting";
+            break;
+        case PeerStateEvent::State::Connected:
+            stats.connected = true;
+            stats.connection_state = "Connected";
+            stats.last_packet_time = std::chrono::steady_clock::now();
+            break;
+        case PeerStateEvent::State::Disconnected:
+            stats.connected = false;
+            stats.connection_state = "Disconnected";
+            break;
+        case PeerStateEvent::State::Error:
+            stats.connected = false;
+            stats.connection_state = "Error: " + state.message;
+            break;
+    }
+
+    // Get elapsed time for this peer
+    {
+        std::lock_guard<std::mutex> lock(peer_start_mutex_);
+        if (auto it = peer_start_times_.find(peer_id);
+            it != peer_start_times_.end())
+        {
+            stats.elapsed_seconds =
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - it->second)
+                    .count();
+        }
+    }
+
+    dashboard_->update_peer_stats(peer_id, stats);
+}
+
+void
+peer_monitor::update_dashboard_stats(
+    std::string const& peer_id,
+    PeerStatsEvent const& stats_event)
+{
+    if (!dashboard_)
+        return;
+
+    // Get existing peer stats to preserve connection info
+    auto all_peers = dashboard_->get_all_peers_stats();
+    PeerDashboard::Stats stats;
+
+    // Find existing stats for this peer
+    for (const auto& peer : all_peers)
+    {
+        if (peer.peer_id == peer_id)
+        {
+            stats = peer;
+            break;
+        }
+    }
+
+    stats.peer_id = peer_id;
+    stats.last_packet_time = std::chrono::steady_clock::now();
+
+    // Update packet counters from event
+    stats.packet_counts.clear();
+    stats.packet_bytes.clear();
+    stats.total_packets = 0;
+    stats.total_bytes = 0;
+
+    for (auto const& [type_val, counter] : stats_event.counters)
+    {
+        auto type_name =
+            packet_type_to_string(static_cast<packet_type>(type_val), false);
+        stats.packet_counts[std::string(type_name)] = counter.packet_count;
+        stats.packet_bytes[std::string(type_name)] = counter.total_bytes;
+        stats.total_packets += counter.packet_count;
+        stats.total_bytes += counter.total_bytes;
+    }
+
+    // Get elapsed time for this peer
+    {
+        std::lock_guard<std::mutex> lock(peer_start_mutex_);
+        if (auto it = peer_start_times_.find(peer_id);
+            it != peer_start_times_.end())
+        {
+            stats.elapsed_seconds =
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - it->second)
+                    .count();
+        }
+    }
+
+    dashboard_->update_peer_stats(peer_id, stats);
 }
 
 void

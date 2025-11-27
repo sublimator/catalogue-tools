@@ -1,9 +1,11 @@
 #include <catl/core/logger.h>
 #include <catl/peer/monitor/command-line.h>
 #include <catl/peer/monitor/monitor.h>
+#include <catl/peer/monitor/peer-dashboard.h>
 
 #include <atomic>
 #include <csignal>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 
@@ -41,6 +43,9 @@ signal_handler(int signal)
 int
 main(int argc, char* argv[])
 {
+    // Register terminal restore as safety net (runs on any exit)
+    std::atexit(catl::peer::monitor::PeerDashboard::restore_terminal);
+
     // Set logger level
     Logger::set_level(LogLevel::INFO);
     Logger::set_log_counter(true);
