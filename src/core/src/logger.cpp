@@ -1,5 +1,8 @@
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <ostream>
@@ -14,6 +17,11 @@ LogLevel Logger::current_level_ = LogLevel::ERROR;  // Default log level
 std::mutex Logger::log_mutex_;
 std::ostream* Logger::output_stream_ = nullptr;  // nullptr = use std::cout
 std::ostream* Logger::error_stream_ = nullptr;   // nullptr = use std::cerr
+std::atomic<std::uint64_t> Logger::log_counter_{0};
+bool Logger::include_log_counter_ = false;
+bool Logger::use_relative_time_ = false;
+std::chrono::steady_clock::time_point Logger::start_time_ =
+    std::chrono::steady_clock::now();
 
 bool
 Logger::should_log(LogLevel level)
@@ -36,6 +44,8 @@ get_level_string(const LogLevel& level)
             return "INFO";
         case LogLevel::DEBUG:
             return "DEBUG";
+        case LogLevel::TRACE:
+            return "TRACE";
         case LogLevel::NONE:
             return "NONE";
         case LogLevel::INHERIT:
@@ -74,7 +84,8 @@ Logger::set_level(const std::string& levelStr)
         {"warn", LogLevel::WARNING},
         {"warning", LogLevel::WARNING},
         {"info", LogLevel::INFO},
-        {"debug", LogLevel::DEBUG}};
+        {"debug", LogLevel::DEBUG},
+        {"trace", LogLevel::TRACE}};
 
     // Convert input to lowercase
     std::string lower_level_str = levelStr;
@@ -116,4 +127,24 @@ Logger::reset_streams()
     std::lock_guard<std::mutex> lock(log_mutex_);
     output_stream_ = nullptr;
     error_stream_ = nullptr;
+}
+
+void
+Logger::set_log_counter(bool enabled)
+{
+    include_log_counter_ = enabled;
+    if (!enabled)
+    {
+        log_counter_.store(0);
+    }
+}
+
+void
+Logger::set_relative_time(bool enabled)
+{
+    use_relative_time_ = enabled;
+    if (enabled)
+    {
+        start_time_ = std::chrono::steady_clock::now();
+    }
 }

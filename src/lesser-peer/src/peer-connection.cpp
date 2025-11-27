@@ -39,26 +39,36 @@ peer_connection::async_connect(const connection_handler& handler)
         return;
     }
 
-    // Resolve the host
-    tcp::resolver resolver(io_context_);
-    auto endpoints =
-        resolver.resolve(config_.host, std::to_string(config_.port));
-
-    // Connect to the server
-    asio::async_connect(
-        socket_->lowest_layer(),
-        endpoints,
-        [self = shared_from_this(), handler](
-            boost::system::error_code ec, tcp::endpoint endpoint) {
-            if (!ec)
-            {
-                self->remote_endpoint_ = endpoint;
-                self->handle_connect(ec, handler);
-            }
-            else
+    // Resolve the host asynchronously
+    auto resolver = std::make_shared<tcp::resolver>(io_context_);
+    resolver->async_resolve(
+        config_.host,
+        std::to_string(config_.port),
+        [self = shared_from_this(), handler, resolver](
+            boost::system::error_code ec,
+            tcp::resolver::results_type endpoints) {
+            if (ec)
             {
                 handler(ec);
+                return;
             }
+
+            // Connect to the server
+            asio::async_connect(
+                self->socket_->lowest_layer(),
+                endpoints,
+                [self, handler](
+                    boost::system::error_code ec, tcp::endpoint endpoint) {
+                    if (!ec)
+                    {
+                        self->remote_endpoint_ = endpoint;
+                        self->handle_connect(ec, handler);
+                    }
+                    else
+                    {
+                        handler(ec);
+                    }
+                });
         });
 }
 
@@ -226,8 +236,8 @@ peer_connection::send_http_request(const connection_handler& handler)
     req->set("Connect-As", "Peer");
     req->set("Crawl", "private");
 
-    // Network ID for Xahau Testnet (port 21338)
-    req->set("Network-ID", "21338");
+    // Network ID (configurable)
+    req->set("Network-ID", std::to_string(config_.network_id));
 
     // Add network time (seconds since Ripple epoch - Jan 1, 2000)
     // Ripple epoch is Unix timestamp 946684800
@@ -433,7 +443,14 @@ peer_connection::handle_read_header(
 {
     if (ec)
     {
-        LOGE("Error reading header: ", ec.message());
+        // Log exact error code for debugging disconnects
+        LOGE("Error reading header: ", ec.message(), " (val=", ec.value(), ")");
+
+        if (ec == asio::error::eof || ec == asio::error::connection_reset)
+        {
+            LOGI("🔌 Connection closed by peer (EOF/Reset) during header read");
+            close();
+        }
         return;
     }
 
@@ -526,11 +543,12 @@ peer_connection::handle_read_payload(
 {
     if (ec)
     {
-        LOGE("Error reading payload: ", ec.message(), " (", ec.value(), ")");
+        LOGE(
+            "Error reading payload: ", ec.message(), " (val=", ec.value(), ")");
         // Check if it's EOF or connection closed
         if (ec == asio::error::eof || ec == asio::error::connection_reset)
         {
-            LOGI("Connection closed by peer");
+            LOGI("🔌 Connection closed by peer (EOF/Reset) during payload read");
             close();
         }
         return;

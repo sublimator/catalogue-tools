@@ -5,10 +5,28 @@ set -ex
 echo "🔨 Building peer monitor..."
 ninja -C build src/lesser-peer/peermon
 
-# Default testnet peers (you can override these)
-# Xahau Testnet specific peer
-PEER_HOST=${PEER_HOST:-"79.110.60.125"}
-PEER_PORT=${PEER_PORT:-21338}
+# Network presets
+NETWORK=${NETWORK:-"xahau-test"} # xahau-test | xahau-main
+
+case "$NETWORK" in
+xahau-main)
+  DEFAULT_HOST="bacab.alloy.ee"
+  DEFAULT_PORT=21337
+  DEFAULT_NETWORK_ID=21337
+  ADDITIONAL_PEERS=""
+  ;;
+xahau-test | *)
+  DEFAULT_HOST="79.110.60.121"
+  DEFAULT_PORT=21338
+  DEFAULT_NETWORK_ID=21338
+  ADDITIONAL_PEERS="79.110.60.122:21338 79.110.60.124:21338 79.110.60.125:21338"
+  ;;
+esac
+
+# Default peers (overridable)
+PEER_HOST=${PEER_HOST:-"$DEFAULT_HOST"}
+PEER_PORT=${PEER_PORT:-$DEFAULT_PORT}
+NETWORK_ID=${NETWORK_ID:-$DEFAULT_NETWORK_ID}
 
 # Alternative testnet options:
 # XRPL Testnet: s.altnet.rippletest.net:51235
@@ -41,11 +59,11 @@ HIDE_PACKETS=${HIDE_PACKETS:-""} # Hide these packet types
 QUERY_TX=${QUERY_TX:-""} # Transaction hashes to query from the peer (comma-separated)
 
 # Logging controls (set to 0 to disable specific log partitions)
-LOG_TXSET=${LOG_TXSET:-1}    # Transaction set acquisition logging
-LOG_WIRE=${LOG_WIRE:-1}      # Wire format parsing logging
-LOG_TX_JSON=${LOG_TX_JSON:-1} # Transaction JSON output
-LOG_MANIFEST=${LOG_MANIFEST:-1} # Manifest tracking logging
-export LOG_TXSET LOG_WIRE LOG_TX_JSON LOG_MANIFEST  # Export for the child process
+LOG_TXSET=${LOG_TXSET:-1}                          # Transaction set acquisition logging
+LOG_WIRE=${LOG_WIRE:-1}                            # Wire format parsing logging
+LOG_TX_JSON=${LOG_TX_JSON:-1}                      # Transaction JSON output
+LOG_MANIFEST=${LOG_MANIFEST:-1}                    # Manifest tracking logging
+export LOG_TXSET LOG_WIRE LOG_TX_JSON LOG_MANIFEST # Export for the child process
 
 # Protocol definitions path (should exist in your project)
 # Use Xahau definitions for Xahau testnet
@@ -59,6 +77,12 @@ ARGS="$PEER_HOST $PEER_PORT"
 ARGS="$ARGS --threads $THREADS"
 ARGS="$ARGS --timeout $TIMEOUT"
 ARGS="$ARGS --protocol-definitions $PROTOCOL_DEFS"
+ARGS="$ARGS --network-id $NETWORK_ID"
+
+# Add additional peers
+for peer in $ADDITIONAL_PEERS; do
+  ARGS="$ARGS --peer $peer"
+done
 
 # Add optional flags
 [ -n "$LISTEN_MODE" ] && ARGS="$ARGS --listen"
@@ -79,10 +103,12 @@ ARGS="$ARGS --protocol-definitions $PROTOCOL_DEFS"
 # Add transaction queries (pass as single quoted argument to preserve commas)
 [ -n "$QUERY_TX" ] && ARGS="$ARGS --query-tx \"$QUERY_TX\""
 
-echo "🌐 Connecting to peer at $PEER_HOST:$PEER_PORT"
+echo "🌐 Connecting to primary peer at $PEER_HOST:$PEER_PORT"
+[ -n "$ADDITIONAL_PEERS" ] && echo "   Additional peers: $ADDITIONAL_PEERS"
 echo "📊 Configuration:"
 echo "   - IO Threads: $THREADS"
 echo "   - Timeout: $TIMEOUT seconds"
+echo "   - Network: $NETWORK (Network-ID=$NETWORK_ID)"
 [ -n "$DASHBOARD" ] && echo "   - Dashboard UI: ENABLED (logs to peermon.log)"
 [ -n "$SHOW_PACKETS" ] && echo "   - Showing only: $SHOW_PACKETS"
 [ -n "$HIDE_PACKETS" ] && echo "   - Hiding: $HIDE_PACKETS"

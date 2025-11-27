@@ -1,4 +1,5 @@
 #include <boost/algorithm/string.hpp>
+#include <catl/core/logger.h>
 #include <catl/peer/monitor/command-line.h>
 #include <catl/peer/packet-names.h>
 #include <iostream>
@@ -16,13 +17,21 @@ command_line_parser::command_line_parser()
     , all_desc_("All options")
 {
     general_desc_.add_options()("help,h", "Show this help message")(
-        "version,v", "Show version information");
+        "version,V", "Show version information")(
+        "verbose,v", "Increase log verbosity (can be repeated)")(
+        "quiet,q", "Decrease log verbosity");
 
     connection_desc_.add_options()(
         "host",
         po::value<std::string>()->required(),
         "Host IP address or hostname")(
         "port", po::value<std::uint16_t>()->required(), "Port number")(
+        "peer,p",
+        po::value<std::vector<std::string>>()->multitoken(),
+        "Additional peer(s) as host:port (can specify multiple)")(
+        "network-id",
+        po::value<std::uint32_t>()->default_value(21338),
+        "Network-ID header (e.g. 21338 testnet, 21337 mainnet)")(
         "listen,l", po::bool_switch(), "Listen mode (act as server)")(
         "cert",
         po::value<std::string>()->default_value("listen.cert"),
@@ -45,22 +54,13 @@ command_line_parser::command_line_parser()
     display_desc_.add_options()(
         "dashboard",
         po::bool_switch(),
-        "Enable FTXUI dashboard with log redirection")(
-        "no-cls", po::bool_switch(), "Don't clear screen between updates")(
-        "no-dump", po::bool_switch(), "Don't dump packet contents")(
-        "no-stats", po::bool_switch(), "Don't show statistics")(
-        "no-http", po::bool_switch(), "Don't show HTTP upgrade messages")(
-        "no-hex", po::bool_switch(), "Don't show hex dumps")(
-        "no-json",
-        po::bool_switch(),
-        "Don't show JSON output for transactions/validations")(
-        "raw-hex", po::bool_switch(), "Show raw hex without formatting")(
-        "slow",
-        po::bool_switch(),
-        "Update display at most once every 5 seconds")(
+        "Enable FTXUI dashboard (implies --quiet output to stdout)")(
         "manifests-only",
         po::bool_switch(),
-        "Only collect manifests then exit");
+        "Harvest manifests (specialized mode)")(
+        "txset-acquire",
+        po::bool_switch(),
+        "Enable transaction set acquisition");
 
     filter_desc_.add_options()(
         "show",
@@ -71,7 +71,7 @@ command_line_parser::command_line_parser()
         "Hide these packet types (comma-separated)")(
         "query-tx",
         po::value<std::vector<std::string>>()->multitoken(),
-        "Query specific transactions by hash (can specify multiple)");
+        "Query specific transactions by hash");
 
     // Positional arguments for host and port
     pos_desc_.add("host", 1);
@@ -123,24 +123,53 @@ command_line_parser::parse(int argc, char* argv[])
             std::chrono::seconds(vm["timeout"].as<int>());
         config.peer.protocol_definitions_path =
             vm["protocol-definitions"].as<std::string>();
+        config.peer.network_id = vm["network-id"].as<std::uint32_t>();
 
-        // Populate display config
-        config.display.use_dashboard = vm["dashboard"].as<bool>();
-        config.display.use_cls = !vm["no-cls"].as<bool>();
-        config.display.no_dump = vm["no-dump"].as<bool>();
-        config.display.no_stats = vm["no-stats"].as<bool>();
-        config.display.no_http = vm["no-http"].as<bool>();
-        config.display.no_hex = vm["no-hex"].as<bool>();
-        config.display.no_json = vm["no-json"].as<bool>();
-        config.display.raw_hex = vm["raw-hex"].as<bool>();
-        config.display.slow = vm["slow"].as<bool>();
-        config.display.manifests_only = vm["manifests-only"].as<bool>();
-
-        if (config.display.no_hex && config.display.raw_hex)
+        // Parse additional peers (--peer host:port)
+        if (vm.count("peer"))
         {
-            throw std::runtime_error("Cannot use both --no-hex and --raw-hex");
+            auto peers = vm["peer"].as<std::vector<std::string>>();
+            for (const auto& peer_str : peers)
+            {
+                auto colon_pos = peer_str.rfind(':');
+                if (colon_pos == std::string::npos)
+                {
+                    throw std::runtime_error(
+                        "Invalid peer format: " + peer_str +
+                        " (expected host:port)");
+                }
+                std::string host = peer_str.substr(0, colon_pos);
+                std::uint16_t port = static_cast<std::uint16_t>(
+                    std::stoi(peer_str.substr(colon_pos + 1)));
+                config.additional_peers.emplace_back(host, port);
+            }
         }
 
+        // Determine Operational Mode
+        config.mode = MonitorMode::Monitor;
+        if (vm["manifests-only"].as<bool>())
+        {
+            config.mode = MonitorMode::Harvest;
+        }
+        else if (vm.count("query-tx"))
+        {
+            config.mode = MonitorMode::Query;
+        }
+
+        // Determine View Mode
+        if (vm["dashboard"].as<bool>())
+        {
+            config.view = ViewMode::Dashboard;
+        }
+        else
+        {
+            config.view = ViewMode::Stream;
+        }
+
+        // Other flags
+        config.enable_txset_acquire = vm["txset-acquire"].as<bool>();
+
+        // Filter setup
         if (vm.count("show") && vm.count("hide"))
         {
             throw std::runtime_error("Cannot use both --show and --hide");
@@ -155,34 +184,51 @@ command_line_parser::parse(int argc, char* argv[])
             parse_packet_filter("", vm["hide"].as<std::string>());
         }
 
-        // Copy filter to config
         config.filter = filter_;
 
-        // Parse transaction query hashes (supports both space and comma
-        // separation)
+        // Parse transaction query hashes
         if (vm.count("query-tx"))
         {
             auto hashes = vm["query-tx"].as<std::vector<std::string>>();
             config.query_tx_hashes.clear();
-
-            // Process each hash, splitting on commas if present
             for (const auto& hash_str : hashes)
             {
-                // Split on commas
                 std::vector<std::string> items;
                 boost::split(items, hash_str, boost::is_any_of(","));
-
                 for (auto& item : items)
                 {
-                    // Trim whitespace
                     boost::trim(item);
                     if (!item.empty())
-                    {
                         config.query_tx_hashes.push_back(item);
-                    }
                 }
             }
         }
+
+        // Configure Logging based on verbosity
+        // Default level: INFO
+        // -q: ERROR
+        // -v: DEBUG
+        // -vv: TRACE (Hex dumps enabled via partitions)
+
+        LogLevel level = LogLevel::INFO;
+        int v_count = vm.count("verbose");
+        if (vm.count("quiet"))
+        {
+            level = LogLevel::ERROR;
+        }
+        else if (v_count == 1)
+        {
+            level = LogLevel::DEBUG;
+        }
+        else if (v_count >= 2)
+        {
+            level = LogLevel::TRACE;
+        }
+
+        Logger::set_level(level);
+
+        // If in dashboard mode, we might want to force some log settings later
+        // but for now we set global defaults.
 
         return config;
     }
@@ -230,32 +276,14 @@ void
 command_line_parser::print_help(std::ostream& os) const
 {
     os << "XRPL Peer Monitor v" << VERSION << "\n";
-    os << "A tool to connect to an XRPL node as a peer and monitor traffic\n\n";
     os << "Usage: peermon HOST PORT [options]\n\n";
     os << all_desc_ << "\n";
-
-    os << "Packet types:\n";
-    os << "  mtMANIFESTS, mtPING, mtCLUSTER, mtENDPOINTS, mtTRANSACTION,\n";
-    os << "  mtGET_LEDGER, mtLEDGER_DATA, mtPROPOSE_LEDGER, mtSTATUS_CHANGE,\n";
-    os << "  mtHAVE_SET, mtVALIDATION, mtGET_OBJECTS, mtGET_SHARD_INFO,\n";
-    os << "  mtSHARD_INFO, mtGET_PEER_SHARD_INFO, mtPEER_SHARD_INFO,\n";
-    os << "  mtVALIDATORLIST, mtSQUELCH, mtVALIDATORLISTCOLLECTION,\n";
-    os << "  mtPROOF_PATH_REQ, mtPROOF_PATH_RESPONSE, mtREPLAY_DELTA_REQ,\n";
-    os << "  mtREPLAY_DELTA_RESPONSE, mtGET_PEER_SHARD_INFO_V2,\n";
-    os << "  mtPEER_SHARD_INFO_V2, mtHAVE_TRANSACTIONS, mtTRANSACTIONS,\n";
-    os << "  mtRESOURCE_REPORT\n\n";
-
-    os << "Examples:\n";
-    os << "  peermon r.ripple.com 51235 --no-dump\n";
-    os << "  peermon r.ripple.com 51235 --show mtGET_LEDGER,mtVALIDATION\n";
-    os << "  peermon 0.0.0.0 51235 --listen\n";
 }
 
 void
 command_line_parser::print_version(std::ostream& os) const
 {
     os << "XRPL Peer Monitor v" << VERSION << "\n";
-    os << "Built with modern C++ and Boost.Asio\n";
 }
 
 }  // namespace catl::peer::monitor

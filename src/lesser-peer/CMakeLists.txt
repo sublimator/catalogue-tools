@@ -5,7 +5,9 @@ add_library(
   src/peer-connection.cpp
   src/wire-format.cpp
   src/txset-acquirer.cpp
-  src/manifest-tracker.cpp)
+  src/manifest-tracker.cpp
+  src/peer-manager.cpp
+  src/control-http.cpp)
 
 target_include_directories(
   catl_lesser_peer
@@ -23,6 +25,7 @@ target_link_libraries(
          Boost::program_options
          catl::base58
          catl::core
+         catl::crypto
          catl::catalogue_common
          catl::xdata
          catl::xdata_json)
@@ -50,6 +53,7 @@ add_executable(
   src/monitor/main.cpp
   src/monitor/monitor.cpp
   src/monitor/packet-processor.cpp
+  src/monitor/packet-logger.cpp
   src/monitor/command-line.cpp
   src/monitor/peer-dashboard.cpp)
 

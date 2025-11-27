@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -57,7 +59,8 @@ enum class LogLevel {
     ERROR = 0,
     WARNING = 1,
     INFO = 2,
-    DEBUG = 3
+    DEBUG = 3,
+    TRACE = 4
 };
 
 class Logger
@@ -68,6 +71,10 @@ private:
     static std::ostream* output_stream_;  // For INFO/DEBUG (default: std::cout)
     static std::ostream*
         error_stream_;  // For ERROR/WARNING (default: std::cerr)
+    static std::atomic<std::uint64_t> log_counter_;
+    static bool include_log_counter_;
+    static bool use_relative_time_;
+    static std::chrono::steady_clock::time_point start_time_;
 
     // Fast level check method
     static bool
@@ -77,24 +84,50 @@ private:
     static std::string
     format_timestamp()
     {
-        auto now = std::chrono::system_clock::now();
-        auto time_t_now = std::chrono::system_clock::to_time_t(now);
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      now.time_since_epoch()) %
-            1000;
+        std::ostringstream oss;
+        if (use_relative_time_)
+        {
+            auto now = std::chrono::steady_clock::now();
+            auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - start_time_);
+            auto total_ms = delta.count();
+            auto hours = total_ms / 3'600'000;
+            total_ms %= 3'600'000;
+            auto minutes = total_ms / 60'000;
+            total_ms %= 60'000;
+            auto seconds = total_ms / 1000;
+            auto ms = total_ms % 1000;
+            oss << "[" << std::setfill('0') << std::setw(2) << hours << ":"
+                << std::setw(2) << minutes << ":" << std::setw(2) << seconds
+                << "." << std::setw(3) << ms << "]";
+        }
+        else
+        {
+            auto now = std::chrono::system_clock::now();
+            auto time_t_now = std::chrono::system_clock::to_time_t(now);
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          now.time_since_epoch()) %
+                1000;
 
-        std::tm tm_now;
+            std::tm tm_now;
 #ifdef _WIN32
-        localtime_s(&tm_now, &time_t_now);
+            localtime_s(&tm_now, &time_t_now);
 #else
-        localtime_r(&time_t_now, &tm_now);
+            localtime_r(&time_t_now, &tm_now);
 #endif
 
-        std::ostringstream oss;
-        oss << "[" << std::setfill('0') << std::setw(2) << tm_now.tm_hour << ":"
-            << std::setw(2) << tm_now.tm_min << ":" << std::setw(2)
-            << tm_now.tm_sec << "." << std::setw(3) << ms.count() << "] ";
+            oss << "[" << std::setfill('0') << std::setw(2) << tm_now.tm_hour
+                << ":" << std::setw(2) << tm_now.tm_min << ":" << std::setw(2)
+                << tm_now.tm_sec << "." << std::setw(3) << ms.count() << "]";
+        }
 
+        if (include_log_counter_)
+        {
+            auto count = log_counter_.fetch_add(1, std::memory_order_relaxed);
+            oss << "[" << std::setw(8) << std::setfill('0') << count << "]";
+        }
+
+        oss << " ";
         return oss.str();
     }
 
@@ -119,6 +152,14 @@ public:
     // Reset both streams to defaults
     static void
     reset_streams();
+
+    // Enable/disable log line counter in prefix
+    static void
+    set_log_counter(bool enabled);
+
+    // Use relative timestamps from program start instead of wall clock
+    static void
+    set_relative_time(bool enabled);
 
     // Log with efficient formatting using variadic templates
     template <typename... Args>
@@ -154,6 +195,9 @@ public:
                 break;
             case LogLevel::DEBUG:
                 oss << "[DEBUG] ";
+                break;
+            case LogLevel::TRACE:
+                oss << "[TRACE] ";
                 break;
             case LogLevel::NONE:
             case LogLevel::INHERIT:
@@ -200,6 +244,9 @@ public:
                 break;
             case LogLevel::DEBUG:
                 oss << "[DEBUG] ";
+                break;
+            case LogLevel::TRACE:
+                oss << "[TRACE] ";
                 break;
             case LogLevel::NONE:
             case LogLevel::INHERIT:
@@ -333,6 +380,12 @@ public:
             messageLevel <= effective_level;
     }
 
+    bool
+    is_enabled(LogLevel messageLevel) const
+    {
+        return should_log(messageLevel);
+    }
+
     // In LogPartition class, add:
     // Friend declaration to allow access
     template <typename T, typename... Args>
@@ -451,6 +504,19 @@ private:
         ":",                                     \
         __LINE__,                                \
         ")")
+#define PLOGT(partition, ...)                    \
+    if ((partition).should_log(LogLevel::TRACE)) \
+    Logger::log_internal(                        \
+        LogLevel::TRACE,                         \
+        "[",                                     \
+        (partition).name(),                      \
+        "] ",                                    \
+        __VA_ARGS__,                             \
+        " (",                                    \
+        __RELATIVE_FILEPATH__,                   \
+        ":",                                     \
+        __LINE__,                                \
+        ")")
 
 #define LOGE(...)              \
     Logger::log(               \
@@ -485,6 +551,16 @@ private:
     if (Logger::get_level() >= LogLevel::DEBUG) \
     Logger::log(                                \
         LogLevel::DEBUG,                        \
+        __VA_ARGS__,                            \
+        " (",                                   \
+        __RELATIVE_FILEPATH__,                  \
+        ":",                                    \
+        __LINE__,                               \
+        ")")
+#define LOGT(...)                               \
+    if (Logger::get_level() >= LogLevel::TRACE) \
+    Logger::log(                                \
+        LogLevel::TRACE,                        \
         __VA_ARGS__,                            \
         " (",                                   \
         __RELATIVE_FILEPATH__,                  \

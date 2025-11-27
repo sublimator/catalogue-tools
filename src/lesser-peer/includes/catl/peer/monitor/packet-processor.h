@@ -8,6 +8,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 
 namespace catl::peer::monitor {
@@ -20,6 +21,7 @@ public:
     // Process incoming packet
     void
     process_packet(
+        std::string const& peer_id,
         std::shared_ptr<peer_connection> connection,
         packet_header const& header,
         std::vector<std::uint8_t> const& payload);
@@ -74,6 +76,8 @@ private:
     void
     handle_validation(std::vector<std::uint8_t> const& payload);
     void
+    handle_endpoints(std::vector<std::uint8_t> const& payload);
+    void
     handle_get_objects(
         std::shared_ptr<peer_connection> connection,
         std::vector<std::uint8_t> const& payload);
@@ -102,13 +106,24 @@ private:
 
     std::chrono::steady_clock::time_point start_time_;
     std::chrono::steady_clock::time_point last_display_time_;
+    std::chrono::steady_clock::time_point last_dashboard_update_;
 
     // Transaction set acquirers keyed by set hash
-    std::map<std::string, std::unique_ptr<TransactionSetAcquirer>>
+    // Use shared_ptr so callbacks cannot invalidate current stack frames while
+    // we iterate (completion may erase from map).
+    std::map<std::string, std::shared_ptr<TransactionSetAcquirer>>
         txset_acquirers_;
 
     // Manifest tracker for mapping ephemeral keys to master validator keys
     ManifestTracker manifest_tracker_;
+
+    // Discovered peer endpoints (from mtENDPOINTS)
+    std::set<std::string> available_endpoints_;
+
+    // Seen validations per ledger for deduplication
+    // Key = ledger sequence, Value = set of validation hashes
+    std::map<uint32_t, std::set<std::string>> validations_by_ledger_;
+    static constexpr size_t MAX_LEDGERS_TRACKED = 5;
 };
 
 }  // namespace catl::peer::monitor

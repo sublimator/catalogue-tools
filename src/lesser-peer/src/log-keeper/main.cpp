@@ -40,6 +40,8 @@ main(int argc, char* argv[])
 {
     // Set logger level
     Logger::set_level(LogLevel::INFO);
+    Logger::set_log_counter(true);
+    Logger::set_relative_time(true);
 
     // Parse command line
     po::options_description desc("Log Keeper Options");
@@ -59,6 +61,9 @@ main(int argc, char* argv[])
         "node-private",
         po::value<std::string>(),
         "Node private key (base58-encoded)")(
+        "network-id",
+        po::value<std::uint32_t>()->default_value(21338),
+        "Network-ID header (e.g. 21338 testnet, 21337 mainnet)")(
         "debug,d", po::bool_switch(), "Enable debug logging");
 
     po::positional_options_description pos_desc;
@@ -131,6 +136,7 @@ main(int argc, char* argv[])
         config.io_threads = vm["threads"].as<std::size_t>();
         config.protocol_definitions_path =
             vm["protocol-definitions"].as<std::string>();
+        config.network_id = vm["network-id"].as<std::uint32_t>();
 
         // Set node private key if provided
         if (vm.count("node-private"))

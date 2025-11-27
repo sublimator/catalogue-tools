@@ -1,6 +1,8 @@
+#include "ripple.pb.h"
 #include <boost/filesystem.hpp>
 #include <catl/core/logger.h>
 #include <catl/peer/monitor/monitor.h>
+#include <catl/peer/monitor/packet-logger.h>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -13,33 +15,44 @@ peer_monitor::peer_monitor(monitor_config config)
     , ssl_context_(
           std::make_unique<asio::ssl::context>(asio::ssl::context::tlsv12))
 {
-    // Force no_dump when using dashboard to prevent output interference
-    if (config_.display.use_dashboard)
-    {
-        config_.display.no_dump = true;
-    }
-
-    // When querying transactions, use special query mode
-    if (!config_.query_tx_hashes.empty())
-    {
-        config_.display.query_mode =
-            true;  // Special query mode - only show transaction results
-        config_.display.no_stats = true;  // No packet statistics
-        config_.display.no_dump = true;   // No packet dumps
-        config_.display.no_hex = true;    // No hex dumps
-        config_.display.no_json = true;   // No JSON dumps
-    }
-
     // Create the packet processor with the updated config
     processor_ = std::make_unique<packet_processor>(config_);
 
+    // Create the packet logger
+    logger_ = std::make_unique<PacketLogger>(config_);
+
     setup_ssl_context();
 
+    // Event bus and manager for multi-peer support (even when using a single
+    // peer)
+    bus_ = std::make_shared<PeerEventBus>();
+    manager_ = std::make_unique<PeerManager>(io_context_, *ssl_context_, bus_);
+
+    // Single-thread event processing using a strand
+    event_strand_ =
+        std::make_unique<boost::asio::strand<asio::io_context::executor_type>>(
+            io_context_.get_executor());
+
+    // Subscribe once to the event bus to handle packets/states for all peers
+    subscription_id_ = bus_->subscribe([this](PeerEvent const& event) {
+        if (event_strand_)
+        {
+            asio::dispatch(
+                *event_strand_, [this, event]() { handle_event(event); });
+        }
+        else
+        {
+            handle_event(event);
+        }
+    });
+
     // Create dashboard only if enabled
-    if (config_.display.use_dashboard)
+    if (config_.view == ViewMode::Dashboard)
     {
         dashboard_ = std::make_shared<PeerDashboard>();
         processor_->set_dashboard(dashboard_);
+        // Register shutdown callback so 'q' in dashboard stops the monitor
+        dashboard_->set_shutdown_callback([this]() { request_stop(); });
     }
 
     // Set shutdown callback for manifests-only mode
@@ -92,7 +105,7 @@ peer_monitor::run()
     running_ = true;
 
     // Set up log redirection and start dashboard if enabled
-    if (config_.display.use_dashboard)
+    if (config_.view == ViewMode::Dashboard)
     {
         std::cout << "\n🎨 Starting dashboard..." << std::endl;
         std::cout << "   Redirecting logs to peermon.log" << std::endl;
@@ -108,6 +121,7 @@ peer_monitor::run()
         namespace fs = boost::filesystem;
         fs::path log_path = fs::current_path() / "peermon.log";
         log_file_.open(log_path.string(), std::ios::out | std::ios::trunc);
+        log_file_ << std::unitbuf;  // Flush after every insertion
 
         if (log_file_.is_open())
         {
@@ -115,10 +129,22 @@ peer_monitor::run()
             Logger::set_output_stream(&log_file_);  // INFO/DEBUG logs
             Logger::set_error_stream(&log_file_);   // ERROR/WARNING logs
         }
+        else
+        {
+            std::cerr << "❌ Failed to open peermon.log! Disabling logging to "
+                         "prevent UI corruption."
+                      << std::endl;
+            // Disable logger output to stdout/stderr to save the dashboard
+            Logger::set_output_stream(nullptr);
+            Logger::set_error_stream(nullptr);
+        }
 
         // Start the dashboard UI
         dashboard_->start();
     }
+
+    // Start diagnostic heartbeat thread
+    diagnostic_thread_ = std::thread(&peer_monitor::run_diagnostics, this);
 
     // Create work guard to keep io_context alive
     work_guard_ = std::make_unique<
@@ -146,26 +172,25 @@ peer_monitor::run()
         }
         else
         {
-            // Connect to peer
-            auto connection = std::make_shared<peer_connection>(
-                io_context_, *ssl_context_, config_.peer);
-            connection->async_connect(
-                [this, connection](boost::system::error_code ec) {
-                    if (!ec)
-                    {
-                        LOGI(
-                            "Connected and upgraded to ",
-                            connection->remote_endpoint());
-                        // Connection is now fully established with HTTP upgrade
-                        // complete
-                        handle_connection(connection);
-                    }
-                    else
-                    {
-                        LOGE("Connection failed: ", ec.message());
-                        stop();
-                    }
-                });
+            // Connect to primary peer via the manager
+            auto id = manager_->add_peer(config_.peer);
+            LOGI(
+                "Connecting to ",
+                config_.peer.host,
+                ":",
+                config_.peer.port,
+                " as ",
+                id);
+
+            // Connect to additional peers
+            for (const auto& [host, port] : config_.additional_peers)
+            {
+                peer::peer_config peer_cfg = config_.peer;  // Copy base config
+                peer_cfg.host = host;
+                peer_cfg.port = port;
+                auto peer_id = manager_->add_peer(peer_cfg);
+                LOGI("Connecting to ", host, ":", port, " as ", peer_id);
+            }
         }
 
         // Start IO threads
@@ -235,10 +260,39 @@ peer_monitor::stop()
     // Request stop first
     request_stop();
 
+    // Stop peers and unsubscribe
+    if (manager_)
+    {
+        manager_->stop_all();
+    }
+    if (bus_ && subscription_id_ != 0)
+    {
+        bus_->unsubscribe(subscription_id_);
+        subscription_id_ = 0;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(query_mutex_);
+        query_timers_.clear();
+        queries_scheduled_.clear();
+    }
+
+    // Stop heartbeats
+    {
+        std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+        heartbeat_timers_.clear();
+    }
+
     // Stop the dashboard
     if (dashboard_)
     {
         dashboard_->stop();
+    }
+
+    // Stop diagnostic thread
+    if (diagnostic_thread_.joinable())
+    {
+        diagnostic_thread_.join();
     }
 
     // Restore logger streams to defaults and close log file
@@ -247,7 +301,7 @@ peer_monitor::stop()
         Logger::reset_streams();
         log_file_.close();
 
-        if (config_.display.use_dashboard)
+        if (config_.view == ViewMode::Dashboard)
         {
             std::cout << "\n✅ Dashboard stopped - logs saved to peermon.log"
                       << std::endl;
@@ -331,32 +385,248 @@ void
 peer_monitor::handle_connection(std::shared_ptr<peer_connection> connection)
 {
     // Start reading packets first
-    connection->start_read([this, connection](
+    std::string peer_id = "listener:" + connection->remote_endpoint();
+    connection->start_read([this, connection, peer_id](
                                packet_header const& header,
                                std::vector<std::uint8_t> const& payload) {
-        processor_->process_packet(connection, header, payload);
+        processor_->process_packet(peer_id, connection, header, payload);
     });
 
     // Send transaction queries after a short delay to ensure connection is
     // ready
-    if (!config_.query_tx_hashes.empty())
-    {
-        // Silently schedule queries after a delay
+    schedule_queries("listener", connection);
+}
 
-        // Schedule the queries after a delay
-        auto timer = std::make_shared<asio::steady_timer>(io_context_);
-        timer->expires_after(std::chrono::seconds(2));
-        timer->async_wait(
-            [this, connection, timer](boost::system::error_code ec) {
-                if (!ec)
-                {
-                    // Query user's transactions
-                    for (const auto& tx_hash : config_.query_tx_hashes)
+void
+peer_monitor::handle_event(PeerEvent const& event)
+{
+    event_counter_++;
+
+    // 1. Logic Processor (State, Replies, etc.)
+    switch (event.type)
+    {
+        case PeerEventType::Packet: {
+            auto const& pkt = std::get<PeerPacketEvent>(event.data);
+            processor_->process_packet(
+                event.peer_id, pkt.connection, pkt.header, pkt.payload);
+            break;
+        }
+        default:
+            break;
+    }
+
+    // 2. Logger Observer (Text Output)
+    if (logger_)
+    {
+        logger_->on_event(event);
+    }
+
+    // 3. Monitor Logic (Connection State)
+    switch (event.type)
+    {
+        case PeerEventType::State: {
+            auto const& st = std::get<PeerStateEvent>(event.data);
+            if (st.state == PeerStateEvent::State::Connected && st.connection)
+            {
+                schedule_queries(event.peer_id, st.connection);
+                send_empty_endpoints(event.peer_id, st.connection);
+                send_status(event.peer_id, st.connection);
+                schedule_heartbeat(event.peer_id, st.connection);
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void
+peer_monitor::schedule_queries(
+    std::string const& peer_id,
+    std::shared_ptr<peer_connection> connection)
+{
+    if (config_.query_tx_hashes.empty())
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(query_mutex_);
+        if (!queries_scheduled_.insert(peer_id).second)
+        {
+            return;  // already scheduled
+        }
+    }
+
+    auto timer = std::make_shared<asio::steady_timer>(io_context_);
+    timer->expires_after(std::chrono::seconds(2));
+    timer->async_wait([this, connection, timer](boost::system::error_code ec) {
+        if (!ec)
+        {
+            for (const auto& tx_hash : config_.query_tx_hashes)
+            {
+                connection->send_transaction_query(tx_hash);
+            }
+        }
+    });
+
+    std::lock_guard<std::mutex> lock(query_mutex_);
+    query_timers_.push_back(timer);
+}
+
+void
+peer_monitor::send_empty_endpoints(
+    std::string const& peer_id,
+    std::shared_ptr<peer_connection> connection)
+{
+    {
+        std::lock_guard<std::mutex> lock(endpoints_mutex_);
+        if (!endpoints_sent_.insert(peer_id).second)
+        {
+            return;  // already sent
+        }
+    }
+
+    protocol::TMEndpoints eps;
+    eps.set_version(2);
+
+    std::string serialized;
+    if (!eps.SerializeToString(&serialized))
+    {
+        LOGE("Failed to serialize empty TMEndpoints");
+        return;
+    }
+
+    connection->async_send_packet(
+        packet_type::endpoints,
+        std::vector<std::uint8_t>(serialized.begin(), serialized.end()),
+        [](boost::system::error_code ec) {
+            if (ec)
+            {
+                LOGE("Failed to send empty TMEndpoints: ", ec.message());
+            }
+        });
+}
+
+void
+peer_monitor::send_status(
+    std::string const& peer_id,
+    std::shared_ptr<peer_connection> connection)
+{
+    protocol::TMStatusChange status;
+    status.set_newstatus(protocol::NodeStatus::nsMONITORING);
+    status.set_newevent(
+        protocol::NodeEvent::neLOST_SYNC);  // We are just starting, so we are
+                                            // effectively out of sync
+
+    // Use basic network time (seconds since Ripple epoch)
+    static constexpr uint32_t RIPPLE_EPOCH = 946684800;
+    auto unix_now = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+    status.set_networktime(unix_now - RIPPLE_EPOCH);
+
+    std::string serialized;
+    if (!status.SerializeToString(&serialized))
+    {
+        LOGE("Failed to serialize status");
+        return;
+    }
+
+    connection->async_send_packet(
+        packet_type::status_change,
+        std::vector<std::uint8_t>(serialized.begin(), serialized.end()),
+        [](boost::system::error_code ec) {
+            if (ec)
+            {
+                LOGE("Failed to send status: ", ec.message());
+            }
+        });
+}
+
+void
+peer_monitor::schedule_heartbeat(
+    std::string const& peer_id,
+    std::shared_ptr<peer_connection> connection)
+{
+    std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+
+    auto timer = std::make_shared<asio::steady_timer>(io_context_);
+    heartbeat_timers_[peer_id] = timer;
+
+    auto send_ping = std::make_shared<
+        std::function<void(boost::system::error_code)>>();  // NOLINT
+    *send_ping = [this, peer_id, connection, timer, send_ping](
+                     boost::system::error_code ec) {
+        if (ec || stopping_)
+            return;
+
+        // Build a simple ping
+        protocol::TMPing ping;
+        ping.set_type(protocol::TMPing_pingType_ptPING);
+        ping.set_seq(1);
+
+        std::vector<std::uint8_t> ping_data(ping.ByteSizeLong());
+        if (ping.SerializeToArray(ping_data.data(), ping_data.size()))
+        {
+            connection->async_send_packet(
+                packet_type::ping,
+                ping_data,
+                [](boost::system::error_code send_ec) {
+                    if (send_ec)
                     {
-                        connection->send_transaction_query(tx_hash);
+                        LOGD("Heartbeat ping failed: ", send_ec.message());
                     }
-                }
-            });
+                });
+        }
+
+        // Reschedule
+        timer->expires_after(std::chrono::seconds(10));
+        timer->async_wait(*send_ping);
+    };
+
+    timer->expires_after(std::chrono::seconds(10));
+    timer->async_wait(*send_ping);
+}
+
+void
+peer_monitor::run_diagnostics()
+{
+    uint64_t last_strand_events_count = 0;
+    uint64_t last_ui_renders_count = 0;
+    while (running_)
+    {
+        // Sleep for 30 seconds (or check regularly for shutdown)
+        for (int i = 0; i < 300 && running_; ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        if (!running_)
+            break;
+
+        uint64_t current_strand_events = event_counter_.load();
+        uint64_t diff_strand_events =
+            current_strand_events - last_strand_events_count;
+
+        uint64_t current_ui_renders = 0;
+        uint64_t diff_ui_renders = 0;
+        if (dashboard_)
+        {
+            current_ui_renders = dashboard_->ui_render_counter_.load();
+            diff_ui_renders = current_ui_renders - last_ui_renders_count;
+        }
+
+        LOGI(
+            "❤️ Heartbeat: Strand processed ",
+            current_strand_events,
+            " (+ ",
+            diff_strand_events,
+            " events in last 30s) | UI rendered ",
+            current_ui_renders,
+            " (+ ",
+            diff_ui_renders,
+            " times in last 30s)");
+        last_strand_events_count = current_strand_events;
+        last_ui_renders_count = current_ui_renders;
     }
 }
 

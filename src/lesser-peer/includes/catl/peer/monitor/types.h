@@ -2,23 +2,20 @@
 
 #include <catl/peer/types.h>
 #include <set>
+#include <string>
+#include <vector>
 
 namespace catl::peer::monitor {
 
-struct display_config
-{
-    bool use_cls = true;
-    bool no_dump = false;
-    bool slow = false;
-    bool raw_hex = false;
-    bool no_stats = false;
-    bool no_hex = false;
-    bool no_json = false;
-    bool manifests_only = false;
-    bool no_http = false;
-    bool use_dashboard = false;  // Enable FTXUI dashboard with log redirection
-    bool query_mode =
-        false;  // Special mode for transaction queries - only show results
+enum class MonitorMode {
+    Monitor,  // Passive listening (Default)
+    Query,    // Active query for specific objects
+    Harvest   // Specialized data harvesting (e.g. manifests)
+};
+
+enum class ViewMode {
+    Stream,    // Scrolling log output (stdout)
+    Dashboard  // TUI Dashboard (FTXUI)
 };
 
 struct packet_filter
@@ -29,13 +26,19 @@ struct packet_filter
 
 struct monitor_config
 {
-    peer::peer_config peer;
-    display_config display;
+    peer::peer_config peer;  // Primary peer
+    std::vector<std::pair<std::string, std::uint16_t>> additional_peers;
+
+    MonitorMode mode = MonitorMode::Monitor;
+    ViewMode view = ViewMode::Stream;
+
     packet_filter filter;
 
-    // Transaction queries
-    std::vector<std::string>
-        query_tx_hashes;  // List of transaction hashes to query
+    // Configuration
+    bool enable_txset_acquire = false;
+
+    // Query Mode params
+    std::vector<std::string> query_tx_hashes;
 };
 
 }  // namespace catl::peer::monitor

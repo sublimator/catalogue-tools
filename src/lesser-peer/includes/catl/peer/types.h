@@ -47,6 +47,9 @@ struct peer_config
 
     // Node identity (optional base58-encoded private key)
     std::optional<std::string> node_private_key;
+
+    // Network identifier (Xahau Testnet=21338, Mainnet=21337)
+    std::uint32_t network_id = 21338;
 };
 
 enum class packet_type : std::uint16_t {

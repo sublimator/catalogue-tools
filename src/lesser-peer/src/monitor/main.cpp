@@ -43,6 +43,8 @@ main(int argc, char* argv[])
 {
     // Set logger level
     Logger::set_level(LogLevel::INFO);
+    Logger::set_log_counter(true);
+    Logger::set_relative_time(true);
 
     // Parse command line
     catl::peer::monitor::command_line_parser parser;

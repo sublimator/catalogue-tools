@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -88,6 +89,22 @@ public:
     LedgerInfo
     get_current_ledger() const;
 
+    // Discovered peer endpoints
+    void
+    update_available_endpoints(std::vector<std::string> const& endpoints);
+    std::vector<std::string>
+    get_available_endpoints() const;
+
+    // Shutdown callback - called when user quits the dashboard
+    using shutdown_callback_t = std::function<void()>;
+    void
+    set_shutdown_callback(shutdown_callback_t callback)
+    {
+        shutdown_callback_ = std::move(callback);
+    }
+
+    std::atomic<uint64_t> ui_render_counter_{0};  // UI thread heartbeat
+
 private:
     void
     run_ui();
@@ -140,6 +157,13 @@ private:
     mutable std::mutex ledger_mutex_;
     LedgerInfo current_validated_ledger_;
     std::map<uint32_t, uint32_t> ledger_validations_;  // seq -> count
+
+    // Known peer endpoints (mtENDPOINTS)
+    mutable std::mutex endpoints_mutex_;
+    std::vector<std::string> available_endpoints_;
+
+    // Shutdown callback
+    shutdown_callback_t shutdown_callback_;
 };
 
 }  // namespace catl::peer::monitor

@@ -27,7 +27,10 @@ public:
         std::string ephemeral_key_hex;  // Ephemeral key in hex
     };
 
-    ManifestTracker() = default;
+    explicit ManifestTracker(std::uint32_t network_id = 21338)
+        : network_id_(network_id)
+    {
+    }
 
     /**
      * Process a manifest blob to extract key mappings
@@ -74,6 +77,8 @@ public:
     }
 
 private:
+    std::uint32_t network_id_{21338};
+
     // Map ephemeral key (hex) -> master key (base58)
     std::unordered_map<std::string, std::string> ephemeral_to_master_;
 

@@ -34,10 +34,17 @@ ManifestTracker::process_manifest(const uint8_t* manifest_data, size_t size)
         Slice manifest_slice(manifest_data, size);
         xdata::SliceCursor cursor{manifest_slice, 0};
 
-        // Load protocol definitions (cached)
-        // Using Xahau testnet protocol (network ID 21338)
-        static auto protocol = xdata::Protocol::load_embedded_xahau_protocol(
-            xdata::ProtocolOptions{.network_id = 21338});
+        // Load protocol definitions (cached per network)
+        static thread_local std::uint32_t cached_network_id = 0;
+        static thread_local std::optional<xdata::Protocol> cached_protocol;
+
+        if (!cached_protocol || cached_network_id != network_id_)
+        {
+            cached_protocol = xdata::Protocol::load_embedded_xahau_protocol(
+                xdata::ProtocolOptions{.network_id = network_id_});
+            cached_network_id = network_id_;
+        }
+        auto const& protocol = *cached_protocol;
 
         // Parse to JSON to extract fields
         xdata::JsonVisitor visitor(protocol);
