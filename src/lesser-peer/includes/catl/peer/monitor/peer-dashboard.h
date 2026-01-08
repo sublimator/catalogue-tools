@@ -7,11 +7,33 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
 namespace catl::peer::monitor {
+
+// Information about a validator that has validated a ledger
+struct ValidatorInfo
+{
+    std::string master_key_hex;  // from manifest (or ephemeral if no manifest)
+    std::string ephemeral_key_hex;  // signing key from validation
+    std::set<std::string>
+        seen_from_peers;  // peer_ids that relayed this validator's validation
+    std::chrono::steady_clock::time_point first_seen;
+};
+
+// Consensus state for a single ledger
+struct LedgerConsensus
+{
+    uint32_t sequence = 0;
+    std::string hash;
+    std::map<std::string, ValidatorInfo> validators;  // master_key -> info
+    std::chrono::steady_clock::time_point first_seen;
+    bool is_validated = false;  // hit quorum
+};
 
 class PeerDashboard
 {
@@ -85,7 +107,7 @@ public:
     std::vector<Stats>
     get_all_peers_stats() const;
 
-    // Ledger tracking
+    // Ledger tracking (legacy - kept for compatibility)
     void
     update_ledger_info(
         uint32_t sequence,
@@ -93,6 +115,24 @@ public:
         uint32_t validation_count);
     LedgerInfo
     get_current_ledger() const;
+
+    // Consensus tracking (new)
+    void
+    record_validation(
+        uint32_t ledger_seq,
+        std::string const& ledger_hash,
+        std::string const& validator_key,  // master key (resolved) or ephemeral
+        std::string const& ephemeral_key,
+        std::string const& peer_id);
+
+    std::optional<LedgerConsensus>
+    get_last_validated() const;
+
+    std::optional<LedgerConsensus>
+    get_validating() const;
+
+    size_t
+    get_known_validator_count() const;
 
     // Discovered peer endpoints
     void
@@ -163,10 +203,19 @@ private:
     std::string connection_state_{"Disconnected"};
     std::chrono::steady_clock::time_point last_packet_time_;
 
-    // Global ledger tracking
+    // Global ledger tracking (legacy)
     mutable std::mutex ledger_mutex_;
     LedgerInfo current_validated_ledger_;
     std::map<uint32_t, uint32_t> ledger_validations_;  // seq -> count
+
+    // Consensus tracking (new) - two-panel model
+    mutable std::mutex consensus_mutex_;
+    std::optional<LedgerConsensus> last_validated_;  // ledger that hit quorum
+    std::optional<LedgerConsensus> validating_;  // current ledger in progress
+    std::set<std::string>
+        known_validators_;  // all validators seen (for quorum)
+    std::map<std::string, std::string>
+        peer_to_validator_;  // peer_id -> master_key (if detected)
 
     // Known peer endpoints (mtENDPOINTS)
     mutable std::mutex endpoints_mutex_;

@@ -211,6 +211,93 @@ PeerDashboard::get_current_ledger() const
 }
 
 void
+PeerDashboard::record_validation(
+    uint32_t ledger_seq,
+    std::string const& ledger_hash,
+    std::string const& validator_key,
+    std::string const& ephemeral_key,
+    std::string const& peer_id)
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+    auto now = std::chrono::steady_clock::now();
+
+    // Add validator to known set
+    known_validators_.insert(validator_key);
+
+    // Track which peer this validator's validations came from
+    peer_to_validator_[peer_id] = validator_key;
+
+    // If we have a new ledger sequence, start tracking it
+    if (!validating_ || ledger_seq > validating_->sequence)
+    {
+        // If there was a previous validating_ that didn't hit quorum,
+        // it gets replaced (this is fine - network moved on)
+        validating_ = LedgerConsensus{};
+        validating_->sequence = ledger_seq;
+        validating_->hash = ledger_hash;
+        validating_->first_seen = now;
+        validating_->is_validated = false;
+    }
+
+    // Only record if this is for the current validating ledger
+    if (validating_ && ledger_seq == validating_->sequence)
+    {
+        auto& validators = validating_->validators;
+        auto it = validators.find(validator_key);
+        if (it == validators.end())
+        {
+            // New validator for this ledger
+            ValidatorInfo info;
+            info.master_key_hex = validator_key;
+            info.ephemeral_key_hex = ephemeral_key;
+            info.seen_from_peers.insert(peer_id);
+            info.first_seen = now;
+            validators[validator_key] = std::move(info);
+        }
+        else
+        {
+            // Already have this validator, just add the peer
+            it->second.seen_from_peers.insert(peer_id);
+        }
+
+        // Check quorum: majority of known validators
+        // Mark as validated but keep accumulating validations
+        size_t quorum = (known_validators_.size() / 2) + 1;
+        if (validators.size() >= quorum && !validating_->is_validated)
+        {
+            validating_->is_validated = true;
+        }
+
+        // Always update last_validated_ to show latest validator count
+        if (validating_->is_validated)
+        {
+            last_validated_ = *validating_;
+        }
+    }
+}
+
+std::optional<LedgerConsensus>
+PeerDashboard::get_last_validated() const
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+    return last_validated_;
+}
+
+std::optional<LedgerConsensus>
+PeerDashboard::get_validating() const
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+    return validating_;
+}
+
+size_t
+PeerDashboard::get_known_validator_count() const
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+    return known_validators_.size();
+}
+
+void
 PeerDashboard::update_available_endpoints(
     std::vector<std::string> const& endpoints)
 {
@@ -438,50 +525,159 @@ PeerDashboard::run_ui()
             std::string activity =
                 receiving ? get_spinner() + " Receiving" : "Idle";
 
-            // Ledger info section
-            Elements ledger_elements;
-            ledger_elements.push_back(
-                text("📜 VALIDATED LEDGER") | bold | color(Color::Cyan));
-            ledger_elements.push_back(separator());
+            // Get consensus tracking info
+            auto last_validated = get_last_validated();
+            auto validating = get_validating();
+            auto known_validators = get_known_validator_count();
 
-            if (current_ledger.sequence > 0)
+            // Last Validated Ledger section
+            Elements last_validated_elements;
+            last_validated_elements.push_back(
+                text("✓ LAST VALIDATED") | bold | color(Color::GreenLight));
+            last_validated_elements.push_back(separator());
+
+            if (last_validated && last_validated->sequence > 0)
             {
-                ledger_elements.push_back(hbox({
+                // Alternate color based on even/odd sequence
+                Color seq_color = (last_validated->sequence % 2 == 0)
+                    ? Color::Yellow
+                    : Color::Cyan;
+                last_validated_elements.push_back(hbox({
                     text("Sequence: "),
-                    text(std::to_string(current_ledger.sequence)) | bold |
-                        color(Color::Yellow),
+                    text(format_number(last_validated->sequence)) | bold |
+                        color(seq_color),
                 }));
 
-                if (!current_ledger.hash.empty())
+                if (!last_validated->hash.empty())
                 {
-                    ledger_elements.push_back(hbox({
+                    last_validated_elements.push_back(hbox({
                         text("Hash: "),
-                        text(current_ledger.hash.substr(0, 16) + "...") | bold,
+                        text(last_validated->hash.substr(0, 16) + "...") | bold,
                     }));
                 }
 
-                ledger_elements.push_back(hbox({
-                    text("Validations: "),
-                    text(std::to_string(current_ledger.validation_count)) |
+                size_t val_count = last_validated->validators.size();
+                last_validated_elements.push_back(hbox({
+                    text("Validators: "),
+                    text(
+                        std::to_string(val_count) + "/" +
+                        std::to_string(known_validators)) |
                         bold | color(Color::GreenLight),
                 }));
 
-                auto ledger_age =
-                    std::chrono::duration_cast<std::chrono::seconds>(
-                        now - current_ledger.last_update)
-                        .count();
-                ledger_elements.push_back(hbox({
-                    text("Last update: "),
-                    text(std::to_string(ledger_age) + "s ago") | dim,
+                auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                               now - last_validated->first_seen)
+                               .count();
+                last_validated_elements.push_back(hbox({
+                    text("Closed: "),
+                    text(std::to_string(age) + "s ago") | dim,
                 }));
             }
             else
             {
-                ledger_elements.push_back(
-                    text("No validated ledgers yet") | dim);
+                last_validated_elements.push_back(
+                    text("Waiting for quorum...") | dim);
             }
 
-            auto ledger_section = vbox(ledger_elements);
+            // Validating section (in progress)
+            Elements validating_elements;
+            validating_elements.push_back(
+                text("⏳ VALIDATING...") | bold | color(Color::Cyan));
+            validating_elements.push_back(separator());
+
+            if (validating && validating->sequence > 0)
+            {
+                // Alternate color based on even/odd sequence
+                Color seq_color = (validating->sequence % 2 == 0)
+                    ? Color::Yellow
+                    : Color::Cyan;
+                validating_elements.push_back(hbox({
+                    text("Sequence: "),
+                    text(format_number(validating->sequence)) | bold |
+                        color(seq_color),
+                }));
+
+                if (!validating->hash.empty())
+                {
+                    validating_elements.push_back(hbox({
+                        text("Hash: "),
+                        text(validating->hash.substr(0, 16) + "...") | bold,
+                    }));
+                }
+
+                size_t val_count = validating->validators.size();
+                size_t quorum = (known_validators / 2) + 1;
+                float progress = known_validators > 0
+                    ? static_cast<float>(val_count) / known_validators
+                    : 0.0f;
+
+                validating_elements.push_back(hbox({
+                    text("Progress: "),
+                    text(
+                        std::to_string(val_count) + "/" +
+                        std::to_string(known_validators) + " (need " +
+                        std::to_string(quorum) + ")") |
+                        bold,
+                }));
+
+                validating_elements.push_back(
+                    gauge(progress) | color(Color::Blue));
+
+                // Show validators (max 6)
+                size_t shown = 0;
+                for (auto const& [key, info] : validating->validators)
+                {
+                    if (shown >= 6)
+                        break;
+                    std::string short_key =
+                        key.size() > 12 ? key.substr(0, 12) + "..." : key;
+                    // Build compact peer list: "1,2,3" instead of
+                    // "peer-1,peer-2,peer-3"
+                    std::string peers_str;
+                    for (auto const& p : info.seen_from_peers)
+                    {
+                        if (!peers_str.empty())
+                            peers_str += ",";
+                        // Extract just the number from "peer-N"
+                        auto pos = p.find('-');
+                        if (pos != std::string::npos && pos + 1 < p.size())
+                            peers_str += p.substr(pos + 1);
+                        else
+                            peers_str += p.substr(0, 2);
+                    }
+                    validating_elements.push_back(hbox({
+                        text("  ✓ ") | color(Color::GreenLight),
+                        text(short_key) | dim,
+                        text(" [") | dim,
+                        text(peers_str) | dim,
+                        text("]") | dim,
+                    }));
+                    shown++;
+                }
+                if (validating->validators.size() > 6)
+                {
+                    validating_elements.push_back(
+                        text(
+                            "  +" +
+                            std::to_string(validating->validators.size() - 6) +
+                            " more") |
+                        dim);
+                }
+            }
+            else
+            {
+                validating_elements.push_back(
+                    text("Waiting for validations...") | dim);
+            }
+
+            // Combine into horizontal layout with minimum height
+            auto ledger_section = hbox({
+                vbox(last_validated_elements) | flex |
+                    size(HEIGHT, GREATER_THAN, 14),
+                separator(),
+                vbox(validating_elements) | flex |
+                    size(HEIGHT, GREATER_THAN, 14),
+            });
 
             // Multiple peers section
             Elements peers_elements;

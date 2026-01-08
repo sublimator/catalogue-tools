@@ -75,7 +75,9 @@ private:
     void
     handle_status_change(std::vector<std::uint8_t> const& payload);
     void
-    handle_validation(std::vector<std::uint8_t> const& payload);
+    handle_validation(
+        std::string const& peer_id,
+        std::vector<std::uint8_t> const& payload);
     void
     handle_endpoints(std::vector<std::uint8_t> const& payload);
     void
@@ -118,11 +120,6 @@ private:
 
     // Discovered peer endpoints (from mtENDPOINTS)
     std::set<std::string> available_endpoints_;
-
-    // Seen validations per ledger for deduplication
-    // Key = ledger sequence, Value = set of validation hashes
-    std::map<uint32_t, std::set<std::string>> validations_by_ledger_;
-    static constexpr size_t MAX_LEDGERS_TRACKED = 5;
 };
 
 }  // namespace catl::peer::monitor

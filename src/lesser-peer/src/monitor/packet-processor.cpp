@@ -58,7 +58,7 @@ packet_processor::process_packet(
             handle_status_change(payload);
             break;
         case packet_type::validation:
-            handle_validation(payload);
+            handle_validation(peer_id, payload);
             break;
         case packet_type::endpoints:
             handle_endpoints(payload);
@@ -267,42 +267,185 @@ packet_processor::handle_status_change(std::vector<std::uint8_t> const& payload)
 }
 
 void
-packet_processor::handle_validation(std::vector<std::uint8_t> const& payload)
+packet_processor::handle_validation(
+    std::string const& peer_id,
+    std::vector<std::uint8_t> const& payload)
 {
     if (!dashboard_)
         return;
 
-    // Get current ledger sequence from dashboard
-    auto current = dashboard_->get_current_ledger();
-    if (current.sequence == 0)
-        return;  // No ledger to associate with
+    // Parse the TMValidation protobuf wrapper
+    protocol::TMValidation val;
+    if (!val.ParseFromArray(payload.data(), payload.size()))
+        return;
 
-    uint32_t ledger_seq = current.sequence;
+    auto const& validation_bytes = val.validation();
+    auto const* data =
+        reinterpret_cast<const uint8_t*>(validation_bytes.data());
+    size_t size = validation_bytes.size();
 
-    // Hash validation payload for deduplication
-    crypto::Sha512HalfHasher hasher;
-    hasher.update(payload.data(), payload.size());
-    auto hash = hasher.finalize();
-    std::string key = hash.hex();
+    if (size < 10)
+        return;  // Too small to be valid
 
-    // Check if we've seen this validation for this ledger
-    auto& ledger_validations = validations_by_ledger_[ledger_seq];
-    auto [it, inserted] = ledger_validations.insert(key);
-    if (!inserted)
-        return;  // Duplicate, ignore
+    // Parse STObject fields from validation
+    // Field codes:
+    //   LedgerSequence: type=2 (UInt32), field=6 -> 0x26 (single byte when
+    //   field<16) LedgerHash: type=5 (Hash256), field=1 -> 0x51 SigningPubKey:
+    //   type=7 (Blob), field=3 -> 0x73
 
-    // Prune old ledgers - keep only recent ones
-    while (validations_by_ledger_.size() > MAX_LEDGERS_TRACKED)
+    uint32_t ledger_seq = 0;
+    std::string ledger_hash;
+    std::string signing_key_hex;
+
+    for (size_t i = 0; i < size - 4;)
     {
-        // Remove oldest (lowest sequence)
-        validations_by_ledger_.erase(validations_by_ledger_.begin());
+        uint8_t type_field = data[i];
+        uint8_t type_code = (type_field >> 4) & 0x0F;
+        uint8_t field_code = type_field & 0x0F;
+
+        // Handle extended type/field encoding
+        size_t header_len = 1;
+        if (type_code == 0 && i + 1 < size)
+        {
+            type_code = data[i + 1];
+            header_len = 2;
+        }
+        if (field_code == 0 && i + header_len < size)
+        {
+            field_code = data[i + header_len];
+            header_len++;
+        }
+
+        i += header_len;
+        if (i >= size)
+            break;
+
+        // LedgerSequence: type=2, field=6 (0x26)
+        if (type_code == 2 && field_code == 6 && i + 4 <= size)
+        {
+            ledger_seq = (static_cast<uint32_t>(data[i]) << 24) |
+                (static_cast<uint32_t>(data[i + 1]) << 16) |
+                (static_cast<uint32_t>(data[i + 2]) << 8) |
+                static_cast<uint32_t>(data[i + 3]);
+            i += 4;
+            continue;
+        }
+
+        // LedgerHash: type=5, field=1 (0x51)
+        if (type_code == 5 && field_code == 1 && i + 32 <= size)
+        {
+            std::stringstream ss;
+            for (size_t j = 0; j < 32; ++j)
+            {
+                ss << std::hex << std::setw(2) << std::setfill('0')
+                   << static_cast<int>(data[i + j]);
+            }
+            ledger_hash = ss.str();
+            i += 32;
+            continue;
+        }
+
+        // SigningPubKey: type=7, field=3 (0x73) - VL encoded
+        if (type_code == 7 && field_code == 3 && i < size)
+        {
+            // Read VL length
+            uint8_t len_byte = data[i];
+            size_t vl_len = 0;
+            size_t len_bytes = 1;
+
+            if (len_byte <= 192)
+            {
+                vl_len = len_byte;
+            }
+            else if (len_byte <= 240 && i + 1 < size)
+            {
+                vl_len = 193 + ((len_byte - 193) * 256) + data[i + 1];
+                len_bytes = 2;
+            }
+            else if (len_byte <= 254 && i + 2 < size)
+            {
+                vl_len = 12481 + ((len_byte - 241) * 65536) +
+                    (data[i + 1] * 256) + data[i + 2];
+                len_bytes = 3;
+            }
+
+            i += len_bytes;
+            if (i + vl_len <= size && vl_len == 33)
+            {
+                std::stringstream ss;
+                for (size_t j = 0; j < vl_len; ++j)
+                {
+                    ss << std::hex << std::setw(2) << std::setfill('0')
+                       << static_cast<int>(data[i + j]);
+                }
+                signing_key_hex = ss.str();
+                i += vl_len;
+                continue;
+            }
+            i += vl_len;
+            continue;
+        }
+
+        // Skip other fields based on type
+        switch (type_code)
+        {
+            case 1:
+                i += 2;
+                break;  // UInt16
+            case 2:
+                i += 4;
+                break;  // UInt32
+            case 3:
+                i += 8;
+                break;  // UInt64
+            case 4:
+                i += 16;
+                break;  // Hash128
+            case 5:
+                i += 32;
+                break;  // Hash256
+            case 6:
+                i += 8;
+                break;  // Amount (simplified)
+            case 7:
+            case 8: {  // Blob, AccountID - VL encoded
+                if (i < size)
+                {
+                    uint8_t lb = data[i];
+                    size_t vl = 0, lbytes = 1;
+                    if (lb <= 192)
+                        vl = lb;
+                    else if (lb <= 240 && i + 1 < size)
+                    {
+                        vl = 193 + ((lb - 193) * 256) + data[i + 1];
+                        lbytes = 2;
+                    }
+                    i += lbytes + vl;
+                }
+                break;
+            }
+            default:
+                // Unknown type - try to skip 1 byte and continue
+                i += 1;
+                break;
+        }
     }
 
-    // Update dashboard with validation count for this ledger
-    dashboard_->update_ledger_info(
-        ledger_seq,
-        current.hash,
-        static_cast<uint32_t>(ledger_validations.size()));
+    // Must have at least ledger sequence and signing key
+    if (ledger_seq == 0 || signing_key_hex.empty())
+        return;
+
+    // Resolve ephemeral key to master key via manifest tracker
+    std::string validator_key = signing_key_hex;
+    auto master_key = manifest_tracker_.get_master_key(signing_key_hex);
+    if (master_key)
+    {
+        validator_key = *master_key;
+    }
+
+    // Record the validation in the dashboard
+    dashboard_->record_validation(
+        ledger_seq, ledger_hash, validator_key, signing_key_hex, peer_id);
 }
 
 void
