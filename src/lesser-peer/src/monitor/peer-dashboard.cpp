@@ -1,12 +1,13 @@
 #include <catl/peer/monitor/peer-dashboard.h>
+#include <cmath>
 #include <cstdio>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/loop.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/color.hpp>
+#include <ftxui/screen/terminal.hpp>
 #include <iomanip>
-#include <iostream>  // Required for std::cerr
 #include <sstream>
 
 namespace catl::peer::monitor {
@@ -14,6 +15,26 @@ namespace catl::peer::monitor {
 using namespace ftxui;
 
 PeerDashboard::PeerDashboard() = default;
+
+void
+PeerDashboard::load_protocol(
+    std::string const& definitions_path,
+    uint32_t network_id)
+{
+    xdata::ProtocolOptions opts;
+    if (network_id > 0)
+        opts.network_id = network_id;
+
+    if (!definitions_path.empty())
+    {
+        // Load from file - let it throw if it fails
+        protocol_ = xdata::Protocol::load_from_file(definitions_path, opts);
+    }
+    else
+    {
+        protocol_ = xdata::Protocol::load_embedded_xahau_protocol(opts);
+    }
+}
 
 void
 PeerDashboard::restore_terminal()
@@ -193,13 +214,13 @@ PeerDashboard::update_ledger_info(
             std::chrono::steady_clock::now();
     }
 
-    // Track validation counts for recent ledgers
-    ledger_validations_[sequence] = validation_count;
+    // Track validation counts for recent ledgers (legacy)
+    legacy_ledger_counts_[sequence] = validation_count;
 
     // Keep only last 10 ledgers
-    while (ledger_validations_.size() > 10)
+    while (legacy_ledger_counts_.size() > 10)
     {
-        ledger_validations_.erase(ledger_validations_.begin());
+        legacy_ledger_counts_.erase(legacy_ledger_counts_.begin());
     }
 }
 
@@ -227,67 +248,95 @@ PeerDashboard::record_validation(
     // Track which peer this validator's validations came from
     peer_to_validator_[peer_id] = validator_key;
 
-    // If we have a new ledger sequence, start tracking it
-    if (!validating_ || ledger_seq > validating_->sequence)
+    // Always add to ledger_validations_ map - never reject based on sequence
+    auto& consensus = ledger_validations_[ledger_seq];
+    if (consensus.sequence == 0)
     {
-        // If there was a previous validating_ that didn't hit quorum,
-        // it gets replaced (this is fine - network moved on)
-        validating_ = LedgerConsensus{};
-        validating_->sequence = ledger_seq;
-        validating_->hash = ledger_hash;
-        validating_->first_seen = now;
-        validating_->is_validated = false;
+        // First validation for this ledger
+        consensus.sequence = ledger_seq;
+        consensus.hash = ledger_hash;
+        consensus.first_seen = now;
+        consensus.is_validated = false;
     }
 
-    // Only record if this is for the current validating ledger
-    if (validating_ && ledger_seq == validating_->sequence)
+    // Add/update validator info
+    auto& validators = consensus.validators;
+    auto it = validators.find(validator_key);
+    if (it == validators.end())
     {
-        auto& validators = validating_->validators;
-        auto it = validators.find(validator_key);
-        if (it == validators.end())
-        {
-            // New validator for this ledger
-            ValidatorInfo info;
-            info.master_key_hex = validator_key;
-            info.ephemeral_key_hex = ephemeral_key;
-            info.seen_from_peers.insert(peer_id);
-            info.first_seen = now;
-            validators[validator_key] = std::move(info);
-        }
-        else
-        {
-            // Already have this validator, just add the peer
-            it->second.seen_from_peers.insert(peer_id);
-        }
-
-        // Check quorum: majority of known validators
-        // Mark as validated but keep accumulating validations
-        size_t quorum = (known_validators_.size() / 2) + 1;
-        if (validators.size() >= quorum && !validating_->is_validated)
-        {
-            validating_->is_validated = true;
-        }
-
-        // Always update last_validated_ to show latest validator count
-        if (validating_->is_validated)
-        {
-            last_validated_ = *validating_;
-        }
+        // New validator for this ledger
+        ValidatorInfo info;
+        info.master_key_hex = validator_key;
+        info.ephemeral_key_hex = ephemeral_key;
+        info.seen_from_peers.insert(peer_id);
+        info.first_seen = now;
+        validators[validator_key] = std::move(info);
     }
+    else
+    {
+        // Already have this validator, just add the peer
+        it->second.seen_from_peers.insert(peer_id);
+    }
+
+    // Check quorum: 80% of known validators (XRPL consensus threshold)
+    size_t quorum =
+        static_cast<size_t>(std::ceil(known_validators_.size() * 0.8));
+    if (validators.size() >= quorum && !consensus.is_validated)
+    {
+        consensus.is_validated = true;
+    }
+
+    // LRU cleanup
+    prune_old_rounds();
+}
+
+// Internal impl - must be called with consensus_mutex_ held
+std::optional<LedgerConsensus>
+PeerDashboard::get_last_validated_impl() const
+{
+    // Find highest validated sequence
+    for (auto it = ledger_validations_.rbegin();
+         it != ledger_validations_.rend();
+         ++it)
+    {
+        if (it->second.is_validated)
+            return it->second;
+    }
+    return std::nullopt;
+}
+
+// Internal impl - must be called with consensus_mutex_ held
+std::optional<LedgerConsensus>
+PeerDashboard::get_validating_impl() const
+{
+    auto last = get_last_validated_impl();
+    if (!last)
+    {
+        // No validated ledger yet - return highest sequence being tracked
+        if (!ledger_validations_.empty())
+            return ledger_validations_.rbegin()->second;
+        return std::nullopt;
+    }
+
+    // Return ledger after last validated (if exists)
+    auto it = ledger_validations_.find(last->sequence + 1);
+    if (it != ledger_validations_.end())
+        return it->second;
+    return std::nullopt;
 }
 
 std::optional<LedgerConsensus>
 PeerDashboard::get_last_validated() const
 {
     std::lock_guard<std::mutex> lock(consensus_mutex_);
-    return last_validated_;
+    return get_last_validated_impl();
 }
 
 std::optional<LedgerConsensus>
 PeerDashboard::get_validating() const
 {
     std::lock_guard<std::mutex> lock(consensus_mutex_);
-    return validating_;
+    return get_validating_impl();
 }
 
 size_t
@@ -295,6 +344,253 @@ PeerDashboard::get_known_validator_count() const
 {
     std::lock_guard<std::mutex> lock(consensus_mutex_);
     return known_validators_.size();
+}
+
+void
+PeerDashboard::record_proposal(
+    std::string const& prev_ledger_hash,
+    std::string const& tx_set_hash,
+    std::string const& validator_key,
+    uint32_t propose_seq,
+    std::string const& peer_id)
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+    auto now = std::chrono::steady_clock::now();
+
+    // Debug counters
+    ++proposals_received_;
+    if (propose_seq == 0)
+        ++proposals_seq0_;
+    else
+        ++proposals_seq_gt0_;
+
+    // Always add to proposal_rounds_ map - keyed by prev_ledger_hash
+    auto& round = proposal_rounds_[prev_ledger_hash];
+    if (round.prev_ledger_hash.empty())
+    {
+        // First proposal for this round
+        round.prev_ledger_hash = prev_ledger_hash;
+        round.first_proposal = now;
+        round.ledger_seq = infer_ledger_seq(prev_ledger_hash);
+    }
+
+    // Find the latest entry for this validator (highest proposeSeq)
+    ProposalEvent* latest_entry = nullptr;
+    for (auto& event : round.timeline)
+    {
+        if (event.validator_key == validator_key)
+        {
+            if (!latest_entry || event.propose_seq > latest_entry->propose_seq)
+                latest_entry = &event;
+        }
+    }
+
+    if (latest_entry)
+    {
+        if (propose_seq > latest_entry->propose_seq)
+        {
+            // New proposeSeq = validator changed position, add new entry
+            ProposalEvent new_event;
+            new_event.validator_key = validator_key;
+            new_event.tx_set_hash = tx_set_hash;
+            new_event.propose_seq = propose_seq;
+            new_event.seen_from_peers.insert(peer_id);
+            new_event.received_at = now;
+            round.timeline.push_back(std::move(new_event));
+        }
+        else
+        {
+            // Same or older seq, just add peer to latest entry
+            latest_entry->seen_from_peers.insert(peer_id);
+        }
+    }
+    else
+    {
+        // New validator
+        ProposalEvent event;
+        event.validator_key = validator_key;
+        event.tx_set_hash = tx_set_hash;
+        event.propose_seq = propose_seq;
+        event.seen_from_peers.insert(peer_id);
+        event.received_at = now;
+        round.timeline.push_back(std::move(event));
+    }
+
+    // Update debug counter
+    proposal_rounds_count_ = proposal_rounds_.size();
+
+    // LRU cleanup
+    prune_old_rounds();
+}
+
+void
+PeerDashboard::prune_old_rounds()
+{
+    // Keep only MAX_TRACKED_ROUNDS ledgers (already under lock)
+    while (ledger_validations_.size() > MAX_TRACKED_ROUNDS)
+    {
+        ledger_validations_.erase(ledger_validations_.begin());
+    }
+
+    // Prune proposal rounds by age - keep only MAX_TRACKED_ROUNDS newest
+    // Sort by first_proposal timestamp and keep the most recent ones
+    if (proposal_rounds_.size() > MAX_TRACKED_ROUNDS)
+    {
+        // Find oldest proposals by first_proposal time
+        std::vector<
+            std::pair<std::chrono::steady_clock::time_point, std::string>>
+            by_time;
+        for (auto const& [hash, props] : proposal_rounds_)
+        {
+            by_time.emplace_back(props.first_proposal, hash);
+        }
+        std::sort(by_time.begin(), by_time.end());
+
+        // Remove oldest until we're at limit
+        size_t to_remove = proposal_rounds_.size() - MAX_TRACKED_ROUNDS;
+        for (size_t i = 0; i < to_remove && i < by_time.size(); ++i)
+        {
+            proposal_rounds_.erase(by_time[i].second);
+        }
+    }
+}
+
+uint32_t
+PeerDashboard::infer_ledger_seq(std::string const& prev_hash) const
+{
+    // Find validation with this hash and return seq + 1
+    for (auto const& [seq, consensus] : ledger_validations_)
+    {
+        if (consensus.hash == prev_hash)
+            return seq + 1;
+    }
+    return 0;  // Unknown
+}
+
+std::optional<LedgerProposals>
+PeerDashboard::get_proposals_for_ledger(uint32_t seq) const
+{
+    // Find proposals where prev_hash matches a ledger's hash
+    auto consensus_it = ledger_validations_.find(seq - 1);
+    if (consensus_it == ledger_validations_.end())
+        return std::nullopt;
+
+    std::string const& prev_hash = consensus_it->second.hash;
+    auto prop_it = proposal_rounds_.find(prev_hash);
+    if (prop_it != proposal_rounds_.end())
+        return prop_it->second;
+    return std::nullopt;
+}
+
+std::optional<LedgerProposals>
+PeerDashboard::get_current_proposals() const
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+
+    if (proposal_rounds_.empty())
+        return std::nullopt;
+
+    // Find the most recent proposal round by first_proposal timestamp
+    const LedgerProposals* newest = nullptr;
+    for (auto const& [hash, props] : proposal_rounds_)
+    {
+        if (!newest || props.first_proposal > newest->first_proposal)
+            newest = &props;
+    }
+
+    return newest ? std::optional<LedgerProposals>(*newest) : std::nullopt;
+}
+
+std::optional<LedgerProposals>
+PeerDashboard::get_last_proposals() const
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+
+    if (proposal_rounds_.size() < 2)
+        return std::nullopt;
+
+    // Find the two most recent proposal rounds
+    const LedgerProposals* newest = nullptr;
+    const LedgerProposals* second = nullptr;
+
+    for (auto const& [hash, props] : proposal_rounds_)
+    {
+        if (!newest || props.first_proposal > newest->first_proposal)
+        {
+            second = newest;
+            newest = &props;
+        }
+        else if (!second || props.first_proposal > second->first_proposal)
+        {
+            second = &props;
+        }
+    }
+
+    return second ? std::optional<LedgerProposals>(*second) : std::nullopt;
+}
+
+std::optional<std::pair<std::string, uint32_t>>
+PeerDashboard::get_txset_to_acquire() const
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+
+    // Get LAST PROPOSED (second most recent)
+    if (proposal_rounds_.size() < 2)
+        return std::nullopt;
+
+    const LedgerProposals* newest = nullptr;
+    const LedgerProposals* second = nullptr;
+
+    for (auto const& [hash, props] : proposal_rounds_)
+    {
+        if (!newest || props.first_proposal > newest->first_proposal)
+        {
+            second = newest;
+            newest = &props;
+        }
+        else if (!second || props.first_proposal > second->first_proposal)
+        {
+            second = &props;
+        }
+    }
+
+    if (!second || second->timeline.empty())
+        return std::nullopt;
+
+    // Get LATEST tx_set_hash per validator (highest propose_seq)
+    std::map<std::string, std::pair<uint32_t, std::string>>
+        validator_latest;  // validator -> (seq, hash)
+    for (auto const& event : second->timeline)
+    {
+        auto it = validator_latest.find(event.validator_key);
+        if (it == validator_latest.end() ||
+            event.propose_seq > it->second.first)
+        {
+            validator_latest[event.validator_key] = {
+                event.propose_seq, event.tx_set_hash};
+        }
+    }
+
+    // Count unique hashes among latest proposals
+    std::map<std::string, size_t> hash_counts;
+    for (auto const& [validator, seq_hash] : validator_latest)
+    {
+        hash_counts[seq_hash.second]++;
+    }
+
+    // Only return if all validators agree (1 unique hash)
+    if (hash_counts.size() != 1)
+        return std::nullopt;  // Not converged yet
+
+    std::string best_hash = hash_counts.begin()->first;
+
+    // Check if we already have it
+    auto it = txset_acquisitions_.find(best_hash);
+    if (it != txset_acquisitions_.end())
+        return std::nullopt;  // Already tracking
+
+    // Return hash and ledger_seq
+    return std::make_pair(best_hash, second->ledger_seq);
 }
 
 void
@@ -367,6 +663,166 @@ void
 PeerDashboard::request_exit()
 {
     exit_requested_ = true;
+}
+
+void
+PeerDashboard::record_txset_start(
+    std::string const& tx_set_hash,
+    uint32_t ledger_seq)
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+
+    // Check if already tracking
+    if (txset_acquisitions_.find(tx_set_hash) != txset_acquisitions_.end())
+        return;
+
+    // Create new entry
+    TxSetInfo info;
+    info.tx_set_hash = tx_set_hash;
+    info.ledger_seq = ledger_seq;
+    info.status = TxSetStatus::Acquiring;
+    info.started_at = std::chrono::steady_clock::now();
+    txset_acquisitions_[tx_set_hash] = std::move(info);
+
+    // LRU cleanup - remove oldest if over limit
+    while (txset_acquisitions_.size() > MAX_TRACKED_TXSETS)
+    {
+        auto oldest = txset_acquisitions_.begin();
+        for (auto it = txset_acquisitions_.begin();
+             it != txset_acquisitions_.end();
+             ++it)
+        {
+            if (it->second.started_at < oldest->second.started_at)
+                oldest = it;
+        }
+        txset_acquisitions_.erase(oldest);
+    }
+}
+
+void
+PeerDashboard::record_txset_transaction(
+    std::string const& tx_set_hash,
+    uint16_t tx_type)
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+
+    auto it = txset_acquisitions_.find(tx_set_hash);
+    if (it == txset_acquisitions_.end())
+        return;
+
+    it->second.type_histogram[tx_type]++;
+    it->second.total_txns++;
+}
+
+void
+PeerDashboard::record_txset_complete(
+    std::string const& tx_set_hash,
+    bool success)
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+
+    auto it = txset_acquisitions_.find(tx_set_hash);
+    if (it == txset_acquisitions_.end())
+        return;
+
+    it->second.status = success ? TxSetStatus::Complete : TxSetStatus::Failed;
+    it->second.completed_at = std::chrono::steady_clock::now();
+}
+
+void
+PeerDashboard::record_txset_request(std::string const& tx_set_hash)
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+
+    auto it = txset_acquisitions_.find(tx_set_hash);
+    if (it == txset_acquisitions_.end())
+        return;
+
+    it->second.requests_sent++;
+}
+
+void
+PeerDashboard::record_txset_reply(std::string const& tx_set_hash)
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+
+    auto it = txset_acquisitions_.find(tx_set_hash);
+    if (it == txset_acquisitions_.end())
+        return;
+
+    it->second.replies_received++;
+}
+
+void
+PeerDashboard::record_txset_error(std::string const& tx_set_hash)
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+
+    auto it = txset_acquisitions_.find(tx_set_hash);
+    if (it == txset_acquisitions_.end())
+        return;
+
+    it->second.errors++;
+}
+
+void
+PeerDashboard::record_txset_peers(
+    std::string const& tx_set_hash,
+    uint32_t peers_used)
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+
+    auto it = txset_acquisitions_.find(tx_set_hash);
+    if (it == txset_acquisitions_.end())
+        return;
+
+    it->second.peers_used = peers_used;
+}
+
+std::optional<TxSetInfo>
+PeerDashboard::get_current_txset() const
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+
+    if (txset_acquisitions_.empty())
+        return std::nullopt;
+
+    // Find most recent completed, or most recent acquiring
+    const TxSetInfo* best = nullptr;
+    for (auto const& [hash, info] : txset_acquisitions_)
+    {
+        if (!best)
+        {
+            best = &info;
+            continue;
+        }
+
+        // Prefer completed over acquiring
+        if (info.status == TxSetStatus::Complete &&
+            best->status != TxSetStatus::Complete)
+        {
+            best = &info;
+        }
+        else if (info.status == best->status)
+        {
+            // Same status - prefer more recent
+            if (info.started_at > best->started_at)
+                best = &info;
+        }
+    }
+
+    return best ? std::optional<TxSetInfo>(*best) : std::nullopt;
+}
+
+std::optional<TxSetInfo>
+PeerDashboard::get_txset(std::string const& hash) const
+{
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+
+    auto it = txset_acquisitions_.find(hash);
+    if (it != txset_acquisitions_.end())
+        return it->second;
+    return std::nullopt;
 }
 
 void
@@ -606,7 +1062,8 @@ PeerDashboard::run_ui()
                 }
 
                 size_t val_count = validating->validators.size();
-                size_t quorum = (known_validators / 2) + 1;
+                size_t quorum =
+                    static_cast<size_t>(std::ceil(known_validators * 0.8));
                 float progress = known_validators > 0
                     ? static_cast<float>(val_count) / known_validators
                     : 0.0f;
@@ -623,12 +1080,9 @@ PeerDashboard::run_ui()
                 validating_elements.push_back(
                     gauge(progress) | color(Color::Blue));
 
-                // Show validators (max 6)
-                size_t shown = 0;
+                // Show all validators
                 for (auto const& [key, info] : validating->validators)
                 {
-                    if (shown >= 6)
-                        break;
                     std::string short_key =
                         key.size() > 12 ? key.substr(0, 12) + "..." : key;
                     // Build compact peer list: "1,2,3" instead of
@@ -652,16 +1106,6 @@ PeerDashboard::run_ui()
                         text(peers_str) | dim,
                         text("]") | dim,
                     }));
-                    shown++;
-                }
-                if (validating->validators.size() > 6)
-                {
-                    validating_elements.push_back(
-                        text(
-                            "  +" +
-                            std::to_string(validating->validators.size() - 6) +
-                            " more") |
-                        dim);
                 }
             }
             else
@@ -670,13 +1114,347 @@ PeerDashboard::run_ui()
                     text("Waiting for validations...") | dim);
             }
 
-            // Combine into horizontal layout with minimum height
-            auto ledger_section = hbox({
-                vbox(last_validated_elements) | flex |
-                    size(HEIGHT, GREATER_THAN, 14),
+            // Helper to render proposal list
+            auto render_proposals =
+                [&](std::optional<LedgerProposals> const& proposals,
+                    std::string const& title,
+                    Color title_color) -> Elements {
+                Elements elements;
+                elements.push_back(text(title) | bold | color(title_color));
+                elements.push_back(separator());
+
+                if (proposals && !proposals->timeline.empty())
+                {
+                    // First pass: find each validator's LATEST position
+                    std::map<std::string, std::pair<uint32_t, std::string>>
+                        validator_latest;  // validator -> (seq, hash)
+                    for (auto const& event : proposals->timeline)
+                    {
+                        auto& [seq, hash] =
+                            validator_latest[event.validator_key];
+                        if (event.propose_seq >= seq)
+                        {
+                            seq = event.propose_seq;
+                            hash = event.tx_set_hash;
+                        }
+                    }
+
+                    // Count unique validators and their CURRENT tx sets
+                    std::set<std::string> unique_validators;
+                    std::set<std::string> unique_txsets;
+                    for (auto const& [validator, seq_hash] : validator_latest)
+                    {
+                        unique_validators.insert(validator);
+                        unique_txsets.insert(seq_hash.second);
+                    }
+
+                    std::string seq_str = proposals->ledger_seq > 0
+                        ? format_number(proposals->ledger_seq)
+                        : "?";
+                    std::string prev_short =
+                        proposals->prev_ledger_hash.size() > 8
+                        ? proposals->prev_ledger_hash.substr(0, 8) + "..."
+                        : proposals->prev_ledger_hash;
+                    elements.push_back(hbox({
+                        text("Ledger "),
+                        text(seq_str) | bold | color(title_color),
+                        text(" | "),
+                        text(
+                            std::to_string(unique_validators.size()) +
+                            " proposers"),
+                        text(" | "),
+                        text(std::to_string(unique_txsets.size()) + " tx sets"),
+                        text(" | prev=") | dim,
+                        text(prev_short) | dim,
+                    }));
+                    elements.push_back(separator());
+
+                    // Group by validator
+                    struct ValidatorProposals
+                    {
+                        std::string latest_hash;
+                        uint32_t latest_seq = 0;
+                        std::set<std::string> all_peers;
+                        std::vector<double> timings;
+                    };
+                    std::map<std::string, ValidatorProposals> by_validator;
+
+                    for (auto const& event : proposals->timeline)
+                    {
+                        auto& vp = by_validator[event.validator_key];
+                        // Only update hash/seq if this is a higher proposeSeq
+                        // (handles out-of-order arrival)
+                        if (event.propose_seq >= vp.latest_seq)
+                        {
+                            vp.latest_hash = event.tx_set_hash;
+                            vp.latest_seq = event.propose_seq;
+                        }
+                        // Always accumulate peers and timings
+                        for (auto const& p : event.seen_from_peers)
+                            vp.all_peers.insert(p);
+                        auto delta_ms =
+                            std::chrono::duration_cast<
+                                std::chrono::milliseconds>(
+                                event.received_at - proposals->first_proposal)
+                                .count();
+                        vp.timings.push_back(delta_ms / 1000.0);
+                    }
+
+                    // Find majority hash
+                    std::map<std::string, size_t> hash_counts;
+                    for (auto const& [key, vp] : by_validator)
+                        hash_counts[vp.latest_hash]++;
+                    std::string majority_hash;
+                    size_t max_count = 0;
+                    for (auto const& [hash, count] : hash_counts)
+                    {
+                        if (count > max_count)
+                        {
+                            max_count = count;
+                            majority_hash = hash;
+                        }
+                    }
+
+                    // Render all validators
+                    for (auto const& [key, vp] : by_validator)
+                    {
+                        std::string short_key =
+                            key.size() > 10 ? key.substr(0, 10) + "..." : key;
+                        std::string short_hash = vp.latest_hash.size() > 8
+                            ? vp.latest_hash.substr(0, 8)
+                            : vp.latest_hash;
+
+                        std::string peers_str;
+                        for (auto const& p : vp.all_peers)
+                        {
+                            if (!peers_str.empty())
+                                peers_str += ",";
+                            auto pos = p.find('-');
+                            if (pos != std::string::npos && pos + 1 < p.size())
+                                peers_str += p.substr(pos + 1);
+                            else
+                                peers_str += p.substr(0, 2);
+                        }
+
+                        std::string timings_str;
+                        for (auto t : vp.timings)
+                        {
+                            if (!timings_str.empty())
+                                timings_str += ",";
+                            std::stringstream ss;
+                            ss << std::fixed << std::setprecision(1) << t;
+                            timings_str += ss.str();
+                        }
+
+                        bool is_different = !majority_hash.empty() &&
+                            vp.latest_hash != majority_hash;
+                        Color hash_color =
+                            is_different ? Color::RedLight : Color::GreenLight;
+
+                        elements.push_back(hbox({
+                            text(short_key) | dim,
+                            text(" "),
+                            text(short_hash) | color(hash_color),
+                            text(" seq=") | dim,
+                            text(std::to_string(vp.latest_seq)) |
+                                (vp.latest_seq > 0 ? color(Color::Yellow)
+                                                   : nothing),
+                            text(" [") | dim,
+                            text(peers_str) | dim,
+                            text("] [") | dim,
+                            text(timings_str + "s") | dim,
+                            text("]") | dim,
+                            is_different ? (text(" !") | color(Color::RedLight))
+                                         : text(""),
+                        }));
+                    }
+                }
+                else
+                {
+                    elements.push_back(text("Waiting...") | dim);
+                }
+                return elements;
+            };
+
+            // Render both LAST PROPOSED and PROPOSING
+            auto last_proposals = get_last_proposals();
+            auto current_proposals = get_current_proposals();
+
+            auto last_proposed_elements = render_proposals(
+                last_proposals, "✓ LAST PROPOSED", Color::GreenLight);
+            auto proposing_elements = render_proposals(
+                current_proposals, "📋 PROPOSING", Color::Yellow);
+
+            // Add debug counters to proposing
+            proposing_elements.push_back(separator());
+            proposing_elements.push_back(hbox({
+                text("rx=") | dim,
+                text(std::to_string(proposals_received_.load())) |
+                    color(Color::Cyan),
+                text(" s0=") | dim,
+                text(std::to_string(proposals_seq0_.load())) |
+                    color(Color::GreenLight),
+                text(" s>0=") | dim,
+                text(std::to_string(proposals_seq_gt0_.load())) |
+                    color(Color::Yellow),
+                text(" rnds=") | dim,
+                text(std::to_string(proposal_rounds_count_.load())) |
+                    color(Color::Magenta),
+            }));
+
+            // Calculate fixed heights based on peer count
+            // Validation section: header(1) + sep(1) + 4 info lines +
+            // validators Proposal section: header(1) + sep(1) + summary(1) +
+            // sep(1) + validators
+            size_t peer_count = all_peers.size();
+            int validation_height = 6 + static_cast<int>(peer_count);
+            int proposal_height = 4 + static_cast<int>(peer_count);
+
+            // Render txset panel - show recent acquired txsets
+            auto render_txset = [&]() -> Elements {
+                Elements elements;
+                elements.push_back(
+                    text("📦 ACQUIRED TX SETS") | bold | color(Color::Magenta));
+                elements.push_back(separator());
+
+                // Get all txsets, sorted by completion time (most recent first)
+                std::vector<TxSetInfo> all_txsets;
+                {
+                    std::lock_guard<std::mutex> lock(consensus_mutex_);
+                    for (auto const& [hash, info] : txset_acquisitions_)
+                    {
+                        all_txsets.push_back(info);
+                    }
+                }
+
+                if (all_txsets.empty())
+                {
+                    elements.push_back(text("No tx sets acquired yet") | dim);
+                    return elements;
+                }
+
+                // Sort by started_at (most recent first)
+                std::sort(
+                    all_txsets.begin(),
+                    all_txsets.end(),
+                    [](auto const& a, auto const& b) {
+                        return a.started_at > b.started_at;
+                    });
+
+                // Helper to get tx type name from protocol or fallback to
+                // numeric
+                auto get_tx_type_name = [this](uint16_t type) -> std::string {
+                    if (protocol_)
+                    {
+                        auto name = protocol_->get_transaction_type_name(type);
+                        if (name)
+                            return *name;
+                    }
+                    return "T" + std::to_string(type);
+                };
+
+                // Show up to 5 most recent
+                size_t to_show = std::min(all_txsets.size(), size_t(5));
+                for (size_t i = 0; i < to_show; ++i)
+                {
+                    auto const& txset = all_txsets[i];
+
+                    // Status
+                    std::string status_str;
+                    Color status_color = Color::White;
+                    switch (txset.status)
+                    {
+                        case TxSetStatus::Pending:
+                            status_str = "Pending";
+                            status_color = Color::GrayLight;
+                            break;
+                        case TxSetStatus::Acquiring:
+                            status_str = "...";
+                            status_color = Color::Yellow;
+                            break;
+                        case TxSetStatus::Complete:
+                            status_str = "✓";
+                            status_color = Color::GreenLight;
+                            break;
+                        case TxSetStatus::Failed:
+                            status_str = "✗";
+                            status_color = Color::Red;
+                            break;
+                    }
+
+                    // Compact single-line format: L{seq} hash [status] count
+                    // txns: type1=N
+                    std::string types_str;
+                    for (auto const& [type, count] : txset.type_histogram)
+                    {
+                        std::string name = get_tx_type_name(type);
+                        if (!types_str.empty())
+                            types_str += ", ";
+                        types_str += name + "=" + std::to_string(count);
+                    }
+
+                    // Ledger seq prefix
+                    std::string seq_str = txset.ledger_seq > 0
+                        ? "L" + std::to_string(txset.ledger_seq) + " "
+                        : "";
+
+                    // Format: req/reply stats + peers used + errors
+                    std::string io_str = "r" +
+                        std::to_string(txset.requests_sent) + "/" +
+                        std::to_string(txset.replies_received);
+                    if (txset.peers_used > 0)
+                        io_str += "/p" + std::to_string(txset.peers_used);
+                    if (txset.errors > 0)
+                        io_str += "/e" + std::to_string(txset.errors);
+
+                    elements.push_back(hbox({
+                        text(seq_str) | color(Color::Yellow),
+                        text(txset.tx_set_hash.substr(0, 12) + "...") |
+                            color(Color::Cyan),
+                        text(" [") | dim,
+                        text(status_str) | color(status_color),
+                        text("] ") | dim,
+                        text(io_str) | color(Color::GrayLight),
+                        text(" ") | dim,
+                        text(std::to_string(txset.total_txns)) | bold,
+                        text(" txns") | dim,
+                        text(types_str.empty() ? "" : ": " + types_str) | dim,
+                    }));
+                }
+
+                return elements;
+            };
+
+            auto txset_elements = render_txset();
+
+            // Combine into layout - validations on top, proposals below
+            // Calculate widths: main columns are 50/50, inner panels are 50/50
+            // of that
+            auto term_size = Terminal::Size();
+            int main_half =
+                (term_size.dimx - 4) / 2;          // -4 for borders/separators
+            int inner_half = (main_half - 1) / 2;  // -1 for inner separator
+
+            auto consensus_section = vbox({
+                hbox({
+                    vbox(last_validated_elements) |
+                        size(WIDTH, EQUAL, inner_half) |
+                        size(HEIGHT, EQUAL, validation_height),
+                    separator(),
+                    vbox(validating_elements) | size(WIDTH, EQUAL, inner_half) |
+                        size(HEIGHT, EQUAL, validation_height),
+                }),
                 separator(),
-                vbox(validating_elements) | flex |
-                    size(HEIGHT, GREATER_THAN, 14),
+                hbox({
+                    vbox(last_proposed_elements) |
+                        size(WIDTH, EQUAL, inner_half) |
+                        size(HEIGHT, EQUAL, proposal_height),
+                    separator(),
+                    vbox(proposing_elements) | size(WIDTH, EQUAL, inner_half) |
+                        size(HEIGHT, EQUAL, proposal_height),
+                }),
+                separator(),
+                vbox(txset_elements) | size(HEIGHT, LESS_THAN, 12),
             });
 
             // Multiple peers section
@@ -694,8 +1472,7 @@ PeerDashboard::run_ui()
             }
             else
             {
-                for (size_t i = 0; i < all_peers.size() && i < 5;
-                     ++i)  // Show max 5 peers
+                for (size_t i = 0; i < all_peers.size(); ++i)
                 {
                     const auto& peer = all_peers[i];
                     Color peer_status_color =
@@ -724,15 +1501,6 @@ PeerDashboard::run_ui()
                             static_cast<double>(peer.total_bytes))) |
                             dim,
                     }));
-                }
-
-                if (all_peers.size() > 5)
-                {
-                    peers_elements.push_back(
-                        text(
-                            "... and " + std::to_string(all_peers.size() - 5) +
-                            " more") |
-                        dim);
                 }
             }
 
@@ -952,22 +1720,22 @@ PeerDashboard::run_ui()
             }
             auto endpoints_section = vbox(endpoint_elements);
 
-            // Layout
+            // Layout - use explicit 50/50 width for main columns
             return vbox({
                        text("XRPL Peer Monitor Dashboard") | bold | hcenter |
                            color(Color::MagentaLight),
                        separator(),
                        hbox({
                            vbox({
-                               ledger_section,
+                               consensus_section,
                                separator(),
                                peers_section,
                                separator(),
                                connection_section,
                                separator(),
                                stats_section,
-                           }) | border |
-                               flex,
+                           }) | size(WIDTH, EQUAL, main_half) |
+                               border,
                            separator(),
                            vbox({
                                packet_section,
@@ -975,8 +1743,8 @@ PeerDashboard::run_ui()
                                throughput_section,
                                separator(),
                                endpoints_section,
-                           }) | border |
-                               flex,
+                           }) | size(WIDTH, EQUAL, main_half) |
+                               border,
                        }) | flex,
                        separator(),
                        text("Press 'q' to quit | 'c' to clear stats") |
@@ -1046,17 +1814,10 @@ PeerDashboard::run_ui()
         // Belt-and-suspenders: restore terminal after FTXUI cleanup
         restore_terminal();
     }
-    catch (std::exception const& e)
-    {
-        // Restore terminal before logging - screen may be in bad state
-        restore_terminal();
-        std::cerr << "CRITICAL DASHBOARD ERROR: " << e.what() << std::endl;
-        running_ = false;
-    }
     catch (...)
     {
+        // Restore terminal on any error
         restore_terminal();
-        std::cerr << "CRITICAL DASHBOARD ERROR: Unknown exception" << std::endl;
         running_ = false;
     }
 }

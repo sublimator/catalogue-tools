@@ -30,8 +30,11 @@ packet_processor::process_packet(
     packet_header const& header,
     std::vector<std::uint8_t> const& payload)
 {
-    // peer_id is used for routing but stats tracking moved to monitor
-    (void)peer_id;
+    // Track active connection for parallel txset acquisition
+    if (connection)
+    {
+        active_connections_[peer_id] = connection;
+    }
 
     auto type = static_cast<packet_type>(header.type);
     update_stats(type, header.payload_size);
@@ -49,10 +52,10 @@ packet_processor::process_packet(
             handle_manifests(payload);
             break;
         case packet_type::ledger_data:
-            handle_ledger_data(payload);
+            handle_ledger_data(connection, payload);
             break;
         case packet_type::propose_ledger:
-            handle_propose_ledger(connection, payload);
+            handle_propose_ledger(peer_id, connection, payload);
             break;
         case packet_type::status_change:
             handle_status_change(payload);
@@ -127,7 +130,9 @@ packet_processor::handle_manifests(std::vector<std::uint8_t> const& payload)
 }
 
 void
-packet_processor::handle_ledger_data(std::vector<std::uint8_t> const& payload)
+packet_processor::handle_ledger_data(
+    std::shared_ptr<peer_connection> connection,
+    std::vector<std::uint8_t> const& payload)
 {
     protocol::TMLedgerData ld;
     if (!ld.ParseFromArray(payload.data(), payload.size()))
@@ -142,17 +147,45 @@ packet_processor::handle_ledger_data(std::vector<std::uint8_t> const& payload)
                  << static_cast<int>(static_cast<std::uint8_t>(hash[i]));
     }
 
+    // Log ALL ledger_data packets for debugging
+    PLOGI(
+        proposal_log(),
+        "📦 Received mtLEDGER_DATA type=",
+        ld.type(),
+        " hash=",
+        hash_str.str().substr(0, 16),
+        "... nodes=",
+        ld.nodes_size());
+
     // Check if this is a candidate transaction set response
     if (ld.type() == protocol::liTS_CANDIDATE)
     {
-        if (!config_.enable_txset_acquire)
-            return;
+        PLOGI(
+            proposal_log(),
+            "📥 Received liTS_CANDIDATE for hash=",
+            hash_str.str().substr(0, 16),
+            "... nodes=",
+            ld.nodes_size(),
+            " acquirers=",
+            txset_acquirers_.size());
 
+        // Only process if we have an active acquirer for this hash
         auto it = txset_acquirers_.find(hash_str.str());
         if (it == txset_acquirers_.end())
+        {
+            PLOGI(proposal_log(), "  ⚠️ No acquirer found for this hash");
             return;
+        }
 
         auto acquirer = it->second;
+
+        // Record reply received
+        if (dashboard_ && ld.nodes_size() > 0)
+            dashboard_->record_txset_reply(hash_str.str());
+
+        // Record successful response for this connection (latency tracking)
+        if (connection)
+            acquirer->record_response(connection.get());
 
         for (int i = 0; i < ld.nodes_size(); ++i)
         {
@@ -180,6 +213,7 @@ packet_processor::handle_ledger_data(std::vector<std::uint8_t> const& payload)
 
 void
 packet_processor::handle_propose_ledger(
+    std::string const& peer_id,
     std::shared_ptr<peer_connection> connection,
     std::vector<std::uint8_t> const& payload)
 {
@@ -203,6 +237,83 @@ packet_processor::handle_propose_ledger(
                       << static_cast<int>(
                              static_cast<std::uint8_t>(prev_hash[i]));
     }
+    LOGD(
+        "[PROP-PKT] seq=",
+        ps.proposeseq(),
+        " tx_hash=",
+        hash_str.str().substr(0, 16),
+        "... prev=",
+        prev_hash_str.str().substr(0, 16),
+        "...");
+
+    // Extract nodePubKey and resolve to master key
+    std::string validator_key;
+    if (ps.has_nodepubkey())
+    {
+        auto const& pub_key = ps.nodepubkey();
+        std::stringstream key_str;
+        for (std::size_t i = 0; i < pub_key.size() && i < 33; ++i)
+        {
+            key_str << std::hex << std::setw(2) << std::setfill('0')
+                    << static_cast<int>(static_cast<std::uint8_t>(pub_key[i]));
+        }
+        auto ephemeral_key_hex = key_str.str();
+
+        // Resolve ephemeral key to master key via manifest tracker
+        auto master_key = manifest_tracker_.get_master_key(ephemeral_key_hex);
+        validator_key = master_key ? *master_key : ephemeral_key_hex;
+    }
+
+    // Duplicate detection: same (prev_hash, validator, seq) with different
+    // tx_hash
+    if (!validator_key.empty())
+    {
+        ProposalKey key{prev_hash_str.str(), validator_key, ps.proposeseq()};
+        auto it = seen_proposals_.find(key);
+        if (it != seen_proposals_.end())
+        {
+            if (it->second != hash_str.str())
+            {
+                PLOGE(
+                    proposal_log(),
+                    "CONFLICT! validator=",
+                    validator_key.substr(0, 16),
+                    "... seq=",
+                    ps.proposeseq(),
+                    " prev=",
+                    prev_hash_str.str().substr(0, 16),
+                    "... OLD_HASH=",
+                    it->second.substr(0, 16),
+                    "... NEW_HASH=",
+                    hash_str.str().substr(0, 16),
+                    "...");
+            }
+        }
+        else
+        {
+            seen_proposals_[key] = hash_str.str();
+            PLOGI(
+                proposal_log(),
+                "NEW seq=",
+                ps.proposeseq(),
+                " validator=",
+                validator_key.substr(0, 12),
+                "... tx=",
+                hash_str.str().substr(0, 12),
+                "...");
+        }
+    }
+
+    // Record proposal in dashboard if we have a valid validator key
+    if (dashboard_ && !validator_key.empty())
+    {
+        dashboard_->record_proposal(
+            prev_hash_str.str(),
+            hash_str.str(),
+            validator_key,
+            ps.proposeseq(),
+            peer_id);
+    }
 
     if (dashboard_ && ps.proposeseq() > 0)
     {
@@ -214,20 +325,87 @@ packet_processor::handle_propose_ledger(
         (hash_str.str() ==
          "0000000000000000000000000000000000000000000000000000000000000000");
 
-    if (!is_empty_set && config_.enable_txset_acquire)
+    // Check if we need to acquire a converged txset (from LAST PROPOSED)
+    if (dashboard_)
     {
-        if (txset_acquirers_.find(hash_str.str()) == txset_acquirers_.end())
+        auto to_acquire = dashboard_->get_txset_to_acquire();
+        if (to_acquire &&
+            txset_acquirers_.find(to_acquire->first) == txset_acquirers_.end())
         {
+            auto const& [tx_hash, ledger_seq] = *to_acquire;
+
+            // Notify dashboard of acquisition start
+            dashboard_->record_txset_start(tx_hash, ledger_seq);
+
+            // Build connection pool from all active peers
+            std::vector<peer_connection*> conn_pool;
+
+            // Start with current connection (it just sent the proposal)
+            if (connection)
+                conn_pool.push_back(connection.get());
+
+            // Add other active connections
+            for (auto& [pid, weak_conn] : active_connections_)
+            {
+                if (pid == peer_id)
+                    continue;  // Already added above
+                auto conn = weak_conn.lock();
+                if (conn && conn->is_connected())
+                    conn_pool.push_back(conn.get());
+            }
+
+            PLOGI(
+                proposal_log(),
+                "🚀 Starting txset acquisition for L",
+                ledger_seq,
+                " hash=",
+                tx_hash.substr(0, 16),
+                "... (",
+                conn_pool.size(),
+                " peers)");
+
             auto acquirer = std::make_shared<TransactionSetAcquirer>(
-                hash_str.str(),
-                connection.get(),
-                [](std::string const&, Slice const&) {},  // No-op tx callback
-                [this, set_hash = hash_str.str()](bool, size_t) {
+                tx_hash,
+                conn_pool,
+                [this, set_hash = tx_hash](
+                    std::string const&, Slice const& tx_data) {
+                    if (tx_data.size() >= 3 && dashboard_)
+                    {
+                        auto* data = tx_data.data();
+                        if (data[0] == 0x12)
+                        {
+                            uint16_t tx_type =
+                                (static_cast<uint16_t>(data[1]) << 8) |
+                                static_cast<uint16_t>(data[2]);
+                            dashboard_->record_txset_transaction(
+                                set_hash, tx_type);
+                            return;
+                        }
+                        dashboard_->record_txset_transaction(set_hash, 0);
+                    }
+                },
+                [this, set_hash = tx_hash](
+                    bool success, size_t, size_t peers_used) {
+                    if (dashboard_)
+                    {
+                        dashboard_->record_txset_peers(set_hash, peers_used);
+                        if (!success)
+                            dashboard_->record_txset_error(set_hash);
+                        dashboard_->record_txset_complete(set_hash, success);
+                    }
                     txset_acquirers_.erase(set_hash);
                 });
 
+            if (dashboard_)
+            {
+                acquirer->set_request_callback(
+                    [this, set_hash = tx_hash](size_t) {
+                        dashboard_->record_txset_request(set_hash);
+                    });
+            }
+
             acquirer->start();
-            txset_acquirers_[hash_str.str()] = std::move(acquirer);
+            txset_acquirers_[tx_hash] = std::move(acquirer);
         }
     }
 }
@@ -506,6 +684,38 @@ void
 packet_processor::set_custom_handler(packet_type type, custom_handler handler)
 {
     custom_handlers_[type] = handler;
+}
+
+std::vector<std::pair<std::string, std::shared_ptr<peer_connection>>>
+packet_processor::get_connections_for_acquisition(
+    std::string const& exclude_peer_id,
+    size_t max_count)
+{
+    std::vector<std::pair<std::string, std::shared_ptr<peer_connection>>>
+        result;
+
+    for (auto it = active_connections_.begin();
+         it != active_connections_.end() && result.size() < max_count;)
+    {
+        if (it->first == exclude_peer_id)
+        {
+            ++it;
+            continue;
+        }
+
+        auto conn = it->second.lock();
+        if (!conn || !conn->is_connected())
+        {
+            // Remove stale entry
+            it = active_connections_.erase(it);
+            continue;
+        }
+
+        result.emplace_back(it->first, conn);
+        ++it;
+    }
+
+    return result;
 }
 
 }  // namespace catl::peer::monitor

@@ -19,6 +19,8 @@ inline constexpr uint32_t XAHAU = 21337;
 inline constexpr uint32_t XRPL_TESTNET = 1;       // s.altnet.rippletest.net
 inline constexpr uint32_t XRPL_DEVNET = 2;        // s.devnet.rippletest.net
 inline constexpr uint32_t XAHAU_TESTNET = 21338;  // Xahau testnet
+inline constexpr uint32_t XAHAU_LOCAL_TESTNET =
+    99999;  // xahaud-scripts local testnet
 
 // Map network variants to their base network for type compatibility
 inline constexpr uint32_t
@@ -29,7 +31,8 @@ find_base_network_id(uint32_t net_id)
         return XRPL;
 
     // Xahau variants → Xahau base
-    if (net_id == XAHAU || net_id == XAHAU_TESTNET)
+    if (net_id == XAHAU || net_id == XAHAU_TESTNET ||
+        net_id == XAHAU_LOCAL_TESTNET)
         return XAHAU;
 
     // Unknown network - return as-is
@@ -94,7 +97,7 @@ inline const FieldType AccountID{"AccountID", 8, std::nullopt, 0};
 inline const FieldType Number{
     "Number",
     9,
-    {{Networks::XRPL}},
+    {{Networks::XRPL, Networks::XAHAU}},
     12};  // XRPL specific, 12 bytes (8 byte mantissa + 4 byte exponent)
 
 // Container types - Universal
@@ -123,17 +126,21 @@ inline const FieldType UInt512{"UInt512", 23, std::nullopt, 64};
 inline const FieldType Issue{
     "Issue",
     24,
-    {{Networks::XRPL}},
+    {{Networks::XRPL, Networks::XAHAU}},
     0};  // SPECIAL: 20 bytes (XRP) or 40 bytes (currency + issuer)
 inline const FieldType XChainBridge{
     "XChainBridge",
     25,
-    {{Networks::XRPL}},
+    {{Networks::XRPL, Networks::XAHAU}},
     40};  // 20 + 20 account IDs
 
 // TODO: we don't actually know this type yet, it might not be the 160-bit
 // encoding per the Amount
-inline const FieldType Currency{"Currency", 26, {{Networks::XRPL}}, 20};
+inline const FieldType Currency{
+    "Currency",
+    26,
+    {{Networks::XRPL, Networks::XAHAU}},
+    20};
 
 // High level types (cannot be serialized inside other types)
 inline const FieldType Transaction{"Transaction", 10001, std::nullopt, 0};

@@ -5,6 +5,7 @@
 #include "catl/peer/monitor/types.h"
 #include "catl/peer/peer-connection.h"
 #include "catl/peer/txset-acquirer.h"
+#include <catl/core/logger.h>
 #include <functional>
 #include <map>
 #include <memory>
@@ -12,6 +13,15 @@
 #include <string>
 
 namespace catl::peer::monitor {
+
+// Log partition for proposal tracking - set to INFO to see all, ERROR for
+// conflicts only
+inline LogPartition&
+proposal_log()
+{
+    static LogPartition partition("PROPOSAL", LogLevel::INFO);
+    return partition;
+}
 
 class packet_processor
 {
@@ -67,9 +77,12 @@ private:
     void
     handle_get_ledger(std::vector<std::uint8_t> const& payload);
     void
-    handle_ledger_data(std::vector<std::uint8_t> const& payload);
+    handle_ledger_data(
+        std::shared_ptr<peer_connection> connection,
+        std::vector<std::uint8_t> const& payload);
     void
     handle_propose_ledger(
+        std::string const& peer_id,
         std::shared_ptr<peer_connection> connection,
         std::vector<std::uint8_t> const& payload);
     void
@@ -120,6 +133,36 @@ private:
 
     // Discovered peer endpoints (from mtENDPOINTS)
     std::set<std::string> available_endpoints_;
+
+    // Proposal duplicate detection: (prev_hash, validator_key, propose_seq) ->
+    // tx_set_hash If we see same key with different hash, that's a protocol
+    // violation
+    struct ProposalKey
+    {
+        std::string prev_hash;
+        std::string validator_key;
+        uint32_t propose_seq;
+        bool
+        operator<(ProposalKey const& o) const
+        {
+            if (prev_hash != o.prev_hash)
+                return prev_hash < o.prev_hash;
+            if (validator_key != o.validator_key)
+                return validator_key < o.validator_key;
+            return propose_seq < o.propose_seq;
+        }
+    };
+    std::map<ProposalKey, std::string> seen_proposals_;  // key -> tx_set_hash
+
+    // Active peer connections for parallel txset acquisition
+    std::map<std::string, std::weak_ptr<peer_connection>>
+        active_connections_;  // peer_id -> connection
+
+    // Get up to N different connections for txset acquisition pool
+    std::vector<std::pair<std::string, std::shared_ptr<peer_connection>>>
+    get_connections_for_acquisition(
+        std::string const& exclude_peer_id,
+        size_t max_count);
 };
 
 }  // namespace catl::peer::monitor

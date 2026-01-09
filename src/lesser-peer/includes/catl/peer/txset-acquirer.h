@@ -2,6 +2,7 @@
 
 #include <catl/core/types.h>
 #include <catl/peer/wire-format.h>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -12,6 +13,44 @@ namespace catl::peer {
 
 // Forward declare
 class peer_connection;
+
+/**
+ * Entry in connection pool with performance tracking
+ */
+struct PooledConnection
+{
+    peer_connection* conn;
+    int errors = 0;            // Consecutive error count
+    int successes = 0;         // Successful response count
+    double total_latency = 0;  // Sum of response times (ms)
+    std::chrono::steady_clock::time_point
+        cooldown_until{};  // Ignore until this time
+    std::chrono::steady_clock::time_point
+        request_sent{};  // When last request was sent
+
+    // Average latency in ms (returns high value if no successes)
+    double
+    avg_latency() const
+    {
+        return successes > 0 ? total_latency / successes : 9999.0;
+    }
+
+    // Score for ranking (lower = better)
+    // Combines error rate and latency
+    double
+    score() const
+    {
+        double error_penalty = errors * 100.0;  // 100ms penalty per error
+        return avg_latency() + error_penalty;
+    }
+
+    // Check if in cooldown period
+    bool
+    in_cooldown() const
+    {
+        return std::chrono::steady_clock::now() < cooldown_until;
+    }
+};
 
 /**
  * Represents a SHAMapNodeID for requesting nodes
@@ -62,14 +101,45 @@ public:
         std::function<void(std::string const& tx_hash, Slice const& tx_data)>;
 
     // Callback when acquisition completes (success or failure)
-    using CompletionCallback =
-        std::function<void(bool success, size_t num_transactions)>;
+    using CompletionCallback = std::function<
+        void(bool success, size_t num_transactions, size_t peers_used)>;
 
+    // Callback when a request batch is sent (for tracking)
+    using RequestCallback = std::function<void(size_t nodes_requested)>;
+
+    /**
+     * Create acquirer with a pool of connections
+     * @param set_hash Transaction set hash to acquire
+     * @param connections Pool of connections to use (round-robin)
+     * @param on_transaction Called for each transaction found
+     * @param on_complete Called when acquisition completes or fails
+     */
     TransactionSetAcquirer(
         std::string const& set_hash,
-        peer_connection* connection,
+        std::vector<peer_connection*> connections,
         TransactionCallback on_transaction,
         CompletionCallback on_complete);
+
+    // Set optional request callback (called each time a batch is sent)
+    void
+    set_request_callback(RequestCallback cb)
+    {
+        on_request_ = std::move(cb);
+    }
+
+    // Add a connection to the pool dynamically
+    void
+    add_connection(peer_connection* conn);
+
+    // Record that a connection successfully responded
+    // Call this when you receive data from a peer
+    void
+    record_response(peer_connection* conn);
+
+    // Record that a connection failed/timed out
+    // Puts connection in cooldown if too many errors
+    void
+    record_error(peer_connection* conn);
 
     /**
      * Start the acquisition by requesting the root node
@@ -116,6 +186,15 @@ public:
         return transaction_count_;
     }
 
+    /**
+     * Get number of unique peers used during acquisition
+     */
+    size_t
+    get_peers_used() const
+    {
+        return peers_used_.size();
+    }
+
 private:
     void
     request_node(SHAMapNodeID const& node_id);
@@ -131,9 +210,11 @@ private:
     check_completion();
 
     std::string set_hash_;
-    peer_connection* connection_;
+    std::vector<PooledConnection> connections_;  // Connection pool
+    size_t next_conn_idx_ = 0;                   // Round-robin index
     TransactionCallback on_transaction_;
     CompletionCallback on_complete_;
+    RequestCallback on_request_;
 
     // Track requested and received nodes
     std::set<SHAMapNodeID> requested_nodes_;
@@ -143,8 +224,30 @@ private:
     std::vector<SHAMapNodeID> pending_requests_;
 
     size_t transaction_count_;
+    std::set<peer_connection*> peers_used_;   // Track unique peers used
+    size_t retry_count_ = 0;                  // How many times we've retried
+    static constexpr size_t MAX_RETRIES = 3;  // Max retries before giving up
     bool complete_;
     bool failed_;
+
+    // Track which connection was used for last request (for latency tracking)
+    peer_connection* last_request_conn_ = nullptr;
+
+    // Cooldown duration for bad connections
+    static constexpr auto COOLDOWN_DURATION = std::chrono::seconds(30);
+    static constexpr int MAX_CONSECUTIVE_ERRORS = 3;
+
+    // Get best available connection (by score, skip cooldowns)
+    peer_connection*
+    get_best_connection();
+
+    // Find pool entry for a connection
+    PooledConnection*
+    find_connection(peer_connection* conn);
+
+    // Try to retry with a different peer, returns true if retry initiated
+    bool
+    try_retry();
 };
 
 }  // namespace catl::peer

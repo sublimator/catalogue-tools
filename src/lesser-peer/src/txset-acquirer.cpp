@@ -3,6 +3,7 @@
 #include <catl/peer/txset-acquirer.h>
 #include <cstdlib>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace catl::peer {
@@ -116,17 +117,200 @@ SHAMapNodeID::operator==(SHAMapNodeID const& other) const
 
 TransactionSetAcquirer::TransactionSetAcquirer(
     std::string const& set_hash,
-    peer_connection* connection,
+    std::vector<peer_connection*> connections,
     TransactionCallback on_transaction,
     CompletionCallback on_complete)
     : set_hash_(set_hash)
-    , connection_(connection)
     , on_transaction_(std::move(on_transaction))
     , on_complete_(std::move(on_complete))
     , transaction_count_(0)
     , complete_(false)
     , failed_(false)
 {
+    // Initialize connection pool
+    for (auto* conn : connections)
+    {
+        if (conn)
+            connections_.push_back({conn, 0});
+    }
+
+    if (connections_.empty())
+    {
+        PLOGE(
+            txset_partition,
+            "TransactionSetAcquirer created with no connections!");
+        failed_ = true;
+    }
+}
+
+void
+TransactionSetAcquirer::add_connection(peer_connection* conn)
+{
+    if (conn)
+        connections_.push_back({conn, 0});
+}
+
+PooledConnection*
+TransactionSetAcquirer::find_connection(peer_connection* conn)
+{
+    for (auto& pc : connections_)
+    {
+        if (pc.conn == conn)
+            return &pc;
+    }
+    return nullptr;
+}
+
+void
+TransactionSetAcquirer::record_response(peer_connection* conn)
+{
+    auto* pc = find_connection(conn);
+    if (!pc)
+        return;
+
+    // Calculate latency if we have a request timestamp
+    if (pc->request_sent != std::chrono::steady_clock::time_point{})
+    {
+        auto now = std::chrono::steady_clock::now();
+        auto latency_ms =
+            std::chrono::duration<double, std::milli>(now - pc->request_sent)
+                .count();
+        pc->total_latency += latency_ms;
+        pc->successes++;
+
+        PLOGD(
+            txset_partition,
+            "  📊 Response latency: ",
+            static_cast<int>(latency_ms),
+            "ms (avg: ",
+            static_cast<int>(pc->avg_latency()),
+            "ms)");
+    }
+
+    // Reset consecutive errors on success
+    pc->errors = 0;
+}
+
+void
+TransactionSetAcquirer::record_error(peer_connection* conn)
+{
+    auto* pc = find_connection(conn);
+    if (!pc)
+        return;
+
+    pc->errors++;
+
+    PLOGW(
+        txset_partition,
+        "  ⚠️ Connection error #",
+        pc->errors,
+        " (score: ",
+        static_cast<int>(pc->score()),
+        ")");
+
+    // Put in cooldown if too many consecutive errors
+    if (pc->errors >= MAX_CONSECUTIVE_ERRORS)
+    {
+        pc->cooldown_until =
+            std::chrono::steady_clock::now() + COOLDOWN_DURATION;
+        PLOGW(
+            txset_partition,
+            "  🚫 Connection in cooldown for ",
+            COOLDOWN_DURATION.count(),
+            "s");
+    }
+}
+
+peer_connection*
+TransactionSetAcquirer::get_best_connection()
+{
+    if (connections_.empty())
+        return nullptr;
+
+    // Round-robin through connections, skipping bad ones
+    size_t start = next_conn_idx_;
+    do
+    {
+        auto& pc = connections_[next_conn_idx_];
+        next_conn_idx_ = (next_conn_idx_ + 1) % connections_.size();
+
+        // Skip connections in cooldown or with too many errors
+        if (pc.in_cooldown() || pc.errors >= MAX_CONSECUTIVE_ERRORS)
+            continue;
+
+        PLOGD(
+            txset_partition,
+            "  🎯 Using conn #",
+            (next_conn_idx_ == 0 ? connections_.size() : next_conn_idx_) - 1,
+            " (errs=",
+            pc.errors,
+            ", score=",
+            static_cast<int>(pc.score()),
+            ")");
+
+        return pc.conn;
+    } while (next_conn_idx_ != start);
+
+    // All connections are bad - just use first one
+    PLOGW(
+        txset_partition,
+        "All ",
+        connections_.size(),
+        " connections have errors, using first");
+    return connections_[0].conn;
+}
+
+bool
+TransactionSetAcquirer::try_retry()
+{
+    if (retry_count_ >= MAX_RETRIES)
+    {
+        PLOGW(
+            txset_partition,
+            "  ❌ Max retries (",
+            MAX_RETRIES,
+            ") reached, giving up");
+        return false;
+    }
+
+    // Mark current connection as having an error
+    if (last_request_conn_)
+    {
+        record_error(last_request_conn_);
+    }
+
+    retry_count_++;
+    PLOGI(
+        txset_partition,
+        "  🔄 Retry #",
+        retry_count_,
+        "/",
+        MAX_RETRIES,
+        " - re-requesting missing nodes");
+
+    // Re-request all nodes we haven't received yet
+    for (auto const& node_id : requested_nodes_)
+    {
+        if (received_nodes_.count(node_id) == 0)
+        {
+            pending_requests_.push_back(node_id);
+        }
+    }
+
+    if (pending_requests_.empty())
+    {
+        PLOGW(txset_partition, "  No missing nodes to retry");
+        return false;
+    }
+
+    PLOGI(
+        txset_partition,
+        "  📝 Re-requesting ",
+        pending_requests_.size(),
+        " missing nodes");
+
+    flush_pending_requests();
+    return true;
 }
 
 void
@@ -175,23 +359,47 @@ TransactionSetAcquirer::flush_pending_requests()
     if (pending_requests_.empty())
         return;
 
-    PLOGI(
-        txset_partition, "  📨 Requesting ", pending_requests_.size(), " nodes");
+    size_t num_nodes = pending_requests_.size();
+
+    // Get best connection from pool (by score)
+    auto* conn = get_best_connection();
+    if (!conn)
+    {
+        PLOGE(txset_partition, "No connections available for request!");
+        failed_ = true;
+        check_completion();
+        return;
+    }
+
+    PLOGI(txset_partition, "  📨 Requesting ", num_nodes, " nodes");
 
     // Convert to wire format
     std::vector<std::string> node_ids_wire;
-    node_ids_wire.reserve(pending_requests_.size());
+    node_ids_wire.reserve(num_nodes);
 
     for (auto const& node_id : pending_requests_)
     {
         node_ids_wire.push_back(node_id.get_wire_string());
     }
 
+    // Track which connection we're using and when
+    last_request_conn_ = conn;
+    peers_used_.insert(conn);  // Track unique peers
+    auto* pc = find_connection(conn);
+    if (pc)
+        pc->request_sent = std::chrono::steady_clock::now();
+
     // Send the batch request
-    connection_->request_transaction_set_nodes(set_hash_, node_ids_wire);
+    conn->request_transaction_set_nodes(set_hash_, node_ids_wire);
 
     // Clear pending
     pending_requests_.clear();
+
+    // Notify callback that a request was sent
+    if (on_request_)
+    {
+        on_request_(num_nodes);
+    }
 }
 
 void
@@ -216,7 +424,10 @@ TransactionSetAcquirer::on_node_received(
     if (!wire_type)
     {
         PLOGE(txset_partition, "Invalid wire type for node");
-        failed_ = true;
+        // Don't mark received - we'll retry
+        received_nodes_.erase(node_id);
+        if (!try_retry())
+            failed_ = true;
         check_completion();
         return;
     }
@@ -228,7 +439,9 @@ TransactionSetAcquirer::on_node_received(
             if (children.empty())
             {
                 PLOGE(txset_partition, "Failed to parse inner node");
-                failed_ = true;
+                received_nodes_.erase(node_id);
+                if (!try_retry())
+                    failed_ = true;
             }
             else
             {
@@ -242,7 +455,9 @@ TransactionSetAcquirer::on_node_received(
             if (tx_data.empty())
             {
                 PLOGE(txset_partition, "Failed to parse transaction leaf");
-                failed_ = true;
+                received_nodes_.erase(node_id);
+                if (!try_retry())
+                    failed_ = true;
             }
             else
             {
@@ -256,7 +471,9 @@ TransactionSetAcquirer::on_node_received(
                 txset_partition,
                 "Unsupported wire type: ",
                 static_cast<int>(*wire_type));
-            failed_ = true;
+            received_nodes_.erase(node_id);
+            if (!try_retry())
+                failed_ = true;
             break;
     }
 
@@ -330,7 +547,7 @@ TransactionSetAcquirer::check_completion()
 
         if (on_complete_)
         {
-            on_complete_(!failed_, transaction_count_);
+            on_complete_(!failed_, transaction_count_, peers_used_.size());
         }
     }
 }

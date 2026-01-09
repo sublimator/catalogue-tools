@@ -6,19 +6,29 @@ echo "🔨 Building peer monitor..."
 ninja -C build src/lesser-peer/peermon
 
 # Network presets
-NETWORK=${NETWORK:-"xahau-test"} # xahau-test | xahau-main
+NETWORK=${NETWORK:-"xahau-test"} # xahau-test | xahau-main | xahau-local
 
 case "$NETWORK" in
 xahau-main)
   DEFAULT_HOST="bacab.alloy.ee"
   DEFAULT_PORT=21337
   DEFAULT_NETWORK_ID=21337
+  DEFAULT_PROTOCOL_DEFS="" # Use embedded
   ADDITIONAL_PEERS=""
+  ;;
+xahau-local)
+  DEFAULT_HOST="127.0.0.1"
+  DEFAULT_PORT=51235
+  DEFAULT_NETWORK_ID=99999
+  DEFAULT_PROTOCOL_DEFS="" # Use embedded
+  ADDITIONAL_PEERS="127.0.0.1:51236 127.0.0.1:51237 127.0.0.1:51238 127.0.0.1:51239 127.0.0.1:51240 127.0.0.1:51241"
   ;;
 xahau-test | *)
   DEFAULT_HOST="79.110.60.121"
   DEFAULT_PORT=21338
   DEFAULT_NETWORK_ID=21338
+  # Use tt-rng definitions for testnet (has Shuffle/Entropy types)
+  DEFAULT_PROTOCOL_DEFS="/Users/nicholasdudfield/projects/xahaud-worktrees/xahaud-tt-rng/server-definitions.json"
   ADDITIONAL_PEERS="79.110.60.122:21338 79.110.60.124:21338 79.110.60.125:21338"
   ;;
 esac
@@ -67,7 +77,7 @@ export LOG_TXSET LOG_WIRE LOG_TX_JSON LOG_MANIFEST # Export for the child proces
 
 # Protocol definitions path (should exist in your project)
 # Use Xahau definitions for Xahau testnet
-PROTOCOL_DEFS=${PROTOCOL_DEFS:-"tests/x-data/fixture/xahau_definitions.json"}
+PROTOCOL_DEFS=${PROTOCOL_DEFS:-"$DEFAULT_PROTOCOL_DEFS"}
 
 # Build command
 CMD="./build/src/lesser-peer/peermon"
@@ -76,7 +86,7 @@ CMD="./build/src/lesser-peer/peermon"
 ARGS="$PEER_HOST $PEER_PORT"
 ARGS="$ARGS --threads $THREADS"
 ARGS="$ARGS --timeout $TIMEOUT"
-ARGS="$ARGS --protocol-definitions $PROTOCOL_DEFS"
+[ -n "$PROTOCOL_DEFS" ] && ARGS="$ARGS --protocol-definitions $PROTOCOL_DEFS"
 ARGS="$ARGS --network-id $NETWORK_ID"
 
 # Add additional peers

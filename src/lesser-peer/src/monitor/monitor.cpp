@@ -51,6 +51,9 @@ peer_monitor::peer_monitor(monitor_config config)
     if (config_.view == ViewMode::Dashboard)
     {
         dashboard_ = std::make_shared<PeerDashboard>();
+        // Load protocol definitions for transaction type names
+        dashboard_->load_protocol(
+            config_.peer.protocol_definitions_path, config_.peer.network_id);
         // Set dashboard on processor for ledger/validation updates
         processor_->set_dashboard(dashboard_);
         // Register shutdown callback so 'q' in dashboard stops the monitor
