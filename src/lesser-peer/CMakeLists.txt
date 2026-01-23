@@ -5,6 +5,7 @@ add_library(
   src/peer-connection.cpp
   src/wire-format.cpp
   src/txset-acquirer.cpp
+  src/shared-node-cache.cpp
   src/manifest-tracker.cpp
   src/peer-manager.cpp
   src/control-http.cpp)
@@ -26,6 +27,7 @@ target_link_libraries(
          catl::base58
          catl::core
          catl::crypto
+         catl::shamap
          catl::catalogue_common
          catl::xdata
          catl::xdata_json)
