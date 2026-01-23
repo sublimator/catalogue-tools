@@ -20,7 +20,8 @@ xahau-local)
   DEFAULT_HOST="127.0.0.1"
   DEFAULT_PORT=51235
   DEFAULT_NETWORK_ID=99999
-  DEFAULT_PROTOCOL_DEFS="" # Use embedded
+  # Use tt-rng definitions for local testnet (has Shuffle/Entropy types)
+  DEFAULT_PROTOCOL_DEFS="/Users/nicholasdudfield/projects/xahaud-worktrees/xahaud-tt-rng/server-definitions.json"
   ADDITIONAL_PEERS="127.0.0.1:51236 127.0.0.1:51237 127.0.0.1:51238 127.0.0.1:51239 127.0.0.1:51240 127.0.0.1:51241"
   ;;
 xahau-test | *)
@@ -48,6 +49,7 @@ NETWORK_ID=${NETWORK_ID:-$DEFAULT_NETWORK_ID}
 THREADS=${THREADS:-2}          # Number of IO threads
 TIMEOUT=${TIMEOUT:-30}         # Connection timeout in seconds
 LISTEN_MODE=${LISTEN_MODE:-""} # Set to any value to run in listen mode
+LLDB=${LLDB:-""}               # Run under lldb debugger
 
 # Display options
 DASHBOARD=${DASHBOARD:-""}           # Enable FTXUI dashboard with log redirection
@@ -120,6 +122,7 @@ echo "   - IO Threads: $THREADS"
 echo "   - Timeout: $TIMEOUT seconds"
 echo "   - Network: $NETWORK (Network-ID=$NETWORK_ID)"
 [ -n "$DASHBOARD" ] && echo "   - Dashboard UI: ENABLED (logs to peermon.log)"
+[ -n "$LLDB" ] && echo "   - Debugger: LLDB"
 [ -n "$SHOW_PACKETS" ] && echo "   - Showing only: $SHOW_PACKETS"
 [ -n "$HIDE_PACKETS" ] && echo "   - Hiding: $HIDE_PACKETS"
 [ -n "$QUERY_TX" ] && echo "   - Querying transactions: $QUERY_TX"
@@ -172,4 +175,9 @@ echo "========================================="
 echo ""
 
 # Run the peer monitor (use eval to handle quoted arguments properly)
-eval "$CMD $ARGS"
+if [ -n "$LLDB" ]; then
+  echo "🐛 Running under lldb debugger..."
+  eval "lldb -- $CMD $ARGS"
+else
+  eval "$CMD $ARGS"
+fi
