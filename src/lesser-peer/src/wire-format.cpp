@@ -29,8 +29,12 @@ get_wire_type(const uint8_t* data, size_t size)
             return SHAMapWireType::Transaction;
         case 1:
             return SHAMapWireType::AccountState;
+        case 2:
+            return SHAMapWireType::Inner;
         case 3:
             return SHAMapWireType::CompressedInner;
+        case 4:
+            return SHAMapWireType::TransactionWithMeta;
         default:
             return std::nullopt;
     }
@@ -150,6 +154,76 @@ parse_transaction_leaf_node(const uint8_t* data, size_t size)
 
     // Return transaction data (everything except last byte)
     return Slice(data, size - 1);
+}
+
+std::vector<InnerNodeChild>
+parse_uncompressed_inner_node(const uint8_t* data, size_t size)
+{
+    std::vector<InnerNodeChild> children;
+
+    // Uncompressed inner: 16 × 32 bytes = 512 bytes + 1 wire type byte = 513
+    constexpr size_t EXPECTED_SIZE = 16 * 32 + 1;
+
+    if (size != EXPECTED_SIZE)
+    {
+        PLOGE(
+            wire_partition,
+            "parse_uncompressed_inner_node: invalid size ",
+            size,
+            " (expected ",
+            EXPECTED_SIZE,
+            ")");
+        return children;
+    }
+
+    // Verify wire type
+    auto wire_type = get_wire_type(data, size);
+    if (!wire_type || *wire_type != SHAMapWireType::Inner)
+    {
+        PLOGE(
+            wire_partition, "parse_uncompressed_inner_node: invalid wire type");
+        return children;
+    }
+
+    // Zero hash for comparison (empty branches)
+    static const Hash256 zero_hash{};
+
+    PLOGD(wire_partition, "Parsing uncompressed inner node (16 branches)");
+
+    // Parse all 16 hashes - branch number is implicit (0-15)
+    for (uint8_t branch = 0; branch < 16; ++branch)
+    {
+        size_t offset = branch * 32;
+        Hash256 hash(data + offset);
+
+        // Skip zero hashes (empty branches)
+        if (hash == zero_hash)
+        {
+            continue;
+        }
+
+        InnerNodeChild child;
+        child.hash = hash;
+        child.branch = branch;
+
+        PLOGD(
+            wire_partition,
+            "  Child[",
+            static_cast<int>(branch),
+            "]: hash=",
+            child.hash.hex().substr(0, 16),
+            "...");
+
+        children.push_back(child);
+    }
+
+    PLOGD(
+        wire_partition,
+        "Parsed uncompressed inner node with ",
+        children.size(),
+        " non-empty children");
+
+    return children;
 }
 
 }  // namespace catl::peer
