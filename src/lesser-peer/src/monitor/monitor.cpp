@@ -288,6 +288,12 @@ peer_monitor::stop()
         heartbeat_timers_.clear();
     }
 
+    // Stop packet processor (clears acquirers to prevent dangling callbacks)
+    if (processor_)
+    {
+        processor_->stop();
+    }
+
     // Stop the dashboard
     if (dashboard_)
     {

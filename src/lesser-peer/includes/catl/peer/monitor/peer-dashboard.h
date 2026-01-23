@@ -61,20 +61,46 @@ struct LedgerProposals
 // Transaction set acquisition status
 enum class TxSetStatus { Pending, Acquiring, Complete, Failed };
 
+// Proposal txset info (for Proposals tab)
+struct ProposalTxSet
+{
+    std::string tx_set_hash;
+    std::string prev_ledger_hash;  // Which round this belongs to
+    TxSetStatus status = TxSetStatus::Pending;
+    std::map<uint16_t, uint32_t> type_histogram;  // tx_type -> count
+    std::set<uint32_t> ledger_seqs;  // LedgerSequence values seen (debug)
+    uint32_t total_txns = 0;
+    std::set<std::string> proposing_validators;  // Who proposed this txset
+    std::chrono::steady_clock::time_point first_seen;
+    std::chrono::steady_clock::time_point completed_at;
+};
+
 // Acquired transaction set with type histogram
 struct TxSetInfo
 {
     std::string tx_set_hash;
-    uint32_t ledger_seq = 0;  // Ledger being built (inferred from proposals)
+    std::string computed_hash;  // Hash computed from acquired txns (for debug)
+    uint32_t ledger_seq = 0;    // Ledger being built (inferred from proposals)
     TxSetStatus status = TxSetStatus::Pending;
     std::map<uint16_t, uint32_t> type_histogram;  // tx_type -> count
     uint32_t total_txns = 0;
-    uint32_t requests_sent = 0;     // Number of requests sent
-    uint32_t replies_received = 0;  // Number of replies received
+    uint32_t requests_sent = 0;     // Cumulative requests (includes retries)
+    uint32_t replies_received = 0;  // Cumulative replies
     uint32_t errors = 0;            // Number of errors
     uint32_t peers_used = 0;        // Number of unique peers used
+    uint32_t unique_requested = 0;  // Unique nodes requested
+    uint32_t unique_received = 0;   // Unique nodes received
     std::chrono::steady_clock::time_point started_at;
     std::chrono::steady_clock::time_point completed_at;
+
+    // Winner flag - set when this txset wins its round (consensus converged)
+    bool is_winner = false;
+
+    // Shuffle transaction details (type 88)
+    std::map<uint32_t, uint32_t>
+        shuffle_ledger_seqs;  // LedgerSequence -> count
+    std::map<std::string, uint32_t>
+        shuffle_parent_hashes;  // ParentHash (12 chars) -> count
 };
 
 class PeerDashboard
@@ -128,6 +154,13 @@ public:
     // Load protocol definitions from file (must be called before start())
     void
     load_protocol(std::string const& definitions_path, uint32_t network_id = 0);
+
+    // Get protocol (for parsing transactions)
+    xdata::Protocol const*
+    get_protocol() const
+    {
+        return protocol_ ? &*protocol_ : nullptr;
+    }
 
     // Restore terminal state (cursor, alternate screen, mouse modes)
     // Safe to call multiple times. Use as safety net on abnormal exit.
@@ -197,23 +230,57 @@ public:
 
     // Transaction set acquisition tracking
     void
-    record_txset_start(std::string const& tx_set_hash, uint32_t ledger_seq);
+    record_txset_start(
+        std::string const& tx_set_hash,
+        std::string const& prev_ledger_hash);
     void
     record_txset_transaction(std::string const& tx_set_hash, uint16_t tx_type);
     void
+    record_txset_shuffle_data(
+        std::string const& tx_set_hash,
+        uint32_t ledger_seq,
+        std::string const& parent_hash);  // First 12 hex chars
+    void
     record_txset_complete(std::string const& tx_set_hash, bool success);
     void
-    record_txset_request(std::string const& tx_set_hash);
+    record_txset_computed_hash(
+        std::string const& tx_set_hash,
+        std::string const& computed_hash);
     void
-    record_txset_reply(std::string const& tx_set_hash);
+    record_txset_request(std::string const& tx_set_hash, size_t count = 1);
+    void
+    record_txset_reply(std::string const& tx_set_hash, size_t count = 1);
     void
     record_txset_error(std::string const& tx_set_hash);
     void
     record_txset_peers(std::string const& tx_set_hash, uint32_t peers_used);
+    void
+    record_txset_unique_counts(
+        std::string const& tx_set_hash,
+        uint32_t unique_requested,
+        uint32_t unique_received);
     std::optional<TxSetInfo>
     get_current_txset() const;  // Most recent completed or acquiring
     std::optional<TxSetInfo>
     get_txset(std::string const& hash) const;
+
+    // Proposal txset tracking (for Proposals tab)
+    void
+    record_proposal_txset_start(
+        std::string const& tx_set_hash,
+        std::string const& prev_ledger_hash,
+        std::string const& validator_key);
+    void
+    record_proposal_txset_transaction(
+        std::string const& tx_set_hash,
+        uint16_t tx_type,
+        uint32_t ledger_seq);
+    void
+    record_proposal_txset_complete(
+        std::string const& tx_set_hash,
+        bool success);
+    std::vector<ProposalTxSet>
+    get_proposal_txsets(std::string const& prev_ledger_hash) const;
 
     // Discovered peer endpoints
     void
@@ -254,6 +321,7 @@ private:
 
     // Protocol definitions for transaction type names
     std::optional<xdata::Protocol> protocol_;
+    std::string protocol_source_;  // Path or "embedded"
 
     // UI thread
     std::unique_ptr<std::thread> ui_thread_;
@@ -323,8 +391,12 @@ private:
         proposal_rounds_;  // prev_hash -> proposals
 
     // Storage for transaction set acquisitions (keyed by tx_set_hash)
-    static constexpr size_t MAX_TRACKED_TXSETS = 10;
+    static constexpr size_t MAX_TRACKED_TXSETS = 200;
     std::map<std::string, TxSetInfo> txset_acquisitions_;  // tx_hash -> info
+
+    // Proposal txsets (for Proposals tab display)
+    // Keyed by tx_set_hash, shows what txns each proposed set contains
+    std::map<std::string, ProposalTxSet> proposal_txsets_;  // tx_hash -> info
 
     // Known validators (for quorum calculation)
     std::set<std::string>
@@ -353,6 +425,16 @@ private:
     // Known peer endpoints (mtENDPOINTS)
     mutable std::mutex endpoints_mutex_;
     std::vector<std::string> available_endpoints_;
+
+    // Tab navigation
+    enum class Tab { Main = 0, Proposals = 1 };
+    std::atomic<int> current_tab_{0};
+
+    // Proposals tab pause feature
+    std::atomic<bool> proposals_paused_{false};
+    mutable std::mutex pause_mutex_;
+    std::string paused_prev_hash_;       // Current round we're paused on
+    std::string paused_last_prev_hash_;  // Previous round (for LAST LEDGER)
 
     // Shutdown callback
     shutdown_callback_t shutdown_callback_;

@@ -1,3 +1,4 @@
+#include <boost/json.hpp>
 #include <catl/base58/base58.h>
 #include <catl/common/utils.h>
 #include <catl/core/logger.h>
@@ -5,6 +6,7 @@
 #include <catl/peer/monitor/packet-processor.h>
 #include <catl/peer/packet-names.h>
 #include <catl/peer/wire-format.h>
+#include <catl/xdata-json/parse_transaction.h>
 
 #include "ripple.pb.h"  // Generated from ripple.proto
 
@@ -16,11 +18,27 @@
 
 namespace catl::peer::monitor {
 
+static LogPartition pproc_log("pproc", LogLevel::INFO);
+
 packet_processor::packet_processor(monitor_config const& config)
     : config_(config)
     , start_time_(std::chrono::steady_clock::now())
     , manifest_tracker_(config_.peer.network_id)
 {
+}
+
+packet_processor::~packet_processor()
+{
+    stop();
+}
+
+void
+packet_processor::stop()
+{
+    // Clear all acquirers to prevent callbacks accessing destroyed objects
+    txset_acquirers_.clear();
+    active_connections_.clear();
+    dashboard_.reset();
 }
 
 void
@@ -169,7 +187,8 @@ packet_processor::handle_ledger_data(
             " acquirers=",
             txset_acquirers_.size());
 
-        // Only process if we have an active acquirer for this hash
+        // Find acquirer - COPY the shared_ptr to prevent use-after-free
+        // if the acquirer completes and erases itself during processing
         auto it = txset_acquirers_.find(hash_str.str());
         if (it == txset_acquirers_.end())
         {
@@ -177,11 +196,11 @@ packet_processor::handle_ledger_data(
             return;
         }
 
-        auto acquirer = it->second;
+        auto acquirer = it->second;  // Copy, not reference!
 
-        // Record reply received
+        // Record reply received (count actual nodes)
         if (dashboard_ && ld.nodes_size() > 0)
-            dashboard_->record_txset_reply(hash_str.str());
+            dashboard_->record_txset_reply(hash_str.str(), ld.nodes_size());
 
         // Record successful response for this connection (latency tracking)
         if (connection)
@@ -315,98 +334,144 @@ packet_processor::handle_propose_ledger(
             peer_id);
     }
 
-    if (dashboard_ && ps.proposeseq() > 0)
-    {
-        dashboard_->update_ledger_info(
-            ps.proposeseq() - 1, prev_hash_str.str(), 1);
-    }
-
     bool is_empty_set =
         (hash_str.str() ==
          "0000000000000000000000000000000000000000000000000000000000000000");
 
-    // Check if we need to acquire a converged txset (from LAST PROPOSED)
-    if (dashboard_)
+    // ONE acquirer per txset hash globally
+    // Start acquiring if we don't have an acquirer AND don't already have the
+    // data
+    bool should_acquire = dashboard_ && !is_empty_set &&
+        txset_acquirers_.find(hash_str.str()) == txset_acquirers_.end() &&
+        !dashboard_->get_txset(hash_str.str());  // Not already acquired
+
+    if (should_acquire)
     {
-        auto to_acquire = dashboard_->get_txset_to_acquire();
-        if (to_acquire &&
-            txset_acquirers_.find(to_acquire->first) == txset_acquirers_.end())
+        // Notify dashboard of acquisition start (pass prev_hash for ledger_seq
+        // inference)
+        dashboard_->record_txset_start(hash_str.str(), prev_hash_str.str());
+
+        // Build connection pool
+        std::vector<peer_connection*> conn_pool;
+        if (connection)
+            conn_pool.push_back(connection.get());
+        for (auto& [pid, weak_conn] : active_connections_)
         {
-            auto const& [tx_hash, ledger_seq] = *to_acquire;
-
-            // Notify dashboard of acquisition start
-            dashboard_->record_txset_start(tx_hash, ledger_seq);
-
-            // Build connection pool from all active peers
-            std::vector<peer_connection*> conn_pool;
-
-            // Start with current connection (it just sent the proposal)
-            if (connection)
-                conn_pool.push_back(connection.get());
-
-            // Add other active connections
-            for (auto& [pid, weak_conn] : active_connections_)
-            {
-                if (pid == peer_id)
-                    continue;  // Already added above
-                auto conn = weak_conn.lock();
-                if (conn && conn->is_connected())
-                    conn_pool.push_back(conn.get());
-            }
-
-            PLOGI(
-                proposal_log(),
-                "🚀 Starting txset acquisition for L",
-                ledger_seq,
-                " hash=",
-                tx_hash.substr(0, 16),
-                "... (",
-                conn_pool.size(),
-                " peers)");
-
-            auto acquirer = std::make_shared<TransactionSetAcquirer>(
-                tx_hash,
-                conn_pool,
-                [this, set_hash = tx_hash](
-                    std::string const&, Slice const& tx_data) {
-                    if (tx_data.size() >= 3 && dashboard_)
-                    {
-                        auto* data = tx_data.data();
-                        if (data[0] == 0x12)
-                        {
-                            uint16_t tx_type =
-                                (static_cast<uint16_t>(data[1]) << 8) |
-                                static_cast<uint16_t>(data[2]);
-                            dashboard_->record_txset_transaction(
-                                set_hash, tx_type);
-                            return;
-                        }
-                        dashboard_->record_txset_transaction(set_hash, 0);
-                    }
-                },
-                [this, set_hash = tx_hash](
-                    bool success, size_t, size_t peers_used) {
-                    if (dashboard_)
-                    {
-                        dashboard_->record_txset_peers(set_hash, peers_used);
-                        if (!success)
-                            dashboard_->record_txset_error(set_hash);
-                        dashboard_->record_txset_complete(set_hash, success);
-                    }
-                    txset_acquirers_.erase(set_hash);
-                });
-
-            if (dashboard_)
-            {
-                acquirer->set_request_callback(
-                    [this, set_hash = tx_hash](size_t) {
-                        dashboard_->record_txset_request(set_hash);
-                    });
-            }
-
-            acquirer->start();
-            txset_acquirers_[tx_hash] = std::move(acquirer);
+            if (pid == peer_id)
+                continue;
+            auto conn = weak_conn.lock();
+            if (conn && conn->is_connected())
+                conn_pool.push_back(conn.get());
         }
+
+        PLOGI(
+            proposal_log(),
+            "📋 Acquiring txset hash=",
+            hash_str.str().substr(0, 16),
+            "... (",
+            conn_pool.size(),
+            " peers)");
+
+        auto acquirer = std::make_shared<TransactionSetAcquirer>(
+            hash_str.str(),
+            conn_pool,
+            [this, set_hash = hash_str.str()](
+                std::string const&, Slice const& tx_data) {
+                if (tx_data.size() >= 3 && dashboard_)
+                {
+                    auto* data = tx_data.data();
+                    if (data[0] == 0x12)
+                    {
+                        uint16_t tx_type =
+                            (static_cast<uint16_t>(data[1]) << 8) |
+                            static_cast<uint16_t>(data[2]);
+                        dashboard_->record_txset_transaction(set_hash, tx_type);
+
+                        // For Shuffle (88), extract extra data
+                        if (tx_type == 88)
+                        {
+                            auto* proto = dashboard_->get_protocol();
+                            if (proto)
+                            {
+                                try
+                                {
+                                    auto json =
+                                        xdata::json::parse_txset_transaction(
+                                            tx_data, *proto);
+                                    if (json.is_object())
+                                    {
+                                        auto& obj = json.as_object();
+                                        uint32_t ls = 0;
+                                        std::string ph;
+                                        if (auto* v = obj.if_contains(
+                                                "LedgerSequence"))
+                                        {
+                                            if (v->is_uint64())
+                                                ls = static_cast<uint32_t>(
+                                                    v->as_uint64());
+                                            else if (v->is_int64())
+                                                ls = static_cast<uint32_t>(
+                                                    v->as_int64());
+                                        }
+                                        if (auto* v =
+                                                obj.if_contains("ParentHash"))
+                                        {
+                                            if (v->is_string())
+                                                ph = v->as_string();
+                                        }
+                                        dashboard_->record_txset_shuffle_data(
+                                            set_hash, ls, ph);
+                                    }
+                                }
+                                catch (...)
+                                {
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    dashboard_->record_txset_transaction(set_hash, 0);
+                }
+            },
+            [this, set_hash = hash_str.str()](
+                bool success,
+                size_t,
+                size_t peers_used,
+                size_t unique_requested,
+                size_t unique_received,
+                std::string const& computed_hash) {
+                if (dashboard_)
+                {
+                    dashboard_->record_txset_peers(set_hash, peers_used);
+                    dashboard_->record_txset_unique_counts(
+                        set_hash, unique_requested, unique_received);
+                    if (!computed_hash.empty())
+                        dashboard_->record_txset_computed_hash(
+                            set_hash, computed_hash);
+                    if (!success)
+                        dashboard_->record_txset_error(set_hash);
+                    dashboard_->record_txset_complete(set_hash, success);
+                }
+                txset_acquirers_.erase(set_hash);
+            },
+            nullptr);
+
+        if (dashboard_)
+        {
+            acquirer->set_request_callback(
+                [this, set_hash = hash_str.str()](size_t num_nodes) {
+                    dashboard_->record_txset_request(set_hash, num_nodes);
+                });
+        }
+
+        acquirer->start();
+        txset_acquirers_[hash_str.str()] = std::move(acquirer);
+    }
+
+    if (dashboard_ && ps.proposeseq() > 0)
+    {
+        dashboard_->update_ledger_info(
+            ps.proposeseq() - 1, prev_hash_str.str(), 1);
     }
 }
 

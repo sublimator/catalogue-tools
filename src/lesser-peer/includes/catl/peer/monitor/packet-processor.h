@@ -4,6 +4,7 @@
 #include "catl/peer/monitor/peer-dashboard.h"
 #include "catl/peer/monitor/types.h"
 #include "catl/peer/peer-connection.h"
+#include "catl/peer/shared-node-cache.h"
 #include "catl/peer/txset-acquirer.h"
 #include <catl/core/logger.h>
 #include <functional>
@@ -27,6 +28,11 @@ class packet_processor
 {
 public:
     packet_processor(monitor_config const& config);
+    ~packet_processor();
+
+    // Stop all active acquirers - call before destroying
+    void
+    stop();
 
     // Process incoming packet
     void
@@ -122,7 +128,7 @@ private:
 
     std::chrono::steady_clock::time_point start_time_;
 
-    // Transaction set acquirers keyed by set hash
+    // Transaction set acquirers keyed by set hash (ONE acquirer per txset)
     // Use shared_ptr so callbacks cannot invalidate current stack frames while
     // we iterate (completion may erase from map).
     std::map<std::string, std::shared_ptr<TransactionSetAcquirer>>
@@ -157,6 +163,9 @@ private:
     // Active peer connections for parallel txset acquisition
     std::map<std::string, std::weak_ptr<peer_connection>>
         active_connections_;  // peer_id -> connection
+
+    // Shared node cache for txset acquisition deduplication
+    SharedNodeCache shared_node_cache_;
 
     // Get up to N different connections for txset acquisition pool
     std::vector<std::pair<std::string, std::shared_ptr<peer_connection>>>
