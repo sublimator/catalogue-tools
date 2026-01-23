@@ -31,6 +31,7 @@ get_node_prefix(SHAMapNodeType type)
         case tnINNER:
             return HashPrefix::inner_node;
         case tnTRANSACTION_NM:
+            return HashPrefix::tx_id;
         case tnTRANSACTION_MD:
             return HashPrefix::tx_node;
         case tnACCOUNT_STATE:
@@ -103,7 +104,10 @@ SHAMapLeafNodeT<Traits>::update_hash(SHAMapOptions const&)
         // Update with all hash components in order
         hasher.update(prefix.data(), prefix.size());
         hasher.update(item->slice().data(), item->slice().size());
-        hasher.update(item->key().data(), Key::size());
+        if (prefix != HashPrefix::tx_id)
+        {
+            hasher.update(item->key().data(), Key::size());
+        }
 
         // Finalize hash and take first 256 bits
         this->hash = hasher.finalize();
