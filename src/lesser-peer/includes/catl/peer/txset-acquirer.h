@@ -1,11 +1,15 @@
 #pragma once
 
 #include <catl/core/types.h>
+#include <catl/crypto/sha512-half-hasher.h>
 #include <catl/peer/wire-format.h>
+#include <catl/shamap/shamap.h>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -13,6 +17,7 @@ namespace catl::peer {
 
 // Forward declare
 class peer_connection;
+class SharedNodeCache;
 
 /**
  * Entry in connection pool with performance tracking
@@ -72,7 +77,8 @@ struct SHAMapNodeID
     get_wire_string() const;
 
     // Create child node ID for given branch (0-15)
-    SHAMapNodeID
+    // Returns nullopt if branch is invalid (>=16) or depth is at max
+    std::optional<SHAMapNodeID>
     get_child(uint8_t branch) const;
 
     // Comparison for use in maps
@@ -101,8 +107,15 @@ public:
         std::function<void(std::string const& tx_hash, Slice const& tx_data)>;
 
     // Callback when acquisition completes (success or failure)
-    using CompletionCallback = std::function<
-        void(bool success, size_t num_transactions, size_t peers_used)>;
+    // unique_requested/unique_received are the actual node counts for debugging
+    // computed_hash is the hash we computed from the acquired transactions
+    using CompletionCallback = std::function<void(
+        bool success,
+        size_t num_transactions,
+        size_t peers_used,
+        size_t unique_requested,
+        size_t unique_received,
+        std::string const& computed_hash)>;
 
     // Callback when a request batch is sent (for tracking)
     using RequestCallback = std::function<void(size_t nodes_requested)>;
@@ -113,18 +126,27 @@ public:
      * @param connections Pool of connections to use (round-robin)
      * @param on_transaction Called for each transaction found
      * @param on_complete Called when acquisition completes or fails
+     * @param cache Optional shared cache for node deduplication
      */
     TransactionSetAcquirer(
         std::string const& set_hash,
         std::vector<peer_connection*> connections,
         TransactionCallback on_transaction,
-        CompletionCallback on_complete);
+        CompletionCallback on_complete,
+        SharedNodeCache* cache = nullptr);
 
     // Set optional request callback (called each time a batch is sent)
     void
     set_request_callback(RequestCallback cb)
     {
         on_request_ = std::move(cb);
+    }
+
+    // Set shared cache (alternative to constructor param)
+    void
+    set_shared_cache(SharedNodeCache* cache)
+    {
+        cache_ = cache;
     }
 
     // Add a connection to the pool dynamically
@@ -169,6 +191,14 @@ public:
     }
 
     /**
+     * Check for timeout and retry if needed.
+     * Call this periodically (e.g., when receiving any response).
+     * Returns true if a retry was triggered.
+     */
+    bool
+    check_timeout();
+
+    /**
      * Get the transaction set hash being acquired
      */
     std::string const&
@@ -195,6 +225,24 @@ public:
         return peers_used_.size();
     }
 
+    /**
+     * Get number of unique nodes requested
+     */
+    size_t
+    get_requested_count() const
+    {
+        return requested_nodes_.size();
+    }
+
+    /**
+     * Get number of unique nodes received
+     */
+    size_t
+    get_received_count() const
+    {
+        return received_nodes_.size();
+    }
+
 private:
     void
     request_node(SHAMapNodeID const& node_id);
@@ -212,6 +260,7 @@ private:
     std::string set_hash_;
     std::vector<PooledConnection> connections_;  // Connection pool
     size_t next_conn_idx_ = 0;                   // Round-robin index
+    size_t preferred_conn_idx_ = 0;  // Preferred peer (source of proposal)
     TransactionCallback on_transaction_;
     CompletionCallback on_complete_;
     RequestCallback on_request_;
@@ -230,12 +279,25 @@ private:
     bool complete_;
     bool failed_;
 
+    // SHAMap for verifying the transaction set hash
+    // Uses tnTRANSACTION_NM (transaction, no metadata)
+    std::unique_ptr<shamap::SHAMap> verification_map_;
+    Hash256 expected_hash_;  // Parsed from set_hash_
+
+    // Add transaction to verification map and return its hash
+    Hash256
+    add_to_verification_map(Slice const& tx_data);
+
     // Track which connection was used for last request (for latency tracking)
     peer_connection* last_request_conn_ = nullptr;
 
     // Cooldown duration for bad connections
     static constexpr auto COOLDOWN_DURATION = std::chrono::seconds(30);
     static constexpr int MAX_CONSECUTIVE_ERRORS = 3;
+
+    // Request timeout - retry if no response within this time
+    static constexpr auto REQUEST_TIMEOUT = std::chrono::seconds(5);
+    std::chrono::steady_clock::time_point last_request_time_{};
 
     // Get best available connection (by score, skip cooldowns)
     peer_connection*
@@ -248,6 +310,24 @@ private:
     // Try to retry with a different peer, returns true if retry initiated
     bool
     try_retry();
+
+    // Shared node cache (optional, for deduplication across acquirers)
+    SharedNodeCache* cache_ = nullptr;
+
+    // Map from node position to expected content hash
+    // (learned from parent inner node, used for cache lookup/verification)
+    std::map<SHAMapNodeID, Hash256> expected_hashes_;
+
+    // Request a node with known expected hash (for cache integration)
+    void
+    request_node_with_hash(SHAMapNodeID const& node_id, Hash256 const& hash);
+
+    // Process a node that was retrieved from cache
+    void
+    process_cached_node(
+        SHAMapNodeID const& node_id,
+        Hash256 const& hash,
+        Slice const& data);
 };
 
 }  // namespace catl::peer
