@@ -68,12 +68,17 @@ PeerSession::PeerSession(
 void
 PeerSession::start()
 {
-    if (started_)
-        return;
-    started_ = true;
-    explicitly_stopped_ = false;
-    current_backoff_ = reconnect_config_.initial_delay;
-    reconnect_attempts_ = 0;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (started_)
+            return;
+        // Tight lock scope: avoid holding state_mutex_ across publish_state().
+        started_ = true;
+        explicitly_stopped_ = false;
+        reconnect_scheduled_ = false;
+        current_backoff_ = reconnect_config_.initial_delay;
+        reconnect_attempts_ = 0;
+    }
 
     std::string connect_msg = config_.host + ":" + std::to_string(config_.port);
     publish_state(PeerStateEvent::State::Connecting, connect_msg);
@@ -87,14 +92,24 @@ PeerSession::start()
 void
 PeerSession::stop()
 {
-    explicitly_stopped_ = true;
-    if (reconnect_timer_)
+    std::shared_ptr<peer_connection> conn;
     {
-        reconnect_timer_->cancel();
-        reconnect_timer_.reset();
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        // Tight lock scope: avoid holding state_mutex_ across publish_state().
+        explicitly_stopped_ = true;
+        reconnect_scheduled_ = false;
+        if (reconnect_timer_)
+        {
+            reconnect_timer_->cancel();
+            reconnect_timer_.reset();
+        }
+        connected_ = false;
+        conn = connection_;
     }
-    connection_->close();
-    connected_ = false;
+    if (conn)
+    {
+        conn->close();
+    }
     publish_state(PeerStateEvent::State::Disconnected, "Stopped");
 }
 
@@ -107,11 +122,32 @@ PeerSession::handle_connect_result(boost::system::error_code const& ec)
         return;
     }
 
-    // Reset backoff on successful connection
-    current_backoff_ = reconnect_config_.initial_delay;
-    reconnect_attempts_ = 0;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (explicitly_stopped_)
+        {
+            if (connection_)
+            {
+                connection_->close();
+            }
+            return;
+        }
+    }
 
-    connected_ = true;
+    // Reset backoff on successful connection
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        // Tight lock scope: avoid holding state_mutex_ across publish_state().
+        current_backoff_ = reconnect_config_.initial_delay;
+        reconnect_attempts_ = 0;
+        reconnect_scheduled_ = false;
+        if (reconnect_timer_)
+        {
+            reconnect_timer_->cancel();
+            reconnect_timer_.reset();
+        }
+        connected_ = true;
+    }
     publish_state(PeerStateEvent::State::Connected);
 
     // Set up disconnect handler to trigger reconnection
@@ -221,6 +257,7 @@ PeerSession::remote_endpoint() const
 void
 PeerSession::set_reconnect_config(ReconnectConfig config)
 {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     reconnect_config_ = std::move(config);
     current_backoff_ = reconnect_config_.initial_delay;
 }
@@ -228,12 +265,21 @@ PeerSession::set_reconnect_config(ReconnectConfig config)
 void
 PeerSession::handle_disconnect(boost::system::error_code ec)
 {
-    connected_ = false;
-
-    if (explicitly_stopped_)
     {
-        publish_state(PeerStateEvent::State::Disconnected, "Stopped");
-        return;
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        // Tight lock scope: avoid holding state_mutex_ across publish_state().
+        connected_ = false;
+
+        if (explicitly_stopped_)
+        {
+            publish_state(PeerStateEvent::State::Disconnected, "Stopped");
+            return;
+        }
+
+        if (reconnect_scheduled_)
+            return;
+
+        reconnect_scheduled_ = true;
     }
 
     publish_state(PeerStateEvent::State::Disconnected, ec.message());
@@ -247,49 +293,80 @@ PeerSession::handle_disconnect(boost::system::error_code ec)
 void
 PeerSession::schedule_reconnect()
 {
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (explicitly_stopped_)
+            return;
+        if (reconnect_timer_)
+        {
+            reconnect_timer_->cancel();
+            reconnect_timer_.reset();
+        }
+    }
+
     auto reconnect_at = std::chrono::steady_clock::now() + current_backoff_;
     publish_state(
         PeerStateEvent::State::Reconnecting,
         config_.host + ":" + std::to_string(config_.port),
         reconnect_at);
 
-    reconnect_timer_ = std::make_shared<asio::steady_timer>(io_context_);
-    reconnect_timer_->expires_after(current_backoff_);
-    reconnect_timer_->async_wait(
-        [self = shared_from_this()](boost::system::error_code ec) {
-            if (!ec && !self->explicitly_stopped_)
-            {
-                self->attempt_reconnect();
-            }
-        });
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        reconnect_timer_ = std::make_shared<asio::steady_timer>(io_context_);
+        reconnect_timer_->expires_after(current_backoff_);
+        reconnect_timer_->async_wait(
+            [self = shared_from_this()](boost::system::error_code ec) {
+                if (!ec)
+                {
+                    self->attempt_reconnect();
+                }
+            });
+    }
 
     // Exponential backoff with cap
-    auto next_backoff = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::duration<double>(
-            current_backoff_.count() * reconnect_config_.backoff_multiplier));
-    current_backoff_ = std::min(next_backoff, reconnect_config_.max_delay);
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        auto next_backoff = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::duration<double>(
+                current_backoff_.count() *
+                reconnect_config_.backoff_multiplier));
+        current_backoff_ = std::min(next_backoff, reconnect_config_.max_delay);
+    }
 }
 
 void
 PeerSession::attempt_reconnect()
 {
-    reconnect_attempts_++;
+    int attempt_num = 0;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (explicitly_stopped_)
+            return;
+        reconnect_attempts_++;
+        attempt_num = reconnect_attempts_;
+    }
     LOGI(
         "Attempting reconnect #",
-        reconnect_attempts_,
+        attempt_num,
         " to ",
         config_.host,
         ":",
         config_.port);
 
-    // Create a new connection
-    connection_ =
-        std::make_shared<peer_connection>(io_context_, ssl_context_, config_);
+    std::shared_ptr<peer_connection> conn;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        reconnect_scheduled_ = false;
+        // Create a new connection
+        connection_ = std::make_shared<peer_connection>(
+            io_context_, ssl_context_, config_);
+        conn = connection_;
+    }
 
     std::string connect_msg = config_.host + ":" + std::to_string(config_.port);
     publish_state(PeerStateEvent::State::Connecting, connect_msg);
 
-    connection_->async_connect(
+    conn->async_connect(
         [self = shared_from_this()](boost::system::error_code ec) {
             self->handle_connect_result(ec);
         });

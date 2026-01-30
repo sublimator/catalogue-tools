@@ -135,6 +135,9 @@ private:
     std::chrono::seconds current_backoff_{1};
     int reconnect_attempts_{0};
     bool explicitly_stopped_{false};
+    bool reconnect_scheduled_{false};
+    // Keep lock scope tight to avoid holding across publish_state or callbacks.
+    mutable std::mutex state_mutex_;
 };
 
 class PeerManager

@@ -446,10 +446,9 @@ peer_connection::handle_read_header(
         // Log exact error code for debugging disconnects
         LOGE("Error reading header: ", ec.message(), " (val=", ec.value(), ")");
 
-        if (ec == asio::error::eof || ec == asio::error::connection_reset ||
-            ec == asio::error::broken_pipe)
+        if (ec != asio::error::operation_aborted)
         {
-            LOGI("Connection closed by peer during header read");
+            LOGI("Connection closed during header read");
             close();
             if (disconnect_handler_)
             {
@@ -498,6 +497,14 @@ peer_connection::handle_read_header(
                     LOGE(
                         "Error reading compressed header extension: ",
                         ec.message());
+                    if (ec != asio::error::operation_aborted)
+                    {
+                        close();
+                        if (disconnect_handler_)
+                        {
+                            disconnect_handler_(ec);
+                        }
+                    }
                     return;
                 }
                 self->current_header_.uncompressed_size =
@@ -551,10 +558,9 @@ peer_connection::handle_read_payload(
         LOGE(
             "Error reading payload: ", ec.message(), " (val=", ec.value(), ")");
         // Check if it's EOF or connection closed
-        if (ec == asio::error::eof || ec == asio::error::connection_reset ||
-            ec == asio::error::broken_pipe)
+        if (ec != asio::error::operation_aborted)
         {
-            LOGI("Connection closed by peer during payload read");
+            LOGI("Connection closed during payload read");
             close();
             if (disconnect_handler_)
             {
@@ -624,9 +630,7 @@ peer_connection::async_send_packet(
                 handler(ec);
             }
             // Detect connection errors and trigger disconnect
-            if (ec == asio::error::eof || ec == asio::error::connection_reset ||
-                ec == asio::error::broken_pipe ||
-                ec == asio::error::not_connected)
+            if (ec && ec != asio::error::operation_aborted)
             {
                 LOGI("Connection lost during write");
                 self->close();

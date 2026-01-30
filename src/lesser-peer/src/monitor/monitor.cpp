@@ -489,8 +489,37 @@ peer_monitor::handle_event(PeerEvent const& event)
                 st.state == PeerStateEvent::State::Error)
             {
                 // Clean up heartbeat timer for this peer
-                std::lock_guard<std::mutex> lock(heartbeat_mutex_);
-                heartbeat_timers_.erase(event.peer_id);
+                {
+                    std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+                    if (auto it = heartbeat_timers_.find(event.peer_id);
+                        it != heartbeat_timers_.end())
+                    {
+                        it->second->cancel();
+                        heartbeat_timers_.erase(it);
+                    }
+                }
+
+                // Allow queries/endpoints to be sent again on reconnect
+                {
+                    std::lock_guard<std::mutex> lock(query_mutex_);
+                    queries_scheduled_.erase(event.peer_id);
+                }
+                {
+                    std::lock_guard<std::mutex> lock(endpoints_mutex_);
+                    std::string prefix = event.peer_id + ":";
+                    for (auto it = endpoints_sent_.begin();
+                         it != endpoints_sent_.end();)
+                    {
+                        if (it->rfind(prefix, 0) == 0)
+                        {
+                            it = endpoints_sent_.erase(it);
+                        }
+                        else
+                        {
+                            ++it;
+                        }
+                    }
+                }
             }
             break;
         }
@@ -610,14 +639,26 @@ peer_monitor::schedule_heartbeat(
 {
     std::lock_guard<std::mutex> lock(heartbeat_mutex_);
 
+    if (auto it = heartbeat_timers_.find(peer_id);
+        it != heartbeat_timers_.end())
+    {
+        it->second->cancel();
+        heartbeat_timers_.erase(it);
+    }
+
     auto timer = std::make_shared<asio::steady_timer>(io_context_);
     heartbeat_timers_[peer_id] = timer;
+    std::weak_ptr<peer_connection> weak_connection = connection;
 
     auto send_ping = std::make_shared<
         std::function<void(boost::system::error_code)>>();  // NOLINT
-    *send_ping = [this, peer_id, connection, timer, send_ping](
+    *send_ping = [this, peer_id, weak_connection, timer, send_ping](
                      boost::system::error_code ec) {
         if (ec || stopping_)
+            return;
+
+        auto connection = weak_connection.lock();
+        if (!connection)
             return;
 
         // Build a simple ping
