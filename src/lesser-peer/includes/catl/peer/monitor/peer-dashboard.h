@@ -333,6 +333,7 @@ private:
     // Multi-peer tracking
     mutable std::mutex peers_mutex_;
     std::map<std::string, Stats> peer_stats_;  // peer_id -> Stats
+    std::vector<std::string> peer_order_;  // stable insertion order for tabs
 
     // Backward compatibility - default peer
     std::string default_peer_id_{"default"};
@@ -364,6 +365,11 @@ private:
 
     mutable std::mutex throughput_mutex_;
     std::deque<ThroughputSample> throughput_history_;
+
+    // Per-peer throughput tracking for Peers tab rates
+    mutable std::mutex per_peer_throughput_mutex_;
+    std::unordered_map<std::string, std::deque<ThroughputSample>>
+        per_peer_throughput_;
 
     // Connection state (deprecated - kept for backward compatibility)
     mutable std::mutex state_mutex_;

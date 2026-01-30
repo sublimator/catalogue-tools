@@ -140,6 +140,9 @@ PeerDashboard::update_peer_stats(const std::string& peer_id, const Stats& stats)
 {
     uint64_t total_packets = 0;
     uint64_t total_bytes = 0;
+    double peer_pps = 0;
+    double peer_bps = 0;
+    auto now = std::chrono::steady_clock::now();
 
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
@@ -147,6 +150,12 @@ PeerDashboard::update_peer_stats(const std::string& peer_id, const Stats& stats)
         // Create a copy of stats and ensure peer_id is set
         Stats updated_stats = stats;
         updated_stats.peer_id = peer_id;
+
+        // Track stable order for peers tab
+        if (peer_stats_.find(peer_id) == peer_stats_.end())
+        {
+            peer_order_.push_back(peer_id);
+        }
 
         // Update or insert the peer stats
         peer_stats_[peer_id] = updated_stats;
@@ -159,11 +168,69 @@ PeerDashboard::update_peer_stats(const std::string& peer_id, const Stats& stats)
         }
     }
 
+    // Update per-peer throughput history and compute rates
+    {
+        std::lock_guard<std::mutex> lock(per_peer_throughput_mutex_);
+        auto& history = per_peer_throughput_[peer_id];
+
+        if (!stats.connected)
+        {
+            history.clear();
+            peer_pps = 0;
+            peer_bps = 0;
+        }
+        else
+        {
+            // If counters reset (e.g., reconnect), reset history to avoid
+            // negative deltas.
+            if (!history.empty() &&
+                (stats.total_packets < history.back().packets ||
+                 stats.total_bytes < history.back().bytes))
+            {
+                history.clear();
+            }
+
+            history.push_back({now, stats.total_packets, stats.total_bytes});
+
+            auto cutoff = now - std::chrono::seconds(60);
+            while (!history.empty() &&
+                   (history.front().timestamp < cutoff || history.size() > 200))
+            {
+                history.pop_front();
+            }
+
+            if (history.size() >= 2)
+            {
+                auto dt =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        history.back().timestamp - history.front().timestamp)
+                        .count();
+                if (dt > 0)
+                {
+                    peer_pps =
+                        (history.back().packets - history.front().packets) *
+                        1000.0 / dt;
+                    peer_bps = (history.back().bytes - history.front().bytes) *
+                        1000.0 / dt;
+                }
+            }
+        }
+    }
+
+    // Store per-peer rates
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        auto it = peer_stats_.find(peer_id);
+        if (it != peer_stats_.end())
+        {
+            it->second.packets_per_sec = peer_pps;
+            it->second.bytes_per_sec = peer_bps;
+        }
+    }
+
     // Update throughput history with aggregated totals
     {
         std::lock_guard<std::mutex> lock(throughput_mutex_);
-        auto now = std::chrono::steady_clock::now();
-
         throughput_history_.push_back({now, total_packets, total_bytes});
 
         // Keep only last 60 seconds
@@ -182,6 +249,9 @@ PeerDashboard::remove_peer(const std::string& peer_id)
 {
     std::lock_guard<std::mutex> lock(peers_mutex_);
     peer_stats_.erase(peer_id);
+    auto it = std::find(peer_order_.begin(), peer_order_.end(), peer_id);
+    if (it != peer_order_.end())
+        peer_order_.erase(it);
 }
 
 std::vector<PeerDashboard::Stats>
@@ -2160,6 +2230,9 @@ PeerDashboard::run_ui()
                 text(" "),
                 text(" [2] Proposals ") |
                     (tab == 1 ? bold | bgcolor(Color::Blue) : dim),
+                text(" "),
+                text(" [3] Peers ") |
+                    (tab == 2 ? bold | bgcolor(Color::Blue) : dim),
                 filler(),
             });
 
@@ -2874,8 +2947,282 @@ PeerDashboard::run_ui()
 
             auto proposals_content = render_proposals_tab() | flex;
 
+            // Peers tab - grid view for per-peer stats
+            auto render_peers_tab = [&]() -> Element {
+                Elements cards;
+                std::vector<Stats> peers;
+                {
+                    std::lock_guard<std::mutex> lock(peers_mutex_);
+                    for (auto const& id : peer_order_)
+                    {
+                        auto it = peer_stats_.find(id);
+                        if (it != peer_stats_.end())
+                            peers.push_back(it->second);
+                    }
+                }
+                if (peers.empty())
+                {
+                    peers = all_peers;
+                }
+
+                auto render_peer_card = [&](Stats const& peer) -> Element {
+                    // Status
+                    bool is_reconnecting =
+                        peer.reconnect_at.time_since_epoch().count() > 0 &&
+                        peer.reconnect_at > now;
+                    Color status_color = peer.connected
+                        ? Color::GreenLight
+                        : (is_reconnecting ? Color::Yellow : Color::Red);
+                    std::string status_icon = peer.connected
+                        ? "🟢"
+                        : (is_reconnecting ? "🟡" : "🔴");
+
+                    // Short address for display
+                    std::string addr = peer.peer_address;
+                    if (addr.size() > 24)
+                        addr = addr.substr(0, 24) + "...";
+
+                    // State label (avoid showing host:port for reconnecting)
+                    std::string state_label;
+                    if (peer.connection_state.rfind("Error:", 0) == 0)
+                        state_label = peer.connection_state;
+                    else if (peer.connected)
+                        state_label = "Connected";
+                    else if (is_reconnecting)
+                        state_label = "Reconnecting";
+                    else
+                        state_label = "Disconnected";
+
+                    // Last packet age
+                    std::string last_pkt = "n/a";
+                    if (peer.last_packet_time.time_since_epoch().count() > 0)
+                    {
+                        auto age =
+                            std::chrono::duration_cast<std::chrono::seconds>(
+                                now - peer.last_packet_time)
+                                .count();
+                        if (age < 0)
+                            age = 0;
+                        last_pkt = std::to_string(age) + "s";
+                    }
+
+                    // Reconnect countdown
+                    std::string reconnect_str;
+                    if (is_reconnecting)
+                    {
+                        auto remaining =
+                            std::chrono::duration_cast<std::chrono::seconds>(
+                                peer.reconnect_at - now)
+                                .count();
+                        if (remaining < 0)
+                            remaining = 0;
+                        reconnect_str =
+                            "reconnect in " + std::to_string(remaining) + "s";
+                    }
+
+                    // Fixed packet type slots for easy cross-peer comparison
+                    static const std::vector<std::string> fixed_types = {
+                        "mtPING",
+                        "mtMANIFESTS",
+                        "mtCLUSTER",
+                        "mtENDPOINTS",
+                        "mtTRANSACTION",
+                        "mtGET_LEDGER",
+                        "mtLEDGER_DATA",
+                        "mtPROPOSE_LEDGER",
+                        "mtSTATUS_CHANGE",
+                        "mtHAVE_SET",
+                        "mtVALIDATION",
+                        "mtGET_OBJECTS",
+                        "mtVALIDATORLIST",
+                        "mtSQUELCH",
+                        "mtVALIDATORLISTCOLLECTION",
+                        "mtPROOF_PATH_REQ",
+                        "mtPROOF_PATH_RESPONSE",
+                        "mtREPLAY_DELTA_REQ",
+                        "mtREPLAY_DELTA_RESPONSE",
+                        "mtHAVE_TRANSACTIONS",
+                        "mtTRANSACTIONS",
+                        "mtGET_PEER_SHARD_INFO_V2",
+                        "mtPEER_SHARD_INFO_V2",
+                    };
+
+                    Elements lines;
+                    lines.push_back(hbox({
+                        text(status_icon + " ") | color(status_color),
+                        text(peer.peer_id) | bold | color(status_color),
+                    }));
+                    lines.push_back(hbox({
+                        text("Addr: ") | dim,
+                        text(addr.empty() ? "(unknown)" : addr),
+                    }));
+                    lines.push_back(hbox({
+                        text("State: ") | dim,
+                        text(state_label) | color(status_color),
+                    }));
+                    if (!peer.peer_version.empty() ||
+                        !peer.protocol_version.empty())
+                    {
+                        lines.push_back(hbox({
+                            text("Ver: ") | dim,
+                            text(
+                                peer.peer_version.empty() ? "-"
+                                                          : peer.peer_version) |
+                                dim,
+                            text("  Proto: ") | dim,
+                            text(
+                                peer.protocol_version.empty()
+                                    ? "-"
+                                    : peer.protocol_version) |
+                                dim,
+                        }));
+                    }
+                    if (!reconnect_str.empty())
+                    {
+                        lines.push_back(text(reconnect_str) | dim);
+                    }
+                    lines.push_back(hbox({
+                        text("Uptime: ") | dim,
+                        text(
+                            peer.connected
+                                ? format_elapsed(peer.elapsed_seconds)
+                                : std::string("--:--:--")) |
+                            bold,
+                    }));
+                    lines.push_back(hbox({
+                        text("Last pkt: ") | dim,
+                        text(last_pkt),
+                    }));
+                    lines.push_back(hbox({
+                        text("Pkts: ") | dim,
+                        text(format_number(peer.total_packets)) | bold,
+                        text("  Bytes: ") | dim,
+                        text(format_bytes(
+                            static_cast<double>(peer.total_bytes))) |
+                            bold,
+                    }));
+                    lines.push_back(hbox({
+                        text("Rate: ") | dim,
+                        text(
+                            format_rate(
+                                peer.connected ? peer.packets_per_sec : 0.0) +
+                            "/s") |
+                            color(Color::GreenLight),
+                        text("  ") | dim,
+                        text(
+                            format_bytes(
+                                peer.connected ? peer.bytes_per_sec : 0.0) +
+                            "/s") |
+                            color(Color::Cyan),
+                    }));
+
+                    auto render_type_line = [&](std::string const& type,
+                                                uint64_t count) -> Element {
+                        return hbox({
+                            text("  ") | dim,
+                            text(type) | color(Color::Yellow) |
+                                size(WIDTH, EQUAL, 28),
+                            text(": ") | dim,
+                            text(format_number(count)) | dim |
+                                size(WIDTH, EQUAL, 6),
+                        });
+                    };
+
+                    Elements left_col;
+                    Elements right_col;
+                    for (size_t i = 0; i < fixed_types.size(); ++i)
+                    {
+                        auto const& type = fixed_types[i];
+                        auto it = peer.packet_counts.find(type);
+                        uint64_t count =
+                            it != peer.packet_counts.end() ? it->second : 0;
+                        auto line = render_type_line(type, count);
+                        if (i % 2 == 0)
+                            left_col.push_back(line);
+                        else
+                            right_col.push_back(line);
+                    }
+                    lines.push_back(text("Packet types:") | dim);
+                    lines.push_back(hbox({
+                        vbox(left_col) | size(WIDTH, EQUAL, 42),
+                        separator(),
+                        vbox(right_col) | size(WIDTH, EQUAL, 42),
+                    }));
+
+                    return vbox(lines) | border;
+                };
+
+                if (peers.empty())
+                {
+                    return vbox({
+                               text("No peers connected") | dim | hcenter,
+                           }) |
+                        flex;
+                }
+
+                for (auto const& peer : peers)
+                {
+                    cards.push_back(render_peer_card(peer));
+                }
+
+                // Build a 3x3 grid (or fewer if not enough peers)
+                const int columns = 3;
+                const int max_cards = 9;
+                const int rows = 3;
+                if (static_cast<int>(cards.size()) > max_cards)
+                    cards.resize(max_cards);
+
+                auto term_size = Terminal::Size();
+                int available_width = term_size.dimx - 6;
+                int available_height = term_size.dimy - 8;
+                int card_width =
+                    std::max(20, (available_width - (columns - 1)) / columns);
+                int card_height =
+                    std::max(6, (available_height - (rows - 1)) / rows);
+
+                std::vector<Element> rows_el;
+                for (size_t i = 0; i < cards.size(); i += columns)
+                {
+                    Elements row_cells;
+                    for (int c = 0; c < columns; ++c)
+                    {
+                        size_t idx = i + c;
+                        if (idx < cards.size())
+                            row_cells.push_back(
+                                cards[idx] | size(WIDTH, EQUAL, card_width) |
+                                size(HEIGHT, EQUAL, card_height));
+                        else
+                            row_cells.push_back(
+                                filler() | size(WIDTH, EQUAL, card_width) |
+                                size(HEIGHT, EQUAL, card_height));
+                        if (c < columns - 1)
+                            row_cells.push_back(separator());
+                    }
+                    rows_el.push_back(hbox(row_cells));
+                    if (i + columns < cards.size())
+                        rows_el.push_back(separator());
+                }
+
+                std::string header =
+                    "PEERS (" + std::to_string(all_peers.size()) + ")";
+                if (all_peers.size() > static_cast<size_t>(max_cards))
+                {
+                    header += " showing first " + std::to_string(max_cards);
+                }
+
+                return vbox({
+                    text(header) | bold | color(Color::Cyan),
+                    separator(),
+                    vbox(rows_el) | flex,
+                });
+            };
+
+            auto peers_content = render_peers_tab() | flex;
+
             // Select content based on tab
-            Element content = tab == 0 ? main_content : proposals_content;
+            Element content = tab == 0
+                ? main_content
+                : (tab == 1 ? proposals_content : peers_content);
 
             // Layout - use explicit 50/50 width for main columns
             return vbox({
@@ -2885,7 +3232,7 @@ PeerDashboard::run_ui()
                        separator(),
                        content | flex,
                        separator(),
-                       text("'1'/'2' tabs | SPACE pause | 'q' quit | 'c' "
+                       text("'1'/'2'/'3' tabs | SPACE pause | 'q' quit | 'c' "
                             "clear") |
                            hcenter | dim,
                    }) |
@@ -2929,6 +3276,11 @@ PeerDashboard::run_ui()
                 else if (event.character() == "2")
                 {
                     current_tab_ = 1;  // Proposals tab
+                    return true;
+                }
+                else if (event.character() == "3")
+                {
+                    current_tab_ = 2;  // Peers tab
                     return true;
                 }
                 else if (event.character() == " ")

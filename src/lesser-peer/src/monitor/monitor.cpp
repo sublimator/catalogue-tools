@@ -499,6 +499,12 @@ peer_monitor::handle_event(PeerEvent const& event)
                     }
                 }
 
+                // Clear start time so uptime doesn't keep ticking
+                {
+                    std::lock_guard<std::mutex> lock(peer_start_mutex_);
+                    peer_start_times_.erase(event.peer_id);
+                }
+
                 // Allow queries/endpoints to be sent again on reconnect
                 {
                     std::lock_guard<std::mutex> lock(query_mutex_);
@@ -699,6 +705,21 @@ peer_monitor::update_dashboard_state(
 
     PeerDashboard::Stats stats;
     stats.peer_id = peer_id;
+
+    // Preserve existing counters/metrics for this peer so disconnects don't
+    // zero them.
+    {
+        auto all_peers = dashboard_->get_all_peers_stats();
+        for (auto const& peer : all_peers)
+        {
+            if (peer.peer_id == peer_id)
+            {
+                stats = peer;
+                stats.peer_id = peer_id;
+                break;
+            }
+        }
+    }
 
     if (state.connection)
     {
