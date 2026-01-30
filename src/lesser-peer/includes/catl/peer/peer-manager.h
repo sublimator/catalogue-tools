@@ -46,6 +46,9 @@ struct ReconnectConfig
 
 class PeerSession : public std::enable_shared_from_this<PeerSession>
 {
+    // Test access
+    friend class PeerSessionTestAccess;
+
 public:
     PeerSession(
         std::string id,

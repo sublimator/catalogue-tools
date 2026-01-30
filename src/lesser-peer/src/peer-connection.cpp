@@ -499,10 +499,10 @@ peer_connection::handle_read_header(
                         ec.message());
                     if (ec != asio::error::operation_aborted)
                     {
-                        close();
-                        if (disconnect_handler_)
+                        self->close();
+                        if (self->disconnect_handler_)
                         {
-                            disconnect_handler_(ec);
+                            self->disconnect_handler_(ec);
                         }
                     }
                     return;

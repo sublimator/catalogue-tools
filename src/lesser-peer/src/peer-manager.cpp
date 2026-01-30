@@ -188,7 +188,7 @@ PeerSession::publish_state_error(boost::system::error_code const& ec)
         return;
 
     PeerStateEvent state_event{
-        PeerStateEvent::State::Error, ec.message(), ec, connection_};
+        PeerStateEvent::State::Error, ec.message(), ec, connection_, {}};
     PeerEvent event{
         id_,
         PeerEventType::State,
