@@ -4,6 +4,7 @@
 #include <atomic>
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
+#include <chrono>
 #include <mutex>
 
 #include <catl/peer/peer-manager.h>
@@ -139,6 +140,44 @@ TEST(PeerSession, AttemptReconnectNoopWhenStopped)
 
     EXPECT_EQ(
         PeerSessionTestAccess::connection(*session).get(), original_conn.get());
+}
+
+TEST(PeerSession, ReconnectTimerFiresConnectingEvent)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_ctx(asio::ssl::context::tlsv12);
+    auto bus = std::make_shared<PeerEventBus>();
+
+    std::atomic<int> connecting_count{0};
+    auto sub_id = bus->subscribe([&](PeerEvent const& event) {
+        if (event.type != PeerEventType::State)
+            return;
+        auto const& st = std::get<PeerStateEvent>(event.data);
+        if (st.state == PeerStateEvent::State::Connecting)
+            connecting_count++;
+    });
+
+    auto session = std::make_shared<PeerSession>(
+        "peer-1", io, ssl_ctx, make_config(), bus);
+
+    ReconnectConfig cfg;
+    cfg.initial_delay = std::chrono::seconds(0);
+    cfg.max_delay = std::chrono::seconds(1);
+    cfg.backoff_multiplier = 1.0;
+    session->set_reconnect_config(cfg);
+
+    boost::system::error_code ec = boost::asio::error::connection_reset;
+    PeerSessionTestAccess::handle_disconnect(*session, ec);
+
+    asio::steady_timer stop_timer(io);
+    stop_timer.expires_after(std::chrono::milliseconds(100));
+    stop_timer.async_wait([&](boost::system::error_code const&) { io.stop(); });
+
+    io.run();
+
+    EXPECT_GE(connecting_count.load(), 1);
+
+    bus->unsubscribe(sub_id);
 }
 
 }  // namespace test
