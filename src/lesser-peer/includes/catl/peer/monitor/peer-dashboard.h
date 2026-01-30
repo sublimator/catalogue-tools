@@ -142,6 +142,8 @@ public:
         // Connection state
         std::string connection_state = "Disconnected";
         std::chrono::steady_clock::time_point last_packet_time;
+        std::chrono::steady_clock::time_point
+            reconnect_at;  // When reconnect will be attempted
 
         // Ledger tracking
         LedgerInfo current_ledger;

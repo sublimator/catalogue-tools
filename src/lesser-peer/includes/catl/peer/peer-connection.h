@@ -20,6 +20,7 @@ public:
     using connection_handler = std::function<void(boost::system::error_code)>;
     using packet_handler = std::function<
         void(packet_header const&, std::vector<std::uint8_t> const&)>;
+    using disconnect_handler = std::function<void(boost::system::error_code)>;
 
     peer_connection(
         asio::io_context& io_context,
@@ -101,6 +102,10 @@ public:
     void
     close();
 
+    // Set handler to be called on disconnect (EOF, reset, etc.)
+    void
+    set_disconnect_handler(disconnect_handler handler);
+
     // Get socket for accept operations
     ssl_socket&
     socket()
@@ -174,6 +179,9 @@ private:
     std::atomic<uint32_t> query_seq_{1};  // Start at 1
     mutable std::mutex query_map_mutex_;
     std::map<uint32_t, std::string> query_map_;  // seq -> tx_hash
+
+    // Disconnect handler
+    disconnect_handler disconnect_handler_;
 
     // Helper methods
     void

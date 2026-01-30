@@ -71,7 +71,12 @@ PeerSession::start()
     if (started_)
         return;
     started_ = true;
-    publish_state(PeerStateEvent::State::Connecting);
+    explicitly_stopped_ = false;
+    current_backoff_ = reconnect_config_.initial_delay;
+    reconnect_attempts_ = 0;
+
+    std::string connect_msg = config_.host + ":" + std::to_string(config_.port);
+    publish_state(PeerStateEvent::State::Connecting, connect_msg);
 
     connection_->async_connect(
         [self = shared_from_this()](boost::system::error_code ec) {
@@ -82,9 +87,15 @@ PeerSession::start()
 void
 PeerSession::stop()
 {
+    explicitly_stopped_ = true;
+    if (reconnect_timer_)
+    {
+        reconnect_timer_->cancel();
+        reconnect_timer_.reset();
+    }
     connection_->close();
     connected_ = false;
-    publish_state(PeerStateEvent::State::Disconnected);
+    publish_state(PeerStateEvent::State::Disconnected, "Stopped");
 }
 
 void
@@ -92,12 +103,22 @@ PeerSession::handle_connect_result(boost::system::error_code const& ec)
 {
     if (ec)
     {
-        publish_state_error(ec);
+        handle_disconnect(ec);
         return;
     }
 
+    // Reset backoff on successful connection
+    current_backoff_ = reconnect_config_.initial_delay;
+    reconnect_attempts_ = 0;
+
     connected_ = true;
     publish_state(PeerStateEvent::State::Connected);
+
+    // Set up disconnect handler to trigger reconnection
+    connection_->set_disconnect_handler(
+        [self = shared_from_this()](boost::system::error_code ec) {
+            self->handle_disconnect(ec);
+        });
 
     connection_->start_read([self = shared_from_this()](
                                 packet_header const& header,
@@ -109,12 +130,13 @@ PeerSession::handle_connect_result(boost::system::error_code const& ec)
 void
 PeerSession::publish_state(
     PeerStateEvent::State state,
-    std::string const& message)
+    std::string const& message,
+    std::chrono::steady_clock::time_point reconnect_at)
 {
     if (!bus_)
         return;
 
-    PeerStateEvent state_event{state, message, {}, connection_};
+    PeerStateEvent state_event{state, message, {}, connection_, reconnect_at};
     PeerEvent event{
         id_,
         PeerEventType::State,
@@ -194,6 +216,83 @@ std::string
 PeerSession::remote_endpoint() const
 {
     return connection_->remote_endpoint();
+}
+
+void
+PeerSession::set_reconnect_config(ReconnectConfig config)
+{
+    reconnect_config_ = std::move(config);
+    current_backoff_ = reconnect_config_.initial_delay;
+}
+
+void
+PeerSession::handle_disconnect(boost::system::error_code ec)
+{
+    connected_ = false;
+
+    if (explicitly_stopped_)
+    {
+        publish_state(PeerStateEvent::State::Disconnected, "Stopped");
+        return;
+    }
+
+    publish_state(PeerStateEvent::State::Disconnected, ec.message());
+
+    if (reconnect_config_.enabled)
+    {
+        schedule_reconnect();
+    }
+}
+
+void
+PeerSession::schedule_reconnect()
+{
+    auto reconnect_at = std::chrono::steady_clock::now() + current_backoff_;
+    publish_state(
+        PeerStateEvent::State::Reconnecting,
+        config_.host + ":" + std::to_string(config_.port),
+        reconnect_at);
+
+    reconnect_timer_ = std::make_shared<asio::steady_timer>(io_context_);
+    reconnect_timer_->expires_after(current_backoff_);
+    reconnect_timer_->async_wait(
+        [self = shared_from_this()](boost::system::error_code ec) {
+            if (!ec && !self->explicitly_stopped_)
+            {
+                self->attempt_reconnect();
+            }
+        });
+
+    // Exponential backoff with cap
+    auto next_backoff = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::duration<double>(
+            current_backoff_.count() * reconnect_config_.backoff_multiplier));
+    current_backoff_ = std::min(next_backoff, reconnect_config_.max_delay);
+}
+
+void
+PeerSession::attempt_reconnect()
+{
+    reconnect_attempts_++;
+    LOGI(
+        "Attempting reconnect #",
+        reconnect_attempts_,
+        " to ",
+        config_.host,
+        ":",
+        config_.port);
+
+    // Create a new connection
+    connection_ =
+        std::make_shared<peer_connection>(io_context_, ssl_context_, config_);
+
+    std::string connect_msg = config_.host + ":" + std::to_string(config_.port);
+    publish_state(PeerStateEvent::State::Connecting, connect_msg);
+
+    connection_->async_connect(
+        [self = shared_from_this()](boost::system::error_code ec) {
+            self->handle_connect_result(ec);
+        });
 }
 
 // ------------------- PeerManager -------------------

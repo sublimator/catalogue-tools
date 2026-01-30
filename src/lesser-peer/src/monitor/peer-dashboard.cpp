@@ -78,7 +78,9 @@ PeerDashboard::stop()
     exit_requested_ = true;
     running_ = false;
 
-    if (ui_thread_ && ui_thread_->joinable())
+    // Only join if we're not being called from the UI thread itself
+    if (ui_thread_ && ui_thread_->joinable() &&
+        ui_thread_->get_id() != std::this_thread::get_id())
     {
         ui_thread_->join();
         ui_thread_.reset();
@@ -1213,12 +1215,33 @@ PeerDashboard::run_ui()
                 primary_network_id = primary_peer.network_id;
             }
 
-            // Connection status color
-            Color status_color = is_connected ? Color::GreenLight : Color::Red;
-            std::string status_icon = is_connected ? "🟢" : "🔴";
+            // Get current time for all time-based checks
+            auto now = std::chrono::steady_clock::now();
+
+            // Connection status color - check for reconnecting state
+            bool is_reconnecting = !all_peers.empty() &&
+                all_peers[0].reconnect_at.time_since_epoch().count() > 0 &&
+                all_peers[0].reconnect_at > now;
+            Color status_color;
+            std::string status_icon;
+
+            if (is_connected)
+            {
+                status_color = Color::GreenLight;
+                status_icon = "🟢";
+            }
+            else if (is_reconnecting)
+            {
+                status_color = Color::Yellow;
+                status_icon = "🟡";
+            }
+            else
+            {
+                status_color = Color::Red;
+                status_icon = "🔴";
+            }
 
             // Check if primary peer is receiving data
-            auto now = std::chrono::steady_clock::now();
             bool receiving = false;
             if (!all_peers.empty())
             {
@@ -1228,8 +1251,27 @@ PeerDashboard::run_ui()
                         .count();
                 receiving = all_peers[0].connected && since_last < 5;
             }
-            std::string activity =
-                receiving ? get_spinner() + " Receiving" : "Idle";
+            std::string activity;
+            if (receiving)
+            {
+                activity = get_spinner() + " Receiving";
+            }
+            else if (is_reconnecting)
+            {
+                // Compute live countdown for primary peer
+                auto remaining =
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        all_peers[0].reconnect_at - now)
+                        .count();
+                if (remaining < 0)
+                    remaining = 0;
+                activity = get_spinner() + " " + state + " in " +
+                    std::to_string(remaining) + "s";
+            }
+            else
+            {
+                activity = "Idle";
+            }
 
             // Get consensus tracking info
             auto last_validated = get_last_validated();
@@ -1792,25 +1834,71 @@ PeerDashboard::run_ui()
                 for (size_t i = 0; i < all_peers.size(); ++i)
                 {
                     const auto& peer = all_peers[i];
-                    Color peer_status_color =
-                        peer.connected ? Color::GreenLight : Color::Red;
-                    std::string peer_num = std::to_string(i + 1) + ".";
-                    std::string status_icon = peer.connected ? "●" : "○";
 
-                    // Check if this peer is actively receiving
+                    // Determine status based on reconnect_at time
+                    bool is_reconnecting =
+                        peer.reconnect_at.time_since_epoch().count() > 0 &&
+                        peer.reconnect_at > now;
+                    Color peer_status_color;
+                    std::string status_icon;
+
+                    if (peer.connected)
+                    {
+                        peer_status_color = Color::GreenLight;
+                        status_icon = "●";
+                    }
+                    else if (is_reconnecting)
+                    {
+                        peer_status_color = Color::Yellow;
+                        status_icon = "◐";
+                    }
+                    else
+                    {
+                        peer_status_color = Color::Red;
+                        status_icon = "○";
+                    }
+
+                    std::string peer_num = std::to_string(i + 1) + ".";
+
+                    // Check if this peer is actively receiving or reconnecting
                     auto peer_since_last =
                         std::chrono::duration_cast<std::chrono::seconds>(
                             now - peer.last_packet_time)
                             .count();
                     bool peer_receiving = peer.connected && peer_since_last < 3;
                     std::string activity_icon =
-                        peer_receiving ? get_spinner() : " ";
+                        (peer_receiving || is_reconnecting) ? get_spinner()
+                                                            : " ";
+
+                    // Show address if connected, otherwise show connection
+                    // state
+                    std::string display_text;
+                    if (peer.connected)
+                    {
+                        display_text = peer.peer_address;
+                    }
+                    else if (is_reconnecting)
+                    {
+                        // Compute live countdown
+                        auto remaining =
+                            std::chrono::duration_cast<std::chrono::seconds>(
+                                peer.reconnect_at - now)
+                                .count();
+                        if (remaining < 0)
+                            remaining = 0;
+                        display_text = peer.connection_state + " in " +
+                            std::to_string(remaining) + "s";
+                    }
+                    else
+                    {
+                        display_text = peer.connection_state;
+                    }
 
                     peers_elements.push_back(hbox({
                         text(peer_num) | size(WIDTH, EQUAL, 3) | dim,
                         text(status_icon) | color(peer_status_color),
                         text(activity_icon) | color(Color::Cyan),
-                        text(" " + peer.peer_address) | bold,
+                        text(" " + display_text) | bold,
                         text(" | "),
                         text(format_number(peer.total_packets)) | dim,
                         text(" pkts | "),
@@ -2810,12 +2898,11 @@ PeerDashboard::run_ui()
             {
                 if (event.character() == "q")
                 {
+                    // Just exit the screen - the loop will exit and
+                    // the monitor will detect shutdown via the callback
+                    // after the UI thread finishes cleanly
+                    exit_requested_ = true;
                     screen.Exit();
-                    // Signal monitor to shut down
-                    if (shutdown_callback_)
-                    {
-                        shutdown_callback_();
-                    }
                     return true;
                 }
                 else if (event.character() == "c")
@@ -2912,10 +2999,17 @@ PeerDashboard::run_ui()
         }
 
         running_ = false;
-        exit_requested_ = false;
 
         // Belt-and-suspenders: restore terminal after FTXUI cleanup
         restore_terminal();
+
+        // If user requested exit (pressed 'q'), notify the monitor to shut down
+        // Do this AFTER the loop exits to avoid deadlock
+        if (exit_requested_ && shutdown_callback_)
+        {
+            shutdown_callback_();
+        }
+        exit_requested_ = false;
     }
     catch (...)
     {

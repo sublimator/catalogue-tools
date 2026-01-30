@@ -19,12 +19,20 @@ enum class PeerEventType { State, Packet, Stats, Lifecycle };
 
 struct PeerStateEvent
 {
-    enum class State { Connecting, Connected, Disconnected, Error };
+    enum class State {
+        Connecting,
+        Connected,
+        Disconnected,
+        Error,
+        Reconnecting
+    };
 
     State state;
     std::string message;
     boost::system::error_code error;
     std::shared_ptr<peer_connection> connection;
+    std::chrono::steady_clock::time_point
+        reconnect_at;  // For Reconnecting state
 };
 
 struct PeerPacketEvent

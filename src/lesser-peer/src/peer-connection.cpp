@@ -446,10 +446,15 @@ peer_connection::handle_read_header(
         // Log exact error code for debugging disconnects
         LOGE("Error reading header: ", ec.message(), " (val=", ec.value(), ")");
 
-        if (ec == asio::error::eof || ec == asio::error::connection_reset)
+        if (ec == asio::error::eof || ec == asio::error::connection_reset ||
+            ec == asio::error::broken_pipe)
         {
-            LOGI("🔌 Connection closed by peer (EOF/Reset) during header read");
+            LOGI("Connection closed by peer during header read");
             close();
+            if (disconnect_handler_)
+            {
+                disconnect_handler_(ec);
+            }
         }
         return;
     }
@@ -546,10 +551,15 @@ peer_connection::handle_read_payload(
         LOGE(
             "Error reading payload: ", ec.message(), " (val=", ec.value(), ")");
         // Check if it's EOF or connection closed
-        if (ec == asio::error::eof || ec == asio::error::connection_reset)
+        if (ec == asio::error::eof || ec == asio::error::connection_reset ||
+            ec == asio::error::broken_pipe)
         {
-            LOGI("🔌 Connection closed by peer (EOF/Reset) during payload read");
+            LOGI("Connection closed by peer during payload read");
             close();
+            if (disconnect_handler_)
+            {
+                disconnect_handler_(ec);
+            }
         }
         return;
     }
@@ -607,10 +617,23 @@ peer_connection::async_send_packet(
     asio::async_write(
         *socket_,
         asio::buffer(packet),
-        [handler](boost::system::error_code ec, std::size_t) {
+        [self = shared_from_this(), handler](
+            boost::system::error_code ec, std::size_t) {
             if (handler)
             {
                 handler(ec);
+            }
+            // Detect connection errors and trigger disconnect
+            if (ec == asio::error::eof || ec == asio::error::connection_reset ||
+                ec == asio::error::broken_pipe ||
+                ec == asio::error::not_connected)
+            {
+                LOGI("Connection lost during write");
+                self->close();
+                if (self->disconnect_handler_)
+                {
+                    self->disconnect_handler_(ec);
+                }
             }
         });
 }
@@ -965,6 +988,12 @@ peer_connection::request_transaction_set_nodes(
                 LOGE("Failed to request transaction set nodes: ", ec.message());
             }
         });
+}
+
+void
+peer_connection::set_disconnect_handler(disconnect_handler handler)
+{
+    disconnect_handler_ = std::move(handler);
 }
 
 void

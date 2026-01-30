@@ -63,6 +63,11 @@ PacketLogger::log_state(PeerStateEvent const& state, std::string const& peer_id)
             state.error.value(),
             ")");
     }
+    else if (state.state == PeerStateEvent::State::Reconnecting)
+    {
+        PLOGI(
+            packet_log, "🔄 Peer Reconnecting: ", peer_id, " - ", state.message);
+    }
 }
 
 void

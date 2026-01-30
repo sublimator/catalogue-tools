@@ -251,6 +251,12 @@ peer_monitor::request_stop()
     {
         running_ = false;
 
+        // Stop dashboard first so it exits cleanly and restores terminal
+        if (dashboard_)
+        {
+            dashboard_->stop();
+        }
+
         // Reset work guard to allow io_context to finish
         work_guard_.reset();
 
@@ -634,11 +640,11 @@ peer_monitor::schedule_heartbeat(
         }
 
         // Reschedule
-        timer->expires_after(std::chrono::seconds(10));
+        timer->expires_after(std::chrono::seconds(3));
         timer->async_wait(*send_ping);
     };
 
-    timer->expires_after(std::chrono::seconds(10));
+    timer->expires_after(std::chrono::seconds(3));
     timer->async_wait(*send_ping);
 }
 
@@ -665,7 +671,9 @@ peer_monitor::update_dashboard_state(
     {
         case PeerStateEvent::State::Connecting:
             stats.connected = false;
-            stats.connection_state = "Connecting";
+            stats.connection_state = state.message.empty()
+                ? "Connecting"
+                : "Connecting: " + state.message;
             break;
         case PeerStateEvent::State::Connected:
             stats.connected = true;
@@ -679,6 +687,11 @@ peer_monitor::update_dashboard_state(
         case PeerStateEvent::State::Error:
             stats.connected = false;
             stats.connection_state = "Error: " + state.message;
+            break;
+        case PeerStateEvent::State::Reconnecting:
+            stats.connected = false;
+            stats.connection_state = state.message;
+            stats.reconnect_at = state.reconnect_at;
             break;
     }
 

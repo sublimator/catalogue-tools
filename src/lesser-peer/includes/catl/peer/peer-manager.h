@@ -35,6 +35,15 @@ private:
     std::atomic<SubscriberId> next_id_{1};
 };
 
+// Reconnection configuration
+struct ReconnectConfig
+{
+    bool enabled = true;
+    std::chrono::seconds initial_delay{1};
+    std::chrono::seconds max_delay{60};
+    double backoff_multiplier = 2.0;
+};
+
 class PeerSession : public std::enable_shared_from_this<PeerSession>
 {
 public:
@@ -76,12 +85,27 @@ public:
     void
     publish_lifecycle(PeerLifecycleEvent::Action action);
 
+    void
+    set_reconnect_config(ReconnectConfig config);
+
 private:
+    void
+    handle_disconnect(boost::system::error_code ec);
+
+    void
+    schedule_reconnect();
+
+    void
+    attempt_reconnect();
+
     void
     handle_connect_result(boost::system::error_code const& ec);
 
     void
-    publish_state(PeerStateEvent::State state, std::string const& message = {});
+    publish_state(
+        PeerStateEvent::State state,
+        std::string const& message = {},
+        std::chrono::steady_clock::time_point reconnect_at = {});
 
     void
     publish_state_error(boost::system::error_code const& ec);
@@ -104,6 +128,13 @@ private:
     bool started_{false};
     bool connected_{false};
     packet_counters counters_;
+
+    // Reconnection state
+    ReconnectConfig reconnect_config_;
+    std::shared_ptr<asio::steady_timer> reconnect_timer_;
+    std::chrono::seconds current_backoff_{1};
+    int reconnect_attempts_{0};
+    bool explicitly_stopped_{false};
 };
 
 class PeerManager
