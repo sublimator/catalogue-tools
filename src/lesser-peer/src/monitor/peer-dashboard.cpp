@@ -2406,14 +2406,21 @@ PeerDashboard::run_ui()
                     return result;
                 };
 
+                // Timing info for first/last validator
+                struct ValidatorTiming
+                {
+                    std::string validator_key;
+                    int64_t delta_ms;
+                };
+
                 // Helper to render txset info
-                // delta_ms: milliseconds since reference time (negative if
-                // before), nullopt to hide
+                // first/last: timing info for first and last validators
                 auto render_txset_info =
                     [&](std::string const& txset_hash,
                         std::set<std::string> const& validators,
                         bool is_winner,
-                        std::optional<int64_t> delta_ms =
+                        std::optional<ValidatorTiming> first = std::nullopt,
+                        std::optional<ValidatorTiming> last =
                             std::nullopt) -> Elements {
                     Elements els;
                     Color hash_color =
@@ -2426,15 +2433,26 @@ PeerDashboard::run_ui()
                     std::string validator_str =
                         format_validator_set(validators);
 
-                    // Format delta string
-                    std::string delta_str;
-                    if (delta_ms.has_value())
+                    // Format timing string: "n1=+100ms" or "n1=+100ms,
+                    // n3=+500ms"
+                    std::string timing_str;
+                    auto format_timing = [&](ValidatorTiming const& t) {
+                        auto it = validator_index.find(t.validator_key);
+                        int idx = it != validator_index.end() ? it->second : 0;
+                        std::string ms_str = t.delta_ms >= 0
+                            ? "+" + std::to_string(t.delta_ms) + "ms"
+                            : std::to_string(t.delta_ms) + "ms";
+                        return "n" + std::to_string(idx) + "=" + ms_str;
+                    };
+
+                    if (first.has_value())
                     {
-                        int64_t ms = delta_ms.value();
-                        if (ms >= 0)
-                            delta_str = "+" + std::to_string(ms) + "ms";
-                        else
-                            delta_str = std::to_string(ms) + "ms";
+                        timing_str = format_timing(first.value());
+                        if (last.has_value() &&
+                            last->validator_key != first->validator_key)
+                        {
+                            timing_str += ", " + format_timing(last.value());
+                        }
                     }
 
                     els.push_back(hbox({
@@ -2442,8 +2460,8 @@ PeerDashboard::run_ui()
                         text(short_hash) | bold | color(hash_color),
                         text(" ") | dim,
                         text(validator_str) | color(hash_color),
-                        delta_str.empty() ? text("")
-                                          : text(" " + delta_str) | dim,
+                        timing_str.empty() ? text("")
+                                           : text(" " + timing_str) | dim,
                     }));
 
                     auto txset_it = txset_data.find(txset_hash);
@@ -2628,13 +2646,16 @@ PeerDashboard::run_ui()
                     }));
                     elements.push_back(separator());
 
-                    // Get seq=0 proposals only - collect validators and first
-                    // seen time
+                    // Get seq=0 proposals only - collect validators and
+                    // first/last seen times
                     struct TxSetEntry
                     {
                         std::string hash;
                         std::set<std::string> validators;
                         std::chrono::steady_clock::time_point first_seen;
+                        std::chrono::steady_clock::time_point last_seen;
+                        std::string first_validator;
+                        std::string last_validator;
                     };
                     std::map<std::string, TxSetEntry> txset_map;
                     for (auto const& event : props.timeline)
@@ -2646,6 +2667,18 @@ PeerDashboard::run_ui()
                             {
                                 entry.hash = event.tx_set_hash;
                                 entry.first_seen = event.received_at;
+                                entry.first_validator = event.validator_key;
+                                entry.last_seen = event.received_at;
+                                entry.last_validator = event.validator_key;
+                            }
+                            else
+                            {
+                                // Update last seen if this is newer
+                                if (event.received_at > entry.last_seen)
+                                {
+                                    entry.last_seen = event.received_at;
+                                    entry.last_validator = event.validator_key;
+                                }
                             }
                             entry.validators.insert(event.validator_key);
                         }
@@ -2691,13 +2724,24 @@ PeerDashboard::run_ui()
                     for (auto const& entry : txsets)
                     {
                         bool is_majority = (entry.hash == majority_hash);
-                        // Calculate delta in milliseconds
-                        auto delta = std::chrono::duration_cast<
-                                         std::chrono::milliseconds>(
-                                         entry.first_seen - ref_time)
-                                         .count();
+                        // Calculate first/last timing
+                        auto first_delta = std::chrono::duration_cast<
+                                               std::chrono::milliseconds>(
+                                               entry.first_seen - ref_time)
+                                               .count();
+                        auto last_delta = std::chrono::duration_cast<
+                                              std::chrono::milliseconds>(
+                                              entry.last_seen - ref_time)
+                                              .count();
+                        ValidatorTiming first{
+                            entry.first_validator, first_delta};
+                        ValidatorTiming last{entry.last_validator, last_delta};
                         auto info = render_txset_info(
-                            entry.hash, entry.validators, is_majority, delta);
+                            entry.hash,
+                            entry.validators,
+                            is_majority,
+                            first,
+                            last);
                         for (auto& el : info)
                             elements.push_back(std::move(el));
                     }
@@ -2722,13 +2766,16 @@ PeerDashboard::run_ui()
 
                     auto const& props = *curr_props_opt;
 
-                    // Get seq=N proposals only - collect validators and first
-                    // seen time
+                    // Get seq=N proposals only - collect validators and
+                    // first/last seen times
                     struct TxSetEntry
                     {
                         std::string hash;
                         std::set<std::string> validators;
                         std::chrono::steady_clock::time_point first_seen;
+                        std::chrono::steady_clock::time_point last_seen;
+                        std::string first_validator;
+                        std::string last_validator;
                     };
                     std::map<std::string, TxSetEntry> txset_map;
                     for (auto const& event : props.timeline)
@@ -2740,6 +2787,17 @@ PeerDashboard::run_ui()
                             {
                                 entry.hash = event.tx_set_hash;
                                 entry.first_seen = event.received_at;
+                                entry.first_validator = event.validator_key;
+                                entry.last_seen = event.received_at;
+                                entry.last_validator = event.validator_key;
+                            }
+                            else
+                            {
+                                if (event.received_at > entry.last_seen)
+                                {
+                                    entry.last_seen = event.received_at;
+                                    entry.last_validator = event.validator_key;
+                                }
                             }
                             entry.validators.insert(event.validator_key);
                         }
@@ -2785,12 +2843,23 @@ PeerDashboard::run_ui()
                     for (auto const& entry : txsets)
                     {
                         bool is_majority = (entry.hash == majority_hash);
-                        auto delta = std::chrono::duration_cast<
-                                         std::chrono::milliseconds>(
-                                         entry.first_seen - ref_time)
-                                         .count();
+                        auto first_delta = std::chrono::duration_cast<
+                                               std::chrono::milliseconds>(
+                                               entry.first_seen - ref_time)
+                                               .count();
+                        auto last_delta = std::chrono::duration_cast<
+                                              std::chrono::milliseconds>(
+                                              entry.last_seen - ref_time)
+                                              .count();
+                        ValidatorTiming first{
+                            entry.first_validator, first_delta};
+                        ValidatorTiming last{entry.last_validator, last_delta};
                         auto info = render_txset_info(
-                            entry.hash, entry.validators, is_majority, delta);
+                            entry.hash,
+                            entry.validators,
+                            is_majority,
+                            first,
+                            last);
                         for (auto& el : info)
                             elements.push_back(std::move(el));
                     }
@@ -2833,6 +2902,9 @@ PeerDashboard::run_ui()
                         std::string hash;
                         std::set<std::string> validators;
                         std::chrono::steady_clock::time_point first_seen;
+                        std::chrono::steady_clock::time_point last_seen;
+                        std::string first_validator;
+                        std::string last_validator;
                     };
                     std::map<std::string, TxSetEntry> txset_map;
                     for (auto const& event : props.timeline)
@@ -2844,6 +2916,17 @@ PeerDashboard::run_ui()
                             {
                                 entry.hash = event.tx_set_hash;
                                 entry.first_seen = event.received_at;
+                                entry.first_validator = event.validator_key;
+                                entry.last_seen = event.received_at;
+                                entry.last_validator = event.validator_key;
+                            }
+                            else
+                            {
+                                if (event.received_at > entry.last_seen)
+                                {
+                                    entry.last_seen = event.received_at;
+                                    entry.last_validator = event.validator_key;
+                                }
                             }
                             entry.validators.insert(event.validator_key);
                         }
@@ -2884,12 +2967,23 @@ PeerDashboard::run_ui()
                     for (auto const& entry : txsets)
                     {
                         bool is_majority = (entry.hash == majority_hash);
-                        auto delta = std::chrono::duration_cast<
-                                         std::chrono::milliseconds>(
-                                         entry.first_seen - ref_time)
-                                         .count();
+                        auto first_delta = std::chrono::duration_cast<
+                                               std::chrono::milliseconds>(
+                                               entry.first_seen - ref_time)
+                                               .count();
+                        auto last_delta = std::chrono::duration_cast<
+                                              std::chrono::milliseconds>(
+                                              entry.last_seen - ref_time)
+                                              .count();
+                        ValidatorTiming first{
+                            entry.first_validator, first_delta};
+                        ValidatorTiming last{entry.last_validator, last_delta};
                         auto info = render_txset_info(
-                            entry.hash, entry.validators, is_majority, delta);
+                            entry.hash,
+                            entry.validators,
+                            is_majority,
+                            first,
+                            last);
                         for (auto& el : info)
                             elements.push_back(std::move(el));
                     }
