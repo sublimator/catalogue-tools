@@ -173,7 +173,7 @@ private:
     asio::io_context& io_context_;
     asio::ssl::context& ssl_context_;
     std::shared_ptr<PeerEventBus> bus_;
-    std::atomic<std::uint64_t> next_peer_id_{1};
+    std::atomic<std::uint64_t> next_peer_id_{0};
     std::map<std::string, std::shared_ptr<PeerSession>> sessions_;
     mutable std::mutex mutex_;
 };

@@ -1928,7 +1928,7 @@ PeerDashboard::run_ui()
                         status_icon = "○";
                     }
 
-                    std::string peer_num = std::to_string(i + 1) + ".";
+                    std::string peer_num = std::to_string(i) + ".";
 
                     // Check if this peer is actively receiving or reconnecting
                     auto peer_since_last =
@@ -1983,7 +1983,7 @@ PeerDashboard::run_ui()
 
             // Connection info section (for primary peer)
             auto connection_section = vbox({
-                text("🌐 PRIMARY PEER (1)") | bold | color(Color::Cyan),
+                text("🌐 PRIMARY PEER (0)") | bold | color(Color::Cyan),
                 separator(),
                 hbox({
                     text("Status: "),
@@ -2198,7 +2198,8 @@ PeerDashboard::run_ui()
             // Debug section for protocol type resolution
             Elements debug_elements;
             debug_elements.push_back(
-                text("🔧 DEBUG: Type Resolution") | bold | color(Color::Yellow));
+                text("🔧 DEBUG: Type Resolution") | bold |
+                color(Color::Yellow));
             debug_elements.push_back(separator());
             if (protocol_)
             {
@@ -2351,7 +2352,7 @@ PeerDashboard::run_ui()
                 std::map<std::string, int> validator_index;
                 {
                     std::lock_guard<std::mutex> lock(consensus_mutex_);
-                    int idx = 1;
+                    int idx = 0;
                     for (auto const& vk : known_validators_)
                     {
                         validator_index[vk] = idx++;
@@ -3067,9 +3068,8 @@ PeerDashboard::run_ui()
                     Color status_color = peer.connected
                         ? Color::GreenLight
                         : (is_reconnecting ? Color::Yellow : Color::Red);
-                    std::string status_icon = peer.connected
-                        ? "🟢"
-                        : (is_reconnecting ? "🟡" : "🔴");
+                    std::string status_icon =
+                        peer.connected ? "🟢" : (is_reconnecting ? "🟡" : "🔴");
 
                     // Short address for display
                     std::string addr = peer.peer_address;
