@@ -4,6 +4,7 @@
 #include "catl/peer/monitor/packet-logger.h"
 #include "catl/peer/monitor/packet-processor.h"
 #include "catl/peer/monitor/peer-dashboard.h"
+#include "catl/peer/monitor/peer-mapping.h"
 #include "catl/peer/monitor/types.h"
 #include "catl/peer/peer-connection.h"
 #include "catl/peer/peer-manager.h"
@@ -87,6 +88,7 @@ private:
     std::unique_ptr<packet_processor> processor_;
     std::unique_ptr<PacketLogger> logger_;
     std::shared_ptr<PeerDashboard> dashboard_;
+    std::shared_ptr<PeerMapping> peer_mapping_;
 
     // Log file for dashboard mode
     std::ofstream log_file_;

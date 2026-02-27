@@ -319,9 +319,6 @@ PeerDashboard::record_validation(
     // Add validator to known set
     known_validators_.insert(validator_key);
 
-    // Track which peer this validator's validations came from
-    peer_to_validator_[peer_id] = validator_key;
-
     // Always add to ledger_validations_ map - never reject based on sequence
     auto& consensus = ledger_validations_[ledger_seq];
     if (consensus.sequence == 0)
@@ -338,13 +335,18 @@ PeerDashboard::record_validation(
     auto it = validators.find(validator_key);
     if (it == validators.end())
     {
-        // New validator for this ledger
+        // New validator for this ledger - this peer delivered first
         ValidatorInfo info;
         info.master_key_hex = validator_key;
         info.ephemeral_key_hex = ephemeral_key;
         info.seen_from_peers.insert(peer_id);
         info.first_seen = now;
         validators[validator_key] = std::move(info);
+
+        // Notify peer mapping: this peer was first to deliver this
+        // validator's validation (likely the direct connection)
+        if (peer_mapping_)
+            peer_mapping_->on_first_validation(peer_id, validator_key);
     }
     else
     {
@@ -2348,14 +2350,25 @@ PeerDashboard::run_ui()
                     txset_data = txset_acquisitions_;
                 }
 
-                // Build validator key -> index mapping (stable ordering)
+                // Build validator key -> index mapping (from peer mapping)
                 std::map<std::string, int> validator_index;
+                if (peer_mapping_)
+                {
+                    auto mappings = peer_mapping_->get_all();
+                    for (auto const& info : mappings)
+                    {
+                        if (!info.master_key.empty())
+                            validator_index[info.master_key] = info.index;
+                    }
+                }
+                // Fallback for validators not mapped to a connected peer
                 {
                     std::lock_guard<std::mutex> lock(consensus_mutex_);
-                    int idx = 0;
+                    int next_idx = static_cast<int>(validator_index.size());
                     for (auto const& vk : known_validators_)
                     {
-                        validator_index[vk] = idx++;
+                        if (validator_index.find(vk) == validator_index.end())
+                            validator_index[vk] = next_idx++;
                     }
                 }
 

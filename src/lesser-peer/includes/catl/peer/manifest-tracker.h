@@ -36,9 +36,9 @@ public:
      * Process a manifest blob to extract key mappings
      * @param manifest_data Raw manifest data
      * @param size Size of manifest data
-     * @return true if successfully processed
+     * @return ManifestInfo if successfully processed
      */
-    bool
+    std::optional<ManifestInfo>
     process_manifest(const uint8_t* manifest_data, size_t size);
 
     /**

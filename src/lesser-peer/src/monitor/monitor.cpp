@@ -47,6 +47,9 @@ peer_monitor::peer_monitor(monitor_config config)
         }
     });
 
+    // Create peer mapping service
+    peer_mapping_ = std::make_shared<PeerMapping>();
+
     // Create dashboard only if enabled
     if (config_.view == ViewMode::Dashboard)
     {
@@ -56,6 +59,8 @@ peer_monitor::peer_monitor(monitor_config config)
             config_.peer.protocol_definitions_path, config_.peer.network_id);
         // Set dashboard on processor for ledger/validation updates
         processor_->set_dashboard(dashboard_);
+        // Share peer mapping with dashboard
+        dashboard_->set_peer_mapping(peer_mapping_);
         // Register shutdown callback so 'q' in dashboard stops the monitor
         dashboard_->set_shutdown_callback([this]() { request_stop(); });
     }

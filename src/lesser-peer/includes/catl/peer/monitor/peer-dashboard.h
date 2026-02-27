@@ -1,5 +1,7 @@
 #pragma once
 
+#include "catl/peer/monitor/peer-mapping.h"
+
 #include <atomic>
 #include <catl/xdata/protocol.h>
 #include <chrono>
@@ -290,6 +292,13 @@ public:
     std::vector<std::string>
     get_available_endpoints() const;
 
+    // Set peer mapping for validator identity resolution
+    void
+    set_peer_mapping(std::shared_ptr<PeerMapping> mapping)
+    {
+        peer_mapping_ = std::move(mapping);
+    }
+
     // Shutdown callback - called when user quits the dashboard
     using shutdown_callback_t = std::function<void()>;
     void
@@ -409,8 +418,9 @@ private:
     // Known validators (for quorum calculation)
     std::set<std::string>
         known_validators_;  // all validators seen (for quorum)
-    std::map<std::string, std::string>
-        peer_to_validator_;  // peer_id -> master_key (if detected)
+
+    // Peer mapping for validator identity resolution
+    std::shared_ptr<PeerMapping> peer_mapping_;
 
     // LRU cleanup helper
     void

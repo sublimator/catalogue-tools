@@ -23,7 +23,7 @@ static LogPartition manifest_partition("manifest", []() -> LogLevel {
     return LogLevel::INFO;
 }());
 
-bool
+std::optional<ManifestTracker::ManifestInfo>
 ManifestTracker::process_manifest(const uint8_t* manifest_data, size_t size)
 {
     try
@@ -127,7 +127,7 @@ ManifestTracker::process_manifest(const uint8_t* manifest_data, size_t size)
         if (master_key.empty() || ephemeral_key.empty())
         {
             PLOGE(manifest_partition, "  Failed to extract keys from manifest");
-            return false;
+            return std::nullopt;
         }
 
         // Convert to hex for map keys
@@ -167,12 +167,12 @@ ManifestTracker::process_manifest(const uint8_t* manifest_data, size_t size)
         PLOGI(manifest_partition, "  Ephemeral: ", ephemeral_base58);
         PLOGI(manifest_partition, "  Sequence:  ", sequence);
 
-        return true;
+        return info;
     }
     catch (std::exception const& e)
     {
         PLOGE(manifest_partition, "Failed to process manifest: ", e.what());
-        return false;
+        return std::nullopt;
     }
 }
 
