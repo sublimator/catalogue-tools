@@ -2,6 +2,7 @@
 #include <catl/peer/monitor/peer-mapping.h>
 
 #include <algorithm>
+#include <cstring>
 #include <set>
 
 namespace catl::peer::monitor {
