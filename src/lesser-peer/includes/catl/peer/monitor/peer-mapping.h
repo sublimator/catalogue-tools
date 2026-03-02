@@ -8,6 +8,20 @@
 
 namespace catl::peer::monitor {
 
+// Maps validator master keys to peer connection indices (V0 = peer-0's
+// validator, etc.) using first-delivery voting.
+//
+// Why voting? In XRPL/Xahau, node identity keys (from the peer handshake
+// Public-Key header) and validator keys are completely separate key pairs
+// loaded from different config sections ([node_seed] vs [validator_token]).
+// There is no protocol message that bridges them. Even xahaud's own
+// reduce_relay::Slots uses a similar observation-based approach internally.
+//
+// How it works: peermon connects directly to each node. When a validation
+// arrives, the delivering peer is recorded. Since the direct path (1 hop)
+// always beats relayed paths (2+ hops through the hub), the peer that most
+// often delivers a validator's validation first is that validator's direct
+// connection. In practice this resolves correctly on the very first round.
 class PeerMapping
 {
 public:
