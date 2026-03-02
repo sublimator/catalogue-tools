@@ -15,11 +15,10 @@ if(is_apple_clang)
     -Wheader-hygiene
   )
   
-  # Try to match GCC's stricter behavior
-  # Unfortunately, libc++ on macOS has different transitive includes than libstdc++
-  # The best we can do is use tools like include-what-you-use (iwyu)
-  message(STATUS "Note: macOS libc++ has different transitive includes than Linux libstdc++")
-  message(STATUS "Consider using include-what-you-use (iwyu) for stricter checking")
+  # Match GCC/libstdc++ behavior: libc++ normally leaks transitive includes
+  # that libstdc++ doesn't, causing builds to pass locally but fail on CI (gcc).
+  # This define strips those transitive includes so missing #includes fail here.
+  add_compile_definitions(_LIBCPP_REMOVE_TRANSITIVE_INCLUDES)
 endif()
 
 # For all compilers, ensure we catch common include issues
