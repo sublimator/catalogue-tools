@@ -52,6 +52,10 @@ public:
     size_t
     resolved_count() const;
 
+    // Reset all votes and mappings (e.g. on network restart)
+    void
+    clear();
+
 private:
     static int
     parse_peer_index(std::string const& peer_id);

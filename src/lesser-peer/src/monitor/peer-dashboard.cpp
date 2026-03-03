@@ -682,6 +682,10 @@ PeerDashboard::reset_consensus_state()
             stats.recent_ledgers.clear();
     }
 
+    // Reset peer mapping (vote history is stale)
+    if (peer_mapping_)
+        peer_mapping_->clear();
+
     // Unpause if paused (stale pinned hashes)
     if (proposals_paused_.load())
     {

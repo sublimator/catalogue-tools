@@ -85,6 +85,15 @@ PeerMapping::resolved_count() const
 }
 
 void
+PeerMapping::clear()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    first_delivery_votes_.clear();
+    master_to_index_.clear();
+    PLOGI(peer_mapping_log(), "mapping cleared (network restart)");
+}
+
+void
 PeerMapping::rebuild_mapping()
 {
     // For each validator, find the peer that most frequently delivers first
