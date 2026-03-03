@@ -703,6 +703,18 @@ PeerDashboard::reset_consensus_state()
 
     proposal_rounds_count_ = 0;
 
+    // Clear debug counters
+    proposals_received_ = 0;
+    proposals_seq0_ = 0;
+    proposals_seq_gt0_ = 0;
+    proposals_ignored_ = 0;
+
+    // Clear per-peer throughput history
+    {
+        std::lock_guard<std::mutex> tlock(per_peer_throughput_mutex_);
+        per_peer_throughput_.clear();
+    }
+
     // Notify external components (e.g. packet_processor)
     if (restart_callback_)
         restart_callback_();
@@ -3510,7 +3522,7 @@ PeerDashboard::run_ui()
                 }
                 else if (event.character() == "c")
                 {
-                    // Clear stats
+                    // Clear all stats and consensus state
                     total_packets_ = 0;
                     total_bytes_ = 0;
                     {
@@ -3521,6 +3533,10 @@ PeerDashboard::run_ui()
                     {
                         std::lock_guard<std::mutex> lock(throughput_mutex_);
                         throughput_history_.clear();
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(consensus_mutex_);
+                        reset_consensus_state();
                     }
                     return true;
                 }
