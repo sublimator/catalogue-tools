@@ -63,6 +63,9 @@ peer_monitor::peer_monitor(monitor_config config)
         dashboard_->set_peer_mapping(peer_mapping_);
         // Register shutdown callback so 'q' in dashboard stops the monitor
         dashboard_->set_shutdown_callback([this]() { request_stop(); });
+        // Register restart callback so network restart resets processor state
+        dashboard_->set_restart_callback(
+            [this]() { processor_->reset_state(); });
     }
 
     // Set shutdown callback for manifests-only mode

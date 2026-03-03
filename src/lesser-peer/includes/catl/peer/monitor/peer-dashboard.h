@@ -313,6 +313,14 @@ public:
         shutdown_callback_ = std::move(callback);
     }
 
+    // Restart callback - called when network restart is detected
+    using restart_callback_t = std::function<void()>;
+    void
+    set_restart_callback(restart_callback_t callback)
+    {
+        restart_callback_ = std::move(callback);
+    }
+
     // Check if a txset needs to be acquired (returns hash and ledger_seq if
     // convergence detected and not yet acquired)
     std::optional<std::pair<std::string, uint32_t>>
@@ -465,8 +473,9 @@ private:
     std::string paused_prev_hash_;       // Current round we're paused on
     std::string paused_last_prev_hash_;  // Previous round (for LAST LEDGER)
 
-    // Shutdown callback
+    // Callbacks
     shutdown_callback_t shutdown_callback_;
+    restart_callback_t restart_callback_;
 };
 
 }  // namespace catl::peer::monitor

@@ -668,6 +668,7 @@ PeerDashboard::reset_consensus_state()
     proposal_rounds_.clear();
     txset_acquisitions_.clear();
     proposal_txsets_.clear();
+    known_validators_.clear();
 
     {
         std::lock_guard<std::mutex> llock(ledger_mutex_);
@@ -680,6 +681,11 @@ PeerDashboard::reset_consensus_state()
         std::lock_guard<std::mutex> plock(peers_mutex_);
         for (auto& [_, stats] : peer_stats_)
             stats.recent_ledgers.clear();
+    }
+
+    {
+        std::lock_guard<std::mutex> elock(endpoints_mutex_);
+        available_endpoints_.clear();
     }
 
     // Reset peer mapping (vote history is stale)
@@ -696,6 +702,10 @@ PeerDashboard::reset_consensus_state()
     }
 
     proposal_rounds_count_ = 0;
+
+    // Notify external components (e.g. packet_processor)
+    if (restart_callback_)
+        restart_callback_();
 }
 
 uint32_t

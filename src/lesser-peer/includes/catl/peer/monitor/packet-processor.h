@@ -71,6 +71,10 @@ public:
         dashboard_ = dashboard;
     }
 
+    // Reset sequence-dependent state (called on network restart)
+    void
+    reset_state();
+
 private:
     void
     handle_ping(

@@ -42,6 +42,16 @@ packet_processor::stop()
 }
 
 void
+packet_processor::reset_state()
+{
+    seen_proposals_.clear();
+    txset_acquirers_.clear();
+    shared_node_cache_.clear();
+    manifest_tracker_.clear();
+    available_endpoints_.clear();
+}
+
+void
 packet_processor::process_packet(
     std::string const& peer_id,
     std::shared_ptr<peer_connection> connection,
