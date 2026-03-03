@@ -256,6 +256,33 @@ packet_processor::handle_propose_ledger(
                       << static_cast<int>(
                              static_cast<std::uint8_t>(prev_hash[i]));
     }
+    // Parse RNG extension fields from ExtendedPosition.
+    // Layout: [32B txSetHash] [1B flags] [optional 32B hashes...]
+    // Flags: 0x01=commitSetHash, 0x02=entropySetHash,
+    //        0x04=myCommitment,  0x08=myReveal
+    bool has_commitment = false;
+    bool has_reveal = false;
+    if (hash.size() > 32)
+    {
+        auto flags = static_cast<uint8_t>(hash[32]);
+        // Walk past optional hashes to validate size, and extract flags
+        size_t expected = 33;
+        if (flags & 0x01)
+            expected += 32;  // commitSetHash
+        if (flags & 0x02)
+            expected += 32;  // entropySetHash
+        if (flags & 0x04)
+            expected += 32;  // myCommitment
+        if (flags & 0x08)
+            expected += 32;  // myReveal
+
+        if (hash.size() >= expected)
+        {
+            has_commitment = (flags & 0x04) != 0;
+            has_reveal = (flags & 0x08) != 0;
+        }
+    }
+
     LOGD(
         "[PROP-PKT] seq=",
         ps.proposeseq(),
@@ -263,7 +290,9 @@ packet_processor::handle_propose_ledger(
         hash_str.str().substr(0, 16),
         "... prev=",
         prev_hash_str.str().substr(0, 16),
-        "...");
+        "...",
+        has_commitment ? " [C]" : "",
+        has_reveal ? " [R]" : "");
 
     // Extract nodePubKey and resolve to master key
     std::string validator_key;
@@ -331,7 +360,9 @@ packet_processor::handle_propose_ledger(
             hash_str.str(),
             validator_key,
             ps.proposeseq(),
-            peer_id);
+            peer_id,
+            has_commitment,
+            has_reveal);
     }
 
     bool is_empty_set =

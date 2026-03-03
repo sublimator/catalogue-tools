@@ -495,7 +495,9 @@ PeerDashboard::record_proposal(
     std::string const& tx_set_hash,
     std::string const& validator_key,
     uint32_t propose_seq,
-    std::string const& peer_id)
+    std::string const& peer_id,
+    bool has_commitment,
+    bool has_reveal)
 {
     std::lock_guard<std::mutex> lock(consensus_mutex_);
     auto now = std::chrono::steady_clock::now();
@@ -539,6 +541,8 @@ PeerDashboard::record_proposal(
             new_event.propose_seq = propose_seq;
             new_event.seen_from_peers.insert(peer_id);
             new_event.received_at = now;
+            new_event.has_commitment = has_commitment;
+            new_event.has_reveal = has_reveal;
             round.timeline.push_back(std::move(new_event));
         }
         else
@@ -556,6 +560,8 @@ PeerDashboard::record_proposal(
         event.propose_seq = propose_seq;
         event.seen_from_peers.insert(peer_id);
         event.received_at = now;
+        event.has_commitment = has_commitment;
+        event.has_reveal = has_reveal;
         round.timeline.push_back(std::move(event));
     }
 
@@ -2670,6 +2676,8 @@ PeerDashboard::run_ui()
                         std::chrono::steady_clock::time_point last_seen;
                         std::string first_validator;
                         std::string last_validator;
+                        size_t commit_count = 0;
+                        size_t reveal_count = 0;
                     };
                     std::map<std::string, TxSetEntry> txset_map;
                     for (auto const& event : props.timeline)
@@ -2695,6 +2703,10 @@ PeerDashboard::run_ui()
                                 }
                             }
                             entry.validators.insert(event.validator_key);
+                            if (event.has_commitment)
+                                ++entry.commit_count;
+                            if (event.has_reveal)
+                                ++entry.reveal_count;
                         }
                     }
 
@@ -2758,6 +2770,18 @@ PeerDashboard::run_ui()
                             last);
                         for (auto& el : info)
                             elements.push_back(std::move(el));
+                        if (entry.commit_count > 0 || entry.reveal_count > 0)
+                        {
+                            elements.push_back(hbox({
+                                text("  RNG ") | dim,
+                                text("C:" +
+                                     std::to_string(entry.commit_count)) |
+                                    color(Color::Cyan),
+                                text(" R:" +
+                                     std::to_string(entry.reveal_count)) |
+                                    color(Color::Magenta),
+                            }));
+                        }
                     }
 
                     return vbox(elements);
@@ -2790,6 +2814,8 @@ PeerDashboard::run_ui()
                         std::chrono::steady_clock::time_point last_seen;
                         std::string first_validator;
                         std::string last_validator;
+                        size_t commit_count = 0;
+                        size_t reveal_count = 0;
                     };
                     std::map<std::string, TxSetEntry> txset_map;
                     for (auto const& event : props.timeline)
@@ -2814,6 +2840,10 @@ PeerDashboard::run_ui()
                                 }
                             }
                             entry.validators.insert(event.validator_key);
+                            if (event.has_commitment)
+                                ++entry.commit_count;
+                            if (event.has_reveal)
+                                ++entry.reveal_count;
                         }
                     }
 
@@ -2876,6 +2906,18 @@ PeerDashboard::run_ui()
                             last);
                         for (auto& el : info)
                             elements.push_back(std::move(el));
+                        if (entry.commit_count > 0 || entry.reveal_count > 0)
+                        {
+                            elements.push_back(hbox({
+                                text("  RNG ") | dim,
+                                text("C:" +
+                                     std::to_string(entry.commit_count)) |
+                                    color(Color::Cyan),
+                                text(" R:" +
+                                     std::to_string(entry.reveal_count)) |
+                                    color(Color::Magenta),
+                            }));
+                        }
                     }
 
                     return vbox(elements);
@@ -2919,6 +2961,8 @@ PeerDashboard::run_ui()
                         std::chrono::steady_clock::time_point last_seen;
                         std::string first_validator;
                         std::string last_validator;
+                        size_t commit_count = 0;
+                        size_t reveal_count = 0;
                     };
                     std::map<std::string, TxSetEntry> txset_map;
                     for (auto const& event : props.timeline)
@@ -2943,6 +2987,10 @@ PeerDashboard::run_ui()
                                 }
                             }
                             entry.validators.insert(event.validator_key);
+                            if (event.has_commitment)
+                                ++entry.commit_count;
+                            if (event.has_reveal)
+                                ++entry.reveal_count;
                         }
                     }
 
@@ -3000,6 +3048,18 @@ PeerDashboard::run_ui()
                             last);
                         for (auto& el : info)
                             elements.push_back(std::move(el));
+                        if (entry.commit_count > 0 || entry.reveal_count > 0)
+                        {
+                            elements.push_back(hbox({
+                                text("  RNG ") | dim,
+                                text("C:" +
+                                     std::to_string(entry.commit_count)) |
+                                    color(Color::Cyan),
+                                text(" R:" +
+                                     std::to_string(entry.reveal_count)) |
+                                    color(Color::Magenta),
+                            }));
+                        }
                     }
 
                     return vbox(elements);
