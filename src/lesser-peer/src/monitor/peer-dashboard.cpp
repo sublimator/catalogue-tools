@@ -1,4 +1,5 @@
 #include <catl/peer/monitor/peer-dashboard.h>
+#include <catl/core/logger.h>
 #include <cmath>
 #include <cstdio>
 #include <ftxui/component/component.hpp>
@@ -13,6 +14,7 @@
 namespace catl::peer::monitor {
 
 using namespace ftxui;
+using ftxui::color;  // Prefer ftxui::color over catl::color (from logger.h)
 
 PeerDashboard::PeerDashboard() = default;
 
@@ -354,6 +356,45 @@ PeerDashboard::record_validation(
         it->second.seen_from_peers.insert(peer_id);
     }
 
+    // Detect testnet restart: if we're accumulating validations for a
+    // sequence lower than our highest validated, the network has restarted.
+    // Check before quorum so we reset early — remaining validations from
+    // other peers will naturally re-accumulate in clean state.
+    if (!ledger_validations_.empty())
+    {
+        for (auto it = ledger_validations_.rbegin();
+             it != ledger_validations_.rend();
+             ++it)
+        {
+            if (it->first > ledger_seq && it->second.is_validated)
+            {
+                LOGI(
+                    "Network restart detected: validation for seq=",
+                    ledger_seq,
+                    " but already validated seq=",
+                    it->first,
+                    " — resetting state");
+                reset_consensus_state();
+                // Re-add this validation into fresh state and return.
+                // Subsequent validations from other peers will accumulate
+                // and hit quorum naturally.
+                auto& fresh = ledger_validations_[ledger_seq];
+                fresh.sequence = ledger_seq;
+                fresh.hash = ledger_hash;
+                fresh.first_seen = now;
+                fresh.is_validated = false;
+                ValidatorInfo info;
+                info.master_key_hex = validator_key;
+                info.ephemeral_key_hex = ephemeral_key;
+                info.seen_from_peers.insert(peer_id);
+                info.first_seen = now;
+                fresh.validators[validator_key] = std::move(info);
+                return;
+            }
+            break;  // Only check the highest entry
+        }
+    }
+
     // Check quorum: 80% of known validators (XRPL consensus threshold)
     size_t quorum =
         static_cast<size_t>(std::ceil(known_validators_.size() * 0.8));
@@ -617,6 +658,40 @@ PeerDashboard::prune_old_rounds()
             proposal_rounds_.erase(by_time[i].second);
         }
     }
+}
+
+void
+PeerDashboard::reset_consensus_state()
+{
+    // Called with consensus_mutex_ already held.
+    ledger_validations_.clear();
+    proposal_rounds_.clear();
+    txset_acquisitions_.clear();
+    proposal_txsets_.clear();
+
+    {
+        std::lock_guard<std::mutex> llock(ledger_mutex_);
+        legacy_ledger_counts_.clear();
+        current_validated_ledger_ = {};
+    }
+
+    // Clear per-peer recent_ledgers
+    {
+        std::lock_guard<std::mutex> plock(peers_mutex_);
+        for (auto& [_, stats] : peer_stats_)
+            stats.recent_ledgers.clear();
+    }
+
+    // Unpause if paused (stale pinned hashes)
+    if (proposals_paused_.load())
+    {
+        proposals_paused_.store(false);
+        std::lock_guard<std::mutex> plock(pause_mutex_);
+        paused_prev_hash_.clear();
+        paused_last_prev_hash_.clear();
+    }
+
+    proposal_rounds_count_ = 0;
 }
 
 uint32_t

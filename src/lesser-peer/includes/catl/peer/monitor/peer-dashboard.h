@@ -432,6 +432,11 @@ private:
     void
     prune_old_rounds();
 
+    // Reset consensus state (e.g. on testnet restart detection)
+    // Must be called with consensus_mutex_ held.
+    void
+    reset_consensus_state();
+
     // Helper to infer ledger sequence from prev_hash
     uint32_t
     infer_ledger_seq(std::string const& prev_hash) const;
