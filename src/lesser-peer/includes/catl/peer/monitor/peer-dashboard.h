@@ -46,6 +46,10 @@ struct ProposalEvent
     uint32_t propose_seq;       // 0=initial, >0=changed position
     std::set<std::string> seen_from_peers;
     std::chrono::steady_clock::time_point received_at;
+
+    // RNG extension fields (from ExtendedPosition in the proposal)
+    bool has_commitment = false;
+    bool has_reveal = false;
 };
 
 // All proposals for current open ledger
@@ -224,7 +228,9 @@ public:
         std::string const& tx_set_hash,
         std::string const& validator_key,  // master key (resolved) or ephemeral
         uint32_t propose_seq,
-        std::string const& peer_id);
+        std::string const& peer_id,
+        bool has_commitment = false,
+        bool has_reveal = false);
 
     std::optional<LedgerProposals>
     get_current_proposals() const;
