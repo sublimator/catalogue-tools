@@ -7,6 +7,7 @@ ninja -C build src/lesser-peer/peermon
 
 # Network presets
 NETWORK=${NETWORK:-"xahau-test"} # xahau-test | xahau-main | xahau-local
+NETWORK_JSON=${NETWORK_JSON:-""} # Path to xahaud-scripts network.json (overrides xahau-local config)
 
 case "$NETWORK" in
 xahau-main)
@@ -17,19 +18,39 @@ xahau-main)
   ADDITIONAL_PEERS=""
   ;;
 xahau-local)
-  DEFAULT_HOST="127.0.0.1"
-  DEFAULT_PORT=51235
-  DEFAULT_NETWORK_ID=99999
-  # Use tt-rng definitions for local testnet (has Shuffle/Entropy types)
-  DEFAULT_PROTOCOL_DEFS="/Users/nicholasdudfield/projects/xahaud-worktrees/xahaud-tt-rng/server-definitions.json"
-  ADDITIONAL_PEERS="127.0.0.1:51236 127.0.0.1:51237 127.0.0.1:51238 127.0.0.1:51239 127.0.0.1:51240 127.0.0.1:51241"
+  if [ -n "$NETWORK_JSON" ]; then
+    # Parse network.json from xahaud-scripts
+    if [ ! -f "$NETWORK_JSON" ]; then
+      echo "ERROR: NETWORK_JSON not found: $NETWORK_JSON" >&2
+      exit 1
+    fi
+    DEFAULT_HOST="127.0.0.1"
+    DEFAULT_NETWORK_ID=$(jq -r '.network_id' "$NETWORK_JSON")
+    DEFAULT_PORT=$(jq -r '.nodes[0].port_peer' "$NETWORK_JSON")
+    ADDITIONAL_PEERS=$(jq -r '.nodes[1:] | .[].port_peer | "127.0.0.1:\(.)"' "$NETWORK_JSON" | tr '\n' ' ')
+    # Look for server-definitions.json next to network.json's parent dir
+    NETWORK_JSON_DIR=$(dirname "$NETWORK_JSON")
+    DEFS_PATH=$(cd "$NETWORK_JSON_DIR/.." && pwd)/server-definitions.json
+    if [ -f "$DEFS_PATH" ]; then
+      DEFAULT_PROTOCOL_DEFS="$DEFS_PATH"
+    else
+      DEFAULT_PROTOCOL_DEFS=""
+      echo "WARNING: server-definitions.json not found at $DEFS_PATH" >&2
+    fi
+    echo "📂 Loaded network.json: $(jq -r '.node_count' "$NETWORK_JSON") nodes, network_id=$DEFAULT_NETWORK_ID"
+  else
+    DEFAULT_HOST="127.0.0.1"
+    DEFAULT_PORT=51235
+    DEFAULT_NETWORK_ID=99999
+    DEFAULT_PROTOCOL_DEFS="/Users/nicholasdudfield/projects/xahaud-worktrees/xahaud-feature-export-rng/server-definitions.json"
+    ADDITIONAL_PEERS="127.0.0.1:51236 127.0.0.1:51237 127.0.0.1:51238 127.0.0.1:51239 127.0.0.1:51240 127.0.0.1:51241"
+  fi
   ;;
 xahau-test | *)
   DEFAULT_HOST="79.110.60.121"
   DEFAULT_PORT=21338
   DEFAULT_NETWORK_ID=21338
-  # Use tt-rng definitions for testnet (has Shuffle/Entropy types)
-  DEFAULT_PROTOCOL_DEFS="/Users/nicholasdudfield/projects/xahaud-worktrees/xahaud-tt-rng/server-definitions.json"
+  DEFAULT_PROTOCOL_DEFS="/Users/nicholasdudfield/projects/xahaud-worktrees/xahaud-feature-export-rng/server-definitions.json"
   ADDITIONAL_PEERS="79.110.60.122:21338 79.110.60.124:21338 79.110.60.125:21338"
   ;;
 esac
