@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <catl/core/logger.h>
 #include <catl/peer/monitor/peer-dashboard.h>
 #include <cmath>
@@ -9,12 +10,20 @@
 #include <ftxui/screen/color.hpp>
 #include <ftxui/screen/terminal.hpp>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace catl::peer::monitor {
 
 using namespace ftxui;
 using ftxui::color;  // Prefer ftxui::color over catl::color (from logger.h)
+
+static LogPartition&
+dashboard_log()
+{
+    static LogPartition partition("DASHBOARD", LogLevel::WARNING);
+    return partition;
+}
 
 PeerDashboard::PeerDashboard() = default;
 
@@ -153,10 +162,32 @@ PeerDashboard::update_peer_stats(const std::string& peer_id, const Stats& stats)
         Stats updated_stats = stats;
         updated_stats.peer_id = peer_id;
 
-        // Track stable order for peers tab
+        // Track natural order for peers tab (peer-0, peer-1, ..., peer-10)
         if (peer_stats_.find(peer_id) == peer_stats_.end())
         {
-            peer_order_.push_back(peer_id);
+            // Insert in natural numeric order
+            auto num = [](std::string const& id) -> int {
+                auto pos = id.find('-');
+                if (pos != std::string::npos && pos + 1 < id.size())
+                {
+                    try
+                    {
+                        return std::stoi(id.substr(pos + 1));
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+                return std::numeric_limits<int>::max();
+            };
+            auto it = std::lower_bound(
+                peer_order_.begin(),
+                peer_order_.end(),
+                peer_id,
+                [&](std::string const& a, std::string const& b) {
+                    return num(a) < num(b);
+                });
+            peer_order_.insert(it, peer_id);
         }
 
         // Update or insert the peer stats
@@ -261,10 +292,13 @@ PeerDashboard::get_all_peers_stats() const
 {
     std::lock_guard<std::mutex> lock(peers_mutex_);
     std::vector<Stats> all_stats;
+    all_stats.reserve(peer_order_.size());
 
-    for (const auto& [peer_id, stats] : peer_stats_)
+    for (auto const& id : peer_order_)
     {
-        all_stats.push_back(stats);
+        auto it = peer_stats_.find(id);
+        if (it != peer_stats_.end())
+            all_stats.push_back(it->second);
     }
 
     return all_stats;
@@ -1470,940 +1504,994 @@ PeerDashboard::run_ui()
             // Get current time for all time-based checks
             auto now = std::chrono::steady_clock::now();
 
-            // Connection status color - check for reconnecting state
-            bool is_reconnecting = !all_peers.empty() &&
-                all_peers[0].reconnect_at.time_since_epoch().count() > 0 &&
-                all_peers[0].reconnect_at > now;
-            Color status_color;
-            std::string status_icon;
+            // Main tab content — wrapped in lambda to skip when not visible
+            auto render_main_tab = [&]() -> Element {
+                // Connection status color - check for reconnecting state
+                bool is_reconnecting = !all_peers.empty() &&
+                    all_peers[0].reconnect_at.time_since_epoch().count() > 0 &&
+                    all_peers[0].reconnect_at > now;
+                Color status_color;
+                std::string status_icon;
 
-            if (is_connected)
-            {
-                status_color = Color::GreenLight;
-                status_icon = "🟢";
-            }
-            else if (is_reconnecting)
-            {
-                status_color = Color::Yellow;
-                status_icon = "🟡";
-            }
-            else
-            {
-                status_color = Color::Red;
-                status_icon = "🔴";
-            }
-
-            // Check if primary peer is receiving data
-            bool receiving = false;
-            if (!all_peers.empty())
-            {
-                auto since_last =
-                    std::chrono::duration_cast<std::chrono::seconds>(
-                        now - all_peers[0].last_packet_time)
-                        .count();
-                receiving = all_peers[0].connected && since_last < 5;
-            }
-            std::string activity;
-            if (receiving)
-            {
-                activity = get_spinner() + " Receiving";
-            }
-            else if (is_reconnecting)
-            {
-                // Compute live countdown for primary peer
-                auto remaining =
-                    std::chrono::duration_cast<std::chrono::seconds>(
-                        all_peers[0].reconnect_at - now)
-                        .count();
-                if (remaining < 0)
-                    remaining = 0;
-                activity = get_spinner() + " " + state + " in " +
-                    std::to_string(remaining) + "s";
-            }
-            else
-            {
-                activity = "Idle";
-            }
-
-            // Get consensus tracking info
-            auto last_validated = get_last_validated();
-            auto validating = get_validating();
-            auto known_validators = get_known_validator_count();
-
-            // Last Validated Ledger section
-            Elements last_validated_elements;
-            last_validated_elements.push_back(
-                text("✓ LAST VALIDATED") | bold | color(Color::GreenLight));
-            last_validated_elements.push_back(separator());
-
-            if (last_validated && last_validated->sequence > 0)
-            {
-                // Alternate color based on even/odd sequence
-                Color seq_color = (last_validated->sequence % 2 == 0)
-                    ? Color::Yellow
-                    : Color::Cyan;
-                last_validated_elements.push_back(hbox({
-                    text("Sequence: "),
-                    text(format_number(last_validated->sequence)) | bold |
-                        color(seq_color),
-                }));
-
-                if (!last_validated->hash.empty())
+                if (is_connected)
                 {
-                    last_validated_elements.push_back(hbox({
-                        text("Hash: "),
-                        text(last_validated->hash.substr(0, 16) + "...") | bold,
-                    }));
+                    status_color = Color::GreenLight;
+                    status_icon = "🟢";
+                }
+                else if (is_reconnecting)
+                {
+                    status_color = Color::Yellow;
+                    status_icon = "🟡";
+                }
+                else
+                {
+                    status_color = Color::Red;
+                    status_icon = "🔴";
                 }
 
-                size_t val_count = last_validated->validators.size();
-                last_validated_elements.push_back(hbox({
-                    text("Validators: "),
-                    text(
-                        std::to_string(val_count) + "/" +
-                        std::to_string(known_validators)) |
-                        bold | color(Color::GreenLight),
-                }));
+                // Check if primary peer is receiving data
+                bool receiving = false;
+                if (!all_peers.empty())
+                {
+                    auto since_last =
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            now - all_peers[0].last_packet_time)
+                            .count();
+                    receiving = all_peers[0].connected && since_last < 5;
+                }
+                std::string activity;
+                if (receiving)
+                {
+                    activity = get_spinner() + " Receiving";
+                }
+                else if (is_reconnecting)
+                {
+                    // Compute live countdown for primary peer
+                    auto remaining =
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            all_peers[0].reconnect_at - now)
+                            .count();
+                    if (remaining < 0)
+                        remaining = 0;
+                    activity = get_spinner() + " " + state + " in " +
+                        std::to_string(remaining) + "s";
+                }
+                else
+                {
+                    activity = "Idle";
+                }
 
-                auto age = std::chrono::duration_cast<std::chrono::seconds>(
-                               now - last_validated->first_seen)
-                               .count();
-                last_validated_elements.push_back(hbox({
-                    text("Closed: "),
-                    text(std::to_string(age) + "s ago") | dim,
-                }));
-            }
-            else
-            {
+                // Get consensus tracking info
+                auto last_validated = get_last_validated();
+                auto validating = get_validating();
+                auto known_validators = get_known_validator_count();
+
+                // Last Validated Ledger section
+                Elements last_validated_elements;
                 last_validated_elements.push_back(
-                    text("Waiting for quorum...") | dim);
-            }
+                    text("✓ LAST VALIDATED") | bold | color(Color::GreenLight));
+                last_validated_elements.push_back(separator());
 
-            // Validating section (in progress)
-            Elements validating_elements;
-            validating_elements.push_back(
-                text("⏳ VALIDATING...") | bold | color(Color::Cyan));
-            validating_elements.push_back(separator());
-
-            if (validating && validating->sequence > 0)
-            {
-                // Alternate color based on even/odd sequence
-                Color seq_color = (validating->sequence % 2 == 0)
-                    ? Color::Yellow
-                    : Color::Cyan;
-                validating_elements.push_back(hbox({
-                    text("Sequence: "),
-                    text(format_number(validating->sequence)) | bold |
-                        color(seq_color),
-                }));
-
-                if (!validating->hash.empty())
+                if (last_validated && last_validated->sequence > 0)
                 {
-                    validating_elements.push_back(hbox({
-                        text("Hash: "),
-                        text(validating->hash.substr(0, 16) + "...") | bold,
+                    // Alternate color based on even/odd sequence
+                    Color seq_color = (last_validated->sequence % 2 == 0)
+                        ? Color::Yellow
+                        : Color::Cyan;
+                    last_validated_elements.push_back(hbox({
+                        text("Sequence: "),
+                        text(format_number(last_validated->sequence)) | bold |
+                            color(seq_color),
                     }));
-                }
 
-                size_t val_count = validating->validators.size();
-                size_t quorum =
-                    static_cast<size_t>(std::ceil(known_validators * 0.8));
-                float progress = known_validators > 0
-                    ? static_cast<float>(val_count) / known_validators
-                    : 0.0f;
-
-                validating_elements.push_back(hbox({
-                    text("Progress: "),
-                    text(
-                        std::to_string(val_count) + "/" +
-                        std::to_string(known_validators) + " (need " +
-                        std::to_string(quorum) + ")") |
-                        bold,
-                }));
-
-                validating_elements.push_back(
-                    gauge(progress) | color(Color::Blue));
-
-                // Show all validators
-                for (auto const& [key, info] : validating->validators)
-                {
-                    std::string short_key =
-                        key.size() > 12 ? key.substr(0, 12) + "..." : key;
-                    // Build compact peer list: "1,2,3" instead of
-                    // "peer-1,peer-2,peer-3"
-                    std::string peers_str;
-                    for (auto const& p : info.seen_from_peers)
+                    if (!last_validated->hash.empty())
                     {
-                        if (!peers_str.empty())
-                            peers_str += ",";
-                        // Extract just the number from "peer-N"
-                        auto pos = p.find('-');
-                        if (pos != std::string::npos && pos + 1 < p.size())
-                            peers_str += p.substr(pos + 1);
-                        else
-                            peers_str += p.substr(0, 2);
-                    }
-                    validating_elements.push_back(hbox({
-                        text("  ✓ ") | color(Color::GreenLight),
-                        text(short_key) | dim,
-                        text(" [") | dim,
-                        text(peers_str) | dim,
-                        text("]") | dim,
-                    }));
-                }
-            }
-            else
-            {
-                validating_elements.push_back(
-                    text("Waiting for validations...") | dim);
-            }
-
-            // Helper to render proposal list
-            auto render_proposals =
-                [&](std::optional<LedgerProposals> const& proposals,
-                    std::string const& title,
-                    Color title_color) -> Elements {
-                Elements elements;
-                elements.push_back(text(title) | bold | color(title_color));
-                elements.push_back(separator());
-
-                if (proposals && !proposals->timeline.empty())
-                {
-                    // First pass: find each validator's LATEST position
-                    std::map<std::string, std::pair<uint32_t, std::string>>
-                        validator_latest;  // validator -> (seq, hash)
-                    for (auto const& event : proposals->timeline)
-                    {
-                        auto& [seq, hash] =
-                            validator_latest[event.validator_key];
-                        if (event.propose_seq >= seq)
-                        {
-                            seq = event.propose_seq;
-                            hash = event.tx_set_hash;
-                        }
+                        last_validated_elements.push_back(hbox({
+                            text("Hash: "),
+                            text(last_validated->hash.substr(0, 16) + "...") |
+                                bold,
+                        }));
                     }
 
-                    // Count unique validators and their CURRENT tx sets
-                    std::set<std::string> unique_validators;
-                    std::set<std::string> unique_txsets;
-                    for (auto const& [validator, seq_hash] : validator_latest)
-                    {
-                        unique_validators.insert(validator);
-                        unique_txsets.insert(seq_hash.second);
-                    }
-
-                    std::string seq_str = proposals->ledger_seq > 0
-                        ? format_number(proposals->ledger_seq)
-                        : "?";
-                    std::string prev_short =
-                        proposals->prev_ledger_hash.size() > 8
-                        ? proposals->prev_ledger_hash.substr(0, 8) + "..."
-                        : proposals->prev_ledger_hash;
-                    elements.push_back(hbox({
-                        text("Ledger "),
-                        text(seq_str) | bold | color(title_color),
-                        text(" | "),
+                    size_t val_count = last_validated->validators.size();
+                    last_validated_elements.push_back(hbox({
+                        text("Validators: "),
                         text(
-                            std::to_string(unique_validators.size()) +
-                            " proposers"),
-                        text(" | "),
-                        text(std::to_string(unique_txsets.size()) + " tx sets"),
-                        text(" | prev=") | dim,
-                        text(prev_short) | dim,
+                            std::to_string(val_count) + "/" +
+                            std::to_string(known_validators)) |
+                            bold | color(Color::GreenLight),
                     }));
-                    elements.push_back(separator());
 
-                    // Group by validator
-                    struct ValidatorProposals
-                    {
-                        std::string latest_hash;
-                        uint32_t latest_seq = 0;
-                        std::set<std::string> all_peers;
-                        std::vector<double> timings;
-                    };
-                    std::map<std::string, ValidatorProposals> by_validator;
+                    auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                                   now - last_validated->first_seen)
+                                   .count();
+                    last_validated_elements.push_back(hbox({
+                        text("Closed: "),
+                        text(std::to_string(age) + "s ago") | dim,
+                    }));
+                }
+                else
+                {
+                    last_validated_elements.push_back(
+                        text("Waiting for quorum...") | dim);
+                }
 
-                    for (auto const& event : proposals->timeline)
+                // Validating section (in progress)
+                Elements validating_elements;
+                validating_elements.push_back(
+                    text("⏳ VALIDATING...") | bold | color(Color::Cyan));
+                validating_elements.push_back(separator());
+
+                if (validating && validating->sequence > 0)
+                {
+                    // Alternate color based on even/odd sequence
+                    Color seq_color = (validating->sequence % 2 == 0)
+                        ? Color::Yellow
+                        : Color::Cyan;
+                    validating_elements.push_back(hbox({
+                        text("Sequence: "),
+                        text(format_number(validating->sequence)) | bold |
+                            color(seq_color),
+                    }));
+
+                    if (!validating->hash.empty())
                     {
-                        auto& vp = by_validator[event.validator_key];
-                        // Only update hash/seq if this is a higher proposeSeq
-                        // (handles out-of-order arrival)
-                        if (event.propose_seq >= vp.latest_seq)
-                        {
-                            vp.latest_hash = event.tx_set_hash;
-                            vp.latest_seq = event.propose_seq;
-                        }
-                        // Always accumulate peers and timings
-                        for (auto const& p : event.seen_from_peers)
-                            vp.all_peers.insert(p);
-                        auto delta_ms =
-                            std::chrono::duration_cast<
-                                std::chrono::milliseconds>(
-                                event.received_at - proposals->first_proposal)
-                                .count();
-                        vp.timings.push_back(delta_ms / 1000.0);
+                        validating_elements.push_back(hbox({
+                            text("Hash: "),
+                            text(validating->hash.substr(0, 16) + "...") | bold,
+                        }));
                     }
 
-                    // Find majority hash
-                    std::map<std::string, size_t> hash_counts;
-                    for (auto const& [key, vp] : by_validator)
-                        hash_counts[vp.latest_hash]++;
-                    std::string majority_hash;
-                    size_t max_count = 0;
-                    for (auto const& [hash, count] : hash_counts)
-                    {
-                        if (count > max_count)
-                        {
-                            max_count = count;
-                            majority_hash = hash;
-                        }
-                    }
+                    size_t val_count = validating->validators.size();
+                    size_t quorum =
+                        static_cast<size_t>(std::ceil(known_validators * 0.8));
+                    float progress = known_validators > 0
+                        ? static_cast<float>(val_count) / known_validators
+                        : 0.0f;
 
-                    // Render all validators
-                    for (auto const& [key, vp] : by_validator)
+                    validating_elements.push_back(hbox({
+                        text("Progress: "),
+                        text(
+                            std::to_string(val_count) + "/" +
+                            std::to_string(known_validators) + " (need " +
+                            std::to_string(quorum) + ")") |
+                            bold,
+                    }));
+
+                    validating_elements.push_back(
+                        gauge(progress) | color(Color::Blue));
+
+                    // Show all validators
+                    for (auto const& [key, info] : validating->validators)
                     {
                         std::string short_key =
-                            key.size() > 10 ? key.substr(0, 10) + "..." : key;
-                        std::string short_hash = vp.latest_hash.size() > 8
-                            ? vp.latest_hash.substr(0, 8)
-                            : vp.latest_hash;
-
+                            key.size() > 12 ? key.substr(0, 12) + "..." : key;
+                        // Build compact peer list: "1,2,3" instead of
+                        // "peer-1,peer-2,peer-3"
                         std::string peers_str;
-                        for (auto const& p : vp.all_peers)
+                        for (auto const& p : info.seen_from_peers)
                         {
                             if (!peers_str.empty())
                                 peers_str += ",";
+                            // Extract just the number from "peer-N"
                             auto pos = p.find('-');
                             if (pos != std::string::npos && pos + 1 < p.size())
                                 peers_str += p.substr(pos + 1);
                             else
                                 peers_str += p.substr(0, 2);
                         }
-
-                        std::string timings_str;
-                        for (auto t : vp.timings)
-                        {
-                            if (!timings_str.empty())
-                                timings_str += ",";
-                            std::stringstream ss;
-                            ss << std::fixed << std::setprecision(1) << t;
-                            timings_str += ss.str();
-                        }
-
-                        bool is_different = !majority_hash.empty() &&
-                            vp.latest_hash != majority_hash;
-                        Color hash_color =
-                            is_different ? Color::RedLight : Color::GreenLight;
-
-                        elements.push_back(hbox({
+                        validating_elements.push_back(hbox({
+                            text("  ✓ ") | color(Color::GreenLight),
                             text(short_key) | dim,
-                            text(" "),
-                            text(short_hash) | color(hash_color),
-                            text(" seq=") | dim,
-                            text(std::to_string(vp.latest_seq)) |
-                                (vp.latest_seq > 0 ? color(Color::Yellow)
-                                                   : nothing),
                             text(" [") | dim,
                             text(peers_str) | dim,
-                            text("] [") | dim,
-                            text(timings_str + "s") | dim,
                             text("]") | dim,
-                            is_different ? (text(" !") | color(Color::RedLight))
-                                         : text(""),
                         }));
                     }
                 }
                 else
                 {
-                    elements.push_back(text("Waiting...") | dim);
+                    validating_elements.push_back(
+                        text("Waiting for validations...") | dim);
                 }
-                return elements;
-            };
 
-            // Render both LAST PROPOSED and PROPOSING
-            auto last_proposals = get_last_proposals();
-            auto current_proposals = get_current_proposals();
+                // Helper to render proposal list
+                auto render_proposals =
+                    [&](std::optional<LedgerProposals> const& proposals,
+                        std::string const& title,
+                        Color title_color) -> Elements {
+                    Elements elements;
+                    elements.push_back(text(title) | bold | color(title_color));
+                    elements.push_back(separator());
 
-            auto last_proposed_elements = render_proposals(
-                last_proposals, "✓ LAST PROPOSED", Color::GreenLight);
-            auto proposing_elements = render_proposals(
-                current_proposals, "📋 PROPOSING", Color::Yellow);
-
-            // Add debug counters to proposing
-            proposing_elements.push_back(separator());
-            proposing_elements.push_back(hbox({
-                text("rx=") | dim,
-                text(std::to_string(proposals_received_.load())) |
-                    color(Color::Cyan),
-                text(" s0=") | dim,
-                text(std::to_string(proposals_seq0_.load())) |
-                    color(Color::GreenLight),
-                text(" s>0=") | dim,
-                text(std::to_string(proposals_seq_gt0_.load())) |
-                    color(Color::Yellow),
-                text(" rnds=") | dim,
-                text(std::to_string(proposal_rounds_count_.load())) |
-                    color(Color::Magenta),
-            }));
-
-            // Calculate fixed heights based on peer count
-            // Validation section: header(1) + sep(1) + 4 info lines +
-            // validators Proposal section: header(1) + sep(1) + summary(1) +
-            // sep(1) + validators
-            size_t peer_count = all_peers.size();
-            int validation_height = 6 + static_cast<int>(peer_count);
-            int proposal_height = 4 + static_cast<int>(peer_count);
-
-            // Render txset panel - show recent acquired txsets (WINNERS ONLY)
-            auto render_txset = [&]() -> Elements {
-                Elements elements;
-                elements.push_back(
-                    text("📦 ACQUIRED TX SETS") | bold | color(Color::Magenta));
-                elements.push_back(separator());
-
-                // Get winning txsets (marked as winners when ledger validated)
-                std::vector<TxSetInfo> all_txsets;
-                {
-                    std::lock_guard<std::mutex> lock(consensus_mutex_);
-                    for (auto const& [hash, info] : txset_acquisitions_)
+                    if (proposals && !proposals->timeline.empty())
                     {
-                        if (info.is_winner)
+                        // First pass: find each validator's LATEST position
+                        std::map<std::string, std::pair<uint32_t, std::string>>
+                            validator_latest;  // validator -> (seq, hash)
+                        for (auto const& event : proposals->timeline)
                         {
-                            all_txsets.push_back(info);
+                            auto& [seq, hash] =
+                                validator_latest[event.validator_key];
+                            if (event.propose_seq >= seq)
+                            {
+                                seq = event.propose_seq;
+                                hash = event.tx_set_hash;
+                            }
+                        }
+
+                        // Count unique validators and their CURRENT tx sets
+                        std::set<std::string> unique_validators;
+                        std::set<std::string> unique_txsets;
+                        for (auto const& [validator, seq_hash] :
+                             validator_latest)
+                        {
+                            unique_validators.insert(validator);
+                            unique_txsets.insert(seq_hash.second);
+                        }
+
+                        std::string seq_str = proposals->ledger_seq > 0
+                            ? format_number(proposals->ledger_seq)
+                            : "?";
+                        std::string prev_short =
+                            proposals->prev_ledger_hash.size() > 8
+                            ? proposals->prev_ledger_hash.substr(0, 8) + "..."
+                            : proposals->prev_ledger_hash;
+                        elements.push_back(hbox({
+                            text("Ledger "),
+                            text(seq_str) | bold | color(title_color),
+                            text(" | "),
+                            text(
+                                std::to_string(unique_validators.size()) +
+                                " proposers"),
+                            text(" | "),
+                            text(
+                                std::to_string(unique_txsets.size()) +
+                                " tx sets"),
+                            text(" | prev=") | dim,
+                            text(prev_short) | dim,
+                        }));
+                        elements.push_back(separator());
+
+                        // Group by validator
+                        struct ValidatorProposals
+                        {
+                            std::string latest_hash;
+                            uint32_t latest_seq = 0;
+                            std::set<std::string> all_peers;
+                            std::vector<double> timings;
+                        };
+                        std::map<std::string, ValidatorProposals> by_validator;
+
+                        for (auto const& event : proposals->timeline)
+                        {
+                            auto& vp = by_validator[event.validator_key];
+                            // Only update hash/seq if this is a higher
+                            // proposeSeq (handles out-of-order arrival)
+                            if (event.propose_seq >= vp.latest_seq)
+                            {
+                                vp.latest_hash = event.tx_set_hash;
+                                vp.latest_seq = event.propose_seq;
+                            }
+                            // Always accumulate peers and timings
+                            for (auto const& p : event.seen_from_peers)
+                                vp.all_peers.insert(p);
+                            auto delta_ms = std::chrono::duration_cast<
+                                                std::chrono::milliseconds>(
+                                                event.received_at -
+                                                proposals->first_proposal)
+                                                .count();
+                            vp.timings.push_back(delta_ms / 1000.0);
+                        }
+
+                        // Find majority hash
+                        std::map<std::string, size_t> hash_counts;
+                        for (auto const& [key, vp] : by_validator)
+                            hash_counts[vp.latest_hash]++;
+                        std::string majority_hash;
+                        size_t max_count = 0;
+                        for (auto const& [hash, count] : hash_counts)
+                        {
+                            if (count > max_count)
+                            {
+                                max_count = count;
+                                majority_hash = hash;
+                            }
+                        }
+
+                        // Render all validators
+                        for (auto const& [key, vp] : by_validator)
+                        {
+                            std::string short_key = key.size() > 10
+                                ? key.substr(0, 10) + "..."
+                                : key;
+                            std::string short_hash = vp.latest_hash.size() > 8
+                                ? vp.latest_hash.substr(0, 8)
+                                : vp.latest_hash;
+
+                            std::string peers_str;
+                            for (auto const& p : vp.all_peers)
+                            {
+                                if (!peers_str.empty())
+                                    peers_str += ",";
+                                auto pos = p.find('-');
+                                if (pos != std::string::npos &&
+                                    pos + 1 < p.size())
+                                    peers_str += p.substr(pos + 1);
+                                else
+                                    peers_str += p.substr(0, 2);
+                            }
+
+                            std::string timings_str;
+                            for (auto t : vp.timings)
+                            {
+                                if (!timings_str.empty())
+                                    timings_str += ",";
+                                std::stringstream ss;
+                                ss << std::fixed << std::setprecision(1) << t;
+                                timings_str += ss.str();
+                            }
+
+                            bool is_different = !majority_hash.empty() &&
+                                vp.latest_hash != majority_hash;
+                            Color hash_color = is_different ? Color::RedLight
+                                                            : Color::GreenLight;
+
+                            elements.push_back(hbox({
+                                text(short_key) | dim,
+                                text(" "),
+                                text(short_hash) | color(hash_color),
+                                text(" seq=") | dim,
+                                text(std::to_string(vp.latest_seq)) |
+                                    (vp.latest_seq > 0 ? color(Color::Yellow)
+                                                       : nothing),
+                                text(" [") | dim,
+                                text(peers_str) | dim,
+                                text("] [") | dim,
+                                text(timings_str + "s") | dim,
+                                text("]") | dim,
+                                is_different
+                                    ? (text(" !") | color(Color::RedLight))
+                                    : text(""),
+                            }));
                         }
                     }
-                }
-
-                if (all_txsets.empty())
-                {
-                    elements.push_back(text("No tx sets acquired yet") | dim);
-                    return elements;
-                }
-
-                // Sort by started_at (most recent first)
-                std::sort(
-                    all_txsets.begin(),
-                    all_txsets.end(),
-                    [](auto const& a, auto const& b) {
-                        return a.started_at > b.started_at;
-                    });
-
-                // Helper to get tx type name from protocol or fallback to
-                // numeric
-                auto get_tx_type_name = [this](uint16_t type) -> std::string {
-                    if (protocol_)
+                    else
                     {
-                        auto name = protocol_->get_transaction_type_name(type);
-                        if (name)
-                            return *name;
+                        elements.push_back(text("Waiting...") | dim);
                     }
-                    return "T" + std::to_string(type);
+                    return elements;
                 };
 
-                // Show up to 5 most recent
-                size_t to_show = std::min(all_txsets.size(), size_t(5));
-                for (size_t i = 0; i < to_show; ++i)
-                {
-                    auto const& txset = all_txsets[i];
+                // Render both LAST PROPOSED and PROPOSING
+                auto last_proposals = get_last_proposals();
+                auto current_proposals = get_current_proposals();
 
-                    // Status
-                    std::string status_str;
-                    Color status_color = Color::White;
-                    switch (txset.status)
+                auto last_proposed_elements = render_proposals(
+                    last_proposals, "✓ LAST PROPOSED", Color::GreenLight);
+                auto proposing_elements = render_proposals(
+                    current_proposals, "📋 PROPOSING", Color::Yellow);
+
+                // Add debug counters to proposing
+                proposing_elements.push_back(separator());
+                proposing_elements.push_back(hbox({
+                    text("rx=") | dim,
+                    text(std::to_string(proposals_received_.load())) |
+                        color(Color::Cyan),
+                    text(" s0=") | dim,
+                    text(std::to_string(proposals_seq0_.load())) |
+                        color(Color::GreenLight),
+                    text(" s>0=") | dim,
+                    text(std::to_string(proposals_seq_gt0_.load())) |
+                        color(Color::Yellow),
+                    text(" rnds=") | dim,
+                    text(std::to_string(proposal_rounds_count_.load())) |
+                        color(Color::Magenta),
+                }));
+
+                // Calculate fixed heights based on peer count
+                // Validation section: header(1) + sep(1) + 4 info lines +
+                // validators Proposal section: header(1) + sep(1) + summary(1)
+                // + sep(1) + validators
+                size_t peer_count = all_peers.size();
+                int validation_height = 6 + static_cast<int>(peer_count);
+                int proposal_height = 4 + static_cast<int>(peer_count);
+
+                // Render txset panel - show recent acquired txsets (WINNERS
+                // ONLY)
+                auto render_txset = [&]() -> Elements {
+                    Elements elements;
+                    elements.push_back(
+                        text("📦 ACQUIRED TX SETS") | bold |
+                        color(Color::Magenta));
+                    elements.push_back(separator());
+
+                    // Get winning txsets (marked as winners when ledger
+                    // validated)
+                    std::vector<TxSetInfo> all_txsets;
                     {
-                        case TxSetStatus::Pending:
-                            status_str = "Pending";
-                            status_color = Color::GrayLight;
-                            break;
-                        case TxSetStatus::Acquiring:
-                            status_str = "...";
-                            status_color = Color::Yellow;
-                            break;
-                        case TxSetStatus::Complete:
-                            status_str = "✓";
-                            status_color = Color::GreenLight;
-                            break;
-                        case TxSetStatus::Failed:
-                            status_str = "✗";
-                            status_color = Color::Red;
-                            break;
-                    }
-
-                    // Compact single-line format: L{seq} hash [status] count
-                    // txns: type1=N
-                    std::string types_str;
-                    for (auto const& [type, count] : txset.type_histogram)
-                    {
-                        std::string name = get_tx_type_name(type);
-                        if (!types_str.empty())
-                            types_str += ", ";
-                        types_str += name + "=" + std::to_string(count);
-
-                        // For Shuffle (88), append LS histogram and PH
-                        if (type == 88)
+                        std::lock_guard<std::mutex> lock(consensus_mutex_);
+                        for (auto const& [hash, info] : txset_acquisitions_)
                         {
-                            if (!txset.shuffle_ledger_seqs.empty())
+                            if (info.is_winner)
                             {
-                                types_str += " (LS={";
-                                bool first = true;
-                                for (auto const& [ls, cnt] :
-                                     txset.shuffle_ledger_seqs)
-                                {
-                                    if (!first)
-                                        types_str += ",";
-                                    types_str += std::to_string(ls) + ":" +
-                                        std::to_string(cnt);
-                                    first = false;
-                                }
-                                types_str += "}";
-                                // Add parent hashes if present
-                                if (!txset.shuffle_parent_hashes.empty())
-                                {
-                                    types_str += " PH={";
-                                    first = true;
-                                    for (auto const& [ph, cnt] :
-                                         txset.shuffle_parent_hashes)
-                                    {
-                                        if (!first)
-                                            types_str += ",";
-                                        types_str +=
-                                            ph + ":" + std::to_string(cnt);
-                                        first = false;
-                                    }
-                                    types_str += "}";
-                                }
-                                types_str += ")";
+                                all_txsets.push_back(info);
                             }
                         }
                     }
 
-                    // Ledger seq prefix
-                    std::string seq_str = txset.ledger_seq > 0
-                        ? "L" + std::to_string(txset.ledger_seq) + " "
-                        : "";
-
-                    // Format depends on status:
-                    // - Acquiring: show cumulative r{sent}/{received} to show
-                    // activity
-                    // - Complete: show n{nodes} since unique_req==unique_recv
-                    std::string io_str;
-                    if (txset.status == TxSetStatus::Acquiring)
+                    if (all_txsets.empty())
                     {
-                        // Show cumulative counts during acquisition
-                        io_str = "r" + std::to_string(txset.requests_sent) +
-                            "/" + std::to_string(txset.replies_received);
+                        elements.push_back(
+                            text("No tx sets acquired yet") | dim);
+                        return elements;
                     }
-                    else
-                    {
-                        // Show final unique node count for completed/failed
-                        io_str = "n" + std::to_string(txset.unique_received);
-                    }
-                    if (txset.peers_used > 0)
-                        io_str += "/p" + std::to_string(txset.peers_used);
-                    if (txset.errors > 0)
-                        io_str += "/e" + std::to_string(txset.errors);
 
-                    elements.push_back(hbox({
-                        text(seq_str) | color(Color::Yellow),
-                        text(txset.tx_set_hash.substr(0, 12) + "...") |
-                            color(Color::Cyan),
-                        text(" [") | dim,
-                        text(status_str) | color(status_color),
-                        text("] ") | dim,
-                        text(io_str) | color(Color::GrayLight),
-                        text(" ") | dim,
-                        text(std::to_string(txset.total_txns)) | bold,
-                        text(" txns") | dim,
-                        text(types_str.empty() ? "" : ": " + types_str) | dim,
-                    }));
+                    // Sort by started_at (most recent first)
+                    std::sort(
+                        all_txsets.begin(),
+                        all_txsets.end(),
+                        [](auto const& a, auto const& b) {
+                            return a.started_at > b.started_at;
+                        });
 
-                    // Show computed hash on second line for failed txsets
-                    if (txset.status == TxSetStatus::Failed &&
-                        !txset.computed_hash.empty())
+                    // Helper to get tx type name from protocol or fallback to
+                    // numeric
+                    auto get_tx_type_name =
+                        [this](uint16_t type) -> std::string {
+                        if (protocol_)
+                        {
+                            auto name =
+                                protocol_->get_transaction_type_name(type);
+                            if (name)
+                                return *name;
+                        }
+                        return "T" + std::to_string(type);
+                    };
+
+                    // Show up to 5 most recent
+                    size_t to_show = std::min(all_txsets.size(), size_t(5));
+                    for (size_t i = 0; i < to_show; ++i)
                     {
+                        auto const& txset = all_txsets[i];
+
+                        // Status
+                        std::string status_str;
+                        Color status_color = Color::White;
+                        switch (txset.status)
+                        {
+                            case TxSetStatus::Pending:
+                                status_str = "Pending";
+                                status_color = Color::GrayLight;
+                                break;
+                            case TxSetStatus::Acquiring:
+                                status_str = "...";
+                                status_color = Color::Yellow;
+                                break;
+                            case TxSetStatus::Complete:
+                                status_str = "✓";
+                                status_color = Color::GreenLight;
+                                break;
+                            case TxSetStatus::Failed:
+                                status_str = "✗";
+                                status_color = Color::Red;
+                                break;
+                        }
+
+                        // Compact single-line format: L{seq} hash [status]
+                        // count txns: type1=N
+                        std::string types_str;
+                        for (auto const& [type, count] : txset.type_histogram)
+                        {
+                            std::string name = get_tx_type_name(type);
+                            if (!types_str.empty())
+                                types_str += ", ";
+                            types_str += name + "=" + std::to_string(count);
+
+                            // For Shuffle (88), append LS histogram and PH
+                            if (type == 88)
+                            {
+                                if (!txset.shuffle_ledger_seqs.empty())
+                                {
+                                    types_str += " (LS={";
+                                    bool first = true;
+                                    for (auto const& [ls, cnt] :
+                                         txset.shuffle_ledger_seqs)
+                                    {
+                                        if (!first)
+                                            types_str += ",";
+                                        types_str += std::to_string(ls) + ":" +
+                                            std::to_string(cnt);
+                                        first = false;
+                                    }
+                                    types_str += "}";
+                                    // Add parent hashes if present
+                                    if (!txset.shuffle_parent_hashes.empty())
+                                    {
+                                        types_str += " PH={";
+                                        first = true;
+                                        for (auto const& [ph, cnt] :
+                                             txset.shuffle_parent_hashes)
+                                        {
+                                            if (!first)
+                                                types_str += ",";
+                                            types_str +=
+                                                ph + ":" + std::to_string(cnt);
+                                            first = false;
+                                        }
+                                        types_str += "}";
+                                    }
+                                    types_str += ")";
+                                }
+                            }
+                        }
+
+                        // Ledger seq prefix
+                        std::string seq_str = txset.ledger_seq > 0
+                            ? "L" + std::to_string(txset.ledger_seq) + " "
+                            : "";
+
+                        // Format depends on status:
+                        // - Acquiring: show cumulative r{sent}/{received} to
+                        // show activity
+                        // - Complete: show n{nodes} since
+                        // unique_req==unique_recv
+                        std::string io_str;
+                        if (txset.status == TxSetStatus::Acquiring)
+                        {
+                            // Show cumulative counts during acquisition
+                            io_str = "r" + std::to_string(txset.requests_sent) +
+                                "/" + std::to_string(txset.replies_received);
+                        }
+                        else
+                        {
+                            // Show final unique node count for completed/failed
+                            io_str =
+                                "n" + std::to_string(txset.unique_received);
+                        }
+                        if (txset.peers_used > 0)
+                            io_str += "/p" + std::to_string(txset.peers_used);
+                        if (txset.errors > 0)
+                            io_str += "/e" + std::to_string(txset.errors);
+
                         elements.push_back(hbox({
-                            text("    ") | dim,
-                            text("exp=") | dim,
-                            text(txset.tx_set_hash.substr(0, 16)) |
-                                color(Color::Green),
-                            text(" got=") | dim,
-                            text(txset.computed_hash.substr(0, 16)) |
-                                color(Color::Red),
+                            text(seq_str) | color(Color::Yellow),
+                            text(txset.tx_set_hash.substr(0, 12) + "...") |
+                                color(Color::Cyan),
+                            text(" [") | dim,
+                            text(status_str) | color(status_color),
+                            text("] ") | dim,
+                            text(io_str) | color(Color::GrayLight),
+                            text(" ") | dim,
+                            text(std::to_string(txset.total_txns)) | bold,
+                            text(" txns") | dim,
+                            text(types_str.empty() ? "" : ": " + types_str) |
+                                dim,
+                        }));
+
+                        // Show computed hash on second line for failed txsets
+                        if (txset.status == TxSetStatus::Failed &&
+                            !txset.computed_hash.empty())
+                        {
+                            elements.push_back(hbox({
+                                text("    ") | dim,
+                                text("exp=") | dim,
+                                text(txset.tx_set_hash.substr(0, 16)) |
+                                    color(Color::Green),
+                                text(" got=") | dim,
+                                text(txset.computed_hash.substr(0, 16)) |
+                                    color(Color::Red),
+                            }));
+                        }
+                    }
+
+                    return elements;
+                };
+
+                auto txset_elements = render_txset();
+
+                // Combine into layout - validations on top, proposals below
+                // Calculate widths: main columns are 50/50, inner panels are
+                // 50/50 of that
+                auto term_size = Terminal::Size();
+                int main_half =
+                    (term_size.dimx - 4) / 2;  // -4 for borders/separators
+                int inner_half = (main_half - 1) / 2;  // -1 for inner separator
+
+                auto consensus_section = vbox({
+                    hbox({
+                        vbox(last_validated_elements) |
+                            size(WIDTH, EQUAL, inner_half) |
+                            size(HEIGHT, EQUAL, validation_height),
+                        separator(),
+                        vbox(validating_elements) |
+                            size(WIDTH, EQUAL, inner_half) |
+                            size(HEIGHT, EQUAL, validation_height),
+                    }),
+                    separator(),
+                    hbox({
+                        vbox(last_proposed_elements) |
+                            size(WIDTH, EQUAL, inner_half) |
+                            size(HEIGHT, EQUAL, proposal_height),
+                        separator(),
+                        vbox(proposing_elements) |
+                            size(WIDTH, EQUAL, inner_half) |
+                            size(HEIGHT, EQUAL, proposal_height),
+                    }),
+                    separator(),
+                    vbox(txset_elements) | size(HEIGHT, LESS_THAN, 12),
+                });
+
+                // Multiple peers section
+                Elements peers_elements;
+                peers_elements.push_back(
+                    text(
+                        "👥 CONNECTED PEERS (" +
+                        std::to_string(all_peers.size()) + ")") |
+                    bold | color(Color::Cyan));
+                peers_elements.push_back(separator());
+
+                if (all_peers.empty())
+                {
+                    peers_elements.push_back(text("No connected peers") | dim);
+                }
+                else
+                {
+                    for (size_t i = 0; i < all_peers.size(); ++i)
+                    {
+                        const auto& peer = all_peers[i];
+
+                        // Determine status based on reconnect_at time
+                        bool is_reconnecting =
+                            peer.reconnect_at.time_since_epoch().count() > 0 &&
+                            peer.reconnect_at > now;
+                        Color peer_status_color;
+                        std::string status_icon;
+
+                        if (peer.connected)
+                        {
+                            peer_status_color = Color::GreenLight;
+                            status_icon = "●";
+                        }
+                        else if (is_reconnecting)
+                        {
+                            peer_status_color = Color::Yellow;
+                            status_icon = "◐";
+                        }
+                        else
+                        {
+                            peer_status_color = Color::Red;
+                            status_icon = "○";
+                        }
+
+                        std::string peer_num = std::to_string(i) + ".";
+
+                        // Check if this peer is actively receiving or
+                        // reconnecting
+                        auto peer_since_last =
+                            std::chrono::duration_cast<std::chrono::seconds>(
+                                now - peer.last_packet_time)
+                                .count();
+                        bool peer_receiving =
+                            peer.connected && peer_since_last < 3;
+                        std::string activity_icon =
+                            (peer_receiving || is_reconnecting) ? get_spinner()
+                                                                : " ";
+
+                        // Show address if connected, otherwise show connection
+                        // state
+                        std::string display_text;
+                        if (peer.connected)
+                        {
+                            display_text = peer.peer_address;
+                        }
+                        else if (is_reconnecting)
+                        {
+                            // Compute live countdown
+                            auto remaining = std::chrono::duration_cast<
+                                                 std::chrono::seconds>(
+                                                 peer.reconnect_at - now)
+                                                 .count();
+                            if (remaining < 0)
+                                remaining = 0;
+                            display_text = peer.connection_state + " in " +
+                                std::to_string(remaining) + "s";
+                        }
+                        else
+                        {
+                            display_text = peer.connection_state;
+                        }
+
+                        peers_elements.push_back(hbox({
+                            text(peer_num) | size(WIDTH, EQUAL, 3) | dim,
+                            text(status_icon) | color(peer_status_color),
+                            text(activity_icon) | color(Color::Cyan),
+                            text(" " + display_text) | bold,
+                            text(" | "),
+                            text(format_number(peer.total_packets)) | dim,
+                            text(" pkts | "),
+                            text(format_bytes(
+                                static_cast<double>(peer.total_bytes))) |
+                                dim,
                         }));
                     }
                 }
 
-                return elements;
-            };
+                auto peers_section = vbox(peers_elements);
 
-            auto txset_elements = render_txset();
-
-            // Combine into layout - validations on top, proposals below
-            // Calculate widths: main columns are 50/50, inner panels are 50/50
-            // of that
-            auto term_size = Terminal::Size();
-            int main_half =
-                (term_size.dimx - 4) / 2;          // -4 for borders/separators
-            int inner_half = (main_half - 1) / 2;  // -1 for inner separator
-
-            auto consensus_section = vbox({
-                hbox({
-                    vbox(last_validated_elements) |
-                        size(WIDTH, EQUAL, inner_half) |
-                        size(HEIGHT, EQUAL, validation_height),
+                // Connection info section (for primary peer)
+                auto connection_section = vbox({
+                    text("🌐 PRIMARY PEER (0)") | bold | color(Color::Cyan),
                     separator(),
-                    vbox(validating_elements) | size(WIDTH, EQUAL, inner_half) |
-                        size(HEIGHT, EQUAL, validation_height),
-                }),
-                separator(),
-                hbox({
-                    vbox(last_proposed_elements) |
-                        size(WIDTH, EQUAL, inner_half) |
-                        size(HEIGHT, EQUAL, proposal_height),
-                    separator(),
-                    vbox(proposing_elements) | size(WIDTH, EQUAL, inner_half) |
-                        size(HEIGHT, EQUAL, proposal_height),
-                }),
-                separator(),
-                vbox(txset_elements) | size(HEIGHT, LESS_THAN, 12),
-            });
-
-            // Multiple peers section
-            Elements peers_elements;
-            peers_elements.push_back(
-                text(
-                    "👥 CONNECTED PEERS (" + std::to_string(all_peers.size()) +
-                    ")") |
-                bold | color(Color::Cyan));
-            peers_elements.push_back(separator());
-
-            if (all_peers.empty())
-            {
-                peers_elements.push_back(text("No connected peers") | dim);
-            }
-            else
-            {
-                for (size_t i = 0; i < all_peers.size(); ++i)
-                {
-                    const auto& peer = all_peers[i];
-
-                    // Determine status based on reconnect_at time
-                    bool is_reconnecting =
-                        peer.reconnect_at.time_since_epoch().count() > 0 &&
-                        peer.reconnect_at > now;
-                    Color peer_status_color;
-                    std::string status_icon;
-
-                    if (peer.connected)
-                    {
-                        peer_status_color = Color::GreenLight;
-                        status_icon = "●";
-                    }
-                    else if (is_reconnecting)
-                    {
-                        peer_status_color = Color::Yellow;
-                        status_icon = "◐";
-                    }
-                    else
-                    {
-                        peer_status_color = Color::Red;
-                        status_icon = "○";
-                    }
-
-                    std::string peer_num = std::to_string(i) + ".";
-
-                    // Check if this peer is actively receiving or reconnecting
-                    auto peer_since_last =
-                        std::chrono::duration_cast<std::chrono::seconds>(
-                            now - peer.last_packet_time)
-                            .count();
-                    bool peer_receiving = peer.connected && peer_since_last < 3;
-                    std::string activity_icon =
-                        (peer_receiving || is_reconnecting) ? get_spinner()
-                                                            : " ";
-
-                    // Show address if connected, otherwise show connection
-                    // state
-                    std::string display_text;
-                    if (peer.connected)
-                    {
-                        display_text = peer.peer_address;
-                    }
-                    else if (is_reconnecting)
-                    {
-                        // Compute live countdown
-                        auto remaining =
-                            std::chrono::duration_cast<std::chrono::seconds>(
-                                peer.reconnect_at - now)
-                                .count();
-                        if (remaining < 0)
-                            remaining = 0;
-                        display_text = peer.connection_state + " in " +
-                            std::to_string(remaining) + "s";
-                    }
-                    else
-                    {
-                        display_text = peer.connection_state;
-                    }
-
-                    peers_elements.push_back(hbox({
-                        text(peer_num) | size(WIDTH, EQUAL, 3) | dim,
-                        text(status_icon) | color(peer_status_color),
-                        text(activity_icon) | color(Color::Cyan),
-                        text(" " + display_text) | bold,
-                        text(" | "),
-                        text(format_number(peer.total_packets)) | dim,
-                        text(" pkts | "),
-                        text(format_bytes(
-                            static_cast<double>(peer.total_bytes))) |
-                            dim,
-                    }));
-                }
-            }
-
-            auto peers_section = vbox(peers_elements);
-
-            // Connection info section (for primary peer)
-            auto connection_section = vbox({
-                text("🌐 PRIMARY PEER (0)") | bold | color(Color::Cyan),
-                separator(),
-                hbox({
-                    text("Status: "),
-                    text(status_icon + " " + state) | bold |
-                        color(status_color),
-                }),
-                hbox({
-                    text("Peer: "),
-                    text(primary_address) | bold,
-                }),
-                hbox({
-                    text("Version: "),
-                    text(primary_version) | bold | color(Color::Yellow),
-                }),
-                hbox({
-                    text("Protocol: "),
-                    text(primary_protocol) | bold,
-                }),
-                hbox({
-                    text("Network ID: "),
-                    text(
-                        primary_network_id.empty() ? "none"
-                                                   : primary_network_id) |
-                        bold,
-                }),
-                hbox({
-                    text("Activity: "),
-                    text(activity) | bold |
-                        color(receiving ? Color::GreenLight : Color::GrayDark),
-                }),
-            });
-
-            // Overall stats section - aggregate from all peers
-            uint64_t total_pkts = 0;
-            uint64_t total_b = 0;
-            double elapsed = 0;
-            for (const auto& peer : all_peers)
-            {
-                total_pkts += peer.total_packets;
-                total_b += peer.total_bytes;
-                if (peer.elapsed_seconds > elapsed)
-                    elapsed = peer.elapsed_seconds;
-            }
-
-            // Calculate current throughput
-            double pps = 0.0, bps = 0.0;
-            {
-                std::lock_guard<std::mutex> lock(throughput_mutex_);
-                if (throughput_history_.size() >= 2)
-                {
-                    auto dt =
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            throughput_history_.back().timestamp -
-                            throughput_history_.front().timestamp)
-                            .count();
-
-                    if (dt > 0)
-                    {
-                        pps = (throughput_history_.back().packets -
-                               throughput_history_.front().packets) *
-                            1000.0 / dt;
-                        bps = (throughput_history_.back().bytes -
-                               throughput_history_.front().bytes) *
-                            1000.0 / dt;
-                    }
-                }
-            }
-
-            auto stats_section = vbox({
-                text("📊 STATISTICS") | bold | color(Color::Cyan),
-                separator(),
-                hbox({
-                    text("Uptime: "),
-                    text(format_elapsed(elapsed)) | bold | color(Color::Yellow),
-                }),
-                hbox({
-                    text("Total packets: "),
-                    text(format_number(total_pkts)) | bold,
-                }),
-                hbox({
-                    text("Total data: "),
-                    text(format_bytes(static_cast<double>(total_b))) | bold,
-                }),
-                separator(),
-                text("Current Throughput") | bold,
-                hbox({
-                    text("  Packets/sec: "),
-                    text(format_rate(pps)) | bold | color(Color::GreenLight),
-                }),
-                hbox({
-                    text("  Data rate: "),
-                    text(format_bytes(bps) + "/s") | bold |
-                        color(Color::GreenLight),
-                }),
-                separator(),
-                text("Average (since start)") | bold,
-                hbox({
-                    text("  Packets/sec: "),
-                    text(format_rate(elapsed > 0 ? total_pkts / elapsed : 0)) |
-                        bold,
-                }),
-                hbox({
-                    text("  Data rate: "),
-                    text(
-                        format_bytes(elapsed > 0 ? total_b / elapsed : 0) +
-                        "/s") |
-                        bold,
-                }),
-            });
-
-            // Packet types section (top 10)
-            Elements packet_elements;
-            packet_elements.push_back(
-                text("📦 PACKET TYPES") | bold | color(Color::Cyan));
-            packet_elements.push_back(separator());
-
-            // Aggregate packet counts from all peers
-            std::map<std::string, uint64_t> counts;
-            std::map<std::string, uint64_t> bytes;
-            for (const auto& peer : all_peers)
-            {
-                for (const auto& [type, count] : peer.packet_counts)
-                {
-                    counts[type] += count;
-                }
-                for (const auto& [type, b] : peer.packet_bytes)
-                {
-                    bytes[type] += b;
-                }
-            }
-
-            // Sort by count
-            std::vector<std::pair<std::string, uint64_t>> sorted_packets(
-                counts.begin(), counts.end());
-            std::sort(
-                sorted_packets.begin(),
-                sorted_packets.end(),
-                [](const auto& a, const auto& b) {
-                    return a.second > b.second;
+                    hbox({
+                        text("Status: "),
+                        text(status_icon + " " + state) | bold |
+                            color(status_color),
+                    }),
+                    hbox({
+                        text("Peer: "),
+                        text(primary_address) | bold,
+                    }),
+                    hbox({
+                        text("Version: "),
+                        text(primary_version) | bold | color(Color::Yellow),
+                    }),
+                    hbox({
+                        text("Protocol: "),
+                        text(primary_protocol) | bold,
+                    }),
+                    hbox({
+                        text("Network ID: "),
+                        text(
+                            primary_network_id.empty() ? "none"
+                                                       : primary_network_id) |
+                            bold,
+                    }),
+                    hbox({
+                        text("Activity: "),
+                        text(activity) | bold |
+                            color(
+                                receiving ? Color::GreenLight
+                                          : Color::GrayDark),
+                    }),
                 });
 
-            // Display top 10
-            int shown = 0;
-            for (const auto& [type, count] : sorted_packets)
-            {
-                if (shown >= 10)
-                    break;
+                // Overall stats section - aggregate from all peers
+                uint64_t total_pkts = 0;
+                uint64_t total_b = 0;
+                double elapsed = 0;
+                for (const auto& peer : all_peers)
+                {
+                    total_pkts += peer.total_packets;
+                    total_b += peer.total_bytes;
+                    if (peer.elapsed_seconds > elapsed)
+                        elapsed = peer.elapsed_seconds;
+                }
 
-                double pct =
-                    total_pkts > 0 ? (count * 100.0 / total_pkts) : 0.0;
-                double rate = elapsed > 0 ? count / elapsed : 0.0;
-                uint64_t type_bytes = bytes[type];
+                // Calculate current throughput
+                double pps = 0.0, bps = 0.0;
+                {
+                    std::lock_guard<std::mutex> lock(throughput_mutex_);
+                    if (throughput_history_.size() >= 2)
+                    {
+                        auto dt = std::chrono::duration_cast<
+                                      std::chrono::milliseconds>(
+                                      throughput_history_.back().timestamp -
+                                      throughput_history_.front().timestamp)
+                                      .count();
 
-                packet_elements.push_back(hbox({
-                    text(type) | size(WIDTH, EQUAL, 26) | color(Color::Yellow),
-                    text(format_number(count)) | size(WIDTH, EQUAL, 12),
-                    text(format_rate(rate) + "/s") | size(WIDTH, EQUAL, 10),
-                    text(format_bytes(static_cast<double>(type_bytes))) |
-                        size(WIDTH, EQUAL, 10),
-                    gauge(pct / 100.0f) | flex | color(Color::Blue),
-                    text(" " + format_rate(pct) + "%") | size(WIDTH, EQUAL, 8),
-                }));
-                shown++;
-            }
+                        if (dt > 0)
+                        {
+                            pps = (throughput_history_.back().packets -
+                                   throughput_history_.front().packets) *
+                                1000.0 / dt;
+                            bps = (throughput_history_.back().bytes -
+                                   throughput_history_.front().bytes) *
+                                1000.0 / dt;
+                        }
+                    }
+                }
 
-            auto packet_section = vbox(packet_elements);
+                auto stats_section = vbox({
+                    text("📊 STATISTICS") | bold | color(Color::Cyan),
+                    separator(),
+                    hbox({
+                        text("Uptime: "),
+                        text(format_elapsed(elapsed)) | bold |
+                            color(Color::Yellow),
+                    }),
+                    hbox({
+                        text("Total packets: "),
+                        text(format_number(total_pkts)) | bold,
+                    }),
+                    hbox({
+                        text("Total data: "),
+                        text(format_bytes(static_cast<double>(total_b))) | bold,
+                    }),
+                    separator(),
+                    text("Current Throughput") | bold,
+                    hbox({
+                        text("  Packets/sec: "),
+                        text(format_rate(pps)) | bold |
+                            color(Color::GreenLight),
+                    }),
+                    hbox({
+                        text("  Data rate: "),
+                        text(format_bytes(bps) + "/s") | bold |
+                            color(Color::GreenLight),
+                    }),
+                    separator(),
+                    text("Average (since start)") | bold,
+                    hbox({
+                        text("  Packets/sec: "),
+                        text(format_rate(
+                            elapsed > 0 ? total_pkts / elapsed : 0)) |
+                            bold,
+                    }),
+                    hbox({
+                        text("  Data rate: "),
+                        text(
+                            format_bytes(elapsed > 0 ? total_b / elapsed : 0) +
+                            "/s") |
+                            bold,
+                    }),
+                });
 
-            // Throughput graph
-            auto graph_fn = [&](int w, int h) {
-                return throughput_graph(w, h);
-            };
+                // Packet types section (top 10)
+                Elements packet_elements;
+                packet_elements.push_back(
+                    text("📦 PACKET TYPES") | bold | color(Color::Cyan));
+                packet_elements.push_back(separator());
 
-            auto throughput_section = vbox({
-                text("📈 PACKET THROUGHPUT (last 60s)") | bold |
-                    color(Color::Cyan),
-                separator(),
-                graph(std::ref(graph_fn)) | color(Color::GreenLight) | flex,
-            });
+                // Aggregate packet counts from all peers
+                std::map<std::string, uint64_t> counts;
+                std::map<std::string, uint64_t> bytes;
+                for (const auto& peer : all_peers)
+                {
+                    for (const auto& [type, count] : peer.packet_counts)
+                    {
+                        counts[type] += count;
+                    }
+                    for (const auto& [type, b] : peer.packet_bytes)
+                    {
+                        bytes[type] += b;
+                    }
+                }
 
-            // Discovered endpoints section (bottom right)
-            auto available_eps = get_available_endpoints();
-            Elements endpoint_elements;
-            endpoint_elements.push_back(
-                text("🌍 DISCOVERED PEERS") | bold | color(Color::Cyan));
-            endpoint_elements.push_back(separator());
-            if (available_eps.empty())
-            {
-                endpoint_elements.push_back(text("None yet") | dim);
-            }
-            else
-            {
+                // Sort by count
+                std::vector<std::pair<std::string, uint64_t>> sorted_packets(
+                    counts.begin(), counts.end());
+                std::sort(
+                    sorted_packets.begin(),
+                    sorted_packets.end(),
+                    [](const auto& a, const auto& b) {
+                        return a.second > b.second;
+                    });
+
+                // Display top 10
                 int shown = 0;
-                for (auto const& ep : available_eps)
+                for (const auto& [type, count] : sorted_packets)
                 {
                     if (shown >= 10)
                         break;
-                    endpoint_elements.push_back(text("• " + ep));
+
+                    double pct =
+                        total_pkts > 0 ? (count * 100.0 / total_pkts) : 0.0;
+                    double rate = elapsed > 0 ? count / elapsed : 0.0;
+                    uint64_t type_bytes = bytes[type];
+
+                    packet_elements.push_back(hbox({
+                        text(type) | size(WIDTH, EQUAL, 26) |
+                            color(Color::Yellow),
+                        text(format_number(count)) | size(WIDTH, EQUAL, 12),
+                        text(format_rate(rate) + "/s") | size(WIDTH, EQUAL, 10),
+                        text(format_bytes(static_cast<double>(type_bytes))) |
+                            size(WIDTH, EQUAL, 10),
+                        gauge(pct / 100.0f) | flex | color(Color::Blue),
+                        text(" " + format_rate(pct) + "%") |
+                            size(WIDTH, EQUAL, 8),
+                    }));
                     shown++;
                 }
-                if (static_cast<int>(available_eps.size()) > 10)
-                {
-                    endpoint_elements.push_back(
-                        text(
-                            "... and " +
-                            std::to_string(available_eps.size() - 10) +
-                            " more") |
-                        dim);
-                }
-            }
-            auto endpoints_section = vbox(endpoint_elements);
 
-            // Debug section for protocol type resolution
-            Elements debug_elements;
-            debug_elements.push_back(
-                text("🔧 DEBUG: Type Resolution") | bold |
-                color(Color::Yellow));
-            debug_elements.push_back(separator());
-            if (protocol_)
-            {
-                auto name88 = protocol_->get_transaction_type_name(88);
-                auto name89 = protocol_->get_transaction_type_name(89);
+                auto packet_section = vbox(packet_elements);
+
+                // Throughput graph
+                auto graph_fn = [&](int w, int h) {
+                    return throughput_graph(w, h);
+                };
+
+                auto throughput_section = vbox({
+                    text("📈 PACKET THROUGHPUT (last 60s)") | bold |
+                        color(Color::Cyan),
+                    separator(),
+                    graph(std::ref(graph_fn)) | color(Color::GreenLight) | flex,
+                });
+
+                // Discovered endpoints section (bottom right)
+                auto available_eps = get_available_endpoints();
+                Elements endpoint_elements;
+                endpoint_elements.push_back(
+                    text("🌍 DISCOVERED PEERS") | bold | color(Color::Cyan));
+                endpoint_elements.push_back(separator());
+                if (available_eps.empty())
+                {
+                    endpoint_elements.push_back(text("None yet") | dim);
+                }
+                else
+                {
+                    int shown = 0;
+                    for (auto const& ep : available_eps)
+                    {
+                        if (shown >= 10)
+                            break;
+                        endpoint_elements.push_back(text("• " + ep));
+                        shown++;
+                    }
+                    if (static_cast<int>(available_eps.size()) > 10)
+                    {
+                        endpoint_elements.push_back(
+                            text(
+                                "... and " +
+                                std::to_string(available_eps.size() - 10) +
+                                " more") |
+                            dim);
+                    }
+                }
+                auto endpoints_section = vbox(endpoint_elements);
+
+                // Debug section for protocol type resolution
+                Elements debug_elements;
                 debug_elements.push_back(
-                    text("Source: " + protocol_source_) | dim);
-                debug_elements.push_back(
-                    text("Protocol: loaded") | color(Color::Green));
-                debug_elements.push_back(text(
-                    "Type 88: " +
-                    (name88 ? *name88 : std::string("(nullopt)"))));
-                debug_elements.push_back(text(
-                    "Type 89: " +
-                    (name89 ? *name89 : std::string("(nullopt)"))));
-            }
-            else
-            {
-                debug_elements.push_back(
-                    text("Protocol: NOT LOADED") | color(Color::Red));
-            }
-            auto debug_section = vbox(debug_elements);
+                    text("🔧 DEBUG: Type Resolution") | bold |
+                    color(Color::Yellow));
+                debug_elements.push_back(separator());
+                if (protocol_)
+                {
+                    auto name88 = protocol_->get_transaction_type_name(88);
+                    auto name89 = protocol_->get_transaction_type_name(89);
+                    debug_elements.push_back(
+                        text("Source: " + protocol_source_) | dim);
+                    debug_elements.push_back(
+                        text("Protocol: loaded") | color(Color::Green));
+                    debug_elements.push_back(text(
+                        "Type 88: " +
+                        (name88 ? *name88 : std::string("(nullopt)"))));
+                    debug_elements.push_back(text(
+                        "Type 89: " +
+                        (name89 ? *name89 : std::string("(nullopt)"))));
+                }
+                else
+                {
+                    debug_elements.push_back(
+                        text("Protocol: NOT LOADED") | color(Color::Red));
+                }
+                auto debug_section = vbox(debug_elements);
+
+                return hbox({
+                    vbox({
+                        consensus_section,
+                        separator(),
+                        peers_section,
+                        separator(),
+                        connection_section,
+                        separator(),
+                        stats_section,
+                    }) | size(WIDTH, EQUAL, main_half) |
+                        border,
+                    separator(),
+                    vbox({
+                        packet_section,
+                        separator(),
+                        throughput_section,
+                        separator(),
+                        endpoints_section,
+                        separator(),
+                        debug_section,
+                    }) | size(WIDTH, EQUAL, main_half) |
+                        border,
+                });
+            };  // end render_main_tab
 
             // Tab bar
             int tab = current_tab_.load();
@@ -2420,31 +2508,6 @@ PeerDashboard::run_ui()
                 text(" [4] Commands ") |
                     (tab == 3 ? bold | bgcolor(Color::Blue) : dim),
                 filler(),
-            });
-
-            // Main tab content
-            auto main_content = hbox({
-                vbox({
-                    consensus_section,
-                    separator(),
-                    peers_section,
-                    separator(),
-                    connection_section,
-                    separator(),
-                    stats_section,
-                }) | size(WIDTH, EQUAL, main_half) |
-                    border,
-                separator(),
-                vbox({
-                    packet_section,
-                    separator(),
-                    throughput_section,
-                    separator(),
-                    endpoints_section,
-                    separator(),
-                    debug_section,
-                }) | size(WIDTH, EQUAL, main_half) |
-                    border,
             });
 
             // Proposals tab - two columns: LAST LEDGER (left) | CURRENT LEDGER
@@ -3293,28 +3356,37 @@ PeerDashboard::run_ui()
                 });
             };
 
-            auto proposals_content = render_proposals_tab() | flex;
-
             // Peers tab - grid view for per-peer stats
             auto render_peers_tab = [&]() -> Element {
-                Elements cards;
-                std::vector<Stats> peers;
-                {
-                    std::lock_guard<std::mutex> lock(peers_mutex_);
-                    for (auto const& id : peer_order_)
-                    {
-                        auto it = peer_stats_.find(id);
-                        if (it != peer_stats_.end())
-                            peers.push_back(it->second);
-                    }
-                }
+                auto const& peers = all_peers;
+
                 if (peers.empty())
                 {
-                    peers = all_peers;
+                    return vbox({
+                               text("No peers connected") | dim | hcenter,
+                           }) |
+                        flex;
                 }
 
-                auto render_peer_card = [&](Stats const& peer) -> Element {
-                    // Status
+                // Table header
+                Elements rows_el;
+                rows_el.push_back(hbox({
+                    text("  ") | size(WIDTH, EQUAL, 3),
+                    text("PEER") | bold | size(WIDTH, EQUAL, 10),
+                    text("STATE") | bold | size(WIDTH, EQUAL, 14),
+                    text("ADDRESS") | bold | size(WIDTH, EQUAL, 22),
+                    text("UPTIME") | bold | size(WIDTH, EQUAL, 10),
+                    text("LAST") | bold | size(WIDTH, EQUAL, 6),
+                    text("PKTS") | bold | size(WIDTH, EQUAL, 10),
+                    text("BYTES") | bold | size(WIDTH, EQUAL, 10),
+                    text("PKT/s") | bold | size(WIDTH, EQUAL, 8),
+                    text("B/s") | bold | size(WIDTH, EQUAL, 10),
+                    text("VERSION") | bold,
+                }));
+                rows_el.push_back(separator());
+
+                for (auto const& peer : peers)
+                {
                     bool is_reconnecting =
                         peer.reconnect_at.time_since_epoch().count() > 0 &&
                         peer.reconnect_at > now;
@@ -3322,26 +3394,28 @@ PeerDashboard::run_ui()
                         ? Color::GreenLight
                         : (is_reconnecting ? Color::Yellow : Color::Red);
                     std::string status_icon =
-                        peer.connected ? "🟢" : (is_reconnecting ? "🟡" : "🔴");
+                        peer.connected ? "●" : (is_reconnecting ? "●" : "●");
 
-                    // Short address for display
-                    std::string addr = peer.peer_address;
-                    if (addr.size() > 24)
-                        addr = addr.substr(0, 24) + "...";
-
-                    // State label (avoid showing host:port for reconnecting)
                     std::string state_label;
                     if (peer.connection_state.rfind("Error:", 0) == 0)
-                        state_label = peer.connection_state;
+                        state_label = "Error";
                     else if (peer.connected)
                         state_label = "Connected";
                     else if (is_reconnecting)
-                        state_label = "Reconnecting";
+                    {
+                        auto remaining =
+                            std::chrono::duration_cast<std::chrono::seconds>(
+                                peer.reconnect_at - now)
+                                .count();
+                        if (remaining < 0)
+                            remaining = 0;
+                        state_label =
+                            "Reconn " + std::to_string(remaining) + "s";
+                    }
                     else
                         state_label = "Disconnected";
 
-                    // Last packet age
-                    std::string last_pkt = "n/a";
+                    std::string last_pkt = "-";
                     if (peer.last_packet_time.time_since_epoch().count() > 0)
                     {
                         auto age =
@@ -3353,250 +3427,186 @@ PeerDashboard::run_ui()
                         last_pkt = std::to_string(age) + "s";
                     }
 
-                    // Reconnect countdown
-                    std::string reconnect_str;
-                    if (is_reconnecting)
-                    {
-                        auto remaining =
-                            std::chrono::duration_cast<std::chrono::seconds>(
-                                peer.reconnect_at - now)
-                                .count();
-                        if (remaining < 0)
-                            remaining = 0;
-                        reconnect_str =
-                            "reconnect in " + std::to_string(remaining) + "s";
-                    }
+                    std::string addr = peer.peer_address;
+                    if (addr.size() > 21)
+                        addr = addr.substr(0, 21);
 
-                    // Fixed packet type slots for easy cross-peer comparison
-                    static const std::vector<std::string> fixed_types = {
-                        "mtPING",
-                        "mtMANIFESTS",
-                        "mtCLUSTER",
-                        "mtENDPOINTS",
-                        "mtTRANSACTION",
-                        "mtGET_LEDGER",
-                        "mtLEDGER_DATA",
-                        "mtPROPOSE_LEDGER",
-                        "mtSTATUS_CHANGE",
-                        "mtHAVE_SET",
-                        "mtVALIDATION",
-                        "mtGET_OBJECTS",
-                        "mtVALIDATORLIST",
-                        "mtSQUELCH",
-                        "mtVALIDATORLISTCOLLECTION",
-                        "mtPROOF_PATH_REQ",
-                        "mtPROOF_PATH_RESPONSE",
-                        "mtREPLAY_DELTA_REQ",
-                        "mtREPLAY_DELTA_RESPONSE",
-                        "mtHAVE_TRANSACTIONS",
-                        "mtTRANSACTIONS",
-                        "mtGET_PEER_SHARD_INFO_V2",
-                        "mtPEER_SHARD_INFO_V2",
-                    };
-
-                    Elements lines;
-                    lines.push_back(hbox({
-                        text(status_icon + " ") | color(status_color),
-                        text(peer.peer_id) | bold | color(status_color),
-                    }));
-                    lines.push_back(hbox({
-                        text("Addr: ") | dim,
-                        text(addr.empty() ? "(unknown)" : addr),
-                    }));
-                    lines.push_back(hbox({
-                        text("State: ") | dim,
-                        text(state_label) | color(status_color),
-                    }));
-                    if (!peer.peer_version.empty() ||
-                        !peer.protocol_version.empty())
-                    {
-                        lines.push_back(hbox({
-                            text("Ver: ") | dim,
-                            text(
-                                peer.peer_version.empty() ? "-"
-                                                          : peer.peer_version) |
-                                dim,
-                            text("  Proto: ") | dim,
-                            text(
-                                peer.protocol_version.empty()
-                                    ? "-"
-                                    : peer.protocol_version) |
-                                dim,
-                        }));
-                    }
-                    if (!reconnect_str.empty())
-                    {
-                        lines.push_back(text(reconnect_str) | dim);
-                    }
-                    lines.push_back(hbox({
-                        text("Uptime: ") | dim,
+                    rows_el.push_back(hbox({
+                        text(status_icon + " ") | color(status_color) |
+                            size(WIDTH, EQUAL, 3),
+                        text(peer.peer_id) | bold | color(status_color) |
+                            size(WIDTH, EQUAL, 10),
+                        text(state_label) | color(status_color) |
+                            size(WIDTH, EQUAL, 14),
+                        text(addr.empty() ? "-" : addr) |
+                            size(WIDTH, EQUAL, 22),
                         text(
                             peer.connected
                                 ? format_elapsed(peer.elapsed_seconds)
-                                : std::string("--:--:--")) |
-                            bold,
-                    }));
-                    lines.push_back(hbox({
-                        text("Last pkt: ") | dim,
-                        text(last_pkt),
-                    }));
-                    lines.push_back(hbox({
-                        text("Pkts: ") | dim,
-                        text(format_number(peer.total_packets)) | bold,
-                        text("  Bytes: ") | dim,
+                                : "--:--:--") |
+                            size(WIDTH, EQUAL, 10),
+                        text(last_pkt) | size(WIDTH, EQUAL, 6),
+                        text(format_number(peer.total_packets)) | bold |
+                            size(WIDTH, EQUAL, 10),
                         text(format_bytes(
                             static_cast<double>(peer.total_bytes))) |
-                            bold,
-                    }));
-                    lines.push_back(hbox({
-                        text("Rate: ") | dim,
+                            size(WIDTH, EQUAL, 10),
                         text(
                             format_rate(
                                 peer.connected ? peer.packets_per_sec : 0.0) +
                             "/s") |
-                            color(Color::GreenLight),
-                        text("  ") | dim,
+                            color(Color::GreenLight) | size(WIDTH, EQUAL, 8),
                         text(
                             format_bytes(
                                 peer.connected ? peer.bytes_per_sec : 0.0) +
                             "/s") |
-                            color(Color::Cyan),
+                            color(Color::Cyan) | size(WIDTH, EQUAL, 10),
+                        text(
+                            peer.peer_version.empty() ? "-"
+                                                      : peer.peer_version) |
+                            dim,
                     }));
+                }
 
-                    auto render_type_line = [&](std::string const& type,
-                                                uint64_t count) -> Element {
-                        return hbox({
-                            text("  ") | dim,
-                            text(type) | color(Color::Yellow) |
-                                size(WIDTH, EQUAL, 28),
-                            text(": ") | dim,
-                            text(format_number(count)) | dim |
-                                size(WIDTH, EQUAL, 6),
-                        });
-                    };
-
-                    Elements left_col;
-                    Elements right_col;
-                    for (size_t i = 0; i < fixed_types.size(); ++i)
-                    {
-                        auto const& type = fixed_types[i];
-                        auto it = peer.packet_counts.find(type);
-                        uint64_t count =
-                            it != peer.packet_counts.end() ? it->second : 0;
-                        auto line = render_type_line(type, count);
-                        if (i % 2 == 0)
-                            left_col.push_back(line);
-                        else
-                            right_col.push_back(line);
-                    }
-                    lines.push_back(text("Packet types:") | dim);
-                    lines.push_back(hbox({
-                        vbox(left_col) | size(WIDTH, EQUAL, 42),
-                        separator(),
-                        vbox(right_col) | size(WIDTH, EQUAL, 42),
-                    }));
-
-                    return vbox(lines) | border;
+                // Packet breakdown below the table — only non-zero types
+                // across all peers, one compact row per type
+                static const std::vector<std::string> type_names = {
+                    "mtPING",
+                    "mtMANIFESTS",
+                    "mtCLUSTER",
+                    "mtENDPOINTS",
+                    "mtTRANSACTION",
+                    "mtGET_LEDGER",
+                    "mtLEDGER_DATA",
+                    "mtPROPOSE_LEDGER",
+                    "mtSTATUS_CHANGE",
+                    "mtHAVE_SET",
+                    "mtVALIDATION",
+                    "mtGET_OBJECTS",
+                    "mtVALIDATORLIST",
+                    "mtSQUELCH",
+                    "mtVALIDATORLISTCOLLECTION",
+                    "mtPROOF_PATH_REQ",
+                    "mtPROOF_PATH_RESPONSE",
+                    "mtREPLAY_DELTA_REQ",
+                    "mtREPLAY_DELTA_RESPONSE",
+                    "mtHAVE_TRANSACTIONS",
+                    "mtTRANSACTIONS",
                 };
 
-                if (peers.empty())
+                // Find which types have any non-zero count
+                std::vector<std::string const*> active_types;
+                for (auto const& type : type_names)
                 {
-                    return vbox({
-                               text("No peers connected") | dim | hcenter,
-                           }) |
-                        flex;
-                }
-
-                for (auto const& peer : peers)
-                {
-                    cards.push_back(render_peer_card(peer));
-                }
-
-                // Build a 3x3 grid (or fewer if not enough peers)
-                const int columns = 3;
-                const int max_cards = 9;
-                const int rows = 3;
-                if (static_cast<int>(cards.size()) > max_cards)
-                    cards.resize(max_cards);
-
-                auto term_size = Terminal::Size();
-                int available_width = term_size.dimx - 6;
-                int available_height = term_size.dimy - 8;
-                int card_width =
-                    std::max(20, (available_width - (columns - 1)) / columns);
-                int card_height =
-                    std::max(6, (available_height - (rows - 1)) / rows);
-
-                std::vector<Element> rows_el;
-                for (size_t i = 0; i < cards.size(); i += columns)
-                {
-                    Elements row_cells;
-                    for (int c = 0; c < columns; ++c)
+                    for (auto const& peer : peers)
                     {
-                        size_t idx = i + c;
-                        if (idx < cards.size())
-                            row_cells.push_back(
-                                cards[idx] | size(WIDTH, EQUAL, card_width) |
-                                size(HEIGHT, EQUAL, card_height));
-                        else
-                            row_cells.push_back(
-                                filler() | size(WIDTH, EQUAL, card_width) |
-                                size(HEIGHT, EQUAL, card_height));
-                        if (c < columns - 1)
-                            row_cells.push_back(separator());
+                        auto it = peer.packet_counts.find(type);
+                        if (it != peer.packet_counts.end() && it->second > 0)
+                        {
+                            active_types.push_back(&type);
+                            break;
+                        }
                     }
-                    rows_el.push_back(hbox(row_cells));
-                    if (i + columns < cards.size())
-                        rows_el.push_back(separator());
+                }
+
+                if (!active_types.empty())
+                {
+                    rows_el.push_back(separator());
+
+                    // Type breakdown header: TYPE | peer-0 | peer-1 | ...
+                    int type_col_w = 26;
+                    int peer_col_w = 8;
+
+                    Elements hdr_cells;
+                    hdr_cells.push_back(
+                        text("PACKET TYPE") | bold |
+                        size(WIDTH, EQUAL, type_col_w));
+                    for (auto const& peer : peers)
+                    {
+                        // Short label: just the number
+                        auto pos = peer.peer_id.find('-');
+                        std::string label = (pos != std::string::npos)
+                            ? "P" + peer.peer_id.substr(pos + 1)
+                            : peer.peer_id;
+                        hdr_cells.push_back(
+                            text(label) | bold |
+                            size(WIDTH, EQUAL, peer_col_w));
+                    }
+                    rows_el.push_back(hbox(hdr_cells));
+
+                    for (auto const* type_ptr : active_types)
+                    {
+                        Elements cells;
+                        cells.push_back(
+                            text(*type_ptr) | color(Color::Yellow) |
+                            size(WIDTH, EQUAL, type_col_w));
+                        for (auto const& peer : peers)
+                        {
+                            auto it = peer.packet_counts.find(*type_ptr);
+                            uint64_t count = (it != peer.packet_counts.end())
+                                ? it->second
+                                : 0;
+                            cells.push_back(
+                                text(count > 0 ? format_number(count) : "·") |
+                                dim | size(WIDTH, EQUAL, peer_col_w));
+                        }
+                        rows_el.push_back(hbox(cells));
+                    }
                 }
 
                 std::string header =
-                    "PEERS (" + std::to_string(all_peers.size()) + ")";
-                if (all_peers.size() > static_cast<size_t>(max_cards))
-                {
-                    header += " showing first " + std::to_string(max_cards);
-                }
+                    "PEERS (" + std::to_string(peers.size()) + ")";
 
                 return vbox({
                     text(header) | bold | color(Color::Cyan),
                     separator(),
-                    vbox(rows_el) | flex,
+                    vbox(rows_el) | flex | yframe,
                 });
             };
 
-            auto peers_content = render_peers_tab() | flex;
+            // Only render the active tab's content
+            static const char* tab_names[] = {
+                "Main", "Proposals", "Peers", "Commands"};
+            auto render_start = std::chrono::steady_clock::now();
 
-            // Update commands tab peer list
-            {
-                std::vector<std::pair<std::string, bool>> peer_list;
-                for (auto const& peer : all_peers)
-                {
-                    peer_list.emplace_back(peer.peer_id, peer.connected);
-                }
-                commands_tab_.update_peers(peer_list);
-            }
-            auto commands_content = commands_tab_.render();
-
-            // Select content based on tab
             Element content;
             switch (tab)
             {
                 case 0:
-                    content = main_content;
+                    content = render_main_tab();
                     break;
                 case 1:
-                    content = proposals_content;
+                    content = render_proposals_tab() | flex;
                     break;
                 case 2:
-                    content = peers_content;
+                    content = render_peers_tab() | flex;
                     break;
-                case 3:
-                    content = commands_content;
+                case 3: {
+                    std::vector<std::pair<std::string, bool>> peer_list;
+                    for (auto const& peer : all_peers)
+                    {
+                        peer_list.emplace_back(peer.peer_id, peer.connected);
+                    }
+                    commands_tab_.update_peers(peer_list);
+                    content = commands_tab_.render();
                     break;
+                }
                 default:
-                    content = main_content;
+                    content = render_main_tab();
                     break;
             }
+
+            auto render_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - render_start)
+                    .count();
+            PLOGD(
+                dashboard_log(),
+                "render [",
+                tab_names[tab < 4 ? tab : 0],
+                "] ",
+                render_us,
+                "us");
 
             // Layout - use explicit 50/50 width for main columns
             return vbox({
