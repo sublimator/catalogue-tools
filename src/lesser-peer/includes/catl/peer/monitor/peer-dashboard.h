@@ -7,6 +7,7 @@
 #include <catl/xdata/protocol.h>
 #include <chrono>
 #include <deque>
+#include <ftxui/dom/elements.hpp>
 #include <functional>
 #include <map>
 #include <memory>
@@ -155,6 +156,21 @@ public:
         // Ledger tracking
         LedgerInfo current_ledger;
         std::map<uint32_t, uint32_t> recent_ledgers;  // seq -> validation count
+    };
+
+    // Per-frame locals passed to tab render methods
+    struct RenderParams
+    {
+        std::vector<Stats> const& all_peers;
+        std::chrono::steady_clock::time_point now;
+        LedgerInfo current_ledger;
+        bool is_connected;
+        std::string state;
+        std::string primary_address;
+        std::string primary_version;
+        std::string primary_protocol;
+        std::string primary_network_id;
+        std::chrono::steady_clock::time_point last_packet;
     };
 
     PeerDashboard();
@@ -502,6 +518,14 @@ private:
     // Callbacks
     shutdown_callback_t shutdown_callback_;
     restart_callback_t restart_callback_;
+
+    // Tab render methods (each in its own .cpp)
+    ftxui::Element
+    render_main_tab_(RenderParams const& p);
+    ftxui::Element
+    render_proposals_tab_(RenderParams const& p);
+    ftxui::Element
+    render_peers_tab_(RenderParams const& p);
 };
 
 }  // namespace catl::peer::monitor

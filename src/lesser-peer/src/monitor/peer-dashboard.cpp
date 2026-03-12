@@ -1457,6 +1457,19 @@ PeerDashboard::run_ui()
             // Get current time for all time-based checks
             auto now = std::chrono::steady_clock::now();
 
+            RenderParams p{
+                all_peers,
+                now,
+                current_ledger,
+                is_connected,
+                state,
+                primary_address,
+                primary_version,
+                primary_protocol,
+                primary_network_id,
+                last_packet,
+            };
+
             // Main tab content — wrapped in lambda to skip when not visible
             auto render_main_tab = [&]() -> Element {
                 // Connection status color - check for reconnecting state
