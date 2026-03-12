@@ -63,6 +63,10 @@ public:
         shutdown_callback_ = std::move(callback);
     }
 
+    // Get a single connection by peer_id (nullptr if expired/missing)
+    std::shared_ptr<peer_connection>
+    get_connection(std::string const& peer_id);
+
     // Set dashboard for ledger/validation updates
     // Note: Per-peer stats are handled separately by monitor via events
     void
@@ -78,6 +82,7 @@ public:
 private:
     void
     handle_ping(
+        std::string const& peer_id,
         std::shared_ptr<peer_connection> connection,
         std::vector<std::uint8_t> const& payload);
     void

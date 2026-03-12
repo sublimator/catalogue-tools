@@ -66,6 +66,32 @@ peer_monitor::peer_monitor(monitor_config config)
         // Register restart callback so network restart resets processor state
         dashboard_->set_restart_callback(
             [this]() { processor_->reset_state(); });
+        // Register send callback so Commands tab can send packets via IO
+        // thread
+        dashboard_->set_send_callback([this](
+                                          std::string peer_id,
+                                          packet_type type,
+                                          std::vector<std::uint8_t> data) {
+            asio::post(*event_strand_, [this, peer_id, type, data]() {
+                auto conn = processor_->get_connection(peer_id);
+                if (!conn)
+                {
+                    LOGD("Commands: no connection for peer ", peer_id);
+                    return;
+                }
+                conn->async_send_packet(
+                    type, data, [peer_id](boost::system::error_code ec) {
+                        if (ec)
+                        {
+                            LOGE(
+                                "Commands: send failed to ",
+                                peer_id,
+                                ": ",
+                                ec.message());
+                        }
+                    });
+            });
+        });
     }
 
     // Set shutdown callback for manifests-only mode

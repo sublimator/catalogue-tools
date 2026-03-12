@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catl/peer/monitor/peer-commands-tab.h"
 #include "catl/peer/monitor/peer-mapping.h"
 
 #include <atomic>
@@ -305,6 +306,20 @@ public:
         peer_mapping_ = std::move(mapping);
     }
 
+    // Send callback - called when user sends a command from the Commands tab
+    void
+    set_send_callback(send_callback_t callback)
+    {
+        commands_tab_.set_send_callback(std::move(callback));
+    }
+
+    // Forward pong to Commands tab for RTT tracking
+    void
+    record_pong(std::string const& peer_id, uint32_t seq)
+    {
+        commands_tab_.record_pong(peer_id, seq);
+    }
+
     // Shutdown callback - called when user quits the dashboard
     using shutdown_callback_t = std::function<void()>;
     void
@@ -472,6 +487,9 @@ private:
     mutable std::mutex pause_mutex_;
     std::string paused_prev_hash_;       // Current round we're paused on
     std::string paused_last_prev_hash_;  // Previous round (for LAST LEDGER)
+
+    // Peer Commands tab
+    PeerCommandsTab commands_tab_;
 
     // Callbacks
     shutdown_callback_t shutdown_callback_;

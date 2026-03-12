@@ -70,7 +70,7 @@ packet_processor::process_packet(
     // Handle PINGs always (critical for liveness)
     if (type == packet_type::ping)
     {
-        handle_ping(connection, payload);
+        handle_ping(peer_id, connection, payload);
     }
 
     // Handle specific packet types for logic/state maintenance
@@ -121,6 +121,7 @@ packet_processor::process_packet(
 
 void
 packet_processor::handle_ping(
+    std::string const& peer_id,
     std::shared_ptr<peer_connection> connection,
     std::vector<std::uint8_t> const& payload)
 {
@@ -137,6 +138,14 @@ packet_processor::handle_ping(
 
         connection->async_send_packet(
             packet_type::ping, pong_data, [](boost::system::error_code) {});
+    }
+    else if (ping.type() == protocol::TMPing_pingType_ptPONG)
+    {
+        // Forward to dashboard for RTT tracking
+        if (dashboard_ && ping.has_seq())
+        {
+            dashboard_->record_pong(peer_id, ping.seq());
+        }
     }
 }
 
@@ -790,6 +799,21 @@ void
 packet_processor::set_custom_handler(packet_type type, custom_handler handler)
 {
     custom_handlers_[type] = handler;
+}
+
+std::shared_ptr<peer_connection>
+packet_processor::get_connection(std::string const& peer_id)
+{
+    auto it = active_connections_.find(peer_id);
+    if (it == active_connections_.end())
+        return nullptr;
+    auto conn = it->second.lock();
+    if (!conn || !conn->is_connected())
+    {
+        active_connections_.erase(it);
+        return nullptr;
+    }
+    return conn;
 }
 
 std::vector<std::pair<std::string, std::shared_ptr<peer_connection>>>

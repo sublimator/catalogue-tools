@@ -1,5 +1,5 @@
-#include <catl/peer/monitor/peer-dashboard.h>
 #include <catl/core/logger.h>
+#include <catl/peer/monitor/peer-dashboard.h>
 #include <cmath>
 #include <cstdio>
 #include <ftxui/component/component.hpp>
@@ -1365,7 +1365,8 @@ PeerDashboard::run_ui()
             return output;
         };
 
-        auto component = Renderer([&]() -> Element {
+        auto commands_component = commands_tab_.component();
+        auto component = Renderer(commands_component, [&]() -> Element {
             ui_render_counter_++;  // Increment heartbeat counter for UI thread
             // Get all peer stats
             auto all_peers = get_all_peers_stats();
@@ -2343,6 +2344,9 @@ PeerDashboard::run_ui()
                 text(" "),
                 text(" [3] Peers ") |
                     (tab == 2 ? bold | bgcolor(Color::Blue) : dim),
+                text(" "),
+                text(" [4] Commands ") |
+                    (tab == 3 ? bold | bgcolor(Color::Blue) : dim),
                 filler(),
             });
 
@@ -2875,11 +2879,12 @@ PeerDashboard::run_ui()
                         {
                             elements.push_back(hbox({
                                 text("  RNG ") | dim,
-                                text("C:" +
-                                     std::to_string(entry.commit_count)) |
+                                text(
+                                    "C:" + std::to_string(entry.commit_count)) |
                                     color(Color::Cyan),
-                                text(" R:" +
-                                     std::to_string(entry.reveal_count)) |
+                                text(
+                                    " R:" +
+                                    std::to_string(entry.reveal_count)) |
                                     color(Color::Magenta),
                             }));
                         }
@@ -3011,11 +3016,12 @@ PeerDashboard::run_ui()
                         {
                             elements.push_back(hbox({
                                 text("  RNG ") | dim,
-                                text("C:" +
-                                     std::to_string(entry.commit_count)) |
+                                text(
+                                    "C:" + std::to_string(entry.commit_count)) |
                                     color(Color::Cyan),
-                                text(" R:" +
-                                     std::to_string(entry.reveal_count)) |
+                                text(
+                                    " R:" +
+                                    std::to_string(entry.reveal_count)) |
                                     color(Color::Magenta),
                             }));
                         }
@@ -3153,11 +3159,12 @@ PeerDashboard::run_ui()
                         {
                             elements.push_back(hbox({
                                 text("  RNG ") | dim,
-                                text("C:" +
-                                     std::to_string(entry.commit_count)) |
+                                text(
+                                    "C:" + std::to_string(entry.commit_count)) |
                                     color(Color::Cyan),
-                                text(" R:" +
-                                     std::to_string(entry.reveal_count)) |
+                                text(
+                                    " R:" +
+                                    std::to_string(entry.reveal_count)) |
                                     color(Color::Magenta),
                             }));
                         }
@@ -3487,10 +3494,37 @@ PeerDashboard::run_ui()
 
             auto peers_content = render_peers_tab() | flex;
 
+            // Update commands tab peer list
+            {
+                std::vector<std::pair<std::string, bool>> peer_list;
+                for (auto const& peer : all_peers)
+                {
+                    peer_list.emplace_back(peer.peer_id, peer.connected);
+                }
+                commands_tab_.update_peers(peer_list);
+            }
+            auto commands_content = commands_tab_.render();
+
             // Select content based on tab
-            Element content = tab == 0
-                ? main_content
-                : (tab == 1 ? proposals_content : peers_content);
+            Element content;
+            switch (tab)
+            {
+                case 0:
+                    content = main_content;
+                    break;
+                case 1:
+                    content = proposals_content;
+                    break;
+                case 2:
+                    content = peers_content;
+                    break;
+                case 3:
+                    content = commands_content;
+                    break;
+                default:
+                    content = main_content;
+                    break;
+            }
 
             // Layout - use explicit 50/50 width for main columns
             return vbox({
@@ -3500,7 +3534,7 @@ PeerDashboard::run_ui()
                        separator(),
                        content | flex,
                        separator(),
-                       text("'1'/'2'/'3' tabs | SPACE pause | 'q' quit | 'c' "
+                       text("'1'-'4' tabs | SPACE pause | 'q' quit | 'c' "
                             "clear") |
                            hcenter | dim,
                    }) |
@@ -3555,6 +3589,11 @@ PeerDashboard::run_ui()
                     current_tab_ = 2;  // Peers tab
                     return true;
                 }
+                else if (event.character() == "4")
+                {
+                    current_tab_ = 3;  // Commands tab
+                    return true;
+                }
                 else if (event.character() == " ")
                 {
                     // Toggle pause on proposals tab
@@ -3598,6 +3637,20 @@ PeerDashboard::run_ui()
                     return true;
                 }
             }
+            // On Commands tab, let unhandled events propagate to interactive
+            // components (checkboxes, radiobox, buttons)
+            if (current_tab_.load() == 3)
+            {
+                return false;
+            }
+
+            // On other tabs, consume character events to prevent accidental
+            // interaction with the commands component
+            if (event.is_character())
+            {
+                return true;
+            }
+
             // Ignore mouse events
             if (event.is_mouse())
             {
