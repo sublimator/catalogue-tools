@@ -75,6 +75,11 @@ target_include_directories(
   PRIVATE ${CMAKE_CURRENT_BINARY_DIR}
   PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/src)
 
+# FTXUI rendering benchmark (standalone, no project deps)
+add_executable(ftxui-bench src/monitor/ftxui-bench.cpp)
+target_link_libraries(
+  ftxui-bench PRIVATE ftxui::screen ftxui::dom ftxui::component)
+
 # Build log-keeper executable
 add_executable(log-keeper src/log-keeper/main.cpp src/log-keeper/log-keeper.cpp)
 

@@ -9,7 +9,6 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/color.hpp>
 #include <ftxui/screen/terminal.hpp>
-#include <iomanip>
 #include <limits>
 #include <sstream>
 
@@ -1372,10 +1371,16 @@ PeerDashboard::run_ui()
 
         // Helpers
         auto format_number = [](uint64_t num) -> std::string {
-            std::stringstream ss;
-            ss.imbue(std::locale(""));
-            ss << std::fixed << num;
-            return ss.str();
+            // Format with thousands separators using manual insertion
+            // (avoids std::locale("") which makes a system call each time)
+            auto s = std::to_string(num);
+            int pos = static_cast<int>(s.size()) - 3;
+            while (pos > 0)
+            {
+                s.insert(pos, ",");
+                pos -= 3;
+            }
+            return s;
         };
 
         auto format_bytes = [](double bytes) -> std::string {
@@ -1386,29 +1391,28 @@ PeerDashboard::run_ui()
                 bytes /= 1024;
                 i++;
             }
-            std::stringstream ss;
-            ss << std::fixed << std::setprecision(2) << bytes << " "
-               << suffixes[i];
-            return ss.str();
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.2f %s", bytes, suffixes[i]);
+            return buf;
         };
 
         auto format_rate = [](double rate) -> std::string {
-            std::stringstream ss;
-            ss << std::fixed << std::setprecision(1) << rate;
-            return ss.str();
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.1f", rate);
+            return buf;
         };
 
         auto format_elapsed = [](double seconds) -> std::string {
             int total_sec = static_cast<int>(seconds);
-            int hours = total_sec / 3600;
-            int minutes = (total_sec % 3600) / 60;
-            int secs = total_sec % 60;
-
-            std::stringstream ss;
-            ss << std::setfill('0') << std::setw(2) << hours << ":"
-               << std::setfill('0') << std::setw(2) << minutes << ":"
-               << std::setfill('0') << std::setw(2) << secs;
-            return ss.str();
+            char buf[16];
+            std::snprintf(
+                buf,
+                sizeof(buf),
+                "%02d:%02d:%02d",
+                total_sec / 3600,
+                (total_sec % 3600) / 60,
+                total_sec % 60);
+            return buf;
         };
 
         // Spinner animation
@@ -1473,9 +1477,11 @@ PeerDashboard::run_ui()
 
         auto commands_component = commands_tab_.component();
         auto component = Renderer(commands_component, [&]() -> Element {
+            auto frame_start = std::chrono::steady_clock::now();
             ui_render_counter_++;  // Increment heartbeat counter for UI thread
             // Get all peer stats
             auto all_peers = get_all_peers_stats();
+            auto after_stats = std::chrono::steady_clock::now();
 
             // Get current validated ledger
             auto current_ledger = get_current_ledger();
@@ -1827,9 +1833,9 @@ PeerDashboard::run_ui()
                             {
                                 if (!timings_str.empty())
                                     timings_str += ",";
-                                std::stringstream ss;
-                                ss << std::fixed << std::setprecision(1) << t;
-                                timings_str += ss.str();
+                                char buf[16];
+                                std::snprintf(buf, sizeof(buf), "%.1f", t);
+                                timings_str += buf;
                             }
 
                             bool is_different = !majority_hash.empty() &&
@@ -3368,25 +3374,7 @@ PeerDashboard::run_ui()
                         flex;
                 }
 
-                // Table header
-                Elements rows_el;
-                rows_el.push_back(hbox({
-                    text("  ") | size(WIDTH, EQUAL, 3),
-                    text("PEER") | bold | size(WIDTH, EQUAL, 10),
-                    text("STATE") | bold | size(WIDTH, EQUAL, 14),
-                    text("ADDRESS") | bold | size(WIDTH, EQUAL, 22),
-                    text("UPTIME") | bold | size(WIDTH, EQUAL, 10),
-                    text("LAST") | bold | size(WIDTH, EQUAL, 6),
-                    text("PKTS") | bold | size(WIDTH, EQUAL, 10),
-                    text("BYTES") | bold | size(WIDTH, EQUAL, 10),
-                    text("PKT/s") | bold | size(WIDTH, EQUAL, 8),
-                    text("B/s") | bold | size(WIDTH, EQUAL, 10),
-                    text("VERSION") | bold,
-                }));
-                rows_el.push_back(separator());
-
-                for (auto const& peer : peers)
-                {
+                auto render_peer_card = [&](Stats const& peer) -> Element {
                     bool is_reconnecting =
                         peer.reconnect_at.time_since_epoch().count() > 0 &&
                         peer.reconnect_at > now;
@@ -3398,7 +3386,7 @@ PeerDashboard::run_ui()
 
                     std::string state_label;
                     if (peer.connection_state.rfind("Error:", 0) == 0)
-                        state_label = "Error";
+                        state_label = peer.connection_state;
                     else if (peer.connected)
                         state_label = "Connected";
                     else if (is_reconnecting)
@@ -3428,130 +3416,138 @@ PeerDashboard::run_ui()
                     }
 
                     std::string addr = peer.peer_address;
-                    if (addr.size() > 21)
-                        addr = addr.substr(0, 21);
+                    if (addr.size() > 24)
+                        addr = addr.substr(0, 24) + "...";
 
-                    rows_el.push_back(hbox({
-                        text(status_icon + " ") | color(status_color) |
-                            size(WIDTH, EQUAL, 3),
-                        text(peer.peer_id) | bold | color(status_color) |
-                            size(WIDTH, EQUAL, 10),
-                        text(state_label) | color(status_color) |
-                            size(WIDTH, EQUAL, 14),
-                        text(addr.empty() ? "-" : addr) |
-                            size(WIDTH, EQUAL, 22),
+                    // Fixed packet type slots for cross-peer comparison
+                    static const std::vector<std::string> fixed_types = {
+                        "mtPING",
+                        "mtMANIFESTS",
+                        "mtCLUSTER",
+                        "mtENDPOINTS",
+                        "mtTRANSACTION",
+                        "mtGET_LEDGER",
+                        "mtLEDGER_DATA",
+                        "mtPROPOSE_LEDGER",
+                        "mtSTATUS_CHANGE",
+                        "mtHAVE_SET",
+                        "mtVALIDATION",
+                        "mtGET_OBJECTS",
+                        "mtVALIDATORLIST",
+                        "mtSQUELCH",
+                        "mtVALIDATORLISTCOLLECTION",
+                        "mtPROOF_PATH_REQ",
+                        "mtPROOF_PATH_RESPONSE",
+                        "mtREPLAY_DELTA_REQ",
+                        "mtREPLAY_DELTA_RESPONSE",
+                        "mtHAVE_TRANSACTIONS",
+                        "mtTRANSACTIONS",
+                        "mtGET_PEER_SHARD_INFO_V2",
+                        "mtPEER_SHARD_INFO_V2",
+                    };
+
+                    Elements left_col, right_col;
+                    for (size_t i = 0; i < fixed_types.size(); ++i)
+                    {
+                        auto it = peer.packet_counts.find(fixed_types[i]);
+                        uint64_t count =
+                            it != peer.packet_counts.end() ? it->second : 0;
+                        char buf[48];
+                        std::snprintf(
+                            buf,
+                            sizeof(buf),
+                            "  %-26s %6s",
+                            fixed_types[i].c_str(),
+                            format_number(count).c_str());
+                        if (i % 2 == 0)
+                            left_col.push_back(text(buf) | dim);
+                        else
+                            right_col.push_back(text(buf) | dim);
+                    }
+
+                    Elements lines;
+                    lines.push_back(hbox({
+                        text(status_icon + " ") | color(status_color),
+                        text(peer.peer_id) | bold | color(status_color),
+                    }));
+                    lines.push_back(hbox({
+                        text("Addr: ") | dim,
+                        text(addr.empty() ? "(unknown)" : addr),
+                    }));
+                    lines.push_back(hbox({
+                        text("State: ") | dim,
+                        text(state_label) | color(status_color),
+                    }));
+                    lines.push_back(hbox({
+                        text("Uptime: ") | dim,
                         text(
                             peer.connected
                                 ? format_elapsed(peer.elapsed_seconds)
-                                : "--:--:--") |
-                            size(WIDTH, EQUAL, 10),
-                        text(last_pkt) | size(WIDTH, EQUAL, 6),
-                        text(format_number(peer.total_packets)) | bold |
-                            size(WIDTH, EQUAL, 10),
+                                : std::string("--:--:--")) |
+                            bold,
+                        text("  Last: ") | dim,
+                        text(last_pkt),
+                    }));
+                    lines.push_back(hbox({
+                        text("Pkts: ") | dim,
+                        text(format_number(peer.total_packets)) | bold,
+                        text("  Bytes: ") | dim,
                         text(format_bytes(
                             static_cast<double>(peer.total_bytes))) |
-                            size(WIDTH, EQUAL, 10),
+                            bold,
+                    }));
+                    lines.push_back(hbox({
+                        text("Rate: ") | dim,
                         text(
                             format_rate(
                                 peer.connected ? peer.packets_per_sec : 0.0) +
                             "/s") |
-                            color(Color::GreenLight) | size(WIDTH, EQUAL, 8),
+                            color(Color::GreenLight),
+                        text("  ") | dim,
                         text(
                             format_bytes(
                                 peer.connected ? peer.bytes_per_sec : 0.0) +
                             "/s") |
-                            color(Color::Cyan) | size(WIDTH, EQUAL, 10),
-                        text(
-                            peer.peer_version.empty() ? "-"
-                                                      : peer.peer_version) |
-                            dim,
+                            color(Color::Cyan),
                     }));
-                }
+                    lines.push_back(text("Packet types:") | dim);
+                    lines.push_back(hbox({
+                        vbox(left_col),
+                        text(" "),
+                        vbox(right_col),
+                    }));
 
-                // Packet breakdown below the table — only non-zero types
-                // across all peers, one compact row per type
-                static const std::vector<std::string> type_names = {
-                    "mtPING",
-                    "mtMANIFESTS",
-                    "mtCLUSTER",
-                    "mtENDPOINTS",
-                    "mtTRANSACTION",
-                    "mtGET_LEDGER",
-                    "mtLEDGER_DATA",
-                    "mtPROPOSE_LEDGER",
-                    "mtSTATUS_CHANGE",
-                    "mtHAVE_SET",
-                    "mtVALIDATION",
-                    "mtGET_OBJECTS",
-                    "mtVALIDATORLIST",
-                    "mtSQUELCH",
-                    "mtVALIDATORLISTCOLLECTION",
-                    "mtPROOF_PATH_REQ",
-                    "mtPROOF_PATH_RESPONSE",
-                    "mtREPLAY_DELTA_REQ",
-                    "mtREPLAY_DELTA_RESPONSE",
-                    "mtHAVE_TRANSACTIONS",
-                    "mtTRANSACTIONS",
+                    return vbox(lines) | border;
                 };
 
-                // Find which types have any non-zero count
-                std::vector<std::string const*> active_types;
-                for (auto const& type : type_names)
+                Elements cards;
+                for (auto const& peer : peers)
+                    cards.push_back(render_peer_card(peer));
+
+                // Build grid with 3 columns
+                const int columns = 3;
+                auto term_size = Terminal::Size();
+                int available_width = term_size.dimx - 4;
+                int card_width =
+                    std::max(20, (available_width - (columns - 1)) / columns);
+
+                Elements rows_el;
+                for (size_t i = 0; i < cards.size(); i += columns)
                 {
-                    for (auto const& peer : peers)
+                    Elements row_cells;
+                    for (int c = 0; c < columns; ++c)
                     {
-                        auto it = peer.packet_counts.find(type);
-                        if (it != peer.packet_counts.end() && it->second > 0)
-                        {
-                            active_types.push_back(&type);
-                            break;
-                        }
+                        size_t idx = i + c;
+                        if (idx < cards.size())
+                            row_cells.push_back(
+                                cards[idx] | size(WIDTH, EQUAL, card_width));
+                        else
+                            row_cells.push_back(
+                                filler() | size(WIDTH, EQUAL, card_width));
+                        if (c < columns - 1)
+                            row_cells.push_back(separator());
                     }
-                }
-
-                if (!active_types.empty())
-                {
-                    rows_el.push_back(separator());
-
-                    // Type breakdown header: TYPE | peer-0 | peer-1 | ...
-                    int type_col_w = 26;
-                    int peer_col_w = 8;
-
-                    Elements hdr_cells;
-                    hdr_cells.push_back(
-                        text("PACKET TYPE") | bold |
-                        size(WIDTH, EQUAL, type_col_w));
-                    for (auto const& peer : peers)
-                    {
-                        // Short label: just the number
-                        auto pos = peer.peer_id.find('-');
-                        std::string label = (pos != std::string::npos)
-                            ? "P" + peer.peer_id.substr(pos + 1)
-                            : peer.peer_id;
-                        hdr_cells.push_back(
-                            text(label) | bold |
-                            size(WIDTH, EQUAL, peer_col_w));
-                    }
-                    rows_el.push_back(hbox(hdr_cells));
-
-                    for (auto const* type_ptr : active_types)
-                    {
-                        Elements cells;
-                        cells.push_back(
-                            text(*type_ptr) | color(Color::Yellow) |
-                            size(WIDTH, EQUAL, type_col_w));
-                        for (auto const& peer : peers)
-                        {
-                            auto it = peer.packet_counts.find(*type_ptr);
-                            uint64_t count = (it != peer.packet_counts.end())
-                                ? it->second
-                                : 0;
-                            cells.push_back(
-                                text(count > 0 ? format_number(count) : "·") |
-                                dim | size(WIDTH, EQUAL, peer_col_w));
-                        }
-                        rows_el.push_back(hbox(cells));
-                    }
+                    rows_el.push_back(hbox(row_cells));
                 }
 
                 std::string header =
@@ -3596,16 +3592,29 @@ PeerDashboard::run_ui()
                     break;
             }
 
-            auto render_us =
+            auto render_end = std::chrono::steady_clock::now();
+            auto stats_us =
                 std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::steady_clock::now() - render_start)
+                    after_stats - frame_start)
+                    .count();
+            auto tab_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    render_end - render_start)
+                    .count();
+            auto total_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    render_end - frame_start)
                     .count();
             PLOGD(
                 dashboard_log(),
                 "render [",
                 tab_names[tab < 4 ? tab : 0],
-                "] ",
-                render_us,
+                "] stats=",
+                stats_us,
+                "us tab=",
+                tab_us,
+                "us total=",
+                total_us,
                 "us");
 
             // Layout - use explicit 50/50 width for main columns
