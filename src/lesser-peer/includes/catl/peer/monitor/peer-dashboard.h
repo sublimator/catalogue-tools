@@ -299,6 +299,14 @@ public:
     std::vector<std::string>
     get_available_endpoints() const;
 
+    // Reconcile an ephemeral key with its resolved master key.
+    // Sweeps known_validators_, ledger_validations_, proposal_rounds_,
+    // and peer_mapping_ to replace old_key with new_key.
+    void
+    reconcile_key(
+        std::string const& old_key,
+        std::string const& new_key);
+
     // Set peer mapping for validator identity resolution
     void
     set_peer_mapping(std::shared_ptr<PeerMapping> mapping)

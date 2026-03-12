@@ -531,6 +531,78 @@ PeerDashboard::get_known_validator_count() const
 }
 
 void
+PeerDashboard::reconcile_key(
+    std::string const& old_key,
+    std::string const& new_key)
+{
+    if (old_key == new_key || old_key.empty() || new_key.empty())
+        return;
+
+    std::lock_guard<std::mutex> lock(consensus_mutex_);
+
+    // 1. known_validators_: remove ephemeral, ensure master present
+    if (known_validators_.erase(old_key))
+    {
+        known_validators_.insert(new_key);
+        LOGD(
+            "Reconcile: ",
+            old_key.substr(0, 12),
+            "... -> ",
+            new_key.substr(0, 12),
+            "...");
+    }
+    else
+    {
+        return;  // old_key wasn't tracked, nothing to reconcile
+    }
+
+    // 2. ledger_validations_: re-key validator entries
+    for (auto& [seq, consensus] : ledger_validations_)
+    {
+        auto it = consensus.validators.find(old_key);
+        if (it != consensus.validators.end())
+        {
+            auto info = std::move(it->second);
+            info.master_key_hex = new_key;
+            consensus.validators.erase(it);
+            // Merge into existing master key entry if present
+            auto master_it = consensus.validators.find(new_key);
+            if (master_it != consensus.validators.end())
+            {
+                // Merge seen_from_peers
+                master_it->second.seen_from_peers.insert(
+                    info.seen_from_peers.begin(), info.seen_from_peers.end());
+            }
+            else
+            {
+                consensus.validators[new_key] = std::move(info);
+            }
+        }
+    }
+
+    // 3. proposal_rounds_: re-key timeline entries and proposing_validators
+    for (auto& [hash, props] : proposal_rounds_)
+    {
+        for (auto& event : props.timeline)
+        {
+            if (event.validator_key == old_key)
+                event.validator_key = new_key;
+        }
+    }
+    for (auto& [hash, txset] : proposal_txsets_)
+    {
+        if (txset.proposing_validators.erase(old_key))
+            txset.proposing_validators.insert(new_key);
+    }
+
+    // 4. peer_mapping_: transfer votes from old_key to new_key
+    if (peer_mapping_)
+    {
+        peer_mapping_->reconcile_key(old_key, new_key);
+    }
+}
+
+void
 PeerDashboard::record_proposal(
     std::string const& prev_ledger_hash,
     std::string const& tx_set_hash,

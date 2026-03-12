@@ -85,6 +85,28 @@ PeerMapping::resolved_count() const
 }
 
 void
+PeerMapping::reconcile_key(
+    std::string const& old_key,
+    std::string const& new_key)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = first_delivery_votes_.find(old_key);
+    if (it == first_delivery_votes_.end())
+        return;
+
+    // Merge votes into new_key
+    auto& new_votes = first_delivery_votes_[new_key];
+    for (auto const& [peer_id, count] : it->second)
+    {
+        new_votes[peer_id] += count;
+    }
+    first_delivery_votes_.erase(it);
+
+    rebuild_mapping();
+}
+
+void
 PeerMapping::clear()
 {
     std::lock_guard<std::mutex> lock(mutex_);

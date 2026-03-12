@@ -161,8 +161,18 @@ packet_processor::handle_manifests(std::vector<std::uint8_t> const& payload)
         auto const& manifest = manifests.list(i);
         auto const& sto = manifest.stobject();
         // Process manifest with the tracker
-        manifest_tracker_.process_manifest(
+        auto info = manifest_tracker_.process_manifest(
             reinterpret_cast<const uint8_t*>(sto.data()), sto.size());
+
+        // Reconcile: if this manifest established an ephemeral→master mapping,
+        // sweep dashboard state to replace any entries stored under the raw
+        // ephemeral hex key with the resolved master key.
+        if (info && dashboard_ && !info->ephemeral_key_hex.empty() &&
+            !info->master_key.empty())
+        {
+            dashboard_->reconcile_key(
+                info->ephemeral_key_hex, info->master_key);
+        }
     }
 }
 

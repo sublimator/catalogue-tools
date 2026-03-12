@@ -52,6 +52,12 @@ public:
     size_t
     resolved_count() const;
 
+    // Transfer votes from old_key to new_key (ephemeral → master resolution)
+    void
+    reconcile_key(
+        std::string const& old_key,
+        std::string const& new_key);
+
     // Reset all votes and mappings (e.g. on network restart)
     void
     clear();
