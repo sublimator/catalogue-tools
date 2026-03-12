@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <catl/core/logger.h>
+#include <catl/peer/monitor/dashboard-format.h>
 #include <catl/peer/monitor/peer-dashboard.h>
 #include <cmath>
 #include <cstdio>
@@ -1369,60 +1370,6 @@ PeerDashboard::run_ui()
         auto screen = ScreenInteractive::Fullscreen();
         screen.TrackMouse(false);  // Disable mouse capture
 
-        // Helpers
-        auto format_number = [](uint64_t num) -> std::string {
-            // Format with thousands separators using manual insertion
-            // (avoids std::locale("") which makes a system call each time)
-            auto s = std::to_string(num);
-            int pos = static_cast<int>(s.size()) - 3;
-            while (pos > 0)
-            {
-                s.insert(pos, ",");
-                pos -= 3;
-            }
-            return s;
-        };
-
-        auto format_bytes = [](double bytes) -> std::string {
-            const char* suffixes[] = {"B", "K", "M", "G", "T"};
-            int i = 0;
-            while (bytes > 1024 && i < 4)
-            {
-                bytes /= 1024;
-                i++;
-            }
-            char buf[32];
-            std::snprintf(buf, sizeof(buf), "%.2f %s", bytes, suffixes[i]);
-            return buf;
-        };
-
-        auto format_rate = [](double rate) -> std::string {
-            char buf[32];
-            std::snprintf(buf, sizeof(buf), "%.1f", rate);
-            return buf;
-        };
-
-        auto format_elapsed = [](double seconds) -> std::string {
-            int total_sec = static_cast<int>(seconds);
-            char buf[16];
-            std::snprintf(
-                buf,
-                sizeof(buf),
-                "%02d:%02d:%02d",
-                total_sec / 3600,
-                (total_sec % 3600) / 60,
-                total_sec % 60);
-            return buf;
-        };
-
-        // Spinner animation
-        static int spinner_frame = 0;
-        auto get_spinner = [&]() -> std::string {
-            const std::vector<std::string> frames = {
-                "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
-            spinner_frame = (spinner_frame + 1) % frames.size();
-            return frames[spinner_frame];
-        };
 
         // Create throughput graph
         auto throughput_graph = [this](
@@ -1548,7 +1495,7 @@ PeerDashboard::run_ui()
                 std::string activity;
                 if (receiving)
                 {
-                    activity = get_spinner() + " Receiving";
+                    activity = fmt::spinner() + " Receiving";
                 }
                 else if (is_reconnecting)
                 {
@@ -1559,7 +1506,7 @@ PeerDashboard::run_ui()
                             .count();
                     if (remaining < 0)
                         remaining = 0;
-                    activity = get_spinner() + " " + state + " in " +
+                    activity = fmt::spinner() + " " + state + " in " +
                         std::to_string(remaining) + "s";
                 }
                 else
@@ -1586,7 +1533,7 @@ PeerDashboard::run_ui()
                         : Color::Cyan;
                     last_validated_elements.push_back(hbox({
                         text("Sequence: "),
-                        text(format_number(last_validated->sequence)) | bold |
+                        text(fmt::number(last_validated->sequence)) | bold |
                             color(seq_color),
                     }));
 
@@ -1636,7 +1583,7 @@ PeerDashboard::run_ui()
                         : Color::Cyan;
                     validating_elements.push_back(hbox({
                         text("Sequence: "),
-                        text(format_number(validating->sequence)) | bold |
+                        text(fmt::number(validating->sequence)) | bold |
                             color(seq_color),
                     }));
 
@@ -1737,7 +1684,7 @@ PeerDashboard::run_ui()
                         }
 
                         std::string seq_str = proposals->ledger_seq > 0
-                            ? format_number(proposals->ledger_seq)
+                            ? fmt::number(proposals->ledger_seq)
                             : "?";
                         std::string prev_short =
                             proposals->prev_ledger_hash.size() > 8
@@ -2181,7 +2128,7 @@ PeerDashboard::run_ui()
                         bool peer_receiving =
                             peer.connected && peer_since_last < 3;
                         std::string activity_icon =
-                            (peer_receiving || is_reconnecting) ? get_spinner()
+                            (peer_receiving || is_reconnecting) ? fmt::spinner()
                                                                 : " ";
 
                         // Show address if connected, otherwise show connection
@@ -2214,9 +2161,9 @@ PeerDashboard::run_ui()
                             text(activity_icon) | color(Color::Cyan),
                             text(" " + display_text) | bold,
                             text(" | "),
-                            text(format_number(peer.total_packets)) | dim,
+                            text(fmt::number(peer.total_packets)) | dim,
                             text(" pkts | "),
-                            text(format_bytes(
+                            text(fmt::bytes(
                                 static_cast<double>(peer.total_bytes))) |
                                 dim,
                         }));
@@ -2303,41 +2250,41 @@ PeerDashboard::run_ui()
                     separator(),
                     hbox({
                         text("Uptime: "),
-                        text(format_elapsed(elapsed)) | bold |
+                        text(fmt::elapsed(elapsed)) | bold |
                             color(Color::Yellow),
                     }),
                     hbox({
                         text("Total packets: "),
-                        text(format_number(total_pkts)) | bold,
+                        text(fmt::number(total_pkts)) | bold,
                     }),
                     hbox({
                         text("Total data: "),
-                        text(format_bytes(static_cast<double>(total_b))) | bold,
+                        text(fmt::bytes(static_cast<double>(total_b))) | bold,
                     }),
                     separator(),
                     text("Current Throughput") | bold,
                     hbox({
                         text("  Packets/sec: "),
-                        text(format_rate(pps)) | bold |
+                        text(fmt::rate(pps)) | bold |
                             color(Color::GreenLight),
                     }),
                     hbox({
                         text("  Data rate: "),
-                        text(format_bytes(bps) + "/s") | bold |
+                        text(fmt::bytes(bps) + "/s") | bold |
                             color(Color::GreenLight),
                     }),
                     separator(),
                     text("Average (since start)") | bold,
                     hbox({
                         text("  Packets/sec: "),
-                        text(format_rate(
+                        text(fmt::rate(
                             elapsed > 0 ? total_pkts / elapsed : 0)) |
                             bold,
                     }),
                     hbox({
                         text("  Data rate: "),
                         text(
-                            format_bytes(elapsed > 0 ? total_b / elapsed : 0) +
+                            fmt::bytes(elapsed > 0 ? total_b / elapsed : 0) +
                             "/s") |
                             bold,
                     }),
@@ -2389,12 +2336,12 @@ PeerDashboard::run_ui()
                     packet_elements.push_back(hbox({
                         text(type) | size(WIDTH, EQUAL, 26) |
                             color(Color::Yellow),
-                        text(format_number(count)) | size(WIDTH, EQUAL, 12),
-                        text(format_rate(rate) + "/s") | size(WIDTH, EQUAL, 10),
-                        text(format_bytes(static_cast<double>(type_bytes))) |
+                        text(fmt::number(count)) | size(WIDTH, EQUAL, 12),
+                        text(fmt::rate(rate) + "/s") | size(WIDTH, EQUAL, 10),
+                        text(fmt::bytes(static_cast<double>(type_bytes))) |
                             size(WIDTH, EQUAL, 10),
                         gauge(pct / 100.0f) | flex | color(Color::Blue),
-                        text(" " + format_rate(pct) + "%") |
+                        text(" " + fmt::rate(pct) + "%") |
                             size(WIDTH, EQUAL, 8),
                     }));
                     shown++;
@@ -3458,7 +3405,7 @@ PeerDashboard::run_ui()
                             sizeof(buf),
                             "  %-26s %6s",
                             fixed_types[i].c_str(),
-                            format_number(count).c_str());
+                            fmt::number(count).c_str());
                         if (i % 2 == 0)
                             left_col.push_back(text(buf) | dim);
                         else
@@ -3482,7 +3429,7 @@ PeerDashboard::run_ui()
                         text("Uptime: ") | dim,
                         text(
                             peer.connected
-                                ? format_elapsed(peer.elapsed_seconds)
+                                ? fmt::elapsed(peer.elapsed_seconds)
                                 : std::string("--:--:--")) |
                             bold,
                         text("  Last: ") | dim,
@@ -3490,22 +3437,22 @@ PeerDashboard::run_ui()
                     }));
                     lines.push_back(hbox({
                         text("Pkts: ") | dim,
-                        text(format_number(peer.total_packets)) | bold,
+                        text(fmt::number(peer.total_packets)) | bold,
                         text("  Bytes: ") | dim,
-                        text(format_bytes(
+                        text(fmt::bytes(
                             static_cast<double>(peer.total_bytes))) |
                             bold,
                     }));
                     lines.push_back(hbox({
                         text("Rate: ") | dim,
                         text(
-                            format_rate(
+                            fmt::rate(
                                 peer.connected ? peer.packets_per_sec : 0.0) +
                             "/s") |
                             color(Color::GreenLight),
                         text("  ") | dim,
                         text(
-                            format_bytes(
+                            fmt::bytes(
                                 peer.connected ? peer.bytes_per_sec : 0.0) +
                             "/s") |
                             color(Color::Cyan),
