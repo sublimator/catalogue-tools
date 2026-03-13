@@ -61,7 +61,8 @@ add_executable(
   src/monitor/peer-mapping.cpp
   src/monitor/peer-commands-tab.cpp
   src/monitor/render-peers-tab.cpp
-  src/monitor/render-proposals-tab.cpp)
+  src/monitor/render-proposals-tab.cpp
+  src/monitor/render-main-tab.cpp)
 
 target_link_libraries(
   peermon
