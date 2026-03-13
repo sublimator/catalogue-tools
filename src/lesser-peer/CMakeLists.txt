@@ -58,6 +58,7 @@ add_executable(
   src/monitor/packet-logger.cpp
   src/monitor/command-line.cpp
   src/monitor/peer-dashboard.cpp
+  src/monitor/dashboard-data.cpp
   src/monitor/peer-mapping.cpp
   src/monitor/peer-commands-tab.cpp
   src/monitor/render-peers-tab.cpp
