@@ -1,17 +1,13 @@
 #include <algorithm>
 #include <catl/core/logger.h>
-#include <catl/peer/monitor/dashboard-format.h>
 #include <catl/peer/monitor/peer-dashboard.h>
 #include <cmath>
-#include <cstdio>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/loop.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/color.hpp>
-#include <ftxui/screen/terminal.hpp>
 #include <limits>
-#include <sstream>
 
 namespace catl::peer::monitor {
 
@@ -1538,6 +1534,24 @@ PeerDashboard::run_ui()
                     {
                         std::lock_guard<std::mutex> lock(throughput_mutex_);
                         throughput_history_.clear();
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(peers_mutex_);
+                        for (auto& [id, stats] : peer_stats_)
+                        {
+                            stats.total_packets = 0;
+                            stats.total_bytes = 0;
+                            stats.elapsed_seconds = 0;
+                            stats.packets_per_sec = 0;
+                            stats.bytes_per_sec = 0;
+                            stats.packet_counts.clear();
+                            stats.packet_bytes.clear();
+                        }
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(
+                            per_peer_throughput_mutex_);
+                        per_peer_throughput_.clear();
                     }
                     {
                         std::lock_guard<std::mutex> lock(consensus_mutex_);
