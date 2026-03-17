@@ -28,14 +28,15 @@ xahau-local)
     DEFAULT_NETWORK_ID=$(jq -r '.network_id' "$NETWORK_JSON")
     DEFAULT_PORT=$(jq -r '.nodes[0].port_peer' "$NETWORK_JSON")
     ADDITIONAL_PEERS=$(jq -r '.nodes[1:] | .[].port_peer | "127.0.0.1:\(.)"' "$NETWORK_JSON" | tr '\n' ' ')
-    # Look for server-definitions.json next to network.json's parent dir
+    # Look for server-definitions.json next to network.json, then parent dir
     NETWORK_JSON_DIR=$(dirname "$NETWORK_JSON")
-    DEFS_PATH=$(cd "$NETWORK_JSON_DIR/.." && pwd)/server-definitions.json
-    if [ -f "$DEFS_PATH" ]; then
-      DEFAULT_PROTOCOL_DEFS="$DEFS_PATH"
+    if [ -f "$NETWORK_JSON_DIR/server-definitions.json" ]; then
+      DEFAULT_PROTOCOL_DEFS="$NETWORK_JSON_DIR/server-definitions.json"
+    elif [ -f "$NETWORK_JSON_DIR/../server-definitions.json" ]; then
+      DEFAULT_PROTOCOL_DEFS="$(cd "$NETWORK_JSON_DIR/.." && pwd)/server-definitions.json"
     else
       DEFAULT_PROTOCOL_DEFS=""
-      echo "WARNING: server-definitions.json not found at $DEFS_PATH" >&2
+      echo "WARNING: server-definitions.json not found next to or above $NETWORK_JSON" >&2
     fi
     echo "📂 Loaded network.json: $(jq -r '.node_count' "$NETWORK_JSON") nodes, network_id=$DEFAULT_NETWORK_ID"
   else
