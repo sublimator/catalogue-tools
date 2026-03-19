@@ -1,0 +1,144 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""
+git-blame-diff: Show a diff with blame annotations on context lines.
+
+Usage:
+    git-blame-diff [<git-diff-args>...]
+
+Examples:
+    git-blame-diff                     # blame-annotated diff of working tree
+    git-blame-diff HEAD~3..HEAD        # blame-annotated diff of last 3 commits
+    git-blame-diff main..feature       # blame-annotated diff between branches
+"""
+
+import subprocess
+import sys
+import re
+from collections import defaultdict
+
+
+def run(cmd: list[str]) -> str:
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    return r.stdout
+
+
+def get_blame_for_file(file: str, ref: str | None = None) -> dict[int, str]:
+    """Get blame info for each line: {line_number: 'author date'}"""
+    cmd = ["git", "blame", "--porcelain"]
+    if ref:
+        cmd.append(ref)
+    cmd.append("--")
+    cmd.append(file)
+
+    try:
+        output = run(cmd)
+    except Exception:
+        return {}
+
+    blame = {}
+    current_line = 0
+    author = ""
+    date = ""
+
+    for line in output.splitlines():
+        # Header line: <hash> <orig-line> <final-line> [<num-lines>]
+        m = re.match(r'^[0-9a-f]{40} \d+ (\d+)', line)
+        if m:
+            current_line = int(m.group(1))
+            author = ""
+            date = ""
+        elif line.startswith("author "):
+            author = line[7:].strip()
+            # Shorten to first name or first 12 chars
+            if len(author) > 12:
+                author = author.split()[0][:12]
+        elif line.startswith("author-time "):
+            import datetime
+            ts = int(line[12:].strip())
+            date = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+        elif line.startswith("\t"):
+            # Content line — store the blame
+            blame[current_line] = f"{author:<12} {date}"
+
+    return blame
+
+
+def main():
+    diff_args = sys.argv[1:] if len(sys.argv) > 1 else []
+
+    # Get the diff
+    diff_output = run(["git", "diff"] + diff_args)
+    if not diff_output.strip():
+        # Try staged
+        diff_output = run(["git", "diff", "--cached"] + diff_args)
+    if not diff_output.strip():
+        print("No diff to show")
+        return
+
+    # Figure out the base ref for blame
+    # If args look like "A..B", blame against A
+    # Otherwise blame against HEAD
+    base_ref = "HEAD"
+    for arg in diff_args:
+        if ".." in arg:
+            base_ref = arg.split("..")[0]
+            break
+
+    # Cache blame per file
+    blame_cache: dict[str, dict[int, str]] = {}
+
+    current_file = None
+    old_line = 0
+    new_line = 0
+
+    for line in diff_output.splitlines():
+        # Diff header
+        if line.startswith("diff --git"):
+            print(f"\033[1m{line}\033[0m")
+            continue
+        if line.startswith("index ") or line.startswith("---") or line.startswith("+++"):
+            if line.startswith("--- a/"):
+                current_file = line[6:]
+                if current_file not in blame_cache:
+                    blame_cache[current_file] = get_blame_for_file(
+                        current_file, base_ref)
+            elif line.startswith("+++ b/"):
+                pass  # new file path, blame uses old
+            print(f"\033[2m{line}\033[0m")
+            continue
+
+        # Hunk header
+        m = re.match(r'^@@ -(\d+)', line)
+        if m:
+            old_line = int(m.group(1))
+            m2 = re.search(r'\+(\d+)', line)
+            new_line = int(m2.group(1)) if m2 else old_line
+            print(f"\033[36m{line}\033[0m")
+            continue
+
+        # Diff lines
+        blame = blame_cache.get(current_file, {})
+
+        if line.startswith("+"):
+            # Added line — no blame (it's new)
+            print(f"\033[32m{'(new)':>23} \033[0m│\033[32m{line}\033[0m")
+            new_line += 1
+        elif line.startswith("-"):
+            # Removed line — blame from the old file
+            info = blame.get(old_line, "???")
+            print(f"\033[31m{info:>23} \033[0m│\033[31m{line}\033[0m")
+            old_line += 1
+        else:
+            # Context line — blame it
+            info = blame.get(old_line, "")
+            print(f"\033[2m{info:>23} \033[0m│{line}")
+            old_line += 1
+            new_line += 1
+
+
+if __name__ == "__main__":
+    main()

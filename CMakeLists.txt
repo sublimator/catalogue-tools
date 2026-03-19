@@ -111,8 +111,14 @@ add_subdirectory(src/xdata-json)
 # Add the experiments module
 add_subdirectory(src/experiments)
 
+# Add the peer-client module
+add_subdirectory(src/peer-client)
+
 # Add the lesser-peer module
 add_subdirectory(src/lesser-peer)
+
+# Add the xproof tool
+add_subdirectory(src/xproof)
 
 # Add tests if testing is enabled
 option(BUILD_TESTING "Build the testing tree" ON)

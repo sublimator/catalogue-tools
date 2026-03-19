@@ -111,6 +111,11 @@ public:
     {
         return !(*this == other);
     }
+    bool
+    operator<(const Hash256& other) const
+    {
+        return data_ < other.data_;
+    }
 
     // Return hex string representation of the hash
     [[nodiscard]] std::string
