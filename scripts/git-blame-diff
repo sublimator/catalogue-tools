@@ -1,143 +1,476 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.12"
+# requires-python = ">=3.14"
 # dependencies = []
 # ///
 """
 git-blame-diff: Show a diff with blame annotations on context lines.
 
 Usage:
-    git-blame-diff [<git-diff-args>...]
+    git-blame-diff [options] [<git-diff-args>...]
 
-Examples:
-    git-blame-diff                     # blame-annotated diff of working tree
-    git-blame-diff HEAD~3..HEAD        # blame-annotated diff of last 3 commits
-    git-blame-diff main..feature       # blame-annotated diff between branches
+Options:
+    --commit-line       Show commit subject instead of author name
+    --collapse          Collapse consecutive same-commit lines
+    --width=N           Force subject field width (overrides auto)
 """
 
 import subprocess
 import sys
+import os
 import re
-from collections import defaultdict
+import datetime
+import shutil
+import textwrap
+from dataclasses import dataclass
+
+USE_COLOR = sys.stdout.isatty()
 
 
 def run(cmd: list[str]) -> str:
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    return r.stdout
+    return subprocess.run(cmd, capture_output=True, text=True).stdout
 
 
-def get_blame_for_file(file: str, ref: str | None = None) -> dict[int, str]:
-    """Get blame info for each line: {line_number: 'author date'}"""
+def c(code: str, text: str) -> str:
+    """Apply ANSI color if outputting to a terminal."""
+    if not USE_COLOR:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def dim(text): return c("2", text)
+def green(text): return c("32", text)
+def red(text): return c("31", text)
+def cyan(text): return c("36", text)
+def bold(text): return c("1", text)
+
+
+# ─── Blame ───────────────────────────────────────────────────────────────
+
+def get_blame_for_file(file, ref=None):
     cmd = ["git", "blame", "--porcelain"]
     if ref:
         cmd.append(ref)
-    cmd.append("--")
-    cmd.append(file)
-
+    cmd += ["--", file]
     try:
         output = run(cmd)
     except Exception:
         return {}
 
     blame = {}
-    current_line = 0
-    author = ""
-    date = ""
+    commit_info = {}
+    cur_line = 0
+    cur_commit = author = date = subject = ""
 
     for line in output.splitlines():
-        # Header line: <hash> <orig-line> <final-line> [<num-lines>]
-        m = re.match(r'^[0-9a-f]{40} \d+ (\d+)', line)
+        m = re.match(r'^([0-9a-f]{40}) \d+ (\d+)', line)
         if m:
-            current_line = int(m.group(1))
-            author = ""
-            date = ""
+            cur_commit, cur_line = m.group(1), int(m.group(2))
+            if cur_commit in commit_info:
+                author, date, subject = commit_info[cur_commit]
+            else:
+                author = date = subject = ""
         elif line.startswith("author "):
             author = line[7:].strip()
-            # Shorten to first name or first 12 chars
             if len(author) > 12:
                 author = author.split()[0][:12]
         elif line.startswith("author-time "):
-            import datetime
-            ts = int(line[12:].strip())
-            date = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+            date = datetime.datetime.fromtimestamp(int(line[12:])).strftime("%Y-%m-%d")
+        elif line.startswith("summary "):
+            subject = line[8:].strip()
         elif line.startswith("\t"):
-            # Content line — store the blame
-            blame[current_line] = f"{author:<12} {date}"
-
+            commit_info[cur_commit] = (author, date, subject)
+            blame[cur_line] = (cur_commit[:8], author, date, subject)
     return blame
 
 
-def main():
-    diff_args = sys.argv[1:] if len(sys.argv) > 1 else []
+# ─── Diff line ───────────────────────────────────────────────────────────
 
-    # Get the diff
-    diff_output = run(["git", "diff"] + diff_args)
-    if not diff_output.strip():
-        # Try staged
-        diff_output = run(["git", "diff", "--cached"] + diff_args)
-    if not diff_output.strip():
-        print("No diff to show")
-        return
+class DiffLine:
+    __slots__ = ('kind', 'blame', 'text', 'old_ln', 'new_ln')
+    def __init__(self, kind, blame, text, old_ln=0, new_ln=0):
+        self.kind = kind
+        self.blame = blame
+        self.text = text
+        self.old_ln = old_ln
+        self.new_ln = new_ln
 
-    # Figure out the base ref for blame
-    # If args look like "A..B", blame against A
-    # Otherwise blame against HEAD
-    base_ref = "HEAD"
-    for arg in diff_args:
-        if ".." in arg:
-            base_ref = arg.split("..")[0]
-            break
 
-    # Cache blame per file
-    blame_cache: dict[str, dict[int, str]] = {}
+def parse_refs(args):
+    base = target = "HEAD"
+    non_flags = [a for a in args if not a.startswith("-") and a != "--"]
+    if "--" in args:
+        non_flags = [a for a in args[:args.index("--")] if not a.startswith("-")]
+    for a in non_flags:
+        if "..." in a:
+            base, _, target = a.partition("...")
+        elif ".." in a:
+            base, _, target = a.partition("..")
+        else:
+            base, target = a, "HEAD"
+        break
+    return base, target or "HEAD"
 
-    current_file = None
-    old_line = 0
-    new_line = 0
 
+def collect(diff_output, base_ref, target_ref):
+    bc, tc = {}, {}
+    of = nf = None
+    ol = nl = 0
+    lines = []
     for line in diff_output.splitlines():
-        # Diff header
         if line.startswith("diff --git"):
-            print(f"\033[1m{line}\033[0m")
-            continue
+            lines.append(DiffLine("header", None, line)); continue
         if line.startswith("index ") or line.startswith("---") or line.startswith("+++"):
-            if line.startswith("--- a/"):
-                current_file = line[6:]
-                if current_file not in blame_cache:
-                    blame_cache[current_file] = get_blame_for_file(
-                        current_file, base_ref)
+            if line.startswith("--- a/"): of = line[6:]
+            elif line.startswith("--- /dev/null"): of = None
             elif line.startswith("+++ b/"):
-                pass  # new file path, blame uses old
-            print(f"\033[2m{line}\033[0m")
-            continue
-
-        # Hunk header
+                nf = line[6:]
+                if of and of not in bc: bc[of] = get_blame_for_file(of, base_ref)
+                if nf and nf not in tc: tc[nf] = get_blame_for_file(nf, target_ref)
+            lines.append(DiffLine("raw", None, line)); continue
         m = re.match(r'^@@ -(\d+)', line)
         if m:
-            old_line = int(m.group(1))
+            ol = int(m.group(1))
             m2 = re.search(r'\+(\d+)', line)
-            new_line = int(m2.group(1)) if m2 else old_line
-            print(f"\033[36m{line}\033[0m")
+            nl = int(m2.group(1)) if m2 else ol
+            lines.append(DiffLine("hunk", None, line)); continue
+        ob = bc.get(of, {}) if of else {}
+        nb = tc.get(nf, {}) if nf else {}
+        if line.startswith("+"):
+            lines.append(DiffLine("add", nb.get(nl), line, 0, nl)); nl += 1
+        elif line.startswith("-"):
+            lines.append(DiffLine("del", ob.get(ol), line, ol, 0)); ol += 1
+        else:
+            lines.append(DiffLine("context", ob.get(ol), line, ol, nl)); ol += 1; nl += 1
+    return lines
+
+
+# ─── Column system ───────────────────────────────────────────────────────
+
+@dataclass
+class Field:
+    """A text field within a column."""
+    name: str
+    min_width: int = 0
+    desired_width: int = 0
+    max_width: int = 999  # cap
+    priority: int = 0     # higher = allocated first
+    width: int = 0        # allocated width
+
+
+class Column:
+    """A column that contains fields and renders them as fixed-width lines."""
+
+    def __init__(self, separator: str = ""):
+        self.fields: list[Field] = []
+        self.separator = separator  # char drawn at the right edge
+
+    def add(self, name, min_w=0, desired_w=0, max_w=999, priority=0) -> 'Column':
+        self.fields.append(Field(name, min_w, desired_w, max_w, priority))
+        return self
+
+    @property
+    def min_width(self):
+        return sum(f.min_width for f in self.fields)
+
+    @property
+    def desired_width(self):
+        return sum(f.desired_width for f in self.fields)
+
+    @property
+    def width(self):
+        return sum(f.width for f in self.fields)
+
+    def field(self, name) -> Field | None:
+        for f in self.fields:
+            if f.name == name:
+                return f
+        return None
+
+    def allocate(self, total_width: int):
+        """Allocate width to fields within this column."""
+        # Step 1: give minimums
+        for f in self.fields:
+            f.width = f.min_width
+
+        remaining = total_width - sum(f.width for f in self.fields)
+        if remaining <= 0:
+            return
+
+        # Step 2: grow by priority (highest first), up to desired, capped by max
+        by_priority = sorted(self.fields, key=lambda f: -f.priority)
+        for f in by_priority:
+            want = min(f.desired_width, f.max_width) - f.width
+            if want <= 0:
+                continue
+            give = min(want, remaining)
+            f.width += give
+            remaining -= give
+            if remaining <= 0:
+                break
+
+        # Step 3: leftover goes to highest priority flex field, up to max
+        if remaining > 0:
+            for f in by_priority:
+                if f.priority > 0:
+                    give = min(remaining, f.max_width - f.width)
+                    if give > 0:
+                        f.width += give
+                        remaining -= give
+                    break
+
+    def render_fields(self, values: dict[str, str]) -> str:
+        """Render field values into a fixed-width string."""
+        parts = []
+        for f in self.fields:
+            val = values.get(f.name, "")
+            if len(val) > f.width and f.width > 1:
+                val = val[:f.width - 1] + "…"
+            parts.append(f"{val:<{f.width}}")
+        return "".join(parts)
+
+    def render_blank(self) -> str:
+        return " " * self.width
+
+    def render_text(self, text: str) -> str:
+        """Render arbitrary text into column width (for word-wrap overflow)."""
+        if len(text) > self.width:
+            text = text[:self.width - 1] + "…"
+        return f"{text:<{self.width}}"
+
+
+class Layout:
+    """Multi-column layout that stitches columns together."""
+
+    def __init__(self, term_width: int):
+        self.term_width = term_width
+        self.columns: list[Column] = []
+
+    def add_column(self, col: Column) -> 'Layout':
+        self.columns.append(col)
+        return self
+
+    def allocate(self):
+        """Distribute terminal width across columns, then within each column."""
+        # Fixed columns get their desired width
+        # The last column (code) gets whatever's left
+        # Separators cost 1 char each
+
+        sep_width = sum(1 for c in self.columns if c.separator)
+        fixed_min = sum(c.min_width for c in self.columns[:-1])
+        fixed_desired = sum(c.desired_width for c in self.columns[:-1])
+
+        last = self.columns[-1]  # code column
+        code_desired = last.desired_width
+
+        available = self.term_width - sep_width
+
+        # Give code its desired width first
+        code_w = min(code_desired, available - fixed_min)
+        code_w = max(code_w, last.min_width)
+
+        # Remaining goes to left columns
+        left_w = available - code_w
+
+        # Distribute among left columns proportionally to desired
+        left_cols = self.columns[:-1]
+        total_desired = sum(c.desired_width for c in left_cols) or 1
+
+        for col in left_cols:
+            share = int(left_w * col.desired_width / total_desired)
+            share = max(share, col.min_width)
+            col.allocate(share)
+
+        # Code column
+        actual_left = sum(c.width for c in left_cols)
+        last.allocate(available - actual_left)
+
+    def render_row(self, col_strings: list[str]) -> str:
+        """Stitch column strings together with separators."""
+        parts = []
+        for i, (col, text) in enumerate(zip(self.columns, col_strings)):
+            parts.append(text)
+            if col.separator:
+                parts.append(col.separator)
+        return "".join(parts)
+
+
+# ─── Putting it all together ─────────────────────────────────────────────
+
+def percentile(vals, pct):
+    if not vals:
+        return 0
+    vals.sort()
+    return vals[min(len(vals) - 1, int(len(vals) * pct))]
+
+
+def build_layout(lines, show_subject, width_override):
+    term_w = 999999 if not sys.stdout.isatty() else shutil.get_terminal_size().columns
+
+    # Measure content
+    max_ln = 0
+    code_ws = []
+    subj_ws = []
+    auth_ws = []
+    for dl in lines:
+        if dl.kind in ("add", "del", "context"):
+            max_ln = max(max_ln, dl.old_ln, dl.new_ln)
+            code_ws.append(len(dl.text))
+            if dl.blame:
+                subj_ws.append(len(dl.blame[3]))
+                auth_ws.append(len(dl.blame[1]))
+
+    ln_w = max(3, len(str(max_ln)))
+    code_p95 = percentile(code_ws, 0.95) if code_ws else 40
+    subj_p95 = percentile(subj_ws, 0.95) if subj_ws else 20
+
+    # Blame column
+    blame_col = Column()
+    blame_col.add("hash", min_w=8, desired_w=8, max_w=8, priority=10)
+    blame_col.add("sp1", min_w=1, desired_w=1, max_w=1, priority=10)
+
+    if show_subject:
+        blame_col.add("date", min_w=0, desired_w=10, max_w=10, priority=5)
+        blame_col.add("sp2", min_w=0, desired_w=1, max_w=1, priority=5)
+        sw = width_override if width_override else subj_p95
+        blame_col.add("subject", min_w=0, desired_w=sw, max_w=sw, priority=2)
+    else:
+        auth_p = percentile(auth_ws, 1.0) if auth_ws else 12
+        blame_col.add("author", min_w=0, desired_w=auth_p, max_w=auth_p, priority=3)
+        blame_col.add("sp2", min_w=0, desired_w=1, max_w=1, priority=3)
+        blame_col.add("date", min_w=0, desired_w=10, max_w=10, priority=5)
+
+    # Line numbers column
+    ln_col = Column(separator="│")
+    ln_col.add("old_ln", min_w=0, desired_w=ln_w, max_w=ln_w, priority=1)
+    ln_col.add("sp", min_w=0, desired_w=1, max_w=1, priority=1)
+    ln_col.add("new_ln", min_w=ln_w, desired_w=ln_w, max_w=ln_w, priority=8)
+
+    # Code column (flex, gets whatever's left)
+    code_col = Column()
+    code_col.add("code", min_w=20, desired_w=code_p95, priority=10)
+
+    layout = Layout(term_w)
+    layout.add_column(blame_col)
+    layout.add_column(ln_col)
+    layout.add_column(code_col)
+    layout.allocate()
+
+    return layout
+
+
+def render_all(lines, layout, show_subject, collapse):
+    blame_col = layout.columns[0]
+    ln_col = layout.columns[1]
+    code_col = layout.columns[2]
+
+    def blame_values(info):
+        if not info:
+            return {}
+        h, author, date, subject = info
+        if show_subject:
+            return {"hash": h, "sp1": " ", "date": date, "sp2": " ", "subject": subject}
+        else:
+            return {"hash": h, "sp1": " ", "author": author, "sp2": " ", "date": date}
+
+    def ln_values(dl):
+        old_f = ln_col.field("old_ln")
+        new_f = ln_col.field("new_ln")
+        ow = old_f.width if old_f else 0
+        nw = new_f.width if new_f else 0
+        if dl.kind == "add":
+            return {"old_ln": " " * ow, "sp": " ", "new_ln": str(dl.new_ln).rjust(nw)}
+        elif dl.kind == "del":
+            return {"old_ln": str(dl.old_ln).rjust(ow), "sp": " ", "new_ln": " " * nw}
+        elif dl.kind == "context":
+            return {"old_ln": str(dl.old_ln).rjust(ow), "sp": " ", "new_ln": str(dl.new_ln).rjust(nw)}
+        return {"old_ln": " " * ow, "sp": " ", "new_ln": " " * nw}
+
+    def emit(dl, blame_str, ln_str):
+        code = dl.text
+        if dl.kind == "context":
+            print(f"{dim(blame_str + ln_str + '│')}{code}")
+        elif dl.kind == "add":
+            print(f"{green(blame_str)}{dim(ln_str + '│')}{green(code)}")
+        elif dl.kind == "del":
+            print(f"{red(blame_str)}{dim(ln_str + '│')}{red(code)}")
+
+    i = 0
+    while i < len(lines):
+        dl = lines[i]
+        if dl.kind == "header":
+            print(bold(dl.text)); i += 1; continue
+        if dl.kind == "raw":
+            print(dim(dl.text)); i += 1; continue
+        if dl.kind == "hunk":
+            print(); print(cyan(dl.text)); print(); i += 1; continue
+
+        if not collapse:
+            b = blame_col.render_fields(blame_values(dl.blame))
+            l = ln_col.render_fields(ln_values(dl))
+            emit(dl, b, l)
+            i += 1
             continue
 
-        # Diff lines
-        blame = blame_cache.get(current_file, {})
+        # Collapse: same-commit group
+        gh = dl.blame[0] if dl.blame else None
+        group = [dl]
+        j = i + 1
+        while j < len(lines) and lines[j].kind in ("add", "del", "context"):
+            jh = lines[j].blame[0] if lines[j].blame else None
+            if jh != gh: break
+            group.append(lines[j]); j += 1
 
-        if line.startswith("+"):
-            # Added line — no blame (it's new)
-            print(f"\033[32m{'(new)':>23} \033[0m│\033[32m{line}\033[0m")
-            new_line += 1
-        elif line.startswith("-"):
-            # Removed line — blame from the old file
-            info = blame.get(old_line, "???")
-            print(f"\033[31m{info:>23} \033[0m│\033[31m{line}\033[0m")
-            old_line += 1
-        else:
-            # Context line — blame it
-            info = blame.get(old_line, "")
-            print(f"\033[2m{info:>23} \033[0m│{line}")
-            old_line += 1
-            new_line += 1
+        # First line: full blame
+        b = blame_col.render_fields(blame_values(group[0].blame))
+        l = ln_col.render_fields(ln_values(group[0]))
+        emit(group[0], b, l)
+
+        # Word-wrap remainder of subject into ditto lines
+        wrap_lines = []
+        if show_subject and group[0].blame:
+            full_subj = group[0].blame[3]
+            subj_f = blame_col.field("subject")
+            if subj_f and subj_f.width > 0 and len(full_subj) > subj_f.width:
+                shown = subj_f.width - 1
+                remainder = full_subj[shown:].strip()
+                if remainder and blame_col.width > 10:
+                    wrap_lines = textwrap.wrap(remainder, width=blame_col.width)
+
+        blank = blame_col.render_blank()
+        for k, gdl in enumerate(group[1:]):
+            if k < len(wrap_lines):
+                b = blame_col.render_text(wrap_lines[k])
+            else:
+                b = blank
+            l = ln_col.render_fields(ln_values(gdl))
+            emit(gdl, b, l)
+
+        i = j
+
+
+def main():
+    all_args = sys.argv[1:]
+    show_subject = "--commit-line" in all_args
+    collapse = "--collapse" in all_args
+    width_override = None
+    diff_args = []
+    for arg in all_args:
+        if arg in ("--commit-line", "--collapse"): continue
+        if arg.startswith("--width="):
+            width_override = int(arg.split("=", 1)[1]); continue
+        diff_args.append(arg)
+
+    diff_output = run(["git", "diff"] + diff_args)
+    if not diff_output.strip():
+        diff_output = run(["git", "diff", "--cached"] + diff_args)
+    if not diff_output.strip():
+        print("No diff to show"); return
+
+    base, target = parse_refs(diff_args)
+    lines = collect(diff_output, base, target)
+    layout = build_layout(lines, show_subject, width_override)
+    render_all(lines, layout, show_subject, collapse)
 
 
 if __name__ == "__main__":
