@@ -93,12 +93,22 @@ inline const FieldType Amount{
 inline const FieldType Blob{"Blob", 7, std::nullopt, 0};  // VL encoded
 inline const FieldType AccountID{"AccountID", 8, std::nullopt, 0};
 
-// 9-13 reserved
+// 9-13: newer numeric types
 inline const FieldType Number{
     "Number",
     9,
     {{Networks::XRPL, Networks::XAHAU}},
     12};  // XRPL specific, 12 bytes (8 byte mantissa + 4 byte exponent)
+inline const FieldType Int32{
+    "Int32",
+    10,
+    {{Networks::XRPL}},
+    4};  // Signed 32-bit integer
+inline const FieldType Int64{
+    "Int64",
+    11,
+    {{Networks::XRPL}},
+    8};  // Signed 64-bit integer
 
 // Container types - Universal
 inline const FieldType STObject{"STObject", 14, std::nullopt, 0};
@@ -150,11 +160,12 @@ inline const FieldType Metadata{"Metadata", 10004, std::nullopt, 0};
 
 // Helper array for iteration/lookup
 inline const std::array ALL = {
-    NotPresent,  UInt16,     UInt32,    UInt64,       Hash128,  Hash256,
-    Amount,      Blob,       AccountID, Number,       STObject, STArray,
-    UInt8,       Hash160,    PathSet,   Vector256,    UInt96,   Hash192,
-    UInt384,     UInt512,    Issue,     XChainBridge, Currency, Transaction,
-    LedgerEntry, Validation, Metadata,  Unknown,      Done};
+    NotPresent, UInt16,      UInt32,      UInt64,     Hash128,  Hash256,
+    Amount,     Blob,        AccountID,   Number,     Int32,    Int64,
+    STObject,   STArray,     UInt8,       Hash160,    PathSet,  Vector256,
+    UInt96,     Hash192,     UInt384,     UInt512,    Issue,    XChainBridge,
+    Currency,   Transaction, LedgerEntry, Validation, Metadata, Unknown,
+    Done};
 
 // Efficient lookup by code
 inline std::optional<FieldType>

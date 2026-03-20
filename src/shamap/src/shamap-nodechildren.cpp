@@ -1,8 +1,8 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
+#include "catl/core/logger.h"
 #include "catl/shamap/shamap-nodechildren.h"
 #include "catl/shamap/shamap-treenode.h"
-#include "catl/core/logger.h"
 #include <memory>
 #include <stdexcept>
 
@@ -31,7 +31,8 @@ NodeChildrenT<Traits>::NodeChildrenT() : capacity_(16), canonicalized_(false)
 // Private constructor that allocates exactly capacity slots
 template <typename Traits>
 NodeChildrenT<Traits>::NodeChildrenT(uint8_t cap)
-    : capacity_(cap), canonicalized_(true)  // Always canonicalized when using this ctor
+    : capacity_(cap)
+    , canonicalized_(true)  // Always canonicalized when using this ctor
 {
     if (cap == 0 || cap > 16)
         throw std::invalid_argument("Invalid capacity for NodeChildrenT");
@@ -49,10 +50,16 @@ NodeChildrenT<Traits>::NodeChildrenT(uint8_t cap)
 template <typename Traits>
 NodeChildrenT<Traits>::~NodeChildrenT()
 {
-    PLOGD(destructor_log, "~NodeChildrenT: count=", get_child_count(),
-          ", canonical=", canonicalized_,
-          ", refcount=", ref_count_.load(),
-          ", capacity=", static_cast<int>(capacity_));
+    PLOGD(
+        destructor_log,
+        "~NodeChildrenT: count=",
+        get_child_count(),
+        ", canonical=",
+        canonicalized_,
+        ", refcount=",
+        ref_count_.load(),
+        ", capacity=",
+        static_cast<int>(capacity_));
     delete[] children_;
 }
 
@@ -90,6 +97,9 @@ NodeChildrenT<Traits>::set_child(
     {
         children_[branch] = child;
         branch_mask_ |= (1 << branch);
+        // Real child supersedes any placeholder
+        if constexpr (has_placeholders_v<Traits>)
+            placeholders_.clear(branch);
     }
     else if (branch_mask_ & (1 << branch))
     {
@@ -127,6 +137,10 @@ NodeChildrenT<Traits>::canonicalize() const
             result->branch_to_index_[i] = new_index++;
         }
     }
+
+    // Preserve placeholders
+    if constexpr (has_placeholders_v<Traits>)
+        result->placeholders_ = placeholders_;
 
     return result;
 }
@@ -172,6 +186,10 @@ NodeChildrenT<Traits>::copy() const
 
     // Never copy the canonicalized state!
     new_children->canonicalized_ = false;
+
+    // Preserve placeholders
+    if constexpr (has_placeholders_v<Traits>)
+        new_children->placeholders_ = placeholders_;
 
     return new_children;
 }

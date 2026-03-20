@@ -1,10 +1,13 @@
 #pragma once
 
+#include "catl/shamap/shamap-traits.h"
 #include "catl/shamap/shamap-treenode.h"
 #include <atomic>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
 #include <memory>
+#include <type_traits>
+#include <variant>
 
 namespace catl::shamap {
 /**
@@ -20,6 +23,14 @@ private:
     uint8_t capacity_ = 0;              // Actual allocation size
     bool canonicalized_ = false;        // Has this been optimized?
     int8_t branch_to_index_[16] = {0};  // Maps branch to array index
+
+    // Placeholder hash storage — zero bytes for DefaultNodeTraits,
+    // full PlaceholderHashes for AbbreviatedTreeTraits.
+    [[no_unique_address]]
+    std::conditional_t<
+        has_placeholders_v<Traits>,
+        PlaceholderHashes,
+        std::monostate> placeholders_{};
 
     // Intrusive reference counting for thread-safe shared ownership
     mutable std::atomic<int> ref_count_{0};
@@ -150,6 +161,72 @@ public:
         return branch_mask_;
     }
 
+    // ── Placeholder support (compile-time gated by Traits) ─────
+    //
+    // Placeholders are precomputed subtree hashes stored alongside the
+    // children array. They represent pruned subtrees in abbreviated trees.
+    // A branch is in exactly one of three states:
+    //   - branch_mask_ set          → real child (use child->get_hash())
+    //   - placeholder_mask_ set     → no child, use stored hash
+    //   - neither                   → empty (hash = zero)
+    //
+    // Real children always supersede placeholders:
+    //   - set_child() clears any placeholder on that branch
+    //   - set_placeholder() is a no-op if a real child exists
+    //
+    // The placeholder storage is zero-cost for DefaultNodeTraits
+    // (std::monostate via [[no_unique_address]]).
+
+    /// Does this branch have a placeholder hash?
+    bool
+    has_placeholder(int branch) const
+    {
+        if constexpr (has_placeholders_v<Traits>)
+            return placeholders_.has(branch);
+        else
+            return false;
+    }
+
+    /// Set a placeholder hash for a branch. No-op if a real child exists.
+    void
+    set_placeholder(int branch, Hash256 const& hash)
+    {
+        if constexpr (has_placeholders_v<Traits>)
+        {
+            if (has_child(branch))
+                return;  // real child wins
+            placeholders_.set(branch, hash);
+        }
+    }
+
+    /// Clear a placeholder hash for a branch.
+    void
+    clear_placeholder(int branch)
+    {
+        if constexpr (has_placeholders_v<Traits>)
+            placeholders_.clear(branch);
+    }
+
+    /// Get the placeholder hash for a branch.
+    Hash256 const&
+    get_placeholder(int branch) const
+    {
+        if constexpr (has_placeholders_v<Traits>)
+            return placeholders_.get(branch);
+        else
+            return Hash256::zero();
+    }
+
+    /// Placeholder mask — which branches have placeholder hashes.
+    uint16_t
+    get_placeholder_mask() const
+    {
+        if constexpr (has_placeholders_v<Traits>)
+            return placeholders_.mask;
+        else
+            return 0;
+    }
+
     // Memory optimization - returns new canonicalized object or nullptr
     boost::intrusive_ptr<NodeChildrenT<Traits>>
     canonicalize() const;
@@ -176,12 +253,14 @@ public:
     operator=(const NodeChildrenT&) = delete;
 
     // Intrusive reference counting support
-    friend void intrusive_ptr_add_ref(const NodeChildrenT<Traits>* p)
+    friend void
+    intrusive_ptr_add_ref(const NodeChildrenT<Traits>* p)
     {
         p->ref_count_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    friend void intrusive_ptr_release(const NodeChildrenT<Traits>* p)
+    friend void
+    intrusive_ptr_release(const NodeChildrenT<Traits>* p)
     {
         if (p->ref_count_.fetch_sub(1, std::memory_order_release) == 1)
         {

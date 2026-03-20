@@ -16,8 +16,9 @@ void
 SHAMapInnerNodeT<Traits>::update_hash_reference(SHAMapOptions const& options)
 {
     auto children = this->get_children();
-    if (uint16_t branchMask = children->get_branch_mask();
-        branchMask == 0)
+    uint16_t branchMask = children->get_branch_mask();
+    uint16_t placeholderMask = children->get_placeholder_mask();
+    if (branchMask == 0 && placeholderMask == 0)
     {
         this->hash = Hash256::zero();
         this->hash_valid_ = true;
@@ -32,13 +33,22 @@ SHAMapInnerNodeT<Traits>::update_hash_reference(SHAMapOptions const& options)
         auto prefix = HashPrefix::inner_node;
         hasher.update(prefix.data(), prefix.size());
 
-        // Add each branch's hash (or zero hash for empty branches)
+        // Add each branch's hash. Three sources in priority order:
+        //   1. Real child → compute/get its hash
+        //   2. Placeholder → use precomputed subtree hash (abbreviated trees
+        //   only)
+        //   3. Neither → zero hash (empty branch)
         for (int i = 0; i < 16; i++)
         {
             const uint8_t* hashData = Hash256::zero().data();
             if (const auto child = children->get_child(i))
             {
                 hashData = child->get_hash(options).data();
+            }
+            else if constexpr (has_placeholders_v<Traits>)
+            {
+                if (children->has_placeholder(i))
+                    hashData = children->get_placeholder(i).data();
             }
 
             hasher.update(hashData, Hash256::size());

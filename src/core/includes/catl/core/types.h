@@ -4,6 +4,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <span>
 #include <string>
 
 /**
@@ -39,6 +41,11 @@ public:
     {
         return size_ == 0;
     }
+    std::span<const uint8_t>
+    span() const
+    {
+        return {data_, size_};
+    }
 
     Slice
     subslice(size_t pos) const
@@ -46,8 +53,11 @@ public:
         return {data_ + pos, size_ - pos};
     }
 
-    bool eq(const Slice& other) const {
-        return size_ == other.size_ && std::memcmp(data_, other.data_, size_) == 0;
+    bool
+    eq(const Slice& other) const
+    {
+        return size_ == other.size_ &&
+            std::memcmp(data_, other.data_, size_) == 0;
     }
 };
 
@@ -110,6 +120,29 @@ public:
     operator!=(const Hash256& other) const
     {
         return !(*this == other);
+    }
+    /// Compare against raw pointer (32 bytes assumed).
+    bool
+    matches(const uint8_t* ptr) const
+    {
+        return std::memcmp(data_.data(), ptr, 32) == 0;
+    }
+
+    /// Find this hash in a buffer. Returns byte offset or -1 if not found.
+    int
+    find_in(const uint8_t* data, size_t size) const
+    {
+        for (size_t i = 0; i + 32 <= size; ++i)
+            if (matches(data + i))
+                return static_cast<int>(i);
+        return -1;
+    }
+
+    /// Find this hash in a Slice.
+    int
+    find_in(Slice const& s) const
+    {
+        return find_in(s.data(), s.size());
     }
     bool
     operator<(const Hash256& other) const
@@ -224,4 +257,78 @@ public:
     intrusive_ptr_add_ref(MmapItem* p);
     friend void
     intrusive_ptr_release(MmapItem* p);
+};
+
+/**
+ * MmapItem subclass that owns its memory.
+ * MmapItem itself borrows pointers (e.g. into mmap'd storage).
+ * OwnedItem copies key + data into a single owned allocation.
+ */
+class OwnedItem : public MmapItem
+{
+    std::unique_ptr<uint8_t[]> storage_;
+
+    OwnedItem(
+        const uint8_t* key_ptr,
+        const uint8_t* data_ptr,
+        std::size_t data_size,
+        std::unique_ptr<uint8_t[]> storage)
+        : MmapItem(key_ptr, data_ptr, data_size), storage_(std::move(storage))
+    {
+    }
+
+public:
+    /// Create from separate key and data. Single allocation: [32-byte
+    /// key][data]. Caller wraps in boost::intrusive_ptr<MmapItem> as needed.
+    static OwnedItem*
+    create(Hash256 const& key, Slice const& data)
+    {
+        auto storage = std::make_unique<uint8_t[]>(32 + data.size());
+        std::memcpy(storage.get(), key.data(), 32);
+        std::memcpy(storage.get() + 32, data.data(), data.size());
+        auto* key_ptr = storage.get();
+        auto* data_ptr = storage.get() + 32;
+        return new OwnedItem(
+            key_ptr, data_ptr, data.size(), std::move(storage));
+    }
+};
+
+/**
+ * MmapItem subclass for hash-only placeholder nodes in abbreviated trees.
+ *
+ * Carries a precomputed subtree hash + SHAMap position key inline.
+ * Data slice is empty (size 0). When a SHAMap leaf is constructed from
+ * a HashItem, it sets placeholder_=true and update_hash() becomes a
+ * no-op — the hash is already known.
+ *
+ * Used for proof paths: off-path branches are replaced with HashItems
+ * that preserve the tree's root hash without storing the actual data.
+ */
+class HashItem : public MmapItem
+{
+    uint8_t key_storage_[32];
+    Hash256 hash_;
+
+public:
+    HashItem(Hash256 const& key, Hash256 const& subtree_hash)
+        : MmapItem(
+              key_storage_,
+              key_storage_,
+              0)  // empty slice, non-null pointer
+        , hash_(subtree_hash)
+    {
+        std::memcpy(key_storage_, key.data(), 32);
+    }
+
+    Hash256 const&
+    precomputed_hash() const
+    {
+        return hash_;
+    }
+
+    static HashItem*
+    create(Hash256 const& key, Hash256 const& subtree_hash)
+    {
+        return new HashItem(key, subtree_hash);
+    }
 };

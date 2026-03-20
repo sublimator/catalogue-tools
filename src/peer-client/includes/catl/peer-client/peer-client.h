@@ -1,11 +1,10 @@
 #pragma once
 
+#include "connection.h"
 #include "types.h"
 
 #include <catl/core/logger.h>
 #include <catl/core/types.h>
-#include <catl/peer/peer-connection.h>
-#include <catl/peer/types.h>
 
 #include <atomic>
 #include <boost/asio.hpp>
@@ -18,12 +17,6 @@
 
 namespace catl::peer_client {
 
-namespace asio = boost::asio;
-using catl::peer::packet_header;
-using catl::peer::packet_type;
-using catl::peer::peer_config;
-using catl::peer::peer_connection;
-
 //------------------------------------------------------------------------------
 // Callback type — Layer 1 (core)
 //------------------------------------------------------------------------------
@@ -35,8 +28,8 @@ using Callback = std::function<void(Error, T)>;
 using ReadyCallback = std::function<void(uint32_t peer_ledger_seq)>;
 
 /// Called for messages PeerClient doesn't handle internally
-using UnsolicitedHandler = std::function<
-    void(uint16_t type, std::vector<uint8_t> const& data)>;
+using UnsolicitedHandler =
+    std::function<void(uint16_t type, std::vector<uint8_t> const& data)>;
 
 //------------------------------------------------------------------------------
 // Connection state
@@ -45,9 +38,9 @@ using UnsolicitedHandler = std::function<
 enum class State {
     Disconnected,
     Connecting,
-    Connected,       // TLS + HTTP upgrade done, sending status
-    ExchangingStatus,// Sent our status, waiting for peer's
-    Ready,           // Status exchanged, can send requests
+    Connected,         // TLS + HTTP upgrade done, sending status
+    ExchangingStatus,  // Sent our status, waiting for peer's
+    Ready,             // Status exchanged, can send requests
     Failed,
 };
 
@@ -55,6 +48,57 @@ enum class State {
 // PeerClient
 //------------------------------------------------------------------------------
 
+/**
+ * High-level request/response API for XRPL peer protocol.
+ *
+ * ## Connection Lifecycle
+ *
+ * Use PeerClient::connect() to create. It handles SSL, TLS handshake,
+ * HTTP upgrade, and the status exchange dance (send nsMONITORING, wait
+ * for peer's status, mirror it back). Requests made before the status
+ * exchange completes are queued and flushed automatically.
+ * Peer pings are auto-replied.
+ *
+ * ## Request/Response Correlation
+ *
+ * The XRPL peer protocol has NO general request/response correlation ID.
+ * requestCookie on TMGetLedger is for relay routing — NOT correlation.
+ * TMPing.seq is the only field that is truly echoed for matching.
+ *
+ * We correlate by computing a canonical Hash256 key from response fields:
+ *   - TMLedgerData (liBASE):        hash(ledgerSeq, type)
+ *   - TMLedgerData (liAS/TX_NODE):  hash(ledgerHash, type)
+ *   - TMProofPathResponse:          hash(key, ledgerHash, type)
+ *   - TMPing (ptPONG):              hash(seq)
+ *
+ * ## Deduplication
+ *
+ * By default (RequestOptions::dedupe=true), if a request is made for a
+ * canonical key that already has an in-flight request, the callback is
+ * appended to the existing entry. No new network request is sent. When
+ * the response arrives, ALL callbacks for that key are called with the
+ * same result. Set dedupe=false to force a new network request.
+ *
+ * ## Timeouts
+ *
+ * Each callback has its own asio::steady_timer. When it fires, that
+ * callback is called with Error::Timeout and removed. Other callbacks
+ * for the same key remain active. If all callbacks timeout, the entry
+ * is removed (response will arrive but nobody cares).
+ *
+ * ## Result Types
+ *
+ * Result types (LedgerHeaderResult, ProofPathResult, etc.) own a
+ * shared_ptr to the protobuf message. Accessors return zero-copy views
+ * (Key, WireNodeView, LedgerInfoView) pointing into protobuf storage.
+ * raw() exposes the protobuf for escape hatch.
+ *
+ * ## Threading
+ *
+ * Single io_context thread. No mutex. All get_* calls and callbacks
+ * run on the io_context. Use asio::post(io_context, ...) if calling
+ * from another thread.
+ */
 class PeerClient : public std::enable_shared_from_this<PeerClient>
 {
 public:
@@ -100,6 +144,30 @@ public:
         Hash256 const& key,
         Callback<ProofPathResult> callback,
         RequestOptions opts = {});
+
+    // ---------------------------------------------------------------
+    // SHAMap node fetching (TMGetLedger with nodeIDs)
+    // ---------------------------------------------------------------
+
+    /// Fetch specific nodes from a ledger's account state tree.
+    void
+    get_state_nodes(
+        Hash256 const& ledger_hash,
+        std::vector<SHAMapNodeID> const& node_ids,
+        Callback<LedgerNodesResult> callback,
+        RequestOptions opts = {});
+
+    /// Fetch specific nodes from a ledger's transaction tree.
+    void
+    get_tx_nodes(
+        Hash256 const& ledger_hash,
+        std::vector<SHAMapNodeID> const& node_ids,
+        Callback<LedgerNodesResult> callback,
+        RequestOptions opts = {});
+
+    // ---------------------------------------------------------------
+    // Ping
+    // ---------------------------------------------------------------
 
     void
     ping(Callback<PingResult> callback, RequestOptions opts = {});
@@ -154,7 +222,6 @@ private:
         std::unique_ptr<asio::steady_timer> timer;
     };
 
-
     PeerClient(asio::io_context& io_context);
 
     // ---------------------------------------------------------------
@@ -175,19 +242,17 @@ private:
     send_monitoring_status();
 
     void
-    handle_status_change(std::vector<uint8_t> const& payload, ReadyCallback on_ready);
+    handle_status_change(std::vector<uint8_t> const& payload);
 
     void
-    become_ready(ReadyCallback on_ready);
+    become_ready();
 
     // ---------------------------------------------------------------
     // Packet dispatch
     // ---------------------------------------------------------------
 
     void
-    on_packet(
-        packet_header const& header,
-        std::vector<uint8_t> const& data);
+    on_packet(packet_header const& header, std::vector<uint8_t> const& data);
 
     void
     handle_ping(std::vector<uint8_t> const& payload);
@@ -208,61 +273,96 @@ private:
     void
     flush_queue();
 
-    /// If not ready, queue the callable and return true. Otherwise return false.
+    /// If not ready, queue the callable and return true. Otherwise return
+    /// false.
     bool
     queue_if_not_ready(DeferredRequest fn);
 
     // ---------------------------------------------------------------
-    // Sequence allocator
+    // Sequence allocator (for ping seq)
     // ---------------------------------------------------------------
 
     std::atomic<uint64_t> next_seq_{1};
 
-    uint32_t
-    allocate_cookie()
-    {
-        return static_cast<uint32_t>(next_seq_.fetch_add(1) & 0xFFFFFFFF);
-    }
-
     // ---------------------------------------------------------------
     // Pending request tracking
+    //
+    // Canonical Hash256 keys computed from response fields.
+    // Multiple callbacks per key (fan-out / dedupe).
+    // Per-callback timeouts.
     // ---------------------------------------------------------------
 
-    /// Extract a pending request, cancel its timer, return the callback.
-    template <typename K, typename T>
-    static Callback<T>
-    take_pending(std::map<K, PendingRequest<T>>& map, K const& key)
+    template <typename T>
+    struct PendingCallback
     {
-        auto it = map.find(key);
-        if (it == map.end())
-            return nullptr;
-        auto cb = std::move(it->second.callback);
-        if (it->second.timer)
-            it->second.timer->cancel();
-        map.erase(it);
-        return cb;
-    }
-
-    /// Start a timeout timer for a pending request.
-    /// When it fires, removes the entry from the map and calls callback(Timeout).
-    template <typename K, typename T>
-    void
-    start_timer(
-        std::map<K, PendingRequest<T>>& map,
-        K const& key,
-        std::chrono::seconds timeout);
-
-    struct ProofPathKey
-    {
-        Hash256 ledger_hash;
-        Hash256 key;
-        int type;
-        bool operator<(ProofPathKey const& other) const;
+        Callback<T> callback;
+        std::unique_ptr<asio::steady_timer> timer;
     };
 
-    std::map<uint32_t, PendingRequest<LedgerHeaderResult>> pending_headers_;
-    std::map<uint32_t, PendingRequest<PingResult>> pending_pings_;
-    std::map<ProofPathKey, PendingRequest<ProofPathResult>> pending_proof_paths_;
+    template <typename T>
+    struct PendingEntry
+    {
+        std::vector<PendingCallback<T>> callbacks;
+        bool network_request_sent =
+            false;          // first callback sends, rest piggyback
+        Hash256 match_key;  // secondary key for response matching (e.g.
+                            // ledger_key for node requests)
+    };
+
+    template <typename T>
+    using PendingMap = std::map<Hash256, PendingEntry<T>>;
+
+    /// Compute canonical key for TMGetLedger/TMLedgerData correlation.
+    /// For by-seq (liBASE): hash(seq, type). For by-hash: hash(ledgerHash,
+    /// type).
+    static Hash256
+    ledger_key(uint32_t seq, int type);
+    static Hash256
+    ledger_key(Hash256 const& hash, int type);
+
+    /// Compute canonical key for TMProofPathResponse correlation.
+    static Hash256
+    proof_path_key(Hash256 const& ledger_hash, Hash256 const& key, int type);
+
+    /// Compute canonical key for node requests — includes node_ids so that
+    /// different node-set requests for the same (ledgerHash, type) don't
+    /// collide. Response dispatch matches by scanning pending_nodes_ with
+    /// (ledgerHash, type).
+    static Hash256
+    nodes_key(
+        Hash256 const& ledger_hash,
+        int type,
+        std::vector<SHAMapNodeID> const& node_ids);
+
+    /// Compute canonical key for TMPing correlation.
+    static Hash256
+    ping_key(uint32_t seq);
+
+    /// Compute canonical key from a received TMLedgerData response.
+    static Hash256
+    ledger_key_from_response(uint32_t seq, int type);
+
+    /// Register a callback for a canonical key. Starts its timeout timer.
+    /// Returns true if this is the first callback (caller should send the
+    /// request).
+    template <typename T>
+    bool
+    register_callback(
+        PendingMap<T>& map,
+        Hash256 const& key,
+        Callback<T> callback,
+        RequestOptions const& opts,
+        bool dedupe);
+
+    /// Resolve all callbacks for a canonical key with a result.
+    template <typename T>
+    void
+    resolve(PendingMap<T>& map, Hash256 const& key, Error err, T result);
+
+    PendingMap<LedgerHeaderResult> pending_headers_;
+    PendingMap<LedgerNodesResult> pending_nodes_;
+    PendingMap<PingResult> pending_pings_;
+    PendingMap<ProofPathResult> pending_proof_paths_;
 
     // No mutex — all operations must be on the io_context thread.
     // Use asio::post(io_context_, ...) if calling from another thread.

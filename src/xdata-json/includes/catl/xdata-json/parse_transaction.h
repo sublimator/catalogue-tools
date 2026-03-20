@@ -9,16 +9,22 @@ namespace catl::xdata::json {
 /**
  * Parse a transaction leaf node with metadata to JSON.
  *
- * Transaction format: 4-byte prefix + VL-encoded tx + VL-encoded metadata +
- * 32-byte key Returns: {"tx": {...}, "meta": {...}}
+ * Nodestore format: [4-byte prefix][VL tx][VL meta][32-byte key]
+ * Wire format:      [VL tx][VL meta][32-byte key]
+ *
+ * Returns: {"hash": "...", "tx": {...}, "meta": {...}}
  *
  * @param data The raw transaction node data
  * @param protocol Protocol definitions for parsing
- * @return Parsed JSON object with "tx" and "meta" fields
+ * @param includes_prefix If true (default), skip first 4 bytes (hash prefix)
+ * @return Parsed JSON object with "hash", "tx" and "meta" fields
  * @throws std::runtime_error if data is malformed
  */
 boost::json::value
-parse_transaction(Slice const& data, Protocol const& protocol);
+parse_transaction(
+    Slice const& data,
+    Protocol const& protocol,
+    bool includes_prefix = true);
 
 /**
  * Parse a transaction set leaf node (no metadata, no VL encoding).

@@ -377,6 +377,249 @@ SHAMapT<Traits>::has_item(const Key& key) const
     return get_item(key) != nullptr;
 }
 
+/// Place a leaf at a specific tree position (by nodeID, not key).
+///
+/// Unlike set_item(key) which uses PathFinder and pushes to max depth,
+/// this places the leaf at the EXACT depth encoded in the nodeID.
+/// Inner nodes are synthesized along the path.
+///
+/// Used for abbreviated trees where the leaf's position in the tree
+/// is known from the wire data (nodeID = 33 bytes: path + depth).
+template <typename Traits>
+SetResult
+SHAMapT<Traits>::set_item_at(
+    SHAMapNodeID const& pos,
+    boost::intrusive_ptr<MmapItem>& item)
+    requires(has_placeholders_v<Traits>)
+{
+    if (!item)
+        return SetResult::FAILED;
+
+    if (pos.depth() == 0)
+        return SetResult::FAILED;  // can't place at root
+
+    if (options_.tree_collapse_impl != TreeCollapseImpl::leafs_only)
+        throw SHAMapException(
+            "set_item_at requires TreeCollapseImpl::leafs_only");
+
+    // Walk from root to depth - 1, creating inner nodes as needed.
+    auto* inner = root.get();
+
+    for (uint8_t d = 0; d < pos.depth() - 1; ++d)
+    {
+        int branch = pos.nibble_at(d);
+        auto child = inner->get_child(branch);
+
+        if (child && child->is_inner())
+        {
+            inner = static_cast<SHAMapInnerNodeT<Traits>*>(child.get());
+        }
+        else if (child && child->is_leaf())
+        {
+            // Leaf on our path — split: create inner, relocate leaf
+            auto leaf =
+                boost::static_pointer_cast<SHAMapLeafNodeT<Traits>>(child);
+            auto leaf_key = leaf->get_item()->key();
+            int leaf_branch = select_branch(leaf_key, d + 1);
+
+            auto new_inner =
+                boost::intrusive_ptr(new SHAMapInnerNodeT<Traits>(d + 1));
+            new_inner->set_child(leaf_branch, leaf);
+            inner->set_child(branch, new_inner);
+            inner->invalidate_hash();
+            inner = new_inner.get();
+        }
+        else
+        {
+            // Empty or placeholder — create inner, keep walking
+            auto children_ptr = inner->get_children();
+            if (children_ptr->has_placeholder(branch))
+                children_ptr->clear_placeholder(branch);
+
+            auto new_inner =
+                boost::intrusive_ptr(new SHAMapInnerNodeT<Traits>(d + 1));
+            inner->set_child(branch, new_inner);
+            inner->invalidate_hash();
+            inner = new_inner.get();
+        }
+    }
+
+    // Place the leaf at the target branch
+    int target_branch = pos.nibble_at(pos.depth() - 1);
+
+    auto new_leaf = boost::intrusive_ptr(
+        new SHAMapLeafNodeT<Traits>(item, this->node_type_));
+    inner->set_child(target_branch, new_leaf);
+    inner->invalidate_hash();
+
+    return SetResult::ADD;
+}
+
+/// Check if a placeholder is needed at this position.
+///
+/// Walks the path from root without modifying the tree.
+/// Returns true only if the position is an unfilled gap —
+/// no real node and no placeholder covers it at or above the target depth.
+///
+/// Use after all real leaves are placed via set_item_at() to determine
+/// the minimal set of placeholders needed for a correct root hash.
+template <typename Traits>
+bool
+SHAMapT<Traits>::needs_placeholder(SHAMapNodeID const& pos) const
+    requires(has_placeholders_v<Traits>)
+{
+    if (pos.depth() == 0)
+        return false;
+
+    auto const* inner = root.get();
+
+    for (uint8_t d = 0; d < pos.depth() - 1; ++d)
+    {
+        int branch = pos.nibble_at(d);
+        auto child = inner->get_child(branch);
+
+        if (child && child->is_inner())
+        {
+            inner = static_cast<SHAMapInnerNodeT<Traits> const*>(child.get());
+        }
+        else if (child)
+        {
+            // Real leaf on the path — subtree is covered
+            return false;
+        }
+        else
+        {
+            // No real child — check for placeholder
+            auto children_ptr = inner->get_children();
+            if (children_ptr->has_placeholder(branch))
+                return false;  // covered by a shallower placeholder
+
+            // Empty branch — path doesn't exist. Gap needs filling.
+            return true;
+        }
+    }
+
+    int target_branch = pos.nibble_at(pos.depth() - 1);
+
+    if (inner->has_child(target_branch))
+        return false;
+
+    auto children_ptr = inner->get_children();
+    if (children_ptr->has_placeholder(target_branch))
+        return false;
+
+    return true;
+}
+
+/// Place a hash-only placeholder at a specific tree position.
+///
+/// Core rule: if your depth is greater than what's there, you go deeper.
+///
+/// The walk from root to the target depth handles three cases at each level:
+///
+///   1. Real inner node → walk into it (existing structure)
+///   2. Real leaf node → split: create inner, relocate leaf to its branch,
+///      continue walking. Same collision resolution as set_item.
+///   3. No child (empty or placeholder) → if there's a placeholder hash here,
+///      clear it — we have deeper detail that supersedes the summary. Create
+///      an inner node and continue walking.
+///
+/// At the target depth, set the placeholder hash on the parent inner's branch.
+/// Real children always win (never overwrite a real node with a placeholder).
+///
+/// This works in any insertion order because:
+///   - Deeper detail always supersedes shallower summaries (case 3)
+///   - Shallower placeholders skip branches with existing structure (real wins)
+///   - Leaf splits (case 2) handle interleaved real/placeholder insertions
+///
+/// Requires TreeCollapseImpl::leafs_only — collapsed trees are incompatible
+/// with placeholders because the hash computation for skipped inners assumes
+/// single-path subtrees.
+///
+/// Verified: 1000 randomized insertion orders of inner branch hashes + leaf
+/// hashes from a real 119-transaction XRP ledger all produce the correct
+/// root hash.
+template <typename Traits>
+bool
+SHAMapT<Traits>::set_placeholder(SHAMapNodeID const& pos, Hash256 const& hash)
+    requires(has_placeholders_v<Traits>)
+{
+    if (pos.depth() == 0)
+        return false;  // can't replace the root
+
+    if (options_.tree_collapse_impl != TreeCollapseImpl::leafs_only)
+        throw SHAMapException(
+            "set_placeholder requires TreeCollapseImpl::leafs_only");
+
+    // Walk from root to depth - 1, synthesizing inner nodes as needed.
+    // Always walk to the full target depth — never stop early.
+    auto* inner = root.get();
+
+    for (uint8_t d = 0; d < pos.depth() - 1; ++d)
+    {
+        int branch = pos.nibble_at(d);
+        auto child = inner->get_child(branch);
+
+        if (child && child->is_inner())
+        {
+            // Case 1: existing inner — walk into it
+            inner = static_cast<SHAMapInnerNodeT<Traits>*>(child.get());
+        }
+        else if (child && child->is_leaf())
+        {
+            // Case 2: leaf on our path — split it
+            // Create an inner node, relocate the leaf to its correct branch
+            // at the next depth, continue walking. The loop may encounter
+            // the same leaf again if it shares more nibbles with our path.
+            auto leaf =
+                boost::static_pointer_cast<SHAMapLeafNodeT<Traits>>(child);
+            auto leaf_key = leaf->get_item()->key();
+            int leaf_branch = select_branch(leaf_key, d + 1);
+
+            auto new_inner =
+                boost::intrusive_ptr(new SHAMapInnerNodeT<Traits>(d + 1));
+            new_inner->set_child(leaf_branch, leaf);
+            inner->set_child(branch, new_inner);
+            inner->invalidate_hash();
+            inner = new_inner.get();
+        }
+        else
+        {
+            // Case 3: no real child — empty or placeholder-only branch
+            // If a placeholder exists here, it's a summary hash for the
+            // entire subtree. We're going deeper with more detail, so the
+            // summary is superseded. Clear it — the deeper entries (ours
+            // and future ones) will fill in the correct branch hashes.
+            auto children_ptr = inner->get_children();
+            if (children_ptr->has_placeholder(branch))
+                children_ptr->clear_placeholder(branch);
+
+            // Create an inner node and continue walking toward target depth
+            auto new_inner =
+                boost::intrusive_ptr(new SHAMapInnerNodeT<Traits>(d + 1));
+            inner->set_child(branch, new_inner);
+            inner->invalidate_hash();
+            inner = new_inner.get();
+        }
+    }
+
+    // Now at the parent inner node for the target depth.
+    int target_branch = pos.nibble_at(pos.depth() - 1);
+
+    // Real child (leaf or inner) at this branch — don't overwrite.
+    // The real data is always more authoritative than a placeholder.
+    if (inner->has_child(target_branch))
+        return false;
+
+    // Set the placeholder hash. Overwrites any existing placeholder
+    // on this branch (last write wins for same-depth placeholders).
+    auto children_ptr = inner->get_children();
+    children_ptr->set_placeholder(target_branch, hash);
+    inner->invalidate_hash();
+
+    return true;
+}
+
 template <typename Traits>
 Hash256
 SHAMapT<Traits>::get_hash() const

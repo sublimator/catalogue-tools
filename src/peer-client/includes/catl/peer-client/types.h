@@ -45,7 +45,9 @@ enum class Error {
 
 struct RequestOptions
 {
-    std::chrono::seconds timeout{10};
+    std::chrono::seconds timeout{5};
+    bool dedupe{
+        true};  // share result with pending request for same canonical key
 };
 
 //------------------------------------------------------------------------------
@@ -61,39 +63,60 @@ public:
     explicit LedgerHeaderResult(std::shared_ptr<protocol::TMLedgerData> msg);
 
     /// Is this result valid (has a message)?
-    explicit operator bool() const { return msg_ != nullptr; }
+    explicit
+    operator bool() const
+    {
+        return msg_ != nullptr;
+    }
 
     /// Ledger sequence number.
-    uint32_t seq() const;
+    uint32_t
+    seq() const;
 
     /// Ledger hash — zero-copy view into the protobuf message.
-    Key ledger_hash() const;
+    Key
+    ledger_hash() const;
     /// Ledger hash — owned copy.
-    Hash256 ledger_hash256() const { return ledger_hash().to_hash(); }
+    Hash256
+    ledger_hash256() const
+    {
+        return ledger_hash().to_hash();
+    }
 
     /// Zero-copy view into the serialized ledger header (node 0).
     /// Use LedgerInfoView to access fields.
-    catl::common::LedgerInfoView header() const;
+    catl::common::LedgerInfoView
+    header() const;
 
     /// Raw header bytes.
-    std::span<const uint8_t> header_data() const;
+    std::span<const uint8_t>
+    header_data() const;
 
     /// State tree root node (node 1 from liBASE response).
     /// Returns a WireNodeView — typically an uncompressed inner (513 bytes).
-    WireNodeView state_root_node() const;
+    WireNodeView
+    state_root_node() const;
 
     /// Transaction tree root node (node 2 from liBASE response).
-    WireNodeView tx_root_node() const;
+    WireNodeView
+    tx_root_node() const;
 
     /// Whether state/tx root nodes are present.
-    bool has_state_root() const;
-    bool has_tx_root() const;
+    bool
+    has_state_root() const;
+    bool
+    has_tx_root() const;
 
     /// Number of nodes in the response.
-    int node_count() const;
+    int
+    node_count() const;
 
     /// Access the raw protobuf message.
-    protocol::TMLedgerData const& raw() const { return *msg_; }
+    protocol::TMLedgerData const&
+    raw() const
+    {
+        return *msg_;
+    }
 };
 
 //------------------------------------------------------------------------------
@@ -109,40 +132,64 @@ public:
     explicit ProofPathResult(
         std::shared_ptr<protocol::TMProofPathResponse> msg);
 
-    explicit operator bool() const { return msg_ != nullptr; }
+    explicit
+    operator bool() const
+    {
+        return msg_ != nullptr;
+    }
 
     /// The key that was proven.
-    Key key() const;
-    Hash256 key256() const { return key().to_hash(); }
+    Key
+    key() const;
+    Hash256
+    key256() const
+    {
+        return key().to_hash();
+    }
 
     /// The ledger this proof is against.
-    Key ledger_hash() const;
-    Hash256 ledger_hash256() const { return ledger_hash().to_hash(); }
+    Key
+    ledger_hash() const;
+    Hash256
+    ledger_hash256() const
+    {
+        return ledger_hash().to_hash();
+    }
 
     /// Zero-copy view into the serialized ledger header.
-    catl::common::LedgerInfoView header() const;
+    catl::common::LedgerInfoView
+    header() const;
 
     /// Raw ledger header bytes.
-    std::span<const uint8_t> header_data() const;
+    std::span<const uint8_t>
+    header_data() const;
 
     /// Number of nodes in the proof path.
-    int path_length() const;
+    int
+    path_length() const;
 
     /// Get a node in the proof path as a WireNodeView.
     /// Index 0 = leaf (closest to the key), last = root.
-    WireNodeView path_node(int index) const;
+    WireNodeView
+    path_node(int index) const;
 
     /// Convenience: the leaf node (path_node(0)).
     /// This contains the actual proven data.
-    WireNodeView leaf() const;
+    WireNodeView
+    leaf() const;
 
     /// Convenience: leaf data as a span (strips wire type byte).
     /// For account state: serialized SLE.
     /// For transactions: tx blob (+ meta if TransactionWithMeta).
-    std::span<const uint8_t> leaf_data() const;
+    std::span<const uint8_t>
+    leaf_data() const;
 
     /// Access the raw protobuf message.
-    protocol::TMProofPathResponse const& raw() const { return *msg_; }
+    protocol::TMProofPathResponse const&
+    raw() const
+    {
+        return *msg_;
+    }
 };
 
 //------------------------------------------------------------------------------
@@ -171,6 +218,68 @@ struct SHAMapNodeID
 {
     Hash256 id;
     uint8_t depth = 0;
+
+    /// Wire format: [32 bytes id][1 byte depth]
+    std::string
+    to_wire() const
+    {
+        std::string result;
+        result.resize(33);
+        std::memcpy(result.data(), id.data(), 32);
+        result[32] = static_cast<char>(depth);
+        return result;
+    }
+};
+
+//------------------------------------------------------------------------------
+// LedgerNodesResult — response from get_state_nodes / get_tx_nodes
+//------------------------------------------------------------------------------
+
+class LedgerNodesResult
+{
+    std::shared_ptr<protocol::TMLedgerData> msg_;
+
+public:
+    LedgerNodesResult() = default;
+    explicit LedgerNodesResult(std::shared_ptr<protocol::TMLedgerData> msg);
+
+    explicit
+    operator bool() const
+    {
+        return msg_ != nullptr;
+    }
+
+    uint32_t
+    seq() const;
+    Key
+    ledger_hash() const;
+    Hash256
+    ledger_hash256() const
+    {
+        return ledger_hash().to_hash();
+    }
+
+    /// Number of nodes returned.
+    int
+    node_count() const;
+
+    /// Get a node's wire data as a span. Wrap in WireNodeView to inspect.
+    std::span<const uint8_t>
+    node_data(int index) const;
+
+    /// Get a node's ID (if present in response).
+    std::span<const uint8_t>
+    node_id(int index) const;
+
+    /// Get node as a WireNodeView.
+    WireNodeView
+    node_view(int index) const;
+
+    protocol::TMLedgerData const&
+    raw() const
+    {
+        return *msg_;
+    }
 };
 
 }  // namespace catl::peer_client

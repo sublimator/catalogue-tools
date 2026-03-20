@@ -7,6 +7,7 @@
 #include <openssl/evp.h>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "catl/core/logger.h"
@@ -15,6 +16,7 @@
 #include "catl/shamap/shamap-innernode.h"
 #include "catl/shamap/shamap-leafnode.h"
 #include "catl/shamap/shamap-nodechildren.h"
+#include "catl/shamap/shamap-nodeid.h"
 #include "catl/shamap/shamap-nodetype.h"
 #include "catl/shamap/shamap-options.h"
 #include "catl/shamap/shamap-pathfinder.h"
@@ -127,6 +129,95 @@ public:
 
     bool
     remove_item(const Key& key);
+
+    /// Place a leaf at a specific tree position (by nodeID, not key).
+    /// Creates inner nodes down to the nodeID's depth.
+    /// Unlike set_item(key) which pushes to max depth, this places the
+    /// leaf at the EXACT depth encoded in the nodeID.
+    /// Only available for abbreviated tree traits.
+    SetResult
+    set_item_at(SHAMapNodeID const& pos, boost::intrusive_ptr<MmapItem>& item)
+        requires(has_placeholders_v<Traits>);
+
+    /// Check if a placeholder is needed at this position.
+    /// Walks the path without modifying the tree.
+    /// Returns true if the position is an unfilled gap.
+    /// Returns false if a real node or placeholder already covers it.
+    bool
+    needs_placeholder(SHAMapNodeID const& pos) const
+        requires(has_placeholders_v<Traits>);
+
+    /// Place a hash-only placeholder at a specific tree position.
+    /// Only available when Traits::supports_placeholders is true.
+    /// Creates inner nodes along the path as needed.
+    /// No-op if the position already has a real child.
+    /// Returns true if the placeholder was set, false if skipped.
+    bool
+    set_placeholder(SHAMapNodeID const& pos, Hash256 const& hash)
+        requires(has_placeholders_v<Traits>);
+
+    /// Walk the abbreviated tree, visiting every node (real and placeholder).
+    ///
+    /// Callback signature:
+    ///   void(SHAMapNodeID const& id, Hash256 const& hash,
+    ///        SHAMapTreeNodeT<Traits> const* node)
+    ///
+    /// For real nodes (inner or leaf): node != nullptr, hash = node's hash.
+    /// For placeholders: node == nullptr, hash = placeholder hash.
+    /// Empty branches are not visited.
+    ///
+    /// Walk is depth-first, pre-order. Only available for abbreviated trees.
+    template <typename Fn>
+    void
+    walk_abbreviated(Fn&& callback) const
+        requires(has_placeholders_v<Traits>)
+    {
+        if (!root)
+            return;
+
+        // Stack: (inner node, nodeID of that inner)
+        struct Frame
+        {
+            SHAMapInnerNodeT<Traits> const* inner;
+            SHAMapNodeID id;
+        };
+        std::vector<Frame> stack;
+        stack.push_back({root.get(), SHAMapNodeID::root()});
+
+        while (!stack.empty())
+        {
+            auto [inner, inner_id] = stack.back();
+            stack.pop_back();
+
+            auto children = inner->get_children();
+
+            for (int branch = 0; branch < 16; ++branch)
+            {
+                auto child_id = inner_id.child(branch);
+                auto child = children->get_child(branch);
+
+                if (child)
+                {
+                    auto child_hash = child->get_hash(options_);
+                    callback(child_id, child_hash, child.get());
+
+                    if (child->is_inner())
+                    {
+                        stack.push_back(
+                            {static_cast<SHAMapInnerNodeT<Traits> const*>(
+                                 child.get()),
+                             child_id});
+                    }
+                }
+                else if (children->has_placeholder(branch))
+                {
+                    auto const& ph_hash = children->get_placeholder(branch);
+                    callback(child_id, ph_hash, nullptr);
+                }
+                // Empty branches: not visited
+            }
+        }
+    }
 
     [[nodiscard]] bool
     has_item(const Key& key) const;
