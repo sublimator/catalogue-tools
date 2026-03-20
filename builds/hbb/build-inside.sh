@@ -144,17 +144,28 @@ if ! ctest --test-dir build-hbb --verbose; then
 fi
 
 echo ''
-echo '>>> Checking binaries for dependencies'
+echo '>>> Stripping and checking binaries'
 for binary in $(find build-hbb/src -type f -executable); do
   if file $binary | grep -q 'ELF.*executable'; then
     echo ''
     echo "=== Binary: $binary ==="
-    echo '=== Full ldd output ==='
-    ldd $binary || echo 'ldd failed (static binary?)'
+
+    # Size before strip
+    before=$(stat -c%s "$binary")
+
+    # Strip debug info + symbols
+    strip --strip-all "$binary"
+    after=$(stat -c%s "$binary")
+
+    echo "  Size: $(numfmt --to=iec $before) → $(numfmt --to=iec $after) (stripped)"
+    echo "  Type: $(file -b $binary)"
+
+    echo '  Dependencies:'
+    ldd $binary 2>&1 | sed 's/^/    /' || echo '    static binary (no dynamic deps)'
 
     if command -v libcheck &>/dev/null; then
-      echo '=== Running libcheck ==='
-      libcheck $binary || echo 'libcheck not available'
+      echo '  Libcheck:'
+      libcheck $binary 2>&1 | sed 's/^/    /' || true
     fi
   fi
 done
