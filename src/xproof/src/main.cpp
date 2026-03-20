@@ -1691,6 +1691,7 @@ main(int argc, char* argv[])
                     StateWalkResult r;
                     TreeWalker walker(
                         c, ledger_hash, TreeWalkState::TreeType::state);
+                    walker.set_speculative_depth(8);
                     walker.add_target(key);
                     walker.set_on_placeholder(
                         [&](std::span<const uint8_t> nid, Hash256 const& h) {
@@ -2143,6 +2144,7 @@ main(int argc, char* argv[])
                 {
                     TreeWalker walker(
                         client, ledger_hash, TreeWalkState::TreeType::tx);
+                    walker.set_speculative_depth(4);
                     walker.add_target(tx_hash);
 
                     walker.set_on_placeholder(
