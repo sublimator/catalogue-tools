@@ -2,78 +2,91 @@
 
 #include "types.h"
 
+#include <catl/core/logger.h>
 #include <catl/core/types.h>
+#include <catl/peer/peer-connection.h>
+#include <catl/peer/types.h>
 
 #include <atomic>
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
-#include <mutex>
 
 namespace catl::peer_client {
 
 namespace asio = boost::asio;
+using catl::peer::packet_header;
+using catl::peer::packet_type;
+using catl::peer::peer_config;
+using catl::peer::peer_connection;
 
 //------------------------------------------------------------------------------
 // Callback type — Layer 1 (core)
 //------------------------------------------------------------------------------
 
-/// Callback-based result delivery.
-/// On error, result may be default-constructed.
 template <typename T>
 using Callback = std::function<void(Error, T)>;
 
+/// Called when the client becomes ready (status exchange complete)
+using ReadyCallback = std::function<void(uint32_t peer_ledger_seq)>;
+
+/// Called for messages PeerClient doesn't handle internally
+using UnsolicitedHandler = std::function<
+    void(uint16_t type, std::vector<uint8_t> const& data)>;
+
 //------------------------------------------------------------------------------
-// Forward declarations
+// Connection state
 //------------------------------------------------------------------------------
 
-// Raw connection type — will be defined in this module eventually,
-// for now forward-declared so we can start building against the interface.
-class PeerConnection;
+enum class State {
+    Disconnected,
+    Connecting,
+    Connected,       // TLS + HTTP upgrade done, sending status
+    ExchangingStatus,// Sent our status, waiting for peer's
+    Ready,           // Status exchanged, can send requests
+    Failed,
+};
 
 //------------------------------------------------------------------------------
-// PeerClient — high-level request/response API
-//
-// Layer 1: Callback API (core)
-// Layer 2: Future wrappers (peer-client-async.h)
-// Layer 3: Coroutine wrappers (caller can build from callbacks)
+// PeerClient
 //------------------------------------------------------------------------------
 
 class PeerClient : public std::enable_shared_from_this<PeerClient>
 {
 public:
-    PeerClient(
-        std::shared_ptr<PeerConnection> connection,
-        asio::io_context& io_context);
+    /// Connect to a peer. Returns immediately. Calls on_ready when status
+    /// exchange completes and requests can be made. Any get_* calls before
+    /// ready are queued and flushed automatically.
+    static std::shared_ptr<PeerClient>
+    connect(
+        asio::io_context& io_context,
+        std::string const& host,
+        uint16_t port,
+        uint32_t network_id = 0,
+        ReadyCallback on_ready = nullptr);
 
     ~PeerClient();
 
     // ---------------------------------------------------------------
-    // Ledger headers (TMGetLedger liBASE)
+    // Requests — safe to call before ready (will be queued)
     // ---------------------------------------------------------------
 
-    /// Fetch ledger header by sequence number.
     void
     get_ledger_header(
         uint32_t ledger_seq,
         Callback<LedgerHeaderResult> callback,
         RequestOptions opts = {});
 
-    /// Fetch ledger header by hash.
     void
     get_ledger_header(
         Hash256 const& ledger_hash,
         Callback<LedgerHeaderResult> callback,
         RequestOptions opts = {});
 
-    // ---------------------------------------------------------------
-    // Proof paths (requires LedgerReplay)
-    // ---------------------------------------------------------------
-
-    /// Proof path for a key in the transaction tree.
     void
     get_tx_proof_path(
         Hash256 const& ledger_hash,
@@ -81,7 +94,6 @@ public:
         Callback<ProofPathResult> callback,
         RequestOptions opts = {});
 
-    /// Proof path for a key in the account state tree.
     void
     get_state_proof_path(
         Hash256 const& ledger_hash,
@@ -89,185 +101,153 @@ public:
         Callback<ProofPathResult> callback,
         RequestOptions opts = {});
 
-    // ---------------------------------------------------------------
-    // SHAMap node fetching (TMGetLedger)
-    // ---------------------------------------------------------------
-
-    /// Fetch nodes from a transaction tree.
-    void
-    get_tx_tree_nodes(
-        Hash256 const& ledger_hash,
-        std::vector<SHAMapNodeID> const& node_ids,
-        Callback<LedgerNodesResult> callback,
-        RequestOptions opts = {});
-
-    /// Fetch nodes from an account state tree.
-    void
-    get_state_tree_nodes(
-        Hash256 const& ledger_hash,
-        std::vector<SHAMapNodeID> const& node_ids,
-        Callback<LedgerNodesResult> callback,
-        RequestOptions opts = {});
-
-    /// Fetch nodes from a candidate transaction set.
-    void
-    get_txset_nodes(
-        Hash256 const& txset_hash,
-        std::vector<SHAMapNodeID> const& node_ids,
-        Callback<LedgerNodesResult> callback,
-        RequestOptions opts = {});
-
-    // ---------------------------------------------------------------
-    // Replay delta (requires LedgerReplay)
-    // ---------------------------------------------------------------
-
-    /// Full ledger delta (header + all transactions).
-    void
-    get_replay_delta(
-        Hash256 const& ledger_hash,
-        Callback<ReplayDeltaResult> callback,
-        RequestOptions opts = {});
-
-    // ---------------------------------------------------------------
-    // Ping
-    // ---------------------------------------------------------------
-
     void
     ping(Callback<PingResult> callback, RequestOptions opts = {});
 
     // ---------------------------------------------------------------
-    // Unsolicited messages
+    // State
     // ---------------------------------------------------------------
 
-    /// Handler for messages PeerClient doesn't consume (proposals,
-    /// validations, status changes, etc.). Forwarded to caller if set.
-    using UnsolicitedHandler = std::function<
-        void(uint16_t type, std::vector<uint8_t> const& data)>;
+    State
+    state() const
+    {
+        return state_;
+    }
+
+    bool
+    is_ready() const
+    {
+        return state_ == State::Ready;
+    }
+
+    /// Peer's current ledger seq (known after status exchange)
+    uint32_t
+    peer_ledger_seq() const
+    {
+        return peer_ledger_seq_;
+    }
 
     void
-    set_unsolicited_handler(UnsolicitedHandler handler);
+    set_unsolicited_handler(UnsolicitedHandler handler)
+    {
+        unsolicited_handler_ = std::move(handler);
+    }
 
-    // ---------------------------------------------------------------
-    // Connection state
-    // ---------------------------------------------------------------
-
-    bool
-    is_connected() const;
-
-    /// Whether peer negotiated LedgerReplay during handshake.
-    bool
-    has_ledger_replay() const;
-
-    /// Cancel all in-flight requests (callbacks fire with Cancelled).
     void
     cancel_all();
 
-    /// Number of requests currently in flight.
     size_t
     pending_count() const;
 
-    /// Access the underlying connection.
-    PeerConnection&
-    raw_connection();
+    peer_connection&
+    raw_connection()
+    {
+        return *connection_;
+    }
 
 private:
-    // ---------------------------------------------------------------
-    // Sequence allocator — single counter for all correlation IDs
-    // ---------------------------------------------------------------
-
-    std::atomic<uint64_t> next_seq_{1};
-
-    uint64_t
-    allocate_seq()
-    {
-        return next_seq_.fetch_add(1);
-    }
-
-    /// Masked to uint32 for TMGetLedger requestCookie
-    /// (proto response truncates to uint32)
-    uint32_t
-    allocate_cookie()
-    {
-        return static_cast<uint32_t>(allocate_seq() & 0xFFFFFFFF);
-    }
+    PeerClient(asio::io_context& io_context);
 
     // ---------------------------------------------------------------
-    // Request tracking (type-erased base)
+    // Connection lifecycle
     // ---------------------------------------------------------------
 
-    struct PendingRequestBase
-    {
-        uint64_t id;
-        std::shared_ptr<asio::steady_timer> timer;
-        std::chrono::steady_clock::time_point sent_at;
+    void
+    do_connect(
+        std::string const& host,
+        uint16_t port,
+        uint32_t network_id,
+        ReadyCallback on_ready);
 
-        virtual ~PendingRequestBase() = default;
-        virtual void cancel() = 0;
-        virtual void timeout() = 0;
-    };
+    void
+    on_connected(ReadyCallback on_ready);
 
-    template <typename ResultT>
-    struct PendingRequest : PendingRequestBase
-    {
-        Callback<ResultT> callback;
-        void cancel() override;
-        void timeout() override;
-    };
+    void
+    send_monitoring_status();
 
-    // ---------------------------------------------------------------
-    // Correlation keys
-    // ---------------------------------------------------------------
+    void
+    handle_status_change(std::vector<uint8_t> const& payload, ReadyCallback on_ready);
 
-    // TMProofPathRequest: no cookie, content-match only
-    struct ProofPathKey
-    {
-        Hash256 ledger_hash;
-        Hash256 key;
-        int type;
-
-        bool operator<(ProofPathKey const& other) const;
-    };
-
-    // Pending request maps — one per correlation strategy
-    std::map<uint32_t, std::unique_ptr<PendingRequest<LedgerHeaderResult>>>
-        pending_headers_;       // keyed by requestCookie
-    std::map<uint32_t, std::unique_ptr<PendingRequest<LedgerNodesResult>>>
-        pending_nodes_;         // keyed by requestCookie
-    std::map<ProofPathKey, std::unique_ptr<PendingRequest<ProofPathResult>>>
-        pending_proof_paths_;   // keyed by {hash, key, type}
-    std::map<Hash256, std::unique_ptr<PendingRequest<ReplayDeltaResult>>>
-        pending_deltas_;        // keyed by ledgerHash
-    std::map<uint32_t, std::unique_ptr<PendingRequest<PingResult>>>
-        pending_pings_;         // keyed by ping seq
-
-    mutable std::mutex mutex_;
+    void
+    become_ready(ReadyCallback on_ready);
 
     // ---------------------------------------------------------------
     // Packet dispatch
     // ---------------------------------------------------------------
 
     void
-    on_packet(uint16_t type, std::vector<uint8_t> const& data);
-
-    void dispatch_ledger_data(std::vector<uint8_t> const& data);
-    void dispatch_proof_path_response(std::vector<uint8_t> const& data);
-    void dispatch_replay_delta_response(std::vector<uint8_t> const& data);
-    void dispatch_pong(std::vector<uint8_t> const& data);
-
-    // ---------------------------------------------------------------
-    // Timer management
-    // ---------------------------------------------------------------
+    on_packet(
+        packet_header const& header,
+        std::vector<uint8_t> const& data);
 
     void
-    start_timeout(PendingRequestBase& req, std::chrono::seconds timeout);
+    handle_ping(std::vector<uint8_t> const& payload);
+
+    void
+    dispatch_ledger_data(std::vector<uint8_t> const& data);
+
+    void
+    dispatch_proof_path_response(std::vector<uint8_t> const& data);
+
+    // ---------------------------------------------------------------
+    // Request queue (pre-ready)
+    // ---------------------------------------------------------------
+
+    using DeferredRequest = std::function<void()>;
+    std::deque<DeferredRequest> pending_queue_;
+
+    void
+    flush_queue();
+
+    /// If not ready, queue the callable and return true. Otherwise return false.
+    bool
+    queue_if_not_ready(DeferredRequest fn);
+
+    // ---------------------------------------------------------------
+    // Sequence allocator
+    // ---------------------------------------------------------------
+
+    std::atomic<uint64_t> next_seq_{1};
+
+    uint32_t
+    allocate_cookie()
+    {
+        return static_cast<uint32_t>(next_seq_.fetch_add(1) & 0xFFFFFFFF);
+    }
+
+    // ---------------------------------------------------------------
+    // Pending request tracking
+    // ---------------------------------------------------------------
+
+    struct ProofPathKey
+    {
+        Hash256 ledger_hash;
+        Hash256 key;
+        int type;
+        bool operator<(ProofPathKey const& other) const;
+    };
+
+    std::map<uint32_t, Callback<LedgerHeaderResult>> pending_headers_;
+    std::map<uint32_t, Callback<PingResult>> pending_pings_;
+    std::map<ProofPathKey, Callback<ProofPathResult>> pending_proof_paths_;
+
+    // No mutex — all operations must be on the io_context thread.
+    // Use asio::post(io_context_, ...) if calling from another thread.
 
     // ---------------------------------------------------------------
     // Members
     // ---------------------------------------------------------------
 
-    std::shared_ptr<PeerConnection> connection_;
     asio::io_context& io_context_;
+    std::unique_ptr<asio::ssl::context> ssl_context_;
+    std::shared_ptr<peer_connection> connection_;
     UnsolicitedHandler unsolicited_handler_;
+    ReadyCallback ready_callback_;
+
+    std::atomic<State> state_{State::Disconnected};
+    std::atomic<uint32_t> peer_ledger_seq_{0};
+
+    static LogPartition log_;
 };
 
 }  // namespace catl::peer_client
