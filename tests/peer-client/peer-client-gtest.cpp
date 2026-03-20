@@ -14,7 +14,7 @@ TEST(PeerClientTypes, ErrorEnumValues)
 TEST(PeerClientTypes, DefaultRequestOptions)
 {
     RequestOptions opts;
-    EXPECT_EQ(opts.timeout, std::chrono::seconds{10});
+    EXPECT_EQ(opts.timeout, std::chrono::seconds{5});
 }
 
 }  // namespace catl::peer_client
