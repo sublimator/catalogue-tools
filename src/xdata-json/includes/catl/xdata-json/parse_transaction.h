@@ -20,11 +20,30 @@ namespace catl::xdata::json {
  * @return Parsed JSON object with "hash", "tx" and "meta" fields
  * @throws std::runtime_error if data is malformed
  */
+/// Options for parse_transaction.
+struct ParseTransactionOptions
+{
+    bool includes_prefix = true;
+    /// If true, add a "blob" field with hex-encoded raw item data
+    /// (VL tx + VL meta, excluding prefix and key).
+    bool include_blob = false;
+};
+
 boost::json::value
 parse_transaction(
     Slice const& data,
     Protocol const& protocol,
-    bool includes_prefix = true);
+    ParseTransactionOptions opts = {});
+
+/// Backward-compatible overload.
+inline boost::json::value
+parse_transaction(
+    Slice const& data,
+    Protocol const& protocol,
+    bool includes_prefix)
+{
+    return parse_transaction(data, protocol, {includes_prefix, false});
+}
 
 /**
  * Parse a transaction set leaf node (no metadata, no VL encoding).

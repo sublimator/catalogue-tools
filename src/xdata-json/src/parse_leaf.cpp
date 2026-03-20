@@ -7,9 +7,9 @@
 namespace catl::xdata::json {
 
 boost::json::value
-parse_leaf(Slice const& data, Protocol const& protocol, bool includes_prefix)
+parse_leaf(Slice const& data, Protocol const& protocol, ParseLeafOptions opts)
 {
-    size_t prefix_size = includes_prefix ? 4 : 0;
+    size_t prefix_size = opts.includes_prefix ? 4 : 0;
 
     if (data.size() < prefix_size + 32)
     {
@@ -33,6 +33,14 @@ parse_leaf(Slice const& data, Protocol const& protocol, bool includes_prefix)
     {
         auto& obj = result.as_object();
         obj["index"] = key.hex();
+
+        // Add raw blob hex for round-trip verification
+        if (opts.include_blob)
+        {
+            std::string hex;
+            slice_hex(item_data, hex);
+            obj["blob"] = hex;
+        }
     }
 
     return result;

@@ -431,12 +431,18 @@ make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree)
             if (is_tx_tree)
             {
                 arr.emplace_back(catl::xdata::json::parse_transaction(
-                    full, protocol, false));
+                    full,
+                    protocol,
+                    {.includes_prefix = false,
+                     .include_blob = true}));
             }
             else
             {
-                arr.emplace_back(
-                    catl::xdata::json::parse_leaf(full, protocol, false));
+                arr.emplace_back(catl::xdata::json::parse_leaf(
+                    full,
+                    protocol,
+                    {.includes_prefix = false,
+                     .include_blob = true}));
             }
         }
         catch (std::exception const&)
@@ -949,17 +955,6 @@ resolve_proof_chain(
                 }
 
                 narrative.push_back(trie_desc);
-                narrative.push_back(
-                    "   The trie root hash (recomputed from all branches) "
-                    "must equal the header's " +
-                    std::string(is_state ? "account_hash" : "tx_hash") +
-                    ". Build-time check: " +
-                    std::string(
-                        step.contains("verified") &&
-                                step.at("verified").as_bool()
-                            ? "PASSED"
-                            : "not available") +
-                    ".");
             }
 
             // Reconstruct abbreviated tree from trie JSON and
@@ -980,32 +975,74 @@ resolve_proof_chain(
                         step.at("trie"),
                         node_type,
                         [](std::string const& key_hex,
-                           boost::json::value const&)
+                           boost::json::value const& data)
                             -> boost::intrusive_ptr<MmapItem> {
-                            // We don't have raw bytes to create a real
-                            // item, but we need SOMETHING for the leaf.
-                            // Create a minimal item — its hash won't
-                            // match but the tree structure will be valid.
-                            // TODO: when we have a serializer, create
-                            // the real item and verify fully.
                             auto key = hash_from_hex(key_hex);
+
+                            // Use "blob" field if present (raw hex)
+                            if (data.is_object() &&
+                                data.as_object().contains("blob"))
+                            {
+                                auto blob_hex = std::string(
+                                    data.as_object()
+                                        .at("blob")
+                                        .as_string());
+                                auto bytes = std::vector<uint8_t>();
+                                bytes.reserve(blob_hex.size() / 2);
+                                for (size_t i = 0;
+                                     i + 1 < blob_hex.size();
+                                     i += 2)
+                                {
+                                    unsigned int b;
+                                    std::sscanf(
+                                        blob_hex.c_str() + i,
+                                        "%2x",
+                                        &b);
+                                    bytes.push_back(
+                                        static_cast<uint8_t>(b));
+                                }
+                                Slice s(bytes.data(), bytes.size());
+                                return boost::intrusive_ptr<MmapItem>(
+                                    OwnedItem::create(key, s));
+                            }
+
+                            // No blob — dummy leaf
                             uint8_t dummy = 0;
-                            Slice empty_data(&dummy, 0);
+                            Slice empty(&dummy, 0);
                             return boost::intrusive_ptr<MmapItem>(
-                                OwnedItem::create(key, empty_data));
+                                OwnedItem::create(key, empty));
                         });
 
                     auto computed_root = reconstructed.get_hash();
                     auto expected_root =
                         is_state ? trusted_ac_hash : trusted_tx_hash;
 
-                    // Note: won't match because leaf hash needs raw data.
-                    // But we CAN verify placeholder count and structure.
-                    PLOGI(
-                        verify_log,
-                        "  Trie recon:   root=",
-                        upper_hex(computed_root).substr(0, 16),
-                        "... (leaf hash verification pending serializer)");
+                    if (computed_root == expected_root)
+                    {
+                        PLOGI(
+                            verify_log,
+                            "  Trie root:    PASS (",
+                            upper_hex(computed_root).substr(0, 16),
+                            "... matches header)");
+                        narrative.push_back(
+                            "   Trie root hash recomputed from "
+                            "placeholders + leaf blob: VERIFIED.");
+                    }
+                    else
+                    {
+                        PLOGE(
+                            verify_log,
+                            "  Trie root:    FAIL!");
+                        PLOGE(
+                            verify_log,
+                            "    expected: ",
+                            upper_hex(expected_root));
+                        PLOGE(
+                            verify_log,
+                            "    computed: ",
+                            upper_hex(computed_root));
+                        all_ok = false;
+                    }
                 }
                 catch (std::exception const& e)
                 {
@@ -1013,17 +1050,6 @@ resolve_proof_chain(
                         verify_log,
                         "  Trie reconstruction failed: ",
                         e.what());
-                }
-            }
-
-            if (step.contains("verified"))
-            {
-                bool v = step.at("verified").as_bool();
-                PLOGI(
-                    verify_log, "  Build-time:   ", v ? "VERIFIED" : "FAILED");
-                if (!v)
-                {
-                    all_ok = false;
                 }
             }
 
@@ -2385,7 +2411,7 @@ main(int argc, char* argv[])
                             make_proof_leaf_callback(protocol, false);
                         step["trie"] = sp.tree.get_root()->trie_json(
                             trie_opts, sp.tree.get_options());
-                        step["verified"] = sp.verified;
+                        // verified at build time, verifier re-checks independently
                         chain.push_back(step);
                     }
 
@@ -2408,7 +2434,7 @@ main(int argc, char* argv[])
                             make_proof_leaf_callback(protocol, false);
                         step["trie"] = sp.tree.get_root()->trie_json(
                             trie_opts, sp.tree.get_options());
-                        step["verified"] = sp.verified;
+                        // verified at build time, verifier re-checks independently
                         chain.push_back(step);
                     }
                 }
@@ -2445,7 +2471,7 @@ main(int argc, char* argv[])
                         step["trie"] = abbrev.get_root()->trie_json(
                             trie_opts, abbrev.get_options());
                     }
-                    step["verified"] = verified;
+                    // verified at build time, verifier re-checks independently
                     chain.push_back(step);
                 }
 

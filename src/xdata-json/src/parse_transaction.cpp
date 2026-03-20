@@ -29,9 +29,9 @@ boost::json::value
 parse_transaction(
     Slice const& data,
     Protocol const& protocol,
-    bool includes_prefix)
+    ParseTransactionOptions opts)
 {
-    size_t prefix_size = includes_prefix ? 4 : 0;
+    size_t prefix_size = opts.includes_prefix ? 4 : 0;
     size_t min_size = prefix_size + 32;  // prefix (optional) + 32-byte key
 
     if (data.size() < min_size)
@@ -72,6 +72,16 @@ parse_transaction(
         ParserContext meta_ctx(meta_data);
         parse_with_visitor(meta_ctx, protocol, meta_visitor);
         root["meta"] = meta_visitor.get_result();
+    }
+
+    // Add raw blob hex for round-trip verification
+    if (opts.include_blob)
+    {
+        Slice item_data(
+            data.data() + prefix_size, data.size() - prefix_size - 32);
+        std::string hex;
+        slice_hex(item_data, hex);
+        root["blob"] = hex;
     }
 
     return boost::json::value(root);
