@@ -5,6 +5,37 @@ namespace catl::peer_client {
 
 LogPartition PeerClient::log_("peer-client", LogLevel::INFO);
 
+// ─── Timer helper ───────────────────────────────────────────────────
+
+template <typename K, typename T>
+void
+PeerClient::start_timer(
+    std::map<K, PendingRequest<T>>& map,
+    K const& key,
+    std::chrono::seconds timeout)
+{
+    auto it = map.find(key);
+    if (it == map.end())
+        return;
+
+    auto timer = std::make_unique<asio::steady_timer>(io_context_, timeout);
+    auto* timer_ptr = timer.get();
+    it->second.timer = std::move(timer);
+
+    auto self = shared_from_this();
+    timer_ptr->async_wait(
+        [self, &map, key](boost::system::error_code ec) {
+            if (ec)
+                return;  // timer cancelled = response arrived in time
+            auto cb = take_pending(map, key);
+            if (cb)
+            {
+                PLOGI(PeerClient::log_, "Request timed out");
+                cb(Error::Timeout, T{});
+            }
+        });
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Result types
 // ═══════════════════════════════════════════════════════════════════════
@@ -363,16 +394,11 @@ PeerClient::handle_ping(std::vector<uint8_t> const& payload)
     {
         if (msg.has_seq())
         {
-            auto it = pending_pings_.find(msg.seq());
-            if (it != pending_pings_.end())
+            if (auto cb = take_pending(pending_pings_, msg.seq()))
             {
-                auto cb = std::move(it->second);
-                pending_pings_.erase(it);
-
                 PingResult result;
                 result.seq = msg.seq();
                 result.received_at = std::chrono::steady_clock::now();
-                // sent_at would need to be stored — TODO
                 cb(Error::Success, std::move(result));
             }
         }
@@ -385,10 +411,10 @@ void
 PeerClient::get_ledger_header(
     uint32_t ledger_seq,
     Callback<LedgerHeaderResult> callback,
-    RequestOptions /*opts*/)
+    RequestOptions opts)
 {
-    if (queue_if_not_ready([this, ledger_seq, cb = std::move(callback)]() mutable {
-            get_ledger_header(ledger_seq, std::move(cb));
+    if (queue_if_not_ready([this, ledger_seq, cb = std::move(callback), opts]() mutable {
+            get_ledger_header(ledger_seq, std::move(cb), opts);
         }))
         return;
 
@@ -402,7 +428,8 @@ PeerClient::get_ledger_header(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
-    pending_headers_[cookie] = std::move(callback);
+    pending_headers_[cookie] = {std::move(callback), nullptr};
+    start_timer(pending_headers_, cookie, opts.timeout);
 
     connection_->async_send_packet(
         packet_type::get_ledger, data, [](boost::system::error_code ec) {
@@ -415,11 +442,11 @@ void
 PeerClient::get_ledger_header(
     Hash256 const& ledger_hash,
     Callback<LedgerHeaderResult> callback,
-    RequestOptions /*opts*/)
+    RequestOptions opts)
 {
     if (queue_if_not_ready(
-            [this, ledger_hash, cb = std::move(callback)]() mutable {
-                get_ledger_header(ledger_hash, std::move(cb));
+            [this, ledger_hash, cb = std::move(callback), opts]() mutable {
+                get_ledger_header(ledger_hash, std::move(cb), opts);
             }))
         return;
 
@@ -433,7 +460,8 @@ PeerClient::get_ledger_header(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
-    pending_headers_[cookie] = std::move(callback);
+    pending_headers_[cookie] = {std::move(callback), nullptr};
+    start_timer(pending_headers_, cookie, opts.timeout);
 
     connection_->async_send_packet(
         packet_type::get_ledger, data, [](boost::system::error_code) {});
@@ -449,14 +477,7 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
     // Match by cookie
     Callback<LedgerHeaderResult> callback;
     if (msg->has_requestcookie())
-    {
-        auto it = pending_headers_.find(msg->requestcookie());
-        if (it != pending_headers_.end())
-        {
-            callback = std::move(it->second);
-            pending_headers_.erase(it);
-        }
-    }
+        callback = take_pending(pending_headers_, msg->requestcookie());
 
     if (!callback)
         return;
@@ -480,11 +501,11 @@ PeerClient::get_tx_proof_path(
     Hash256 const& ledger_hash,
     Hash256 const& key,
     Callback<ProofPathResult> callback,
-    RequestOptions /*opts*/)
+    RequestOptions opts)
 {
     if (queue_if_not_ready(
-            [this, ledger_hash, key, cb = std::move(callback)]() mutable {
-                get_tx_proof_path(ledger_hash, key, std::move(cb));
+            [this, ledger_hash, key, cb = std::move(callback), opts]() mutable {
+                get_tx_proof_path(ledger_hash, key, std::move(cb), opts);
             }))
         return;
 
@@ -497,7 +518,8 @@ PeerClient::get_tx_proof_path(
     request.SerializeToArray(data.data(), data.size());
 
     ProofPathKey ppk{ledger_hash, key, protocol::lmTRANASCTION};
-    pending_proof_paths_[ppk] = std::move(callback);
+    pending_proof_paths_[ppk] = {std::move(callback), nullptr};
+    start_timer(pending_proof_paths_, ppk, opts.timeout);
 
     connection_->async_send_packet(
         packet_type::proof_path_req, data, [](boost::system::error_code) {});
@@ -508,11 +530,11 @@ PeerClient::get_state_proof_path(
     Hash256 const& ledger_hash,
     Hash256 const& key,
     Callback<ProofPathResult> callback,
-    RequestOptions /*opts*/)
+    RequestOptions opts)
 {
     if (queue_if_not_ready(
-            [this, ledger_hash, key, cb = std::move(callback)]() mutable {
-                get_state_proof_path(ledger_hash, key, std::move(cb));
+            [this, ledger_hash, key, cb = std::move(callback), opts]() mutable {
+                get_state_proof_path(ledger_hash, key, std::move(cb), opts);
             }))
         return;
 
@@ -525,7 +547,8 @@ PeerClient::get_state_proof_path(
     request.SerializeToArray(data.data(), data.size());
 
     ProofPathKey ppk{ledger_hash, key, protocol::lmACCOUNT_STATE};
-    pending_proof_paths_[ppk] = std::move(callback);
+    pending_proof_paths_[ppk] = {std::move(callback), nullptr};
+    start_timer(pending_proof_paths_, ppk, opts.timeout);
 
     connection_->async_send_packet(
         packet_type::proof_path_req, data, [](boost::system::error_code) {});
@@ -545,12 +568,9 @@ PeerClient::dispatch_proof_path_response(std::vector<uint8_t> const& payload)
     Hash256 lh(reinterpret_cast<const uint8_t*>(msg->ledgerhash().data()));
     ProofPathKey ppk{lh, key, msg->type()};
 
-    auto it = pending_proof_paths_.find(ppk);
-    if (it == pending_proof_paths_.end())
+    auto callback = take_pending(pending_proof_paths_, ppk);
+    if (!callback)
         return;
-
-    auto callback = std::move(it->second);
-    pending_proof_paths_.erase(it);
 
     if (msg->has_error())
     {
@@ -567,10 +587,10 @@ PeerClient::dispatch_proof_path_response(std::vector<uint8_t> const& payload)
 // ─── Ping ───────────────────────────────────────────────────────────
 
 void
-PeerClient::ping(Callback<PingResult> callback, RequestOptions /*opts*/)
+PeerClient::ping(Callback<PingResult> callback, RequestOptions opts)
 {
-    if (queue_if_not_ready([this, cb = std::move(callback)]() mutable {
-            ping(std::move(cb));
+    if (queue_if_not_ready([this, cb = std::move(callback), opts]() mutable {
+            ping(std::move(cb), opts);
         }))
         return;
 
@@ -583,7 +603,8 @@ PeerClient::ping(Callback<PingResult> callback, RequestOptions /*opts*/)
     std::vector<uint8_t> data(msg.ByteSizeLong());
     msg.SerializeToArray(data.data(), data.size());
 
-    pending_pings_[seq] = std::move(callback);
+    pending_pings_[seq] = {std::move(callback), nullptr};
+    start_timer(pending_pings_, seq, opts.timeout);
 
     connection_->async_send_packet(
         packet_type::ping, data, [](boost::system::error_code) {});
@@ -616,12 +637,21 @@ PeerClient::flush_queue()
 void
 PeerClient::cancel_all()
 {
-    for (auto& [_, cb] : pending_headers_)
-        cb(Error::Cancelled, LedgerHeaderResult{});
-    for (auto& [_, cb] : pending_pings_)
-        cb(Error::Cancelled, PingResult{});
-    for (auto& [_, cb] : pending_proof_paths_)
-        cb(Error::Cancelled, ProofPathResult{});
+    for (auto& [_, req] : pending_headers_)
+    {
+        if (req.timer) req.timer->cancel();
+        req.callback(Error::Cancelled, LedgerHeaderResult{});
+    }
+    for (auto& [_, req] : pending_pings_)
+    {
+        if (req.timer) req.timer->cancel();
+        req.callback(Error::Cancelled, PingResult{});
+    }
+    for (auto& [_, req] : pending_proof_paths_)
+    {
+        if (req.timer) req.timer->cancel();
+        req.callback(Error::Cancelled, ProofPathResult{});
+    }
     pending_headers_.clear();
     pending_pings_.clear();
     pending_proof_paths_.clear();

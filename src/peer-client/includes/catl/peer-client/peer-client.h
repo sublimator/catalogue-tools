@@ -146,6 +146,15 @@ public:
     }
 
 private:
+    /// Pairs a callback with its timeout timer.
+    template <typename T>
+    struct PendingRequest
+    {
+        Callback<T> callback;
+        std::unique_ptr<asio::steady_timer> timer;
+    };
+
+
     PeerClient(asio::io_context& io_context);
 
     // ---------------------------------------------------------------
@@ -219,6 +228,30 @@ private:
     // Pending request tracking
     // ---------------------------------------------------------------
 
+    /// Extract a pending request, cancel its timer, return the callback.
+    template <typename K, typename T>
+    static Callback<T>
+    take_pending(std::map<K, PendingRequest<T>>& map, K const& key)
+    {
+        auto it = map.find(key);
+        if (it == map.end())
+            return nullptr;
+        auto cb = std::move(it->second.callback);
+        if (it->second.timer)
+            it->second.timer->cancel();
+        map.erase(it);
+        return cb;
+    }
+
+    /// Start a timeout timer for a pending request.
+    /// When it fires, removes the entry from the map and calls callback(Timeout).
+    template <typename K, typename T>
+    void
+    start_timer(
+        std::map<K, PendingRequest<T>>& map,
+        K const& key,
+        std::chrono::seconds timeout);
+
     struct ProofPathKey
     {
         Hash256 ledger_hash;
@@ -227,9 +260,9 @@ private:
         bool operator<(ProofPathKey const& other) const;
     };
 
-    std::map<uint32_t, Callback<LedgerHeaderResult>> pending_headers_;
-    std::map<uint32_t, Callback<PingResult>> pending_pings_;
-    std::map<ProofPathKey, Callback<ProofPathResult>> pending_proof_paths_;
+    std::map<uint32_t, PendingRequest<LedgerHeaderResult>> pending_headers_;
+    std::map<uint32_t, PendingRequest<PingResult>> pending_pings_;
+    std::map<ProofPathKey, PendingRequest<ProofPathResult>> pending_proof_paths_;
 
     // No mutex — all operations must be on the io_context thread.
     // Use asio::post(io_context_, ...) if calling from another thread.
