@@ -64,7 +64,13 @@ struct PlaceholderHashes
 };
 
 /// Helper to detect placeholder support at compile time.
+/// Defaults to false if the trait doesn't define supports_placeholders.
+template <typename Traits, typename = void>
+inline constexpr bool has_placeholders_v = false;
+
 template <typename Traits>
-inline constexpr bool has_placeholders_v = Traits::supports_placeholders;
+inline constexpr bool
+    has_placeholders_v<Traits, std::void_t<decltype(Traits::supports_placeholders)>> =
+        Traits::supports_placeholders;
 
 }  // namespace catl::shamap
