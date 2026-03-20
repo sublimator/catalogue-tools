@@ -333,6 +333,149 @@ public:
     {
         return current_version_;
     }
+
+    /// Callback for from_trie_json: given a leaf's key hex and data JSON,
+    /// return the raw item bytes (excluding the 32-byte key suffix).
+    using LeafFromJsonCallback = std::function<boost::intrusive_ptr<MmapItem>(
+        std::string const& key_hex,
+        boost::json::value const& data)>;
+
+    /// Reconstruct an abbreviated SHAMap from a JSON trie.
+    ///
+    /// The trie format (per SPEC 2.3):
+    ///   String (64 hex) = placeholder hash
+    ///   Object (keys "0"-"F") = inner node
+    ///   Array [key_hex, data] = leaf
+    ///
+    /// Recursively walks the JSON, building the path as it descends.
+    /// Calls set_item_at for leaves and set_placeholder for hash strings.
+    /// The on_leaf callback converts the leaf JSON data to an MmapItem.
+    ///
+    /// @param trie     The JSON trie value (root object)
+    /// @param type     Node type (tnTRANSACTION_MD or tnACCOUNT_STATE)
+    /// @param on_leaf  Callback to create MmapItem from leaf JSON
+    /// @return The reconstructed abbreviated SHAMap
+    static SHAMapT<Traits>
+    from_trie_json(
+        boost::json::value const& trie,
+        SHAMapNodeType type,
+        LeafFromJsonCallback on_leaf)
+        requires(has_placeholders_v<Traits>)
+    {
+        SHAMapOptions opts;
+        opts.tree_collapse_impl = TreeCollapseImpl::leafs_only;
+        opts.reference_hash_impl = ReferenceHashImpl::recursive_simple;
+        SHAMapT<Traits> map(type, opts);
+
+        // Recursive walker
+        struct Walker
+        {
+            SHAMapT<Traits>& map;
+            LeafFromJsonCallback& on_leaf;
+
+            static Hash256
+            hash_from_hex(std::string const& hex)
+            {
+                Hash256 result;
+                for (size_t i = 0; i < 32 && i * 2 + 1 < hex.size(); ++i)
+                {
+                    unsigned int byte;
+                    std::sscanf(hex.c_str() + i * 2, "%2x", &byte);
+                    result.data()[i] = static_cast<uint8_t>(byte);
+                }
+                return result;
+            }
+
+            static int
+            nibble_from_char(char c)
+            {
+                if (c >= '0' && c <= '9')
+                    return c - '0';
+                if (c >= 'A' && c <= 'F')
+                    return c - 'A' + 10;
+                if (c >= 'a' && c <= 'f')
+                    return c - 'a' + 10;
+                return -1;
+            }
+
+            void
+            walk(
+                boost::json::value const& node,
+                uint8_t depth,
+                uint8_t path[32])
+            {
+                if (node.is_string())
+                {
+                    // Placeholder hash
+                    auto hex = std::string(node.as_string());
+                    if (hex.size() == 64)
+                    {
+                        auto hash = hash_from_hex(hex);
+                        Hash256 path_hash(path);
+                        SHAMapNodeID nid(path_hash, depth);
+                        map.set_placeholder(nid, hash);
+                    }
+                }
+                else if (node.is_array())
+                {
+                    // Leaf: [key_hex, data]
+                    auto const& arr = node.as_array();
+                    if (arr.size() >= 2 && arr[0].is_string())
+                    {
+                        auto key_hex = std::string(arr[0].as_string());
+                        auto item = on_leaf(key_hex, arr[1]);
+                        if (item)
+                        {
+                            Hash256 path_hash(path);
+                            SHAMapNodeID nid(path_hash, depth);
+                            map.set_item_at(nid, item);
+                        }
+                    }
+                }
+                else if (node.is_object())
+                {
+                    // Inner node — recurse into children
+                    auto const& obj = node.as_object();
+                    for (auto const& kv : obj)
+                    {
+                        if (kv.key() == "__depth__")
+                            continue;
+                        if (kv.key().size() != 1)
+                            continue;
+
+                        int nibble = nibble_from_char(kv.key()[0]);
+                        if (nibble < 0)
+                            continue;
+
+                        // Set nibble in path at current depth
+                        uint8_t child_path[32];
+                        std::memcpy(child_path, path, 32);
+                        int byte_idx = depth / 2;
+                        if (depth % 2 == 0)
+                        {
+                            child_path[byte_idx] =
+                                (child_path[byte_idx] & 0x0F) |
+                                (nibble << 4);
+                        }
+                        else
+                        {
+                            child_path[byte_idx] =
+                                (child_path[byte_idx] & 0xF0) |
+                                (nibble & 0xF);
+                        }
+
+                        walk(kv.value(), depth + 1, child_path);
+                    }
+                }
+            }
+        };
+
+        uint8_t root_path[32] = {};
+        Walker walker{map, on_leaf};
+        walker.walk(trie, 0, root_path);
+
+        return map;
+    }
 };
 
 // Define the static log partition declaration for all template instantiations

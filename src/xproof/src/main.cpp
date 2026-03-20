@@ -962,6 +962,60 @@ resolve_proof_chain(
                     ".");
             }
 
+            // Reconstruct abbreviated tree from trie JSON and
+            // verify root hash (placeholder structure only —
+            // leaf hash verification requires a serializer)
+            if (step.contains("trie") && have_tree_hashes)
+            {
+                try
+                {
+                    auto node_type = is_state
+                        ? catl::shamap::tnACCOUNT_STATE
+                        : catl::shamap::tnTRANSACTION_MD;
+
+                    using AbbrevMap = catl::shamap::SHAMapT<
+                        catl::shamap::AbbreviatedTreeTraits>;
+
+                    auto reconstructed = AbbrevMap::from_trie_json(
+                        step.at("trie"),
+                        node_type,
+                        [](std::string const& key_hex,
+                           boost::json::value const&)
+                            -> boost::intrusive_ptr<MmapItem> {
+                            // We don't have raw bytes to create a real
+                            // item, but we need SOMETHING for the leaf.
+                            // Create a minimal item — its hash won't
+                            // match but the tree structure will be valid.
+                            // TODO: when we have a serializer, create
+                            // the real item and verify fully.
+                            auto key = hash_from_hex(key_hex);
+                            uint8_t dummy = 0;
+                            Slice empty_data(&dummy, 0);
+                            return boost::intrusive_ptr<MmapItem>(
+                                OwnedItem::create(key, empty_data));
+                        });
+
+                    auto computed_root = reconstructed.get_hash();
+                    auto expected_root =
+                        is_state ? trusted_ac_hash : trusted_tx_hash;
+
+                    // Note: won't match because leaf hash needs raw data.
+                    // But we CAN verify placeholder count and structure.
+                    PLOGI(
+                        verify_log,
+                        "  Trie recon:   root=",
+                        upper_hex(computed_root).substr(0, 16),
+                        "... (leaf hash verification pending serializer)");
+                }
+                catch (std::exception const& e)
+                {
+                    PLOGW(
+                        verify_log,
+                        "  Trie reconstruction failed: ",
+                        e.what());
+                }
+            }
+
             if (step.contains("verified"))
             {
                 bool v = step.at("verified").as_bool();
