@@ -108,27 +108,31 @@ SHAMapInnerNodeT<Traits>::trie_json(
     boost::json::object result;
     result["__depth__"] = depth_;
 
+    auto children = get_children();
+
     for (int i = 0; i < 16; i++)
     {
+        // Convert nibble to hex string
+        std::string nibble =
+            (i < 10) ? std::to_string(i) : std::string(1, 'A' + (i - 10));
+
         if (has_child(i))
         {
             auto child = get_child(i);
             if (child)
             {
-                // Convert nibble to hex string
-                std::string nibble = (i < 10) ? std::to_string(i)
-                                              : std::string(1, 'A' + (i - 10));
-
                 if (child->is_leaf())
                 {
                     auto leaf =
                         boost::static_pointer_cast<SHAMapLeafNodeT<Traits>>(
                             child);
-                    if (options.key_as_hash)
+                    if (options.on_leaf && leaf->get_item())
+                    {
+                        result[nibble] = options.on_leaf(*leaf->get_item());
+                    }
+                    else if (options.key_as_hash)
                     {
                         auto key_hex = leaf->get_item()->key().hex();
-                        // wrap [ and ] around the nibble at the inner node's
-                        // depth
                         auto wrapped = key_hex.substr(0, depth_) + "[" +
                             key_hex.substr(depth_, 1) + "]" +
                             key_hex.substr(depth_ + 1, 63);
@@ -146,6 +150,13 @@ SHAMapInnerNodeT<Traits>::trie_json(
                             child);
                     result[nibble] = inner->trie_json(options, shamap_options);
                 }
+            }
+        }
+        else if constexpr (has_placeholders_v<Traits>)
+        {
+            if (children->has_placeholder(i))
+            {
+                result[nibble] = children->get_placeholder(i).hex();
             }
         }
     }
@@ -334,7 +345,7 @@ SHAMapInnerNodeT<Traits>::copy(int newVersion, SHAMapInnerNodeT<Traits>* parent)
         newVersion);
 
     // Invoke CoW hook if present
-    if constexpr (requires(Traits & t) {
+    if constexpr (requires(Traits& t) {
                       t.on_inner_node_copied(
                           (SHAMapInnerNodeT<Traits>*)nullptr,
                           (const SHAMapInnerNodeT<Traits>*)nullptr,

@@ -7,21 +7,21 @@
 namespace catl::xdata::json {
 
 boost::json::value
-parse_leaf(Slice const& data, Protocol const& protocol)
+parse_leaf(Slice const& data, Protocol const& protocol, bool includes_prefix)
 {
-    // Leaf format: 4-byte prefix + item data + 32-byte key
-    // We want just the item data (skip prefix, exclude trailing key)
-    if (data.size() < 4 + 32)
+    size_t prefix_size = includes_prefix ? 4 : 0;
+
+    if (data.size() < prefix_size + 32)
     {
         throw std::runtime_error(
             "parse_leaf: data too small (" + std::to_string(data.size()) +
-            " bytes, need at least 36)");
+            " bytes, need at least " + std::to_string(prefix_size + 32) + ")");
     }
 
     // Extract the 32-byte key from the end
     Hash256 key(data.data() + data.size() - 32);
 
-    Slice item_data(data.data() + 4, data.size() - 4 - 32);
+    Slice item_data(data.data() + prefix_size, data.size() - prefix_size - 32);
 
     JsonVisitor visitor(protocol);
     ParserContext ctx(item_data);

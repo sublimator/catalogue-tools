@@ -18,6 +18,9 @@ namespace catl::xdata::json {
  * @throws std::runtime_error if data is malformed
  */
 boost::json::value
-parse_leaf(Slice const& data, Protocol const& protocol);
+parse_leaf(
+    Slice const& data,
+    Protocol const& protocol,
+    bool includes_prefix = true);
 
 }  // namespace catl::xdata::json

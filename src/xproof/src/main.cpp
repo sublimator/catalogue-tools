@@ -11,11 +11,9 @@
 
 // Instantiate SHAMap for AbbreviatedTreeTraits
 INSTANTIATE_SHAMAP_NODE_TRAITS(catl::shamap::AbbreviatedTreeTraits);
+#include <catl/xdata-json/parse_leaf.h>
 #include <catl/xdata-json/parse_transaction.h>
 #include <catl/xdata-json/pretty_print.h>
-#include <catl/xdata/json-visitor.h>
-#include <catl/xdata/parser-context.h>
-#include <catl/xdata/parser.h>
 #include <catl/xdata/protocol.h>
 
 #include <boost/asio/co_spawn.hpp>
@@ -122,6 +120,620 @@ skip_list_key(uint32_t ledger_seq)
 }
 
 static LogPartition log_partition("xproof", LogLevel::INFO);
+
+/// Build a proof-format on_leaf callback for trie_json.
+/// Returns [key_hex, parsed_data] arrays per SPEC 2.3.
+static catl::shamap::LeafJsonCallback
+make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree)
+{
+    return [&protocol, is_tx_tree](MmapItem const& item) -> boost::json::value {
+        boost::json::array arr;
+        arr.emplace_back(upper_hex(item.key().to_hash()));
+
+        try
+        {
+            // Build [data][key] buffer for parsing
+            std::vector<uint8_t> buf(
+                item.slice().data(), item.slice().data() + item.slice().size());
+            buf.insert(buf.end(), item.key().data(), item.key().data() + 32);
+            Slice full(buf.data(), buf.size());
+
+            if (is_tx_tree)
+            {
+                arr.emplace_back(catl::xdata::json::parse_transaction(
+                    full, protocol, false));
+            }
+            else
+            {
+                arr.emplace_back(
+                    catl::xdata::json::parse_leaf(full, protocol, false));
+            }
+        }
+        catch (std::exception const&)
+        {
+            std::string hex;
+            slice_hex(item.slice(), hex);
+            arr.emplace_back(hex);
+        }
+
+        return arr;
+    };
+}
+
+/// Parse SLE leaf data (wire format, no prefix) and check if a hash
+/// exists in the sfHashes (Vector256) array.
+static bool
+sle_hashes_contain(
+    Slice leaf_data,
+    Hash256 const& needle,
+    catl::xdata::Protocol const& protocol)
+{
+    try
+    {
+        PLOGI(log_partition, "  Parsing SLE (", leaf_data.size(), " bytes)");
+        auto json = catl::xdata::json::parse_leaf(leaf_data, protocol, false);
+        auto const& obj = json.as_object();
+
+        // Log the parsed JSON for manual inspection
+        PLOGI(log_partition, "  SLE JSON: ", boost::json::serialize(json));
+
+        if (!obj.contains("Hashes"))
+        {
+            PLOGW(log_partition, "  SLE has no Hashes field!");
+            return false;
+        }
+        auto const& arr = obj.at("Hashes").as_array();
+        PLOGI(log_partition, "  SLE contains ", arr.size(), " hashes");
+        auto needle_hex = upper_hex(needle);
+        for (auto const& h : arr)
+        {
+            if (h.as_string() == needle_hex)
+            {
+                return true;
+            }
+        }
+        PLOGI(log_partition, "  Needle not in list: ", needle_hex);
+        return false;
+    }
+    catch (std::exception const& e)
+    {
+        PLOGE(log_partition, "  sle_hashes_contain FAILED: ", e.what());
+        return false;
+    }
+}
+
+//------------------------------------------------------------------------------
+// Proof chain resolver / verifier
+//------------------------------------------------------------------------------
+
+static LogPartition verify_log("verify", LogLevel::INFO);
+
+/// Hash a ledger header per XRPL spec.
+/// SHA512Half(LWR\0 || seq || drops || parent_hash || tx_hash ||
+///            account_hash || close_time || parent_close_time ||
+///            close_time_resolution || close_flags)
+static Hash256
+hash_ledger_header(boost::json::object const& hdr)
+{
+    catl::crypto::Sha512HalfHasher h;
+
+    // HashPrefix::ledgerMaster = "LWR\0"
+    uint8_t prefix[] = {'L', 'W', 'R', 0x00};
+    h.update(prefix, 4);
+
+    auto write_u32 = [&](uint32_t v) {
+        uint8_t buf[4] = {
+            static_cast<uint8_t>((v >> 24) & 0xFF),
+            static_cast<uint8_t>((v >> 16) & 0xFF),
+            static_cast<uint8_t>((v >> 8) & 0xFF),
+            static_cast<uint8_t>(v & 0xFF)};
+        h.update(buf, 4);
+    };
+
+    auto write_u64 = [&](uint64_t v) {
+        uint8_t buf[8];
+        for (int i = 7; i >= 0; --i)
+        {
+            buf[i] = static_cast<uint8_t>(v & 0xFF);
+            v >>= 8;
+        }
+        h.update(buf, 8);
+    };
+
+    auto write_hash = [&](std::string const& hex_str) {
+        auto hash = hash_from_hex(hex_str);
+        h.update(hash.data(), 32);
+    };
+
+    write_u32(hdr.at("seq").to_number<uint32_t>());
+    write_u64(std::stoull(std::string(hdr.at("drops").as_string())));
+    write_hash(std::string(hdr.at("parent_hash").as_string()));
+    write_hash(std::string(hdr.at("tx_hash").as_string()));
+    write_hash(std::string(hdr.at("account_hash").as_string()));
+    write_u32(hdr.at("parent_close_time").to_number<uint32_t>());
+    write_u32(hdr.at("close_time").to_number<uint32_t>());
+
+    uint8_t resolution =
+        static_cast<uint8_t>(hdr.at("close_time_resolution").to_number<int>());
+    h.update(&resolution, 1);
+
+    uint8_t flags =
+        static_cast<uint8_t>(hdr.at("close_flags").to_number<int>());
+    h.update(&flags, 1);
+
+    return h.finalize();
+}
+
+/// Walk a JSON trie and count nodes.
+struct TrieStats
+{
+    int inners = 0;
+    int leaves = 0;
+    int placeholders = 0;
+    int max_depth = 0;
+};
+
+static void
+count_trie_nodes(boost::json::value const& node, int depth, TrieStats& stats)
+{
+    if (node.is_string())
+    {
+        // Placeholder hash
+        stats.placeholders++;
+        if (depth > stats.max_depth)
+        {
+            stats.max_depth = depth;
+        }
+    }
+    else if (node.is_array())
+    {
+        // Leaf [key, data] or [key, data, raw_hex]
+        stats.leaves++;
+        if (depth > stats.max_depth)
+        {
+            stats.max_depth = depth;
+        }
+    }
+    else if (node.is_object())
+    {
+        // Inner node
+        stats.inners++;
+        auto const& obj = node.as_object();
+        for (auto const& kv : obj)
+        {
+            if (kv.key() == "__depth__")
+            {
+                continue;
+            }
+            // Key should be a single hex nibble "0"-"F"
+            if (kv.key().size() == 1)
+            {
+                count_trie_nodes(kv.value(), depth + 1, stats);
+            }
+        }
+    }
+}
+
+/// Extract the Hashes array from a state tree leaf (LedgerHashes SLE).
+/// The leaf is a JSON array: [key_hex, {parsed SLE with "Hashes": [...]}]
+static boost::json::array const*
+extract_leaf_hashes(boost::json::value const& trie)
+{
+    // Walk the trie to find the leaf (array node)
+    if (trie.is_array())
+    {
+        auto const& arr = trie.as_array();
+        if (arr.size() >= 2 && arr[1].is_object())
+        {
+            auto const& sle = arr[1].as_object();
+            if (sle.contains("Hashes"))
+            {
+                return &sle.at("Hashes").as_array();
+            }
+        }
+        return nullptr;
+    }
+
+    if (trie.is_object())
+    {
+        auto const& obj = trie.as_object();
+        for (auto const& kv : obj)
+        {
+            if (kv.key() == "__depth__")
+            {
+                continue;
+            }
+            auto result = extract_leaf_hashes(kv.value());
+            if (result)
+            {
+                return result;
+            }
+        }
+    }
+    return nullptr;
+}
+
+/// Resolve and verify a JSON proof chain.
+/// Checks header hashes, skip list continuity, and trie structure.
+/// Returns true if all verifiable steps pass.
+static bool
+resolve_proof_chain(boost::json::array const& chain)
+{
+    PLOGI(verify_log, "");
+    PLOGI(
+        verify_log,
+        "═══════════════════════════════════════════════════════════════");
+    PLOGI(verify_log, "  PROOF CHAIN VERIFICATION  (", chain.size(), " steps)");
+    PLOGI(
+        verify_log,
+        "═══════════════════════════════════════════════════════════════");
+
+    Hash256 trusted_hash;
+    bool have_trusted_hash = false;
+    Hash256 trusted_tx_hash;
+    Hash256 trusted_ac_hash;
+    bool have_tree_hashes = false;
+    boost::json::array const* pending_hashes = nullptr;
+    int pending_hashes_count = 0;
+    int step_num = 0;
+    bool all_ok = true;
+
+    // Narrative explanation of the proof chain
+    std::vector<std::string> narrative;
+
+    for (auto const& step_val : chain)
+    {
+        step_num++;
+        if (!step_val.is_object())
+        {
+            continue;
+        }
+        auto const& step = step_val.as_object();
+        if (!step.contains("type"))
+        {
+            continue;
+        }
+        auto type = std::string(step.at("type").as_string());
+
+        // ── Anchor ──────────────────────────────────────────────
+        if (type == "anchor")
+        {
+            auto hash_hex = std::string(step.at("ledger_hash").as_string());
+            trusted_hash = hash_from_hex(hash_hex);
+            have_trusted_hash = true;
+
+            uint32_t anchor_seq = 0;
+            if (step.contains("ledger_index"))
+            {
+                anchor_seq = step.at("ledger_index").to_number<uint32_t>();
+            }
+
+            PLOGI(verify_log, "");
+            PLOGI(verify_log, "Step ", step_num, ": ANCHOR");
+            PLOGI(
+                verify_log, "  Trusted hash: ", hash_hex.substr(0, 16), "...");
+            if (anchor_seq)
+            {
+                PLOGI(verify_log, "  Ledger index: ", anchor_seq);
+            }
+            if (step.contains("note"))
+            {
+                PLOGW(
+                    verify_log,
+                    "  NOTE: ",
+                    std::string(step.at("note").as_string()));
+            }
+
+            narrative.push_back(
+                "1. Start with anchor ledger " + std::to_string(anchor_seq) +
+                " (hash " + hash_hex.substr(0, 16) + "...)");
+            narrative.push_back(
+                "   Trust root: in production, this hash is validated by "
+                "80%+ of UNL validators.");
+        }
+        // ── Ledger Header ───────────────────────────────────────
+        else if (type == "ledger_header")
+        {
+            auto const& hdr = step.at("header").as_object();
+            auto seq = hdr.at("seq").to_number<uint32_t>();
+
+            PLOGI(verify_log, "");
+            PLOGI(
+                verify_log,
+                "Step ",
+                step_num,
+                ": LEDGER HEADER (seq=",
+                seq,
+                ")");
+
+            auto computed = hash_ledger_header(hdr);
+            auto computed_hex = upper_hex(computed);
+            PLOGI(
+                verify_log,
+                "  Computed hash: ",
+                computed_hex.substr(0, 16),
+                "...");
+
+            if (have_trusted_hash)
+            {
+                if (computed == trusted_hash)
+                {
+                    PLOGI(
+                        verify_log,
+                        "  Hash check:   PASS (matches trusted hash)");
+                    narrative.push_back(
+                        "2. Ledger " + std::to_string(seq) +
+                        ": SHA512Half(LWR\\0 || header_fields) = " +
+                        computed_hex.substr(0, 16) +
+                        "... matches anchor hash. "
+                        "Header is authentic.");
+                }
+                else
+                {
+                    PLOGE(verify_log, "  Hash check:   FAIL!");
+                    PLOGE(
+                        verify_log, "    expected: ", upper_hex(trusted_hash));
+                    PLOGE(verify_log, "    computed: ", computed_hex);
+                    all_ok = false;
+                    narrative.push_back(
+                        "   FAIL: header hash " + computed_hex.substr(0, 16) +
+                        "... != trusted " +
+                        upper_hex(trusted_hash).substr(0, 16) + "...");
+                }
+            }
+            else if (pending_hashes)
+            {
+                bool found = false;
+                for (auto const& h : *pending_hashes)
+                {
+                    if (std::string(h.as_string()) == computed_hex)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (found)
+                {
+                    PLOGI(
+                        verify_log,
+                        "  Skip list:    PASS (hash found in ",
+                        pending_hashes->size(),
+                        " entries)");
+                    narrative.push_back(
+                        "   Ledger " + std::to_string(seq) + ": hash " +
+                        computed_hex.substr(0, 16) +
+                        "... found in skip list (" +
+                        std::to_string(pending_hashes_count) +
+                        " entries). This ledger is reachable from the "
+                        "previous trusted ledger.");
+                }
+                else
+                {
+                    PLOGE(
+                        verify_log,
+                        "  Skip list:    FAIL (hash not found in ",
+                        pending_hashes->size(),
+                        " entries)");
+                    all_ok = false;
+                    narrative.push_back(
+                        "   FAIL: hash " + computed_hex.substr(0, 16) +
+                        "... not found in skip list!");
+                }
+                pending_hashes = nullptr;
+            }
+
+            trusted_tx_hash =
+                hash_from_hex(std::string(hdr.at("tx_hash").as_string()));
+            trusted_ac_hash =
+                hash_from_hex(std::string(hdr.at("account_hash").as_string()));
+            have_tree_hashes = true;
+            have_trusted_hash = false;
+
+            PLOGI(
+                verify_log,
+                "  tx_hash:      ",
+                upper_hex(trusted_tx_hash).substr(0, 16),
+                "...");
+            PLOGI(
+                verify_log,
+                "  account_hash: ",
+                upper_hex(trusted_ac_hash).substr(0, 16),
+                "...");
+
+            narrative.push_back(
+                "   Header gives us tx_hash=" +
+                upper_hex(trusted_tx_hash).substr(0, 16) +
+                "... and account_hash=" +
+                upper_hex(trusted_ac_hash).substr(0, 16) + "...");
+        }
+        // ── Map Proof ───────────────────────────────────────────
+        else if (type == "map_proof")
+        {
+            auto tree_type = std::string(step.at("tree").as_string());
+            bool is_state = (tree_type == "state");
+
+            PLOGI(verify_log, "");
+            PLOGI(
+                verify_log,
+                "Step ",
+                step_num,
+                ": MAP PROOF (",
+                tree_type,
+                " tree)");
+
+            Hash256 expected;
+            if (have_tree_hashes)
+            {
+                expected = is_state ? trusted_ac_hash : trusted_tx_hash;
+                PLOGI(
+                    verify_log,
+                    "  Expected root: ",
+                    upper_hex(expected).substr(0, 16),
+                    "...");
+            }
+
+            if (step.contains("trie"))
+            {
+                TrieStats stats;
+                count_trie_nodes(step.at("trie"), 0, stats);
+                PLOGI(
+                    verify_log,
+                    "  Trie: ",
+                    stats.inners,
+                    " inners, ",
+                    stats.leaves,
+                    " leaves, ",
+                    stats.placeholders,
+                    " placeholders, max_depth=",
+                    stats.max_depth);
+
+                std::string trie_desc = "   Map proof (" + tree_type +
+                    " tree): abbreviated trie with " +
+                    std::to_string(stats.leaves) + " leaf, " +
+                    std::to_string(stats.placeholders) +
+                    " placeholder hashes, " + std::to_string(stats.inners) +
+                    " inners (depth " + std::to_string(stats.max_depth) + ").";
+
+                if (is_state)
+                {
+                    auto const* hashes = extract_leaf_hashes(step.at("trie"));
+                    if (hashes)
+                    {
+                        pending_hashes_count = static_cast<int>(hashes->size());
+                        PLOGI(
+                            verify_log,
+                            "  Skip list:    ",
+                            hashes->size(),
+                            " hashes in LedgerHashes SLE");
+                        pending_hashes = hashes;
+                        trie_desc += " Leaf is a LedgerHashes SLE with " +
+                            std::to_string(hashes->size()) +
+                            " ancestor ledger hashes.";
+                    }
+                    else
+                    {
+                        PLOGW(
+                            verify_log,
+                            "  No Hashes field found in state leaf");
+                    }
+                }
+                else
+                {
+                    trie_desc +=
+                        " Leaf contains the target transaction + metadata.";
+                }
+
+                narrative.push_back(trie_desc);
+                narrative.push_back(
+                    "   The trie root hash (recomputed from all branches) "
+                    "must equal the header's " +
+                    std::string(is_state ? "account_hash" : "tx_hash") +
+                    ". Build-time check: " +
+                    std::string(
+                        step.contains("verified") &&
+                                step.at("verified").as_bool()
+                            ? "PASSED"
+                            : "not available") +
+                    ".");
+            }
+
+            if (step.contains("verified"))
+            {
+                bool v = step.at("verified").as_bool();
+                PLOGI(
+                    verify_log, "  Build-time:   ", v ? "VERIFIED" : "FAILED");
+                if (!v)
+                {
+                    all_ok = false;
+                }
+            }
+
+            have_tree_hashes = false;
+        }
+        // ── Parsed Transaction (display only) ───────────────────
+        else if (type == "parsed_transaction")
+        {
+            PLOGI(verify_log, "");
+            PLOGI(
+                verify_log,
+                "Step ",
+                step_num,
+                ": PARSED TRANSACTION (display only)");
+            std::string tx_type, tx_account, tx_hash_str;
+            if (step.contains("data") && step.at("data").is_object())
+            {
+                auto const& data = step.at("data").as_object();
+                if (data.contains("hash"))
+                {
+                    tx_hash_str = std::string(data.at("hash").as_string());
+                    PLOGI(
+                        verify_log,
+                        "  TX hash: ",
+                        tx_hash_str.substr(0, 16),
+                        "...");
+                }
+                if (data.contains("tx") && data.at("tx").is_object())
+                {
+                    auto const& tx = data.at("tx").as_object();
+                    if (tx.contains("TransactionType"))
+                    {
+                        tx_type =
+                            std::string(tx.at("TransactionType").as_string());
+                        PLOGI(verify_log, "  Type:    ", tx_type);
+                    }
+                    if (tx.contains("Account"))
+                    {
+                        tx_account = std::string(tx.at("Account").as_string());
+                        PLOGI(verify_log, "  Account: ", tx_account);
+                    }
+                }
+            }
+            narrative.push_back(
+                "   The proven transaction is a " + tx_type + " from " +
+                tx_account + ".");
+        }
+    }
+
+    // ── Results ─────────────────────────────────────────────────
+    PLOGI(verify_log, "");
+    PLOGI(
+        verify_log,
+        "═══════════════════════════════════════════════════════════════");
+    if (all_ok)
+    {
+        PLOGI(verify_log, "  RESULT: ALL CHECKS PASSED");
+    }
+    else
+    {
+        PLOGE(verify_log, "  RESULT: VERIFICATION FAILED");
+    }
+    PLOGI(
+        verify_log,
+        "═══════════════════════════════════════════════════════════════");
+
+    // ── Narrative explanation ────────────────────────────────────
+    PLOGI(verify_log, "");
+    PLOGI(verify_log, "How this proof works:");
+    PLOGI(verify_log, "");
+    for (auto const& line : narrative)
+    {
+        PLOGI(verify_log, line);
+    }
+    PLOGI(verify_log, "");
+    if (all_ok)
+    {
+        PLOGI(
+            verify_log,
+            "Each step is cryptographically chained: the anchor's hash "
+            "authenticates the first header, each header's account_hash "
+            "authenticates a state tree proof, each state tree proof "
+            "contains a skip list linking to the next ledger, and the "
+            "final header's tx_hash authenticates the transaction proof.");
+    }
+    PLOGI(verify_log, "");
+
+    return all_ok;
+}
 
 //------------------------------------------------------------------------------
 // Parse host:port
@@ -771,13 +1383,22 @@ main(int argc, char* argv[])
                     co_return r;
                 };
 
-                // Helper: build + verify abbreviated state tree
-                auto verify_state_proof =
+                // Helper: build + verify abbreviated state tree.
+                // Returns the built tree for use in map_proof output.
+                using AbbrevMap =
+                    catl::shamap::SHAMapT<catl::shamap::AbbreviatedTreeTraits>;
+
+                struct StateProofResult
+                {
+                    bool verified;
+                    AbbrevMap tree;
+                };
+
+                auto build_state_proof =
                     [&](StateWalkResult const& wr,
                         Hash256 const& key,
-                        Hash256 const& expected_account_hash) -> bool {
-                    using AbbrevMap = catl::shamap::SHAMapT<
-                        catl::shamap::AbbreviatedTreeTraits>;
+                        Hash256 const& expected_account_hash)
+                    -> StateProofResult {
                     catl::shamap::SHAMapOptions opts;
                     opts.tree_collapse_impl =
                         catl::shamap::TreeCollapseImpl::leafs_only;
@@ -792,8 +1413,12 @@ main(int argc, char* argv[])
                     abbrev.set_item_at(wr.leaf_nid, item);
 
                     for (auto& p : wr.placeholders)
+                    {
                         if (abbrev.needs_placeholder(p.nid))
+                        {
                             abbrev.set_placeholder(p.nid, p.hash);
+                        }
+                    }
 
                     auto computed = abbrev.get_hash();
                     bool ok = (computed == expected_account_hash);
@@ -812,10 +1437,11 @@ main(int argc, char* argv[])
                             expected_account_hash.hex());
                         PLOGE(log_partition, "    computed: ", computed.hex());
                     }
-                    return ok;
+                    return {ok, std::move(abbrev)};
                 };
 
-                // No helper needed — Hash256::find_in(Slice) does the scan
+                auto protocol =
+                    catl::xdata::Protocol::load_embedded_xrpl_protocol();
 
                 // ── Step 1: RPC — look up tx to get ledger_index ──
                 catl::rpc::RpcClient rpc(io, rpc_host, rpc_port);
@@ -864,6 +1490,10 @@ main(int argc, char* argv[])
                 Hash256 target_ledger_hash;
                 bool need_flag_hop = (distance > 256);
 
+                // State proof trees — kept for JSON output
+                std::vector<std::tuple<Hash256 /*key*/, StateProofResult>>
+                    state_proofs;
+
                 if (!need_flag_hop)
                 {
                     // Short skip list — target within 256 of anchor
@@ -878,8 +1508,9 @@ main(int argc, char* argv[])
                         throw std::runtime_error(
                             "Short skip list not found in state tree");
 
-                    verify_state_proof(
+                    auto sp = build_state_proof(
                         wr, skip_key_val, anchor_header.account_hash());
+                    state_proofs.emplace_back(skip_key_val, std::move(sp));
 
                     // The target ledger hash should be in sfHashes
                     // But we need the actual hash — fetch the target header to
@@ -888,16 +1519,31 @@ main(int argc, char* argv[])
                         co_await co_get_ledger_header(client, tx_ledger_seq);
                     target_ledger_hash = target_hdr.ledger_hash256();
 
-                    Slice sle_data(
-                        wr.leaf_data.data(), wr.leaf_data.size() - 32);
-                    if (!target_ledger_hash.find_in(sle_data) >= 0)
+                    Slice sle_leaf(wr.leaf_data.data(), wr.leaf_data.size());
+                    PLOGD(
+                        log_partition,
+                        "  Short skip list SLE (",
+                        sle_leaf.size(),
+                        " bytes) key=",
+                        upper_hex(skip_key_val));
+                    {
+                        std::string hex;
+                        slice_hex(sle_leaf, hex);
+                        PLOGD(log_partition, "  raw: ", hex);
+                    }
+                    if (!sle_hashes_contain(
+                            sle_leaf, target_ledger_hash, protocol))
+                    {
                         PLOGW(
                             log_partition,
                             "  Target hash not found in short skip list!");
+                    }
                     else
+                    {
                         PLOGI(
                             log_partition,
                             "  Target hash confirmed in short skip list");
+                    }
                 }
                 else
                 {
@@ -910,11 +1556,12 @@ main(int argc, char* argv[])
                         ")");
 
                     // Hop 1: find flag ledger hash in long skip list
-                    uint32_t flag_seq =
-                        tx_ledger_seq & ~0xFFu;  // round down to nearest 256
+                    // Round UP to nearest 256 — the flag ledger that has
+                    // history covering the target.
+                    uint32_t flag_seq = ((tx_ledger_seq + 255) / 256) * 256;
                     PLOGI(log_partition, "  Flag ledger: ", flag_seq);
 
-                    auto long_skip_key = skip_list_key(tx_ledger_seq);
+                    auto long_skip_key = skip_list_key(flag_seq);
                     PLOGD(
                         log_partition,
                         "  long skip key: ",
@@ -926,8 +1573,11 @@ main(int argc, char* argv[])
                         throw std::runtime_error(
                             "Long skip list not found in state tree");
 
-                    verify_state_proof(
-                        wr1, long_skip_key, anchor_header.account_hash());
+                    {
+                        auto sp = build_state_proof(
+                            wr1, long_skip_key, anchor_header.account_hash());
+                        state_proofs.emplace_back(long_skip_key, std::move(sp));
+                    }
 
                     // Get flag ledger header
                     auto flag_hdr =
@@ -942,16 +1592,34 @@ main(int argc, char* argv[])
                         flag_hdr.ledger_hash().hex().substr(0, 16),
                         "...");
 
-                    Slice long_sle(
-                        wr1.leaf_data.data(), wr1.leaf_data.size() - 32);
-                    if (!flag_hash.find_in(long_sle) >= 0)
+                    PLOGI(
+                        log_partition,
+                        "  Long SLE leaf_data size=",
+                        wr1.leaf_data.size());
+                    Slice long_sle(wr1.leaf_data.data(), wr1.leaf_data.size());
+                    PLOGD(
+                        log_partition,
+                        "  Long skip list SLE (",
+                        long_sle.size(),
+                        " bytes) key=",
+                        upper_hex(long_skip_key));
+                    {
+                        std::string hex;
+                        slice_hex(long_sle, hex);
+                        PLOGD(log_partition, "  raw: ", hex);
+                    }
+                    if (!sle_hashes_contain(long_sle, flag_hash, protocol))
+                    {
                         PLOGW(
                             log_partition,
                             "  Flag hash not found in long skip list!");
+                    }
                     else
+                    {
                         PLOGI(
                             log_partition,
                             "  Flag hash confirmed in long skip list");
+                    }
 
                     // Hop 2: find target hash in flag ledger's short skip list
                     auto short_skip_key = skip_list_key();
@@ -962,25 +1630,44 @@ main(int argc, char* argv[])
                             "Short skip list not found in flag ledger state "
                             "tree");
 
-                    verify_state_proof(
-                        wr2, short_skip_key, flag_header.account_hash());
+                    {
+                        auto sp = build_state_proof(
+                            wr2, short_skip_key, flag_header.account_hash());
+                        state_proofs.emplace_back(
+                            short_skip_key, std::move(sp));
+                    }
 
                     auto target_hdr =
                         co_await co_get_ledger_header(client, tx_ledger_seq);
                     target_ledger_hash = target_hdr.ledger_hash256();
 
-                    Slice short_sle(
-                        wr2.leaf_data.data(), wr2.leaf_data.size() - 32);
-                    if (!target_ledger_hash.find_in(short_sle) >= 0)
+                    Slice short_sle(wr2.leaf_data.data(), wr2.leaf_data.size());
+                    PLOGD(
+                        log_partition,
+                        "  Flag short skip list SLE (",
+                        short_sle.size(),
+                        " bytes) key=",
+                        upper_hex(short_skip_key));
+                    {
+                        std::string hex;
+                        slice_hex(short_sle, hex);
+                        PLOGD(log_partition, "  raw: ", hex);
+                    }
+                    if (!sle_hashes_contain(
+                            short_sle, target_ledger_hash, protocol))
+                    {
                         PLOGW(
                             log_partition,
                             "  Target hash not found in flag's short skip "
                             "list!");
+                    }
                     else
+                    {
                         PLOGI(
                             log_partition,
                             "  Target hash confirmed in flag's short skip "
                             "list");
+                    }
                 }
 
                 // ── Step 4: Get target ledger header ──
@@ -1099,9 +1786,32 @@ main(int argc, char* argv[])
                 }
 
                 // ── Step 7: Build JSON proof chain ──
+                // Per spec: anchor → ledger_header(anchor) →
+                //   [map_proof(state) → ledger_header]* →
+                //   ledger_header(target) → map_proof(tx)
                 boost::json::array chain;
 
-                // Anchor (stub — no validations yet)
+                // Helper to emit a ledger_header step
+                auto emit_header = [&](auto const& hdr_result) {
+                    auto h = hdr_result.header();
+                    boost::json::object step;
+                    step["type"] = "ledger_header";
+                    boost::json::object hdr_obj;
+                    hdr_obj["seq"] = hdr_result.seq();
+                    hdr_obj["drops"] = std::to_string(h.drops());
+                    hdr_obj["parent_hash"] = upper_hex(h.parent_hash());
+                    hdr_obj["tx_hash"] = upper_hex(h.tx_hash());
+                    hdr_obj["account_hash"] = upper_hex(h.account_hash());
+                    hdr_obj["parent_close_time"] = h.parent_close_time();
+                    hdr_obj["close_time"] = h.close_time();
+                    hdr_obj["close_time_resolution"] =
+                        h.close_time_resolution();
+                    hdr_obj["close_flags"] = h.close_flags();
+                    step["header"] = hdr_obj;
+                    chain.push_back(step);
+                };
+
+                // 1. Anchor
                 {
                     boost::json::object anchor;
                     anchor["type"] = "anchor";
@@ -1111,50 +1821,91 @@ main(int argc, char* argv[])
                     chain.push_back(anchor);
                 }
 
-                // Ledger header (target ledger)
+                // 2. Anchor ledger header
+                emit_header(anchor_hdr);
+
+                // 3. State tree proofs (skip list hops)
+                //    For 2-hop: long skip list proof, flag header,
+                //               short skip list proof
+                //    For 1-hop: short skip list proof only
+                if (need_flag_hop && state_proofs.size() >= 2)
                 {
+                    // Long skip list state proof
+                    {
+                        auto& [key, sp] = state_proofs[0];
+                        boost::json::object step;
+                        step["type"] = "map_proof";
+                        step["tree"] = "state";
+                        catl::shamap::TrieJsonOptions trie_opts;
+                        trie_opts.on_leaf =
+                            make_proof_leaf_callback(protocol, false);
+                        step["trie"] = sp.tree.get_root()->trie_json(
+                            trie_opts, sp.tree.get_options());
+                        step["verified"] = sp.verified;
+                        chain.push_back(step);
+                    }
+
+                    // Flag ledger header
+                    {
+                        uint32_t flag_seq = ((tx_ledger_seq + 255) / 256) * 256;
+                        auto flag_hdr2 =
+                            co_await co_get_ledger_header(client, flag_seq);
+                        emit_header(flag_hdr2);
+                    }
+
+                    // Short skip list state proof
+                    {
+                        auto& [key, sp] = state_proofs[1];
+                        boost::json::object step;
+                        step["type"] = "map_proof";
+                        step["tree"] = "state";
+                        catl::shamap::TrieJsonOptions trie_opts;
+                        trie_opts.on_leaf =
+                            make_proof_leaf_callback(protocol, false);
+                        step["trie"] = sp.tree.get_root()->trie_json(
+                            trie_opts, sp.tree.get_options());
+                        step["verified"] = sp.verified;
+                        chain.push_back(step);
+                    }
+                }
+                else if (!state_proofs.empty())
+                {
+                    // Single-hop: short skip list proof
+                    auto& [key, sp] = state_proofs[0];
                     boost::json::object step;
-                    step["type"] = "ledger_header";
-                    boost::json::object hdr_obj;
-                    hdr_obj["seq"] = target_hdr.seq();
-                    hdr_obj["drops"] = std::to_string(target_header.drops());
-                    hdr_obj["parent_hash"] =
-                        upper_hex(target_header.parent_hash());
-                    hdr_obj["tx_hash"] = upper_hex(target_header.tx_hash());
-                    hdr_obj["account_hash"] =
-                        upper_hex(target_header.account_hash());
-                    hdr_obj["parent_close_time"] =
-                        target_header.parent_close_time();
-                    hdr_obj["close_time"] = target_header.close_time();
-                    hdr_obj["close_time_resolution"] =
-                        target_header.close_time_resolution();
-                    hdr_obj["close_flags"] = target_header.close_flags();
-                    step["header"] = hdr_obj;
+                    step["type"] = "map_proof";
+                    step["tree"] = "state";
+                    {
+                        catl::shamap::TrieJsonOptions trie_opts;
+                        trie_opts.on_leaf =
+                            make_proof_leaf_callback(protocol, false);
+                        step["trie"] = sp.tree.get_root()->trie_json(
+                            trie_opts, sp.tree.get_options());
+                    }
+                    step["verified"] = sp.verified;
                     chain.push_back(step);
                 }
 
-                // Map proof (TX tree)
+                // 4. Target ledger header
+                emit_header(target_hdr);
+
+                // 5. TX tree proof
                 {
                     boost::json::object step;
                     step["type"] = "map_proof";
                     step["tree"] = "tx";
-                    step["key"] = upper_hex(tx_hash);
-
-                    // Build the trie JSON from walk_abbreviated
-                    // We need to build the nested structure from the flat walk.
-                    // For now, just output a flat list of nodes with their
-                    // types.
-                    boost::json::object trie;
-                    // TODO: build nested trie JSON per spec section 2.3
-                    step["trie"] = "TODO";
+                    {
+                        catl::shamap::TrieJsonOptions trie_opts;
+                        trie_opts.on_leaf =
+                            make_proof_leaf_callback(protocol, true);
+                        step["trie"] = abbrev.get_root()->trie_json(
+                            trie_opts, abbrev.get_options());
+                    }
                     step["verified"] = verified;
-
                     chain.push_back(step);
                 }
 
-                // Parse the actual transaction for display
-                auto protocol =
-                    catl::xdata::Protocol::load_embedded_xrpl_protocol();
+                // 6. Parsed transaction (for display)
                 try
                 {
                     Slice tx_slice(leaf_data.data(), leaf_data.size());
@@ -1169,6 +1920,10 @@ main(int argc, char* argv[])
                 }
 
                 catl::xdata::json::pretty_print(std::cout, chain);
+
+                // ── Step 8: Verify the proof chain we just built ──
+                resolve_proof_chain(chain);
+
                 result = 0;
             },
             [&](std::exception_ptr ep) {

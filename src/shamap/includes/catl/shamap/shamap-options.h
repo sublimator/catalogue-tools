@@ -1,5 +1,9 @@
 #pragma once
+#include <boost/json/value.hpp>
+#include <functional>
 #include <optional>
+
+class MmapItem;
 
 namespace catl::shamap {
 enum class SetResult {
@@ -14,10 +18,18 @@ enum class SetMode {
     ADD_OR_UPDATE  // Allow either adding or updating
 };
 
+/// Callback to customize leaf rendering in trie_json.
+/// Receives the leaf's MmapItem, returns a json::value to insert.
+/// If not set, default behaviour is the leaf's hash hex string.
+using LeafJsonCallback =
+    std::function<boost::json::value(const MmapItem& item)>;
+
 struct TrieJsonOptions
 {
     bool key_as_hash = false;
     bool pretty = true;
+    /// Optional callback to customize leaf JSON output.
+    LeafJsonCallback on_leaf;
 };
 
 enum class ReferenceHashImpl {
