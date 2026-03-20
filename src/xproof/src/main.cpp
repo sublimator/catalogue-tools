@@ -1,5 +1,8 @@
+#include "xproof/anchor-verifier.h"
+
 #include <catl/core/logger.h>
 #include <catl/crypto/sha512-half-hasher.h>
+#include <catl/crypto/sig-verify.h>
 #include <catl/peer-client/peer-client-coro.h>
 #include <catl/peer-client/peer-client.h>
 #include <catl/peer-client/tree-walker.h>
@@ -141,8 +144,10 @@ struct ValidationCollector
     {
         std::vector<uint8_t> raw;          // full STValidation bytes
         std::vector<uint8_t> signing_key;  // sfSigningPubKey
+        std::vector<uint8_t> signature;    // sfSignature
         Hash256 ledger_hash;               // sfLedgerHash
         uint32_t ledger_seq = 0;           // sfLedgerSequence
+        bool sig_verified = false;         // signature verified?
     };
 
     // All validations grouped by ledger hash
@@ -268,6 +273,11 @@ struct ValidationCollector
                     e.signing_key.assign(
                         fs.data.data(), fs.data.data() + fs.data.size());
                 }
+                else if (fs.field->name == "Signature")
+                {
+                    e.signature.assign(
+                        fs.data.data(), fs.data.data() + fs.data.size());
+                }
                 else if (
                     fs.field->name == "LedgerSequence" && fs.data.size() >= 4)
                 {
@@ -295,18 +305,36 @@ struct ValidationCollector
 
         auto hash = entry.ledger_hash;
         auto seq = entry.ledger_seq;
+
+        // Only keep validations from UNL signing keys
+        if (!unl_signing_keys.empty())
+        {
+            std::ostringstream oss;
+            for (auto b : entry.signing_key)
+            {
+                oss << std::hex << std::setfill('0') << std::setw(2)
+                    << static_cast<int>(b);
+            }
+            if (!unl_signing_keys.count(oss.str()))
+            {
+                return;  // not a UNL validator, discard
+            }
+        }
+
         by_ledger[hash].push_back(std::move(entry));
 
         auto count = by_ledger[hash].size();
         PLOGD(
             log_partition,
-            "  Validation for seq=",
+            "  UNL validation for seq=",
             seq,
             " hash=",
             hash.hex().substr(0, 16),
-            "... (now ",
+            "... (",
             count,
-            " for this ledger)");
+            "/",
+            unl_size,
+            ")");
 
         // Check quorum for this ledger
         check_quorum_for(hash);
@@ -690,161 +718,42 @@ resolve_proof_chain(
                     std::string(step.at("note").as_string()));
             }
 
-            // Verify UNL publisher key if trusted key provided
-            if (!trusted_publisher_key.empty() && step.contains("unl"))
-            {
-                auto const& unl = step.at("unl").as_object();
-                if (unl.contains("public_key"))
-                {
-                    auto proof_key =
-                        std::string(unl.at("public_key").as_string());
-                    if (proof_key == trusted_publisher_key)
-                    {
-                        PLOGI(
-                            verify_log,
-                            "  Publisher key: PASS (matches trusted key)");
-                    }
-                    else
-                    {
-                        PLOGE(verify_log, "  Publisher key: FAIL!");
-                        PLOGE(
-                            verify_log,
-                            "    proof has:  ",
-                            proof_key.substr(0, 16),
-                            "...");
-                        PLOGE(
-                            verify_log,
-                            "    trusted:    ",
-                            trusted_publisher_key.substr(0, 16),
-                            "...");
-                        all_ok = false;
-                    }
-                }
-                else
-                {
-                    PLOGW(verify_log, "  No public_key in UNL data");
-                }
-
-                // Parse the UNL to rebuild validator signing keys,
-                // then verify validations match
-                if (step.contains("validations") && unl.contains("blob"))
-                {
-                    // Decode the blob to get validator manifests
-                    auto blob_hex = std::string(unl.at("blob").as_string());
-                    auto blob_bytes = hash_from_hex(blob_hex.substr(0, 64));
-                    // Actually need full blob — parse as JSON inside
-                    // For now just count validations
-                    auto const& vals = step.at("validations").as_object();
-                    PLOGI(
-                        verify_log,
-                        "  Validations:  ",
-                        vals.size(),
-                        " signing keys in proof");
-                }
-            }
-            else if (!trusted_publisher_key.empty())
-            {
-                PLOGW(
-                    verify_log,
-                    "  No UNL data in anchor — cannot verify publisher");
-                all_ok = false;
-            }
-
-            if (step.contains("summary"))
-            {
-                auto const& sum = step.at("summary").as_object();
-                if (sum.contains("quorum"))
-                {
-                    bool q = sum.at("quorum").as_bool();
-                    int matched = sum.contains("matched_unl")
-                        ? sum.at("matched_unl").to_number<int>()
-                        : 0;
-                    int unl_sz = sum.contains("unl_size")
-                        ? sum.at("unl_size").to_number<int>()
-                        : 0;
-                    PLOGI(
-                        verify_log,
-                        "  Quorum:       ",
-                        q ? "YES" : "NO",
-                        " (",
-                        matched,
-                        "/",
-                        unl_sz,
-                        " UNL validators)");
-                    if (!q)
-                    {
-                        all_ok = false;
-                    }
-                }
-            }
-
             narrative.push_back(
                 "1. Start with anchor ledger " + std::to_string(anchor_seq) +
                 " (hash " + hash_hex.substr(0, 16) + "...)");
-            if (!trusted_publisher_key.empty() && step.contains("unl"))
-            {
-                narrative.push_back(
-                    "   The proof includes a UNL (Unique Node List) signed by "
-                    "publisher key " +
-                    trusted_publisher_key.substr(0, 16) +
-                    "... which matches the trusted key we were given.");
 
-                if (step.contains("summary"))
+            if (!trusted_publisher_key.empty())
+            {
+                auto av_result = xproof::AnchorVerifier::verify(
+                    step, trusted_publisher_key, narrative);
+
+                if (av_result.verified)
                 {
-                    auto const& sum = step.at("summary").as_object();
-                    int matched = sum.contains("matched_unl")
-                        ? sum.at("matched_unl").to_number<int>()
-                        : 0;
-                    int unl_sz = sum.contains("unl_size")
-                        ? sum.at("unl_size").to_number<int>()
-                        : 0;
-                    int total = sum.contains("total_validations")
-                        ? sum.at("total_validations").to_number<int>()
-                        : 0;
-
-                    narrative.push_back(
-                        "   The UNL defines " + std::to_string(unl_sz) +
-                        " trusted validators. The proof contains " +
-                        std::to_string(total) +
-                        " validation signatures, of which " +
-                        std::to_string(matched) + " are from UNL validators.");
-
-                    if (matched == unl_sz)
-                    {
-                        narrative.push_back(
-                            "   All " + std::to_string(unl_sz) +
-                            " UNL validators signed this ledger — "
-                            "full consensus.");
-                    }
-                    else if (matched >= (unl_sz * 4 + 4) / 5)
-                    {
-                        narrative.push_back(
-                            "   " + std::to_string(matched) + "/" +
-                            std::to_string(unl_sz) +
-                            " UNL validators signed (>= 80% quorum).");
-                    }
-                    else
-                    {
-                        narrative.push_back(
-                            "   WARNING: only " + std::to_string(matched) +
-                            "/" + std::to_string(unl_sz) +
-                            " — quorum NOT met.");
-                    }
+                    PLOGI(
+                        verify_log,
+                        "  Anchor: VERIFIED (",
+                        av_result.validations_matched_unl,
+                        "/",
+                        av_result.unl_size,
+                        " UNL, ",
+                        av_result.validations_verified,
+                        " sigs verified)");
                 }
-            }
-            else if (!trusted_publisher_key.empty())
-            {
-                narrative.push_back(
-                    "   WARNING: no UNL data in anchor — "
-                    "cannot verify publisher key.");
+                else
+                {
+                    PLOGE(
+                        verify_log,
+                        "  Anchor: FAILED (",
+                        av_result.error,
+                        ")");
+                    all_ok = false;
+                }
             }
             else
             {
                 narrative.push_back(
                     "   No trusted publisher key provided — "
-                    "anchor trust not verified. The proof chain is "
-                    "internally consistent but not rooted to a "
-                    "known validator set.");
+                    "anchor trust not verified.");
             }
         }
         // ── Ledger Header ───────────────────────────────────────
