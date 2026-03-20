@@ -6,6 +6,7 @@ target_link_libraries(
   xproof
   PRIVATE catl::peer-client
           catl::rpc-client
+          catl::vl-client
           catl::shamap
           catl::xdata
           catl::xdata_json)

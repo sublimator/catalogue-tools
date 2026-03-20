@@ -117,6 +117,9 @@ add_subdirectory(src/peer-client)
 # Add the rpc-client module
 add_subdirectory(src/rpc-client)
 
+# Add the vl-client module
+add_subdirectory(src/vl-client)
+
 # Add the lesser-peer module
 add_subdirectory(src/lesser-peer)
 
