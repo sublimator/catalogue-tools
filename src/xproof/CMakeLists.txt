@@ -2,6 +2,7 @@ add_executable(
   xproof
   src/main.cpp
   src/anchor-verifier.cpp
+  src/proof-builder.cpp
   src/proof-chain-json.cpp
   src/proof-resolver.cpp
   src/proof-steps.cpp
