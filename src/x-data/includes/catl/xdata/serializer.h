@@ -19,7 +19,7 @@ namespace catl::xdata {
 // ---------------------------------------------------------------------------
 // Any type that can accept individual bytes and byte spans.
 // Implementations: VectorSink (collect bytes), HashSink (feed a hasher),
-// CountingSink (just count), etc.
+// Use encoded_size() methods on codecs for pre-allocation.
 template <typename T>
 concept ByteSink = requires(T& s, uint8_t b, std::span<const uint8_t> sp) {
     s.add(b);
@@ -34,7 +34,9 @@ class VectorSink
     std::vector<uint8_t>& buf_;
 
 public:
-    explicit VectorSink(std::vector<uint8_t>& buf) : buf_(buf) {}
+    explicit VectorSink(std::vector<uint8_t>& buf) : buf_(buf)
+    {
+    }
 
     void
     add(uint8_t b)
@@ -50,31 +52,21 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// CountingSink — counts bytes without storing
+// VL prefix size computation (standalone, no sink needed)
 // ---------------------------------------------------------------------------
-class CountingSink
+
+/// Returns the number of bytes needed to encode a VL length prefix.
+inline constexpr size_t
+vl_prefix_size(size_t length)
 {
-    size_t count_ = 0;
-
-public:
-    void
-    add(uint8_t)
-    {
-        ++count_;
-    }
-
-    void
-    add(std::span<const uint8_t> sp)
-    {
-        count_ += sp.size();
-    }
-
-    size_t
-    count() const
-    {
-        return count_;
-    }
-};
+    if (length <= 192)
+        return 1;
+    if (length <= 12480)
+        return 2;
+    if (length <= 918744)
+        return 3;
+    return 3;  // will throw at write time
+}
 
 // ---------------------------------------------------------------------------
 // Serializer<Sink> — low-level binary writer
@@ -87,7 +79,9 @@ class Serializer
     Sink& sink_;
 
 public:
-    explicit Serializer(Sink& sink) : sink_(sink) {}
+    explicit Serializer(Sink& sink) : sink_(sink)
+    {
+    }
 
     Sink&
     sink()
@@ -267,8 +261,8 @@ public:
     }
 
     // IOU amount: 8-byte amount field + 20-byte currency + 20-byte issuer
-    // `amount_bytes` is the 8-byte encoded IOU amount (caller encodes mantissa/exponent)
-    // `currency` is 20 bytes, `issuer` is 20 bytes
+    // `amount_bytes` is the 8-byte encoded IOU amount (caller encodes
+    // mantissa/exponent) `currency` is 20 bytes, `issuer` is 20 bytes
     void
     add_iou_amount(
         std::span<const uint8_t, 8> amount_bytes,
@@ -298,11 +292,10 @@ public:
 
     // Vector256: VL-encoded sequence of 32-byte hashes
     template <std::ranges::input_range R>
-        requires std::same_as<
-            std::remove_cvref_t<std::ranges::range_value_t<R>>,
-            Hash256>
-    void
-    add_vector256(R&& hashes)
+        requires std::
+            same_as<std::remove_cvref_t<std::ranges::range_value_t<R>>, Hash256>
+        void
+        add_vector256(R&& hashes)
     {
         // Count first for VL prefix
         size_t count = 0;

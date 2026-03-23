@@ -4,8 +4,9 @@
 #include "catl/xdata/codecs/account_id.h"
 #include "catl/xdata/codecs/currency.h"
 #include "catl/xdata/serializer.h"
+#include "catl/xdata/types/amount.h"
+#include "catl/xdata/types/iou-value.h"
 #include <boost/json.hpp>
-#include <charconv>
 
 namespace catl::xdata::codecs {
 
@@ -42,18 +43,7 @@ struct AmountCodec
         std::string_view drops_str,
         std::string const& path = {})
     {
-        int64_t drops = 0;
-        auto [ptr, ec] = std::from_chars(
-            drops_str.data(), drops_str.data() + drops_str.size(), drops);
-        if (ec != std::errc{})
-        {
-            throw EncodeError(
-                CodecErrorCode::invalid_value,
-                "Amount",
-                "invalid native amount: " + std::string(drops_str),
-                path);
-        }
-        s.add_native_amount(drops);
+        s.add_native_amount(parse_int64(drops_str, "Amount", path));
     }
 
     // -- IOU amount from string parts --
@@ -81,16 +71,16 @@ struct AmountCodec
         std::string_view mpt_issuance_id,
         std::string const& path = {})
     {
+        require_hex_length(mpt_issuance_id, 48, "Amount", path);
+
         int64_t int_val = 0;
         bool is_negative = false;
 
         if (value.size() > 2 && value[0] == '0' &&
             (value[1] == 'x' || value[1] == 'X'))
         {
-            auto hex = value.substr(2);
-            uint64_t uval = 0;
-            std::from_chars(hex.data(), hex.data() + hex.size(), uval, 16);
-            int_val = static_cast<int64_t>(uval);
+            int_val = static_cast<int64_t>(
+                parse_hex_uint64(value.substr(2), "Amount", path));
         }
         else
         {
@@ -99,8 +89,7 @@ struct AmountCodec
                 is_negative = true;
                 value.remove_prefix(1);
             }
-            std::from_chars(
-                value.data(), value.data() + value.size(), int_val);
+            int_val = parse_int64(value, "Amount", path);
         }
 
         // Zero is always positive
@@ -173,6 +162,46 @@ struct AmountCodec
                 "expected string or object",
                 path);
         }
+    }
+
+    // Decode binary amount to JSON
+    static boost::json::value
+    decode(Slice const& data)
+    {
+        if (is_native_amount(data))
+        {
+            return boost::json::string(parse_native_drops_string(data));
+        }
+        // IOU: 48 bytes
+        if (data.size() == 48)
+        {
+            IOUValue iou = IOUValue::from_bytes(data.data());
+            Slice currency_slice = get_currency_raw(data);
+            std::string issuer =
+                base58::encode_account_id(data.data() + 28, 20);
+
+            boost::json::object obj;
+            obj["currency"] = CurrencyCodec::decode(currency_slice);
+            obj["value"] = boost::json::string(iou.to_string());
+            obj["issuer"] = boost::json::string(issuer);
+            return obj;
+        }
+        // MPT: 33 bytes (1 flag + 8 value + 24 mptid)
+        if (data.size() == 33)
+        {
+            uint64_t val = 0;
+            for (int i = 1; i < 9; ++i)
+            {
+                val = (val << 8) | data.data()[i];
+            }
+            boost::json::object obj;
+            obj["value"] = boost::json::string(std::to_string(val));
+            obj["mpt_issuance_id"] =
+                boost::json::string(hex_encode(data.data() + 9, 24));
+            return obj;
+        }
+        // Fallback
+        return boost::json::string(hex_encode(data));
     }
 
 private:

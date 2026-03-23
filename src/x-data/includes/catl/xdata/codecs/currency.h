@@ -1,6 +1,7 @@
 #pragma once
 
 #include "catl/xdata/codec-error.h"
+#include "catl/xdata/hex.h"
 #include "catl/xdata/serializer.h"
 #include <boost/json.hpp>
 #include <cstring>
@@ -77,6 +78,61 @@ struct CurrencyCodec
                 path);
         }
         encode(s, std::string_view(v.as_string()), path);
+    }
+
+    // Decode 20-byte currency to JSON string
+    static boost::json::value
+    decode(Slice const& data)
+    {
+        if (data.size() != 20)
+            return boost::json::string(hex_encode(data));
+
+        // All zeros → native
+        bool all_zeros = true;
+        for (size_t i = 0; i < 20; ++i)
+        {
+            if (data.data()[i] != 0)
+            {
+                all_zeros = false;
+                break;
+            }
+        }
+        if (all_zeros)
+            return boost::json::string("XRP");
+
+        // Standard 3-char code: 12 zeros + 3 chars + 5 zeros
+        bool standard = true;
+        for (size_t i = 0; i < 12; ++i)
+        {
+            if (data.data()[i] != 0)
+            {
+                standard = false;
+                break;
+            }
+        }
+        if (standard)
+        {
+            for (size_t i = 15; i < 20; ++i)
+            {
+                if (data.data()[i] != 0)
+                {
+                    standard = false;
+                    break;
+                }
+            }
+        }
+        if (standard)
+        {
+            std::string code;
+            for (size_t i = 12; i < 15; ++i)
+            {
+                if (data.data()[i] != 0)
+                    code += static_cast<char>(data.data()[i]);
+            }
+            return boost::json::string(code);
+        }
+
+        return boost::json::string(hex_encode(data));
     }
 };
 

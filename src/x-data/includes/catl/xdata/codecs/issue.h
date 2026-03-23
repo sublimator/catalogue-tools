@@ -4,6 +4,7 @@
 #include "catl/xdata/codecs/account_id.h"
 #include "catl/xdata/codecs/currency.h"
 #include "catl/xdata/serializer.h"
+#include "catl/xdata/types/issue.h"
 #include <boost/json.hpp>
 
 namespace catl::xdata::codecs {
@@ -59,8 +60,7 @@ struct IssueCodec
                 throw EncodeError(
                     CodecErrorCode::invalid_value,
                     "Issue",
-                    "string value must be XRP or XAH, got: " +
-                        std::string(sv),
+                    "string value must be XRP or XAH, got: " + std::string(sv),
                     path);
             }
         }
@@ -94,6 +94,20 @@ struct IssueCodec
                 "expected string or object",
                 path);
         }
+    }
+
+    static boost::json::value
+    decode(Slice const& data)
+    {
+        auto parsed = parse_issue(data);
+        if (parsed.is_native())
+        {
+            return CurrencyCodec::decode(parsed.currency);
+        }
+        boost::json::object obj;
+        obj["currency"] = CurrencyCodec::decode(parsed.currency);
+        obj["issuer"] = AccountIDCodec::decode(parsed.issuer);
+        return obj;
     }
 };
 

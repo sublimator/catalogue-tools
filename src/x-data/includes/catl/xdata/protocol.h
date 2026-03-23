@@ -16,6 +16,7 @@ struct ProtocolOptions
 {
     std::optional<uint32_t> network_id;  // Which network we're parsing for
     bool allow_vl_inference = true;      // Safe unknown type handling
+    bool expand_xaddresses = false;  // Expand X-addresses during serialization
 };
 
 // Protocol definitions matching XRPLDefinitions interface
@@ -112,7 +113,20 @@ public:
         return inferred_vl_types_.count(type_code) > 0;
     }
 
+    bool
+    should_expand_xaddresses() const
+    {
+        return expand_xaddresses_;
+    }
+
+    void
+    set_expand_xaddresses(bool v)
+    {
+        expand_xaddresses_ = v;
+    }
+
 private:
+    bool expand_xaddresses_ = false;
     // Network this protocol was loaded for (if specified)
     std::optional<uint32_t> network_id_;
 

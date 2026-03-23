@@ -64,24 +64,97 @@ struct PathSetCodec
                 if (obj.contains("account"))
                 {
                     AccountIDCodec::encode(
-                        s,
-                        std::string_view(obj.at("account").as_string()));
+                        s, std::string_view(obj.at("account").as_string()));
                 }
                 if (obj.contains("currency"))
                 {
                     CurrencyCodec::encode(
-                        s,
-                        std::string_view(obj.at("currency").as_string()));
+                        s, std::string_view(obj.at("currency").as_string()));
                 }
                 if (obj.contains("issuer"))
                 {
                     AccountIDCodec::encode(
-                        s,
-                        std::string_view(obj.at("issuer").as_string()));
+                        s, std::string_view(obj.at("issuer").as_string()));
                 }
             }
         }
         s.add_pathset_end();
+    }
+
+    static boost::json::value
+    decode(Slice const& data)
+    {
+        boost::json::array paths;
+        boost::json::array current_path;
+
+        size_t pos = 0;
+        while (pos < data.size())
+        {
+            uint8_t type_byte = data.data()[pos++];
+
+            if (type_byte == PathSet::END_BYTE)
+            {
+                if (!current_path.empty())
+                {
+                    paths.push_back(std::move(current_path));
+                }
+                break;
+            }
+
+            if (type_byte == PathSet::PATH_SEPARATOR)
+            {
+                if (!current_path.empty())
+                {
+                    paths.push_back(std::move(current_path));
+                    current_path = boost::json::array();
+                }
+                continue;
+            }
+
+            boost::json::object hop;
+
+            if (type_byte & PathSet::TYPE_ACCOUNT)
+            {
+                if (pos + 20 <= data.size())
+                {
+                    Slice s(data.data() + pos, 20);
+                    hop["account"] = AccountIDCodec::decode(s);
+                    pos += 20;
+                }
+            }
+
+            if (type_byte & PathSet::TYPE_CURRENCY)
+            {
+                if (pos + 20 <= data.size())
+                {
+                    Slice s(data.data() + pos, 20);
+                    hop["currency"] = CurrencyCodec::decode(s);
+                    pos += 20;
+                }
+            }
+
+            if (type_byte & PathSet::TYPE_ISSUER)
+            {
+                if (pos + 20 <= data.size())
+                {
+                    Slice s(data.data() + pos, 20);
+                    hop["issuer"] = AccountIDCodec::decode(s);
+                    pos += 20;
+                }
+            }
+
+            if (!hop.empty())
+            {
+                current_path.push_back(std::move(hop));
+            }
+        }
+
+        if (!current_path.empty())
+        {
+            paths.push_back(std::move(current_path));
+        }
+
+        return paths;
     }
 };
 

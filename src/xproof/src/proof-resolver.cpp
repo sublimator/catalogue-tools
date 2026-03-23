@@ -7,6 +7,7 @@
 #include <catl/core/logger.h>
 #include <catl/crypto/sha512-half-hasher.h>
 #include <catl/shamap/shamap.h>
+#include <catl/xdata/serialize.h>
 
 namespace xproof {
 
@@ -151,6 +152,7 @@ extract_trie_leaf(boost::json::value const& trie)
 bool
 resolve_proof_chain(
     ProofChain const& chain,
+    catl::xdata::Protocol const& protocol,
     std::string const& trusted_publisher_key)
 {
     PLOGI(verify_log, "");
@@ -205,10 +207,7 @@ resolve_proof_chain(
                         "  Trusted hash: ",
                         upper_hex(data.ledger_hash).substr(0, 16),
                         "...");
-                    PLOGI(
-                        verify_log,
-                        "  Ledger index: ",
-                        data.ledger_index);
+                    PLOGI(verify_log, "  Ledger index: ", data.ledger_index);
 
                     AnchorStep anchor_step;
                     anchor_step.ledger_index = data.ledger_index;
@@ -229,9 +228,8 @@ resolve_proof_chain(
                         anchor_step.sub_steps = std::move(av_narrative);
                         anchor_step.publisher_key =
                             trusted_publisher_key.substr(0, 16);
-                        anchor_step.quorum_check = av_result.verified
-                            ? Check::pass
-                            : Check::fail;
+                        anchor_step.quorum_check =
+                            av_result.verified ? Check::pass : Check::fail;
                         anchor_step.unl_size = av_result.unl_size;
                         anchor_step.validations_verified =
                             av_result.validations_verified;
@@ -276,15 +274,13 @@ resolve_proof_chain(
                         role = "anchor";
                         anchor_seq = data.seq;
                     }
-                    else if (
-                        pending_hashes && state_proof_count >= 2)
+                    else if (pending_hashes && state_proof_count >= 2)
                     {
                         role = "target";
                     }
                     else if (pending_hashes && state_proof_count == 1)
                     {
-                        role = (data.seq % 256 == 0 &&
-                                data.seq != anchor_seq)
+                        role = (data.seq % 256 == 0 && data.seq != anchor_seq)
                             ? "flag"
                             : "target";
                     }
@@ -322,13 +318,10 @@ resolve_proof_chain(
 
                     if (have_trusted_hash)
                     {
-                        hdr_step.method =
-                            HeaderVerifyMethod::anchor_hash;
+                        hdr_step.method = HeaderVerifyMethod::anchor_hash;
                         if (computed == trusted_hash)
                         {
-                            PLOGI(
-                                verify_log,
-                                "  Hash check:   PASS");
+                            PLOGI(verify_log, "  Hash check:   PASS");
                             hdr_step.hash_check = Check::pass;
                         }
                         else
@@ -340,8 +333,7 @@ resolve_proof_chain(
                     }
                     else if (pending_hashes)
                     {
-                        hdr_step.method =
-                            HeaderVerifyMethod::skip_list;
+                        hdr_step.method = HeaderVerifyMethod::skip_list;
                         hdr_step.skip_type = (role == "flag")
                             ? SkipListType::flag
                             : SkipListType::recent;
@@ -368,9 +360,7 @@ resolve_proof_chain(
                         }
                         else
                         {
-                            PLOGE(
-                                verify_log,
-                                "  Skip list:    FAIL");
+                            PLOGE(verify_log, "  Skip list:    FAIL");
                             all_ok = false;
                             hdr_step.hash_check = Check::fail;
                         }
@@ -393,8 +383,7 @@ resolve_proof_chain(
                         upper_hex(trusted_ac_hash).substr(0, 16),
                         "...");
 
-                    hdr_step.tx_hash =
-                        upper_hex(trusted_tx_hash).substr(0, 16);
+                    hdr_step.tx_hash = upper_hex(trusted_tx_hash).substr(0, 16);
                     hdr_step.account_hash =
                         upper_hex(trusted_ac_hash).substr(0, 16);
 
@@ -406,8 +395,7 @@ resolve_proof_chain(
                 // ── Map Proof ───────────────────────────────────
                 else if constexpr (std::is_same_v<T, TrieData>)
                 {
-                    bool is_state =
-                        (data.tree == TrieData::TreeType::state);
+                    bool is_state = (data.tree == TrieData::TreeType::state);
                     if (is_state)
                         state_proof_count++;
 
@@ -423,8 +411,7 @@ resolve_proof_chain(
                     Hash256 expected;
                     if (have_tree_hashes)
                     {
-                        expected = is_state ? trusted_ac_hash
-                                            : trusted_tx_hash;
+                        expected = is_state ? trusted_ac_hash : trusted_tx_hash;
                         PLOGI(
                             verify_log,
                             "  Expected root: ",
@@ -469,8 +456,7 @@ resolve_proof_chain(
                                 pending_hashes_count =
                                     static_cast<int>(hashes->size());
                                 pending_hashes = hashes;
-                                map_step.hashes_count =
-                                    pending_hashes_count;
+                                map_step.hashes_count = pending_hashes_count;
 
                                 bool is_flag_skip =
                                     (state_proof_count == 1 &&
@@ -498,14 +484,12 @@ resolve_proof_chain(
                                     ld.as_object().contains("tx"))
                                 {
                                     auto const& tx =
-                                        ld.as_object()
-                                            .at("tx")
-                                            .as_object();
+                                        ld.as_object().at("tx").as_object();
                                     if (tx.contains("TransactionType"))
                                     {
-                                        map_step.tx_type = std::string(
-                                            tx.at("TransactionType")
-                                                .as_string());
+                                        map_step.tx_type =
+                                            std::string(tx.at("TransactionType")
+                                                            .as_string());
                                         PLOGI(
                                             verify_log,
                                             "  TX type:      ",
@@ -513,10 +497,8 @@ resolve_proof_chain(
                                     }
                                     if (tx.contains("Account"))
                                     {
-                                        map_step.tx_account =
-                                            std::string(
-                                                tx.at("Account")
-                                                    .as_string());
+                                        map_step.tx_account = std::string(
+                                            tx.at("Account").as_string());
                                         PLOGI(
                                             verify_log,
                                             "  TX account:   ",
@@ -536,75 +518,57 @@ resolve_proof_chain(
                                     : catl::shamap::tnTRANSACTION_MD;
 
                                 using AbbrevMap = catl::shamap::SHAMapT<
-                                    catl::shamap::
-                                        AbbreviatedTreeTraits>;
+                                    catl::shamap::AbbreviatedTreeTraits>;
 
-                                auto reconstructed =
-                                    AbbrevMap::from_trie_json(
-                                        data.trie_json,
-                                        node_type,
-                                        [](std::string const& key_hex,
-                                           boost::json::value const&
-                                               leaf_data)
-                                            -> boost::intrusive_ptr<
-                                                MmapItem> {
-                                            auto key =
-                                                hash_from_hex(key_hex);
-                                            if (leaf_data.is_object() &&
-                                                leaf_data.as_object()
-                                                    .contains("blob"))
-                                            {
-                                                auto blob =
-                                                    from_hex(std::string(
-                                                        leaf_data
-                                                            .as_object()
-                                                            .at("blob")
-                                                            .as_string()));
-                                                Slice s(
-                                                    blob.data(),
-                                                    blob.size());
-                                                return boost::
-                                                    intrusive_ptr<
-                                                        MmapItem>(
-                                                        OwnedItem::create(
-                                                            key, s));
-                                            }
+                                auto reconstructed = AbbrevMap::from_trie_json(
+                                    data.trie_json,
+                                    node_type,
+                                    [&](std::string const& key_hex,
+                                        boost::json::value const& leaf_data)
+                                        -> boost::intrusive_ptr<MmapItem> {
+                                        auto key = hash_from_hex(key_hex);
+                                        if (!leaf_data.is_object())
+                                        {
                                             uint8_t dummy = 0;
-                                            Slice empty(&dummy, 0);
                                             return boost::intrusive_ptr<
-                                                MmapItem>(
-                                                OwnedItem::create(
-                                                    key, empty));
-                                        });
+                                                MmapItem>(OwnedItem::create(
+                                                key, Slice(&dummy, 0)));
+                                        }
 
-                                auto computed_root =
-                                    reconstructed.get_hash();
-                                auto expected_root = is_state
-                                    ? trusted_ac_hash
-                                    : trusted_tx_hash;
+                                        auto bytes = is_state
+                                            ? catl::xdata::serialize_leaf(
+                                                  leaf_data.as_object(),
+                                                  protocol)
+                                            : catl::xdata::
+                                                  serialize_transaction(
+                                                      leaf_data.as_object(),
+                                                      protocol);
+
+                                        Slice s(bytes.data(), bytes.size());
+                                        return boost::intrusive_ptr<MmapItem>(
+                                            OwnedItem::create(key, s));
+                                    });
+
+                                auto computed_root = reconstructed.get_hash();
+                                auto expected_root = is_state ? trusted_ac_hash
+                                                              : trusted_tx_hash;
 
                                 map_step.computed_root =
-                                    upper_hex(computed_root)
-                                        .substr(0, 16);
+                                    upper_hex(computed_root).substr(0, 16);
 
                                 if (computed_root == expected_root)
                                 {
                                     PLOGI(
                                         verify_log,
                                         "  Trie root:    PASS (",
-                                        upper_hex(computed_root)
-                                            .substr(0, 16),
+                                        upper_hex(computed_root).substr(0, 16),
                                         "...)");
-                                    map_step.root_hash_check =
-                                        Check::pass;
+                                    map_step.root_hash_check = Check::pass;
                                 }
                                 else
                                 {
-                                    PLOGE(
-                                        verify_log,
-                                        "  Trie root:    FAIL!");
-                                    map_step.root_hash_check =
-                                        Check::fail;
+                                    PLOGE(verify_log, "  Trie root:    FAIL!");
+                                    map_step.root_hash_check = Check::fail;
                                     all_ok = false;
                                 }
                             }
@@ -619,8 +583,7 @@ resolve_proof_chain(
                     }
 
                     proof_steps.push_back(
-                        {is_state ? StepType::state_proof
-                                  : StepType::tx_proof,
+                        {is_state ? StepType::state_proof : StepType::tx_proof,
                          step_num,
                          std::move(map_step)});
 

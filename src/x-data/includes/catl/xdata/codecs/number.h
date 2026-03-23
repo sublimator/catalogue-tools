@@ -1,8 +1,9 @@
 #pragma once
 
+#include "catl/xdata/codec-error.h"
 #include "catl/xdata/serializer.h"
+#include "catl/xdata/types/number.h"
 #include <boost/json.hpp>
-#include <charconv>
 
 namespace catl::xdata::codecs {
 
@@ -36,11 +37,9 @@ struct NumberCodec
         auto e_pos = sv.find('e');
         if (e_pos != std::string_view::npos)
         {
-            int64_t mantissa = 0;
-            int32_t exponent = 0;
-            std::from_chars(sv.data(), sv.data() + e_pos, mantissa);
-            std::from_chars(
-                sv.data() + e_pos + 1, sv.data() + sv.size(), exponent);
+            int64_t mantissa = parse_int64(sv.substr(0, e_pos), "Number", {});
+            int32_t exponent = static_cast<int32_t>(
+                parse_int64(sv.substr(e_pos + 1), "Number", {}));
             s.add_number(mantissa, exponent);
             return;
         }
@@ -78,6 +77,13 @@ struct NumberCodec
             mantissa = -mantissa;
 
         s.add_number(mantissa, exponent);
+    }
+
+    static boost::json::value
+    decode(Slice const& data)
+    {
+        STNumber number = parse_number(data);
+        return boost::json::string(number.to_string());
     }
 };
 

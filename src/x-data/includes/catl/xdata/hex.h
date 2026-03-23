@@ -81,4 +81,48 @@ hex_decoded_size(std::string_view hex)
     return hex.size() / 2;
 }
 
+// Encode bytes to uppercase hex string.
+inline std::string
+hex_encode(const uint8_t* data, size_t size)
+{
+    static const char hex_chars[] = "0123456789ABCDEF";
+    std::string result;
+    result.reserve(size * 2);
+    for (size_t i = 0; i < size; ++i)
+    {
+        result.push_back(hex_chars[data[i] >> 4]);
+        result.push_back(hex_chars[data[i] & 0xF]);
+    }
+    return result;
+}
+
+inline std::string
+hex_encode(Slice const& s)
+{
+    return hex_encode(s.data(), s.size());
+}
+
+// Check if data is printable ASCII text.
+inline bool
+is_printable_text(const uint8_t* data, size_t size)
+{
+    if (size == 0)
+        return false;
+    for (size_t i = 0; i < size; ++i)
+    {
+        if (data[i] < 32 || data[i] > 126)
+        {
+            if (data[i] != '\n' && data[i] != '\r' && data[i] != '\t')
+                return false;
+        }
+    }
+    return true;
+}
+
+inline bool
+is_printable_text(Slice const& s)
+{
+    return is_printable_text(s.data(), s.size());
+}
+
 }  // namespace catl::xdata

@@ -42,8 +42,7 @@ struct AccountIDCodec
                 "invalid base58 address: " + std::string(base58_addr),
                 path);
         }
-        s.add_raw(
-            std::span<const uint8_t>{decoded->data(), decoded->size()});
+        s.add_raw(std::span<const uint8_t>{decoded->data(), decoded->size()});
     }
 
     // From JSON (base58 string)
@@ -63,6 +62,13 @@ struct AccountIDCodec
                 path);
         }
         encode(s, std::string_view(v.as_string()), path);
+    }
+
+    static boost::json::value
+    decode(Slice const& data)
+    {
+        return boost::json::string(
+            base58::encode_account_id(data.data(), data.size()));
     }
 };
 

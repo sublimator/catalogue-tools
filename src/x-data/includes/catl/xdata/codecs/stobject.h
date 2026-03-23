@@ -1,10 +1,11 @@
 #pragma once
 
+#include "catl/base58/base58.h"
 #include "catl/xdata/codec-error.h"
 #include "catl/xdata/protocol.h"
 #include "catl/xdata/serializer.h"
-#include <boost/json.hpp>
 #include <algorithm>
+#include <boost/json.hpp>
 #include <vector>
 
 namespace catl::xdata::codecs {
@@ -84,6 +85,68 @@ struct STObjectCodec
     }
 
     // Encode an STObject from JSON. Sorts fields by field code.
+    // Expand X-addresses in a JSON object into classic addresses + tag fields.
+    // Returns a new object if any X-addresses were found, nullopt otherwise.
+    static std::optional<boost::json::object>
+    expand_xaddresses(
+        boost::json::object const& obj,
+        std::string const& path = {})
+    {
+        std::optional<boost::json::object> expanded;
+
+        auto check_field = [&](char const* addr_field,
+                               char const* tag_field,
+                               boost::json::value const& val) {
+            if (!val.is_string())
+                return;
+            auto sv = std::string_view(val.as_string());
+            if (sv.empty() || (sv[0] != 'X' && sv[0] != 'T'))
+                return;
+            auto decoded = base58::decode_xaddress(sv);
+            if (!decoded)
+                return;
+
+            // Lazy-create expanded object
+            if (!expanded)
+                expanded = obj;
+
+            // Replace with classic address
+            auto classic = base58::encode_account_id(
+                decoded->account_id.data(), decoded->account_id.size());
+            (*expanded)[addr_field] = classic;
+
+            // Inject tag if present
+            if (decoded->tag)
+            {
+                if (expanded->contains(tag_field))
+                {
+                    auto existing = expanded->at(tag_field);
+                    uint32_t existing_tag = existing.is_uint64()
+                        ? static_cast<uint32_t>(existing.as_uint64())
+                        : static_cast<uint32_t>(existing.as_int64());
+                    if (existing_tag != *decoded->tag)
+                    {
+                        throw EncodeError(
+                            CodecErrorCode::invalid_value,
+                            "STObject",
+                            std::string("X-address tag conflicts with ") +
+                                tag_field,
+                            path);
+                    }
+                }
+                (*expanded)[tag_field] =
+                    static_cast<std::uint64_t>(*decoded->tag);
+            }
+        };
+
+        if (obj.contains("Account"))
+            check_field("Account", "SourceTag", obj.at("Account"));
+        if (obj.contains("Destination"))
+            check_field("Destination", "DestinationTag", obj.at("Destination"));
+
+        return expanded;
+    }
+
     template <ByteSink Sink>
     static void
     encode(
@@ -93,7 +156,13 @@ struct STObjectCodec
         bool only_signing = false,
         std::string const& path = {})
     {
-        auto const& obj = v.as_object();
+        auto const& orig_obj = v.as_object();
+
+        // Expand X-addresses if enabled on Protocol
+        auto expanded = protocol.should_expand_xaddresses()
+            ? expand_xaddresses(orig_obj, path)
+            : std::nullopt;
+        auto const& obj = expanded ? *expanded : orig_obj;
 
         struct FieldEntry
         {
@@ -117,9 +186,7 @@ struct STObjectCodec
         }
 
         std::sort(
-            fields.begin(),
-            fields.end(),
-            [](auto const& a, auto const& b) {
+            fields.begin(), fields.end(), [](auto const& a, auto const& b) {
                 return a.def.code < b.def.code;
             });
 
@@ -132,13 +199,12 @@ struct STObjectCodec
 
             if (entry.def.meta.is_vl_encoded)
             {
-                size_t val_size = field_value_encoded_size(
-                    entry.def, *entry.val, protocol);
+                size_t val_size =
+                    field_value_encoded_size(entry.def, *entry.val, protocol);
                 s.add_vl_prefix(val_size);
             }
 
-            encode_field_value(
-                s, entry.def, *entry.val, protocol, field_path);
+            encode_field_value(s, entry.def, *entry.val, protocol, field_path);
 
             if (entry.def.meta.type == FieldTypes::STObject)
             {

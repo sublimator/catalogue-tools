@@ -60,6 +60,7 @@ Protocol::load_from_json_value(
         ? std::optional<uint32_t>(
               Networks::find_base_network_id(opts.network_id.value()))
         : std::nullopt;
+    protocol.expand_xaddresses_ = opts.expand_xaddresses;
     const auto& obj = json_value.as_object();
 
     // Parse TYPES mapping first (but don't validate yet)

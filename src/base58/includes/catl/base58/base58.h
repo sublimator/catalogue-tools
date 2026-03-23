@@ -104,6 +104,82 @@ decode_account_id(std::string_view encoded)
     return result ? std::optional{std::move(result->payload)} : std::nullopt;
 }
 
+// ---------------------------------------------------------------------------
+// X-address support
+// ---------------------------------------------------------------------------
+
+struct XAddressDecoded
+{
+    std::vector<uint8_t> account_id;  // 20 bytes
+    std::optional<uint32_t> tag;
+    bool is_test = false;
+};
+
+/// Decode an X-address to classic account ID + optional tag.
+/// Returns nullopt if the string is not a valid X-address.
+inline std::optional<XAddressDecoded>
+decode_xaddress(std::string_view encoded)
+{
+    auto decoded = xrpl_codec.decode_checked(encoded);
+    if (!decoded || decoded->size() != 31)
+        return std::nullopt;
+
+    auto const& buf = *decoded;
+
+    // Check prefix
+    bool is_test;
+    if (buf[0] == 0x05 && buf[1] == 0x44)
+        is_test = false;
+    else if (buf[0] == 0x04 && buf[1] == 0x93)
+        is_test = true;
+    else
+        return std::nullopt;
+
+    // Account ID: bytes 2-21
+    std::vector<uint8_t> account_id(buf.begin() + 2, buf.begin() + 22);
+
+    // Flag byte 22
+    uint8_t flag = buf[22];
+    if (flag == 0)
+    {
+        // No tag — remaining bytes must be zero
+        for (size_t i = 23; i < 31; ++i)
+        {
+            if (buf[i] != 0)
+                return std::nullopt;
+        }
+        return XAddressDecoded{std::move(account_id), std::nullopt, is_test};
+    }
+    else if (flag == 1)
+    {
+        // 32-bit tag, little-endian in bytes 23-26
+        uint32_t tag = static_cast<uint32_t>(buf[23]) |
+            (static_cast<uint32_t>(buf[24]) << 8) |
+            (static_cast<uint32_t>(buf[25]) << 16) |
+            (static_cast<uint32_t>(buf[26]) << 24);
+        // Remaining bytes 27-30 must be zero
+        for (size_t i = 27; i < 31; ++i)
+        {
+            if (buf[i] != 0)
+                return std::nullopt;
+        }
+        return XAddressDecoded{std::move(account_id), tag, is_test};
+    }
+
+    return std::nullopt;  // unsupported flag
+}
+
+/// Check if a string is a valid X-address (starts with X or T).
+inline bool
+is_valid_xaddress(std::string_view s)
+{
+    if (s.empty())
+        return false;
+    if (s[0] != 'X' && s[0] != 'T')
+        return false;
+    return decode_xaddress(s).has_value();
+}
+
 inline std::string
 encode_seed_k256(const uint8_t* bytes, size_t len)
 {

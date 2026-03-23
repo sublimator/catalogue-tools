@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catl/xdata/hex.h"
 #include "catl/xdata/serializer.h"
 #include <boost/json.hpp>
 
@@ -41,6 +42,12 @@ struct FixedHashCodec
     encode(Serializer<Sink>& s, boost::json::value const& v)
     {
         s.add_hex(v.as_string());
+    }
+
+    static boost::json::value
+    decode(Slice const& data)
+    {
+        return boost::json::string(hex_encode(data));
     }
 };
 

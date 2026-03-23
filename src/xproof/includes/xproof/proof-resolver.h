@@ -13,6 +13,7 @@
 
 #include "proof-chain.h"
 
+#include <catl/xdata/protocol.h>
 #include <string>
 
 namespace xproof {
@@ -20,10 +21,13 @@ namespace xproof {
 /// Resolve and verify a proof chain.
 /// If trusted_publisher_key is provided, verifies the anchor's UNL
 /// and validation signatures against it.
+/// Protocol is needed to serialize leaf JSON back to binary for hash
+/// verification.
 /// Returns true if all verifiable steps pass.
 bool
 resolve_proof_chain(
     ProofChain const& chain,
+    catl::xdata::Protocol const& protocol,
     std::string const& trusted_publisher_key = "");
 
 }  // namespace xproof

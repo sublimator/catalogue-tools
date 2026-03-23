@@ -228,6 +228,7 @@ main(int argc, char* argv[])
     }
 
     std::string command = argv[1];
+    auto protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
 
     if (command == "ping" && argc >= 3)
         return cmd_ping(argv[2]);
@@ -322,8 +323,6 @@ main(int argc, char* argv[])
                     co_await co_get_tx_nodes(client, ledger_hash, child_ids);
 
                 // Parse leaves as transactions
-                auto protocol =
-                    catl::xdata::Protocol::load_embedded_xrpl_protocol();
                 int inners = 0, leaves = 0, parsed = 0, failed = 0;
                 boost::json::array tx_arr;
 
@@ -638,8 +637,7 @@ main(int argc, char* argv[])
             io,
             [&]() -> boost::asio::awaitable<void> {
                 auto build_result = co_await xproof::build_proof(
-                    io, rpc_host, rpc_port, peer_host, peer_port,
-                    tx_hash_str);
+                    io, rpc_host, rpc_port, peer_host, peer_port, tx_hash_str);
 
                 // Serialize to JSON
                 auto chain = xproof::to_json(build_result.chain);
@@ -657,6 +655,7 @@ main(int argc, char* argv[])
                 // Verify the proof chain we just built
                 xproof::resolve_proof_chain(
                     build_result.chain,
+                    protocol,
                     build_result.publisher_key_hex);
 
                 result = 0;
@@ -720,7 +719,7 @@ main(int argc, char* argv[])
                 trusted_key.substr(0, 16),
                 "...");
             auto proof = xproof::from_json(chain);
-            bool ok = xproof::resolve_proof_chain(proof, trusted_key);
+            bool ok = xproof::resolve_proof_chain(proof, protocol, trusted_key);
             return ok ? 0 : 1;
         }
         catch (std::exception const& e)

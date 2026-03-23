@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catl/xdata/hex.h"
 #include "catl/xdata/serializer.h"
 #include <boost/json.hpp>
 
@@ -34,6 +35,19 @@ struct Vector256Codec
         {
             s.add_hex(elem.as_string());
         }
+    }
+
+    static boost::json::value
+    decode(Slice const& data)
+    {
+        boost::json::array arr;
+        size_t count = data.size() / 32;
+        for (size_t i = 0; i < count; ++i)
+        {
+            arr.push_back(
+                boost::json::string(hex_encode(data.data() + i * 32, 32)));
+        }
+        return arr;
     }
 };
 

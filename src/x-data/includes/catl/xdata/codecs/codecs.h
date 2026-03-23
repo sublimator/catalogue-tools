@@ -7,6 +7,7 @@
 #include "catl/xdata/codecs/blob.h"
 #include "catl/xdata/codecs/currency.h"
 #include "catl/xdata/codecs/hash.h"
+#include "catl/xdata/codecs/enum.h"
 #include "catl/xdata/codecs/int.h"
 #include "catl/xdata/codecs/issue.h"
 #include "catl/xdata/codecs/number.h"
@@ -90,6 +91,72 @@ field_value_encoded_size(
         "unknown type code " + std::to_string(field.meta.type.code));
 }
 
+// Decode a field value from binary to JSON.
+// For most types this delegates to the codec's decode(). UInt16 enum fields
+// (TransactionType, LedgerEntryType) need Protocol for name resolution.
+inline boost::json::value
+decode_field_value(
+    FieldDef const& field,
+    Slice const& data,
+    Protocol const& protocol)
+{
+    auto const& t = field.meta.type;
+
+    // Enum fields first — numeric on wire, string enum in JSON
+    if (field.code == EnumFieldCodes::TransactionType)
+        return TransactionTypeCodec::decode(data, protocol);
+    if (field.code == EnumFieldCodes::LedgerEntryType)
+        return LedgerEntryTypeCodec::decode(data, protocol);
+    if (field.code == EnumFieldCodes::TransactionResult)
+        return TransactionResultCodec::decode(data, protocol);
+
+    if (t == FieldTypes::UInt8)
+        return UInt8Codec::decode(data);
+    if (t == FieldTypes::UInt16)
+        return UInt16Codec::decode(data);
+    if (t == FieldTypes::UInt32)
+        return UInt32Codec::decode(data);
+    if (t == FieldTypes::UInt64)
+        return UInt64Codec::decode(data);
+    if (t == FieldTypes::Int32)
+        return Int32Codec::decode(data);
+    if (t == FieldTypes::Int64)
+        return Int64Codec::decode(data);
+    if (t == FieldTypes::Hash128)
+        return Hash128Codec::decode(data);
+    if (t == FieldTypes::Hash160)
+        return Hash160Codec::decode(data);
+    if (t == FieldTypes::Hash192)
+        return Hash192Codec::decode(data);
+    if (t == FieldTypes::Hash256)
+        return Hash256Codec::decode(data);
+    if (t == FieldTypes::UInt96)
+        return UInt96Codec::decode(data);
+    if (t == FieldTypes::UInt384)
+        return UInt384Codec::decode(data);
+    if (t == FieldTypes::UInt512)
+        return UInt512Codec::decode(data);
+    if (t == FieldTypes::Amount)
+        return AmountCodec::decode(data);
+    if (t == FieldTypes::AccountID)
+        return AccountIDCodec::decode(data);
+    if (t == FieldTypes::Currency)
+        return CurrencyCodec::decode(data);
+    if (t == FieldTypes::Issue)
+        return IssueCodec::decode(data);
+    if (t == FieldTypes::Number)
+        return NumberCodec::decode(data);
+    if (t == FieldTypes::Vector256)
+        return Vector256Codec::decode(data);
+    if (t == FieldTypes::PathSet)
+        return PathSetCodec::decode(data);
+    if (t == FieldTypes::Blob)
+        return BlobCodec::decode(data);
+
+    // Unknown type: hex fallback
+    return boost::json::string(hex_encode(data));
+}
+
 // Encode a field value (value bytes only, no header/VL)
 template <ByteSink Sink>
 void
@@ -102,52 +169,26 @@ encode_field_value(
 {
     auto const& t = field.meta.type;
 
-    if (t == FieldTypes::UInt8)
+    // Enum fields first (integer code compare, no string matching)
+    if (field.code == EnumFieldCodes::TransactionType)
+    {
+        TransactionTypeCodec::encode(s, v, protocol, path);
+    }
+    else if (field.code == EnumFieldCodes::LedgerEntryType)
+    {
+        LedgerEntryTypeCodec::encode(s, v, protocol, path);
+    }
+    else if (field.code == EnumFieldCodes::TransactionResult)
+    {
+        TransactionResultCodec::encode(s, v, protocol, path);
+    }
+    else if (t == FieldTypes::UInt8)
     {
         UInt8Codec::encode(s, v);
     }
     else if (t == FieldTypes::UInt16)
     {
-        if (v.is_string())
-        {
-            auto sv = std::string_view(v.as_string());
-            std::optional<uint16_t> code;
-            if (field.name == "TransactionType")
-            {
-                for (auto const& [name, c] : protocol.transactionTypes())
-                {
-                    if (name == sv)
-                    {
-                        code = c;
-                        break;
-                    }
-                }
-            }
-            else if (field.name == "LedgerEntryType")
-            {
-                for (auto const& [name, c] : protocol.ledgerEntryTypes())
-                {
-                    if (name == sv)
-                    {
-                        code = c;
-                        break;
-                    }
-                }
-            }
-            if (!code)
-            {
-                throw EncodeError(
-                    CodecErrorCode::unknown_enum,
-                    "UInt16",
-                    "unknown enum value: " + std::string(sv),
-                    path);
-            }
-            UInt16Codec::encode(s, *code);
-        }
-        else
-        {
-            UInt16Codec::encode(s, v);
-        }
+        UInt16Codec::encode(s, v);
     }
     else if (t == FieldTypes::UInt32)
     {
@@ -257,14 +298,9 @@ serialize_object(
     Protocol const& protocol,
     bool only_signing = false)
 {
-    // Pass 1: count bytes
-    CountingSink counter;
-    Serializer<CountingSink> cs(counter);
     boost::json::value v(obj);
-    STObjectCodec::encode(cs, v, protocol, only_signing);
-    size_t total = counter.count();
+    size_t total = STObjectCodec::encoded_size(v, protocol);
 
-    // Pass 2: encode into pre-allocated buffer
     std::vector<uint8_t> buf;
     buf.reserve(total);
     VectorSink vs(buf);

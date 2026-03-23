@@ -28,6 +28,17 @@ struct Int32Codec
     {
         s.add_u32(static_cast<uint32_t>(v.as_int64()));
     }
+
+    static boost::json::value
+    decode(Slice const& data)
+    {
+        int32_t v = static_cast<int32_t>(
+            (static_cast<uint32_t>(data.data()[0]) << 24) |
+            (static_cast<uint32_t>(data.data()[1]) << 16) |
+            (static_cast<uint32_t>(data.data()[2]) << 8) |
+            static_cast<uint32_t>(data.data()[3]));
+        return static_cast<std::int64_t>(v);
+    }
 };
 
 struct Int64Codec
@@ -52,6 +63,17 @@ struct Int64Codec
     encode(Serializer<Sink>& s, boost::json::value const& v)
     {
         s.add_u64(static_cast<uint64_t>(v.as_int64()));
+    }
+
+    static boost::json::value
+    decode(Slice const& data)
+    {
+        uint64_t u = 0;
+        for (int i = 0; i < 8; ++i)
+        {
+            u = (u << 8) | data.data()[i];
+        }
+        return static_cast<std::int64_t>(u);
     }
 };
 
