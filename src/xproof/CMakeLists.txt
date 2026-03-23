@@ -1,4 +1,9 @@
-add_executable(xproof src/main.cpp src/anchor-verifier.cpp src/proof-steps.cpp)
+add_executable(
+  xproof
+  src/main.cpp
+  src/anchor-verifier.cpp
+  src/proof-chain-json.cpp
+  src/proof-steps.cpp)
 
 target_include_directories(xproof PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/includes)
 

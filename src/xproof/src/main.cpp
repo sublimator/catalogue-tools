@@ -1,5 +1,9 @@
 #include "xproof/anchor-verifier.h"
+#include "xproof/hex-utils.h"
+#include "xproof/proof-chain-json.h"
+#include "xproof/proof-chain.h"
 #include "xproof/proof-steps.h"
+#include "xproof/skip-list.h"
 
 #include <catl/core/logger.h>
 #include <catl/crypto/sha512-half-hasher.h>
@@ -35,97 +39,9 @@ INSTANTIATE_SHAMAP_NODE_TRAITS(catl::shamap::AbbreviatedTreeTraits);
 #include <string>
 
 using namespace catl::peer_client;
-
-//------------------------------------------------------------------------------
-// Helpers
-//------------------------------------------------------------------------------
-
-/// Extract nibble at given depth from a 32-byte key.
-/// Depth 0 = high nibble of byte 0, depth 1 = low nibble of byte 0, etc.
-static int
-nibble_at(Hash256 const& key, int depth)
-{
-    int byte_idx = depth / 2;
-    if (depth % 2 == 0)
-        return (key.data()[byte_idx] >> 4) & 0xF;
-    else
-        return key.data()[byte_idx] & 0xF;
-}
-
-/// Single hex nibble char: 0→"0", 10→"A", etc.
-static std::string
-hex_nibble(int n)
-{
-    static const char* chars = "0123456789ABCDEF";
-    return std::string(1, chars[n & 0xF]);
-}
-
-/// Parse 64-char hex string to Hash256.
-static Hash256
-hash_from_hex(std::string const& hex)
-{
-    Hash256 result;
-    if (hex.size() != 64)
-        throw std::runtime_error(
-            "hash_from_hex: expected 64 hex chars, got " +
-            std::to_string(hex.size()));
-    for (size_t i = 0; i < 32; ++i)
-    {
-        unsigned int byte;
-        std::sscanf(hex.c_str() + i * 2, "%2x", &byte);
-        result.data()[i] = static_cast<uint8_t>(byte);
-    }
-    return result;
-}
-
-/// Uppercase hex of a Hash256.
-static std::string
-upper_hex(Hash256 const& h)
-{
-    std::ostringstream oss;
-    for (size_t i = 0; i < 32; ++i)
-        oss << std::hex << std::uppercase << std::setfill('0') << std::setw(2)
-            << static_cast<int>(h.data()[i]);
-    return oss.str();
-}
-
-//------------------------------------------------------------------------------
-// XRPL Keylet computation
-//------------------------------------------------------------------------------
-
-/// Short skip list key: SHA512Half(be16('s'))
-/// Contains hashes of the last 256 ledgers.
-static Hash256
-skip_list_key()
-{
-    catl::crypto::Sha512HalfHasher h;
-    uint16_t ns = 0x0073;  // 's' as big-endian uint16
-    uint8_t buf[2] = {
-        static_cast<uint8_t>((ns >> 8) & 0xFF),
-        static_cast<uint8_t>(ns & 0xFF)};
-    h.update(buf, 2);
-    return h.finalize();
-}
-
-/// Long skip list key: SHA512Half(be16('s'), be32(seq >> 16))
-/// Contains hashes of flag ledgers (every 256th) within a 65536-ledger range.
-static Hash256
-skip_list_key(uint32_t ledger_seq)
-{
-    catl::crypto::Sha512HalfHasher h;
-    uint16_t ns = 0x0073;  // 's'
-    uint32_t group = ledger_seq >> 16;
-    uint8_t buf[6] = {
-        static_cast<uint8_t>((ns >> 8) & 0xFF),
-        static_cast<uint8_t>(ns & 0xFF),
-        static_cast<uint8_t>((group >> 24) & 0xFF),
-        static_cast<uint8_t>((group >> 16) & 0xFF),
-        static_cast<uint8_t>((group >> 8) & 0xFF),
-        static_cast<uint8_t>(group & 0xFF),
-    };
-    h.update(buf, 6);
-    return h.finalize();
-}
+using xproof::hash_from_hex;
+using xproof::upper_hex;
+using xproof::skip_list_key;
 
 static LogPartition log_partition("xproof", LogLevel::INFO);
 
@@ -2386,180 +2302,119 @@ main(int argc, char* argv[])
                     PLOGE(log_partition, "    computed: ", abbrev_hash.hex());
                 }
 
-                // ── Step 7: Build JSON proof chain ──
-                // Per spec: anchor → ledger_header(anchor) →
-                //   [map_proof(state) → ledger_header]* →
-                //   ledger_header(target) → map_proof(tx)
-                boost::json::array chain;
+                // ── Step 7: Build proof chain ──
+                xproof::ProofChain proof_chain;
 
-                // Helper to emit a ledger_header step
-                auto emit_header = [&](auto const& hdr_result) {
+                // Helper: convert LedgerHeaderResult to HeaderData
+                auto make_header = [](auto const& hdr_result)
+                    -> xproof::HeaderData {
                     auto h = hdr_result.header();
-                    boost::json::object step;
-                    step["type"] = "ledger_header";
-                    boost::json::object hdr_obj;
-                    hdr_obj["seq"] = hdr_result.seq();
-                    hdr_obj["drops"] = std::to_string(h.drops());
-                    hdr_obj["parent_hash"] = upper_hex(h.parent_hash());
-                    hdr_obj["tx_hash"] = upper_hex(h.tx_hash());
-                    hdr_obj["account_hash"] = upper_hex(h.account_hash());
-                    hdr_obj["parent_close_time"] = h.parent_close_time();
-                    hdr_obj["close_time"] = h.close_time();
-                    hdr_obj["close_time_resolution"] =
-                        h.close_time_resolution();
-                    hdr_obj["close_flags"] = h.close_flags();
-                    step["header"] = hdr_obj;
-                    chain.push_back(step);
+                    return {
+                        .seq = hdr_result.seq(),
+                        .drops = h.drops(),
+                        .parent_hash = h.parent_hash(),
+                        .tx_hash = h.tx_hash(),
+                        .account_hash = h.account_hash(),
+                        .parent_close_time = h.parent_close_time(),
+                        .close_time = h.close_time(),
+                        .close_time_resolution = h.close_time_resolution(),
+                        .close_flags = h.close_flags(),
+                    };
                 };
 
-                // 1. Anchor — self-contained with all data needed
-                // for offline verification
+                // Helper: render abbreviated tree to trie JSON
+                auto make_trie = [&](auto& tree, bool is_tx)
+                    -> boost::json::value {
+                    catl::shamap::TrieJsonOptions trie_opts;
+                    trie_opts.on_leaf =
+                        make_proof_leaf_callback(protocol, is_tx);
+                    return tree.get_root()->trie_json(
+                        trie_opts, tree.get_options());
+                };
+
+                // 1. Anchor
                 {
-                    // Helper: bytes to hex string
-                    auto bytes_hex =
-                        [](std::vector<uint8_t> const& v) -> std::string {
-                        std::string hex;
-                        Slice s(v.data(), v.size());
-                        slice_hex(s, hex);
-                        return hex;
-                    };
+                    xproof::AnchorData anchor;
+                    anchor.ledger_hash = anchor_hash;
+                    anchor.ledger_index = anchor_hdr.seq();
 
-                    boost::json::object anchor;
-                    anchor["type"] = "anchor";
-                    anchor["ledger_hash"] = upper_hex(anchor_hash);
-                    anchor["ledger_index"] = anchor_hdr.seq();
-
-                    // UNL data — everything needed to reconstruct
-                    // the trusted validator set from a single publisher
-                    // public key
                     if (vl_data)
                     {
-                        boost::json::object unl;
-                        unl["public_key"] = vl_data->publisher_key_hex;
-                        unl["manifest"] =
-                            bytes_hex(vl_data->publisher_manifest.raw);
-                        unl["blob"] = bytes_hex(vl_data->blob_bytes);
-                        unl["signature"] = bytes_hex(vl_data->blob_signature);
-                        anchor["unl"] = unl;
+                        anchor.publisher_key_hex =
+                            vl_data->publisher_key_hex;
+                        anchor.publisher_manifest =
+                            vl_data->publisher_manifest.raw;
+                        anchor.blob = vl_data->blob_bytes;
+                        anchor.blob_signature = vl_data->blob_signature;
                     }
 
-                    // Raw STValidation messages — each is the full
-                    // serialized validation that the verifier can
-                    // independently verify signatures on
-                    auto const& qvals = val_collector.quorum_validations();
-                    boost::json::object validations_obj;
+                    auto const& qvals =
+                        val_collector.quorum_validations();
                     for (auto const& v : qvals)
                     {
-                        // Key by signing key hex, value is raw
-                        // STValidation hex
-                        auto key_hex = bytes_hex(v.signing_key);
-                        validations_obj[key_hex] = bytes_hex(v.raw);
+                        anchor.validations[xproof::bytes_hex(v.signing_key)] =
+                            v.raw;
                     }
-                    anchor["validations"] = validations_obj;
 
-                    // Summary for quick inspection
-                    boost::json::object summary;
-                    summary["total_validations"] =
-                        static_cast<int>(qvals.size());
-                    summary["quorum"] = val_collector.quorum_reached;
-                    if (vl_data)
-                    {
-                        summary["unl_size"] = val_collector.unl_size;
-                        summary["matched_unl"] = val_collector.quorum_count;
-                        int threshold = val_collector.unl_size;
-                        summary["threshold"] = threshold;
-                    }
-                    anchor["summary"] = summary;
-
-                    chain.push_back(anchor);
+                    proof_chain.steps.push_back(std::move(anchor));
                 }
 
-                // 2. Anchor ledger header
-                emit_header(anchor_hdr);
+                // 2. Anchor header
+                proof_chain.steps.push_back(make_header(anchor_hdr));
 
-                // 3. State tree proofs (skip list hops)
-                //    For 2-hop: long skip list proof, flag header,
-                //               short skip list proof
-                //    For 1-hop: short skip list proof only
+                // 3. State tree proofs
                 if (need_flag_hop && state_proofs.size() >= 2)
                 {
                     // Long skip list state proof
                     {
                         auto& [key, sp] = state_proofs[0];
-                        boost::json::object step;
-                        step["type"] = "map_proof";
-                        step["tree"] = "state";
-                        catl::shamap::TrieJsonOptions trie_opts;
-                        trie_opts.on_leaf =
-                            make_proof_leaf_callback(protocol, false);
-                        step["trie"] = sp.tree.get_root()->trie_json(
-                            trie_opts, sp.tree.get_options());
-                        // verified at build time, verifier re-checks
-                        // independently
-                        chain.push_back(step);
+                        xproof::TrieData trie;
+                        trie.tree = xproof::TrieData::TreeType::state;
+                        trie.trie_json = make_trie(sp.tree, false);
+                        proof_chain.steps.push_back(std::move(trie));
                     }
 
-                    // Flag ledger header
+                    // Flag header
                     {
-                        uint32_t flag_seq = ((tx_ledger_seq + 255) / 256) * 256;
+                        uint32_t flag_seq =
+                            ((tx_ledger_seq + 255) / 256) * 256;
                         auto flag_hdr2 =
                             co_await co_get_ledger_header(client, flag_seq);
-                        emit_header(flag_hdr2);
+                        proof_chain.steps.push_back(
+                            make_header(flag_hdr2));
                     }
 
                     // Short skip list state proof
                     {
                         auto& [key, sp] = state_proofs[1];
-                        boost::json::object step;
-                        step["type"] = "map_proof";
-                        step["tree"] = "state";
-                        catl::shamap::TrieJsonOptions trie_opts;
-                        trie_opts.on_leaf =
-                            make_proof_leaf_callback(protocol, false);
-                        step["trie"] = sp.tree.get_root()->trie_json(
-                            trie_opts, sp.tree.get_options());
-                        // verified at build time, verifier re-checks
-                        // independently
-                        chain.push_back(step);
+                        xproof::TrieData trie;
+                        trie.tree = xproof::TrieData::TreeType::state;
+                        trie.trie_json = make_trie(sp.tree, false);
+                        proof_chain.steps.push_back(std::move(trie));
                     }
                 }
                 else if (!state_proofs.empty())
                 {
-                    // Single-hop: short skip list proof
                     auto& [key, sp] = state_proofs[0];
-                    boost::json::object step;
-                    step["type"] = "map_proof";
-                    step["tree"] = "state";
-                    {
-                        catl::shamap::TrieJsonOptions trie_opts;
-                        trie_opts.on_leaf =
-                            make_proof_leaf_callback(protocol, false);
-                        step["trie"] = sp.tree.get_root()->trie_json(
-                            trie_opts, sp.tree.get_options());
-                    }
-                    step["verified"] = sp.verified;
-                    chain.push_back(step);
+                    xproof::TrieData trie;
+                    trie.tree = xproof::TrieData::TreeType::state;
+                    trie.trie_json = make_trie(sp.tree, false);
+                    proof_chain.steps.push_back(std::move(trie));
                 }
 
-                // 4. Target ledger header
-                emit_header(target_hdr);
+                // 4. Target header
+                proof_chain.steps.push_back(make_header(target_hdr));
 
                 // 5. TX tree proof
                 {
-                    boost::json::object step;
-                    step["type"] = "map_proof";
-                    step["tree"] = "tx";
-                    {
-                        catl::shamap::TrieJsonOptions trie_opts;
-                        trie_opts.on_leaf =
-                            make_proof_leaf_callback(protocol, true);
-                        step["trie"] = abbrev.get_root()->trie_json(
-                            trie_opts, abbrev.get_options());
-                    }
-                    // verified at build time, verifier re-checks independently
-                    chain.push_back(step);
+                    xproof::TrieData trie;
+                    trie.tree = xproof::TrieData::TreeType::tx;
+                    trie.trie_json = make_trie(abbrev, true);
+                    proof_chain.steps.push_back(std::move(trie));
                 }
 
+                // Serialize to JSON
+                auto chain = xproof::to_json(proof_chain);
                 catl::xdata::json::pretty_print(std::cout, chain);
 
                 // Write proof to file
