@@ -3,6 +3,7 @@ add_executable(
   src/main.cpp
   src/anchor-verifier.cpp
   src/proof-chain-json.cpp
+  src/proof-resolver.cpp
   src/proof-steps.cpp
   src/validation-collector.cpp)
 
