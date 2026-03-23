@@ -1,9 +1,9 @@
-# Abbreviated SHAMap template instantiation (same pattern as catl_shamap_serialized)
+# Abbreviated SHAMap template instantiation (same pattern as
+# catl_shamap_serialized)
 add_library(catl_shamap_abbreviated STATIC shamap-abbreviated.cpp)
 
-target_precompile_headers(
-  catl_shamap_abbreviated PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/shamap-abbreviated.h)
+target_precompile_headers(catl_shamap_abbreviated PRIVATE
+                          ${CMAKE_CURRENT_SOURCE_DIR}/shamap-abbreviated.h)
 
 target_link_libraries(
   catl_shamap_abbreviated
@@ -16,8 +16,14 @@ target_link_libraries(
 add_executable(
   xproof
   src/main.cpp
+  src/cmd-ping.cpp
+  src/cmd-header.cpp
+  src/cmd-prove.cpp
+  src/cmd-verify.cpp
+  src/cmd-dev.cpp
   src/anchor-verifier.cpp
   src/proof-builder.cpp
+  src/proof-chain-binary.cpp
   src/proof-chain-json.cpp
   src/proof-resolver.cpp
   src/proof-steps.cpp
@@ -32,4 +38,5 @@ target_link_libraries(
           catl::vl-client
           catl::crypto
           catl_shamap_abbreviated
-          catl::xdata)
+          catl::xdata
+          Boost::iostreams)

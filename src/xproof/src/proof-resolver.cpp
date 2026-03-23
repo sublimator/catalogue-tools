@@ -7,6 +7,8 @@
 #include <catl/core/logger.h>
 #include <catl/crypto/sha512-half-hasher.h>
 #include <catl/shamap/shamap.h>
+#include <catl/xdata/parse_leaf.h>
+#include <catl/xdata/parse_transaction.h>
 #include <catl/xdata/serialize.h>
 
 namespace xproof {
@@ -427,6 +429,17 @@ resolve_proof_chain(
                             upper_hex(expected).substr(0, 16);
                     }
 
+                    // Reconstruct the abbreviated SHAMap from
+                    // whichever representation is available.
+                    auto node_type = is_state ? catl::shamap::tnACCOUNT_STATE
+                                              : catl::shamap::tnTRANSACTION_MD;
+
+                    using AbbrevMap = catl::shamap::SHAMapT<
+                        catl::shamap::AbbreviatedTreeTraits>;
+
+                    std::optional<AbbrevMap> reconstructed;
+
+                    // --- JSON trie path ---
                     if (!data.trie_json.is_null())
                     {
                         TrieStats stats;
@@ -447,6 +460,41 @@ resolve_proof_chain(
                             " placeholders, max_depth=",
                             stats.max_depth);
 
+                        try
+                        {
+                            reconstructed = AbbrevMap::from_trie_json(
+                                data.trie_json,
+                                node_type,
+                                [&](std::string const& key_hex,
+                                    boost::json::value const& leaf_data)
+                                    -> boost::intrusive_ptr<MmapItem> {
+                                    auto key = hash_from_hex(key_hex);
+                                    if (!leaf_data.is_object())
+                                    {
+                                        uint8_t dummy = 0;
+                                        return boost::intrusive_ptr<MmapItem>(
+                                            OwnedItem::create(
+                                                key, Slice(&dummy, 0)));
+                                    }
+                                    auto bytes = is_state
+                                        ? catl::xdata::serialize_leaf(
+                                              leaf_data.as_object(), protocol)
+                                        : catl::xdata::serialize_transaction(
+                                              leaf_data.as_object(), protocol);
+                                    Slice s(bytes.data(), bytes.size());
+                                    return boost::intrusive_ptr<MmapItem>(
+                                        OwnedItem::create(key, s));
+                                });
+                        }
+                        catch (std::exception const& e)
+                        {
+                            PLOGW(
+                                verify_log,
+                                "  JSON trie reconstruction failed: ",
+                                e.what());
+                        }
+
+                        // Extract narrative info from JSON trie
                         if (is_state)
                         {
                             auto const* hashes =
@@ -507,78 +555,198 @@ resolve_proof_chain(
                                 }
                             }
                         }
+                    }
+                    // --- Binary trie path ---
+                    else if (!data.trie_binary.empty())
+                    {
+                        PLOGI(
+                            verify_log,
+                            "  Binary trie: ",
+                            data.trie_binary.size(),
+                            " bytes");
 
-                        // Reconstruct and verify trie root hash
-                        if (have_tree_hashes)
+                        try
                         {
-                            try
-                            {
-                                auto node_type = is_state
-                                    ? catl::shamap::tnACCOUNT_STATE
-                                    : catl::shamap::tnTRANSACTION_MD;
+                            reconstructed = AbbrevMap::from_trie_binary(
+                                data.trie_binary, node_type);
 
-                                using AbbrevMap = catl::shamap::SHAMapT<
-                                    catl::shamap::AbbreviatedTreeTraits>;
+                            // Decode leaf data for narrative
+                            reconstructed->walk_abbreviated(
+                                [&](catl::shamap::SHAMapNodeID const&,
+                                    Hash256 const&,
+                                    catl::shamap::SHAMapTreeNodeT<
+                                        catl::shamap::
+                                            AbbreviatedTreeTraits> const*
+                                        node) {
+                                    if (!node || !node->is_leaf())
+                                        return;
+                                    auto leaf = static_cast<
+                                        catl::shamap::SHAMapLeafNodeT<
+                                            catl::shamap::
+                                                AbbreviatedTreeTraits> const*>(
+                                        node);
+                                    auto item = leaf->get_item();
+                                    if (!item)
+                                        return;
 
-                                auto reconstructed = AbbrevMap::from_trie_json(
-                                    data.trie_json,
-                                    node_type,
-                                    [&](std::string const& key_hex,
-                                        boost::json::value const& leaf_data)
-                                        -> boost::intrusive_ptr<MmapItem> {
-                                        auto key = hash_from_hex(key_hex);
-                                        if (!leaf_data.is_object())
+                                    // Reconstruct full leaf bytes:
+                                    // item_data + 32-byte key
+                                    std::vector<uint8_t> buf(
+                                        item->slice().data(),
+                                        item->slice().data() +
+                                            item->slice().size());
+                                    buf.insert(
+                                        buf.end(),
+                                        item->key().data(),
+                                        item->key().data() + 32);
+                                    Slice full(buf.data(), buf.size());
+
+                                    try
+                                    {
+                                        if (is_state)
                                         {
-                                            uint8_t dummy = 0;
-                                            return boost::intrusive_ptr<
-                                                MmapItem>(OwnedItem::create(
-                                                key, Slice(&dummy, 0)));
+                                            auto parsed =
+                                                catl::xdata::parse_leaf(
+                                                    full, protocol, false);
+                                            if (parsed.is_object() &&
+                                                parsed.as_object().contains(
+                                                    "Hashes"))
+                                            {
+                                                // Store decoded hashes for
+                                                // skip list verification.
+                                                // We stash it in trie_json
+                                                // so the existing
+                                                // extract_leaf_hashes works.
+                                                // (Bit of a hack but avoids
+                                                // duplicating the logic.)
+                                                auto& mut_data =
+                                                    const_cast<TrieData&>(data);
+                                                boost::json::array leaf_arr;
+                                                leaf_arr.emplace_back(
+                                                    item->key().hex());
+                                                leaf_arr.emplace_back(parsed);
+                                                mut_data.trie_json = leaf_arr;
+
+                                                auto const* hashes =
+                                                    extract_leaf_hashes(
+                                                        mut_data.trie_json);
+                                                if (hashes)
+                                                {
+                                                    pending_hashes_count =
+                                                        static_cast<int>(
+                                                            hashes->size());
+                                                    pending_hashes = hashes;
+                                                    map_step.hashes_count =
+                                                        pending_hashes_count;
+
+                                                    bool is_flag_skip =
+                                                        (state_proof_count ==
+                                                             1 &&
+                                                         hashes->size() < 256);
+                                                    map_step.skip_type =
+                                                        is_flag_skip
+                                                        ? SkipListType::flag
+                                                        : SkipListType::recent;
+
+                                                    PLOGI(
+                                                        verify_log,
+                                                        "  Skip list:    ",
+                                                        hashes->size(),
+                                                        " hashes");
+                                                }
+                                            }
                                         }
+                                        else
+                                        {
+                                            auto parsed =
+                                                catl::xdata::parse_transaction(
+                                                    full,
+                                                    protocol,
+                                                    {.includes_prefix = false});
+                                            if (parsed.is_object() &&
+                                                parsed.as_object().contains(
+                                                    "tx"))
+                                            {
+                                                auto const& tx =
+                                                    parsed.as_object()
+                                                        .at("tx")
+                                                        .as_object();
+                                                if (tx.contains(
+                                                        "TransactionType"))
+                                                {
+                                                    map_step
+                                                        .tx_type = std::string(
+                                                        tx.at("TransactionType")
+                                                            .as_string());
+                                                    PLOGI(
+                                                        verify_log,
+                                                        "  TX type:      ",
+                                                        map_step.tx_type);
+                                                }
+                                                if (tx.contains("Account"))
+                                                {
+                                                    map_step.tx_account =
+                                                        std::string(
+                                                            tx.at("Account")
+                                                                .as_string());
+                                                    PLOGI(
+                                                        verify_log,
+                                                        "  TX account:   ",
+                                                        map_step.tx_account);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch (...)
+                                    {
+                                        // Leaf decode for narrative is
+                                        // best-effort
+                                    }
+                                });
+                        }
+                        catch (std::exception const& e)
+                        {
+                            PLOGW(
+                                verify_log,
+                                "  Binary trie reconstruction failed: ",
+                                e.what());
+                        }
+                    }
 
-                                        auto bytes = is_state
-                                            ? catl::xdata::serialize_leaf(
-                                                  leaf_data.as_object(),
-                                                  protocol)
-                                            : catl::xdata::
-                                                  serialize_transaction(
-                                                      leaf_data.as_object(),
-                                                      protocol);
+                    // --- Verify root hash (shared for both paths) ---
+                    if (reconstructed && have_tree_hashes)
+                    {
+                        try
+                        {
+                            auto computed_root = reconstructed->get_hash();
+                            auto expected_root =
+                                is_state ? trusted_ac_hash : trusted_tx_hash;
 
-                                        Slice s(bytes.data(), bytes.size());
-                                        return boost::intrusive_ptr<MmapItem>(
-                                            OwnedItem::create(key, s));
-                                    });
+                            map_step.computed_root =
+                                upper_hex(computed_root).substr(0, 16);
 
-                                auto computed_root = reconstructed.get_hash();
-                                auto expected_root = is_state ? trusted_ac_hash
-                                                              : trusted_tx_hash;
-
-                                map_step.computed_root =
-                                    upper_hex(computed_root).substr(0, 16);
-
-                                if (computed_root == expected_root)
-                                {
-                                    PLOGI(
-                                        verify_log,
-                                        "  Trie root:    PASS (",
-                                        upper_hex(computed_root).substr(0, 16),
-                                        "...)");
-                                    map_step.root_hash_check = Check::pass;
-                                }
-                                else
-                                {
-                                    PLOGE(verify_log, "  Trie root:    FAIL!");
-                                    map_step.root_hash_check = Check::fail;
-                                    all_ok = false;
-                                }
-                            }
-                            catch (std::exception const& e)
+                            if (computed_root == expected_root)
                             {
-                                PLOGW(
+                                PLOGI(
                                     verify_log,
-                                    "  Trie reconstruction failed: ",
-                                    e.what());
+                                    "  Trie root:    PASS (",
+                                    upper_hex(computed_root).substr(0, 16),
+                                    "...)");
+                                map_step.root_hash_check = Check::pass;
                             }
+                            else
+                            {
+                                PLOGE(verify_log, "  Trie root:    FAIL!");
+                                map_step.root_hash_check = Check::fail;
+                                all_ok = false;
+                            }
+                        }
+                        catch (std::exception const& e)
+                        {
+                            PLOGW(
+                                verify_log,
+                                "  Trie hash verification failed: ",
+                                e.what());
                         }
                     }
 

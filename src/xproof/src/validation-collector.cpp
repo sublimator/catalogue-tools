@@ -12,15 +12,13 @@ namespace xproof {
 
 static LogPartition log_("xproof", LogLevel::INFO);
 
-ValidationCollector::ValidationCollector(
-    catl::xdata::Protocol const& protocol)
+ValidationCollector::ValidationCollector(catl::xdata::Protocol const& protocol)
     : protocol_(protocol)
 {
 }
 
 void
-ValidationCollector::set_unl(
-    std::vector<catl::vl::Manifest> const& validators)
+ValidationCollector::set_unl(std::vector<catl::vl::Manifest> const& validators)
 {
     unl_size = static_cast<int>(validators.size());
     for (auto const& v : validators)
@@ -66,9 +64,7 @@ ValidationCollector::extract_stvalidation(std::vector<uint8_t> const& data)
 }
 
 void
-ValidationCollector::on_packet(
-    uint16_t type,
-    std::vector<uint8_t> const& data)
+ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
 {
     if (type != 41 || quorum_reached)
         return;
@@ -130,8 +126,7 @@ ValidationCollector::on_packet(
                 e.signature.assign(
                     fs.data.data(), fs.data.data() + fs.data.size());
             }
-            else if (
-                fs.field->name == "LedgerSequence" && fs.data.size() >= 4)
+            else if (fs.field->name == "LedgerSequence" && fs.data.size() >= 4)
             {
                 e.ledger_seq =
                     (static_cast<uint32_t>(fs.data.data()[0]) << 24) |
@@ -237,7 +232,9 @@ ValidationCollector::check_quorum_for(Hash256 const& hash)
         }
     }
 
-    int threshold = unl_size;  // 100% — wait for all validators
+    // 80% is XRPL consensus threshold, 90% gives us a strong proof
+    // while not waiting for stragglers
+    int threshold = (unl_size * 9 + 9) / 10;  // ceil(90%)
     if (matched >= threshold)
     {
         quorum_reached = true;

@@ -1,5 +1,6 @@
 #include "xproof/anchor-verifier.h"
 
+#include <catl/core/base64.h>
 #include <catl/core/logger.h>
 #include <catl/crypto/sha512-half-hasher.h>
 #include <catl/crypto/sig-verify.h>
@@ -246,7 +247,8 @@ AnchorVerifier::verify(
             "... trusted=",
             trusted_key.substr(0, 16),
             "...");
-        narrative.push_back("   FAIL: publisher key does not match trusted key.");
+        narrative.push_back(
+            "   FAIL: publisher key does not match trusted key.");
         return result;
     }
 
@@ -356,52 +358,8 @@ AnchorVerifier::verify(
         if (!vobj.contains("manifest"))
             continue;
 
-        // The manifest field in the blob is base64 — but we stored it
-        // as hex in our proof. Actually, in the blob JSON it's base64.
-        // But our blob_bytes IS the raw blob, so this is base64.
         auto m_b64 = std::string(vobj.at("manifest").as_string());
-
-        // Base64 decode
-        // Simple inline base64 decode
-        static const uint8_t b64table[256] = {
-            // clang-format off
-            64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-            64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-            64,64,64,64,64,64,64,64,64,64,64,62,64,64,64,63,
-            52,53,54,55,56,57,58,59,60,61,64,64,64,64,64,64,
-            64, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
-            15,16,17,18,19,20,21,22,23,24,25,64,64,64,64,64,
-            64,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
-            41,42,43,44,45,46,47,48,49,50,51,64,64,64,64,64,
-            64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-            64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-            64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-            64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-            64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-            64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-            64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-            64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64
-            // clang-format on
-        };
-        std::vector<uint8_t> m_bytes;
-        m_bytes.reserve(m_b64.size() * 3 / 4);
-        uint32_t accum = 0;
-        int bits = 0;
-        for (char c : m_b64)
-        {
-            uint8_t val = b64table[static_cast<uint8_t>(c)];
-            if (val >= 64)
-                continue;
-            accum = (accum << 6) | val;
-            bits += 6;
-            if (bits >= 8)
-            {
-                bits -= 8;
-                m_bytes.push_back(
-                    static_cast<uint8_t>((accum >> bits) & 0xFF));
-            }
-        }
-
+        auto m_bytes = catl::base64_decode(m_b64);
         auto manifest = catl::vl::parse_manifest(m_bytes);
         if (!manifest.signing_public_key.empty())
         {
@@ -417,8 +375,7 @@ AnchorVerifier::verify(
         result.unl_size,
         " validator manifests from UNL blob");
     narrative.push_back(
-        "   Step A4: UNL blob contains " +
-        std::to_string(result.unl_size) +
+        "   Step A4: UNL blob contains " + std::to_string(result.unl_size) +
         " validator manifests. Each maps a master key to a signing key.");
 
     // ── Step 5: Verify each STValidation ────────────────────────
@@ -448,26 +405,18 @@ AnchorVerifier::verify(
         auto parsed = parse_validation(val_bytes);
         if (!parsed.valid)
         {
-            PLOGD(
-                log_,
-                "  Validation ",
-                total,
-                ": parse failed");
+            PLOGD(log_, "  Validation ", total, ": parse failed");
             continue;
         }
 
         // Check ledger hash matches anchor
-        auto parsed_hash_hex = to_hex(std::span<const uint8_t>(
-            parsed.ledger_hash.data(), 32));
+        auto parsed_hash_hex =
+            to_hex(std::span<const uint8_t>(parsed.ledger_hash.data(), 32));
 
         // Case-insensitive compare
         if (lower(parsed_hash_hex) != lower(anchor_hash_hex))
         {
-            PLOGD(
-                log_,
-                "  Validation ",
-                total,
-                ": wrong ledger hash");
+            PLOGD(log_, "  Validation ", total, ": wrong ledger hash");
             continue;
         }
 
@@ -484,8 +433,7 @@ AnchorVerifier::verify(
             parsed.without_signature.end());
 
         // Detect key type and verify
-        auto key_type =
-            catl::crypto::detect_key_type(parsed.signing_key);
+        auto key_type = catl::crypto::detect_key_type(parsed.signing_key);
         bool sig_ok = false;
 
         if (key_type == catl::crypto::KeyType::ed25519)
@@ -511,11 +459,7 @@ AnchorVerifier::verify(
 
         if (!sig_ok)
         {
-            PLOGD(
-                log_,
-                "  Validation ",
-                total,
-                ": signature FAILED");
+            PLOGD(log_, "  Validation ", total, ": signature FAILED");
             continue;
         }
 
@@ -549,11 +493,9 @@ AnchorVerifier::verify(
 
     narrative.push_back(
         "   Step A5: " + std::to_string(total) +
-        " validation messages in proof. " +
-        std::to_string(verified) +
+        " validation messages in proof. " + std::to_string(verified) +
         " signatures cryptographically verified (VAL\\0 + signing data). " +
-        std::to_string(matched_unl) + "/" +
-        std::to_string(result.unl_size) +
+        std::to_string(matched_unl) + "/" + std::to_string(result.unl_size) +
         " are from UNL validators.");
 
     // ── Step 6: Quorum check ────────────────────────────────────
@@ -603,9 +545,8 @@ AnchorVerifier::verify(
             threshold,
             ")");
         narrative.push_back(
-            "   Step A6: FAIL — only " + std::to_string(matched_unl) +
-            "/" + std::to_string(result.unl_size) +
-            " UNL validators signed (need " +
+            "   Step A6: FAIL — only " + std::to_string(matched_unl) + "/" +
+            std::to_string(result.unl_size) + " UNL validators signed (need " +
             std::to_string(threshold) + " for 80% quorum).");
     }
 

@@ -166,6 +166,88 @@ SHAMapInnerNodeT<Traits>::trie_json(
 
 template <typename Traits>
 void
+SHAMapInnerNodeT<Traits>::sink_trie_binary(
+    std::vector<uint8_t>& out,
+    SHAMapOptions const& shamap_options) const
+{
+    auto children = get_children();
+
+    // Build branch header
+    uint32_t header = 0;
+    for (int i = 0; i < 16; i++)
+    {
+        if (has_child(i))
+        {
+            auto child = get_child(i);
+            if (child)
+            {
+                if (child->is_leaf())
+                {
+                    set_branch_type(header, i, BranchType::leaf);
+                }
+                else
+                {
+                    set_branch_type(header, i, BranchType::inner);
+                }
+            }
+        }
+        else if constexpr (has_placeholders_v<Traits>)
+        {
+            if (children->has_placeholder(i))
+            {
+                set_branch_type(header, i, BranchType::hash);
+            }
+        }
+    }
+
+    write_u32_le(out, header);
+
+    // Write child data in order
+    for (int i = 0; i < 16; i++)
+    {
+        auto type = get_branch_type(header, i);
+        if (type == BranchType::empty)
+            continue;
+
+        if (type == BranchType::leaf)
+        {
+            auto child = get_child(i);
+            auto leaf =
+                boost::static_pointer_cast<SHAMapLeafNodeT<Traits>>(child);
+            auto item = leaf->get_item();
+            if (item)
+            {
+                // key: 32 bytes
+                out.insert(
+                    out.end(), item->key().data(), item->key().data() + 32);
+                // data_len: varint
+                auto slice = item->slice();
+                leb128_encode(out, slice.size());
+                // data: raw bytes
+                out.insert(
+                    out.end(), slice.data(), slice.data() + slice.size());
+            }
+        }
+        else if (type == BranchType::inner)
+        {
+            auto child = get_child(i);
+            auto inner =
+                boost::static_pointer_cast<SHAMapInnerNodeT<Traits>>(child);
+            inner->sink_trie_binary(out, shamap_options);
+        }
+        else if (type == BranchType::hash)
+        {
+            if constexpr (has_placeholders_v<Traits>)
+            {
+                auto const& h = children->get_placeholder(i);
+                out.insert(out.end(), h.data(), h.data() + 32);
+            }
+        }
+    }
+}
+
+template <typename Traits>
+void
 SHAMapInnerNodeT<Traits>::invalidate_hash_recursive()
 {
     auto children = get_children();

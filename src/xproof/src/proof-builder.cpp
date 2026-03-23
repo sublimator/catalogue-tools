@@ -19,10 +19,10 @@
 #include <boost/asio/use_awaitable.hpp>
 
 using namespace catl::peer_client;
-using xproof::hash_from_hex;
-using xproof::upper_hex;
-using xproof::skip_list_key;
 using xproof::bytes_hex;
+using xproof::hash_from_hex;
+using xproof::skip_list_key;
+using xproof::upper_hex;
 
 namespace xproof {
 
@@ -30,22 +30,17 @@ static LogPartition log_("xproof", LogLevel::INFO);
 
 /// Build a proof-format on_leaf callback for trie_json.
 static catl::shamap::LeafJsonCallback
-make_proof_leaf_callback(
-    catl::xdata::Protocol const& protocol,
-    bool is_tx_tree)
+make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree)
 {
-    return [&protocol, is_tx_tree](MmapItem const& item)
-               -> boost::json::value {
+    return [&protocol, is_tx_tree](MmapItem const& item) -> boost::json::value {
         boost::json::array arr;
         arr.emplace_back(upper_hex(item.key().to_hash()));
 
         try
         {
             std::vector<uint8_t> buf(
-                item.slice().data(),
-                item.slice().data() + item.slice().size());
-            buf.insert(
-                buf.end(), item.key().data(), item.key().data() + 32);
+                item.slice().data(), item.slice().data() + item.slice().size());
+            buf.insert(buf.end(), item.key().data(), item.key().data() + 32);
             Slice full(buf.data(), buf.size());
 
             if (is_tx_tree)
@@ -83,8 +78,7 @@ sle_hashes_contain(
 {
     try
     {
-        auto json =
-            catl::xdata::parse_leaf(leaf_data, protocol, false);
+        auto json = catl::xdata::parse_leaf(leaf_data, protocol, false);
         auto const& obj = json.as_object();
         if (!obj.contains("Hashes"))
         {
@@ -142,18 +136,17 @@ build_proof(
         AbbrevMap tree;
     };
 
-    auto walk_state = [&](std::shared_ptr<PeerClient> c,
-                          Hash256 const& ledger_hash,
-                          Hash256 const& key)
-        -> boost::asio::awaitable<StateWalkResult> {
+    auto walk_state =
+        [&](std::shared_ptr<PeerClient> c,
+            Hash256 const& ledger_hash,
+            Hash256 const& key) -> boost::asio::awaitable<StateWalkResult> {
         StateWalkResult r;
         TreeWalker walker(c, ledger_hash, TreeWalkState::TreeType::state);
         walker.set_speculative_depth(8);
         walker.add_target(key);
         walker.set_on_placeholder(
             [&](std::span<const uint8_t> nid, Hash256 const& h) {
-                r.placeholders.push_back(
-                    {catl::shamap::SHAMapNodeID(nid), h});
+                r.placeholders.push_back({catl::shamap::SHAMapNodeID(nid), h});
             });
         walker.set_on_leaf([&](std::span<const uint8_t> nid,
                                Hash256 const&,
@@ -166,24 +159,20 @@ build_proof(
         co_return r;
     };
 
-    auto protocol =
-        catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    auto protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
 
     auto build_state_proof =
         [&](StateWalkResult const& wr,
             Hash256 const& key,
             Hash256 const& expected_account_hash) -> StateProofResult {
         catl::shamap::SHAMapOptions opts;
-        opts.tree_collapse_impl =
-            catl::shamap::TreeCollapseImpl::leafs_only;
+        opts.tree_collapse_impl = catl::shamap::TreeCollapseImpl::leafs_only;
         opts.reference_hash_impl =
             catl::shamap::ReferenceHashImpl::recursive_simple;
         AbbrevMap abbrev(catl::shamap::tnACCOUNT_STATE, opts);
 
-        Slice item_data(
-            wr.leaf_data.data(), wr.leaf_data.size() - 32);
-        boost::intrusive_ptr<MmapItem> item(
-            OwnedItem::create(key, item_data));
+        Slice item_data(wr.leaf_data.data(), wr.leaf_data.size() - 32);
+        boost::intrusive_ptr<MmapItem> item(OwnedItem::create(key, item_data));
         abbrev.set_item_at(wr.leaf_nid, item);
 
         for (auto& p : wr.placeholders)
@@ -219,8 +208,7 @@ build_proof(
     uint32_t tx_ledger_seq = 0;
     if (tx_obj.contains("ledger_index"))
     {
-        tx_ledger_seq =
-            tx_obj.at("ledger_index").to_number<uint32_t>();
+        tx_ledger_seq = tx_obj.at("ledger_index").to_number<uint32_t>();
     }
     if (tx_ledger_seq == 0)
     {
@@ -253,14 +241,12 @@ build_proof(
 
     // ── Step 2: Peer — connect and collect validations ──
     std::shared_ptr<PeerClient> client;
-    auto peer_seq =
-        co_await co_connect(io, peer_host, peer_port, 0, client);
+    auto peer_seq = co_await co_connect(io, peer_host, peer_port, 0, client);
     PLOGI(log_, "Connected to peer, peer at ledger ", peer_seq);
 
     ValidationCollector val_collector(protocol);
     client->set_unsolicited_handler(
-        [&val_collector](
-            uint16_t type, std::vector<uint8_t> const& data) {
+        [&val_collector](uint16_t type, std::vector<uint8_t> const& data) {
             val_collector.on_packet(type, data);
         });
     PLOGI(log_, "Listening for validations...");
@@ -273,8 +259,7 @@ build_proof(
             vl_timer.expires_after(std::chrono::milliseconds(100));
             boost::system::error_code ec;
             co_await vl_timer.async_wait(
-                boost::asio::redirect_error(
-                    boost::asio::use_awaitable, ec));
+                boost::asio::redirect_error(boost::asio::use_awaitable, ec));
         }
     }
 
@@ -291,15 +276,13 @@ build_proof(
     if (vl_data && !val_collector.quorum_reached)
     {
         PLOGI(log_, "Waiting for validation quorum...");
-        boost::asio::steady_timer quorum_timer(
-            io, std::chrono::seconds(15));
+        boost::asio::steady_timer quorum_timer(io, std::chrono::seconds(15));
         while (!val_collector.quorum_reached)
         {
             quorum_timer.expires_after(std::chrono::milliseconds(200));
             boost::system::error_code ec;
             co_await quorum_timer.async_wait(
-                boost::asio::redirect_error(
-                    boost::asio::use_awaitable, ec));
+                boost::asio::redirect_error(boost::asio::use_awaitable, ec));
             if (ec)
             {
                 break;
@@ -313,8 +296,7 @@ build_proof(
     if (val_collector.quorum_reached)
     {
         anchor_hash = val_collector.quorum_hash;
-        anchor_seq =
-            val_collector.quorum_validations()[0].ledger_seq;
+        anchor_seq = val_collector.quorum_validations()[0].ledger_seq;
         PLOGI(
             log_,
             "Using validated anchor: seq=",
@@ -337,8 +319,7 @@ build_proof(
             " as unvalidated anchor");
     }
 
-    auto anchor_hdr =
-        co_await co_get_ledger_header(client, anchor_seq);
+    auto anchor_hdr = co_await co_get_ledger_header(client, anchor_seq);
     auto anchor_header = anchor_hdr.header();
     if (!val_collector.quorum_reached)
     {
@@ -369,16 +350,14 @@ build_proof(
         auto wr = co_await walk_state(client, anchor_hash, skip_key_val);
         if (!wr.found)
         {
-            throw std::runtime_error(
-                "Short skip list not found in state tree");
+            throw std::runtime_error("Short skip list not found in state tree");
         }
 
-        auto sp = build_state_proof(
-            wr, skip_key_val, anchor_header.account_hash());
+        auto sp =
+            build_state_proof(wr, skip_key_val, anchor_header.account_hash());
         state_proofs.emplace_back(skip_key_val, std::move(sp));
 
-        auto target_hdr =
-            co_await co_get_ledger_header(client, tx_ledger_seq);
+        auto target_hdr = co_await co_get_ledger_header(client, tx_ledger_seq);
         target_ledger_hash = target_hdr.ledger_hash256();
 
         Slice sle_leaf(wr.leaf_data.data(), wr.leaf_data.size());
@@ -399,12 +378,10 @@ build_proof(
         PLOGI(log_, "  Flag ledger: ", flag_seq);
 
         auto long_skip_key = skip_list_key(flag_seq);
-        auto wr1 =
-            co_await walk_state(client, anchor_hash, long_skip_key);
+        auto wr1 = co_await walk_state(client, anchor_hash, long_skip_key);
         if (!wr1.found)
         {
-            throw std::runtime_error(
-                "Long skip list not found in state tree");
+            throw std::runtime_error("Long skip list not found in state tree");
         }
 
         {
@@ -413,8 +390,7 @@ build_proof(
             state_proofs.emplace_back(long_skip_key, std::move(sp));
         }
 
-        auto flag_hdr =
-            co_await co_get_ledger_header(client, flag_seq);
+        auto flag_hdr = co_await co_get_ledger_header(client, flag_seq);
         auto flag_hash = flag_hdr.ledger_hash256();
         auto flag_header = flag_hdr.header();
 
@@ -429,8 +405,7 @@ build_proof(
         }
 
         auto short_skip_key = skip_list_key();
-        auto wr2 =
-            co_await walk_state(client, flag_hash, short_skip_key);
+        auto wr2 = co_await walk_state(client, flag_hash, short_skip_key);
         if (!wr2.found)
         {
             throw std::runtime_error(
@@ -443,13 +418,11 @@ build_proof(
             state_proofs.emplace_back(short_skip_key, std::move(sp));
         }
 
-        auto target_hdr =
-            co_await co_get_ledger_header(client, tx_ledger_seq);
+        auto target_hdr = co_await co_get_ledger_header(client, tx_ledger_seq);
         target_ledger_hash = target_hdr.ledger_hash256();
 
         Slice short_sle(wr2.leaf_data.data(), wr2.leaf_data.size());
-        if (!sle_hashes_contain(
-                short_sle, target_ledger_hash, protocol))
+        if (!sle_hashes_contain(short_sle, target_ledger_hash, protocol))
         {
             PLOGW(log_, "  Target hash not found in flag's short skip list!");
         }
@@ -460,17 +433,12 @@ build_proof(
     }
 
     // ── Step 4: Get target ledger header ──
-    auto target_hdr =
-        co_await co_get_ledger_header(client, tx_ledger_seq);
+    auto target_hdr = co_await co_get_ledger_header(client, tx_ledger_seq);
     auto target_header = target_hdr.header();
 
     // ── Step 5: Walk TX tree ──
     auto ledger_hash = target_hdr.ledger_hash256();
-    PLOGI(
-        log_,
-        "Walking TX tree for ",
-        tx_hash_str.substr(0, 16),
-        "...");
+    PLOGI(log_, "Walking TX tree for ", tx_hash_str.substr(0, 16), "...");
 
     struct PlaceholderEntry
     {
@@ -483,15 +451,13 @@ build_proof(
     bool found_leaf = false;
 
     {
-        TreeWalker walker(
-            client, ledger_hash, TreeWalkState::TreeType::tx);
+        TreeWalker walker(client, ledger_hash, TreeWalkState::TreeType::tx);
         walker.set_speculative_depth(4);
         walker.add_target(tx_hash);
 
         walker.set_on_placeholder(
             [&](std::span<const uint8_t> nid, Hash256 const& hash) {
-                placeholders.push_back(
-                    {catl::shamap::SHAMapNodeID(nid), hash});
+                placeholders.push_back({catl::shamap::SHAMapNodeID(nid), hash});
             });
 
         walker.set_on_leaf([&](std::span<const uint8_t> nid,
@@ -518,8 +484,7 @@ build_proof(
     PLOGI(log_, "Building abbreviated tree...");
 
     catl::shamap::SHAMapOptions opts;
-    opts.tree_collapse_impl =
-        catl::shamap::TreeCollapseImpl::leafs_only;
+    opts.tree_collapse_impl = catl::shamap::TreeCollapseImpl::leafs_only;
     opts.reference_hash_impl =
         catl::shamap::ReferenceHashImpl::recursive_simple;
     AbbrevMap abbrev(catl::shamap::tnTRANSACTION_MD, opts);
@@ -543,10 +508,7 @@ build_proof(
     auto expected_tx_hash = target_header.tx_hash();
     bool verified = (abbrev_hash == expected_tx_hash);
     PLOGI(log_, "  Abbreviated tree: ", placed, " placeholders");
-    PLOGI(
-        log_,
-        "  TX tree hash: ",
-        verified ? "VERIFIED" : "MISMATCH");
+    PLOGI(log_, "  TX tree hash: ", verified ? "VERIFIED" : "MISMATCH");
 
     // ── Step 7: Build proof chain ──
     ProofChain proof_chain;
@@ -566,11 +528,18 @@ build_proof(
         };
     };
 
-    auto make_trie = [&](auto& tree, bool is_tx) -> boost::json::value {
+    auto make_trie_data =
+        [&](auto& tree, bool is_tx, TrieData::TreeType tree_type) -> TrieData {
+        TrieData trie;
+        trie.tree = tree_type;
+        // JSON trie (with decoded leaf data for human readability)
         catl::shamap::TrieJsonOptions trie_opts;
         trie_opts.on_leaf = make_proof_leaf_callback(protocol, is_tx);
-        return tree.get_root()->trie_json(
-            trie_opts, tree.get_options());
+        trie.trie_json =
+            tree.get_root()->trie_json(trie_opts, tree.get_options());
+        // Binary trie (raw leaf data for compact encoding)
+        trie.trie_binary = tree.trie_binary();
+        return trie;
     };
 
     // Anchor
@@ -582,8 +551,7 @@ build_proof(
         if (vl_data)
         {
             anchor.publisher_key_hex = vl_data->publisher_key_hex;
-            anchor.publisher_manifest =
-                vl_data->publisher_manifest.raw;
+            anchor.publisher_manifest = vl_data->publisher_manifest.raw;
             anchor.blob = vl_data->blob_bytes;
             anchor.blob_signature = vl_data->blob_signature;
         }
@@ -605,49 +573,36 @@ build_proof(
     {
         {
             auto& [key, sp] = state_proofs[0];
-            TrieData trie;
-            trie.tree = TrieData::TreeType::state;
-            trie.trie_json = make_trie(sp.tree, false);
-            proof_chain.steps.push_back(std::move(trie));
+            proof_chain.steps.push_back(
+                make_trie_data(sp.tree, false, TrieData::TreeType::state));
         }
         {
-            uint32_t flag_seq =
-                ((tx_ledger_seq + 255) / 256) * 256;
-            auto flag_hdr2 =
-                co_await co_get_ledger_header(client, flag_seq);
+            uint32_t flag_seq = ((tx_ledger_seq + 255) / 256) * 256;
+            auto flag_hdr2 = co_await co_get_ledger_header(client, flag_seq);
             proof_chain.steps.push_back(make_header(flag_hdr2));
         }
         {
             auto& [key, sp] = state_proofs[1];
-            TrieData trie;
-            trie.tree = TrieData::TreeType::state;
-            trie.trie_json = make_trie(sp.tree, false);
-            proof_chain.steps.push_back(std::move(trie));
+            proof_chain.steps.push_back(
+                make_trie_data(sp.tree, false, TrieData::TreeType::state));
         }
     }
     else if (!state_proofs.empty())
     {
         auto& [key, sp] = state_proofs[0];
-        TrieData trie;
-        trie.tree = TrieData::TreeType::state;
-        trie.trie_json = make_trie(sp.tree, false);
-        proof_chain.steps.push_back(std::move(trie));
+        proof_chain.steps.push_back(
+            make_trie_data(sp.tree, false, TrieData::TreeType::state));
     }
 
     // Target header
     proof_chain.steps.push_back(make_header(target_hdr));
 
     // TX tree proof
-    {
-        TrieData trie;
-        trie.tree = TrieData::TreeType::tx;
-        trie.trie_json = make_trie(abbrev, true);
-        proof_chain.steps.push_back(std::move(trie));
-    }
+    proof_chain.steps.push_back(
+        make_trie_data(abbrev, true, TrieData::TreeType::tx));
 
     co_return BuildResult{
-        std::move(proof_chain),
-        vl_data ? vl_data->publisher_key_hex : ""};
+        std::move(proof_chain), vl_data ? vl_data->publisher_key_hex : ""};
 }
 
 }  // namespace xproof

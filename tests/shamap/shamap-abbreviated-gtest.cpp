@@ -1,17 +1,18 @@
 #include "catl/core/types.h"
-#include "catl/shamap/shamap-header-only.h"
+#include "catl/crypto/sha512-half-hasher.h"
+#include "catl/shamap/shamap-hashprefix.h"
+#include "catl/shamap/shamap-nodeid.h"
 #include "catl/shamap/shamap-traits.h"
+#include "catl/shamap/shamap.h"
 
 #include <algorithm>
 #include <boost/json.hpp>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <map>
 #include <random>
 #include <sstream>
 #include <string>
-
-// Instantiate all SHAMap templates for AbbreviatedTreeTraits
-INSTANTIATE_SHAMAP_NODE_TRAITS(catl::shamap::AbbreviatedTreeTraits);
 
 using namespace catl::shamap;
 

@@ -1,8 +1,5 @@
 # Create the core library
-add_library(
-  catl_core STATIC src/types.cpp src/logger.cpp # Add other implementation files
-                                                # as needed
-)
+add_library(catl_core STATIC src/types.cpp src/logger.cpp src/base64.cpp)
 
 # Set up include directories
 target_include_directories(

@@ -211,6 +211,15 @@ SHAMapT<Traits>::trie_json_string(TrieJsonOptions options) const
 }
 
 template <typename Traits>
+std::vector<uint8_t>
+SHAMapT<Traits>::trie_binary() const
+{
+    std::vector<uint8_t> out;
+    root->sink_trie_binary(out, options_);
+    return out;
+}
+
+template <typename Traits>
 void
 SHAMapT<Traits>::visit_items(
     const std::function<void(const MmapItem&)>& visitor) const

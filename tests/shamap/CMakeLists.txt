@@ -12,6 +12,20 @@ target_link_libraries(
   PUBLIC catl::shamap catl::test_utils
   PRIVATE OpenSSL::SSL GTest::gtest)
 
+# Abbreviated tree template instantiation (same pattern as xproof)
+add_library(catl_shamap_abbreviated_test STATIC shamap-abbreviated.cpp)
+
+target_precompile_headers(catl_shamap_abbreviated_test PRIVATE
+                          ${CMAKE_CURRENT_SOURCE_DIR}/shamap-abbreviated.h)
+
+target_link_libraries(
+  catl_shamap_abbreviated_test
+  PUBLIC catl::shamap_headers
+         catl::crypto
+         Boost::json
+         Boost::headers
+         OpenSSL::SSL)
+
 file(GLOB SHAMAP_TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*-gtest.cpp")
 
 add_executable(shamap_gtest ${SHAMAP_TEST_SOURCES})
@@ -22,6 +36,7 @@ target_include_directories(shamap_gtest
 target_link_libraries(
   shamap_gtest
   PRIVATE catl_shamap_test_utils # Brings in catl::shamap
+          catl_shamap_abbreviated_test
           GTest::gtest_main
           OpenSSL::SSL
           Boost::json

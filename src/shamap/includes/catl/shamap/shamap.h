@@ -242,6 +242,10 @@ public:
     std::string
     trie_json_string(TrieJsonOptions options = {}) const;
 
+    /// Serialize the tree to compact binary trie format.
+    std::vector<uint8_t>
+    trie_binary() const;
+
     void
     visit_items(const std::function<void(const MmapItem&)>& visitor) const;
 
@@ -454,14 +458,12 @@ public:
                         if (depth % 2 == 0)
                         {
                             child_path[byte_idx] =
-                                (child_path[byte_idx] & 0x0F) |
-                                (nibble << 4);
+                                (child_path[byte_idx] & 0x0F) | (nibble << 4);
                         }
                         else
                         {
                             child_path[byte_idx] =
-                                (child_path[byte_idx] & 0xF0) |
-                                (nibble & 0xF);
+                                (child_path[byte_idx] & 0xF0) | (nibble & 0xF);
                         }
 
                         walk(kv.value(), depth + 1, child_path);
@@ -473,6 +475,105 @@ public:
         uint8_t root_path[32] = {};
         Walker walker{map, on_leaf};
         walker.walk(trie, 0, root_path);
+
+        return map;
+    }
+
+    /// Reconstruct an abbreviated SHAMap from binary trie data.
+    ///
+    /// Binary trie format (per SPEC 3.4):
+    ///   4-byte LE branch header (2 bits per branch)
+    ///   Then for each non-empty branch:
+    ///     01 (leaf): [key: 32][data_len: varint][data]
+    ///     10 (inner): recurse
+    ///     11 (hash): [32 bytes]
+    static SHAMapT<Traits>
+    from_trie_binary(std::span<const uint8_t> data, SHAMapNodeType type)
+        requires(has_placeholders_v<Traits>)
+    {
+        SHAMapOptions opts;
+        opts.tree_collapse_impl = TreeCollapseImpl::leafs_only;
+        opts.reference_hash_impl = ReferenceHashImpl::recursive_simple;
+        SHAMapT<Traits> map(type, opts);
+
+        struct Walker
+        {
+            SHAMapT<Traits>& map;
+            std::span<const uint8_t> data;
+            size_t pos = 0;
+
+            void
+            walk(uint8_t depth, uint8_t path[32])
+            {
+                uint32_t header = read_u32_le(data, pos);
+
+                for (int i = 0; i < 16; i++)
+                {
+                    auto bt = get_branch_type(header, i);
+                    if (bt == BranchType::empty)
+                        continue;
+
+                    // Build child path
+                    uint8_t child_path[32];
+                    std::memcpy(child_path, path, 32);
+                    int byte_idx = depth / 2;
+                    if (depth % 2 == 0)
+                    {
+                        child_path[byte_idx] = (child_path[byte_idx] & 0x0F) |
+                            (static_cast<uint8_t>(i) << 4);
+                    }
+                    else
+                    {
+                        child_path[byte_idx] = (child_path[byte_idx] & 0xF0) |
+                            (static_cast<uint8_t>(i) & 0xF);
+                    }
+
+                    if (bt == BranchType::leaf)
+                    {
+                        // key: 32 bytes
+                        if (pos + 32 > data.size())
+                            throw std::runtime_error(
+                                "binary trie: unexpected end reading leaf key");
+                        Hash256 key(data.data() + pos);
+                        pos += 32;
+                        // data_len: varint
+                        size_t data_len = leb128_decode(data, pos);
+                        if (pos + data_len > data.size())
+                            throw std::runtime_error(
+                                "binary trie: unexpected end reading leaf "
+                                "data");
+                        // Create item
+                        Slice item_data(data.data() + pos, data_len);
+                        auto item = boost::intrusive_ptr<MmapItem>(
+                            OwnedItem::create(key, item_data));
+                        pos += data_len;
+
+                        Hash256 path_hash(child_path);
+                        SHAMapNodeID nid(path_hash, depth + 1);
+                        map.set_item_at(nid, item);
+                    }
+                    else if (bt == BranchType::inner)
+                    {
+                        walk(depth + 1, child_path);
+                    }
+                    else if (bt == BranchType::hash)
+                    {
+                        if (pos + 32 > data.size())
+                            throw std::runtime_error(
+                                "binary trie: unexpected end reading hash");
+                        Hash256 hash(data.data() + pos);
+                        pos += 32;
+                        Hash256 path_hash(child_path);
+                        SHAMapNodeID nid(path_hash, depth + 1);
+                        map.set_placeholder(nid, hash);
+                    }
+                }
+            }
+        };
+
+        uint8_t root_path[32] = {};
+        Walker walker{map, data, 0};
+        walker.walk(0, root_path);
 
         return map;
     }

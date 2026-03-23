@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catl/shamap/binary-trie.h"
 #include "catl/shamap/shamap-leafnode.h"
 #include "catl/shamap/shamap-nodechildren.h"
 #include "catl/shamap/shamap-nodetype.h"
@@ -149,6 +150,13 @@ public:
     boost::json::object
     trie_json(TrieJsonOptions options, SHAMapOptions const& shamap_options)
         const;
+
+    /// Serialize this inner node (and descendants) to binary trie format.
+    /// Depth-first, pre-order: 4-byte branch header + child data.
+    void
+    sink_trie_binary(
+        std::vector<uint8_t>& out,
+        SHAMapOptions const& shamap_options) const;
 
     void
     invalidate_hash_recursive();
