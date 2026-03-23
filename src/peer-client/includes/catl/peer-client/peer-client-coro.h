@@ -37,9 +37,36 @@ class PeerClientException : public std::runtime_error
 public:
     Error error;
 
+    static std::string
+    error_name(Error e)
+    {
+        switch (e)
+        {
+            case Error::Success:
+                return "Success";
+            case Error::Timeout:
+                return "Timeout (peer did not respond in time)";
+            case Error::Disconnected:
+                return "Disconnected";
+            case Error::NoLedger:
+                return "NoLedger (peer does not have this ledger)";
+            case Error::NoNode:
+                return "NoNode (requested node not found)";
+            case Error::BadRequest:
+                return "BadRequest";
+            case Error::FeatureDisabled:
+                return "FeatureDisabled";
+            case Error::ParseError:
+                return "ParseError";
+            case Error::Cancelled:
+                return "Cancelled";
+            default:
+                return "Unknown(" + std::to_string(static_cast<int>(e)) + ")";
+        }
+    }
+
     explicit PeerClientException(Error e)
-        : std::runtime_error(
-              "PeerClient error: " + std::to_string(static_cast<int>(e)))
+        : std::runtime_error("PeerClient: " + error_name(e))
         , error(e)
     {
     }
