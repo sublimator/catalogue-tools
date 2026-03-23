@@ -1,4 +1,5 @@
 #include "xproof/anchor-verifier.h"
+#include "xproof/proof-steps.h"
 
 #include <catl/core/logger.h>
 #include <catl/crypto/sha512-half-hasher.h>
@@ -433,16 +434,14 @@ make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree)
                 arr.emplace_back(catl::xdata::json::parse_transaction(
                     full,
                     protocol,
-                    {.includes_prefix = false,
-                     .include_blob = true}));
+                    {.includes_prefix = false, .include_blob = true}));
             }
             else
             {
                 arr.emplace_back(catl::xdata::json::parse_leaf(
                     full,
                     protocol,
-                    {.includes_prefix = false,
-                     .include_blob = true}));
+                    {.includes_prefix = false, .include_blob = true}));
             }
         }
         catch (std::exception const&)
@@ -705,14 +704,14 @@ resolve_proof_chain(
     int step_num = 0;
     bool all_ok = true;
 
-    // Track chain context for narrative
-    int header_count = 0;       // how many headers we've seen
-    int state_proof_count = 0;  // how many state proofs we've seen
+    // Track chain context
+    int header_count = 0;
+    int state_proof_count = 0;
     uint32_t anchor_seq = 0;
-    uint32_t target_seq = 0;    // last header seq (becomes the target)
+    uint32_t target_seq = 0;
 
-    // Narrative explanation of the proof chain
-    std::vector<std::string> narrative;
+    // Structured proof steps for narrative rendering
+    std::vector<xproof::ProofStep> proof_steps;
 
     for (auto const& step_val : chain)
     {
@@ -757,14 +756,31 @@ resolve_proof_chain(
                     std::string(step.at("note").as_string()));
             }
 
-            narrative.push_back(
-                "1. Start with anchor ledger " + std::to_string(anchor_seq) +
-                " (hash " + hash_hex.substr(0, 16) + "...)");
+            xproof::AnchorStep anchor_step;
+            anchor_step.ledger_index = anchor_seq;
+            anchor_step.ledger_hash = hash_hex.substr(0, 16);
 
             if (!trusted_publisher_key.empty())
             {
+                std::vector<std::string> av_narrative;
                 auto av_result = xproof::AnchorVerifier::verify(
-                    step, trusted_publisher_key, narrative);
+                    step, trusted_publisher_key, av_narrative);
+
+                anchor_step.sub_steps = std::move(av_narrative);
+                anchor_step.publisher_key = trusted_publisher_key.substr(0, 16);
+                anchor_step.publisher_key_check = av_result.verified
+                    ? xproof::Check::pass
+                    : xproof::Check::fail;
+                anchor_step.blob_signature_check = xproof::Check::pass;
+                anchor_step.unl_size = av_result.unl_size;
+                anchor_step.validations_total = av_result.validations_total;
+                anchor_step.validations_verified =
+                    av_result.validations_verified;
+                anchor_step.validations_matched =
+                    av_result.validations_matched_unl;
+                anchor_step.quorum_check = av_result.verified
+                    ? xproof::Check::pass
+                    : xproof::Check::fail;
 
                 if (av_result.verified)
                 {
@@ -781,19 +797,13 @@ resolve_proof_chain(
                 else
                 {
                     PLOGE(
-                        verify_log,
-                        "  Anchor: FAILED (",
-                        av_result.error,
-                        ")");
+                        verify_log, "  Anchor: FAILED (", av_result.error, ")");
                     all_ok = false;
                 }
             }
-            else
-            {
-                narrative.push_back(
-                    "   No trusted publisher key provided — "
-                    "anchor trust not verified.");
-            }
+
+            proof_steps.push_back(
+                {xproof::StepType::anchor, step_num, std::move(anchor_step)});
         }
         // ── Ledger Header ───────────────────────────────────────
         else if (type == "ledger_header")
@@ -804,8 +814,8 @@ resolve_proof_chain(
             target_seq = seq;
 
             // Determine role of this header in the chain.
-            // In a 2-hop chain: anchor → state(long) → flag → state(short) → target → tx
-            // In a 1-hop chain: anchor → state(short) → target → tx
+            // In a 2-hop chain: anchor → state(long) → flag → state(short) →
+            // target → tx In a 1-hop chain: anchor → state(short) → target → tx
             // Flag only exists when there are 2 state proofs.
             std::string role;
             if (header_count == 1)
@@ -821,9 +831,9 @@ resolve_proof_chain(
             else if (pending_hashes && state_proof_count == 1)
             {
                 // After 1st state proof:
-                // Could be flag (if more state proofs coming) or target (single-hop).
-                // We don't know yet, so check: is seq a multiple of 256?
-                // Flag ledgers are always multiples of 256.
+                // Could be flag (if more state proofs coming) or target
+                // (single-hop). We don't know yet, so check: is seq a multiple
+                // of 256? Flag ledgers are always multiples of 256.
                 if (seq % 256 == 0 && seq != anchor_seq)
                 {
                     role = "flag";
@@ -857,19 +867,23 @@ resolve_proof_chain(
                 computed_hex.substr(0, 16),
                 "...");
 
+            xproof::HeaderStep hdr_step;
+            hdr_step.seq = seq;
+            hdr_step.computed_hash = computed_hex.substr(0, 16);
+            hdr_step.role = (role == "anchor")
+                ? xproof::HeaderRole::anchor
+                : (role == "flag" ? xproof::HeaderRole::flag
+                                  : xproof::HeaderRole::target);
+
             if (have_trusted_hash)
             {
+                hdr_step.method = xproof::HeaderVerifyMethod::anchor_hash;
                 if (computed == trusted_hash)
                 {
                     PLOGI(
                         verify_log,
                         "  Hash check:   PASS (matches trusted hash)");
-                    narrative.push_back(
-                        "   Anchor header (ledger " + std::to_string(seq) +
-                        "): SHA512Half(LWR\\0 || header_fields) = " +
-                        computed_hex.substr(0, 16) +
-                        "... matches the anchor hash. This header is "
-                        "authentic.");
+                    hdr_step.hash_check = xproof::Check::pass;
                 }
                 else
                 {
@@ -878,14 +892,18 @@ resolve_proof_chain(
                         verify_log, "    expected: ", upper_hex(trusted_hash));
                     PLOGE(verify_log, "    computed: ", computed_hex);
                     all_ok = false;
-                    narrative.push_back(
-                        "   FAIL: header hash " + computed_hex.substr(0, 16) +
-                        "... != trusted " +
-                        upper_hex(trusted_hash).substr(0, 16) + "...");
+                    hdr_step.hash_check = xproof::Check::fail;
                 }
             }
             else if (pending_hashes)
             {
+                hdr_step.method = xproof::HeaderVerifyMethod::skip_list;
+                hdr_step.skip_type = (role == "flag")
+                    ? xproof::SkipListType::flag
+                    : xproof::SkipListType::recent;
+                hdr_step.skip_list_size =
+                    static_cast<int>(pending_hashes->size());
+
                 bool found = false;
                 for (auto const& h : *pending_hashes)
                 {
@@ -896,10 +914,6 @@ resolve_proof_chain(
                     }
                 }
 
-                std::string via = (role == "flag")
-                    ? "a flag skip list (every 256th ledger in this range)"
-                    : "the recent ledger hashes list (last 256 ledgers)";
-
                 if (found)
                 {
                     PLOGI(
@@ -907,15 +921,7 @@ resolve_proof_chain(
                         "  Skip list:    PASS (hash found in ",
                         pending_hashes->size(),
                         " entries)");
-                    narrative.push_back(
-                        "   " +
-                        std::string(role == "flag" ? "Flag" : "Target") +
-                        " ledger " + std::to_string(seq) + ": hash " +
-                        computed_hex.substr(0, 16) + "... found in " + via +
-                        " (" + std::to_string(pending_hashes_count) +
-                        " entries). The chain from anchor " +
-                        std::to_string(anchor_seq) + " to ledger " +
-                        std::to_string(seq) + " is verified.");
+                    hdr_step.hash_check = xproof::Check::pass;
                 }
                 else
                 {
@@ -925,9 +931,7 @@ resolve_proof_chain(
                         pending_hashes->size(),
                         " entries)");
                     all_ok = false;
-                    narrative.push_back(
-                        "   FAIL: hash " + computed_hex.substr(0, 16) +
-                        "... not found in " + via + "!");
+                    hdr_step.hash_check = xproof::Check::fail;
                 }
                 pending_hashes = nullptr;
             }
@@ -950,12 +954,13 @@ resolve_proof_chain(
                 upper_hex(trusted_ac_hash).substr(0, 16),
                 "...");
 
-            narrative.push_back(
-                "   " + std::string(role == "anchor" ? "Anchor" : (role == "flag" ? "Flag" : "Target")) +
-                " header provides tx_hash=" +
-                upper_hex(trusted_tx_hash).substr(0, 16) +
-                "... and account_hash=" +
-                upper_hex(trusted_ac_hash).substr(0, 16) + "...");
+            hdr_step.tx_hash = upper_hex(trusted_tx_hash).substr(0, 16);
+            hdr_step.account_hash = upper_hex(trusted_ac_hash).substr(0, 16);
+
+            proof_steps.push_back(
+                {xproof::StepType::ledger_header,
+                 step_num,
+                 std::move(hdr_step)});
         }
         // ── Map Proof ───────────────────────────────────────────
         else if (type == "map_proof")
@@ -987,10 +992,23 @@ resolve_proof_chain(
                     "...");
             }
 
+            xproof::MapProofStep map_step;
+            map_step.is_state = is_state;
+
+            if (have_tree_hashes)
+            {
+                map_step.expected_root = upper_hex(expected).substr(0, 16);
+            }
+
             if (step.contains("trie"))
             {
                 TrieStats stats;
                 count_trie_nodes(step.at("trie"), 0, stats);
+                map_step.inners = stats.inners;
+                map_step.leaves = stats.leaves;
+                map_step.placeholders = stats.placeholders;
+                map_step.max_depth = stats.max_depth;
+
                 PLOGI(
                     verify_log,
                     "  Trie: ",
@@ -1002,120 +1020,65 @@ resolve_proof_chain(
                     " placeholders, max_depth=",
                     stats.max_depth);
 
-                std::string trie_desc = "   Map proof (" + tree_type +
-                    " tree): abbreviated trie with " +
-                    std::to_string(stats.leaves) + " leaf, " +
-                    std::to_string(stats.placeholders) +
-                    " placeholder hashes, " + std::to_string(stats.inners) +
-                    " inners (depth " + std::to_string(stats.max_depth) + ").";
-
                 if (is_state)
                 {
                     auto const* hashes = extract_leaf_hashes(step.at("trie"));
                     if (hashes)
                     {
                         pending_hashes_count = static_cast<int>(hashes->size());
+                        pending_hashes = hashes;
+                        map_step.hashes_count = pending_hashes_count;
+
+                        bool is_flag_skip =
+                            (state_proof_count == 1 && hashes->size() < 256);
+                        map_step.skip_type = is_flag_skip
+                            ? xproof::SkipListType::flag
+                            : xproof::SkipListType::recent;
+
                         PLOGI(
                             verify_log,
                             "  Skip list:    ",
                             hashes->size(),
                             " hashes in LedgerHashes SLE");
-                        pending_hashes = hashes;
-                        // First state proof in a 2-hop chain = long skip list
-                    // (flag ledger hashes every 256th). Otherwise = short
-                    // skip list (last 256 ledger hashes). We detect 2-hop
-                    // by checking if there are more map_proof(state) steps
-                    // ahead, but simpler: count how many state proofs total.
-                    // Since we process in order, if this is state_proof #1
-                    // and there's a 2nd one coming, the entries will be
-                    // flag ledger hashes (smaller count, ~100-400).
-                    // Short skip list always has exactly 256 entries when
-                    // the ledger is deep enough.
-                    // Heuristic: if entries < 256 and it's the 1st state
-                    // proof, it's likely the long skip list.
-                    bool is_long_skip =
-                        (state_proof_count == 1 && hashes->size() < 256);
-                    std::string skip_type = is_long_skip
-                        ? "skip list of flag ledger hashes "
-                          "(every 256th ledger in this range)"
-                        : "recent ledger hashes (last 256 ledgers)";
-                    trie_desc += " Leaf is a LedgerHashes SLE (" +
-                        skip_type + ") with " +
-                        std::to_string(hashes->size()) +
-                        " entries. The next header's hash must "
-                        "appear in this list.";
-                    }
-                    else
-                    {
-                        PLOGW(
-                            verify_log,
-                            "  No Hashes field found in state leaf");
                     }
                 }
                 else
                 {
-                    // TX tree — extract transaction details from leaf
+                    // TX tree — extract transaction details
                     auto const* leaf = extract_trie_leaf(step.at("trie"));
-                    if (leaf && leaf->is_array() && leaf->as_array().size() >= 2)
+                    if (leaf && leaf->is_array() &&
+                        leaf->as_array().size() >= 2)
                     {
-                        auto const& leaf_data = leaf->as_array()[1];
-                        if (leaf_data.is_object())
+                        auto const& ld = leaf->as_array()[1];
+                        if (ld.is_object())
                         {
-                            auto const& ld = leaf_data.as_object();
-                            std::string tx_type, tx_account;
-                            if (ld.contains("tx") &&
-                                ld.at("tx").is_object())
+                            auto const& lobj = ld.as_object();
+                            if (lobj.contains("tx") &&
+                                lobj.at("tx").is_object())
                             {
-                                auto const& tx = ld.at("tx").as_object();
+                                auto const& tx = lobj.at("tx").as_object();
                                 if (tx.contains("TransactionType"))
                                 {
-                                    tx_type = std::string(
-                                        tx.at("TransactionType")
-                                            .as_string());
+                                    map_step.tx_type = std::string(
+                                        tx.at("TransactionType").as_string());
+                                    PLOGI(
+                                        verify_log,
+                                        "  TX type:      ",
+                                        map_step.tx_type);
                                 }
                                 if (tx.contains("Account"))
                                 {
-                                    tx_account = std::string(
+                                    map_step.tx_account = std::string(
                                         tx.at("Account").as_string());
-                                }
-                            }
-                            if (!tx_type.empty())
-                            {
-                                trie_desc += " Transaction: " + tx_type;
-                                if (!tx_account.empty())
-                                {
-                                    trie_desc += " from " + tx_account;
-                                }
-                                trie_desc += ".";
-                                PLOGI(
-                                    verify_log,
-                                    "  TX type:      ",
-                                    tx_type);
-                                if (!tx_account.empty())
-                                {
                                     PLOGI(
                                         verify_log,
                                         "  TX account:   ",
-                                        tx_account);
+                                        map_step.tx_account);
                                 }
-                            }
-                            else
-                            {
-                                trie_desc +=
-                                    " Leaf contains the target "
-                                    "transaction + metadata.";
                             }
                         }
                     }
-                    else
-                    {
-                        trie_desc +=
-                            " Leaf contains the target "
-                            "transaction + metadata.";
-                    }
                 }
-
-                narrative.push_back(trie_desc);
             }
 
             // Reconstruct abbreviated tree from trie JSON and
@@ -1125,9 +1088,8 @@ resolve_proof_chain(
             {
                 try
                 {
-                    auto node_type = is_state
-                        ? catl::shamap::tnACCOUNT_STATE
-                        : catl::shamap::tnTRANSACTION_MD;
+                    auto node_type = is_state ? catl::shamap::tnACCOUNT_STATE
+                                              : catl::shamap::tnTRANSACTION_MD;
 
                     using AbbrevMap = catl::shamap::SHAMapT<
                         catl::shamap::AbbreviatedTreeTraits>;
@@ -1145,22 +1107,16 @@ resolve_proof_chain(
                                 data.as_object().contains("blob"))
                             {
                                 auto blob_hex = std::string(
-                                    data.as_object()
-                                        .at("blob")
-                                        .as_string());
+                                    data.as_object().at("blob").as_string());
                                 auto bytes = std::vector<uint8_t>();
                                 bytes.reserve(blob_hex.size() / 2);
-                                for (size_t i = 0;
-                                     i + 1 < blob_hex.size();
+                                for (size_t i = 0; i + 1 < blob_hex.size();
                                      i += 2)
                                 {
                                     unsigned int b;
                                     std::sscanf(
-                                        blob_hex.c_str() + i,
-                                        "%2x",
-                                        &b);
-                                    bytes.push_back(
-                                        static_cast<uint8_t>(b));
+                                        blob_hex.c_str() + i, "%2x", &b);
+                                    bytes.push_back(static_cast<uint8_t>(b));
                                 }
                                 Slice s(bytes.data(), bytes.size());
                                 return boost::intrusive_ptr<MmapItem>(
@@ -1178,6 +1134,9 @@ resolve_proof_chain(
                     auto expected_root =
                         is_state ? trusted_ac_hash : trusted_tx_hash;
 
+                    map_step.computed_root =
+                        upper_hex(computed_root).substr(0, 16);
+
                     if (computed_root == expected_root)
                     {
                         PLOGI(
@@ -1185,15 +1144,11 @@ resolve_proof_chain(
                             "  Trie root:    PASS (",
                             upper_hex(computed_root).substr(0, 16),
                             "... matches header)");
-                        narrative.push_back(
-                            "   Trie root hash recomputed from "
-                            "placeholders + leaf blob: VERIFIED.");
+                        map_step.root_hash_check = xproof::Check::pass;
                     }
                     else
                     {
-                        PLOGE(
-                            verify_log,
-                            "  Trie root:    FAIL!");
+                        PLOGE(verify_log, "  Trie root:    FAIL!");
                         PLOGE(
                             verify_log,
                             "    expected: ",
@@ -1202,17 +1157,22 @@ resolve_proof_chain(
                             verify_log,
                             "    computed: ",
                             upper_hex(computed_root));
+                        map_step.root_hash_check = xproof::Check::fail;
                         all_ok = false;
                     }
                 }
                 catch (std::exception const& e)
                 {
                     PLOGW(
-                        verify_log,
-                        "  Trie reconstruction failed: ",
-                        e.what());
+                        verify_log, "  Trie reconstruction failed: ", e.what());
                 }
             }
+
+            proof_steps.push_back(
+                {is_state ? xproof::StepType::state_proof
+                          : xproof::StepType::tx_proof,
+                 step_num,
+                 std::move(map_step)});
 
             have_tree_hashes = false;
         }
@@ -1241,16 +1201,15 @@ resolve_proof_chain(
         "═══════════════════════════════════════════════════════════════");
 
     // ── Narrative explanation ────────────────────────────────────
+    auto narrative_lines = xproof::render_narrative(proof_steps);
     PLOGI(verify_log, "");
-    PLOGI(verify_log, "How this proof works:");
-    PLOGI(verify_log, "");
-    for (auto const& line : narrative)
+    for (auto const& line : narrative_lines)
     {
         PLOGI(verify_log, line);
     }
-    PLOGI(verify_log, "");
     if (all_ok)
     {
+        PLOGI(verify_log, "");
         PLOGI(
             verify_log,
             "Each step is cryptographically chained: the anchor's hash "
@@ -2535,7 +2494,8 @@ main(int argc, char* argv[])
                             make_proof_leaf_callback(protocol, false);
                         step["trie"] = sp.tree.get_root()->trie_json(
                             trie_opts, sp.tree.get_options());
-                        // verified at build time, verifier re-checks independently
+                        // verified at build time, verifier re-checks
+                        // independently
                         chain.push_back(step);
                     }
 
@@ -2558,7 +2518,8 @@ main(int argc, char* argv[])
                             make_proof_leaf_callback(protocol, false);
                         step["trie"] = sp.tree.get_root()->trie_json(
                             trie_opts, sp.tree.get_options());
-                        // verified at build time, verifier re-checks independently
+                        // verified at build time, verifier re-checks
+                        // independently
                         chain.push_back(step);
                     }
                 }
@@ -2612,8 +2573,7 @@ main(int argc, char* argv[])
 
                 // ── Step 8: Verify the proof chain we just built ──
                 resolve_proof_chain(
-                    chain,
-                    vl_data ? vl_data->publisher_key_hex : "");
+                    chain, vl_data ? vl_data->publisher_key_hex : "");
 
                 result = 0;
             },
