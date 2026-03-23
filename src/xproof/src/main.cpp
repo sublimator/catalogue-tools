@@ -24,22 +24,23 @@ print_usage()
         << "xproof - XRPL Proof Chain Tool\n"
         << "\n"
         << "Usage:\n"
-        << "  xproof prove-tx [options] <rpc:port> <peer:port> <tx_hash>\n"
-        << "  xproof verify <proof_file> <publisher_key>\n"
-        << "  xproof ping <peer:port>\n"
-        << "  xproof header <peer:port> <ledger_seq>\n"
+        << "  xproof prove <tx_hash> [options]    build a proof chain\n"
+        << "  xproof verify <proof_file> [key]    verify a proof chain\n"
+        << "  xproof ping <peer:port>             peer protocol ping\n"
+        << "  xproof header <peer:port> <seq>     fetch ledger header\n"
         << "\n"
-        << "Options for prove-tx:\n"
-        << "  --binary          output binary format (default: JSON)\n"
-        << "  --gzip            output binary+zlib compressed format\n"
-        << "  --output <name>   output file base name (default: proof)\n"
+        << "Options for prove:\n"
+        << "  --rpc <host:port>   RPC endpoint (default: "
+        << DEFAULT_RPC << ")\n"
+        << "  --peer <host:port>  peer endpoint (default: "
+        << DEFAULT_PEER << ")\n"
+        << "  --binary            output binary format only\n"
+        << "  --gzip              output compressed binary format only\n"
+        << "  --output <name>     output file base name (default: proof)\n"
         << "\n"
-        << "Dev commands:\n"
-        << "  xproof dev:check-ledger <peer:port>\n"
-        << "  xproof dev:tx <rpc:port> <tx_hash>\n"
-        << "\n"
-        << "The verify command auto-detects JSON vs binary format.\n"
-        << "Peer port is typically 51235. RPC port is 443 or 51234.\n"
+        << "By default, prove outputs both proof.json and proof.bin.\n"
+        << "Verify auto-detects JSON vs binary format.\n"
+        << "Publisher key defaults to vl.ripple.com if not specified.\n"
         << "\n";
 }
 
@@ -65,56 +66,82 @@ main(int argc, char* argv[])
         return cmd_header(argv[2], std::stoul(argv[3]));
     }
 
-    if (command == "prove-tx")
+    if (command == "prove" || command == "prove-tx")
     {
         ProveOptions opts;
+        std::string tx_hash;
 
-        // Parse options before positional args
         int pos = 2;
-        while (pos < argc && argv[pos][0] == '-')
+        while (pos < argc)
         {
-            if (std::strcmp(argv[pos], "--binary") == 0)
+            std::string arg = argv[pos];
+
+            if (arg == "--binary")
             {
                 opts.binary = true;
                 pos++;
             }
-            else if (std::strcmp(argv[pos], "--gzip") == 0)
+            else if (arg == "--gzip")
             {
                 opts.binary = true;
                 opts.compress = true;
                 pos++;
             }
-            else if (std::strcmp(argv[pos], "--output") == 0 && pos + 1 < argc)
+            else if (arg == "--rpc" && pos + 1 < argc)
+            {
+                opts.rpc_endpoint = argv[pos + 1];
+                pos += 2;
+            }
+            else if (arg == "--peer" && pos + 1 < argc)
+            {
+                opts.peer_endpoint = argv[pos + 1];
+                pos += 2;
+            }
+            else if (arg == "--output" && pos + 1 < argc)
             {
                 opts.output = argv[pos + 1];
                 pos += 2;
             }
+            else if (arg[0] == '-')
+            {
+                std::cerr << "Unknown option: " << arg << "\n";
+                return 1;
+            }
             else
             {
-                std::cerr << "Unknown option: " << argv[pos] << "\n";
-                return 1;
+                // Positional: tx_hash
+                tx_hash = arg;
+                pos++;
             }
         }
 
-        if (pos + 3 > argc)
+        if (tx_hash.empty())
         {
-            std::cerr << "Usage: xproof prove-tx [options] <rpc:port> "
-                         "<peer:port> <tx_hash>\n";
+            std::cerr << "Usage: xproof prove <tx_hash> [options]\n";
             return 1;
         }
 
-        opts.rpc_endpoint = argv[pos];
-        opts.peer_endpoint = argv[pos + 1];
-        opts.tx_hash = argv[pos + 2];
-
+        opts.tx_hash = tx_hash;
         return cmd_prove(opts, protocol);
     }
 
-    if (command == "verify" && argc >= 4)
+    if (command == "verify")
     {
-        return cmd_verify(argv[2], argv[3], protocol);
+        if (argc < 3)
+        {
+            std::cerr << "Usage: xproof verify <proof_file> [publisher_key]\n";
+            return 1;
+        }
+
+        std::string proof_path = argv[2];
+        std::string trusted_key = (argc >= 4)
+            ? argv[3]
+            : std::string(DEFAULT_PUBLISHER_KEY);
+
+        return cmd_verify(proof_path, trusted_key, protocol);
     }
 
+    // Unlisted dev commands
     if (command == "dev:check-ledger" && argc >= 3)
     {
         return cmd_dev_check_ledger(argv[2], protocol);
