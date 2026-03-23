@@ -123,7 +123,7 @@ target_link_libraries(
   ${EXECUTABLE_NUDB_EXP}
   PRIVATE catl_catalogue_common # Brings in catl_core
           catl_nodestore
-          catl_xdata_json
+          catl_xdata
           NuDB
           lz4::lz4
           Boost::filesystem

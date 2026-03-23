@@ -4,7 +4,6 @@
 add_subdirectory(cuckoofilter)
 add_subdirectory(crypto)
 add_subdirectory(x-data)
-add_subdirectory(xdata-json)
 add_subdirectory(test-utils)
 add_subdirectory(catalogue-v1)
 add_subdirectory(shamap)

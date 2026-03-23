@@ -29,8 +29,7 @@ target_link_libraries(
          catl::crypto
          catl::shamap
          catl::catalogue_common
-         catl::xdata
-         catl::xdata_json)
+         catl::xdata)
 
 # Link secp256k1 - either from system or built from source
 if(SECP256K1_FOUND)

@@ -5,9 +5,9 @@
 #include "catl/nodestore/node_blob.h"
 #include "catl/nodestore/tree_walker.h"
 #include "catl/utils-v1/nudb/nudb-exp-arg-options.h"
-#include "catl/xdata-json/parse_leaf.h"
-#include "catl/xdata-json/parse_transaction.h"
-#include "catl/xdata-json/pretty_print.h"
+#include "catl/xdata/parse_leaf.h"
+#include "catl/xdata/parse_transaction.h"
+#include "catl/xdata/pretty_print.h"
 #include "catl/xdata/protocol.h"
 
 #include <boost/filesystem.hpp>
@@ -497,11 +497,11 @@ private:
                         auto payload_span = result.blob.payload();
                         Slice payload_slice(
                             payload_span.data(), payload_span.size());
-                        auto json_result = catl::xdata::json::parse_leaf(
+                        auto json_result = catl::xdata::parse_leaf(
                             payload_slice, protocol_);
 
                         std::cout << "\nParsed JSON:\n";
-                        catl::xdata::json::pretty_print(std::cout, json_result);
+                        catl::xdata::pretty_print(std::cout, json_result);
                     }
                     catch (const std::exception& e)
                     {
@@ -600,11 +600,11 @@ private:
                         auto payload_span = result.blob.payload();
                         Slice payload_slice(
                             payload_span.data(), payload_span.size());
-                        auto json_result = catl::xdata::json::parse_transaction(
+                        auto json_result = catl::xdata::parse_transaction(
                             payload_slice, protocol_);
 
                         std::cout << "\nParsed JSON:\n";
-                        catl::xdata::json::pretty_print(std::cout, json_result);
+                        catl::xdata::pretty_print(std::cout, json_result);
                     }
                     catch (const std::exception& e)
                     {
@@ -700,12 +700,12 @@ private:
                             auto payload_span = blob.payload();
                             Slice payload_slice(
                                 payload_span.data(), payload_span.size());
-                            auto json_result = catl::xdata::json::parse_leaf(
+                            auto json_result = catl::xdata::parse_leaf(
                                 payload_slice, protocol_);
 
                             // Pretty print to string first, then log
                             std::ostringstream json_stream;
-                            catl::xdata::json::pretty_print(
+                            catl::xdata::pretty_print(
                                 json_stream, json_result);
                             LOGD(json_stream.str());
                         }
@@ -805,12 +805,12 @@ private:
                             Slice payload_slice(
                                 payload_span.data(), payload_span.size());
                             auto json_result =
-                                catl::xdata::json::parse_transaction(
+                                catl::xdata::parse_transaction(
                                     payload_slice, protocol_);
 
                             // Pretty print to string first, then log
                             std::ostringstream json_stream;
-                            catl::xdata::json::pretty_print(
+                            catl::xdata::pretty_print(
                                 json_stream, json_result);
                             LOGD(json_stream.str());
                         }

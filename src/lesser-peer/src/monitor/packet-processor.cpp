@@ -6,7 +6,7 @@
 #include <catl/peer/monitor/packet-processor.h>
 #include <catl/peer/packet-names.h>
 #include <catl/peer/wire-format.h>
-#include <catl/xdata-json/parse_transaction.h>
+#include <catl/xdata/parse_transaction.h>
 
 #include "ripple.pb.h"  // Generated from ripple.proto
 
@@ -456,7 +456,7 @@ packet_processor::handle_propose_ledger(
                                 try
                                 {
                                     auto json =
-                                        xdata::json::parse_txset_transaction(
+                                        xdata::parse_txset_transaction(
                                             tx_data, *proto);
                                     if (json.is_object())
                                     {

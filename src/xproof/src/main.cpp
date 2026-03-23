@@ -9,8 +9,8 @@
 #include <catl/rpc-client/rpc-client-coro.h>
 #include <catl/shamap/shamap.h>
 
-#include <catl/xdata-json/parse_transaction.h>
-#include <catl/xdata-json/pretty_print.h>
+#include <catl/xdata/parse_transaction.h>
+#include <catl/xdata/pretty_print.h>
 #include <catl/xdata/protocol.h>
 
 #include <boost/asio/co_spawn.hpp>
@@ -343,7 +343,7 @@ main(int argc, char* argv[])
                     try
                     {
                         Slice slice(leaf_data.data(), leaf_data.size());
-                        auto json = catl::xdata::json::parse_transaction(
+                        auto json = catl::xdata::parse_transaction(
                             slice, protocol, false);  // wire format: no prefix
                         tx_arr.push_back(json);
                         parsed++;
@@ -366,7 +366,7 @@ main(int argc, char* argv[])
                     }
                 }
 
-                catl::xdata::json::pretty_print(std::cout, tx_arr);
+                catl::xdata::pretty_print(std::cout, tx_arr);
 
                 PLOGI(
                     log_partition,
@@ -589,7 +589,7 @@ main(int argc, char* argv[])
                         boost::json::serialize(obj.at("hash")));
                 }
 
-                catl::xdata::json::pretty_print(std::cout, tx_result);
+                catl::xdata::pretty_print(std::cout, tx_result);
                 result = 0;
             },
             [&](std::exception_ptr ep) {
@@ -643,13 +643,13 @@ main(int argc, char* argv[])
 
                 // Serialize to JSON
                 auto chain = xproof::to_json(build_result.chain);
-                catl::xdata::json::pretty_print(std::cout, chain);
+                catl::xdata::pretty_print(std::cout, chain);
 
                 // Write proof to file
                 {
                     std::string path = "proof.json";
                     std::ofstream out(path);
-                    catl::xdata::json::pretty_print(out, chain);
+                    catl::xdata::pretty_print(out, chain);
                     out.close();
                     PLOGI(log_partition, "Wrote proof: ", path);
                 }

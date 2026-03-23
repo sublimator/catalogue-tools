@@ -11,8 +11,8 @@
 #include <catl/shamap/shamap-nodeid.h>
 #include <catl/shamap/shamap.h>
 #include <catl/vl-client/vl-client-coro.h>
-#include <catl/xdata-json/parse_leaf.h>
-#include <catl/xdata-json/parse_transaction.h>
+#include <catl/xdata/parse_leaf.h>
+#include <catl/xdata/parse_transaction.h>
 
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -50,14 +50,14 @@ make_proof_leaf_callback(
 
             if (is_tx_tree)
             {
-                arr.emplace_back(catl::xdata::json::parse_transaction(
+                arr.emplace_back(catl::xdata::parse_transaction(
                     full,
                     protocol,
                     {.includes_prefix = false, .include_blob = true}));
             }
             else
             {
-                arr.emplace_back(catl::xdata::json::parse_leaf(
+                arr.emplace_back(catl::xdata::parse_leaf(
                     full,
                     protocol,
                     {.includes_prefix = false, .include_blob = true}));
@@ -84,7 +84,7 @@ sle_hashes_contain(
     try
     {
         auto json =
-            catl::xdata::json::parse_leaf(leaf_data, protocol, false);
+            catl::xdata::parse_leaf(leaf_data, protocol, false);
         auto const& obj = json.as_object();
         if (!obj.contains("Hashes"))
         {

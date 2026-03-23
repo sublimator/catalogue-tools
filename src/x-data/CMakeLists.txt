@@ -49,6 +49,8 @@ add_library(
   catl_xdata STATIC
   src/protocol.cpp
   src/embedded_protocol.cpp
+  src/parse_leaf.cpp
+  src/parse_transaction.cpp
   ${GENERATED_XAHAU_HEADER}
   ${GENERATED_XRPL_HEADER})
 
@@ -71,7 +73,7 @@ target_include_directories(
 )
 
 # Link libraries for the x-data library
-target_link_libraries(catl_xdata PUBLIC catl::core Boost::json)
+target_link_libraries(catl_xdata PUBLIC catl::core catl::base58 Boost::json)
 
 # Link libraries for the CLI
 target_link_libraries(

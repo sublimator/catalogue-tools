@@ -32,5 +32,4 @@ target_link_libraries(
           catl::vl-client
           catl::crypto
           catl_shamap_abbreviated
-          catl::xdata
-          catl::xdata_json)
+          catl::xdata)
