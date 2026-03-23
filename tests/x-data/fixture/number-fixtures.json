@@ -8,107 +8,9795 @@
     "hex": "0DE0B6B3A7640000FFFFFFEE"
   },
   {
+    "input": "2",
+    "hex": "1BC16D674EC80000FFFFFFEE"
+  },
+  {
+    "input": "3",
+    "hex": "29A2241AF62C0000FFFFFFEE"
+  },
+  {
+    "input": "4",
+    "hex": "3782DACE9D900000FFFFFFEE"
+  },
+  {
+    "input": "5",
+    "hex": "4563918244F40000FFFFFFEE"
+  },
+  {
+    "input": "6",
+    "hex": "53444835EC580000FFFFFFEE"
+  },
+  {
+    "input": "7",
+    "hex": "6124FEE993BC0000FFFFFFEE"
+  },
+  {
+    "input": "8",
+    "hex": "6F05B59D3B200000FFFFFFEE"
+  },
+  {
+    "input": "9",
+    "hex": "7CE66C50E2840000FFFFFFEE"
+  },
+  {
     "input": "-1",
     "hex": "F21F494C589C0000FFFFFFEE"
+  },
+  {
+    "input": "-2",
+    "hex": "E43E9298B1380000FFFFFFEE"
+  },
+  {
+    "input": "-3",
+    "hex": "D65DDBE509D40000FFFFFFEE"
+  },
+  {
+    "input": "-4",
+    "hex": "C87D253162700000FFFFFFEE"
+  },
+  {
+    "input": "-5",
+    "hex": "BA9C6E7DBB0C0000FFFFFFEE"
+  },
+  {
+    "input": "-6",
+    "hex": "ACBBB7CA13A80000FFFFFFEE"
+  },
+  {
+    "input": "-7",
+    "hex": "9EDB01166C440000FFFFFFEE"
+  },
+  {
+    "input": "-8",
+    "hex": "90FA4A62C4E00000FFFFFFEE"
+  },
+  {
+    "input": "-9",
+    "hex": "831993AF1D7C0000FFFFFFEE"
+  },
+  {
+    "input": "10",
+    "hex": "0DE0B6B3A7640000FFFFFFEF"
+  },
+  {
+    "input": "11",
+    "hex": "0F43FC2C04EE0000FFFFFFEF"
+  },
+  {
+    "input": "12",
+    "hex": "10A741A462780000FFFFFFEF"
+  },
+  {
+    "input": "13",
+    "hex": "120A871CC0020000FFFFFFEF"
+  },
+  {
+    "input": "14",
+    "hex": "136DCC951D8C0000FFFFFFEF"
+  },
+  {
+    "input": "15",
+    "hex": "14D1120D7B160000FFFFFFEF"
+  },
+  {
+    "input": "16",
+    "hex": "16345785D8A00000FFFFFFEF"
+  },
+  {
+    "input": "17",
+    "hex": "17979CFE362A0000FFFFFFEF"
+  },
+  {
+    "input": "18",
+    "hex": "18FAE27693B40000FFFFFFEF"
+  },
+  {
+    "input": "19",
+    "hex": "1A5E27EEF13E0000FFFFFFEF"
+  },
+  {
+    "input": "20",
+    "hex": "1BC16D674EC80000FFFFFFEF"
+  },
+  {
+    "input": "21",
+    "hex": "1D24B2DFAC520000FFFFFFEF"
+  },
+  {
+    "input": "22",
+    "hex": "1E87F85809DC0000FFFFFFEF"
+  },
+  {
+    "input": "23",
+    "hex": "1FEB3DD067660000FFFFFFEF"
+  },
+  {
+    "input": "24",
+    "hex": "214E8348C4F00000FFFFFFEF"
+  },
+  {
+    "input": "25",
+    "hex": "22B1C8C1227A0000FFFFFFEF"
+  },
+  {
+    "input": "26",
+    "hex": "24150E3980040000FFFFFFEF"
+  },
+  {
+    "input": "27",
+    "hex": "257853B1DD8E0000FFFFFFEF"
+  },
+  {
+    "input": "28",
+    "hex": "26DB992A3B180000FFFFFFEF"
+  },
+  {
+    "input": "29",
+    "hex": "283EDEA298A20000FFFFFFEF"
+  },
+  {
+    "input": "30",
+    "hex": "29A2241AF62C0000FFFFFFEF"
+  },
+  {
+    "input": "31",
+    "hex": "2B05699353B60000FFFFFFEF"
+  },
+  {
+    "input": "32",
+    "hex": "2C68AF0BB1400000FFFFFFEF"
+  },
+  {
+    "input": "33",
+    "hex": "2DCBF4840ECA0000FFFFFFEF"
+  },
+  {
+    "input": "34",
+    "hex": "2F2F39FC6C540000FFFFFFEF"
+  },
+  {
+    "input": "35",
+    "hex": "30927F74C9DE0000FFFFFFEF"
+  },
+  {
+    "input": "36",
+    "hex": "31F5C4ED27680000FFFFFFEF"
+  },
+  {
+    "input": "37",
+    "hex": "33590A6584F20000FFFFFFEF"
+  },
+  {
+    "input": "38",
+    "hex": "34BC4FDDE27C0000FFFFFFEF"
+  },
+  {
+    "input": "39",
+    "hex": "361F955640060000FFFFFFEF"
+  },
+  {
+    "input": "40",
+    "hex": "3782DACE9D900000FFFFFFEF"
+  },
+  {
+    "input": "41",
+    "hex": "38E62046FB1A0000FFFFFFEF"
   },
   {
     "input": "42",
     "hex": "3A4965BF58A40000FFFFFFEF"
   },
   {
+    "input": "43",
+    "hex": "3BACAB37B62E0000FFFFFFEF"
+  },
+  {
+    "input": "44",
+    "hex": "3D0FF0B013B80000FFFFFFEF"
+  },
+  {
+    "input": "45",
+    "hex": "3E73362871420000FFFFFFEF"
+  },
+  {
+    "input": "46",
+    "hex": "3FD67BA0CECC0000FFFFFFEF"
+  },
+  {
+    "input": "47",
+    "hex": "4139C1192C560000FFFFFFEF"
+  },
+  {
+    "input": "48",
+    "hex": "429D069189E00000FFFFFFEF"
+  },
+  {
+    "input": "49",
+    "hex": "44004C09E76A0000FFFFFFEF"
+  },
+  {
+    "input": "50",
+    "hex": "4563918244F40000FFFFFFEF"
+  },
+  {
+    "input": "51",
+    "hex": "46C6D6FAA27E0000FFFFFFEF"
+  },
+  {
+    "input": "52",
+    "hex": "482A1C7300080000FFFFFFEF"
+  },
+  {
+    "input": "53",
+    "hex": "498D61EB5D920000FFFFFFEF"
+  },
+  {
+    "input": "54",
+    "hex": "4AF0A763BB1C0000FFFFFFEF"
+  },
+  {
+    "input": "55",
+    "hex": "4C53ECDC18A60000FFFFFFEF"
+  },
+  {
+    "input": "56",
+    "hex": "4DB7325476300000FFFFFFEF"
+  },
+  {
+    "input": "57",
+    "hex": "4F1A77CCD3BA0000FFFFFFEF"
+  },
+  {
+    "input": "58",
+    "hex": "507DBD4531440000FFFFFFEF"
+  },
+  {
+    "input": "59",
+    "hex": "51E102BD8ECE0000FFFFFFEF"
+  },
+  {
+    "input": "60",
+    "hex": "53444835EC580000FFFFFFEF"
+  },
+  {
+    "input": "61",
+    "hex": "54A78DAE49E20000FFFFFFEF"
+  },
+  {
+    "input": "62",
+    "hex": "560AD326A76C0000FFFFFFEF"
+  },
+  {
+    "input": "63",
+    "hex": "576E189F04F60000FFFFFFEF"
+  },
+  {
+    "input": "64",
+    "hex": "58D15E1762800000FFFFFFEF"
+  },
+  {
+    "input": "65",
+    "hex": "5A34A38FC00A0000FFFFFFEF"
+  },
+  {
+    "input": "66",
+    "hex": "5B97E9081D940000FFFFFFEF"
+  },
+  {
+    "input": "67",
+    "hex": "5CFB2E807B1E0000FFFFFFEF"
+  },
+  {
+    "input": "68",
+    "hex": "5E5E73F8D8A80000FFFFFFEF"
+  },
+  {
+    "input": "69",
+    "hex": "5FC1B97136320000FFFFFFEF"
+  },
+  {
+    "input": "70",
+    "hex": "6124FEE993BC0000FFFFFFEF"
+  },
+  {
+    "input": "71",
+    "hex": "62884461F1460000FFFFFFEF"
+  },
+  {
+    "input": "72",
+    "hex": "63EB89DA4ED00000FFFFFFEF"
+  },
+  {
+    "input": "73",
+    "hex": "654ECF52AC5A0000FFFFFFEF"
+  },
+  {
+    "input": "74",
+    "hex": "66B214CB09E40000FFFFFFEF"
+  },
+  {
+    "input": "75",
+    "hex": "68155A43676E0000FFFFFFEF"
+  },
+  {
+    "input": "76",
+    "hex": "69789FBBC4F80000FFFFFFEF"
+  },
+  {
+    "input": "77",
+    "hex": "6ADBE53422820000FFFFFFEF"
+  },
+  {
+    "input": "78",
+    "hex": "6C3F2AAC800C0000FFFFFFEF"
+  },
+  {
+    "input": "79",
+    "hex": "6DA27024DD960000FFFFFFEF"
+  },
+  {
+    "input": "80",
+    "hex": "6F05B59D3B200000FFFFFFEF"
+  },
+  {
+    "input": "81",
+    "hex": "7068FB1598AA0000FFFFFFEF"
+  },
+  {
+    "input": "82",
+    "hex": "71CC408DF6340000FFFFFFEF"
+  },
+  {
+    "input": "83",
+    "hex": "732F860653BE0000FFFFFFEF"
+  },
+  {
+    "input": "84",
+    "hex": "7492CB7EB1480000FFFFFFEF"
+  },
+  {
+    "input": "85",
+    "hex": "75F610F70ED20000FFFFFFEF"
+  },
+  {
+    "input": "86",
+    "hex": "7759566F6C5C0000FFFFFFEF"
+  },
+  {
+    "input": "87",
+    "hex": "78BC9BE7C9E60000FFFFFFEF"
+  },
+  {
+    "input": "88",
+    "hex": "7A1FE16027700000FFFFFFEF"
+  },
+  {
+    "input": "89",
+    "hex": "7B8326D884FA0000FFFFFFEF"
+  },
+  {
+    "input": "90",
+    "hex": "7CE66C50E2840000FFFFFFEF"
+  },
+  {
+    "input": "91",
+    "hex": "7E49B1C9400E0000FFFFFFEF"
+  },
+  {
+    "input": "92",
+    "hex": "7FACF7419D980000FFFFFFEF"
+  },
+  {
+    "input": "93",
+    "hex": "0CE80612991D0000FFFFFFF0"
+  },
+  {
+    "input": "94",
+    "hex": "0D0B8D0508DE0000FFFFFFF0"
+  },
+  {
+    "input": "95",
+    "hex": "0D2F13F7789F0000FFFFFFF0"
+  },
+  {
+    "input": "96",
+    "hex": "0D529AE9E8600000FFFFFFF0"
+  },
+  {
+    "input": "97",
+    "hex": "0D7621DC58210000FFFFFFF0"
+  },
+  {
+    "input": "98",
+    "hex": "0D99A8CEC7E20000FFFFFFF0"
+  },
+  {
+    "input": "99",
+    "hex": "0DBD2FC137A30000FFFFFFF0"
+  },
+  {
+    "input": "-10",
+    "hex": "F21F494C589C0000FFFFFFEF"
+  },
+  {
+    "input": "-11",
+    "hex": "F0BC03D3FB120000FFFFFFEF"
+  },
+  {
+    "input": "-12",
+    "hex": "EF58BE5B9D880000FFFFFFEF"
+  },
+  {
+    "input": "-13",
+    "hex": "EDF578E33FFE0000FFFFFFEF"
+  },
+  {
+    "input": "-14",
+    "hex": "EC92336AE2740000FFFFFFEF"
+  },
+  {
+    "input": "-15",
+    "hex": "EB2EEDF284EA0000FFFFFFEF"
+  },
+  {
+    "input": "-16",
+    "hex": "E9CBA87A27600000FFFFFFEF"
+  },
+  {
+    "input": "-17",
+    "hex": "E8686301C9D60000FFFFFFEF"
+  },
+  {
+    "input": "-18",
+    "hex": "E7051D896C4C0000FFFFFFEF"
+  },
+  {
+    "input": "-19",
+    "hex": "E5A1D8110EC20000FFFFFFEF"
+  },
+  {
+    "input": "-20",
+    "hex": "E43E9298B1380000FFFFFFEF"
+  },
+  {
+    "input": "-21",
+    "hex": "E2DB4D2053AE0000FFFFFFEF"
+  },
+  {
+    "input": "-22",
+    "hex": "E17807A7F6240000FFFFFFEF"
+  },
+  {
+    "input": "-23",
+    "hex": "E014C22F989A0000FFFFFFEF"
+  },
+  {
+    "input": "-24",
+    "hex": "DEB17CB73B100000FFFFFFEF"
+  },
+  {
+    "input": "-25",
+    "hex": "DD4E373EDD860000FFFFFFEF"
+  },
+  {
+    "input": "-26",
+    "hex": "DBEAF1C67FFC0000FFFFFFEF"
+  },
+  {
+    "input": "-27",
+    "hex": "DA87AC4E22720000FFFFFFEF"
+  },
+  {
+    "input": "-28",
+    "hex": "D92466D5C4E80000FFFFFFEF"
+  },
+  {
+    "input": "-29",
+    "hex": "D7C1215D675E0000FFFFFFEF"
+  },
+  {
+    "input": "-30",
+    "hex": "D65DDBE509D40000FFFFFFEF"
+  },
+  {
+    "input": "-31",
+    "hex": "D4FA966CAC4A0000FFFFFFEF"
+  },
+  {
+    "input": "-32",
+    "hex": "D39750F44EC00000FFFFFFEF"
+  },
+  {
+    "input": "-33",
+    "hex": "D2340B7BF1360000FFFFFFEF"
+  },
+  {
+    "input": "-34",
+    "hex": "D0D0C60393AC0000FFFFFFEF"
+  },
+  {
+    "input": "-35",
+    "hex": "CF6D808B36220000FFFFFFEF"
+  },
+  {
+    "input": "-36",
+    "hex": "CE0A3B12D8980000FFFFFFEF"
+  },
+  {
+    "input": "-37",
+    "hex": "CCA6F59A7B0E0000FFFFFFEF"
+  },
+  {
+    "input": "-38",
+    "hex": "CB43B0221D840000FFFFFFEF"
+  },
+  {
+    "input": "-39",
+    "hex": "C9E06AA9BFFA0000FFFFFFEF"
+  },
+  {
+    "input": "-40",
+    "hex": "C87D253162700000FFFFFFEF"
+  },
+  {
+    "input": "-41",
+    "hex": "C719DFB904E60000FFFFFFEF"
+  },
+  {
     "input": "-42",
     "hex": "C5B69A40A75C0000FFFFFFEF"
   },
   {
-    "input": "1.5",
-    "hex": "14D1120D7B160000FFFFFFEE"
+    "input": "-43",
+    "hex": "C45354C849D20000FFFFFFEF"
   },
   {
-    "input": "-1.5",
-    "hex": "EB2EEDF284EA0000FFFFFFEE"
+    "input": "-44",
+    "hex": "C2F00F4FEC480000FFFFFFEF"
   },
   {
-    "input": "0.5",
-    "hex": "4563918244F40000FFFFFFED"
+    "input": "-45",
+    "hex": "C18CC9D78EBE0000FFFFFFEF"
   },
   {
-    "input": "0.001",
-    "hex": "0DE0B6B3A7640000FFFFFFEB"
+    "input": "-46",
+    "hex": "C029845F31340000FFFFFFEF"
   },
   {
-    "input": "1000000",
-    "hex": "0DE0B6B3A7640000FFFFFFF4"
+    "input": "-47",
+    "hex": "BEC63EE6D3AA0000FFFFFFEF"
   },
   {
-    "input": "-1000000",
-    "hex": "F21F494C589C0000FFFFFFF4"
+    "input": "-48",
+    "hex": "BD62F96E76200000FFFFFFEF"
   },
   {
-    "input": "999999999999999999",
-    "hex": "0DE0B6B3A763FFFF00000000"
+    "input": "-49",
+    "hex": "BBFFB3F618960000FFFFFFEF"
   },
   {
-    "input": "1000000000000000000",
-    "hex": "0DE0B6B3A764000000000000"
+    "input": "-50",
+    "hex": "BA9C6E7DBB0C0000FFFFFFEF"
   },
   {
-    "input": "9999999999999999999",
-    "hex": "0DE0B6B3A764000000000001"
+    "input": "-51",
+    "hex": "B93929055D820000FFFFFFEF"
   },
   {
-    "input": "9999999999999999e80",
-    "hex": "0DE0B6B3A763FF9C0000004E"
+    "input": "-52",
+    "hex": "B7D5E38CFFF80000FFFFFFEF"
   },
   {
-    "input": "9999999999999999e-80",
-    "hex": "0DE0B6B3A763FF9CFFFFFFAE"
+    "input": "-53",
+    "hex": "B6729E14A26E0000FFFFFFEF"
   },
   {
-    "input": "1e18",
-    "hex": "0DE0B6B3A764000000000000"
+    "input": "-54",
+    "hex": "B50F589C44E40000FFFFFFEF"
   },
   {
-    "input": "1e-18",
-    "hex": "0DE0B6B3A7640000FFFFFFDC"
+    "input": "-55",
+    "hex": "B3AC1323E75A0000FFFFFFEF"
   },
   {
-    "input": "1e80",
-    "hex": "0DE0B6B3A76400000000003E"
+    "input": "-56",
+    "hex": "B248CDAB89D00000FFFFFFEF"
   },
   {
-    "input": "1e-80",
-    "hex": "0DE0B6B3A7640000FFFFFF9E"
+    "input": "-57",
+    "hex": "B0E588332C460000FFFFFFEF"
+  },
+  {
+    "input": "-58",
+    "hex": "AF8242BACEBC0000FFFFFFEF"
+  },
+  {
+    "input": "-59",
+    "hex": "AE1EFD4271320000FFFFFFEF"
+  },
+  {
+    "input": "-60",
+    "hex": "ACBBB7CA13A80000FFFFFFEF"
+  },
+  {
+    "input": "-61",
+    "hex": "AB587251B61E0000FFFFFFEF"
+  },
+  {
+    "input": "-62",
+    "hex": "A9F52CD958940000FFFFFFEF"
+  },
+  {
+    "input": "-63",
+    "hex": "A891E760FB0A0000FFFFFFEF"
+  },
+  {
+    "input": "-64",
+    "hex": "A72EA1E89D800000FFFFFFEF"
+  },
+  {
+    "input": "-65",
+    "hex": "A5CB5C703FF60000FFFFFFEF"
+  },
+  {
+    "input": "-66",
+    "hex": "A46816F7E26C0000FFFFFFEF"
+  },
+  {
+    "input": "-67",
+    "hex": "A304D17F84E20000FFFFFFEF"
+  },
+  {
+    "input": "-68",
+    "hex": "A1A18C0727580000FFFFFFEF"
+  },
+  {
+    "input": "-69",
+    "hex": "A03E468EC9CE0000FFFFFFEF"
+  },
+  {
+    "input": "-70",
+    "hex": "9EDB01166C440000FFFFFFEF"
+  },
+  {
+    "input": "-71",
+    "hex": "9D77BB9E0EBA0000FFFFFFEF"
+  },
+  {
+    "input": "-72",
+    "hex": "9C147625B1300000FFFFFFEF"
+  },
+  {
+    "input": "-73",
+    "hex": "9AB130AD53A60000FFFFFFEF"
+  },
+  {
+    "input": "-74",
+    "hex": "994DEB34F61C0000FFFFFFEF"
+  },
+  {
+    "input": "-75",
+    "hex": "97EAA5BC98920000FFFFFFEF"
+  },
+  {
+    "input": "-76",
+    "hex": "968760443B080000FFFFFFEF"
+  },
+  {
+    "input": "-77",
+    "hex": "95241ACBDD7E0000FFFFFFEF"
+  },
+  {
+    "input": "-78",
+    "hex": "93C0D5537FF40000FFFFFFEF"
+  },
+  {
+    "input": "-79",
+    "hex": "925D8FDB226A0000FFFFFFEF"
+  },
+  {
+    "input": "-80",
+    "hex": "90FA4A62C4E00000FFFFFFEF"
+  },
+  {
+    "input": "-81",
+    "hex": "8F9704EA67560000FFFFFFEF"
+  },
+  {
+    "input": "-82",
+    "hex": "8E33BF7209CC0000FFFFFFEF"
+  },
+  {
+    "input": "-83",
+    "hex": "8CD079F9AC420000FFFFFFEF"
+  },
+  {
+    "input": "-84",
+    "hex": "8B6D34814EB80000FFFFFFEF"
+  },
+  {
+    "input": "-85",
+    "hex": "8A09EF08F12E0000FFFFFFEF"
+  },
+  {
+    "input": "-86",
+    "hex": "88A6A99093A40000FFFFFFEF"
+  },
+  {
+    "input": "-87",
+    "hex": "87436418361A0000FFFFFFEF"
+  },
+  {
+    "input": "-88",
+    "hex": "85E01E9FD8900000FFFFFFEF"
+  },
+  {
+    "input": "-89",
+    "hex": "847CD9277B060000FFFFFFEF"
+  },
+  {
+    "input": "-90",
+    "hex": "831993AF1D7C0000FFFFFFEF"
+  },
+  {
+    "input": "-91",
+    "hex": "81B64E36BFF20000FFFFFFEF"
+  },
+  {
+    "input": "-92",
+    "hex": "805308BE62680000FFFFFFEF"
+  },
+  {
+    "input": "-93",
+    "hex": "F317F9ED66E30000FFFFFFF0"
+  },
+  {
+    "input": "-94",
+    "hex": "F2F472FAF7220000FFFFFFF0"
+  },
+  {
+    "input": "-95",
+    "hex": "F2D0EC0887610000FFFFFFF0"
+  },
+  {
+    "input": "-96",
+    "hex": "F2AD651617A00000FFFFFFF0"
+  },
+  {
+    "input": "-97",
+    "hex": "F289DE23A7DF0000FFFFFFF0"
+  },
+  {
+    "input": "-98",
+    "hex": "F2665731381E0000FFFFFFF0"
+  },
+  {
+    "input": "-99",
+    "hex": "F242D03EC85D0000FFFFFFF0"
   },
   {
     "input": "0.1",
     "hex": "0DE0B6B3A7640000FFFFFFED"
   },
   {
-    "input": "0.01",
-    "hex": "0DE0B6B3A7640000FFFFFFEC"
+    "input": "0.9",
+    "hex": "7CE66C50E2840000FFFFFFED"
   },
   {
-    "input": "0.123456789012345678",
-    "hex": "112210F47DE9810CFFFFFFED"
+    "input": "1.1",
+    "hex": "0F43FC2C04EE0000FFFFFFEE"
   },
   {
-    "input": "12345678901234567890",
-    "hex": "112210F47DE9811500000001"
-  },
-  {
-    "input": "-12345678901234567890",
-    "hex": "EEDDEF0B82167EEB00000001"
+    "input": "1.9",
+    "hex": "1A5E27EEF13E0000FFFFFFEE"
   },
   {
     "input": "100",
     "hex": "0DE0B6B3A7640000FFFFFFF0"
   },
   {
-    "input": "1000",
+    "input": "101",
+    "hex": "0E043DA617250000FFFFFFF0"
+  },
+  {
+    "input": "102",
+    "hex": "0E27C49886E60000FFFFFFF0"
+  },
+  {
+    "input": "103",
+    "hex": "0E4B4B8AF6A70000FFFFFFF0"
+  },
+  {
+    "input": "104",
+    "hex": "0E6ED27D66680000FFFFFFF0"
+  },
+  {
+    "input": "105",
+    "hex": "0E92596FD6290000FFFFFFF0"
+  },
+  {
+    "input": "106",
+    "hex": "0EB5E06245EA0000FFFFFFF0"
+  },
+  {
+    "input": "107",
+    "hex": "0ED96754B5AB0000FFFFFFF0"
+  },
+  {
+    "input": "108",
+    "hex": "0EFCEE47256C0000FFFFFFF0"
+  },
+  {
+    "input": "109",
+    "hex": "0F207539952D0000FFFFFFF0"
+  },
+  {
+    "input": "110",
+    "hex": "0F43FC2C04EE0000FFFFFFF0"
+  },
+  {
+    "input": "111",
+    "hex": "0F67831E74AF0000FFFFFFF0"
+  },
+  {
+    "input": "112",
+    "hex": "0F8B0A10E4700000FFFFFFF0"
+  },
+  {
+    "input": "113",
+    "hex": "0FAE910354310000FFFFFFF0"
+  },
+  {
+    "input": "114",
+    "hex": "0FD217F5C3F20000FFFFFFF0"
+  },
+  {
+    "input": "115",
+    "hex": "0FF59EE833B30000FFFFFFF0"
+  },
+  {
+    "input": "116",
+    "hex": "101925DAA3740000FFFFFFF0"
+  },
+  {
+    "input": "117",
+    "hex": "103CACCD13350000FFFFFFF0"
+  },
+  {
+    "input": "118",
+    "hex": "106033BF82F60000FFFFFFF0"
+  },
+  {
+    "input": "119",
+    "hex": "1083BAB1F2B70000FFFFFFF0"
+  },
+  {
+    "input": "120",
+    "hex": "10A741A462780000FFFFFFF0"
+  },
+  {
+    "input": "121",
+    "hex": "10CAC896D2390000FFFFFFF0"
+  },
+  {
+    "input": "122",
+    "hex": "10EE4F8941FA0000FFFFFFF0"
+  },
+  {
+    "input": "123",
+    "hex": "1111D67BB1BB0000FFFFFFF0"
+  },
+  {
+    "input": "124",
+    "hex": "11355D6E217C0000FFFFFFF0"
+  },
+  {
+    "input": "125",
+    "hex": "1158E460913D0000FFFFFFF0"
+  },
+  {
+    "input": "126",
+    "hex": "117C6B5300FE0000FFFFFFF0"
+  },
+  {
+    "input": "127",
+    "hex": "119FF24570BF0000FFFFFFF0"
+  },
+  {
+    "input": "128",
+    "hex": "11C37937E0800000FFFFFFF0"
+  },
+  {
+    "input": "129",
+    "hex": "11E7002A50410000FFFFFFF0"
+  },
+  {
+    "input": "130",
+    "hex": "120A871CC0020000FFFFFFF0"
+  },
+  {
+    "input": "131",
+    "hex": "122E0E0F2FC30000FFFFFFF0"
+  },
+  {
+    "input": "132",
+    "hex": "125195019F840000FFFFFFF0"
+  },
+  {
+    "input": "133",
+    "hex": "12751BF40F450000FFFFFFF0"
+  },
+  {
+    "input": "134",
+    "hex": "1298A2E67F060000FFFFFFF0"
+  },
+  {
+    "input": "135",
+    "hex": "12BC29D8EEC70000FFFFFFF0"
+  },
+  {
+    "input": "136",
+    "hex": "12DFB0CB5E880000FFFFFFF0"
+  },
+  {
+    "input": "137",
+    "hex": "130337BDCE490000FFFFFFF0"
+  },
+  {
+    "input": "138",
+    "hex": "1326BEB03E0A0000FFFFFFF0"
+  },
+  {
+    "input": "139",
+    "hex": "134A45A2ADCB0000FFFFFFF0"
+  },
+  {
+    "input": "140",
+    "hex": "136DCC951D8C0000FFFFFFF0"
+  },
+  {
+    "input": "141",
+    "hex": "139153878D4D0000FFFFFFF0"
+  },
+  {
+    "input": "142",
+    "hex": "13B4DA79FD0E0000FFFFFFF0"
+  },
+  {
+    "input": "143",
+    "hex": "13D8616C6CCF0000FFFFFFF0"
+  },
+  {
+    "input": "144",
+    "hex": "13FBE85EDC900000FFFFFFF0"
+  },
+  {
+    "input": "145",
+    "hex": "141F6F514C510000FFFFFFF0"
+  },
+  {
+    "input": "146",
+    "hex": "1442F643BC120000FFFFFFF0"
+  },
+  {
+    "input": "147",
+    "hex": "14667D362BD30000FFFFFFF0"
+  },
+  {
+    "input": "148",
+    "hex": "148A04289B940000FFFFFFF0"
+  },
+  {
+    "input": "149",
+    "hex": "14AD8B1B0B550000FFFFFFF0"
+  },
+  {
+    "input": "150",
+    "hex": "14D1120D7B160000FFFFFFF0"
+  },
+  {
+    "input": "151",
+    "hex": "14F498FFEAD70000FFFFFFF0"
+  },
+  {
+    "input": "152",
+    "hex": "15181FF25A980000FFFFFFF0"
+  },
+  {
+    "input": "153",
+    "hex": "153BA6E4CA590000FFFFFFF0"
+  },
+  {
+    "input": "154",
+    "hex": "155F2DD73A1A0000FFFFFFF0"
+  },
+  {
+    "input": "155",
+    "hex": "1582B4C9A9DB0000FFFFFFF0"
+  },
+  {
+    "input": "156",
+    "hex": "15A63BBC199C0000FFFFFFF0"
+  },
+  {
+    "input": "157",
+    "hex": "15C9C2AE895D0000FFFFFFF0"
+  },
+  {
+    "input": "158",
+    "hex": "15ED49A0F91E0000FFFFFFF0"
+  },
+  {
+    "input": "159",
+    "hex": "1610D09368DF0000FFFFFFF0"
+  },
+  {
+    "input": "160",
+    "hex": "16345785D8A00000FFFFFFF0"
+  },
+  {
+    "input": "161",
+    "hex": "1657DE7848610000FFFFFFF0"
+  },
+  {
+    "input": "162",
+    "hex": "167B656AB8220000FFFFFFF0"
+  },
+  {
+    "input": "163",
+    "hex": "169EEC5D27E30000FFFFFFF0"
+  },
+  {
+    "input": "164",
+    "hex": "16C2734F97A40000FFFFFFF0"
+  },
+  {
+    "input": "165",
+    "hex": "16E5FA4207650000FFFFFFF0"
+  },
+  {
+    "input": "166",
+    "hex": "1709813477260000FFFFFFF0"
+  },
+  {
+    "input": "167",
+    "hex": "172D0826E6E70000FFFFFFF0"
+  },
+  {
+    "input": "168",
+    "hex": "17508F1956A80000FFFFFFF0"
+  },
+  {
+    "input": "169",
+    "hex": "1774160BC6690000FFFFFFF0"
+  },
+  {
+    "input": "170",
+    "hex": "17979CFE362A0000FFFFFFF0"
+  },
+  {
+    "input": "171",
+    "hex": "17BB23F0A5EB0000FFFFFFF0"
+  },
+  {
+    "input": "172",
+    "hex": "17DEAAE315AC0000FFFFFFF0"
+  },
+  {
+    "input": "173",
+    "hex": "180231D5856D0000FFFFFFF0"
+  },
+  {
+    "input": "174",
+    "hex": "1825B8C7F52E0000FFFFFFF0"
+  },
+  {
+    "input": "175",
+    "hex": "18493FBA64EF0000FFFFFFF0"
+  },
+  {
+    "input": "176",
+    "hex": "186CC6ACD4B00000FFFFFFF0"
+  },
+  {
+    "input": "177",
+    "hex": "18904D9F44710000FFFFFFF0"
+  },
+  {
+    "input": "178",
+    "hex": "18B3D491B4320000FFFFFFF0"
+  },
+  {
+    "input": "179",
+    "hex": "18D75B8423F30000FFFFFFF0"
+  },
+  {
+    "input": "180",
+    "hex": "18FAE27693B40000FFFFFFF0"
+  },
+  {
+    "input": "181",
+    "hex": "191E696903750000FFFFFFF0"
+  },
+  {
+    "input": "182",
+    "hex": "1941F05B73360000FFFFFFF0"
+  },
+  {
+    "input": "183",
+    "hex": "1965774DE2F70000FFFFFFF0"
+  },
+  {
+    "input": "184",
+    "hex": "1988FE4052B80000FFFFFFF0"
+  },
+  {
+    "input": "185",
+    "hex": "19AC8532C2790000FFFFFFF0"
+  },
+  {
+    "input": "186",
+    "hex": "19D00C25323A0000FFFFFFF0"
+  },
+  {
+    "input": "187",
+    "hex": "19F39317A1FB0000FFFFFFF0"
+  },
+  {
+    "input": "188",
+    "hex": "1A171A0A11BC0000FFFFFFF0"
+  },
+  {
+    "input": "189",
+    "hex": "1A3AA0FC817D0000FFFFFFF0"
+  },
+  {
+    "input": "190",
+    "hex": "1A5E27EEF13E0000FFFFFFF0"
+  },
+  {
+    "input": "191",
+    "hex": "1A81AEE160FF0000FFFFFFF0"
+  },
+  {
+    "input": "192",
+    "hex": "1AA535D3D0C00000FFFFFFF0"
+  },
+  {
+    "input": "193",
+    "hex": "1AC8BCC640810000FFFFFFF0"
+  },
+  {
+    "input": "194",
+    "hex": "1AEC43B8B0420000FFFFFFF0"
+  },
+  {
+    "input": "195",
+    "hex": "1B0FCAAB20030000FFFFFFF0"
+  },
+  {
+    "input": "196",
+    "hex": "1B33519D8FC40000FFFFFFF0"
+  },
+  {
+    "input": "197",
+    "hex": "1B56D88FFF850000FFFFFFF0"
+  },
+  {
+    "input": "198",
+    "hex": "1B7A5F826F460000FFFFFFF0"
+  },
+  {
+    "input": "199",
+    "hex": "1B9DE674DF070000FFFFFFF0"
+  },
+  {
+    "input": "1e3",
     "hex": "0DE0B6B3A7640000FFFFFFF1"
   },
   {
-    "input": "10000",
+    "input": "1e4",
     "hex": "0DE0B6B3A7640000FFFFFFF2"
+  },
+  {
+    "input": "1e5",
+    "hex": "0DE0B6B3A7640000FFFFFFF3"
+  },
+  {
+    "input": "1e6",
+    "hex": "0DE0B6B3A7640000FFFFFFF4"
+  },
+  {
+    "input": "1e7",
+    "hex": "0DE0B6B3A7640000FFFFFFF5"
+  },
+  {
+    "input": "1e8",
+    "hex": "0DE0B6B3A7640000FFFFFFF6"
+  },
+  {
+    "input": "1e9",
+    "hex": "0DE0B6B3A7640000FFFFFFF7"
+  },
+  {
+    "input": "200",
+    "hex": "1BC16D674EC80000FFFFFFF0"
+  },
+  {
+    "input": "201",
+    "hex": "1BE4F459BE890000FFFFFFF0"
+  },
+  {
+    "input": "202",
+    "hex": "1C087B4C2E4A0000FFFFFFF0"
+  },
+  {
+    "input": "203",
+    "hex": "1C2C023E9E0B0000FFFFFFF0"
+  },
+  {
+    "input": "204",
+    "hex": "1C4F89310DCC0000FFFFFFF0"
+  },
+  {
+    "input": "205",
+    "hex": "1C7310237D8D0000FFFFFFF0"
+  },
+  {
+    "input": "206",
+    "hex": "1C969715ED4E0000FFFFFFF0"
+  },
+  {
+    "input": "207",
+    "hex": "1CBA1E085D0F0000FFFFFFF0"
+  },
+  {
+    "input": "208",
+    "hex": "1CDDA4FACCD00000FFFFFFF0"
+  },
+  {
+    "input": "209",
+    "hex": "1D012BED3C910000FFFFFFF0"
+  },
+  {
+    "input": "210",
+    "hex": "1D24B2DFAC520000FFFFFFF0"
+  },
+  {
+    "input": "211",
+    "hex": "1D4839D21C130000FFFFFFF0"
+  },
+  {
+    "input": "212",
+    "hex": "1D6BC0C48BD40000FFFFFFF0"
+  },
+  {
+    "input": "213",
+    "hex": "1D8F47B6FB950000FFFFFFF0"
+  },
+  {
+    "input": "214",
+    "hex": "1DB2CEA96B560000FFFFFFF0"
+  },
+  {
+    "input": "215",
+    "hex": "1DD6559BDB170000FFFFFFF0"
+  },
+  {
+    "input": "216",
+    "hex": "1DF9DC8E4AD80000FFFFFFF0"
+  },
+  {
+    "input": "217",
+    "hex": "1E1D6380BA990000FFFFFFF0"
+  },
+  {
+    "input": "218",
+    "hex": "1E40EA732A5A0000FFFFFFF0"
+  },
+  {
+    "input": "219",
+    "hex": "1E6471659A1B0000FFFFFFF0"
+  },
+  {
+    "input": "220",
+    "hex": "1E87F85809DC0000FFFFFFF0"
+  },
+  {
+    "input": "221",
+    "hex": "1EAB7F4A799D0000FFFFFFF0"
+  },
+  {
+    "input": "222",
+    "hex": "1ECF063CE95E0000FFFFFFF0"
+  },
+  {
+    "input": "223",
+    "hex": "1EF28D2F591F0000FFFFFFF0"
+  },
+  {
+    "input": "224",
+    "hex": "1F161421C8E00000FFFFFFF0"
+  },
+  {
+    "input": "225",
+    "hex": "1F399B1438A10000FFFFFFF0"
+  },
+  {
+    "input": "226",
+    "hex": "1F5D2206A8620000FFFFFFF0"
+  },
+  {
+    "input": "227",
+    "hex": "1F80A8F918230000FFFFFFF0"
+  },
+  {
+    "input": "228",
+    "hex": "1FA42FEB87E40000FFFFFFF0"
+  },
+  {
+    "input": "229",
+    "hex": "1FC7B6DDF7A50000FFFFFFF0"
+  },
+  {
+    "input": "230",
+    "hex": "1FEB3DD067660000FFFFFFF0"
+  },
+  {
+    "input": "231",
+    "hex": "200EC4C2D7270000FFFFFFF0"
+  },
+  {
+    "input": "232",
+    "hex": "20324BB546E80000FFFFFFF0"
+  },
+  {
+    "input": "233",
+    "hex": "2055D2A7B6A90000FFFFFFF0"
+  },
+  {
+    "input": "234",
+    "hex": "2079599A266A0000FFFFFFF0"
+  },
+  {
+    "input": "235",
+    "hex": "209CE08C962B0000FFFFFFF0"
+  },
+  {
+    "input": "236",
+    "hex": "20C0677F05EC0000FFFFFFF0"
+  },
+  {
+    "input": "237",
+    "hex": "20E3EE7175AD0000FFFFFFF0"
+  },
+  {
+    "input": "238",
+    "hex": "21077563E56E0000FFFFFFF0"
+  },
+  {
+    "input": "239",
+    "hex": "212AFC56552F0000FFFFFFF0"
+  },
+  {
+    "input": "240",
+    "hex": "214E8348C4F00000FFFFFFF0"
+  },
+  {
+    "input": "241",
+    "hex": "21720A3B34B10000FFFFFFF0"
+  },
+  {
+    "input": "242",
+    "hex": "2195912DA4720000FFFFFFF0"
+  },
+  {
+    "input": "243",
+    "hex": "21B9182014330000FFFFFFF0"
+  },
+  {
+    "input": "244",
+    "hex": "21DC9F1283F40000FFFFFFF0"
+  },
+  {
+    "input": "245",
+    "hex": "22002604F3B50000FFFFFFF0"
+  },
+  {
+    "input": "246",
+    "hex": "2223ACF763760000FFFFFFF0"
+  },
+  {
+    "input": "247",
+    "hex": "224733E9D3370000FFFFFFF0"
+  },
+  {
+    "input": "248",
+    "hex": "226ABADC42F80000FFFFFFF0"
+  },
+  {
+    "input": "249",
+    "hex": "228E41CEB2B90000FFFFFFF0"
+  },
+  {
+    "input": "250",
+    "hex": "22B1C8C1227A0000FFFFFFF0"
+  },
+  {
+    "input": "251",
+    "hex": "22D54FB3923B0000FFFFFFF0"
+  },
+  {
+    "input": "252",
+    "hex": "22F8D6A601FC0000FFFFFFF0"
+  },
+  {
+    "input": "253",
+    "hex": "231C5D9871BD0000FFFFFFF0"
+  },
+  {
+    "input": "254",
+    "hex": "233FE48AE17E0000FFFFFFF0"
+  },
+  {
+    "input": "255",
+    "hex": "23636B7D513F0000FFFFFFF0"
+  },
+  {
+    "input": "256",
+    "hex": "2386F26FC1000000FFFFFFF0"
+  },
+  {
+    "input": "257",
+    "hex": "23AA796230C10000FFFFFFF0"
+  },
+  {
+    "input": "258",
+    "hex": "23CE0054A0820000FFFFFFF0"
+  },
+  {
+    "input": "259",
+    "hex": "23F1874710430000FFFFFFF0"
+  },
+  {
+    "input": "260",
+    "hex": "24150E3980040000FFFFFFF0"
+  },
+  {
+    "input": "261",
+    "hex": "2438952BEFC50000FFFFFFF0"
+  },
+  {
+    "input": "262",
+    "hex": "245C1C1E5F860000FFFFFFF0"
+  },
+  {
+    "input": "263",
+    "hex": "247FA310CF470000FFFFFFF0"
+  },
+  {
+    "input": "264",
+    "hex": "24A32A033F080000FFFFFFF0"
+  },
+  {
+    "input": "265",
+    "hex": "24C6B0F5AEC90000FFFFFFF0"
+  },
+  {
+    "input": "266",
+    "hex": "24EA37E81E8A0000FFFFFFF0"
+  },
+  {
+    "input": "267",
+    "hex": "250DBEDA8E4B0000FFFFFFF0"
+  },
+  {
+    "input": "268",
+    "hex": "253145CCFE0C0000FFFFFFF0"
+  },
+  {
+    "input": "269",
+    "hex": "2554CCBF6DCD0000FFFFFFF0"
+  },
+  {
+    "input": "270",
+    "hex": "257853B1DD8E0000FFFFFFF0"
+  },
+  {
+    "input": "271",
+    "hex": "259BDAA44D4F0000FFFFFFF0"
+  },
+  {
+    "input": "272",
+    "hex": "25BF6196BD100000FFFFFFF0"
+  },
+  {
+    "input": "273",
+    "hex": "25E2E8892CD10000FFFFFFF0"
+  },
+  {
+    "input": "274",
+    "hex": "26066F7B9C920000FFFFFFF0"
+  },
+  {
+    "input": "275",
+    "hex": "2629F66E0C530000FFFFFFF0"
+  },
+  {
+    "input": "276",
+    "hex": "264D7D607C140000FFFFFFF0"
+  },
+  {
+    "input": "277",
+    "hex": "26710452EBD50000FFFFFFF0"
+  },
+  {
+    "input": "278",
+    "hex": "26948B455B960000FFFFFFF0"
+  },
+  {
+    "input": "279",
+    "hex": "26B81237CB570000FFFFFFF0"
+  },
+  {
+    "input": "280",
+    "hex": "26DB992A3B180000FFFFFFF0"
+  },
+  {
+    "input": "281",
+    "hex": "26FF201CAAD90000FFFFFFF0"
+  },
+  {
+    "input": "282",
+    "hex": "2722A70F1A9A0000FFFFFFF0"
+  },
+  {
+    "input": "283",
+    "hex": "27462E018A5B0000FFFFFFF0"
+  },
+  {
+    "input": "284",
+    "hex": "2769B4F3FA1C0000FFFFFFF0"
+  },
+  {
+    "input": "285",
+    "hex": "278D3BE669DD0000FFFFFFF0"
+  },
+  {
+    "input": "286",
+    "hex": "27B0C2D8D99E0000FFFFFFF0"
+  },
+  {
+    "input": "287",
+    "hex": "27D449CB495F0000FFFFFFF0"
+  },
+  {
+    "input": "288",
+    "hex": "27F7D0BDB9200000FFFFFFF0"
+  },
+  {
+    "input": "289",
+    "hex": "281B57B028E10000FFFFFFF0"
+  },
+  {
+    "input": "290",
+    "hex": "283EDEA298A20000FFFFFFF0"
+  },
+  {
+    "input": "291",
+    "hex": "2862659508630000FFFFFFF0"
+  },
+  {
+    "input": "292",
+    "hex": "2885EC8778240000FFFFFFF0"
+  },
+  {
+    "input": "293",
+    "hex": "28A97379E7E50000FFFFFFF0"
+  },
+  {
+    "input": "294",
+    "hex": "28CCFA6C57A60000FFFFFFF0"
+  },
+  {
+    "input": "295",
+    "hex": "28F0815EC7670000FFFFFFF0"
+  },
+  {
+    "input": "296",
+    "hex": "2914085137280000FFFFFFF0"
+  },
+  {
+    "input": "297",
+    "hex": "29378F43A6E90000FFFFFFF0"
+  },
+  {
+    "input": "298",
+    "hex": "295B163616AA0000FFFFFFF0"
+  },
+  {
+    "input": "299",
+    "hex": "297E9D28866B0000FFFFFFF0"
+  },
+  {
+    "input": "300",
+    "hex": "29A2241AF62C0000FFFFFFF0"
+  },
+  {
+    "input": "301",
+    "hex": "29C5AB0D65ED0000FFFFFFF0"
+  },
+  {
+    "input": "302",
+    "hex": "29E931FFD5AE0000FFFFFFF0"
+  },
+  {
+    "input": "303",
+    "hex": "2A0CB8F2456F0000FFFFFFF0"
+  },
+  {
+    "input": "304",
+    "hex": "2A303FE4B5300000FFFFFFF0"
+  },
+  {
+    "input": "305",
+    "hex": "2A53C6D724F10000FFFFFFF0"
+  },
+  {
+    "input": "306",
+    "hex": "2A774DC994B20000FFFFFFF0"
+  },
+  {
+    "input": "307",
+    "hex": "2A9AD4BC04730000FFFFFFF0"
+  },
+  {
+    "input": "308",
+    "hex": "2ABE5BAE74340000FFFFFFF0"
+  },
+  {
+    "input": "309",
+    "hex": "2AE1E2A0E3F50000FFFFFFF0"
+  },
+  {
+    "input": "310",
+    "hex": "2B05699353B60000FFFFFFF0"
+  },
+  {
+    "input": "311",
+    "hex": "2B28F085C3770000FFFFFFF0"
+  },
+  {
+    "input": "312",
+    "hex": "2B4C777833380000FFFFFFF0"
+  },
+  {
+    "input": "313",
+    "hex": "2B6FFE6AA2F90000FFFFFFF0"
+  },
+  {
+    "input": "314",
+    "hex": "2B93855D12BA0000FFFFFFF0"
+  },
+  {
+    "input": "315",
+    "hex": "2BB70C4F827B0000FFFFFFF0"
+  },
+  {
+    "input": "316",
+    "hex": "2BDA9341F23C0000FFFFFFF0"
+  },
+  {
+    "input": "317",
+    "hex": "2BFE1A3461FD0000FFFFFFF0"
+  },
+  {
+    "input": "318",
+    "hex": "2C21A126D1BE0000FFFFFFF0"
+  },
+  {
+    "input": "319",
+    "hex": "2C452819417F0000FFFFFFF0"
+  },
+  {
+    "input": "320",
+    "hex": "2C68AF0BB1400000FFFFFFF0"
+  },
+  {
+    "input": "321",
+    "hex": "2C8C35FE21010000FFFFFFF0"
+  },
+  {
+    "input": "322",
+    "hex": "2CAFBCF090C20000FFFFFFF0"
+  },
+  {
+    "input": "323",
+    "hex": "2CD343E300830000FFFFFFF0"
+  },
+  {
+    "input": "324",
+    "hex": "2CF6CAD570440000FFFFFFF0"
+  },
+  {
+    "input": "325",
+    "hex": "2D1A51C7E0050000FFFFFFF0"
+  },
+  {
+    "input": "326",
+    "hex": "2D3DD8BA4FC60000FFFFFFF0"
+  },
+  {
+    "input": "327",
+    "hex": "2D615FACBF870000FFFFFFF0"
+  },
+  {
+    "input": "328",
+    "hex": "2D84E69F2F480000FFFFFFF0"
+  },
+  {
+    "input": "329",
+    "hex": "2DA86D919F090000FFFFFFF0"
+  },
+  {
+    "input": "330",
+    "hex": "2DCBF4840ECA0000FFFFFFF0"
+  },
+  {
+    "input": "331",
+    "hex": "2DEF7B767E8B0000FFFFFFF0"
+  },
+  {
+    "input": "332",
+    "hex": "2E130268EE4C0000FFFFFFF0"
+  },
+  {
+    "input": "333",
+    "hex": "2E36895B5E0D0000FFFFFFF0"
+  },
+  {
+    "input": "334",
+    "hex": "2E5A104DCDCE0000FFFFFFF0"
+  },
+  {
+    "input": "335",
+    "hex": "2E7D97403D8F0000FFFFFFF0"
+  },
+  {
+    "input": "336",
+    "hex": "2EA11E32AD500000FFFFFFF0"
+  },
+  {
+    "input": "337",
+    "hex": "2EC4A5251D110000FFFFFFF0"
+  },
+  {
+    "input": "338",
+    "hex": "2EE82C178CD20000FFFFFFF0"
+  },
+  {
+    "input": "339",
+    "hex": "2F0BB309FC930000FFFFFFF0"
+  },
+  {
+    "input": "340",
+    "hex": "2F2F39FC6C540000FFFFFFF0"
+  },
+  {
+    "input": "341",
+    "hex": "2F52C0EEDC150000FFFFFFF0"
+  },
+  {
+    "input": "342",
+    "hex": "2F7647E14BD60000FFFFFFF0"
+  },
+  {
+    "input": "343",
+    "hex": "2F99CED3BB970000FFFFFFF0"
+  },
+  {
+    "input": "344",
+    "hex": "2FBD55C62B580000FFFFFFF0"
+  },
+  {
+    "input": "345",
+    "hex": "2FE0DCB89B190000FFFFFFF0"
+  },
+  {
+    "input": "346",
+    "hex": "300463AB0ADA0000FFFFFFF0"
+  },
+  {
+    "input": "347",
+    "hex": "3027EA9D7A9B0000FFFFFFF0"
+  },
+  {
+    "input": "348",
+    "hex": "304B718FEA5C0000FFFFFFF0"
+  },
+  {
+    "input": "349",
+    "hex": "306EF8825A1D0000FFFFFFF0"
+  },
+  {
+    "input": "350",
+    "hex": "30927F74C9DE0000FFFFFFF0"
+  },
+  {
+    "input": "351",
+    "hex": "30B60667399F0000FFFFFFF0"
+  },
+  {
+    "input": "352",
+    "hex": "30D98D59A9600000FFFFFFF0"
+  },
+  {
+    "input": "353",
+    "hex": "30FD144C19210000FFFFFFF0"
+  },
+  {
+    "input": "354",
+    "hex": "31209B3E88E20000FFFFFFF0"
+  },
+  {
+    "input": "355",
+    "hex": "31442230F8A30000FFFFFFF0"
+  },
+  {
+    "input": "356",
+    "hex": "3167A92368640000FFFFFFF0"
+  },
+  {
+    "input": "357",
+    "hex": "318B3015D8250000FFFFFFF0"
+  },
+  {
+    "input": "358",
+    "hex": "31AEB70847E60000FFFFFFF0"
+  },
+  {
+    "input": "359",
+    "hex": "31D23DFAB7A70000FFFFFFF0"
+  },
+  {
+    "input": "360",
+    "hex": "31F5C4ED27680000FFFFFFF0"
+  },
+  {
+    "input": "361",
+    "hex": "32194BDF97290000FFFFFFF0"
+  },
+  {
+    "input": "362",
+    "hex": "323CD2D206EA0000FFFFFFF0"
+  },
+  {
+    "input": "363",
+    "hex": "326059C476AB0000FFFFFFF0"
+  },
+  {
+    "input": "364",
+    "hex": "3283E0B6E66C0000FFFFFFF0"
+  },
+  {
+    "input": "365",
+    "hex": "32A767A9562D0000FFFFFFF0"
+  },
+  {
+    "input": "366",
+    "hex": "32CAEE9BC5EE0000FFFFFFF0"
+  },
+  {
+    "input": "367",
+    "hex": "32EE758E35AF0000FFFFFFF0"
+  },
+  {
+    "input": "368",
+    "hex": "3311FC80A5700000FFFFFFF0"
+  },
+  {
+    "input": "369",
+    "hex": "3335837315310000FFFFFFF0"
+  },
+  {
+    "input": "370",
+    "hex": "33590A6584F20000FFFFFFF0"
+  },
+  {
+    "input": "371",
+    "hex": "337C9157F4B30000FFFFFFF0"
+  },
+  {
+    "input": "372",
+    "hex": "33A0184A64740000FFFFFFF0"
+  },
+  {
+    "input": "373",
+    "hex": "33C39F3CD4350000FFFFFFF0"
+  },
+  {
+    "input": "374",
+    "hex": "33E7262F43F60000FFFFFFF0"
+  },
+  {
+    "input": "375",
+    "hex": "340AAD21B3B70000FFFFFFF0"
+  },
+  {
+    "input": "376",
+    "hex": "342E341423780000FFFFFFF0"
+  },
+  {
+    "input": "377",
+    "hex": "3451BB0693390000FFFFFFF0"
+  },
+  {
+    "input": "378",
+    "hex": "347541F902FA0000FFFFFFF0"
+  },
+  {
+    "input": "379",
+    "hex": "3498C8EB72BB0000FFFFFFF0"
+  },
+  {
+    "input": "380",
+    "hex": "34BC4FDDE27C0000FFFFFFF0"
+  },
+  {
+    "input": "381",
+    "hex": "34DFD6D0523D0000FFFFFFF0"
+  },
+  {
+    "input": "382",
+    "hex": "35035DC2C1FE0000FFFFFFF0"
+  },
+  {
+    "input": "383",
+    "hex": "3526E4B531BF0000FFFFFFF0"
+  },
+  {
+    "input": "384",
+    "hex": "354A6BA7A1800000FFFFFFF0"
+  },
+  {
+    "input": "385",
+    "hex": "356DF29A11410000FFFFFFF0"
+  },
+  {
+    "input": "386",
+    "hex": "3591798C81020000FFFFFFF0"
+  },
+  {
+    "input": "387",
+    "hex": "35B5007EF0C30000FFFFFFF0"
+  },
+  {
+    "input": "388",
+    "hex": "35D8877160840000FFFFFFF0"
+  },
+  {
+    "input": "389",
+    "hex": "35FC0E63D0450000FFFFFFF0"
+  },
+  {
+    "input": "390",
+    "hex": "361F955640060000FFFFFFF0"
+  },
+  {
+    "input": "391",
+    "hex": "36431C48AFC70000FFFFFFF0"
+  },
+  {
+    "input": "392",
+    "hex": "3666A33B1F880000FFFFFFF0"
+  },
+  {
+    "input": "393",
+    "hex": "368A2A2D8F490000FFFFFFF0"
+  },
+  {
+    "input": "394",
+    "hex": "36ADB11FFF0A0000FFFFFFF0"
+  },
+  {
+    "input": "395",
+    "hex": "36D138126ECB0000FFFFFFF0"
+  },
+  {
+    "input": "396",
+    "hex": "36F4BF04DE8C0000FFFFFFF0"
+  },
+  {
+    "input": "397",
+    "hex": "371845F74E4D0000FFFFFFF0"
+  },
+  {
+    "input": "398",
+    "hex": "373BCCE9BE0E0000FFFFFFF0"
+  },
+  {
+    "input": "399",
+    "hex": "375F53DC2DCF0000FFFFFFF0"
+  },
+  {
+    "input": "400",
+    "hex": "3782DACE9D900000FFFFFFF0"
+  },
+  {
+    "input": "401",
+    "hex": "37A661C10D510000FFFFFFF0"
+  },
+  {
+    "input": "402",
+    "hex": "37C9E8B37D120000FFFFFFF0"
+  },
+  {
+    "input": "403",
+    "hex": "37ED6FA5ECD30000FFFFFFF0"
+  },
+  {
+    "input": "404",
+    "hex": "3810F6985C940000FFFFFFF0"
+  },
+  {
+    "input": "405",
+    "hex": "38347D8ACC550000FFFFFFF0"
+  },
+  {
+    "input": "406",
+    "hex": "3858047D3C160000FFFFFFF0"
+  },
+  {
+    "input": "407",
+    "hex": "387B8B6FABD70000FFFFFFF0"
+  },
+  {
+    "input": "408",
+    "hex": "389F12621B980000FFFFFFF0"
+  },
+  {
+    "input": "409",
+    "hex": "38C299548B590000FFFFFFF0"
+  },
+  {
+    "input": "410",
+    "hex": "38E62046FB1A0000FFFFFFF0"
+  },
+  {
+    "input": "411",
+    "hex": "3909A7396ADB0000FFFFFFF0"
+  },
+  {
+    "input": "412",
+    "hex": "392D2E2BDA9C0000FFFFFFF0"
+  },
+  {
+    "input": "413",
+    "hex": "3950B51E4A5D0000FFFFFFF0"
+  },
+  {
+    "input": "414",
+    "hex": "39743C10BA1E0000FFFFFFF0"
+  },
+  {
+    "input": "415",
+    "hex": "3997C30329DF0000FFFFFFF0"
+  },
+  {
+    "input": "416",
+    "hex": "39BB49F599A00000FFFFFFF0"
+  },
+  {
+    "input": "417",
+    "hex": "39DED0E809610000FFFFFFF0"
+  },
+  {
+    "input": "418",
+    "hex": "3A0257DA79220000FFFFFFF0"
+  },
+  {
+    "input": "419",
+    "hex": "3A25DECCE8E30000FFFFFFF0"
+  },
+  {
+    "input": "420",
+    "hex": "3A4965BF58A40000FFFFFFF0"
+  },
+  {
+    "input": "421",
+    "hex": "3A6CECB1C8650000FFFFFFF0"
+  },
+  {
+    "input": "422",
+    "hex": "3A9073A438260000FFFFFFF0"
+  },
+  {
+    "input": "423",
+    "hex": "3AB3FA96A7E70000FFFFFFF0"
+  },
+  {
+    "input": "424",
+    "hex": "3AD7818917A80000FFFFFFF0"
+  },
+  {
+    "input": "425",
+    "hex": "3AFB087B87690000FFFFFFF0"
+  },
+  {
+    "input": "426",
+    "hex": "3B1E8F6DF72A0000FFFFFFF0"
+  },
+  {
+    "input": "427",
+    "hex": "3B42166066EB0000FFFFFFF0"
+  },
+  {
+    "input": "428",
+    "hex": "3B659D52D6AC0000FFFFFFF0"
+  },
+  {
+    "input": "429",
+    "hex": "3B892445466D0000FFFFFFF0"
+  },
+  {
+    "input": "430",
+    "hex": "3BACAB37B62E0000FFFFFFF0"
+  },
+  {
+    "input": "431",
+    "hex": "3BD0322A25EF0000FFFFFFF0"
+  },
+  {
+    "input": "432",
+    "hex": "3BF3B91C95B00000FFFFFFF0"
+  },
+  {
+    "input": "433",
+    "hex": "3C17400F05710000FFFFFFF0"
+  },
+  {
+    "input": "434",
+    "hex": "3C3AC70175320000FFFFFFF0"
+  },
+  {
+    "input": "435",
+    "hex": "3C5E4DF3E4F30000FFFFFFF0"
+  },
+  {
+    "input": "436",
+    "hex": "3C81D4E654B40000FFFFFFF0"
+  },
+  {
+    "input": "437",
+    "hex": "3CA55BD8C4750000FFFFFFF0"
+  },
+  {
+    "input": "438",
+    "hex": "3CC8E2CB34360000FFFFFFF0"
+  },
+  {
+    "input": "439",
+    "hex": "3CEC69BDA3F70000FFFFFFF0"
+  },
+  {
+    "input": "440",
+    "hex": "3D0FF0B013B80000FFFFFFF0"
+  },
+  {
+    "input": "441",
+    "hex": "3D3377A283790000FFFFFFF0"
+  },
+  {
+    "input": "442",
+    "hex": "3D56FE94F33A0000FFFFFFF0"
+  },
+  {
+    "input": "443",
+    "hex": "3D7A858762FB0000FFFFFFF0"
+  },
+  {
+    "input": "444",
+    "hex": "3D9E0C79D2BC0000FFFFFFF0"
+  },
+  {
+    "input": "445",
+    "hex": "3DC1936C427D0000FFFFFFF0"
+  },
+  {
+    "input": "446",
+    "hex": "3DE51A5EB23E0000FFFFFFF0"
+  },
+  {
+    "input": "447",
+    "hex": "3E08A15121FF0000FFFFFFF0"
+  },
+  {
+    "input": "448",
+    "hex": "3E2C284391C00000FFFFFFF0"
+  },
+  {
+    "input": "449",
+    "hex": "3E4FAF3601810000FFFFFFF0"
+  },
+  {
+    "input": "450",
+    "hex": "3E73362871420000FFFFFFF0"
+  },
+  {
+    "input": "451",
+    "hex": "3E96BD1AE1030000FFFFFFF0"
+  },
+  {
+    "input": "452",
+    "hex": "3EBA440D50C40000FFFFFFF0"
+  },
+  {
+    "input": "453",
+    "hex": "3EDDCAFFC0850000FFFFFFF0"
+  },
+  {
+    "input": "454",
+    "hex": "3F0151F230460000FFFFFFF0"
+  },
+  {
+    "input": "455",
+    "hex": "3F24D8E4A0070000FFFFFFF0"
+  },
+  {
+    "input": "456",
+    "hex": "3F485FD70FC80000FFFFFFF0"
+  },
+  {
+    "input": "457",
+    "hex": "3F6BE6C97F890000FFFFFFF0"
+  },
+  {
+    "input": "458",
+    "hex": "3F8F6DBBEF4A0000FFFFFFF0"
+  },
+  {
+    "input": "459",
+    "hex": "3FB2F4AE5F0B0000FFFFFFF0"
+  },
+  {
+    "input": "460",
+    "hex": "3FD67BA0CECC0000FFFFFFF0"
+  },
+  {
+    "input": "461",
+    "hex": "3FFA02933E8D0000FFFFFFF0"
+  },
+  {
+    "input": "462",
+    "hex": "401D8985AE4E0000FFFFFFF0"
+  },
+  {
+    "input": "463",
+    "hex": "404110781E0F0000FFFFFFF0"
+  },
+  {
+    "input": "464",
+    "hex": "4064976A8DD00000FFFFFFF0"
+  },
+  {
+    "input": "465",
+    "hex": "40881E5CFD910000FFFFFFF0"
+  },
+  {
+    "input": "466",
+    "hex": "40ABA54F6D520000FFFFFFF0"
+  },
+  {
+    "input": "467",
+    "hex": "40CF2C41DD130000FFFFFFF0"
+  },
+  {
+    "input": "468",
+    "hex": "40F2B3344CD40000FFFFFFF0"
+  },
+  {
+    "input": "469",
+    "hex": "41163A26BC950000FFFFFFF0"
+  },
+  {
+    "input": "470",
+    "hex": "4139C1192C560000FFFFFFF0"
+  },
+  {
+    "input": "471",
+    "hex": "415D480B9C170000FFFFFFF0"
+  },
+  {
+    "input": "472",
+    "hex": "4180CEFE0BD80000FFFFFFF0"
+  },
+  {
+    "input": "473",
+    "hex": "41A455F07B990000FFFFFFF0"
+  },
+  {
+    "input": "474",
+    "hex": "41C7DCE2EB5A0000FFFFFFF0"
+  },
+  {
+    "input": "475",
+    "hex": "41EB63D55B1B0000FFFFFFF0"
+  },
+  {
+    "input": "476",
+    "hex": "420EEAC7CADC0000FFFFFFF0"
+  },
+  {
+    "input": "477",
+    "hex": "423271BA3A9D0000FFFFFFF0"
+  },
+  {
+    "input": "478",
+    "hex": "4255F8ACAA5E0000FFFFFFF0"
+  },
+  {
+    "input": "479",
+    "hex": "42797F9F1A1F0000FFFFFFF0"
+  },
+  {
+    "input": "480",
+    "hex": "429D069189E00000FFFFFFF0"
+  },
+  {
+    "input": "481",
+    "hex": "42C08D83F9A10000FFFFFFF0"
+  },
+  {
+    "input": "482",
+    "hex": "42E4147669620000FFFFFFF0"
+  },
+  {
+    "input": "483",
+    "hex": "43079B68D9230000FFFFFFF0"
+  },
+  {
+    "input": "484",
+    "hex": "432B225B48E40000FFFFFFF0"
+  },
+  {
+    "input": "485",
+    "hex": "434EA94DB8A50000FFFFFFF0"
+  },
+  {
+    "input": "486",
+    "hex": "4372304028660000FFFFFFF0"
+  },
+  {
+    "input": "487",
+    "hex": "4395B73298270000FFFFFFF0"
+  },
+  {
+    "input": "488",
+    "hex": "43B93E2507E80000FFFFFFF0"
+  },
+  {
+    "input": "489",
+    "hex": "43DCC51777A90000FFFFFFF0"
+  },
+  {
+    "input": "490",
+    "hex": "44004C09E76A0000FFFFFFF0"
+  },
+  {
+    "input": "491",
+    "hex": "4423D2FC572B0000FFFFFFF0"
+  },
+  {
+    "input": "492",
+    "hex": "444759EEC6EC0000FFFFFFF0"
+  },
+  {
+    "input": "493",
+    "hex": "446AE0E136AD0000FFFFFFF0"
+  },
+  {
+    "input": "494",
+    "hex": "448E67D3A66E0000FFFFFFF0"
+  },
+  {
+    "input": "495",
+    "hex": "44B1EEC6162F0000FFFFFFF0"
+  },
+  {
+    "input": "496",
+    "hex": "44D575B885F00000FFFFFFF0"
+  },
+  {
+    "input": "497",
+    "hex": "44F8FCAAF5B10000FFFFFFF0"
+  },
+  {
+    "input": "498",
+    "hex": "451C839D65720000FFFFFFF0"
+  },
+  {
+    "input": "499",
+    "hex": "45400A8FD5330000FFFFFFF0"
+  },
+  {
+    "input": "500",
+    "hex": "4563918244F40000FFFFFFF0"
+  },
+  {
+    "input": "501",
+    "hex": "45871874B4B50000FFFFFFF0"
+  },
+  {
+    "input": "502",
+    "hex": "45AA9F6724760000FFFFFFF0"
+  },
+  {
+    "input": "503",
+    "hex": "45CE265994370000FFFFFFF0"
+  },
+  {
+    "input": "504",
+    "hex": "45F1AD4C03F80000FFFFFFF0"
+  },
+  {
+    "input": "505",
+    "hex": "4615343E73B90000FFFFFFF0"
+  },
+  {
+    "input": "506",
+    "hex": "4638BB30E37A0000FFFFFFF0"
+  },
+  {
+    "input": "507",
+    "hex": "465C4223533B0000FFFFFFF0"
+  },
+  {
+    "input": "508",
+    "hex": "467FC915C2FC0000FFFFFFF0"
+  },
+  {
+    "input": "509",
+    "hex": "46A3500832BD0000FFFFFFF0"
+  },
+  {
+    "input": "510",
+    "hex": "46C6D6FAA27E0000FFFFFFF0"
+  },
+  {
+    "input": "511",
+    "hex": "46EA5DED123F0000FFFFFFF0"
+  },
+  {
+    "input": "512",
+    "hex": "470DE4DF82000000FFFFFFF0"
+  },
+  {
+    "input": "513",
+    "hex": "47316BD1F1C10000FFFFFFF0"
+  },
+  {
+    "input": "514",
+    "hex": "4754F2C461820000FFFFFFF0"
+  },
+  {
+    "input": "515",
+    "hex": "477879B6D1430000FFFFFFF0"
+  },
+  {
+    "input": "516",
+    "hex": "479C00A941040000FFFFFFF0"
+  },
+  {
+    "input": "517",
+    "hex": "47BF879BB0C50000FFFFFFF0"
+  },
+  {
+    "input": "518",
+    "hex": "47E30E8E20860000FFFFFFF0"
+  },
+  {
+    "input": "519",
+    "hex": "4806958090470000FFFFFFF0"
+  },
+  {
+    "input": "520",
+    "hex": "482A1C7300080000FFFFFFF0"
+  },
+  {
+    "input": "521",
+    "hex": "484DA3656FC90000FFFFFFF0"
+  },
+  {
+    "input": "522",
+    "hex": "48712A57DF8A0000FFFFFFF0"
+  },
+  {
+    "input": "523",
+    "hex": "4894B14A4F4B0000FFFFFFF0"
+  },
+  {
+    "input": "524",
+    "hex": "48B8383CBF0C0000FFFFFFF0"
+  },
+  {
+    "input": "525",
+    "hex": "48DBBF2F2ECD0000FFFFFFF0"
+  },
+  {
+    "input": "526",
+    "hex": "48FF46219E8E0000FFFFFFF0"
+  },
+  {
+    "input": "527",
+    "hex": "4922CD140E4F0000FFFFFFF0"
+  },
+  {
+    "input": "528",
+    "hex": "494654067E100000FFFFFFF0"
+  },
+  {
+    "input": "529",
+    "hex": "4969DAF8EDD10000FFFFFFF0"
+  },
+  {
+    "input": "530",
+    "hex": "498D61EB5D920000FFFFFFF0"
+  },
+  {
+    "input": "531",
+    "hex": "49B0E8DDCD530000FFFFFFF0"
+  },
+  {
+    "input": "532",
+    "hex": "49D46FD03D140000FFFFFFF0"
+  },
+  {
+    "input": "533",
+    "hex": "49F7F6C2ACD50000FFFFFFF0"
+  },
+  {
+    "input": "534",
+    "hex": "4A1B7DB51C960000FFFFFFF0"
+  },
+  {
+    "input": "535",
+    "hex": "4A3F04A78C570000FFFFFFF0"
+  },
+  {
+    "input": "536",
+    "hex": "4A628B99FC180000FFFFFFF0"
+  },
+  {
+    "input": "537",
+    "hex": "4A86128C6BD90000FFFFFFF0"
+  },
+  {
+    "input": "538",
+    "hex": "4AA9997EDB9A0000FFFFFFF0"
+  },
+  {
+    "input": "539",
+    "hex": "4ACD20714B5B0000FFFFFFF0"
+  },
+  {
+    "input": "540",
+    "hex": "4AF0A763BB1C0000FFFFFFF0"
+  },
+  {
+    "input": "541",
+    "hex": "4B142E562ADD0000FFFFFFF0"
+  },
+  {
+    "input": "542",
+    "hex": "4B37B5489A9E0000FFFFFFF0"
+  },
+  {
+    "input": "543",
+    "hex": "4B5B3C3B0A5F0000FFFFFFF0"
+  },
+  {
+    "input": "544",
+    "hex": "4B7EC32D7A200000FFFFFFF0"
+  },
+  {
+    "input": "545",
+    "hex": "4BA24A1FE9E10000FFFFFFF0"
+  },
+  {
+    "input": "546",
+    "hex": "4BC5D11259A20000FFFFFFF0"
+  },
+  {
+    "input": "547",
+    "hex": "4BE95804C9630000FFFFFFF0"
+  },
+  {
+    "input": "548",
+    "hex": "4C0CDEF739240000FFFFFFF0"
+  },
+  {
+    "input": "549",
+    "hex": "4C3065E9A8E50000FFFFFFF0"
+  },
+  {
+    "input": "550",
+    "hex": "4C53ECDC18A60000FFFFFFF0"
+  },
+  {
+    "input": "551",
+    "hex": "4C7773CE88670000FFFFFFF0"
+  },
+  {
+    "input": "552",
+    "hex": "4C9AFAC0F8280000FFFFFFF0"
+  },
+  {
+    "input": "553",
+    "hex": "4CBE81B367E90000FFFFFFF0"
+  },
+  {
+    "input": "554",
+    "hex": "4CE208A5D7AA0000FFFFFFF0"
+  },
+  {
+    "input": "555",
+    "hex": "4D058F98476B0000FFFFFFF0"
+  },
+  {
+    "input": "556",
+    "hex": "4D29168AB72C0000FFFFFFF0"
+  },
+  {
+    "input": "557",
+    "hex": "4D4C9D7D26ED0000FFFFFFF0"
+  },
+  {
+    "input": "558",
+    "hex": "4D70246F96AE0000FFFFFFF0"
+  },
+  {
+    "input": "559",
+    "hex": "4D93AB62066F0000FFFFFFF0"
+  },
+  {
+    "input": "560",
+    "hex": "4DB7325476300000FFFFFFF0"
+  },
+  {
+    "input": "561",
+    "hex": "4DDAB946E5F10000FFFFFFF0"
+  },
+  {
+    "input": "562",
+    "hex": "4DFE403955B20000FFFFFFF0"
+  },
+  {
+    "input": "563",
+    "hex": "4E21C72BC5730000FFFFFFF0"
+  },
+  {
+    "input": "564",
+    "hex": "4E454E1E35340000FFFFFFF0"
+  },
+  {
+    "input": "565",
+    "hex": "4E68D510A4F50000FFFFFFF0"
+  },
+  {
+    "input": "566",
+    "hex": "4E8C5C0314B60000FFFFFFF0"
+  },
+  {
+    "input": "567",
+    "hex": "4EAFE2F584770000FFFFFFF0"
+  },
+  {
+    "input": "568",
+    "hex": "4ED369E7F4380000FFFFFFF0"
+  },
+  {
+    "input": "569",
+    "hex": "4EF6F0DA63F90000FFFFFFF0"
+  },
+  {
+    "input": "570",
+    "hex": "4F1A77CCD3BA0000FFFFFFF0"
+  },
+  {
+    "input": "571",
+    "hex": "4F3DFEBF437B0000FFFFFFF0"
+  },
+  {
+    "input": "572",
+    "hex": "4F6185B1B33C0000FFFFFFF0"
+  },
+  {
+    "input": "573",
+    "hex": "4F850CA422FD0000FFFFFFF0"
+  },
+  {
+    "input": "574",
+    "hex": "4FA8939692BE0000FFFFFFF0"
+  },
+  {
+    "input": "575",
+    "hex": "4FCC1A89027F0000FFFFFFF0"
+  },
+  {
+    "input": "576",
+    "hex": "4FEFA17B72400000FFFFFFF0"
+  },
+  {
+    "input": "577",
+    "hex": "5013286DE2010000FFFFFFF0"
+  },
+  {
+    "input": "578",
+    "hex": "5036AF6051C20000FFFFFFF0"
+  },
+  {
+    "input": "579",
+    "hex": "505A3652C1830000FFFFFFF0"
+  },
+  {
+    "input": "580",
+    "hex": "507DBD4531440000FFFFFFF0"
+  },
+  {
+    "input": "581",
+    "hex": "50A14437A1050000FFFFFFF0"
+  },
+  {
+    "input": "582",
+    "hex": "50C4CB2A10C60000FFFFFFF0"
+  },
+  {
+    "input": "583",
+    "hex": "50E8521C80870000FFFFFFF0"
+  },
+  {
+    "input": "584",
+    "hex": "510BD90EF0480000FFFFFFF0"
+  },
+  {
+    "input": "585",
+    "hex": "512F600160090000FFFFFFF0"
+  },
+  {
+    "input": "586",
+    "hex": "5152E6F3CFCA0000FFFFFFF0"
+  },
+  {
+    "input": "587",
+    "hex": "51766DE63F8B0000FFFFFFF0"
+  },
+  {
+    "input": "588",
+    "hex": "5199F4D8AF4C0000FFFFFFF0"
+  },
+  {
+    "input": "589",
+    "hex": "51BD7BCB1F0D0000FFFFFFF0"
+  },
+  {
+    "input": "590",
+    "hex": "51E102BD8ECE0000FFFFFFF0"
+  },
+  {
+    "input": "591",
+    "hex": "520489AFFE8F0000FFFFFFF0"
+  },
+  {
+    "input": "592",
+    "hex": "522810A26E500000FFFFFFF0"
+  },
+  {
+    "input": "593",
+    "hex": "524B9794DE110000FFFFFFF0"
+  },
+  {
+    "input": "594",
+    "hex": "526F1E874DD20000FFFFFFF0"
+  },
+  {
+    "input": "595",
+    "hex": "5292A579BD930000FFFFFFF0"
+  },
+  {
+    "input": "596",
+    "hex": "52B62C6C2D540000FFFFFFF0"
+  },
+  {
+    "input": "597",
+    "hex": "52D9B35E9D150000FFFFFFF0"
+  },
+  {
+    "input": "598",
+    "hex": "52FD3A510CD60000FFFFFFF0"
+  },
+  {
+    "input": "599",
+    "hex": "5320C1437C970000FFFFFFF0"
+  },
+  {
+    "input": "600",
+    "hex": "53444835EC580000FFFFFFF0"
+  },
+  {
+    "input": "601",
+    "hex": "5367CF285C190000FFFFFFF0"
+  },
+  {
+    "input": "602",
+    "hex": "538B561ACBDA0000FFFFFFF0"
+  },
+  {
+    "input": "603",
+    "hex": "53AEDD0D3B9B0000FFFFFFF0"
+  },
+  {
+    "input": "604",
+    "hex": "53D263FFAB5C0000FFFFFFF0"
+  },
+  {
+    "input": "605",
+    "hex": "53F5EAF21B1D0000FFFFFFF0"
+  },
+  {
+    "input": "606",
+    "hex": "541971E48ADE0000FFFFFFF0"
+  },
+  {
+    "input": "607",
+    "hex": "543CF8D6FA9F0000FFFFFFF0"
+  },
+  {
+    "input": "608",
+    "hex": "54607FC96A600000FFFFFFF0"
+  },
+  {
+    "input": "609",
+    "hex": "548406BBDA210000FFFFFFF0"
+  },
+  {
+    "input": "610",
+    "hex": "54A78DAE49E20000FFFFFFF0"
+  },
+  {
+    "input": "611",
+    "hex": "54CB14A0B9A30000FFFFFFF0"
+  },
+  {
+    "input": "612",
+    "hex": "54EE9B9329640000FFFFFFF0"
+  },
+  {
+    "input": "613",
+    "hex": "5512228599250000FFFFFFF0"
+  },
+  {
+    "input": "614",
+    "hex": "5535A97808E60000FFFFFFF0"
+  },
+  {
+    "input": "615",
+    "hex": "5559306A78A70000FFFFFFF0"
+  },
+  {
+    "input": "616",
+    "hex": "557CB75CE8680000FFFFFFF0"
+  },
+  {
+    "input": "617",
+    "hex": "55A03E4F58290000FFFFFFF0"
+  },
+  {
+    "input": "618",
+    "hex": "55C3C541C7EA0000FFFFFFF0"
+  },
+  {
+    "input": "619",
+    "hex": "55E74C3437AB0000FFFFFFF0"
+  },
+  {
+    "input": "620",
+    "hex": "560AD326A76C0000FFFFFFF0"
+  },
+  {
+    "input": "621",
+    "hex": "562E5A19172D0000FFFFFFF0"
+  },
+  {
+    "input": "622",
+    "hex": "5651E10B86EE0000FFFFFFF0"
+  },
+  {
+    "input": "623",
+    "hex": "567567FDF6AF0000FFFFFFF0"
+  },
+  {
+    "input": "624",
+    "hex": "5698EEF066700000FFFFFFF0"
+  },
+  {
+    "input": "625",
+    "hex": "56BC75E2D6310000FFFFFFF0"
+  },
+  {
+    "input": "626",
+    "hex": "56DFFCD545F20000FFFFFFF0"
+  },
+  {
+    "input": "627",
+    "hex": "570383C7B5B30000FFFFFFF0"
+  },
+  {
+    "input": "628",
+    "hex": "57270ABA25740000FFFFFFF0"
+  },
+  {
+    "input": "629",
+    "hex": "574A91AC95350000FFFFFFF0"
+  },
+  {
+    "input": "630",
+    "hex": "576E189F04F60000FFFFFFF0"
+  },
+  {
+    "input": "631",
+    "hex": "57919F9174B70000FFFFFFF0"
+  },
+  {
+    "input": "632",
+    "hex": "57B52683E4780000FFFFFFF0"
+  },
+  {
+    "input": "633",
+    "hex": "57D8AD7654390000FFFFFFF0"
+  },
+  {
+    "input": "634",
+    "hex": "57FC3468C3FA0000FFFFFFF0"
+  },
+  {
+    "input": "635",
+    "hex": "581FBB5B33BB0000FFFFFFF0"
+  },
+  {
+    "input": "636",
+    "hex": "5843424DA37C0000FFFFFFF0"
+  },
+  {
+    "input": "637",
+    "hex": "5866C940133D0000FFFFFFF0"
+  },
+  {
+    "input": "638",
+    "hex": "588A503282FE0000FFFFFFF0"
+  },
+  {
+    "input": "639",
+    "hex": "58ADD724F2BF0000FFFFFFF0"
+  },
+  {
+    "input": "640",
+    "hex": "58D15E1762800000FFFFFFF0"
+  },
+  {
+    "input": "641",
+    "hex": "58F4E509D2410000FFFFFFF0"
+  },
+  {
+    "input": "642",
+    "hex": "59186BFC42020000FFFFFFF0"
+  },
+  {
+    "input": "643",
+    "hex": "593BF2EEB1C30000FFFFFFF0"
+  },
+  {
+    "input": "644",
+    "hex": "595F79E121840000FFFFFFF0"
+  },
+  {
+    "input": "645",
+    "hex": "598300D391450000FFFFFFF0"
+  },
+  {
+    "input": "646",
+    "hex": "59A687C601060000FFFFFFF0"
+  },
+  {
+    "input": "647",
+    "hex": "59CA0EB870C70000FFFFFFF0"
+  },
+  {
+    "input": "648",
+    "hex": "59ED95AAE0880000FFFFFFF0"
+  },
+  {
+    "input": "649",
+    "hex": "5A111C9D50490000FFFFFFF0"
+  },
+  {
+    "input": "650",
+    "hex": "5A34A38FC00A0000FFFFFFF0"
+  },
+  {
+    "input": "651",
+    "hex": "5A582A822FCB0000FFFFFFF0"
+  },
+  {
+    "input": "652",
+    "hex": "5A7BB1749F8C0000FFFFFFF0"
+  },
+  {
+    "input": "653",
+    "hex": "5A9F38670F4D0000FFFFFFF0"
+  },
+  {
+    "input": "654",
+    "hex": "5AC2BF597F0E0000FFFFFFF0"
+  },
+  {
+    "input": "655",
+    "hex": "5AE6464BEECF0000FFFFFFF0"
+  },
+  {
+    "input": "656",
+    "hex": "5B09CD3E5E900000FFFFFFF0"
+  },
+  {
+    "input": "657",
+    "hex": "5B2D5430CE510000FFFFFFF0"
+  },
+  {
+    "input": "658",
+    "hex": "5B50DB233E120000FFFFFFF0"
+  },
+  {
+    "input": "659",
+    "hex": "5B746215ADD30000FFFFFFF0"
+  },
+  {
+    "input": "660",
+    "hex": "5B97E9081D940000FFFFFFF0"
+  },
+  {
+    "input": "661",
+    "hex": "5BBB6FFA8D550000FFFFFFF0"
+  },
+  {
+    "input": "662",
+    "hex": "5BDEF6ECFD160000FFFFFFF0"
+  },
+  {
+    "input": "663",
+    "hex": "5C027DDF6CD70000FFFFFFF0"
+  },
+  {
+    "input": "664",
+    "hex": "5C2604D1DC980000FFFFFFF0"
+  },
+  {
+    "input": "665",
+    "hex": "5C498BC44C590000FFFFFFF0"
+  },
+  {
+    "input": "666",
+    "hex": "5C6D12B6BC1A0000FFFFFFF0"
+  },
+  {
+    "input": "667",
+    "hex": "5C9099A92BDB0000FFFFFFF0"
+  },
+  {
+    "input": "668",
+    "hex": "5CB4209B9B9C0000FFFFFFF0"
+  },
+  {
+    "input": "669",
+    "hex": "5CD7A78E0B5D0000FFFFFFF0"
+  },
+  {
+    "input": "670",
+    "hex": "5CFB2E807B1E0000FFFFFFF0"
+  },
+  {
+    "input": "671",
+    "hex": "5D1EB572EADF0000FFFFFFF0"
+  },
+  {
+    "input": "672",
+    "hex": "5D423C655AA00000FFFFFFF0"
+  },
+  {
+    "input": "673",
+    "hex": "5D65C357CA610000FFFFFFF0"
+  },
+  {
+    "input": "674",
+    "hex": "5D894A4A3A220000FFFFFFF0"
+  },
+  {
+    "input": "675",
+    "hex": "5DACD13CA9E30000FFFFFFF0"
+  },
+  {
+    "input": "676",
+    "hex": "5DD0582F19A40000FFFFFFF0"
+  },
+  {
+    "input": "677",
+    "hex": "5DF3DF2189650000FFFFFFF0"
+  },
+  {
+    "input": "678",
+    "hex": "5E176613F9260000FFFFFFF0"
+  },
+  {
+    "input": "679",
+    "hex": "5E3AED0668E70000FFFFFFF0"
+  },
+  {
+    "input": "680",
+    "hex": "5E5E73F8D8A80000FFFFFFF0"
+  },
+  {
+    "input": "681",
+    "hex": "5E81FAEB48690000FFFFFFF0"
+  },
+  {
+    "input": "682",
+    "hex": "5EA581DDB82A0000FFFFFFF0"
+  },
+  {
+    "input": "683",
+    "hex": "5EC908D027EB0000FFFFFFF0"
+  },
+  {
+    "input": "684",
+    "hex": "5EEC8FC297AC0000FFFFFFF0"
+  },
+  {
+    "input": "685",
+    "hex": "5F1016B5076D0000FFFFFFF0"
+  },
+  {
+    "input": "686",
+    "hex": "5F339DA7772E0000FFFFFFF0"
+  },
+  {
+    "input": "687",
+    "hex": "5F572499E6EF0000FFFFFFF0"
+  },
+  {
+    "input": "688",
+    "hex": "5F7AAB8C56B00000FFFFFFF0"
+  },
+  {
+    "input": "689",
+    "hex": "5F9E327EC6710000FFFFFFF0"
+  },
+  {
+    "input": "690",
+    "hex": "5FC1B97136320000FFFFFFF0"
+  },
+  {
+    "input": "691",
+    "hex": "5FE54063A5F30000FFFFFFF0"
+  },
+  {
+    "input": "692",
+    "hex": "6008C75615B40000FFFFFFF0"
+  },
+  {
+    "input": "693",
+    "hex": "602C4E4885750000FFFFFFF0"
+  },
+  {
+    "input": "694",
+    "hex": "604FD53AF5360000FFFFFFF0"
+  },
+  {
+    "input": "695",
+    "hex": "60735C2D64F70000FFFFFFF0"
+  },
+  {
+    "input": "696",
+    "hex": "6096E31FD4B80000FFFFFFF0"
+  },
+  {
+    "input": "697",
+    "hex": "60BA6A1244790000FFFFFFF0"
+  },
+  {
+    "input": "698",
+    "hex": "60DDF104B43A0000FFFFFFF0"
+  },
+  {
+    "input": "699",
+    "hex": "610177F723FB0000FFFFFFF0"
+  },
+  {
+    "input": "700",
+    "hex": "6124FEE993BC0000FFFFFFF0"
+  },
+  {
+    "input": "701",
+    "hex": "614885DC037D0000FFFFFFF0"
+  },
+  {
+    "input": "702",
+    "hex": "616C0CCE733E0000FFFFFFF0"
+  },
+  {
+    "input": "703",
+    "hex": "618F93C0E2FF0000FFFFFFF0"
+  },
+  {
+    "input": "704",
+    "hex": "61B31AB352C00000FFFFFFF0"
+  },
+  {
+    "input": "705",
+    "hex": "61D6A1A5C2810000FFFFFFF0"
+  },
+  {
+    "input": "706",
+    "hex": "61FA289832420000FFFFFFF0"
+  },
+  {
+    "input": "707",
+    "hex": "621DAF8AA2030000FFFFFFF0"
+  },
+  {
+    "input": "708",
+    "hex": "6241367D11C40000FFFFFFF0"
+  },
+  {
+    "input": "709",
+    "hex": "6264BD6F81850000FFFFFFF0"
+  },
+  {
+    "input": "710",
+    "hex": "62884461F1460000FFFFFFF0"
+  },
+  {
+    "input": "711",
+    "hex": "62ABCB5461070000FFFFFFF0"
+  },
+  {
+    "input": "712",
+    "hex": "62CF5246D0C80000FFFFFFF0"
+  },
+  {
+    "input": "713",
+    "hex": "62F2D93940890000FFFFFFF0"
+  },
+  {
+    "input": "714",
+    "hex": "6316602BB04A0000FFFFFFF0"
+  },
+  {
+    "input": "715",
+    "hex": "6339E71E200B0000FFFFFFF0"
+  },
+  {
+    "input": "716",
+    "hex": "635D6E108FCC0000FFFFFFF0"
+  },
+  {
+    "input": "717",
+    "hex": "6380F502FF8D0000FFFFFFF0"
+  },
+  {
+    "input": "718",
+    "hex": "63A47BF56F4E0000FFFFFFF0"
+  },
+  {
+    "input": "719",
+    "hex": "63C802E7DF0F0000FFFFFFF0"
+  },
+  {
+    "input": "720",
+    "hex": "63EB89DA4ED00000FFFFFFF0"
+  },
+  {
+    "input": "721",
+    "hex": "640F10CCBE910000FFFFFFF0"
+  },
+  {
+    "input": "722",
+    "hex": "643297BF2E520000FFFFFFF0"
+  },
+  {
+    "input": "723",
+    "hex": "64561EB19E130000FFFFFFF0"
+  },
+  {
+    "input": "724",
+    "hex": "6479A5A40DD40000FFFFFFF0"
+  },
+  {
+    "input": "725",
+    "hex": "649D2C967D950000FFFFFFF0"
+  },
+  {
+    "input": "726",
+    "hex": "64C0B388ED560000FFFFFFF0"
+  },
+  {
+    "input": "727",
+    "hex": "64E43A7B5D170000FFFFFFF0"
+  },
+  {
+    "input": "728",
+    "hex": "6507C16DCCD80000FFFFFFF0"
+  },
+  {
+    "input": "729",
+    "hex": "652B48603C990000FFFFFFF0"
+  },
+  {
+    "input": "730",
+    "hex": "654ECF52AC5A0000FFFFFFF0"
+  },
+  {
+    "input": "731",
+    "hex": "657256451C1B0000FFFFFFF0"
+  },
+  {
+    "input": "732",
+    "hex": "6595DD378BDC0000FFFFFFF0"
+  },
+  {
+    "input": "733",
+    "hex": "65B96429FB9D0000FFFFFFF0"
+  },
+  {
+    "input": "734",
+    "hex": "65DCEB1C6B5E0000FFFFFFF0"
+  },
+  {
+    "input": "735",
+    "hex": "6600720EDB1F0000FFFFFFF0"
+  },
+  {
+    "input": "736",
+    "hex": "6623F9014AE00000FFFFFFF0"
+  },
+  {
+    "input": "737",
+    "hex": "66477FF3BAA10000FFFFFFF0"
+  },
+  {
+    "input": "738",
+    "hex": "666B06E62A620000FFFFFFF0"
+  },
+  {
+    "input": "739",
+    "hex": "668E8DD89A230000FFFFFFF0"
+  },
+  {
+    "input": "740",
+    "hex": "66B214CB09E40000FFFFFFF0"
+  },
+  {
+    "input": "741",
+    "hex": "66D59BBD79A50000FFFFFFF0"
+  },
+  {
+    "input": "742",
+    "hex": "66F922AFE9660000FFFFFFF0"
+  },
+  {
+    "input": "743",
+    "hex": "671CA9A259270000FFFFFFF0"
+  },
+  {
+    "input": "744",
+    "hex": "67403094C8E80000FFFFFFF0"
+  },
+  {
+    "input": "745",
+    "hex": "6763B78738A90000FFFFFFF0"
+  },
+  {
+    "input": "746",
+    "hex": "67873E79A86A0000FFFFFFF0"
+  },
+  {
+    "input": "747",
+    "hex": "67AAC56C182B0000FFFFFFF0"
+  },
+  {
+    "input": "748",
+    "hex": "67CE4C5E87EC0000FFFFFFF0"
+  },
+  {
+    "input": "749",
+    "hex": "67F1D350F7AD0000FFFFFFF0"
+  },
+  {
+    "input": "750",
+    "hex": "68155A43676E0000FFFFFFF0"
+  },
+  {
+    "input": "751",
+    "hex": "6838E135D72F0000FFFFFFF0"
+  },
+  {
+    "input": "752",
+    "hex": "685C682846F00000FFFFFFF0"
+  },
+  {
+    "input": "753",
+    "hex": "687FEF1AB6B10000FFFFFFF0"
+  },
+  {
+    "input": "754",
+    "hex": "68A3760D26720000FFFFFFF0"
+  },
+  {
+    "input": "755",
+    "hex": "68C6FCFF96330000FFFFFFF0"
+  },
+  {
+    "input": "756",
+    "hex": "68EA83F205F40000FFFFFFF0"
+  },
+  {
+    "input": "757",
+    "hex": "690E0AE475B50000FFFFFFF0"
+  },
+  {
+    "input": "758",
+    "hex": "693191D6E5760000FFFFFFF0"
+  },
+  {
+    "input": "759",
+    "hex": "695518C955370000FFFFFFF0"
+  },
+  {
+    "input": "760",
+    "hex": "69789FBBC4F80000FFFFFFF0"
+  },
+  {
+    "input": "761",
+    "hex": "699C26AE34B90000FFFFFFF0"
+  },
+  {
+    "input": "762",
+    "hex": "69BFADA0A47A0000FFFFFFF0"
+  },
+  {
+    "input": "763",
+    "hex": "69E33493143B0000FFFFFFF0"
+  },
+  {
+    "input": "764",
+    "hex": "6A06BB8583FC0000FFFFFFF0"
+  },
+  {
+    "input": "765",
+    "hex": "6A2A4277F3BD0000FFFFFFF0"
+  },
+  {
+    "input": "766",
+    "hex": "6A4DC96A637E0000FFFFFFF0"
+  },
+  {
+    "input": "767",
+    "hex": "6A71505CD33F0000FFFFFFF0"
+  },
+  {
+    "input": "768",
+    "hex": "6A94D74F43000000FFFFFFF0"
+  },
+  {
+    "input": "769",
+    "hex": "6AB85E41B2C10000FFFFFFF0"
+  },
+  {
+    "input": "770",
+    "hex": "6ADBE53422820000FFFFFFF0"
+  },
+  {
+    "input": "771",
+    "hex": "6AFF6C2692430000FFFFFFF0"
+  },
+  {
+    "input": "772",
+    "hex": "6B22F31902040000FFFFFFF0"
+  },
+  {
+    "input": "773",
+    "hex": "6B467A0B71C50000FFFFFFF0"
+  },
+  {
+    "input": "774",
+    "hex": "6B6A00FDE1860000FFFFFFF0"
+  },
+  {
+    "input": "775",
+    "hex": "6B8D87F051470000FFFFFFF0"
+  },
+  {
+    "input": "776",
+    "hex": "6BB10EE2C1080000FFFFFFF0"
+  },
+  {
+    "input": "777",
+    "hex": "6BD495D530C90000FFFFFFF0"
+  },
+  {
+    "input": "778",
+    "hex": "6BF81CC7A08A0000FFFFFFF0"
+  },
+  {
+    "input": "779",
+    "hex": "6C1BA3BA104B0000FFFFFFF0"
+  },
+  {
+    "input": "780",
+    "hex": "6C3F2AAC800C0000FFFFFFF0"
+  },
+  {
+    "input": "781",
+    "hex": "6C62B19EEFCD0000FFFFFFF0"
+  },
+  {
+    "input": "782",
+    "hex": "6C8638915F8E0000FFFFFFF0"
+  },
+  {
+    "input": "783",
+    "hex": "6CA9BF83CF4F0000FFFFFFF0"
+  },
+  {
+    "input": "784",
+    "hex": "6CCD46763F100000FFFFFFF0"
+  },
+  {
+    "input": "785",
+    "hex": "6CF0CD68AED10000FFFFFFF0"
+  },
+  {
+    "input": "786",
+    "hex": "6D14545B1E920000FFFFFFF0"
+  },
+  {
+    "input": "787",
+    "hex": "6D37DB4D8E530000FFFFFFF0"
+  },
+  {
+    "input": "788",
+    "hex": "6D5B623FFE140000FFFFFFF0"
+  },
+  {
+    "input": "789",
+    "hex": "6D7EE9326DD50000FFFFFFF0"
+  },
+  {
+    "input": "790",
+    "hex": "6DA27024DD960000FFFFFFF0"
+  },
+  {
+    "input": "791",
+    "hex": "6DC5F7174D570000FFFFFFF0"
+  },
+  {
+    "input": "792",
+    "hex": "6DE97E09BD180000FFFFFFF0"
+  },
+  {
+    "input": "793",
+    "hex": "6E0D04FC2CD90000FFFFFFF0"
+  },
+  {
+    "input": "794",
+    "hex": "6E308BEE9C9A0000FFFFFFF0"
+  },
+  {
+    "input": "795",
+    "hex": "6E5412E10C5B0000FFFFFFF0"
+  },
+  {
+    "input": "796",
+    "hex": "6E7799D37C1C0000FFFFFFF0"
+  },
+  {
+    "input": "797",
+    "hex": "6E9B20C5EBDD0000FFFFFFF0"
+  },
+  {
+    "input": "798",
+    "hex": "6EBEA7B85B9E0000FFFFFFF0"
+  },
+  {
+    "input": "799",
+    "hex": "6EE22EAACB5F0000FFFFFFF0"
+  },
+  {
+    "input": "800",
+    "hex": "6F05B59D3B200000FFFFFFF0"
+  },
+  {
+    "input": "801",
+    "hex": "6F293C8FAAE10000FFFFFFF0"
+  },
+  {
+    "input": "802",
+    "hex": "6F4CC3821AA20000FFFFFFF0"
+  },
+  {
+    "input": "803",
+    "hex": "6F704A748A630000FFFFFFF0"
+  },
+  {
+    "input": "804",
+    "hex": "6F93D166FA240000FFFFFFF0"
+  },
+  {
+    "input": "805",
+    "hex": "6FB7585969E50000FFFFFFF0"
+  },
+  {
+    "input": "806",
+    "hex": "6FDADF4BD9A60000FFFFFFF0"
+  },
+  {
+    "input": "807",
+    "hex": "6FFE663E49670000FFFFFFF0"
+  },
+  {
+    "input": "808",
+    "hex": "7021ED30B9280000FFFFFFF0"
+  },
+  {
+    "input": "809",
+    "hex": "7045742328E90000FFFFFFF0"
+  },
+  {
+    "input": "810",
+    "hex": "7068FB1598AA0000FFFFFFF0"
+  },
+  {
+    "input": "811",
+    "hex": "708C8208086B0000FFFFFFF0"
+  },
+  {
+    "input": "812",
+    "hex": "70B008FA782C0000FFFFFFF0"
+  },
+  {
+    "input": "813",
+    "hex": "70D38FECE7ED0000FFFFFFF0"
+  },
+  {
+    "input": "814",
+    "hex": "70F716DF57AE0000FFFFFFF0"
+  },
+  {
+    "input": "815",
+    "hex": "711A9DD1C76F0000FFFFFFF0"
+  },
+  {
+    "input": "816",
+    "hex": "713E24C437300000FFFFFFF0"
+  },
+  {
+    "input": "817",
+    "hex": "7161ABB6A6F10000FFFFFFF0"
+  },
+  {
+    "input": "818",
+    "hex": "718532A916B20000FFFFFFF0"
+  },
+  {
+    "input": "819",
+    "hex": "71A8B99B86730000FFFFFFF0"
+  },
+  {
+    "input": "820",
+    "hex": "71CC408DF6340000FFFFFFF0"
+  },
+  {
+    "input": "821",
+    "hex": "71EFC78065F50000FFFFFFF0"
+  },
+  {
+    "input": "822",
+    "hex": "72134E72D5B60000FFFFFFF0"
+  },
+  {
+    "input": "823",
+    "hex": "7236D56545770000FFFFFFF0"
+  },
+  {
+    "input": "824",
+    "hex": "725A5C57B5380000FFFFFFF0"
+  },
+  {
+    "input": "825",
+    "hex": "727DE34A24F90000FFFFFFF0"
+  },
+  {
+    "input": "826",
+    "hex": "72A16A3C94BA0000FFFFFFF0"
+  },
+  {
+    "input": "827",
+    "hex": "72C4F12F047B0000FFFFFFF0"
+  },
+  {
+    "input": "828",
+    "hex": "72E87821743C0000FFFFFFF0"
+  },
+  {
+    "input": "829",
+    "hex": "730BFF13E3FD0000FFFFFFF0"
+  },
+  {
+    "input": "830",
+    "hex": "732F860653BE0000FFFFFFF0"
+  },
+  {
+    "input": "831",
+    "hex": "73530CF8C37F0000FFFFFFF0"
+  },
+  {
+    "input": "832",
+    "hex": "737693EB33400000FFFFFFF0"
+  },
+  {
+    "input": "833",
+    "hex": "739A1ADDA3010000FFFFFFF0"
+  },
+  {
+    "input": "834",
+    "hex": "73BDA1D012C20000FFFFFFF0"
+  },
+  {
+    "input": "835",
+    "hex": "73E128C282830000FFFFFFF0"
+  },
+  {
+    "input": "836",
+    "hex": "7404AFB4F2440000FFFFFFF0"
+  },
+  {
+    "input": "837",
+    "hex": "742836A762050000FFFFFFF0"
+  },
+  {
+    "input": "838",
+    "hex": "744BBD99D1C60000FFFFFFF0"
+  },
+  {
+    "input": "839",
+    "hex": "746F448C41870000FFFFFFF0"
+  },
+  {
+    "input": "840",
+    "hex": "7492CB7EB1480000FFFFFFF0"
+  },
+  {
+    "input": "841",
+    "hex": "74B6527121090000FFFFFFF0"
+  },
+  {
+    "input": "842",
+    "hex": "74D9D96390CA0000FFFFFFF0"
+  },
+  {
+    "input": "843",
+    "hex": "74FD6056008B0000FFFFFFF0"
+  },
+  {
+    "input": "844",
+    "hex": "7520E748704C0000FFFFFFF0"
+  },
+  {
+    "input": "845",
+    "hex": "75446E3AE00D0000FFFFFFF0"
+  },
+  {
+    "input": "846",
+    "hex": "7567F52D4FCE0000FFFFFFF0"
+  },
+  {
+    "input": "847",
+    "hex": "758B7C1FBF8F0000FFFFFFF0"
+  },
+  {
+    "input": "848",
+    "hex": "75AF03122F500000FFFFFFF0"
+  },
+  {
+    "input": "849",
+    "hex": "75D28A049F110000FFFFFFF0"
+  },
+  {
+    "input": "850",
+    "hex": "75F610F70ED20000FFFFFFF0"
+  },
+  {
+    "input": "851",
+    "hex": "761997E97E930000FFFFFFF0"
+  },
+  {
+    "input": "852",
+    "hex": "763D1EDBEE540000FFFFFFF0"
+  },
+  {
+    "input": "853",
+    "hex": "7660A5CE5E150000FFFFFFF0"
+  },
+  {
+    "input": "854",
+    "hex": "76842CC0CDD60000FFFFFFF0"
+  },
+  {
+    "input": "855",
+    "hex": "76A7B3B33D970000FFFFFFF0"
+  },
+  {
+    "input": "856",
+    "hex": "76CB3AA5AD580000FFFFFFF0"
+  },
+  {
+    "input": "857",
+    "hex": "76EEC1981D190000FFFFFFF0"
+  },
+  {
+    "input": "858",
+    "hex": "7712488A8CDA0000FFFFFFF0"
+  },
+  {
+    "input": "859",
+    "hex": "7735CF7CFC9B0000FFFFFFF0"
+  },
+  {
+    "input": "860",
+    "hex": "7759566F6C5C0000FFFFFFF0"
+  },
+  {
+    "input": "861",
+    "hex": "777CDD61DC1D0000FFFFFFF0"
+  },
+  {
+    "input": "862",
+    "hex": "77A064544BDE0000FFFFFFF0"
+  },
+  {
+    "input": "863",
+    "hex": "77C3EB46BB9F0000FFFFFFF0"
+  },
+  {
+    "input": "864",
+    "hex": "77E772392B600000FFFFFFF0"
+  },
+  {
+    "input": "865",
+    "hex": "780AF92B9B210000FFFFFFF0"
+  },
+  {
+    "input": "866",
+    "hex": "782E801E0AE20000FFFFFFF0"
+  },
+  {
+    "input": "867",
+    "hex": "785207107AA30000FFFFFFF0"
+  },
+  {
+    "input": "868",
+    "hex": "78758E02EA640000FFFFFFF0"
+  },
+  {
+    "input": "869",
+    "hex": "789914F55A250000FFFFFFF0"
+  },
+  {
+    "input": "870",
+    "hex": "78BC9BE7C9E60000FFFFFFF0"
+  },
+  {
+    "input": "871",
+    "hex": "78E022DA39A70000FFFFFFF0"
+  },
+  {
+    "input": "872",
+    "hex": "7903A9CCA9680000FFFFFFF0"
+  },
+  {
+    "input": "873",
+    "hex": "792730BF19290000FFFFFFF0"
+  },
+  {
+    "input": "874",
+    "hex": "794AB7B188EA0000FFFFFFF0"
+  },
+  {
+    "input": "875",
+    "hex": "796E3EA3F8AB0000FFFFFFF0"
+  },
+  {
+    "input": "876",
+    "hex": "7991C596686C0000FFFFFFF0"
+  },
+  {
+    "input": "877",
+    "hex": "79B54C88D82D0000FFFFFFF0"
+  },
+  {
+    "input": "878",
+    "hex": "79D8D37B47EE0000FFFFFFF0"
+  },
+  {
+    "input": "879",
+    "hex": "79FC5A6DB7AF0000FFFFFFF0"
+  },
+  {
+    "input": "880",
+    "hex": "7A1FE16027700000FFFFFFF0"
+  },
+  {
+    "input": "881",
+    "hex": "7A43685297310000FFFFFFF0"
+  },
+  {
+    "input": "882",
+    "hex": "7A66EF4506F20000FFFFFFF0"
+  },
+  {
+    "input": "883",
+    "hex": "7A8A763776B30000FFFFFFF0"
+  },
+  {
+    "input": "884",
+    "hex": "7AADFD29E6740000FFFFFFF0"
+  },
+  {
+    "input": "885",
+    "hex": "7AD1841C56350000FFFFFFF0"
+  },
+  {
+    "input": "886",
+    "hex": "7AF50B0EC5F60000FFFFFFF0"
+  },
+  {
+    "input": "887",
+    "hex": "7B18920135B70000FFFFFFF0"
+  },
+  {
+    "input": "888",
+    "hex": "7B3C18F3A5780000FFFFFFF0"
+  },
+  {
+    "input": "889",
+    "hex": "7B5F9FE615390000FFFFFFF0"
+  },
+  {
+    "input": "890",
+    "hex": "7B8326D884FA0000FFFFFFF0"
+  },
+  {
+    "input": "891",
+    "hex": "7BA6ADCAF4BB0000FFFFFFF0"
+  },
+  {
+    "input": "892",
+    "hex": "7BCA34BD647C0000FFFFFFF0"
+  },
+  {
+    "input": "893",
+    "hex": "7BEDBBAFD43D0000FFFFFFF0"
+  },
+  {
+    "input": "894",
+    "hex": "7C1142A243FE0000FFFFFFF0"
+  },
+  {
+    "input": "895",
+    "hex": "7C34C994B3BF0000FFFFFFF0"
+  },
+  {
+    "input": "896",
+    "hex": "7C58508723800000FFFFFFF0"
+  },
+  {
+    "input": "897",
+    "hex": "7C7BD77993410000FFFFFFF0"
+  },
+  {
+    "input": "898",
+    "hex": "7C9F5E6C03020000FFFFFFF0"
+  },
+  {
+    "input": "899",
+    "hex": "7CC2E55E72C30000FFFFFFF0"
+  },
+  {
+    "input": "900",
+    "hex": "7CE66C50E2840000FFFFFFF0"
+  },
+  {
+    "input": "901",
+    "hex": "7D09F34352450000FFFFFFF0"
+  },
+  {
+    "input": "902",
+    "hex": "7D2D7A35C2060000FFFFFFF0"
+  },
+  {
+    "input": "903",
+    "hex": "7D51012831C70000FFFFFFF0"
+  },
+  {
+    "input": "904",
+    "hex": "7D74881AA1880000FFFFFFF0"
+  },
+  {
+    "input": "905",
+    "hex": "7D980F0D11490000FFFFFFF0"
+  },
+  {
+    "input": "906",
+    "hex": "7DBB95FF810A0000FFFFFFF0"
+  },
+  {
+    "input": "907",
+    "hex": "7DDF1CF1F0CB0000FFFFFFF0"
+  },
+  {
+    "input": "908",
+    "hex": "7E02A3E4608C0000FFFFFFF0"
+  },
+  {
+    "input": "909",
+    "hex": "7E262AD6D04D0000FFFFFFF0"
+  },
+  {
+    "input": "910",
+    "hex": "7E49B1C9400E0000FFFFFFF0"
+  },
+  {
+    "input": "911",
+    "hex": "7E6D38BBAFCF0000FFFFFFF0"
+  },
+  {
+    "input": "912",
+    "hex": "7E90BFAE1F900000FFFFFFF0"
+  },
+  {
+    "input": "913",
+    "hex": "7EB446A08F510000FFFFFFF0"
+  },
+  {
+    "input": "914",
+    "hex": "7ED7CD92FF120000FFFFFFF0"
+  },
+  {
+    "input": "915",
+    "hex": "7EFB54856ED30000FFFFFFF0"
+  },
+  {
+    "input": "916",
+    "hex": "7F1EDB77DE940000FFFFFFF0"
+  },
+  {
+    "input": "917",
+    "hex": "7F42626A4E550000FFFFFFF0"
+  },
+  {
+    "input": "918",
+    "hex": "7F65E95CBE160000FFFFFFF0"
+  },
+  {
+    "input": "919",
+    "hex": "7F89704F2DD70000FFFFFFF0"
+  },
+  {
+    "input": "920",
+    "hex": "7FACF7419D980000FFFFFFF0"
+  },
+  {
+    "input": "921",
+    "hex": "7FD07E340D590000FFFFFFF0"
+  },
+  {
+    "input": "922",
+    "hex": "7FF405267D1A0000FFFFFFF0"
+  },
+  {
+    "input": "923",
+    "hex": "0CCF279C17AF8000FFFFFFF1"
+  },
+  {
+    "input": "924",
+    "hex": "0CD2B51ABC760000FFFFFFF1"
+  },
+  {
+    "input": "925",
+    "hex": "0CD64299613C8000FFFFFFF1"
+  },
+  {
+    "input": "926",
+    "hex": "0CD9D01806030000FFFFFFF1"
+  },
+  {
+    "input": "927",
+    "hex": "0CDD5D96AAC98000FFFFFFF1"
+  },
+  {
+    "input": "928",
+    "hex": "0CE0EB154F900000FFFFFFF1"
+  },
+  {
+    "input": "929",
+    "hex": "0CE47893F4568000FFFFFFF1"
+  },
+  {
+    "input": "930",
+    "hex": "0CE80612991D0000FFFFFFF1"
+  },
+  {
+    "input": "931",
+    "hex": "0CEB93913DE38000FFFFFFF1"
+  },
+  {
+    "input": "932",
+    "hex": "0CEF210FE2AA0000FFFFFFF1"
+  },
+  {
+    "input": "933",
+    "hex": "0CF2AE8E87708000FFFFFFF1"
+  },
+  {
+    "input": "934",
+    "hex": "0CF63C0D2C370000FFFFFFF1"
+  },
+  {
+    "input": "935",
+    "hex": "0CF9C98BD0FD8000FFFFFFF1"
+  },
+  {
+    "input": "936",
+    "hex": "0CFD570A75C40000FFFFFFF1"
+  },
+  {
+    "input": "937",
+    "hex": "0D00E4891A8A8000FFFFFFF1"
+  },
+  {
+    "input": "938",
+    "hex": "0D047207BF510000FFFFFFF1"
+  },
+  {
+    "input": "939",
+    "hex": "0D07FF8664178000FFFFFFF1"
+  },
+  {
+    "input": "940",
+    "hex": "0D0B8D0508DE0000FFFFFFF1"
+  },
+  {
+    "input": "941",
+    "hex": "0D0F1A83ADA48000FFFFFFF1"
+  },
+  {
+    "input": "942",
+    "hex": "0D12A802526B0000FFFFFFF1"
+  },
+  {
+    "input": "943",
+    "hex": "0D163580F7318000FFFFFFF1"
+  },
+  {
+    "input": "944",
+    "hex": "0D19C2FF9BF80000FFFFFFF1"
+  },
+  {
+    "input": "945",
+    "hex": "0D1D507E40BE8000FFFFFFF1"
+  },
+  {
+    "input": "946",
+    "hex": "0D20DDFCE5850000FFFFFFF1"
+  },
+  {
+    "input": "947",
+    "hex": "0D246B7B8A4B8000FFFFFFF1"
+  },
+  {
+    "input": "948",
+    "hex": "0D27F8FA2F120000FFFFFFF1"
+  },
+  {
+    "input": "949",
+    "hex": "0D2B8678D3D88000FFFFFFF1"
+  },
+  {
+    "input": "950",
+    "hex": "0D2F13F7789F0000FFFFFFF1"
+  },
+  {
+    "input": "951",
+    "hex": "0D32A1761D658000FFFFFFF1"
+  },
+  {
+    "input": "952",
+    "hex": "0D362EF4C22C0000FFFFFFF1"
+  },
+  {
+    "input": "953",
+    "hex": "0D39BC7366F28000FFFFFFF1"
+  },
+  {
+    "input": "954",
+    "hex": "0D3D49F20BB90000FFFFFFF1"
+  },
+  {
+    "input": "955",
+    "hex": "0D40D770B07F8000FFFFFFF1"
+  },
+  {
+    "input": "956",
+    "hex": "0D4464EF55460000FFFFFFF1"
+  },
+  {
+    "input": "957",
+    "hex": "0D47F26DFA0C8000FFFFFFF1"
+  },
+  {
+    "input": "958",
+    "hex": "0D4B7FEC9ED30000FFFFFFF1"
+  },
+  {
+    "input": "959",
+    "hex": "0D4F0D6B43998000FFFFFFF1"
+  },
+  {
+    "input": "960",
+    "hex": "0D529AE9E8600000FFFFFFF1"
+  },
+  {
+    "input": "961",
+    "hex": "0D5628688D268000FFFFFFF1"
+  },
+  {
+    "input": "962",
+    "hex": "0D59B5E731ED0000FFFFFFF1"
+  },
+  {
+    "input": "963",
+    "hex": "0D5D4365D6B38000FFFFFFF1"
+  },
+  {
+    "input": "964",
+    "hex": "0D60D0E47B7A0000FFFFFFF1"
+  },
+  {
+    "input": "965",
+    "hex": "0D645E6320408000FFFFFFF1"
+  },
+  {
+    "input": "966",
+    "hex": "0D67EBE1C5070000FFFFFFF1"
+  },
+  {
+    "input": "967",
+    "hex": "0D6B796069CD8000FFFFFFF1"
+  },
+  {
+    "input": "968",
+    "hex": "0D6F06DF0E940000FFFFFFF1"
+  },
+  {
+    "input": "969",
+    "hex": "0D72945DB35A8000FFFFFFF1"
+  },
+  {
+    "input": "970",
+    "hex": "0D7621DC58210000FFFFFFF1"
+  },
+  {
+    "input": "971",
+    "hex": "0D79AF5AFCE78000FFFFFFF1"
+  },
+  {
+    "input": "972",
+    "hex": "0D7D3CD9A1AE0000FFFFFFF1"
+  },
+  {
+    "input": "973",
+    "hex": "0D80CA5846748000FFFFFFF1"
+  },
+  {
+    "input": "974",
+    "hex": "0D8457D6EB3B0000FFFFFFF1"
+  },
+  {
+    "input": "975",
+    "hex": "0D87E55590018000FFFFFFF1"
+  },
+  {
+    "input": "976",
+    "hex": "0D8B72D434C80000FFFFFFF1"
+  },
+  {
+    "input": "977",
+    "hex": "0D8F0052D98E8000FFFFFFF1"
+  },
+  {
+    "input": "978",
+    "hex": "0D928DD17E550000FFFFFFF1"
+  },
+  {
+    "input": "979",
+    "hex": "0D961B50231B8000FFFFFFF1"
+  },
+  {
+    "input": "980",
+    "hex": "0D99A8CEC7E20000FFFFFFF1"
+  },
+  {
+    "input": "981",
+    "hex": "0D9D364D6CA88000FFFFFFF1"
+  },
+  {
+    "input": "982",
+    "hex": "0DA0C3CC116F0000FFFFFFF1"
+  },
+  {
+    "input": "983",
+    "hex": "0DA4514AB6358000FFFFFFF1"
+  },
+  {
+    "input": "984",
+    "hex": "0DA7DEC95AFC0000FFFFFFF1"
+  },
+  {
+    "input": "985",
+    "hex": "0DAB6C47FFC28000FFFFFFF1"
+  },
+  {
+    "input": "986",
+    "hex": "0DAEF9C6A4890000FFFFFFF1"
+  },
+  {
+    "input": "987",
+    "hex": "0DB28745494F8000FFFFFFF1"
+  },
+  {
+    "input": "988",
+    "hex": "0DB614C3EE160000FFFFFFF1"
+  },
+  {
+    "input": "989",
+    "hex": "0DB9A24292DC8000FFFFFFF1"
+  },
+  {
+    "input": "990",
+    "hex": "0DBD2FC137A30000FFFFFFF1"
+  },
+  {
+    "input": "991",
+    "hex": "0DC0BD3FDC698000FFFFFFF1"
+  },
+  {
+    "input": "992",
+    "hex": "0DC44ABE81300000FFFFFFF1"
+  },
+  {
+    "input": "993",
+    "hex": "0DC7D83D25F68000FFFFFFF1"
+  },
+  {
+    "input": "994",
+    "hex": "0DCB65BBCABD0000FFFFFFF1"
+  },
+  {
+    "input": "995",
+    "hex": "0DCEF33A6F838000FFFFFFF1"
+  },
+  {
+    "input": "996",
+    "hex": "0DD280B9144A0000FFFFFFF1"
+  },
+  {
+    "input": "997",
+    "hex": "0DD60E37B9108000FFFFFFF1"
+  },
+  {
+    "input": "998",
+    "hex": "0DD99BB65DD70000FFFFFFF1"
+  },
+  {
+    "input": "999",
+    "hex": "0DDD2935029D8000FFFFFFF1"
+  },
+  {
+    "input": "-0.5",
+    "hex": "BA9C6E7DBB0C0000FFFFFFED"
+  },
+  {
+    "input": "-1.5",
+    "hex": "EB2EEDF284EA0000FFFFFFEE"
+  },
+  {
+    "input": "-100",
+    "hex": "F21F494C589C0000FFFFFFF0"
+  },
+  {
+    "input": "-101",
+    "hex": "F1FBC259E8DB0000FFFFFFF0"
+  },
+  {
+    "input": "-102",
+    "hex": "F1D83B67791A0000FFFFFFF0"
+  },
+  {
+    "input": "-103",
+    "hex": "F1B4B47509590000FFFFFFF0"
+  },
+  {
+    "input": "-104",
+    "hex": "F1912D8299980000FFFFFFF0"
+  },
+  {
+    "input": "-105",
+    "hex": "F16DA69029D70000FFFFFFF0"
+  },
+  {
+    "input": "-106",
+    "hex": "F14A1F9DBA160000FFFFFFF0"
+  },
+  {
+    "input": "-107",
+    "hex": "F12698AB4A550000FFFFFFF0"
+  },
+  {
+    "input": "-108",
+    "hex": "F10311B8DA940000FFFFFFF0"
+  },
+  {
+    "input": "-109",
+    "hex": "F0DF8AC66AD30000FFFFFFF0"
+  },
+  {
+    "input": "-110",
+    "hex": "F0BC03D3FB120000FFFFFFF0"
+  },
+  {
+    "input": "-111",
+    "hex": "F0987CE18B510000FFFFFFF0"
+  },
+  {
+    "input": "-112",
+    "hex": "F074F5EF1B900000FFFFFFF0"
+  },
+  {
+    "input": "-113",
+    "hex": "F0516EFCABCF0000FFFFFFF0"
+  },
+  {
+    "input": "-114",
+    "hex": "F02DE80A3C0E0000FFFFFFF0"
+  },
+  {
+    "input": "-115",
+    "hex": "F00A6117CC4D0000FFFFFFF0"
+  },
+  {
+    "input": "-116",
+    "hex": "EFE6DA255C8C0000FFFFFFF0"
+  },
+  {
+    "input": "-117",
+    "hex": "EFC35332ECCB0000FFFFFFF0"
+  },
+  {
+    "input": "-118",
+    "hex": "EF9FCC407D0A0000FFFFFFF0"
+  },
+  {
+    "input": "-119",
+    "hex": "EF7C454E0D490000FFFFFFF0"
+  },
+  {
+    "input": "-120",
+    "hex": "EF58BE5B9D880000FFFFFFF0"
+  },
+  {
+    "input": "-121",
+    "hex": "EF3537692DC70000FFFFFFF0"
+  },
+  {
+    "input": "-122",
+    "hex": "EF11B076BE060000FFFFFFF0"
+  },
+  {
+    "input": "-123",
+    "hex": "EEEE29844E450000FFFFFFF0"
+  },
+  {
+    "input": "-124",
+    "hex": "EECAA291DE840000FFFFFFF0"
+  },
+  {
+    "input": "-125",
+    "hex": "EEA71B9F6EC30000FFFFFFF0"
+  },
+  {
+    "input": "-126",
+    "hex": "EE8394ACFF020000FFFFFFF0"
+  },
+  {
+    "input": "-127",
+    "hex": "EE600DBA8F410000FFFFFFF0"
+  },
+  {
+    "input": "-128",
+    "hex": "EE3C86C81F800000FFFFFFF0"
+  },
+  {
+    "input": "-129",
+    "hex": "EE18FFD5AFBF0000FFFFFFF0"
+  },
+  {
+    "input": "-130",
+    "hex": "EDF578E33FFE0000FFFFFFF0"
+  },
+  {
+    "input": "-131",
+    "hex": "EDD1F1F0D03D0000FFFFFFF0"
+  },
+  {
+    "input": "-132",
+    "hex": "EDAE6AFE607C0000FFFFFFF0"
+  },
+  {
+    "input": "-133",
+    "hex": "ED8AE40BF0BB0000FFFFFFF0"
+  },
+  {
+    "input": "-134",
+    "hex": "ED675D1980FA0000FFFFFFF0"
+  },
+  {
+    "input": "-135",
+    "hex": "ED43D62711390000FFFFFFF0"
+  },
+  {
+    "input": "-136",
+    "hex": "ED204F34A1780000FFFFFFF0"
+  },
+  {
+    "input": "-137",
+    "hex": "ECFCC84231B70000FFFFFFF0"
+  },
+  {
+    "input": "-138",
+    "hex": "ECD9414FC1F60000FFFFFFF0"
+  },
+  {
+    "input": "-139",
+    "hex": "ECB5BA5D52350000FFFFFFF0"
+  },
+  {
+    "input": "-140",
+    "hex": "EC92336AE2740000FFFFFFF0"
+  },
+  {
+    "input": "-141",
+    "hex": "EC6EAC7872B30000FFFFFFF0"
+  },
+  {
+    "input": "-142",
+    "hex": "EC4B258602F20000FFFFFFF0"
+  },
+  {
+    "input": "-143",
+    "hex": "EC279E9393310000FFFFFFF0"
+  },
+  {
+    "input": "-144",
+    "hex": "EC0417A123700000FFFFFFF0"
+  },
+  {
+    "input": "-145",
+    "hex": "EBE090AEB3AF0000FFFFFFF0"
+  },
+  {
+    "input": "-146",
+    "hex": "EBBD09BC43EE0000FFFFFFF0"
+  },
+  {
+    "input": "-147",
+    "hex": "EB9982C9D42D0000FFFFFFF0"
+  },
+  {
+    "input": "-148",
+    "hex": "EB75FBD7646C0000FFFFFFF0"
+  },
+  {
+    "input": "-149",
+    "hex": "EB5274E4F4AB0000FFFFFFF0"
+  },
+  {
+    "input": "-150",
+    "hex": "EB2EEDF284EA0000FFFFFFF0"
+  },
+  {
+    "input": "-151",
+    "hex": "EB0B670015290000FFFFFFF0"
+  },
+  {
+    "input": "-152",
+    "hex": "EAE7E00DA5680000FFFFFFF0"
+  },
+  {
+    "input": "-153",
+    "hex": "EAC4591B35A70000FFFFFFF0"
+  },
+  {
+    "input": "-154",
+    "hex": "EAA0D228C5E60000FFFFFFF0"
+  },
+  {
+    "input": "-155",
+    "hex": "EA7D4B3656250000FFFFFFF0"
+  },
+  {
+    "input": "-156",
+    "hex": "EA59C443E6640000FFFFFFF0"
+  },
+  {
+    "input": "-157",
+    "hex": "EA363D5176A30000FFFFFFF0"
+  },
+  {
+    "input": "-158",
+    "hex": "EA12B65F06E20000FFFFFFF0"
+  },
+  {
+    "input": "-159",
+    "hex": "E9EF2F6C97210000FFFFFFF0"
+  },
+  {
+    "input": "-160",
+    "hex": "E9CBA87A27600000FFFFFFF0"
+  },
+  {
+    "input": "-161",
+    "hex": "E9A82187B79F0000FFFFFFF0"
+  },
+  {
+    "input": "-162",
+    "hex": "E9849A9547DE0000FFFFFFF0"
+  },
+  {
+    "input": "-163",
+    "hex": "E96113A2D81D0000FFFFFFF0"
+  },
+  {
+    "input": "-164",
+    "hex": "E93D8CB0685C0000FFFFFFF0"
+  },
+  {
+    "input": "-165",
+    "hex": "E91A05BDF89B0000FFFFFFF0"
+  },
+  {
+    "input": "-166",
+    "hex": "E8F67ECB88DA0000FFFFFFF0"
+  },
+  {
+    "input": "-167",
+    "hex": "E8D2F7D919190000FFFFFFF0"
+  },
+  {
+    "input": "-168",
+    "hex": "E8AF70E6A9580000FFFFFFF0"
+  },
+  {
+    "input": "-169",
+    "hex": "E88BE9F439970000FFFFFFF0"
+  },
+  {
+    "input": "-170",
+    "hex": "E8686301C9D60000FFFFFFF0"
+  },
+  {
+    "input": "-171",
+    "hex": "E844DC0F5A150000FFFFFFF0"
+  },
+  {
+    "input": "-172",
+    "hex": "E821551CEA540000FFFFFFF0"
+  },
+  {
+    "input": "-173",
+    "hex": "E7FDCE2A7A930000FFFFFFF0"
+  },
+  {
+    "input": "-174",
+    "hex": "E7DA47380AD20000FFFFFFF0"
+  },
+  {
+    "input": "-175",
+    "hex": "E7B6C0459B110000FFFFFFF0"
+  },
+  {
+    "input": "-176",
+    "hex": "E79339532B500000FFFFFFF0"
+  },
+  {
+    "input": "-177",
+    "hex": "E76FB260BB8F0000FFFFFFF0"
+  },
+  {
+    "input": "-178",
+    "hex": "E74C2B6E4BCE0000FFFFFFF0"
+  },
+  {
+    "input": "-179",
+    "hex": "E728A47BDC0D0000FFFFFFF0"
+  },
+  {
+    "input": "-180",
+    "hex": "E7051D896C4C0000FFFFFFF0"
+  },
+  {
+    "input": "-181",
+    "hex": "E6E19696FC8B0000FFFFFFF0"
+  },
+  {
+    "input": "-182",
+    "hex": "E6BE0FA48CCA0000FFFFFFF0"
+  },
+  {
+    "input": "-183",
+    "hex": "E69A88B21D090000FFFFFFF0"
+  },
+  {
+    "input": "-184",
+    "hex": "E67701BFAD480000FFFFFFF0"
+  },
+  {
+    "input": "-185",
+    "hex": "E6537ACD3D870000FFFFFFF0"
+  },
+  {
+    "input": "-186",
+    "hex": "E62FF3DACDC60000FFFFFFF0"
+  },
+  {
+    "input": "-187",
+    "hex": "E60C6CE85E050000FFFFFFF0"
+  },
+  {
+    "input": "-188",
+    "hex": "E5E8E5F5EE440000FFFFFFF0"
+  },
+  {
+    "input": "-189",
+    "hex": "E5C55F037E830000FFFFFFF0"
+  },
+  {
+    "input": "-190",
+    "hex": "E5A1D8110EC20000FFFFFFF0"
+  },
+  {
+    "input": "-191",
+    "hex": "E57E511E9F010000FFFFFFF0"
+  },
+  {
+    "input": "-192",
+    "hex": "E55ACA2C2F400000FFFFFFF0"
+  },
+  {
+    "input": "-193",
+    "hex": "E5374339BF7F0000FFFFFFF0"
+  },
+  {
+    "input": "-194",
+    "hex": "E513BC474FBE0000FFFFFFF0"
+  },
+  {
+    "input": "-195",
+    "hex": "E4F03554DFFD0000FFFFFFF0"
+  },
+  {
+    "input": "-196",
+    "hex": "E4CCAE62703C0000FFFFFFF0"
+  },
+  {
+    "input": "-197",
+    "hex": "E4A92770007B0000FFFFFFF0"
+  },
+  {
+    "input": "-198",
+    "hex": "E485A07D90BA0000FFFFFFF0"
+  },
+  {
+    "input": "-199",
+    "hex": "E462198B20F90000FFFFFFF0"
+  },
+  {
+    "input": "-1e3",
+    "hex": "F21F494C589C0000FFFFFFF1"
+  },
+  {
+    "input": "-1e4",
+    "hex": "F21F494C589C0000FFFFFFF2"
+  },
+  {
+    "input": "-1e5",
+    "hex": "F21F494C589C0000FFFFFFF3"
+  },
+  {
+    "input": "-1e6",
+    "hex": "F21F494C589C0000FFFFFFF4"
+  },
+  {
+    "input": "-1e7",
+    "hex": "F21F494C589C0000FFFFFFF5"
+  },
+  {
+    "input": "-1e8",
+    "hex": "F21F494C589C0000FFFFFFF6"
+  },
+  {
+    "input": "-1e9",
+    "hex": "F21F494C589C0000FFFFFFF7"
+  },
+  {
+    "input": "-200",
+    "hex": "E43E9298B1380000FFFFFFF0"
+  },
+  {
+    "input": "-201",
+    "hex": "E41B0BA641770000FFFFFFF0"
+  },
+  {
+    "input": "-202",
+    "hex": "E3F784B3D1B60000FFFFFFF0"
+  },
+  {
+    "input": "-203",
+    "hex": "E3D3FDC161F50000FFFFFFF0"
+  },
+  {
+    "input": "-204",
+    "hex": "E3B076CEF2340000FFFFFFF0"
+  },
+  {
+    "input": "-205",
+    "hex": "E38CEFDC82730000FFFFFFF0"
+  },
+  {
+    "input": "-206",
+    "hex": "E36968EA12B20000FFFFFFF0"
+  },
+  {
+    "input": "-207",
+    "hex": "E345E1F7A2F10000FFFFFFF0"
+  },
+  {
+    "input": "-208",
+    "hex": "E3225B0533300000FFFFFFF0"
+  },
+  {
+    "input": "-209",
+    "hex": "E2FED412C36F0000FFFFFFF0"
+  },
+  {
+    "input": "-210",
+    "hex": "E2DB4D2053AE0000FFFFFFF0"
+  },
+  {
+    "input": "-211",
+    "hex": "E2B7C62DE3ED0000FFFFFFF0"
+  },
+  {
+    "input": "-212",
+    "hex": "E2943F3B742C0000FFFFFFF0"
+  },
+  {
+    "input": "-213",
+    "hex": "E270B849046B0000FFFFFFF0"
+  },
+  {
+    "input": "-214",
+    "hex": "E24D315694AA0000FFFFFFF0"
+  },
+  {
+    "input": "-215",
+    "hex": "E229AA6424E90000FFFFFFF0"
+  },
+  {
+    "input": "-216",
+    "hex": "E2062371B5280000FFFFFFF0"
+  },
+  {
+    "input": "-217",
+    "hex": "E1E29C7F45670000FFFFFFF0"
+  },
+  {
+    "input": "-218",
+    "hex": "E1BF158CD5A60000FFFFFFF0"
+  },
+  {
+    "input": "-219",
+    "hex": "E19B8E9A65E50000FFFFFFF0"
+  },
+  {
+    "input": "-220",
+    "hex": "E17807A7F6240000FFFFFFF0"
+  },
+  {
+    "input": "-221",
+    "hex": "E15480B586630000FFFFFFF0"
+  },
+  {
+    "input": "-222",
+    "hex": "E130F9C316A20000FFFFFFF0"
+  },
+  {
+    "input": "-223",
+    "hex": "E10D72D0A6E10000FFFFFFF0"
+  },
+  {
+    "input": "-224",
+    "hex": "E0E9EBDE37200000FFFFFFF0"
+  },
+  {
+    "input": "-225",
+    "hex": "E0C664EBC75F0000FFFFFFF0"
+  },
+  {
+    "input": "-226",
+    "hex": "E0A2DDF9579E0000FFFFFFF0"
+  },
+  {
+    "input": "-227",
+    "hex": "E07F5706E7DD0000FFFFFFF0"
+  },
+  {
+    "input": "-228",
+    "hex": "E05BD014781C0000FFFFFFF0"
+  },
+  {
+    "input": "-229",
+    "hex": "E0384922085B0000FFFFFFF0"
+  },
+  {
+    "input": "-230",
+    "hex": "E014C22F989A0000FFFFFFF0"
+  },
+  {
+    "input": "-231",
+    "hex": "DFF13B3D28D90000FFFFFFF0"
+  },
+  {
+    "input": "-232",
+    "hex": "DFCDB44AB9180000FFFFFFF0"
+  },
+  {
+    "input": "-233",
+    "hex": "DFAA2D5849570000FFFFFFF0"
+  },
+  {
+    "input": "-234",
+    "hex": "DF86A665D9960000FFFFFFF0"
+  },
+  {
+    "input": "-235",
+    "hex": "DF631F7369D50000FFFFFFF0"
+  },
+  {
+    "input": "-236",
+    "hex": "DF3F9880FA140000FFFFFFF0"
+  },
+  {
+    "input": "-237",
+    "hex": "DF1C118E8A530000FFFFFFF0"
+  },
+  {
+    "input": "-238",
+    "hex": "DEF88A9C1A920000FFFFFFF0"
+  },
+  {
+    "input": "-239",
+    "hex": "DED503A9AAD10000FFFFFFF0"
+  },
+  {
+    "input": "-240",
+    "hex": "DEB17CB73B100000FFFFFFF0"
+  },
+  {
+    "input": "-241",
+    "hex": "DE8DF5C4CB4F0000FFFFFFF0"
+  },
+  {
+    "input": "-242",
+    "hex": "DE6A6ED25B8E0000FFFFFFF0"
+  },
+  {
+    "input": "-243",
+    "hex": "DE46E7DFEBCD0000FFFFFFF0"
+  },
+  {
+    "input": "-244",
+    "hex": "DE2360ED7C0C0000FFFFFFF0"
+  },
+  {
+    "input": "-245",
+    "hex": "DDFFD9FB0C4B0000FFFFFFF0"
+  },
+  {
+    "input": "-246",
+    "hex": "DDDC53089C8A0000FFFFFFF0"
+  },
+  {
+    "input": "-247",
+    "hex": "DDB8CC162CC90000FFFFFFF0"
+  },
+  {
+    "input": "-248",
+    "hex": "DD954523BD080000FFFFFFF0"
+  },
+  {
+    "input": "-249",
+    "hex": "DD71BE314D470000FFFFFFF0"
+  },
+  {
+    "input": "-250",
+    "hex": "DD4E373EDD860000FFFFFFF0"
+  },
+  {
+    "input": "-251",
+    "hex": "DD2AB04C6DC50000FFFFFFF0"
+  },
+  {
+    "input": "-252",
+    "hex": "DD072959FE040000FFFFFFF0"
+  },
+  {
+    "input": "-253",
+    "hex": "DCE3A2678E430000FFFFFFF0"
+  },
+  {
+    "input": "-254",
+    "hex": "DCC01B751E820000FFFFFFF0"
+  },
+  {
+    "input": "-255",
+    "hex": "DC9C9482AEC10000FFFFFFF0"
+  },
+  {
+    "input": "-256",
+    "hex": "DC790D903F000000FFFFFFF0"
+  },
+  {
+    "input": "-257",
+    "hex": "DC55869DCF3F0000FFFFFFF0"
+  },
+  {
+    "input": "-258",
+    "hex": "DC31FFAB5F7E0000FFFFFFF0"
+  },
+  {
+    "input": "-259",
+    "hex": "DC0E78B8EFBD0000FFFFFFF0"
+  },
+  {
+    "input": "-260",
+    "hex": "DBEAF1C67FFC0000FFFFFFF0"
+  },
+  {
+    "input": "-261",
+    "hex": "DBC76AD4103B0000FFFFFFF0"
+  },
+  {
+    "input": "-262",
+    "hex": "DBA3E3E1A07A0000FFFFFFF0"
+  },
+  {
+    "input": "-263",
+    "hex": "DB805CEF30B90000FFFFFFF0"
+  },
+  {
+    "input": "-264",
+    "hex": "DB5CD5FCC0F80000FFFFFFF0"
+  },
+  {
+    "input": "-265",
+    "hex": "DB394F0A51370000FFFFFFF0"
+  },
+  {
+    "input": "-266",
+    "hex": "DB15C817E1760000FFFFFFF0"
+  },
+  {
+    "input": "-267",
+    "hex": "DAF2412571B50000FFFFFFF0"
+  },
+  {
+    "input": "-268",
+    "hex": "DACEBA3301F40000FFFFFFF0"
+  },
+  {
+    "input": "-269",
+    "hex": "DAAB334092330000FFFFFFF0"
+  },
+  {
+    "input": "-270",
+    "hex": "DA87AC4E22720000FFFFFFF0"
+  },
+  {
+    "input": "-271",
+    "hex": "DA64255BB2B10000FFFFFFF0"
+  },
+  {
+    "input": "-272",
+    "hex": "DA409E6942F00000FFFFFFF0"
+  },
+  {
+    "input": "-273",
+    "hex": "DA1D1776D32F0000FFFFFFF0"
+  },
+  {
+    "input": "-274",
+    "hex": "D9F99084636E0000FFFFFFF0"
+  },
+  {
+    "input": "-275",
+    "hex": "D9D60991F3AD0000FFFFFFF0"
+  },
+  {
+    "input": "-276",
+    "hex": "D9B2829F83EC0000FFFFFFF0"
+  },
+  {
+    "input": "-277",
+    "hex": "D98EFBAD142B0000FFFFFFF0"
+  },
+  {
+    "input": "-278",
+    "hex": "D96B74BAA46A0000FFFFFFF0"
+  },
+  {
+    "input": "-279",
+    "hex": "D947EDC834A90000FFFFFFF0"
+  },
+  {
+    "input": "-280",
+    "hex": "D92466D5C4E80000FFFFFFF0"
+  },
+  {
+    "input": "-281",
+    "hex": "D900DFE355270000FFFFFFF0"
+  },
+  {
+    "input": "-282",
+    "hex": "D8DD58F0E5660000FFFFFFF0"
+  },
+  {
+    "input": "-283",
+    "hex": "D8B9D1FE75A50000FFFFFFF0"
+  },
+  {
+    "input": "-284",
+    "hex": "D8964B0C05E40000FFFFFFF0"
+  },
+  {
+    "input": "-285",
+    "hex": "D872C41996230000FFFFFFF0"
+  },
+  {
+    "input": "-286",
+    "hex": "D84F3D2726620000FFFFFFF0"
+  },
+  {
+    "input": "-287",
+    "hex": "D82BB634B6A10000FFFFFFF0"
+  },
+  {
+    "input": "-288",
+    "hex": "D8082F4246E00000FFFFFFF0"
+  },
+  {
+    "input": "-289",
+    "hex": "D7E4A84FD71F0000FFFFFFF0"
+  },
+  {
+    "input": "-290",
+    "hex": "D7C1215D675E0000FFFFFFF0"
+  },
+  {
+    "input": "-291",
+    "hex": "D79D9A6AF79D0000FFFFFFF0"
+  },
+  {
+    "input": "-292",
+    "hex": "D77A137887DC0000FFFFFFF0"
+  },
+  {
+    "input": "-293",
+    "hex": "D7568C86181B0000FFFFFFF0"
+  },
+  {
+    "input": "-294",
+    "hex": "D7330593A85A0000FFFFFFF0"
+  },
+  {
+    "input": "-295",
+    "hex": "D70F7EA138990000FFFFFFF0"
+  },
+  {
+    "input": "-296",
+    "hex": "D6EBF7AEC8D80000FFFFFFF0"
+  },
+  {
+    "input": "-297",
+    "hex": "D6C870BC59170000FFFFFFF0"
+  },
+  {
+    "input": "-298",
+    "hex": "D6A4E9C9E9560000FFFFFFF0"
+  },
+  {
+    "input": "-299",
+    "hex": "D68162D779950000FFFFFFF0"
+  },
+  {
+    "input": "-300",
+    "hex": "D65DDBE509D40000FFFFFFF0"
+  },
+  {
+    "input": "-301",
+    "hex": "D63A54F29A130000FFFFFFF0"
+  },
+  {
+    "input": "-302",
+    "hex": "D616CE002A520000FFFFFFF0"
+  },
+  {
+    "input": "-303",
+    "hex": "D5F3470DBA910000FFFFFFF0"
+  },
+  {
+    "input": "-304",
+    "hex": "D5CFC01B4AD00000FFFFFFF0"
+  },
+  {
+    "input": "-305",
+    "hex": "D5AC3928DB0F0000FFFFFFF0"
+  },
+  {
+    "input": "-306",
+    "hex": "D588B2366B4E0000FFFFFFF0"
+  },
+  {
+    "input": "-307",
+    "hex": "D5652B43FB8D0000FFFFFFF0"
+  },
+  {
+    "input": "-308",
+    "hex": "D541A4518BCC0000FFFFFFF0"
+  },
+  {
+    "input": "-309",
+    "hex": "D51E1D5F1C0B0000FFFFFFF0"
+  },
+  {
+    "input": "-310",
+    "hex": "D4FA966CAC4A0000FFFFFFF0"
+  },
+  {
+    "input": "-311",
+    "hex": "D4D70F7A3C890000FFFFFFF0"
+  },
+  {
+    "input": "-312",
+    "hex": "D4B38887CCC80000FFFFFFF0"
+  },
+  {
+    "input": "-313",
+    "hex": "D49001955D070000FFFFFFF0"
+  },
+  {
+    "input": "-314",
+    "hex": "D46C7AA2ED460000FFFFFFF0"
+  },
+  {
+    "input": "-315",
+    "hex": "D448F3B07D850000FFFFFFF0"
+  },
+  {
+    "input": "-316",
+    "hex": "D4256CBE0DC40000FFFFFFF0"
+  },
+  {
+    "input": "-317",
+    "hex": "D401E5CB9E030000FFFFFFF0"
+  },
+  {
+    "input": "-318",
+    "hex": "D3DE5ED92E420000FFFFFFF0"
+  },
+  {
+    "input": "-319",
+    "hex": "D3BAD7E6BE810000FFFFFFF0"
+  },
+  {
+    "input": "-320",
+    "hex": "D39750F44EC00000FFFFFFF0"
+  },
+  {
+    "input": "-321",
+    "hex": "D373CA01DEFF0000FFFFFFF0"
+  },
+  {
+    "input": "-322",
+    "hex": "D350430F6F3E0000FFFFFFF0"
+  },
+  {
+    "input": "-323",
+    "hex": "D32CBC1CFF7D0000FFFFFFF0"
+  },
+  {
+    "input": "-324",
+    "hex": "D309352A8FBC0000FFFFFFF0"
+  },
+  {
+    "input": "-325",
+    "hex": "D2E5AE381FFB0000FFFFFFF0"
+  },
+  {
+    "input": "-326",
+    "hex": "D2C22745B03A0000FFFFFFF0"
+  },
+  {
+    "input": "-327",
+    "hex": "D29EA05340790000FFFFFFF0"
+  },
+  {
+    "input": "-328",
+    "hex": "D27B1960D0B80000FFFFFFF0"
+  },
+  {
+    "input": "-329",
+    "hex": "D257926E60F70000FFFFFFF0"
+  },
+  {
+    "input": "-330",
+    "hex": "D2340B7BF1360000FFFFFFF0"
+  },
+  {
+    "input": "-331",
+    "hex": "D210848981750000FFFFFFF0"
+  },
+  {
+    "input": "-332",
+    "hex": "D1ECFD9711B40000FFFFFFF0"
+  },
+  {
+    "input": "-333",
+    "hex": "D1C976A4A1F30000FFFFFFF0"
+  },
+  {
+    "input": "-334",
+    "hex": "D1A5EFB232320000FFFFFFF0"
+  },
+  {
+    "input": "-335",
+    "hex": "D18268BFC2710000FFFFFFF0"
+  },
+  {
+    "input": "-336",
+    "hex": "D15EE1CD52B00000FFFFFFF0"
+  },
+  {
+    "input": "-337",
+    "hex": "D13B5ADAE2EF0000FFFFFFF0"
+  },
+  {
+    "input": "-338",
+    "hex": "D117D3E8732E0000FFFFFFF0"
+  },
+  {
+    "input": "-339",
+    "hex": "D0F44CF6036D0000FFFFFFF0"
+  },
+  {
+    "input": "-340",
+    "hex": "D0D0C60393AC0000FFFFFFF0"
+  },
+  {
+    "input": "-341",
+    "hex": "D0AD3F1123EB0000FFFFFFF0"
+  },
+  {
+    "input": "-342",
+    "hex": "D089B81EB42A0000FFFFFFF0"
+  },
+  {
+    "input": "-343",
+    "hex": "D066312C44690000FFFFFFF0"
+  },
+  {
+    "input": "-344",
+    "hex": "D042AA39D4A80000FFFFFFF0"
+  },
+  {
+    "input": "-345",
+    "hex": "D01F234764E70000FFFFFFF0"
+  },
+  {
+    "input": "-346",
+    "hex": "CFFB9C54F5260000FFFFFFF0"
+  },
+  {
+    "input": "-347",
+    "hex": "CFD8156285650000FFFFFFF0"
+  },
+  {
+    "input": "-348",
+    "hex": "CFB48E7015A40000FFFFFFF0"
+  },
+  {
+    "input": "-349",
+    "hex": "CF91077DA5E30000FFFFFFF0"
+  },
+  {
+    "input": "-350",
+    "hex": "CF6D808B36220000FFFFFFF0"
+  },
+  {
+    "input": "-351",
+    "hex": "CF49F998C6610000FFFFFFF0"
+  },
+  {
+    "input": "-352",
+    "hex": "CF2672A656A00000FFFFFFF0"
+  },
+  {
+    "input": "-353",
+    "hex": "CF02EBB3E6DF0000FFFFFFF0"
+  },
+  {
+    "input": "-354",
+    "hex": "CEDF64C1771E0000FFFFFFF0"
+  },
+  {
+    "input": "-355",
+    "hex": "CEBBDDCF075D0000FFFFFFF0"
+  },
+  {
+    "input": "-356",
+    "hex": "CE9856DC979C0000FFFFFFF0"
+  },
+  {
+    "input": "-357",
+    "hex": "CE74CFEA27DB0000FFFFFFF0"
+  },
+  {
+    "input": "-358",
+    "hex": "CE5148F7B81A0000FFFFFFF0"
+  },
+  {
+    "input": "-359",
+    "hex": "CE2DC20548590000FFFFFFF0"
+  },
+  {
+    "input": "-360",
+    "hex": "CE0A3B12D8980000FFFFFFF0"
+  },
+  {
+    "input": "-361",
+    "hex": "CDE6B42068D70000FFFFFFF0"
+  },
+  {
+    "input": "-362",
+    "hex": "CDC32D2DF9160000FFFFFFF0"
+  },
+  {
+    "input": "-363",
+    "hex": "CD9FA63B89550000FFFFFFF0"
+  },
+  {
+    "input": "-364",
+    "hex": "CD7C1F4919940000FFFFFFF0"
+  },
+  {
+    "input": "-365",
+    "hex": "CD589856A9D30000FFFFFFF0"
+  },
+  {
+    "input": "-366",
+    "hex": "CD3511643A120000FFFFFFF0"
+  },
+  {
+    "input": "-367",
+    "hex": "CD118A71CA510000FFFFFFF0"
+  },
+  {
+    "input": "-368",
+    "hex": "CCEE037F5A900000FFFFFFF0"
+  },
+  {
+    "input": "-369",
+    "hex": "CCCA7C8CEACF0000FFFFFFF0"
+  },
+  {
+    "input": "-370",
+    "hex": "CCA6F59A7B0E0000FFFFFFF0"
+  },
+  {
+    "input": "-371",
+    "hex": "CC836EA80B4D0000FFFFFFF0"
+  },
+  {
+    "input": "-372",
+    "hex": "CC5FE7B59B8C0000FFFFFFF0"
+  },
+  {
+    "input": "-373",
+    "hex": "CC3C60C32BCB0000FFFFFFF0"
+  },
+  {
+    "input": "-374",
+    "hex": "CC18D9D0BC0A0000FFFFFFF0"
+  },
+  {
+    "input": "-375",
+    "hex": "CBF552DE4C490000FFFFFFF0"
+  },
+  {
+    "input": "-376",
+    "hex": "CBD1CBEBDC880000FFFFFFF0"
+  },
+  {
+    "input": "-377",
+    "hex": "CBAE44F96CC70000FFFFFFF0"
+  },
+  {
+    "input": "-378",
+    "hex": "CB8ABE06FD060000FFFFFFF0"
+  },
+  {
+    "input": "-379",
+    "hex": "CB6737148D450000FFFFFFF0"
+  },
+  {
+    "input": "-380",
+    "hex": "CB43B0221D840000FFFFFFF0"
+  },
+  {
+    "input": "-381",
+    "hex": "CB20292FADC30000FFFFFFF0"
+  },
+  {
+    "input": "-382",
+    "hex": "CAFCA23D3E020000FFFFFFF0"
+  },
+  {
+    "input": "-383",
+    "hex": "CAD91B4ACE410000FFFFFFF0"
+  },
+  {
+    "input": "-384",
+    "hex": "CAB594585E800000FFFFFFF0"
+  },
+  {
+    "input": "-385",
+    "hex": "CA920D65EEBF0000FFFFFFF0"
+  },
+  {
+    "input": "-386",
+    "hex": "CA6E86737EFE0000FFFFFFF0"
+  },
+  {
+    "input": "-387",
+    "hex": "CA4AFF810F3D0000FFFFFFF0"
+  },
+  {
+    "input": "-388",
+    "hex": "CA27788E9F7C0000FFFFFFF0"
+  },
+  {
+    "input": "-389",
+    "hex": "CA03F19C2FBB0000FFFFFFF0"
+  },
+  {
+    "input": "-390",
+    "hex": "C9E06AA9BFFA0000FFFFFFF0"
+  },
+  {
+    "input": "-391",
+    "hex": "C9BCE3B750390000FFFFFFF0"
+  },
+  {
+    "input": "-392",
+    "hex": "C9995CC4E0780000FFFFFFF0"
+  },
+  {
+    "input": "-393",
+    "hex": "C975D5D270B70000FFFFFFF0"
+  },
+  {
+    "input": "-394",
+    "hex": "C9524EE000F60000FFFFFFF0"
+  },
+  {
+    "input": "-395",
+    "hex": "C92EC7ED91350000FFFFFFF0"
+  },
+  {
+    "input": "-396",
+    "hex": "C90B40FB21740000FFFFFFF0"
+  },
+  {
+    "input": "-397",
+    "hex": "C8E7BA08B1B30000FFFFFFF0"
+  },
+  {
+    "input": "-398",
+    "hex": "C8C4331641F20000FFFFFFF0"
+  },
+  {
+    "input": "-399",
+    "hex": "C8A0AC23D2310000FFFFFFF0"
+  },
+  {
+    "input": "-400",
+    "hex": "C87D253162700000FFFFFFF0"
+  },
+  {
+    "input": "-401",
+    "hex": "C8599E3EF2AF0000FFFFFFF0"
+  },
+  {
+    "input": "-402",
+    "hex": "C836174C82EE0000FFFFFFF0"
+  },
+  {
+    "input": "-403",
+    "hex": "C812905A132D0000FFFFFFF0"
+  },
+  {
+    "input": "-404",
+    "hex": "C7EF0967A36C0000FFFFFFF0"
+  },
+  {
+    "input": "-405",
+    "hex": "C7CB827533AB0000FFFFFFF0"
+  },
+  {
+    "input": "-406",
+    "hex": "C7A7FB82C3EA0000FFFFFFF0"
+  },
+  {
+    "input": "-407",
+    "hex": "C784749054290000FFFFFFF0"
+  },
+  {
+    "input": "-408",
+    "hex": "C760ED9DE4680000FFFFFFF0"
+  },
+  {
+    "input": "-409",
+    "hex": "C73D66AB74A70000FFFFFFF0"
+  },
+  {
+    "input": "-410",
+    "hex": "C719DFB904E60000FFFFFFF0"
+  },
+  {
+    "input": "-411",
+    "hex": "C6F658C695250000FFFFFFF0"
+  },
+  {
+    "input": "-412",
+    "hex": "C6D2D1D425640000FFFFFFF0"
+  },
+  {
+    "input": "-413",
+    "hex": "C6AF4AE1B5A30000FFFFFFF0"
+  },
+  {
+    "input": "-414",
+    "hex": "C68BC3EF45E20000FFFFFFF0"
+  },
+  {
+    "input": "-415",
+    "hex": "C6683CFCD6210000FFFFFFF0"
+  },
+  {
+    "input": "-416",
+    "hex": "C644B60A66600000FFFFFFF0"
+  },
+  {
+    "input": "-417",
+    "hex": "C6212F17F69F0000FFFFFFF0"
+  },
+  {
+    "input": "-418",
+    "hex": "C5FDA82586DE0000FFFFFFF0"
+  },
+  {
+    "input": "-419",
+    "hex": "C5DA2133171D0000FFFFFFF0"
+  },
+  {
+    "input": "-420",
+    "hex": "C5B69A40A75C0000FFFFFFF0"
+  },
+  {
+    "input": "-421",
+    "hex": "C593134E379B0000FFFFFFF0"
+  },
+  {
+    "input": "-422",
+    "hex": "C56F8C5BC7DA0000FFFFFFF0"
+  },
+  {
+    "input": "-423",
+    "hex": "C54C056958190000FFFFFFF0"
+  },
+  {
+    "input": "-424",
+    "hex": "C5287E76E8580000FFFFFFF0"
+  },
+  {
+    "input": "-425",
+    "hex": "C504F78478970000FFFFFFF0"
+  },
+  {
+    "input": "-426",
+    "hex": "C4E1709208D60000FFFFFFF0"
+  },
+  {
+    "input": "-427",
+    "hex": "C4BDE99F99150000FFFFFFF0"
+  },
+  {
+    "input": "-428",
+    "hex": "C49A62AD29540000FFFFFFF0"
+  },
+  {
+    "input": "-429",
+    "hex": "C476DBBAB9930000FFFFFFF0"
+  },
+  {
+    "input": "-430",
+    "hex": "C45354C849D20000FFFFFFF0"
+  },
+  {
+    "input": "-431",
+    "hex": "C42FCDD5DA110000FFFFFFF0"
+  },
+  {
+    "input": "-432",
+    "hex": "C40C46E36A500000FFFFFFF0"
+  },
+  {
+    "input": "-433",
+    "hex": "C3E8BFF0FA8F0000FFFFFFF0"
+  },
+  {
+    "input": "-434",
+    "hex": "C3C538FE8ACE0000FFFFFFF0"
+  },
+  {
+    "input": "-435",
+    "hex": "C3A1B20C1B0D0000FFFFFFF0"
+  },
+  {
+    "input": "-436",
+    "hex": "C37E2B19AB4C0000FFFFFFF0"
+  },
+  {
+    "input": "-437",
+    "hex": "C35AA4273B8B0000FFFFFFF0"
+  },
+  {
+    "input": "-438",
+    "hex": "C3371D34CBCA0000FFFFFFF0"
+  },
+  {
+    "input": "-439",
+    "hex": "C31396425C090000FFFFFFF0"
+  },
+  {
+    "input": "-440",
+    "hex": "C2F00F4FEC480000FFFFFFF0"
+  },
+  {
+    "input": "-441",
+    "hex": "C2CC885D7C870000FFFFFFF0"
+  },
+  {
+    "input": "-442",
+    "hex": "C2A9016B0CC60000FFFFFFF0"
+  },
+  {
+    "input": "-443",
+    "hex": "C2857A789D050000FFFFFFF0"
+  },
+  {
+    "input": "-444",
+    "hex": "C261F3862D440000FFFFFFF0"
+  },
+  {
+    "input": "-445",
+    "hex": "C23E6C93BD830000FFFFFFF0"
+  },
+  {
+    "input": "-446",
+    "hex": "C21AE5A14DC20000FFFFFFF0"
+  },
+  {
+    "input": "-447",
+    "hex": "C1F75EAEDE010000FFFFFFF0"
+  },
+  {
+    "input": "-448",
+    "hex": "C1D3D7BC6E400000FFFFFFF0"
+  },
+  {
+    "input": "-449",
+    "hex": "C1B050C9FE7F0000FFFFFFF0"
+  },
+  {
+    "input": "-450",
+    "hex": "C18CC9D78EBE0000FFFFFFF0"
+  },
+  {
+    "input": "-451",
+    "hex": "C16942E51EFD0000FFFFFFF0"
+  },
+  {
+    "input": "-452",
+    "hex": "C145BBF2AF3C0000FFFFFFF0"
+  },
+  {
+    "input": "-453",
+    "hex": "C12235003F7B0000FFFFFFF0"
+  },
+  {
+    "input": "-454",
+    "hex": "C0FEAE0DCFBA0000FFFFFFF0"
+  },
+  {
+    "input": "-455",
+    "hex": "C0DB271B5FF90000FFFFFFF0"
+  },
+  {
+    "input": "-456",
+    "hex": "C0B7A028F0380000FFFFFFF0"
+  },
+  {
+    "input": "-457",
+    "hex": "C094193680770000FFFFFFF0"
+  },
+  {
+    "input": "-458",
+    "hex": "C070924410B60000FFFFFFF0"
+  },
+  {
+    "input": "-459",
+    "hex": "C04D0B51A0F50000FFFFFFF0"
+  },
+  {
+    "input": "-460",
+    "hex": "C029845F31340000FFFFFFF0"
+  },
+  {
+    "input": "-461",
+    "hex": "C005FD6CC1730000FFFFFFF0"
+  },
+  {
+    "input": "-462",
+    "hex": "BFE2767A51B20000FFFFFFF0"
+  },
+  {
+    "input": "-463",
+    "hex": "BFBEEF87E1F10000FFFFFFF0"
+  },
+  {
+    "input": "-464",
+    "hex": "BF9B689572300000FFFFFFF0"
+  },
+  {
+    "input": "-465",
+    "hex": "BF77E1A3026F0000FFFFFFF0"
+  },
+  {
+    "input": "-466",
+    "hex": "BF545AB092AE0000FFFFFFF0"
+  },
+  {
+    "input": "-467",
+    "hex": "BF30D3BE22ED0000FFFFFFF0"
+  },
+  {
+    "input": "-468",
+    "hex": "BF0D4CCBB32C0000FFFFFFF0"
+  },
+  {
+    "input": "-469",
+    "hex": "BEE9C5D9436B0000FFFFFFF0"
+  },
+  {
+    "input": "-470",
+    "hex": "BEC63EE6D3AA0000FFFFFFF0"
+  },
+  {
+    "input": "-471",
+    "hex": "BEA2B7F463E90000FFFFFFF0"
+  },
+  {
+    "input": "-472",
+    "hex": "BE7F3101F4280000FFFFFFF0"
+  },
+  {
+    "input": "-473",
+    "hex": "BE5BAA0F84670000FFFFFFF0"
+  },
+  {
+    "input": "-474",
+    "hex": "BE38231D14A60000FFFFFFF0"
+  },
+  {
+    "input": "-475",
+    "hex": "BE149C2AA4E50000FFFFFFF0"
+  },
+  {
+    "input": "-476",
+    "hex": "BDF1153835240000FFFFFFF0"
+  },
+  {
+    "input": "-477",
+    "hex": "BDCD8E45C5630000FFFFFFF0"
+  },
+  {
+    "input": "-478",
+    "hex": "BDAA075355A20000FFFFFFF0"
+  },
+  {
+    "input": "-479",
+    "hex": "BD868060E5E10000FFFFFFF0"
+  },
+  {
+    "input": "-480",
+    "hex": "BD62F96E76200000FFFFFFF0"
+  },
+  {
+    "input": "-481",
+    "hex": "BD3F727C065F0000FFFFFFF0"
+  },
+  {
+    "input": "-482",
+    "hex": "BD1BEB89969E0000FFFFFFF0"
+  },
+  {
+    "input": "-483",
+    "hex": "BCF8649726DD0000FFFFFFF0"
+  },
+  {
+    "input": "-484",
+    "hex": "BCD4DDA4B71C0000FFFFFFF0"
+  },
+  {
+    "input": "-485",
+    "hex": "BCB156B2475B0000FFFFFFF0"
+  },
+  {
+    "input": "-486",
+    "hex": "BC8DCFBFD79A0000FFFFFFF0"
+  },
+  {
+    "input": "-487",
+    "hex": "BC6A48CD67D90000FFFFFFF0"
+  },
+  {
+    "input": "-488",
+    "hex": "BC46C1DAF8180000FFFFFFF0"
+  },
+  {
+    "input": "-489",
+    "hex": "BC233AE888570000FFFFFFF0"
+  },
+  {
+    "input": "-490",
+    "hex": "BBFFB3F618960000FFFFFFF0"
+  },
+  {
+    "input": "-491",
+    "hex": "BBDC2D03A8D50000FFFFFFF0"
+  },
+  {
+    "input": "-492",
+    "hex": "BBB8A61139140000FFFFFFF0"
+  },
+  {
+    "input": "-493",
+    "hex": "BB951F1EC9530000FFFFFFF0"
+  },
+  {
+    "input": "-494",
+    "hex": "BB71982C59920000FFFFFFF0"
+  },
+  {
+    "input": "-495",
+    "hex": "BB4E1139E9D10000FFFFFFF0"
+  },
+  {
+    "input": "-496",
+    "hex": "BB2A8A477A100000FFFFFFF0"
+  },
+  {
+    "input": "-497",
+    "hex": "BB0703550A4F0000FFFFFFF0"
+  },
+  {
+    "input": "-498",
+    "hex": "BAE37C629A8E0000FFFFFFF0"
+  },
+  {
+    "input": "-499",
+    "hex": "BABFF5702ACD0000FFFFFFF0"
+  },
+  {
+    "input": "-500",
+    "hex": "BA9C6E7DBB0C0000FFFFFFF0"
+  },
+  {
+    "input": "-501",
+    "hex": "BA78E78B4B4B0000FFFFFFF0"
+  },
+  {
+    "input": "-502",
+    "hex": "BA556098DB8A0000FFFFFFF0"
+  },
+  {
+    "input": "-503",
+    "hex": "BA31D9A66BC90000FFFFFFF0"
+  },
+  {
+    "input": "-504",
+    "hex": "BA0E52B3FC080000FFFFFFF0"
+  },
+  {
+    "input": "-505",
+    "hex": "B9EACBC18C470000FFFFFFF0"
+  },
+  {
+    "input": "-506",
+    "hex": "B9C744CF1C860000FFFFFFF0"
+  },
+  {
+    "input": "-507",
+    "hex": "B9A3BDDCACC50000FFFFFFF0"
+  },
+  {
+    "input": "-508",
+    "hex": "B98036EA3D040000FFFFFFF0"
+  },
+  {
+    "input": "-509",
+    "hex": "B95CAFF7CD430000FFFFFFF0"
+  },
+  {
+    "input": "-510",
+    "hex": "B93929055D820000FFFFFFF0"
+  },
+  {
+    "input": "-511",
+    "hex": "B915A212EDC10000FFFFFFF0"
+  },
+  {
+    "input": "-512",
+    "hex": "B8F21B207E000000FFFFFFF0"
+  },
+  {
+    "input": "-513",
+    "hex": "B8CE942E0E3F0000FFFFFFF0"
+  },
+  {
+    "input": "-514",
+    "hex": "B8AB0D3B9E7E0000FFFFFFF0"
+  },
+  {
+    "input": "-515",
+    "hex": "B88786492EBD0000FFFFFFF0"
+  },
+  {
+    "input": "-516",
+    "hex": "B863FF56BEFC0000FFFFFFF0"
+  },
+  {
+    "input": "-517",
+    "hex": "B84078644F3B0000FFFFFFF0"
+  },
+  {
+    "input": "-518",
+    "hex": "B81CF171DF7A0000FFFFFFF0"
+  },
+  {
+    "input": "-519",
+    "hex": "B7F96A7F6FB90000FFFFFFF0"
+  },
+  {
+    "input": "-520",
+    "hex": "B7D5E38CFFF80000FFFFFFF0"
+  },
+  {
+    "input": "-521",
+    "hex": "B7B25C9A90370000FFFFFFF0"
+  },
+  {
+    "input": "-522",
+    "hex": "B78ED5A820760000FFFFFFF0"
+  },
+  {
+    "input": "-523",
+    "hex": "B76B4EB5B0B50000FFFFFFF0"
+  },
+  {
+    "input": "-524",
+    "hex": "B747C7C340F40000FFFFFFF0"
+  },
+  {
+    "input": "-525",
+    "hex": "B72440D0D1330000FFFFFFF0"
+  },
+  {
+    "input": "-526",
+    "hex": "B700B9DE61720000FFFFFFF0"
+  },
+  {
+    "input": "-527",
+    "hex": "B6DD32EBF1B10000FFFFFFF0"
+  },
+  {
+    "input": "-528",
+    "hex": "B6B9ABF981F00000FFFFFFF0"
+  },
+  {
+    "input": "-529",
+    "hex": "B6962507122F0000FFFFFFF0"
+  },
+  {
+    "input": "-530",
+    "hex": "B6729E14A26E0000FFFFFFF0"
+  },
+  {
+    "input": "-531",
+    "hex": "B64F172232AD0000FFFFFFF0"
+  },
+  {
+    "input": "-532",
+    "hex": "B62B902FC2EC0000FFFFFFF0"
+  },
+  {
+    "input": "-533",
+    "hex": "B608093D532B0000FFFFFFF0"
+  },
+  {
+    "input": "-534",
+    "hex": "B5E4824AE36A0000FFFFFFF0"
+  },
+  {
+    "input": "-535",
+    "hex": "B5C0FB5873A90000FFFFFFF0"
+  },
+  {
+    "input": "-536",
+    "hex": "B59D746603E80000FFFFFFF0"
+  },
+  {
+    "input": "-537",
+    "hex": "B579ED7394270000FFFFFFF0"
+  },
+  {
+    "input": "-538",
+    "hex": "B556668124660000FFFFFFF0"
+  },
+  {
+    "input": "-539",
+    "hex": "B532DF8EB4A50000FFFFFFF0"
+  },
+  {
+    "input": "-540",
+    "hex": "B50F589C44E40000FFFFFFF0"
+  },
+  {
+    "input": "-541",
+    "hex": "B4EBD1A9D5230000FFFFFFF0"
+  },
+  {
+    "input": "-542",
+    "hex": "B4C84AB765620000FFFFFFF0"
+  },
+  {
+    "input": "-543",
+    "hex": "B4A4C3C4F5A10000FFFFFFF0"
+  },
+  {
+    "input": "-544",
+    "hex": "B4813CD285E00000FFFFFFF0"
+  },
+  {
+    "input": "-545",
+    "hex": "B45DB5E0161F0000FFFFFFF0"
+  },
+  {
+    "input": "-546",
+    "hex": "B43A2EEDA65E0000FFFFFFF0"
+  },
+  {
+    "input": "-547",
+    "hex": "B416A7FB369D0000FFFFFFF0"
+  },
+  {
+    "input": "-548",
+    "hex": "B3F32108C6DC0000FFFFFFF0"
+  },
+  {
+    "input": "-549",
+    "hex": "B3CF9A16571B0000FFFFFFF0"
+  },
+  {
+    "input": "-550",
+    "hex": "B3AC1323E75A0000FFFFFFF0"
+  },
+  {
+    "input": "-551",
+    "hex": "B3888C3177990000FFFFFFF0"
+  },
+  {
+    "input": "-552",
+    "hex": "B365053F07D80000FFFFFFF0"
+  },
+  {
+    "input": "-553",
+    "hex": "B3417E4C98170000FFFFFFF0"
+  },
+  {
+    "input": "-554",
+    "hex": "B31DF75A28560000FFFFFFF0"
+  },
+  {
+    "input": "-555",
+    "hex": "B2FA7067B8950000FFFFFFF0"
+  },
+  {
+    "input": "-556",
+    "hex": "B2D6E97548D40000FFFFFFF0"
+  },
+  {
+    "input": "-557",
+    "hex": "B2B36282D9130000FFFFFFF0"
+  },
+  {
+    "input": "-558",
+    "hex": "B28FDB9069520000FFFFFFF0"
+  },
+  {
+    "input": "-559",
+    "hex": "B26C549DF9910000FFFFFFF0"
+  },
+  {
+    "input": "-560",
+    "hex": "B248CDAB89D00000FFFFFFF0"
+  },
+  {
+    "input": "-561",
+    "hex": "B22546B91A0F0000FFFFFFF0"
+  },
+  {
+    "input": "-562",
+    "hex": "B201BFC6AA4E0000FFFFFFF0"
+  },
+  {
+    "input": "-563",
+    "hex": "B1DE38D43A8D0000FFFFFFF0"
+  },
+  {
+    "input": "-564",
+    "hex": "B1BAB1E1CACC0000FFFFFFF0"
+  },
+  {
+    "input": "-565",
+    "hex": "B1972AEF5B0B0000FFFFFFF0"
+  },
+  {
+    "input": "-566",
+    "hex": "B173A3FCEB4A0000FFFFFFF0"
+  },
+  {
+    "input": "-567",
+    "hex": "B1501D0A7B890000FFFFFFF0"
+  },
+  {
+    "input": "-568",
+    "hex": "B12C96180BC80000FFFFFFF0"
+  },
+  {
+    "input": "-569",
+    "hex": "B1090F259C070000FFFFFFF0"
+  },
+  {
+    "input": "-570",
+    "hex": "B0E588332C460000FFFFFFF0"
+  },
+  {
+    "input": "-571",
+    "hex": "B0C20140BC850000FFFFFFF0"
+  },
+  {
+    "input": "-572",
+    "hex": "B09E7A4E4CC40000FFFFFFF0"
+  },
+  {
+    "input": "-573",
+    "hex": "B07AF35BDD030000FFFFFFF0"
+  },
+  {
+    "input": "-574",
+    "hex": "B0576C696D420000FFFFFFF0"
+  },
+  {
+    "input": "-575",
+    "hex": "B033E576FD810000FFFFFFF0"
+  },
+  {
+    "input": "-576",
+    "hex": "B0105E848DC00000FFFFFFF0"
+  },
+  {
+    "input": "-577",
+    "hex": "AFECD7921DFF0000FFFFFFF0"
+  },
+  {
+    "input": "-578",
+    "hex": "AFC9509FAE3E0000FFFFFFF0"
+  },
+  {
+    "input": "-579",
+    "hex": "AFA5C9AD3E7D0000FFFFFFF0"
+  },
+  {
+    "input": "-580",
+    "hex": "AF8242BACEBC0000FFFFFFF0"
+  },
+  {
+    "input": "-581",
+    "hex": "AF5EBBC85EFB0000FFFFFFF0"
+  },
+  {
+    "input": "-582",
+    "hex": "AF3B34D5EF3A0000FFFFFFF0"
+  },
+  {
+    "input": "-583",
+    "hex": "AF17ADE37F790000FFFFFFF0"
+  },
+  {
+    "input": "-584",
+    "hex": "AEF426F10FB80000FFFFFFF0"
+  },
+  {
+    "input": "-585",
+    "hex": "AED09FFE9FF70000FFFFFFF0"
+  },
+  {
+    "input": "-586",
+    "hex": "AEAD190C30360000FFFFFFF0"
+  },
+  {
+    "input": "-587",
+    "hex": "AE899219C0750000FFFFFFF0"
+  },
+  {
+    "input": "-588",
+    "hex": "AE660B2750B40000FFFFFFF0"
+  },
+  {
+    "input": "-589",
+    "hex": "AE428434E0F30000FFFFFFF0"
+  },
+  {
+    "input": "-590",
+    "hex": "AE1EFD4271320000FFFFFFF0"
+  },
+  {
+    "input": "-591",
+    "hex": "ADFB765001710000FFFFFFF0"
+  },
+  {
+    "input": "-592",
+    "hex": "ADD7EF5D91B00000FFFFFFF0"
+  },
+  {
+    "input": "-593",
+    "hex": "ADB4686B21EF0000FFFFFFF0"
+  },
+  {
+    "input": "-594",
+    "hex": "AD90E178B22E0000FFFFFFF0"
+  },
+  {
+    "input": "-595",
+    "hex": "AD6D5A86426D0000FFFFFFF0"
+  },
+  {
+    "input": "-596",
+    "hex": "AD49D393D2AC0000FFFFFFF0"
+  },
+  {
+    "input": "-597",
+    "hex": "AD264CA162EB0000FFFFFFF0"
+  },
+  {
+    "input": "-598",
+    "hex": "AD02C5AEF32A0000FFFFFFF0"
+  },
+  {
+    "input": "-599",
+    "hex": "ACDF3EBC83690000FFFFFFF0"
+  },
+  {
+    "input": "-600",
+    "hex": "ACBBB7CA13A80000FFFFFFF0"
+  },
+  {
+    "input": "-601",
+    "hex": "AC9830D7A3E70000FFFFFFF0"
+  },
+  {
+    "input": "-602",
+    "hex": "AC74A9E534260000FFFFFFF0"
+  },
+  {
+    "input": "-603",
+    "hex": "AC5122F2C4650000FFFFFFF0"
+  },
+  {
+    "input": "-604",
+    "hex": "AC2D9C0054A40000FFFFFFF0"
+  },
+  {
+    "input": "-605",
+    "hex": "AC0A150DE4E30000FFFFFFF0"
+  },
+  {
+    "input": "-606",
+    "hex": "ABE68E1B75220000FFFFFFF0"
+  },
+  {
+    "input": "-607",
+    "hex": "ABC3072905610000FFFFFFF0"
+  },
+  {
+    "input": "-608",
+    "hex": "AB9F803695A00000FFFFFFF0"
+  },
+  {
+    "input": "-609",
+    "hex": "AB7BF94425DF0000FFFFFFF0"
+  },
+  {
+    "input": "-610",
+    "hex": "AB587251B61E0000FFFFFFF0"
+  },
+  {
+    "input": "-611",
+    "hex": "AB34EB5F465D0000FFFFFFF0"
+  },
+  {
+    "input": "-612",
+    "hex": "AB11646CD69C0000FFFFFFF0"
+  },
+  {
+    "input": "-613",
+    "hex": "AAEDDD7A66DB0000FFFFFFF0"
+  },
+  {
+    "input": "-614",
+    "hex": "AACA5687F71A0000FFFFFFF0"
+  },
+  {
+    "input": "-615",
+    "hex": "AAA6CF9587590000FFFFFFF0"
+  },
+  {
+    "input": "-616",
+    "hex": "AA8348A317980000FFFFFFF0"
+  },
+  {
+    "input": "-617",
+    "hex": "AA5FC1B0A7D70000FFFFFFF0"
+  },
+  {
+    "input": "-618",
+    "hex": "AA3C3ABE38160000FFFFFFF0"
+  },
+  {
+    "input": "-619",
+    "hex": "AA18B3CBC8550000FFFFFFF0"
+  },
+  {
+    "input": "-620",
+    "hex": "A9F52CD958940000FFFFFFF0"
+  },
+  {
+    "input": "-621",
+    "hex": "A9D1A5E6E8D30000FFFFFFF0"
+  },
+  {
+    "input": "-622",
+    "hex": "A9AE1EF479120000FFFFFFF0"
+  },
+  {
+    "input": "-623",
+    "hex": "A98A980209510000FFFFFFF0"
+  },
+  {
+    "input": "-624",
+    "hex": "A967110F99900000FFFFFFF0"
+  },
+  {
+    "input": "-625",
+    "hex": "A9438A1D29CF0000FFFFFFF0"
+  },
+  {
+    "input": "-626",
+    "hex": "A920032ABA0E0000FFFFFFF0"
+  },
+  {
+    "input": "-627",
+    "hex": "A8FC7C384A4D0000FFFFFFF0"
+  },
+  {
+    "input": "-628",
+    "hex": "A8D8F545DA8C0000FFFFFFF0"
+  },
+  {
+    "input": "-629",
+    "hex": "A8B56E536ACB0000FFFFFFF0"
+  },
+  {
+    "input": "-630",
+    "hex": "A891E760FB0A0000FFFFFFF0"
+  },
+  {
+    "input": "-631",
+    "hex": "A86E606E8B490000FFFFFFF0"
+  },
+  {
+    "input": "-632",
+    "hex": "A84AD97C1B880000FFFFFFF0"
+  },
+  {
+    "input": "-633",
+    "hex": "A8275289ABC70000FFFFFFF0"
+  },
+  {
+    "input": "-634",
+    "hex": "A803CB973C060000FFFFFFF0"
+  },
+  {
+    "input": "-635",
+    "hex": "A7E044A4CC450000FFFFFFF0"
+  },
+  {
+    "input": "-636",
+    "hex": "A7BCBDB25C840000FFFFFFF0"
+  },
+  {
+    "input": "-637",
+    "hex": "A79936BFECC30000FFFFFFF0"
+  },
+  {
+    "input": "-638",
+    "hex": "A775AFCD7D020000FFFFFFF0"
+  },
+  {
+    "input": "-639",
+    "hex": "A75228DB0D410000FFFFFFF0"
+  },
+  {
+    "input": "-640",
+    "hex": "A72EA1E89D800000FFFFFFF0"
+  },
+  {
+    "input": "-641",
+    "hex": "A70B1AF62DBF0000FFFFFFF0"
+  },
+  {
+    "input": "-642",
+    "hex": "A6E79403BDFE0000FFFFFFF0"
+  },
+  {
+    "input": "-643",
+    "hex": "A6C40D114E3D0000FFFFFFF0"
+  },
+  {
+    "input": "-644",
+    "hex": "A6A0861EDE7C0000FFFFFFF0"
+  },
+  {
+    "input": "-645",
+    "hex": "A67CFF2C6EBB0000FFFFFFF0"
+  },
+  {
+    "input": "-646",
+    "hex": "A6597839FEFA0000FFFFFFF0"
+  },
+  {
+    "input": "-647",
+    "hex": "A635F1478F390000FFFFFFF0"
+  },
+  {
+    "input": "-648",
+    "hex": "A6126A551F780000FFFFFFF0"
+  },
+  {
+    "input": "-649",
+    "hex": "A5EEE362AFB70000FFFFFFF0"
+  },
+  {
+    "input": "-650",
+    "hex": "A5CB5C703FF60000FFFFFFF0"
+  },
+  {
+    "input": "-651",
+    "hex": "A5A7D57DD0350000FFFFFFF0"
+  },
+  {
+    "input": "-652",
+    "hex": "A5844E8B60740000FFFFFFF0"
+  },
+  {
+    "input": "-653",
+    "hex": "A560C798F0B30000FFFFFFF0"
+  },
+  {
+    "input": "-654",
+    "hex": "A53D40A680F20000FFFFFFF0"
+  },
+  {
+    "input": "-655",
+    "hex": "A519B9B411310000FFFFFFF0"
+  },
+  {
+    "input": "-656",
+    "hex": "A4F632C1A1700000FFFFFFF0"
+  },
+  {
+    "input": "-657",
+    "hex": "A4D2ABCF31AF0000FFFFFFF0"
+  },
+  {
+    "input": "-658",
+    "hex": "A4AF24DCC1EE0000FFFFFFF0"
+  },
+  {
+    "input": "-659",
+    "hex": "A48B9DEA522D0000FFFFFFF0"
+  },
+  {
+    "input": "-660",
+    "hex": "A46816F7E26C0000FFFFFFF0"
+  },
+  {
+    "input": "-661",
+    "hex": "A444900572AB0000FFFFFFF0"
+  },
+  {
+    "input": "-662",
+    "hex": "A421091302EA0000FFFFFFF0"
+  },
+  {
+    "input": "-663",
+    "hex": "A3FD822093290000FFFFFFF0"
+  },
+  {
+    "input": "-664",
+    "hex": "A3D9FB2E23680000FFFFFFF0"
+  },
+  {
+    "input": "-665",
+    "hex": "A3B6743BB3A70000FFFFFFF0"
+  },
+  {
+    "input": "-666",
+    "hex": "A392ED4943E60000FFFFFFF0"
+  },
+  {
+    "input": "-667",
+    "hex": "A36F6656D4250000FFFFFFF0"
+  },
+  {
+    "input": "-668",
+    "hex": "A34BDF6464640000FFFFFFF0"
+  },
+  {
+    "input": "-669",
+    "hex": "A3285871F4A30000FFFFFFF0"
+  },
+  {
+    "input": "-670",
+    "hex": "A304D17F84E20000FFFFFFF0"
+  },
+  {
+    "input": "-671",
+    "hex": "A2E14A8D15210000FFFFFFF0"
+  },
+  {
+    "input": "-672",
+    "hex": "A2BDC39AA5600000FFFFFFF0"
+  },
+  {
+    "input": "-673",
+    "hex": "A29A3CA8359F0000FFFFFFF0"
+  },
+  {
+    "input": "-674",
+    "hex": "A276B5B5C5DE0000FFFFFFF0"
+  },
+  {
+    "input": "-675",
+    "hex": "A2532EC3561D0000FFFFFFF0"
+  },
+  {
+    "input": "-676",
+    "hex": "A22FA7D0E65C0000FFFFFFF0"
+  },
+  {
+    "input": "-677",
+    "hex": "A20C20DE769B0000FFFFFFF0"
+  },
+  {
+    "input": "-678",
+    "hex": "A1E899EC06DA0000FFFFFFF0"
+  },
+  {
+    "input": "-679",
+    "hex": "A1C512F997190000FFFFFFF0"
+  },
+  {
+    "input": "-680",
+    "hex": "A1A18C0727580000FFFFFFF0"
+  },
+  {
+    "input": "-681",
+    "hex": "A17E0514B7970000FFFFFFF0"
+  },
+  {
+    "input": "-682",
+    "hex": "A15A7E2247D60000FFFFFFF0"
+  },
+  {
+    "input": "-683",
+    "hex": "A136F72FD8150000FFFFFFF0"
+  },
+  {
+    "input": "-684",
+    "hex": "A113703D68540000FFFFFFF0"
+  },
+  {
+    "input": "-685",
+    "hex": "A0EFE94AF8930000FFFFFFF0"
+  },
+  {
+    "input": "-686",
+    "hex": "A0CC625888D20000FFFFFFF0"
+  },
+  {
+    "input": "-687",
+    "hex": "A0A8DB6619110000FFFFFFF0"
+  },
+  {
+    "input": "-688",
+    "hex": "A0855473A9500000FFFFFFF0"
+  },
+  {
+    "input": "-689",
+    "hex": "A061CD81398F0000FFFFFFF0"
+  },
+  {
+    "input": "-690",
+    "hex": "A03E468EC9CE0000FFFFFFF0"
+  },
+  {
+    "input": "-691",
+    "hex": "A01ABF9C5A0D0000FFFFFFF0"
+  },
+  {
+    "input": "-692",
+    "hex": "9FF738A9EA4C0000FFFFFFF0"
+  },
+  {
+    "input": "-693",
+    "hex": "9FD3B1B77A8B0000FFFFFFF0"
+  },
+  {
+    "input": "-694",
+    "hex": "9FB02AC50ACA0000FFFFFFF0"
+  },
+  {
+    "input": "-695",
+    "hex": "9F8CA3D29B090000FFFFFFF0"
+  },
+  {
+    "input": "-696",
+    "hex": "9F691CE02B480000FFFFFFF0"
+  },
+  {
+    "input": "-697",
+    "hex": "9F4595EDBB870000FFFFFFF0"
+  },
+  {
+    "input": "-698",
+    "hex": "9F220EFB4BC60000FFFFFFF0"
+  },
+  {
+    "input": "-699",
+    "hex": "9EFE8808DC050000FFFFFFF0"
+  },
+  {
+    "input": "-700",
+    "hex": "9EDB01166C440000FFFFFFF0"
+  },
+  {
+    "input": "-701",
+    "hex": "9EB77A23FC830000FFFFFFF0"
+  },
+  {
+    "input": "-702",
+    "hex": "9E93F3318CC20000FFFFFFF0"
+  },
+  {
+    "input": "-703",
+    "hex": "9E706C3F1D010000FFFFFFF0"
+  },
+  {
+    "input": "-704",
+    "hex": "9E4CE54CAD400000FFFFFFF0"
+  },
+  {
+    "input": "-705",
+    "hex": "9E295E5A3D7F0000FFFFFFF0"
+  },
+  {
+    "input": "-706",
+    "hex": "9E05D767CDBE0000FFFFFFF0"
+  },
+  {
+    "input": "-707",
+    "hex": "9DE250755DFD0000FFFFFFF0"
+  },
+  {
+    "input": "-708",
+    "hex": "9DBEC982EE3C0000FFFFFFF0"
+  },
+  {
+    "input": "-709",
+    "hex": "9D9B42907E7B0000FFFFFFF0"
+  },
+  {
+    "input": "-710",
+    "hex": "9D77BB9E0EBA0000FFFFFFF0"
+  },
+  {
+    "input": "-711",
+    "hex": "9D5434AB9EF90000FFFFFFF0"
+  },
+  {
+    "input": "-712",
+    "hex": "9D30ADB92F380000FFFFFFF0"
+  },
+  {
+    "input": "-713",
+    "hex": "9D0D26C6BF770000FFFFFFF0"
+  },
+  {
+    "input": "-714",
+    "hex": "9CE99FD44FB60000FFFFFFF0"
+  },
+  {
+    "input": "-715",
+    "hex": "9CC618E1DFF50000FFFFFFF0"
+  },
+  {
+    "input": "-716",
+    "hex": "9CA291EF70340000FFFFFFF0"
+  },
+  {
+    "input": "-717",
+    "hex": "9C7F0AFD00730000FFFFFFF0"
+  },
+  {
+    "input": "-718",
+    "hex": "9C5B840A90B20000FFFFFFF0"
+  },
+  {
+    "input": "-719",
+    "hex": "9C37FD1820F10000FFFFFFF0"
+  },
+  {
+    "input": "-720",
+    "hex": "9C147625B1300000FFFFFFF0"
+  },
+  {
+    "input": "-721",
+    "hex": "9BF0EF33416F0000FFFFFFF0"
+  },
+  {
+    "input": "-722",
+    "hex": "9BCD6840D1AE0000FFFFFFF0"
+  },
+  {
+    "input": "-723",
+    "hex": "9BA9E14E61ED0000FFFFFFF0"
+  },
+  {
+    "input": "-724",
+    "hex": "9B865A5BF22C0000FFFFFFF0"
+  },
+  {
+    "input": "-725",
+    "hex": "9B62D369826B0000FFFFFFF0"
+  },
+  {
+    "input": "-726",
+    "hex": "9B3F4C7712AA0000FFFFFFF0"
+  },
+  {
+    "input": "-727",
+    "hex": "9B1BC584A2E90000FFFFFFF0"
+  },
+  {
+    "input": "-728",
+    "hex": "9AF83E9233280000FFFFFFF0"
+  },
+  {
+    "input": "-729",
+    "hex": "9AD4B79FC3670000FFFFFFF0"
+  },
+  {
+    "input": "-730",
+    "hex": "9AB130AD53A60000FFFFFFF0"
+  },
+  {
+    "input": "-731",
+    "hex": "9A8DA9BAE3E50000FFFFFFF0"
+  },
+  {
+    "input": "-732",
+    "hex": "9A6A22C874240000FFFFFFF0"
+  },
+  {
+    "input": "-733",
+    "hex": "9A469BD604630000FFFFFFF0"
+  },
+  {
+    "input": "-734",
+    "hex": "9A2314E394A20000FFFFFFF0"
+  },
+  {
+    "input": "-735",
+    "hex": "99FF8DF124E10000FFFFFFF0"
+  },
+  {
+    "input": "-736",
+    "hex": "99DC06FEB5200000FFFFFFF0"
+  },
+  {
+    "input": "-737",
+    "hex": "99B8800C455F0000FFFFFFF0"
+  },
+  {
+    "input": "-738",
+    "hex": "9994F919D59E0000FFFFFFF0"
+  },
+  {
+    "input": "-739",
+    "hex": "9971722765DD0000FFFFFFF0"
+  },
+  {
+    "input": "-740",
+    "hex": "994DEB34F61C0000FFFFFFF0"
+  },
+  {
+    "input": "-741",
+    "hex": "992A6442865B0000FFFFFFF0"
+  },
+  {
+    "input": "-742",
+    "hex": "9906DD50169A0000FFFFFFF0"
+  },
+  {
+    "input": "-743",
+    "hex": "98E3565DA6D90000FFFFFFF0"
+  },
+  {
+    "input": "-744",
+    "hex": "98BFCF6B37180000FFFFFFF0"
+  },
+  {
+    "input": "-745",
+    "hex": "989C4878C7570000FFFFFFF0"
+  },
+  {
+    "input": "-746",
+    "hex": "9878C18657960000FFFFFFF0"
+  },
+  {
+    "input": "-747",
+    "hex": "98553A93E7D50000FFFFFFF0"
+  },
+  {
+    "input": "-748",
+    "hex": "9831B3A178140000FFFFFFF0"
+  },
+  {
+    "input": "-749",
+    "hex": "980E2CAF08530000FFFFFFF0"
+  },
+  {
+    "input": "-750",
+    "hex": "97EAA5BC98920000FFFFFFF0"
+  },
+  {
+    "input": "-751",
+    "hex": "97C71ECA28D10000FFFFFFF0"
+  },
+  {
+    "input": "-752",
+    "hex": "97A397D7B9100000FFFFFFF0"
+  },
+  {
+    "input": "-753",
+    "hex": "978010E5494F0000FFFFFFF0"
+  },
+  {
+    "input": "-754",
+    "hex": "975C89F2D98E0000FFFFFFF0"
+  },
+  {
+    "input": "-755",
+    "hex": "9739030069CD0000FFFFFFF0"
+  },
+  {
+    "input": "-756",
+    "hex": "97157C0DFA0C0000FFFFFFF0"
+  },
+  {
+    "input": "-757",
+    "hex": "96F1F51B8A4B0000FFFFFFF0"
+  },
+  {
+    "input": "-758",
+    "hex": "96CE6E291A8A0000FFFFFFF0"
+  },
+  {
+    "input": "-759",
+    "hex": "96AAE736AAC90000FFFFFFF0"
+  },
+  {
+    "input": "-760",
+    "hex": "968760443B080000FFFFFFF0"
+  },
+  {
+    "input": "-761",
+    "hex": "9663D951CB470000FFFFFFF0"
+  },
+  {
+    "input": "-762",
+    "hex": "9640525F5B860000FFFFFFF0"
+  },
+  {
+    "input": "-763",
+    "hex": "961CCB6CEBC50000FFFFFFF0"
+  },
+  {
+    "input": "-764",
+    "hex": "95F9447A7C040000FFFFFFF0"
+  },
+  {
+    "input": "-765",
+    "hex": "95D5BD880C430000FFFFFFF0"
+  },
+  {
+    "input": "-766",
+    "hex": "95B236959C820000FFFFFFF0"
+  },
+  {
+    "input": "-767",
+    "hex": "958EAFA32CC10000FFFFFFF0"
+  },
+  {
+    "input": "-768",
+    "hex": "956B28B0BD000000FFFFFFF0"
+  },
+  {
+    "input": "-769",
+    "hex": "9547A1BE4D3F0000FFFFFFF0"
+  },
+  {
+    "input": "-770",
+    "hex": "95241ACBDD7E0000FFFFFFF0"
+  },
+  {
+    "input": "-771",
+    "hex": "950093D96DBD0000FFFFFFF0"
+  },
+  {
+    "input": "-772",
+    "hex": "94DD0CE6FDFC0000FFFFFFF0"
+  },
+  {
+    "input": "-773",
+    "hex": "94B985F48E3B0000FFFFFFF0"
+  },
+  {
+    "input": "-774",
+    "hex": "9495FF021E7A0000FFFFFFF0"
+  },
+  {
+    "input": "-775",
+    "hex": "9472780FAEB90000FFFFFFF0"
+  },
+  {
+    "input": "-776",
+    "hex": "944EF11D3EF80000FFFFFFF0"
+  },
+  {
+    "input": "-777",
+    "hex": "942B6A2ACF370000FFFFFFF0"
+  },
+  {
+    "input": "-778",
+    "hex": "9407E3385F760000FFFFFFF0"
+  },
+  {
+    "input": "-779",
+    "hex": "93E45C45EFB50000FFFFFFF0"
+  },
+  {
+    "input": "-780",
+    "hex": "93C0D5537FF40000FFFFFFF0"
+  },
+  {
+    "input": "-781",
+    "hex": "939D4E6110330000FFFFFFF0"
+  },
+  {
+    "input": "-782",
+    "hex": "9379C76EA0720000FFFFFFF0"
+  },
+  {
+    "input": "-783",
+    "hex": "9356407C30B10000FFFFFFF0"
+  },
+  {
+    "input": "-784",
+    "hex": "9332B989C0F00000FFFFFFF0"
+  },
+  {
+    "input": "-785",
+    "hex": "930F3297512F0000FFFFFFF0"
+  },
+  {
+    "input": "-786",
+    "hex": "92EBABA4E16E0000FFFFFFF0"
+  },
+  {
+    "input": "-787",
+    "hex": "92C824B271AD0000FFFFFFF0"
+  },
+  {
+    "input": "-788",
+    "hex": "92A49DC001EC0000FFFFFFF0"
+  },
+  {
+    "input": "-789",
+    "hex": "928116CD922B0000FFFFFFF0"
+  },
+  {
+    "input": "-790",
+    "hex": "925D8FDB226A0000FFFFFFF0"
+  },
+  {
+    "input": "-791",
+    "hex": "923A08E8B2A90000FFFFFFF0"
+  },
+  {
+    "input": "-792",
+    "hex": "921681F642E80000FFFFFFF0"
+  },
+  {
+    "input": "-793",
+    "hex": "91F2FB03D3270000FFFFFFF0"
+  },
+  {
+    "input": "-794",
+    "hex": "91CF741163660000FFFFFFF0"
+  },
+  {
+    "input": "-795",
+    "hex": "91ABED1EF3A50000FFFFFFF0"
+  },
+  {
+    "input": "-796",
+    "hex": "9188662C83E40000FFFFFFF0"
+  },
+  {
+    "input": "-797",
+    "hex": "9164DF3A14230000FFFFFFF0"
+  },
+  {
+    "input": "-798",
+    "hex": "91415847A4620000FFFFFFF0"
+  },
+  {
+    "input": "-799",
+    "hex": "911DD15534A10000FFFFFFF0"
+  },
+  {
+    "input": "-800",
+    "hex": "90FA4A62C4E00000FFFFFFF0"
+  },
+  {
+    "input": "-801",
+    "hex": "90D6C370551F0000FFFFFFF0"
+  },
+  {
+    "input": "-802",
+    "hex": "90B33C7DE55E0000FFFFFFF0"
+  },
+  {
+    "input": "-803",
+    "hex": "908FB58B759D0000FFFFFFF0"
+  },
+  {
+    "input": "-804",
+    "hex": "906C2E9905DC0000FFFFFFF0"
+  },
+  {
+    "input": "-805",
+    "hex": "9048A7A6961B0000FFFFFFF0"
+  },
+  {
+    "input": "-806",
+    "hex": "902520B4265A0000FFFFFFF0"
+  },
+  {
+    "input": "-807",
+    "hex": "900199C1B6990000FFFFFFF0"
+  },
+  {
+    "input": "-808",
+    "hex": "8FDE12CF46D80000FFFFFFF0"
+  },
+  {
+    "input": "-809",
+    "hex": "8FBA8BDCD7170000FFFFFFF0"
+  },
+  {
+    "input": "-810",
+    "hex": "8F9704EA67560000FFFFFFF0"
+  },
+  {
+    "input": "-811",
+    "hex": "8F737DF7F7950000FFFFFFF0"
+  },
+  {
+    "input": "-812",
+    "hex": "8F4FF70587D40000FFFFFFF0"
+  },
+  {
+    "input": "-813",
+    "hex": "8F2C701318130000FFFFFFF0"
+  },
+  {
+    "input": "-814",
+    "hex": "8F08E920A8520000FFFFFFF0"
+  },
+  {
+    "input": "-815",
+    "hex": "8EE5622E38910000FFFFFFF0"
+  },
+  {
+    "input": "-816",
+    "hex": "8EC1DB3BC8D00000FFFFFFF0"
+  },
+  {
+    "input": "-817",
+    "hex": "8E9E5449590F0000FFFFFFF0"
+  },
+  {
+    "input": "-818",
+    "hex": "8E7ACD56E94E0000FFFFFFF0"
+  },
+  {
+    "input": "-819",
+    "hex": "8E574664798D0000FFFFFFF0"
+  },
+  {
+    "input": "-820",
+    "hex": "8E33BF7209CC0000FFFFFFF0"
+  },
+  {
+    "input": "-821",
+    "hex": "8E10387F9A0B0000FFFFFFF0"
+  },
+  {
+    "input": "-822",
+    "hex": "8DECB18D2A4A0000FFFFFFF0"
+  },
+  {
+    "input": "-823",
+    "hex": "8DC92A9ABA890000FFFFFFF0"
+  },
+  {
+    "input": "-824",
+    "hex": "8DA5A3A84AC80000FFFFFFF0"
+  },
+  {
+    "input": "-825",
+    "hex": "8D821CB5DB070000FFFFFFF0"
+  },
+  {
+    "input": "-826",
+    "hex": "8D5E95C36B460000FFFFFFF0"
+  },
+  {
+    "input": "-827",
+    "hex": "8D3B0ED0FB850000FFFFFFF0"
+  },
+  {
+    "input": "-828",
+    "hex": "8D1787DE8BC40000FFFFFFF0"
+  },
+  {
+    "input": "-829",
+    "hex": "8CF400EC1C030000FFFFFFF0"
+  },
+  {
+    "input": "-830",
+    "hex": "8CD079F9AC420000FFFFFFF0"
+  },
+  {
+    "input": "-831",
+    "hex": "8CACF3073C810000FFFFFFF0"
+  },
+  {
+    "input": "-832",
+    "hex": "8C896C14CCC00000FFFFFFF0"
+  },
+  {
+    "input": "-833",
+    "hex": "8C65E5225CFF0000FFFFFFF0"
+  },
+  {
+    "input": "-834",
+    "hex": "8C425E2FED3E0000FFFFFFF0"
+  },
+  {
+    "input": "-835",
+    "hex": "8C1ED73D7D7D0000FFFFFFF0"
+  },
+  {
+    "input": "-836",
+    "hex": "8BFB504B0DBC0000FFFFFFF0"
+  },
+  {
+    "input": "-837",
+    "hex": "8BD7C9589DFB0000FFFFFFF0"
+  },
+  {
+    "input": "-838",
+    "hex": "8BB442662E3A0000FFFFFFF0"
+  },
+  {
+    "input": "-839",
+    "hex": "8B90BB73BE790000FFFFFFF0"
+  },
+  {
+    "input": "-840",
+    "hex": "8B6D34814EB80000FFFFFFF0"
+  },
+  {
+    "input": "-841",
+    "hex": "8B49AD8EDEF70000FFFFFFF0"
+  },
+  {
+    "input": "-842",
+    "hex": "8B26269C6F360000FFFFFFF0"
+  },
+  {
+    "input": "-843",
+    "hex": "8B029FA9FF750000FFFFFFF0"
+  },
+  {
+    "input": "-844",
+    "hex": "8ADF18B78FB40000FFFFFFF0"
+  },
+  {
+    "input": "-845",
+    "hex": "8ABB91C51FF30000FFFFFFF0"
+  },
+  {
+    "input": "-846",
+    "hex": "8A980AD2B0320000FFFFFFF0"
+  },
+  {
+    "input": "-847",
+    "hex": "8A7483E040710000FFFFFFF0"
+  },
+  {
+    "input": "-848",
+    "hex": "8A50FCEDD0B00000FFFFFFF0"
+  },
+  {
+    "input": "-849",
+    "hex": "8A2D75FB60EF0000FFFFFFF0"
+  },
+  {
+    "input": "-850",
+    "hex": "8A09EF08F12E0000FFFFFFF0"
+  },
+  {
+    "input": "-851",
+    "hex": "89E66816816D0000FFFFFFF0"
+  },
+  {
+    "input": "-852",
+    "hex": "89C2E12411AC0000FFFFFFF0"
+  },
+  {
+    "input": "-853",
+    "hex": "899F5A31A1EB0000FFFFFFF0"
+  },
+  {
+    "input": "-854",
+    "hex": "897BD33F322A0000FFFFFFF0"
+  },
+  {
+    "input": "-855",
+    "hex": "89584C4CC2690000FFFFFFF0"
+  },
+  {
+    "input": "-856",
+    "hex": "8934C55A52A80000FFFFFFF0"
+  },
+  {
+    "input": "-857",
+    "hex": "89113E67E2E70000FFFFFFF0"
+  },
+  {
+    "input": "-858",
+    "hex": "88EDB77573260000FFFFFFF0"
+  },
+  {
+    "input": "-859",
+    "hex": "88CA308303650000FFFFFFF0"
+  },
+  {
+    "input": "-860",
+    "hex": "88A6A99093A40000FFFFFFF0"
+  },
+  {
+    "input": "-861",
+    "hex": "8883229E23E30000FFFFFFF0"
+  },
+  {
+    "input": "-862",
+    "hex": "885F9BABB4220000FFFFFFF0"
+  },
+  {
+    "input": "-863",
+    "hex": "883C14B944610000FFFFFFF0"
+  },
+  {
+    "input": "-864",
+    "hex": "88188DC6D4A00000FFFFFFF0"
+  },
+  {
+    "input": "-865",
+    "hex": "87F506D464DF0000FFFFFFF0"
+  },
+  {
+    "input": "-866",
+    "hex": "87D17FE1F51E0000FFFFFFF0"
+  },
+  {
+    "input": "-867",
+    "hex": "87ADF8EF855D0000FFFFFFF0"
+  },
+  {
+    "input": "-868",
+    "hex": "878A71FD159C0000FFFFFFF0"
+  },
+  {
+    "input": "-869",
+    "hex": "8766EB0AA5DB0000FFFFFFF0"
+  },
+  {
+    "input": "-870",
+    "hex": "87436418361A0000FFFFFFF0"
+  },
+  {
+    "input": "-871",
+    "hex": "871FDD25C6590000FFFFFFF0"
+  },
+  {
+    "input": "-872",
+    "hex": "86FC563356980000FFFFFFF0"
+  },
+  {
+    "input": "-873",
+    "hex": "86D8CF40E6D70000FFFFFFF0"
+  },
+  {
+    "input": "-874",
+    "hex": "86B5484E77160000FFFFFFF0"
+  },
+  {
+    "input": "-875",
+    "hex": "8691C15C07550000FFFFFFF0"
+  },
+  {
+    "input": "-876",
+    "hex": "866E3A6997940000FFFFFFF0"
+  },
+  {
+    "input": "-877",
+    "hex": "864AB37727D30000FFFFFFF0"
+  },
+  {
+    "input": "-878",
+    "hex": "86272C84B8120000FFFFFFF0"
+  },
+  {
+    "input": "-879",
+    "hex": "8603A59248510000FFFFFFF0"
+  },
+  {
+    "input": "-880",
+    "hex": "85E01E9FD8900000FFFFFFF0"
+  },
+  {
+    "input": "-881",
+    "hex": "85BC97AD68CF0000FFFFFFF0"
+  },
+  {
+    "input": "-882",
+    "hex": "859910BAF90E0000FFFFFFF0"
+  },
+  {
+    "input": "-883",
+    "hex": "857589C8894D0000FFFFFFF0"
+  },
+  {
+    "input": "-884",
+    "hex": "855202D6198C0000FFFFFFF0"
+  },
+  {
+    "input": "-885",
+    "hex": "852E7BE3A9CB0000FFFFFFF0"
+  },
+  {
+    "input": "-886",
+    "hex": "850AF4F13A0A0000FFFFFFF0"
+  },
+  {
+    "input": "-887",
+    "hex": "84E76DFECA490000FFFFFFF0"
+  },
+  {
+    "input": "-888",
+    "hex": "84C3E70C5A880000FFFFFFF0"
+  },
+  {
+    "input": "-889",
+    "hex": "84A06019EAC70000FFFFFFF0"
+  },
+  {
+    "input": "-890",
+    "hex": "847CD9277B060000FFFFFFF0"
+  },
+  {
+    "input": "-891",
+    "hex": "845952350B450000FFFFFFF0"
+  },
+  {
+    "input": "-892",
+    "hex": "8435CB429B840000FFFFFFF0"
+  },
+  {
+    "input": "-893",
+    "hex": "841244502BC30000FFFFFFF0"
+  },
+  {
+    "input": "-894",
+    "hex": "83EEBD5DBC020000FFFFFFF0"
+  },
+  {
+    "input": "-895",
+    "hex": "83CB366B4C410000FFFFFFF0"
+  },
+  {
+    "input": "-896",
+    "hex": "83A7AF78DC800000FFFFFFF0"
+  },
+  {
+    "input": "-897",
+    "hex": "838428866CBF0000FFFFFFF0"
+  },
+  {
+    "input": "-898",
+    "hex": "8360A193FCFE0000FFFFFFF0"
+  },
+  {
+    "input": "-899",
+    "hex": "833D1AA18D3D0000FFFFFFF0"
+  },
+  {
+    "input": "-900",
+    "hex": "831993AF1D7C0000FFFFFFF0"
+  },
+  {
+    "input": "-901",
+    "hex": "82F60CBCADBB0000FFFFFFF0"
+  },
+  {
+    "input": "-902",
+    "hex": "82D285CA3DFA0000FFFFFFF0"
+  },
+  {
+    "input": "-903",
+    "hex": "82AEFED7CE390000FFFFFFF0"
+  },
+  {
+    "input": "-904",
+    "hex": "828B77E55E780000FFFFFFF0"
+  },
+  {
+    "input": "-905",
+    "hex": "8267F0F2EEB70000FFFFFFF0"
+  },
+  {
+    "input": "-906",
+    "hex": "82446A007EF60000FFFFFFF0"
+  },
+  {
+    "input": "-907",
+    "hex": "8220E30E0F350000FFFFFFF0"
+  },
+  {
+    "input": "-908",
+    "hex": "81FD5C1B9F740000FFFFFFF0"
+  },
+  {
+    "input": "-909",
+    "hex": "81D9D5292FB30000FFFFFFF0"
+  },
+  {
+    "input": "-910",
+    "hex": "81B64E36BFF20000FFFFFFF0"
+  },
+  {
+    "input": "-911",
+    "hex": "8192C74450310000FFFFFFF0"
+  },
+  {
+    "input": "-912",
+    "hex": "816F4051E0700000FFFFFFF0"
+  },
+  {
+    "input": "-913",
+    "hex": "814BB95F70AF0000FFFFFFF0"
+  },
+  {
+    "input": "-914",
+    "hex": "8128326D00EE0000FFFFFFF0"
+  },
+  {
+    "input": "-915",
+    "hex": "8104AB7A912D0000FFFFFFF0"
+  },
+  {
+    "input": "-916",
+    "hex": "80E12488216C0000FFFFFFF0"
+  },
+  {
+    "input": "-917",
+    "hex": "80BD9D95B1AB0000FFFFFFF0"
+  },
+  {
+    "input": "-918",
+    "hex": "809A16A341EA0000FFFFFFF0"
+  },
+  {
+    "input": "-919",
+    "hex": "80768FB0D2290000FFFFFFF0"
+  },
+  {
+    "input": "-920",
+    "hex": "805308BE62680000FFFFFFF0"
+  },
+  {
+    "input": "-921",
+    "hex": "802F81CBF2A70000FFFFFFF0"
+  },
+  {
+    "input": "-922",
+    "hex": "800BFAD982E60000FFFFFFF0"
+  },
+  {
+    "input": "-923",
+    "hex": "F330D863E8508000FFFFFFF1"
+  },
+  {
+    "input": "-924",
+    "hex": "F32D4AE5438A0000FFFFFFF1"
+  },
+  {
+    "input": "-925",
+    "hex": "F329BD669EC38000FFFFFFF1"
+  },
+  {
+    "input": "-926",
+    "hex": "F3262FE7F9FD0000FFFFFFF1"
+  },
+  {
+    "input": "-927",
+    "hex": "F322A26955368000FFFFFFF1"
+  },
+  {
+    "input": "-928",
+    "hex": "F31F14EAB0700000FFFFFFF1"
+  },
+  {
+    "input": "-929",
+    "hex": "F31B876C0BA98000FFFFFFF1"
+  },
+  {
+    "input": "-930",
+    "hex": "F317F9ED66E30000FFFFFFF1"
+  },
+  {
+    "input": "-931",
+    "hex": "F3146C6EC21C8000FFFFFFF1"
+  },
+  {
+    "input": "-932",
+    "hex": "F310DEF01D560000FFFFFFF1"
+  },
+  {
+    "input": "-933",
+    "hex": "F30D5171788F8000FFFFFFF1"
+  },
+  {
+    "input": "-934",
+    "hex": "F309C3F2D3C90000FFFFFFF1"
+  },
+  {
+    "input": "-935",
+    "hex": "F30636742F028000FFFFFFF1"
+  },
+  {
+    "input": "-936",
+    "hex": "F302A8F58A3C0000FFFFFFF1"
+  },
+  {
+    "input": "-937",
+    "hex": "F2FF1B76E5758000FFFFFFF1"
+  },
+  {
+    "input": "-938",
+    "hex": "F2FB8DF840AF0000FFFFFFF1"
+  },
+  {
+    "input": "-939",
+    "hex": "F2F800799BE88000FFFFFFF1"
+  },
+  {
+    "input": "-940",
+    "hex": "F2F472FAF7220000FFFFFFF1"
+  },
+  {
+    "input": "-941",
+    "hex": "F2F0E57C525B8000FFFFFFF1"
+  },
+  {
+    "input": "-942",
+    "hex": "F2ED57FDAD950000FFFFFFF1"
+  },
+  {
+    "input": "-943",
+    "hex": "F2E9CA7F08CE8000FFFFFFF1"
+  },
+  {
+    "input": "-944",
+    "hex": "F2E63D0064080000FFFFFFF1"
+  },
+  {
+    "input": "-945",
+    "hex": "F2E2AF81BF418000FFFFFFF1"
+  },
+  {
+    "input": "-946",
+    "hex": "F2DF22031A7B0000FFFFFFF1"
+  },
+  {
+    "input": "-947",
+    "hex": "F2DB948475B48000FFFFFFF1"
+  },
+  {
+    "input": "-948",
+    "hex": "F2D80705D0EE0000FFFFFFF1"
+  },
+  {
+    "input": "-949",
+    "hex": "F2D479872C278000FFFFFFF1"
+  },
+  {
+    "input": "-950",
+    "hex": "F2D0EC0887610000FFFFFFF1"
+  },
+  {
+    "input": "-951",
+    "hex": "F2CD5E89E29A8000FFFFFFF1"
+  },
+  {
+    "input": "-952",
+    "hex": "F2C9D10B3DD40000FFFFFFF1"
+  },
+  {
+    "input": "-953",
+    "hex": "F2C6438C990D8000FFFFFFF1"
+  },
+  {
+    "input": "-954",
+    "hex": "F2C2B60DF4470000FFFFFFF1"
+  },
+  {
+    "input": "-955",
+    "hex": "F2BF288F4F808000FFFFFFF1"
+  },
+  {
+    "input": "-956",
+    "hex": "F2BB9B10AABA0000FFFFFFF1"
+  },
+  {
+    "input": "-957",
+    "hex": "F2B80D9205F38000FFFFFFF1"
+  },
+  {
+    "input": "-958",
+    "hex": "F2B48013612D0000FFFFFFF1"
+  },
+  {
+    "input": "-959",
+    "hex": "F2B0F294BC668000FFFFFFF1"
+  },
+  {
+    "input": "-960",
+    "hex": "F2AD651617A00000FFFFFFF1"
+  },
+  {
+    "input": "-961",
+    "hex": "F2A9D79772D98000FFFFFFF1"
+  },
+  {
+    "input": "-962",
+    "hex": "F2A64A18CE130000FFFFFFF1"
+  },
+  {
+    "input": "-963",
+    "hex": "F2A2BC9A294C8000FFFFFFF1"
+  },
+  {
+    "input": "-964",
+    "hex": "F29F2F1B84860000FFFFFFF1"
+  },
+  {
+    "input": "-965",
+    "hex": "F29BA19CDFBF8000FFFFFFF1"
+  },
+  {
+    "input": "-966",
+    "hex": "F298141E3AF90000FFFFFFF1"
+  },
+  {
+    "input": "-967",
+    "hex": "F294869F96328000FFFFFFF1"
+  },
+  {
+    "input": "-968",
+    "hex": "F290F920F16C0000FFFFFFF1"
+  },
+  {
+    "input": "-969",
+    "hex": "F28D6BA24CA58000FFFFFFF1"
+  },
+  {
+    "input": "-970",
+    "hex": "F289DE23A7DF0000FFFFFFF1"
+  },
+  {
+    "input": "-971",
+    "hex": "F28650A503188000FFFFFFF1"
+  },
+  {
+    "input": "-972",
+    "hex": "F282C3265E520000FFFFFFF1"
+  },
+  {
+    "input": "-973",
+    "hex": "F27F35A7B98B8000FFFFFFF1"
+  },
+  {
+    "input": "-974",
+    "hex": "F27BA82914C50000FFFFFFF1"
+  },
+  {
+    "input": "-975",
+    "hex": "F2781AAA6FFE8000FFFFFFF1"
+  },
+  {
+    "input": "-976",
+    "hex": "F2748D2BCB380000FFFFFFF1"
+  },
+  {
+    "input": "-977",
+    "hex": "F270FFAD26718000FFFFFFF1"
+  },
+  {
+    "input": "-978",
+    "hex": "F26D722E81AB0000FFFFFFF1"
+  },
+  {
+    "input": "-979",
+    "hex": "F269E4AFDCE48000FFFFFFF1"
+  },
+  {
+    "input": "-980",
+    "hex": "F2665731381E0000FFFFFFF1"
+  },
+  {
+    "input": "-981",
+    "hex": "F262C9B293578000FFFFFFF1"
+  },
+  {
+    "input": "-982",
+    "hex": "F25F3C33EE910000FFFFFFF1"
+  },
+  {
+    "input": "-983",
+    "hex": "F25BAEB549CA8000FFFFFFF1"
+  },
+  {
+    "input": "-984",
+    "hex": "F2582136A5040000FFFFFFF1"
+  },
+  {
+    "input": "-985",
+    "hex": "F25493B8003D8000FFFFFFF1"
+  },
+  {
+    "input": "-986",
+    "hex": "F25106395B770000FFFFFFF1"
+  },
+  {
+    "input": "-987",
+    "hex": "F24D78BAB6B08000FFFFFFF1"
+  },
+  {
+    "input": "-988",
+    "hex": "F249EB3C11EA0000FFFFFFF1"
+  },
+  {
+    "input": "-989",
+    "hex": "F2465DBD6D238000FFFFFFF1"
+  },
+  {
+    "input": "-990",
+    "hex": "F242D03EC85D0000FFFFFFF1"
+  },
+  {
+    "input": "-991",
+    "hex": "F23F42C023968000FFFFFFF1"
+  },
+  {
+    "input": "-992",
+    "hex": "F23BB5417ED00000FFFFFFF1"
+  },
+  {
+    "input": "-993",
+    "hex": "F23827C2DA098000FFFFFFF1"
+  },
+  {
+    "input": "-994",
+    "hex": "F2349A4435430000FFFFFFF1"
+  },
+  {
+    "input": "-995",
+    "hex": "F2310CC5907C8000FFFFFFF1"
+  },
+  {
+    "input": "-996",
+    "hex": "F22D7F46EBB60000FFFFFFF1"
+  },
+  {
+    "input": "-997",
+    "hex": "F229F1C846EF8000FFFFFFF1"
+  },
+  {
+    "input": "-998",
+    "hex": "F2266449A2290000FFFFFFF1"
+  },
+  {
+    "input": "-999",
+    "hex": "F222D6CAFD628000FFFFFFF1"
+  },
+  {
+    "input": "0.11",
+    "hex": "0F43FC2C04EE0000FFFFFFED"
+  },
+  {
+    "input": "0.99",
+    "hex": "0DBD2FC137A30000FFFFFFEE"
+  },
+  {
+    "input": "1.11",
+    "hex": "0F67831E74AF0000FFFFFFEE"
+  },
+  {
+    "input": "1.99",
+    "hex": "1B9DE674DF070000FFFFFFEE"
+  },
+  {
+    "input": "1001",
+    "hex": "0DE444324C2A8000FFFFFFF1"
+  },
+  {
+    "input": "1002",
+    "hex": "0DE7D1B0F0F10000FFFFFFF1"
+  },
+  {
+    "input": "1003",
+    "hex": "0DEB5F2F95B78000FFFFFFF1"
+  },
+  {
+    "input": "1004",
+    "hex": "0DEEECAE3A7E0000FFFFFFF1"
+  },
+  {
+    "input": "1005",
+    "hex": "0DF27A2CDF448000FFFFFFF1"
+  },
+  {
+    "input": "1006",
+    "hex": "0DF607AB840B0000FFFFFFF1"
+  },
+  {
+    "input": "1007",
+    "hex": "0DF9952A28D18000FFFFFFF1"
+  },
+  {
+    "input": "1008",
+    "hex": "0DFD22A8CD980000FFFFFFF1"
+  },
+  {
+    "input": "1009",
+    "hex": "0E00B027725E8000FFFFFFF1"
+  },
+  {
+    "input": "1111",
+    "hex": "0F6B109D19758000FFFFFFF1"
+  },
+  {
+    "input": "1999",
+    "hex": "1BBDDFE8AA018000FFFFFFF1"
+  },
+  {
+    "input": "1e-2",
+    "hex": "0DE0B6B3A7640000FFFFFFEC"
+  },
+  {
+    "input": "1e-3",
+    "hex": "0DE0B6B3A7640000FFFFFFEB"
+  },
+  {
+    "input": "1e-4",
+    "hex": "0DE0B6B3A7640000FFFFFFEA"
+  },
+  {
+    "input": "1e-5",
+    "hex": "0DE0B6B3A7640000FFFFFFE9"
+  },
+  {
+    "input": "1e-6",
+    "hex": "0DE0B6B3A7640000FFFFFFE8"
+  },
+  {
+    "input": "1e-7",
+    "hex": "0DE0B6B3A7640000FFFFFFE7"
+  },
+  {
+    "input": "1e-8",
+    "hex": "0DE0B6B3A7640000FFFFFFE6"
+  },
+  {
+    "input": "1e-9",
+    "hex": "0DE0B6B3A7640000FFFFFFE5"
+  },
+  {
+    "input": "1e10",
+    "hex": "0DE0B6B3A7640000FFFFFFF8"
+  },
+  {
+    "input": "1e11",
+    "hex": "0DE0B6B3A7640000FFFFFFF9"
+  },
+  {
+    "input": "1e12",
+    "hex": "0DE0B6B3A7640000FFFFFFFA"
+  },
+  {
+    "input": "1e13",
+    "hex": "0DE0B6B3A7640000FFFFFFFB"
+  },
+  {
+    "input": "1e14",
+    "hex": "0DE0B6B3A7640000FFFFFFFC"
+  },
+  {
+    "input": "1e15",
+    "hex": "0DE0B6B3A7640000FFFFFFFD"
+  },
+  {
+    "input": "1e16",
+    "hex": "0DE0B6B3A7640000FFFFFFFE"
+  },
+  {
+    "input": "1e17",
+    "hex": "0DE0B6B3A7640000FFFFFFFF"
+  },
+  {
+    "input": "1e18",
+    "hex": "0DE0B6B3A764000000000000"
+  },
+  {
+    "input": "1e19",
+    "hex": "0DE0B6B3A764000000000001"
+  },
+  {
+    "input": "1e20",
+    "hex": "0DE0B6B3A764000000000002"
+  },
+  {
+    "input": "1e80",
+    "hex": "0DE0B6B3A76400000000003E"
+  },
+  {
+    "input": "5000",
+    "hex": "4563918244F40000FFFFFFF1"
+  },
+  {
+    "input": "5999",
+    "hex": "5340BAB747918000FFFFFFF1"
+  },
+  {
+    "input": "9000",
+    "hex": "7CE66C50E2840000FFFFFFF1"
+  },
+  {
+    "input": "9999",
+    "hex": "0DE05BC096E9C000FFFFFFF2"
+  },
+  {
+    "input": "9e18",
+    "hex": "7CE66C50E284000000000000"
+  },
+  {
+    "input": "9e80",
+    "hex": "7CE66C50E28400000000003E"
+  },
+  {
+    "input": "-0.55",
+    "hex": "B3AC1323E75A0000FFFFFFED"
+  },
+  {
+    "input": "-1.10",
+    "hex": "F0BC03D3FB120000FFFFFFEE"
+  },
+  {
+    "input": "-1.55",
+    "hex": "EA7D4B3656250000FFFFFFEE"
+  },
+  {
+    "input": "-1e-1",
+    "hex": "F21F494C589C0000FFFFFFED"
+  },
+  {
+    "input": "-1e-2",
+    "hex": "F21F494C589C0000FFFFFFEC"
+  },
+  {
+    "input": "-1e-3",
+    "hex": "F21F494C589C0000FFFFFFEB"
+  },
+  {
+    "input": "-1e-4",
+    "hex": "F21F494C589C0000FFFFFFEA"
+  },
+  {
+    "input": "-1e-5",
+    "hex": "F21F494C589C0000FFFFFFE9"
+  },
+  {
+    "input": "-1e-6",
+    "hex": "F21F494C589C0000FFFFFFE8"
+  },
+  {
+    "input": "-1e-7",
+    "hex": "F21F494C589C0000FFFFFFE7"
+  },
+  {
+    "input": "-1e-8",
+    "hex": "F21F494C589C0000FFFFFFE6"
+  },
+  {
+    "input": "-1e-9",
+    "hex": "F21F494C589C0000FFFFFFE5"
+  },
+  {
+    "input": "-1e10",
+    "hex": "F21F494C589C0000FFFFFFF8"
+  },
+  {
+    "input": "-1e11",
+    "hex": "F21F494C589C0000FFFFFFF9"
+  },
+  {
+    "input": "-1e12",
+    "hex": "F21F494C589C0000FFFFFFFA"
+  },
+  {
+    "input": "-1e13",
+    "hex": "F21F494C589C0000FFFFFFFB"
+  },
+  {
+    "input": "-1e14",
+    "hex": "F21F494C589C0000FFFFFFFC"
+  },
+  {
+    "input": "-1e15",
+    "hex": "F21F494C589C0000FFFFFFFD"
+  },
+  {
+    "input": "-1e16",
+    "hex": "F21F494C589C0000FFFFFFFE"
+  },
+  {
+    "input": "-1e17",
+    "hex": "F21F494C589C0000FFFFFFFF"
+  },
+  {
+    "input": "-1e18",
+    "hex": "F21F494C589C000000000000"
+  },
+  {
+    "input": "-1e19",
+    "hex": "F21F494C589C000000000001"
+  },
+  {
+    "input": "-1e20",
+    "hex": "F21F494C589C000000000002"
+  },
+  {
+    "input": "-1e80",
+    "hex": "F21F494C589C00000000003E"
+  },
+  {
+    "input": "-9999",
+    "hex": "F21FA43F69164000FFFFFFF2"
+  },
+  {
+    "input": "-9e-1",
+    "hex": "831993AF1D7C0000FFFFFFED"
+  },
+  {
+    "input": "-9e18",
+    "hex": "831993AF1D7C000000000000"
+  },
+  {
+    "input": "-9e80",
+    "hex": "831993AF1D7C00000000003E"
+  },
+  {
+    "input": "0.111",
+    "hex": "0F67831E74AF0000FFFFFFED"
+  },
+  {
+    "input": "0.999",
+    "hex": "0DDD2935029D8000FFFFFFEE"
+  },
+  {
+    "input": "1.111",
+    "hex": "0F6B109D19758000FFFFFFEE"
+  },
+  {
+    "input": "1.999",
+    "hex": "1BBDDFE8AA018000FFFFFFEE"
+  },
+  {
+    "input": "10001",
+    "hex": "0DE111A6B7DE4000FFFFFFF2"
+  },
+  {
+    "input": "10002",
+    "hex": "0DE16C99C8588000FFFFFFF2"
+  },
+  {
+    "input": "10003",
+    "hex": "0DE1C78CD8D2C000FFFFFFF2"
+  },
+  {
+    "input": "10004",
+    "hex": "0DE2227FE94D0000FFFFFFF2"
+  },
+  {
+    "input": "10005",
+    "hex": "0DE27D72F9C74000FFFFFFF2"
+  },
+  {
+    "input": "10006",
+    "hex": "0DE2D8660A418000FFFFFFF2"
+  },
+  {
+    "input": "10007",
+    "hex": "0DE333591ABBC000FFFFFFF2"
+  },
+  {
+    "input": "10008",
+    "hex": "0DE38E4C2B360000FFFFFFF2"
+  },
+  {
+    "input": "10009",
+    "hex": "0DE3E93F3BB04000FFFFFFF2"
+  },
+  {
+    "input": "11111",
+    "hex": "0F6B6B9029EFC000FFFFFFF2"
+  },
+  {
+    "input": "123.1",
+    "hex": "111563FA56818000FFFFFFF0"
+  },
+  {
+    "input": "123.9",
+    "hex": "1131CFEF7CB58000FFFFFFF0"
+  },
+  {
+    "input": "123e1",
+    "hex": "1111D67BB1BB0000FFFFFFF1"
+  },
+  {
+    "input": "19999",
+    "hex": "1BC112743E4DC000FFFFFFF2"
+  },
+  {
+    "input": "1e-10",
+    "hex": "0DE0B6B3A7640000FFFFFFE4"
+  },
+  {
+    "input": "1e-11",
+    "hex": "0DE0B6B3A7640000FFFFFFE3"
+  },
+  {
+    "input": "1e-12",
+    "hex": "0DE0B6B3A7640000FFFFFFE2"
+  },
+  {
+    "input": "1e-13",
+    "hex": "0DE0B6B3A7640000FFFFFFE1"
+  },
+  {
+    "input": "1e-14",
+    "hex": "0DE0B6B3A7640000FFFFFFE0"
+  },
+  {
+    "input": "1e-15",
+    "hex": "0DE0B6B3A7640000FFFFFFDF"
+  },
+  {
+    "input": "1e-16",
+    "hex": "0DE0B6B3A7640000FFFFFFDE"
+  },
+  {
+    "input": "1e-17",
+    "hex": "0DE0B6B3A7640000FFFFFFDD"
+  },
+  {
+    "input": "1e-18",
+    "hex": "0DE0B6B3A7640000FFFFFFDC"
+  },
+  {
+    "input": "1e-19",
+    "hex": "0DE0B6B3A7640000FFFFFFDB"
+  },
+  {
+    "input": "1e-20",
+    "hex": "0DE0B6B3A7640000FFFFFFDA"
+  },
+  {
+    "input": "1e-80",
+    "hex": "0DE0B6B3A7640000FFFFFF9E"
+  },
+  {
+    "input": "50000",
+    "hex": "4563918244F40000FFFFFFF2"
+  },
+  {
+    "input": "59999",
+    "hex": "5343ED42DBDDC000FFFFFFF2"
+  },
+  {
+    "input": "90000",
+    "hex": "7CE66C50E2840000FFFFFFF2"
+  },
+  {
+    "input": "99999",
+    "hex": "0DE0AD9B58F16000FFFFFFF3"
+  },
+  {
+    "input": "9e-18",
+    "hex": "7CE66C50E2840000FFFFFFDC"
+  },
+  {
+    "input": "9e-80",
+    "hex": "7CE66C50E2840000FFFFFF9E"
+  },
+  {
+    "input": "-0.555",
+    "hex": "B2FA7067B8950000FFFFFFED"
+  },
+  {
+    "input": "-1.555",
+    "hex": "EA6B87BD1E448000FFFFFFEE"
+  },
+  {
+    "input": "-123.5",
+    "hex": "EEDC660B16648000FFFFFFF0"
+  },
+  {
+    "input": "-123e1",
+    "hex": "EEEE29844E450000FFFFFFF1"
+  },
+  {
+    "input": "-1e-10",
+    "hex": "F21F494C589C0000FFFFFFE4"
+  },
+  {
+    "input": "-1e-11",
+    "hex": "F21F494C589C0000FFFFFFE3"
+  },
+  {
+    "input": "-1e-12",
+    "hex": "F21F494C589C0000FFFFFFE2"
+  },
+  {
+    "input": "-1e-13",
+    "hex": "F21F494C589C0000FFFFFFE1"
+  },
+  {
+    "input": "-1e-14",
+    "hex": "F21F494C589C0000FFFFFFE0"
+  },
+  {
+    "input": "-1e-15",
+    "hex": "F21F494C589C0000FFFFFFDF"
+  },
+  {
+    "input": "-1e-16",
+    "hex": "F21F494C589C0000FFFFFFDE"
+  },
+  {
+    "input": "-1e-17",
+    "hex": "F21F494C589C0000FFFFFFDD"
+  },
+  {
+    "input": "-1e-18",
+    "hex": "F21F494C589C0000FFFFFFDC"
+  },
+  {
+    "input": "-1e-19",
+    "hex": "F21F494C589C0000FFFFFFDB"
+  },
+  {
+    "input": "-1e-20",
+    "hex": "F21F494C589C0000FFFFFFDA"
+  },
+  {
+    "input": "-1e-80",
+    "hex": "F21F494C589C0000FFFFFF9E"
+  },
+  {
+    "input": "-99999",
+    "hex": "F21F5264A70EA000FFFFFFF3"
+  },
+  {
+    "input": "-9e-18",
+    "hex": "831993AF1D7C0000FFFFFFDC"
+  },
+  {
+    "input": "-9e-80",
+    "hex": "831993AF1D7C0000FFFFFF9E"
+  },
+  {
+    "input": "0.1111",
+    "hex": "0F6B109D19758000FFFFFFED"
+  },
+  {
+    "input": "0.9999",
+    "hex": "0DE05BC096E9C000FFFFFFEE"
+  },
+  {
+    "input": "1.1111",
+    "hex": "0F6B6B9029EFC000FFFFFFEE"
+  },
+  {
+    "input": "1.9999",
+    "hex": "1BC112743E4DC000FFFFFFEE"
+  },
+  {
+    "input": "100001",
+    "hex": "0DE0BFCBF5D6A000FFFFFFF3"
+  },
+  {
+    "input": "100002",
+    "hex": "0DE0C8E444494000FFFFFFF3"
+  },
+  {
+    "input": "100003",
+    "hex": "0DE0D1FC92BBE000FFFFFFF3"
+  },
+  {
+    "input": "100004",
+    "hex": "0DE0DB14E12E8000FFFFFFF3"
+  },
+  {
+    "input": "100005",
+    "hex": "0DE0E42D2FA12000FFFFFFF3"
+  },
+  {
+    "input": "100006",
+    "hex": "0DE0ED457E13C000FFFFFFF3"
+  },
+  {
+    "input": "100007",
+    "hex": "0DE0F65DCC866000FFFFFFF3"
+  },
+  {
+    "input": "100008",
+    "hex": "0DE0FF761AF90000FFFFFFF3"
+  },
+  {
+    "input": "100009",
+    "hex": "0DE1088E696BA000FFFFFFF3"
+  },
+  {
+    "input": "111111",
+    "hex": "0F6B74A878626000FFFFFFF3"
+  },
+  {
+    "input": "123.11",
+    "hex": "1115BEED66FBC000FFFFFFF0"
+  },
+  {
+    "input": "123.99",
+    "hex": "1135027B1101C000FFFFFFF0"
+  },
+  {
+    "input": "123e-1",
+    "hex": "1111D67BB1BB0000FFFFFFEF"
+  },
+  {
+    "input": "123e18",
+    "hex": "1111D67BB1BB000000000002"
+  },
+  {
+    "input": "123e80",
+    "hex": "1111D67BB1BB000000000040"
+  },
+  {
+    "input": "199999",
+    "hex": "1BC1644F00556000FFFFFFF3"
+  },
+  {
+    "input": "500000",
+    "hex": "4563918244F40000FFFFFFF3"
+  },
+  {
+    "input": "599999",
+    "hex": "53443F1D9DE56000FFFFFFF3"
+  },
+  {
+    "input": "900000",
+    "hex": "7CE66C50E2840000FFFFFFF3"
+  },
+  {
+    "input": "999999",
+    "hex": "0DE0B5CAD2BEF000FFFFFFF4"
+  },
+  {
+    "input": "-0.5555",
+    "hex": "B2E8ACEE80B48000FFFFFFED"
+  },
+  {
+    "input": "-1.5555",
+    "hex": "EA69C0FDCBE14000FFFFFFEE"
+  },
+  {
+    "input": "-123.55",
+    "hex": "EEDA9F4BC4014000FFFFFFF0"
+  },
+  {
+    "input": "-123e-1",
+    "hex": "EEEE29844E450000FFFFFFEF"
+  },
+  {
+    "input": "-123e18",
+    "hex": "EEEE29844E45000000000002"
+  },
+  {
+    "input": "-123e80",
+    "hex": "EEEE29844E45000000000040"
+  },
+  {
+    "input": "-999999",
+    "hex": "F21F4A352D411000FFFFFFF4"
+  },
+  {
+    "input": "0.11111",
+    "hex": "0F6B6B9029EFC000FFFFFFED"
+  },
+  {
+    "input": "0.99999",
+    "hex": "0DE0AD9B58F16000FFFFFFEE"
+  },
+  {
+    "input": "1.11111",
+    "hex": "0F6B74A878626000FFFFFFEE"
+  },
+  {
+    "input": "1.99999",
+    "hex": "1BC1644F00556000FFFFFFEE"
+  },
+  {
+    "input": "1000001",
+    "hex": "0DE0B79C7C091000FFFFFFF4"
+  },
+  {
+    "input": "1000002",
+    "hex": "0DE0B88550AE2000FFFFFFF4"
+  },
+  {
+    "input": "1000003",
+    "hex": "0DE0B96E25533000FFFFFFF4"
+  },
+  {
+    "input": "1000004",
+    "hex": "0DE0BA56F9F84000FFFFFFF4"
+  },
+  {
+    "input": "1000005",
+    "hex": "0DE0BB3FCE9D5000FFFFFFF4"
+  },
+  {
+    "input": "1000006",
+    "hex": "0DE0BC28A3426000FFFFFFF4"
+  },
+  {
+    "input": "1000007",
+    "hex": "0DE0BD1177E77000FFFFFFF4"
+  },
+  {
+    "input": "1000008",
+    "hex": "0DE0BDFA4C8C8000FFFFFFF4"
+  },
+  {
+    "input": "1000009",
+    "hex": "0DE0BEE321319000FFFFFFF4"
+  },
+  {
+    "input": "1111111",
+    "hex": "0F6B75914D077000FFFFFFF4"
+  },
+  {
+    "input": "123.111",
+    "hex": "1115C805B56E6000FFFFFFF0"
+  },
+  {
+    "input": "123.999",
+    "hex": "11355455D3096000FFFFFFF0"
+  },
+  {
+    "input": "123e-18",
+    "hex": "1111D67BB1BB0000FFFFFFDE"
+  },
+  {
+    "input": "123e-80",
+    "hex": "1111D67BB1BB0000FFFFFFA0"
+  },
+  {
+    "input": "1999999",
+    "hex": "1BC16C7E7A22F000FFFFFFF4"
+  },
+  {
+    "input": "5000000",
+    "hex": "4563918244F40000FFFFFFF4"
+  },
+  {
+    "input": "5999999",
+    "hex": "5344474D17B2F000FFFFFFF4"
+  },
+  {
+    "input": "9000000",
+    "hex": "7CE66C50E2840000FFFFFFF4"
+  },
+  {
+    "input": "9999999",
+    "hex": "0DE0B69C5EED1800FFFFFFF5"
+  },
+  {
+    "input": "-0.55555",
+    "hex": "B2E6E62F2E514000FFFFFFED"
+  },
+  {
+    "input": "-1.55555",
+    "hex": "EA69938443A42000FFFFFFEE"
+  },
+  {
+    "input": "-123.555",
+    "hex": "EEDA71D23BC42000FFFFFFF0"
+  },
+  {
+    "input": "-123e-18",
+    "hex": "EEEE29844E450000FFFFFFDE"
+  },
+  {
+    "input": "-123e-80",
+    "hex": "EEEE29844E450000FFFFFFA0"
+  },
+  {
+    "input": "-9999999",
+    "hex": "F21F4963A112E800FFFFFFF5"
+  },
+  {
+    "input": "0.111111",
+    "hex": "0F6B74A878626000FFFFFFED"
+  },
+  {
+    "input": "0.999999",
+    "hex": "0DE0B5CAD2BEF000FFFFFFEE"
+  },
+  {
+    "input": "1.111111",
+    "hex": "0F6B75914D077000FFFFFFEE"
+  },
+  {
+    "input": "1.999999",
+    "hex": "1BC16C7E7A22F000FFFFFFEE"
+  },
+  {
+    "input": "10000001",
+    "hex": "0DE0B6CAEFDAE800FFFFFFF5"
+  },
+  {
+    "input": "10000002",
+    "hex": "0DE0B6E23851D000FFFFFFF5"
+  },
+  {
+    "input": "10000003",
+    "hex": "0DE0B6F980C8B800FFFFFFF5"
+  },
+  {
+    "input": "10000004",
+    "hex": "0DE0B710C93FA000FFFFFFF5"
+  },
+  {
+    "input": "10000005",
+    "hex": "0DE0B72811B68800FFFFFFF5"
+  },
+  {
+    "input": "10000006",
+    "hex": "0DE0B73F5A2D7000FFFFFFF5"
+  },
+  {
+    "input": "10000007",
+    "hex": "0DE0B756A2A45800FFFFFFF5"
+  },
+  {
+    "input": "10000008",
+    "hex": "0DE0B76DEB1B4000FFFFFFF5"
+  },
+  {
+    "input": "10000009",
+    "hex": "0DE0B78533922800FFFFFFF5"
+  },
+  {
+    "input": "11111111",
+    "hex": "0F6B75A8957E5800FFFFFFF5"
+  },
+  {
+    "input": "123.1111",
+    "hex": "1115C8EE8A137000FFFFFFF0"
+  },
+  {
+    "input": "123.9999",
+    "hex": "11355C854CD6F000FFFFFFF0"
+  },
+  {
+    "input": "19999999",
+    "hex": "1BC16D5006511800FFFFFFF5"
+  },
+  {
+    "input": "50000000",
+    "hex": "4563918244F40000FFFFFFF5"
+  },
+  {
+    "input": "59999999",
+    "hex": "5344481EA3E11800FFFFFFF5"
+  },
+  {
+    "input": "90000000",
+    "hex": "7CE66C50E2840000FFFFFFF5"
+  },
+  {
+    "input": "99999999",
+    "hex": "0DE0B6B153581C00FFFFFFF6"
+  },
+  {
+    "input": "-0.555555",
+    "hex": "B2E6B8B5A6142000FFFFFFED"
+  },
+  {
+    "input": "-1.555555",
+    "hex": "EA698EF81C6AD000FFFFFFEE"
+  },
+  {
+    "input": "-123.5555",
+    "hex": "EEDA6D46148AD000FFFFFFF0"
+  },
+  {
+    "input": "-99999999",
+    "hex": "F21F494EACA7E400FFFFFFF6"
+  },
+  {
+    "input": "0.1111111",
+    "hex": "0F6B75914D077000FFFFFFED"
+  },
+  {
+    "input": "0.9999999",
+    "hex": "0DE0B69C5EED1800FFFFFFEE"
+  },
+  {
+    "input": "1.1111111",
+    "hex": "0F6B75A8957E5800FFFFFFEE"
+  },
+  {
+    "input": "1.9999999",
+    "hex": "1BC16D5006511800FFFFFFEE"
+  },
+  {
+    "input": "100000001",
+    "hex": "0DE0B6B5FB6FE400FFFFFFF6"
+  },
+  {
+    "input": "100000002",
+    "hex": "0DE0B6B84F7BC800FFFFFFF6"
+  },
+  {
+    "input": "100000003",
+    "hex": "0DE0B6BAA387AC00FFFFFFF6"
+  },
+  {
+    "input": "100000004",
+    "hex": "0DE0B6BCF7939000FFFFFFF6"
+  },
+  {
+    "input": "100000005",
+    "hex": "0DE0B6BF4B9F7400FFFFFFF6"
+  },
+  {
+    "input": "100000006",
+    "hex": "0DE0B6C19FAB5800FFFFFFF6"
+  },
+  {
+    "input": "100000007",
+    "hex": "0DE0B6C3F3B73C00FFFFFFF6"
+  },
+  {
+    "input": "100000008",
+    "hex": "0DE0B6C647C32000FFFFFFF6"
+  },
+  {
+    "input": "100000009",
+    "hex": "0DE0B6C89BCF0400FFFFFFF6"
+  },
+  {
+    "input": "111111111",
+    "hex": "0F6B75AAE98A3C00FFFFFFF6"
+  },
+  {
+    "input": "123.11111",
+    "hex": "1115C905D28A5800FFFFFFF0"
+  },
+  {
+    "input": "123.99999",
+    "hex": "11355D56D9051800FFFFFFF0"
+  },
+  {
+    "input": "199999999",
+    "hex": "1BC16D64FABC1C00FFFFFFF6"
+  },
+  {
+    "input": "500000000",
+    "hex": "4563918244F40000FFFFFFF6"
+  },
+  {
+    "input": "599999999",
+    "hex": "53444833984C1C00FFFFFFF6"
+  },
+  {
+    "input": "900000000",
+    "hex": "7CE66C50E2840000FFFFFFF6"
+  },
+  {
+    "input": "999999999",
+    "hex": "0DE0B6B36BC93600FFFFFFF7"
+  },
+  {
+    "input": "-0.5555555",
+    "hex": "B2E6B4297EDAD000FFFFFFED"
+  },
+  {
+    "input": "-1.5555555",
+    "hex": "EA698E83B2184800FFFFFFEE"
+  },
+  {
+    "input": "-123.55555",
+    "hex": "EEDA6CD1AA384800FFFFFFF0"
+  },
+  {
+    "input": "-999999999",
+    "hex": "F21F494C9436CA00FFFFFFF7"
+  },
+  {
+    "input": "0.11111111",
+    "hex": "0F6B75A8957E5800FFFFFFED"
+  },
+  {
+    "input": "0.99999999",
+    "hex": "0DE0B6B153581C00FFFFFFEE"
+  },
+  {
+    "input": "1.11111111",
+    "hex": "0F6B75AAE98A3C00FFFFFFEE"
+  },
+  {
+    "input": "1.99999999",
+    "hex": "1BC16D64FABC1C00FFFFFFEE"
+  },
+  {
+    "input": "1000000001",
+    "hex": "0DE0B6B3E2FECA00FFFFFFF7"
+  },
+  {
+    "input": "1000000002",
+    "hex": "0DE0B6B41E999400FFFFFFF7"
+  },
+  {
+    "input": "1000000003",
+    "hex": "0DE0B6B45A345E00FFFFFFF7"
+  },
+  {
+    "input": "1000000004",
+    "hex": "0DE0B6B495CF2800FFFFFFF7"
+  },
+  {
+    "input": "1000000005",
+    "hex": "0DE0B6B4D169F200FFFFFFF7"
+  },
+  {
+    "input": "1000000006",
+    "hex": "0DE0B6B50D04BC00FFFFFFF7"
+  },
+  {
+    "input": "1000000007",
+    "hex": "0DE0B6B5489F8600FFFFFFF7"
+  },
+  {
+    "input": "1000000008",
+    "hex": "0DE0B6B5843A5000FFFFFFF7"
+  },
+  {
+    "input": "1000000009",
+    "hex": "0DE0B6B5BFD51A00FFFFFFF7"
+  },
+  {
+    "input": "1111111111",
+    "hex": "0F6B75AB25250600FFFFFFF7"
+  },
+  {
+    "input": "123.111111",
+    "hex": "1115C90826963C00FFFFFFF0"
+  },
+  {
+    "input": "123.999999",
+    "hex": "11355D6BCD701C00FFFFFFF0"
+  },
+  {
+    "input": "1999999999",
+    "hex": "1BC16D67132D3600FFFFFFF7"
+  },
+  {
+    "input": "5000000000",
+    "hex": "4563918244F40000FFFFFFF7"
+  },
+  {
+    "input": "5999999999",
+    "hex": "53444835B0BD3600FFFFFFF7"
+  },
+  {
+    "input": "9000000000",
+    "hex": "7CE66C50E2840000FFFFFFF7"
+  },
+  {
+    "input": "9999999999",
+    "hex": "0DE0B6B3A16E1F00FFFFFFF8"
+  },
+  {
+    "input": "-0.55555555",
+    "hex": "B2E6B3B514884800FFFFFFED"
+  },
+  {
+    "input": "-1.55555555",
+    "hex": "EA698E780DDCD400FFFFFFEE"
+  },
+  {
+    "input": "-123.555555",
+    "hex": "EEDA6CC605FCD400FFFFFFF0"
+  },
+  {
+    "input": "-9999999999",
+    "hex": "F21F494C5E91E100FFFFFFF8"
+  },
+  {
+    "input": "0.111111111",
+    "hex": "0F6B75AAE98A3C00FFFFFFED"
+  },
+  {
+    "input": "0.999999999",
+    "hex": "0DE0B6B36BC93600FFFFFFEE"
+  },
+  {
+    "input": "1.111111111",
+    "hex": "0F6B75AB25250600FFFFFFEE"
+  },
+  {
+    "input": "1.999999999",
+    "hex": "1BC16D67132D3600FFFFFFEE"
+  },
+  {
+    "input": "10000000001",
+    "hex": "0DE0B6B3AD59E100FFFFFFF8"
+  },
+  {
+    "input": "10000000002",
+    "hex": "0DE0B6B3B34FC200FFFFFFF8"
+  },
+  {
+    "input": "10000000003",
+    "hex": "0DE0B6B3B945A300FFFFFFF8"
+  },
+  {
+    "input": "10000000004",
+    "hex": "0DE0B6B3BF3B8400FFFFFFF8"
+  },
+  {
+    "input": "10000000005",
+    "hex": "0DE0B6B3C5316500FFFFFFF8"
+  },
+  {
+    "input": "10000000006",
+    "hex": "0DE0B6B3CB274600FFFFFFF8"
+  },
+  {
+    "input": "10000000007",
+    "hex": "0DE0B6B3D11D2700FFFFFFF8"
+  },
+  {
+    "input": "10000000008",
+    "hex": "0DE0B6B3D7130800FFFFFFF8"
+  },
+  {
+    "input": "10000000009",
+    "hex": "0DE0B6B3DD08E900FFFFFFF8"
+  },
+  {
+    "input": "11111111111",
+    "hex": "0F6B75AB2B1AE700FFFFFFF8"
+  },
+  {
+    "input": "123.1111111",
+    "hex": "1115C90862310600FFFFFFF0"
+  },
+  {
+    "input": "123.9999999",
+    "hex": "11355D6DE5E13600FFFFFFF0"
+  },
+  {
+    "input": "19999999999",
+    "hex": "1BC16D6748D21F00FFFFFFF8"
+  },
+  {
+    "input": "50000000000",
+    "hex": "4563918244F40000FFFFFFF8"
+  },
+  {
+    "input": "59999999999",
+    "hex": "53444835E6621F00FFFFFFF8"
+  },
+  {
+    "input": "90000000000",
+    "hex": "7CE66C50E2840000FFFFFFF8"
+  },
+  {
+    "input": "99999999999",
+    "hex": "0DE0B6B3A6CB6980FFFFFFF9"
+  },
+  {
+    "input": "-0.555555555",
+    "hex": "B2E6B3A9704CD400FFFFFFED"
+  },
+  {
+    "input": "-1.555555555",
+    "hex": "EA698E76E3D6E200FFFFFFEE"
+  },
+  {
+    "input": "-123.5555555",
+    "hex": "EEDA6CC4DBF6E200FFFFFFF0"
+  },
+  {
+    "input": "-99999999999",
+    "hex": "F21F494C59349680FFFFFFF9"
+  },
+  {
+    "input": "100000000001",
+    "hex": "0DE0B6B3A7FC9680FFFFFFF9"
+  },
+  {
+    "input": "100000000002",
+    "hex": "0DE0B6B3A8952D00FFFFFFF9"
+  },
+  {
+    "input": "100000000003",
+    "hex": "0DE0B6B3A92DC380FFFFFFF9"
+  },
+  {
+    "input": "100000000004",
+    "hex": "0DE0B6B3A9C65A00FFFFFFF9"
+  },
+  {
+    "input": "100000000005",
+    "hex": "0DE0B6B3AA5EF080FFFFFFF9"
+  },
+  {
+    "input": "100000000006",
+    "hex": "0DE0B6B3AAF78700FFFFFFF9"
+  },
+  {
+    "input": "100000000007",
+    "hex": "0DE0B6B3AB901D80FFFFFFF9"
+  },
+  {
+    "input": "100000000008",
+    "hex": "0DE0B6B3AC28B400FFFFFFF9"
+  },
+  {
+    "input": "100000000009",
+    "hex": "0DE0B6B3ACC14A80FFFFFFF9"
+  },
+  {
+    "input": "111111111111",
+    "hex": "0F6B75AB2BB37D80FFFFFFF9"
+  },
+  {
+    "input": "123.11111111",
+    "hex": "1115C9086826E700FFFFFFF0"
+  },
+  {
+    "input": "123.99999999",
+    "hex": "11355D6E1B861F00FFFFFFF0"
+  },
+  {
+    "input": "199999999999",
+    "hex": "1BC16D674E2F6980FFFFFFF9"
+  },
+  {
+    "input": "500000000000",
+    "hex": "4563918244F40000FFFFFFF9"
+  },
+  {
+    "input": "599999999999",
+    "hex": "53444835EBBF6980FFFFFFF9"
+  },
+  {
+    "input": "900000000000",
+    "hex": "7CE66C50E2840000FFFFFFF9"
+  },
+  {
+    "input": "999999999999",
+    "hex": "0DE0B6B3A754BDC0FFFFFFFA"
+  },
+  {
+    "input": "-123.55555555",
+    "hex": "EEDA6CC4BE297D00FFFFFFF0"
+  },
+  {
+    "input": "-999999999999",
+    "hex": "F21F494C58AB4240FFFFFFFA"
+  },
+  {
+    "input": "1000000000001",
+    "hex": "0DE0B6B3A7734240FFFFFFFA"
+  },
+  {
+    "input": "1000000000002",
+    "hex": "0DE0B6B3A7828480FFFFFFFA"
+  },
+  {
+    "input": "1000000000003",
+    "hex": "0DE0B6B3A791C6C0FFFFFFFA"
+  },
+  {
+    "input": "1000000000004",
+    "hex": "0DE0B6B3A7A10900FFFFFFFA"
+  },
+  {
+    "input": "1000000000005",
+    "hex": "0DE0B6B3A7B04B40FFFFFFFA"
+  },
+  {
+    "input": "1000000000006",
+    "hex": "0DE0B6B3A7BF8D80FFFFFFFA"
+  },
+  {
+    "input": "1000000000007",
+    "hex": "0DE0B6B3A7CECFC0FFFFFFFA"
+  },
+  {
+    "input": "1000000000008",
+    "hex": "0DE0B6B3A7DE1200FFFFFFFA"
+  },
+  {
+    "input": "1000000000009",
+    "hex": "0DE0B6B3A7ED5440FFFFFFFA"
+  },
+  {
+    "input": "1111111111111",
+    "hex": "0F6B75AB2BC2BFC0FFFFFFFA"
+  },
+  {
+    "input": "123.111111111",
+    "hex": "1115C90868BF7D80FFFFFFF0"
+  },
+  {
+    "input": "123.999999999",
+    "hex": "11355D6E20E36980FFFFFFF0"
+  },
+  {
+    "input": "1999999999999",
+    "hex": "1BC16D674EB8BDC0FFFFFFFA"
+  },
+  {
+    "input": "5000000000000",
+    "hex": "4563918244F40000FFFFFFFA"
+  },
+  {
+    "input": "5999999999999",
+    "hex": "53444835EC48BDC0FFFFFFFA"
+  },
+  {
+    "input": "9000000000000",
+    "hex": "7CE66C50E2840000FFFFFFFA"
+  },
+  {
+    "input": "9999999999999",
+    "hex": "0DE0B6B3A7627960FFFFFFFB"
+  },
+  {
+    "input": "-123.555555555",
+    "hex": "EEDA6CC4BB2E8C80FFFFFFF0"
+  },
+  {
+    "input": "-9999999999999",
+    "hex": "F21F494C589D86A0FFFFFFFB"
+  },
+  {
+    "input": "10000000000001",
+    "hex": "0DE0B6B3A76586A0FFFFFFFB"
+  },
+  {
+    "input": "10000000000002",
+    "hex": "0DE0B6B3A7670D40FFFFFFFB"
+  },
+  {
+    "input": "10000000000003",
+    "hex": "0DE0B6B3A76893E0FFFFFFFB"
+  },
+  {
+    "input": "10000000000004",
+    "hex": "0DE0B6B3A76A1A80FFFFFFFB"
+  },
+  {
+    "input": "10000000000005",
+    "hex": "0DE0B6B3A76BA120FFFFFFFB"
+  },
+  {
+    "input": "10000000000006",
+    "hex": "0DE0B6B3A76D27C0FFFFFFFB"
+  },
+  {
+    "input": "10000000000007",
+    "hex": "0DE0B6B3A76EAE60FFFFFFFB"
+  },
+  {
+    "input": "10000000000008",
+    "hex": "0DE0B6B3A7703500FFFFFFFB"
+  },
+  {
+    "input": "10000000000009",
+    "hex": "0DE0B6B3A771BBA0FFFFFFFB"
+  },
+  {
+    "input": "11111111111111",
+    "hex": "0F6B75AB2BC44660FFFFFFFB"
+  },
+  {
+    "input": "19999999999999",
+    "hex": "1BC16D674EC67960FFFFFFFB"
+  },
+  {
+    "input": "50000000000000",
+    "hex": "4563918244F40000FFFFFFFB"
+  },
+  {
+    "input": "59999999999999",
+    "hex": "53444835EC567960FFFFFFFB"
+  },
+  {
+    "input": "90000000000000",
+    "hex": "7CE66C50E2840000FFFFFFFB"
+  },
+  {
+    "input": "99999999999999",
+    "hex": "0DE0B6B3A763D8F0FFFFFFFC"
+  },
+  {
+    "input": "-99999999999999",
+    "hex": "F21F494C589C2710FFFFFFFC"
+  },
+  {
+    "input": "100000000000001",
+    "hex": "0DE0B6B3A7642710FFFFFFFC"
+  },
+  {
+    "input": "100000000000002",
+    "hex": "0DE0B6B3A7644E20FFFFFFFC"
+  },
+  {
+    "input": "100000000000003",
+    "hex": "0DE0B6B3A7647530FFFFFFFC"
+  },
+  {
+    "input": "100000000000004",
+    "hex": "0DE0B6B3A7649C40FFFFFFFC"
+  },
+  {
+    "input": "100000000000005",
+    "hex": "0DE0B6B3A764C350FFFFFFFC"
+  },
+  {
+    "input": "100000000000006",
+    "hex": "0DE0B6B3A764EA60FFFFFFFC"
+  },
+  {
+    "input": "100000000000007",
+    "hex": "0DE0B6B3A7651170FFFFFFFC"
+  },
+  {
+    "input": "100000000000008",
+    "hex": "0DE0B6B3A7653880FFFFFFFC"
+  },
+  {
+    "input": "100000000000009",
+    "hex": "0DE0B6B3A7655F90FFFFFFFC"
+  },
+  {
+    "input": "111111111111111",
+    "hex": "0F6B75AB2BC46D70FFFFFFFC"
+  },
+  {
+    "input": "199999999999999",
+    "hex": "1BC16D674EC7D8F0FFFFFFFC"
+  },
+  {
+    "input": "500000000000000",
+    "hex": "4563918244F40000FFFFFFFC"
+  },
+  {
+    "input": "599999999999999",
+    "hex": "53444835EC57D8F0FFFFFFFC"
+  },
+  {
+    "input": "900000000000000",
+    "hex": "7CE66C50E2840000FFFFFFFC"
+  },
+  {
+    "input": "999999999999999",
+    "hex": "0DE0B6B3A763FC18FFFFFFFD"
+  },
+  {
+    "input": "-999999999999999",
+    "hex": "F21F494C589C03E8FFFFFFFD"
+  },
+  {
+    "input": "1000000000000001",
+    "hex": "0DE0B6B3A76403E8FFFFFFFD"
+  },
+  {
+    "input": "1000000000000002",
+    "hex": "0DE0B6B3A76407D0FFFFFFFD"
+  },
+  {
+    "input": "1000000000000003",
+    "hex": "0DE0B6B3A7640BB8FFFFFFFD"
+  },
+  {
+    "input": "1000000000000004",
+    "hex": "0DE0B6B3A7640FA0FFFFFFFD"
+  },
+  {
+    "input": "1000000000000005",
+    "hex": "0DE0B6B3A7641388FFFFFFFD"
+  },
+  {
+    "input": "1000000000000006",
+    "hex": "0DE0B6B3A7641770FFFFFFFD"
+  },
+  {
+    "input": "1000000000000007",
+    "hex": "0DE0B6B3A7641B58FFFFFFFD"
+  },
+  {
+    "input": "1000000000000008",
+    "hex": "0DE0B6B3A7641F40FFFFFFFD"
+  },
+  {
+    "input": "1000000000000009",
+    "hex": "0DE0B6B3A7642328FFFFFFFD"
+  },
+  {
+    "input": "1111111111111111",
+    "hex": "0F6B75AB2BC47158FFFFFFFD"
+  },
+  {
+    "input": "1999999999999999",
+    "hex": "1BC16D674EC7FC18FFFFFFFD"
+  },
+  {
+    "input": "5000000000000000",
+    "hex": "4563918244F40000FFFFFFFD"
+  },
+  {
+    "input": "5999999999999999",
+    "hex": "53444835EC57FC18FFFFFFFD"
+  },
+  {
+    "input": "9000000000000000",
+    "hex": "7CE66C50E2840000FFFFFFFD"
+  },
+  {
+    "input": "9999999999999999",
+    "hex": "0DE0B6B3A763FF9CFFFFFFFE"
+  },
+  {
+    "input": "-9999999999999999",
+    "hex": "F21F494C589C0064FFFFFFFE"
+  },
+  {
+    "input": "10000000000000001",
+    "hex": "0DE0B6B3A7640064FFFFFFFE"
+  },
+  {
+    "input": "10000000000000002",
+    "hex": "0DE0B6B3A76400C8FFFFFFFE"
+  },
+  {
+    "input": "10000000000000003",
+    "hex": "0DE0B6B3A764012CFFFFFFFE"
+  },
+  {
+    "input": "10000000000000004",
+    "hex": "0DE0B6B3A7640190FFFFFFFE"
+  },
+  {
+    "input": "10000000000000005",
+    "hex": "0DE0B6B3A76401F4FFFFFFFE"
+  },
+  {
+    "input": "10000000000000006",
+    "hex": "0DE0B6B3A7640258FFFFFFFE"
+  },
+  {
+    "input": "10000000000000007",
+    "hex": "0DE0B6B3A76402BCFFFFFFFE"
+  },
+  {
+    "input": "10000000000000008",
+    "hex": "0DE0B6B3A7640320FFFFFFFE"
+  },
+  {
+    "input": "10000000000000009",
+    "hex": "0DE0B6B3A7640384FFFFFFFE"
+  },
+  {
+    "input": "11111111111111111",
+    "hex": "0F6B75AB2BC471BCFFFFFFFE"
+  },
+  {
+    "input": "19999999999999999",
+    "hex": "1BC16D674EC7FF9CFFFFFFFE"
+  },
+  {
+    "input": "50000000000000000",
+    "hex": "4563918244F40000FFFFFFFE"
+  },
+  {
+    "input": "59999999999999999",
+    "hex": "53444835EC57FF9CFFFFFFFE"
+  },
+  {
+    "input": "90000000000000000",
+    "hex": "7CE66C50E2840000FFFFFFFE"
+  },
+  {
+    "input": "99999999999999999",
+    "hex": "0DE0B6B3A763FFF6FFFFFFFF"
+  },
+  {
+    "input": "-99999999999999999",
+    "hex": "F21F494C589C000AFFFFFFFF"
+  },
+  {
+    "input": "100000000000000001",
+    "hex": "0DE0B6B3A764000AFFFFFFFF"
+  },
+  {
+    "input": "100000000000000002",
+    "hex": "0DE0B6B3A7640014FFFFFFFF"
+  },
+  {
+    "input": "100000000000000003",
+    "hex": "0DE0B6B3A764001EFFFFFFFF"
+  },
+  {
+    "input": "100000000000000004",
+    "hex": "0DE0B6B3A7640028FFFFFFFF"
+  },
+  {
+    "input": "100000000000000005",
+    "hex": "0DE0B6B3A7640032FFFFFFFF"
+  },
+  {
+    "input": "100000000000000006",
+    "hex": "0DE0B6B3A764003CFFFFFFFF"
+  },
+  {
+    "input": "100000000000000007",
+    "hex": "0DE0B6B3A7640046FFFFFFFF"
+  },
+  {
+    "input": "100000000000000008",
+    "hex": "0DE0B6B3A7640050FFFFFFFF"
+  },
+  {
+    "input": "100000000000000009",
+    "hex": "0DE0B6B3A764005AFFFFFFFF"
+  },
+  {
+    "input": "111111111111111111",
+    "hex": "0F6B75AB2BC471C6FFFFFFFF"
+  },
+  {
+    "input": "199999999999999999",
+    "hex": "1BC16D674EC7FFF6FFFFFFFF"
+  },
+  {
+    "input": "500000000000000000",
+    "hex": "4563918244F40000FFFFFFFF"
+  },
+  {
+    "input": "599999999999999999",
+    "hex": "53444835EC57FFF6FFFFFFFF"
+  },
+  {
+    "input": "900000000000000000",
+    "hex": "7CE66C50E2840000FFFFFFFF"
+  },
+  {
+    "input": "999999999999999999",
+    "hex": "0DE0B6B3A763FFFF00000000"
+  },
+  {
+    "input": "9999999999999999e1",
+    "hex": "0DE0B6B3A763FF9CFFFFFFFF"
+  },
+  {
+    "input": "-999999999999999999",
+    "hex": "F21F494C589C000100000000"
+  },
+  {
+    "input": "-9999999999999999e1",
+    "hex": "F21F494C589C0064FFFFFFFF"
+  },
+  {
+    "input": "1000000000000000001",
+    "hex": "0DE0B6B3A764000100000000"
+  },
+  {
+    "input": "1000000000000000002",
+    "hex": "0DE0B6B3A764000200000000"
+  },
+  {
+    "input": "1000000000000000003",
+    "hex": "0DE0B6B3A764000300000000"
+  },
+  {
+    "input": "1000000000000000004",
+    "hex": "0DE0B6B3A764000400000000"
+  },
+  {
+    "input": "1000000000000000005",
+    "hex": "0DE0B6B3A764000500000000"
+  },
+  {
+    "input": "1000000000000000006",
+    "hex": "0DE0B6B3A764000600000000"
+  },
+  {
+    "input": "1000000000000000007",
+    "hex": "0DE0B6B3A764000700000000"
+  },
+  {
+    "input": "1000000000000000008",
+    "hex": "0DE0B6B3A764000800000000"
+  },
+  {
+    "input": "1000000000000000009",
+    "hex": "0DE0B6B3A764000900000000"
+  },
+  {
+    "input": "1111111111111111111",
+    "hex": "0F6B75AB2BC471C700000000"
+  },
+  {
+    "input": "1999999999999999999",
+    "hex": "1BC16D674EC7FFFF00000000"
+  },
+  {
+    "input": "5000000000000000000",
+    "hex": "4563918244F4000000000000"
+  },
+  {
+    "input": "5999999999999999999",
+    "hex": "53444835EC57FFFF00000000"
+  },
+  {
+    "input": "9223372036854775807",
+    "hex": "7FFFFFFFFFFFFFFF00000000"
+  },
+  {
+    "input": "9223372036854775808",
+    "hex": "0CCCCCCCCCCCCCCD00000001"
+  },
+  {
+    "input": "9999999999999999e-1",
+    "hex": "0DE0B6B3A763FF9CFFFFFFFD"
+  },
+  {
+    "input": "9999999999999999e18",
+    "hex": "0DE0B6B3A763FF9C00000010"
+  },
+  {
+    "input": "9999999999999999e80",
+    "hex": "0DE0B6B3A763FF9C0000004E"
+  },
+  {
+    "input": "-9223372036854775807",
+    "hex": "800000000000000100000000"
+  },
+  {
+    "input": "-9223372036854775808",
+    "hex": "F33333333333333300000001"
+  },
+  {
+    "input": "-9999999999999999e-1",
+    "hex": "F21F494C589C0064FFFFFFFD"
+  },
+  {
+    "input": "-9999999999999999e18",
+    "hex": "F21F494C589C006400000010"
+  },
+  {
+    "input": "-9999999999999999e80",
+    "hex": "F21F494C589C00640000004E"
+  },
+  {
+    "input": "9999999999999999e-18",
+    "hex": "0DE0B6B3A763FF9CFFFFFFEC"
+  },
+  {
+    "input": "9999999999999999e-80",
+    "hex": "0DE0B6B3A763FF9CFFFFFFAE"
+  },
+  {
+    "input": "-9999999999999999e-18",
+    "hex": "F21F494C589C0064FFFFFFEC"
+  },
+  {
+    "input": "-9999999999999999e-80",
+    "hex": "F21F494C589C0064FFFFFFAE"
   }
 ]
