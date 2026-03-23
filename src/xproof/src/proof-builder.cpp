@@ -1,4 +1,3 @@
-#include "xproof/abbreviated-tree.h"
 #include "xproof/proof-builder.h"
 #include "xproof/hex-utils.h"
 #include "xproof/skip-list.h"

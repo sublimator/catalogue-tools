@@ -1,0 +1,1 @@
+#include "shamap-abbreviated.h"
