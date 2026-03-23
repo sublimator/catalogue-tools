@@ -182,6 +182,23 @@ Protocol::load_from_json_value(
         }
     }
 
+    // Parse PERMISSIONS mapping (granular permission values)
+    if (obj.contains("PERMISSIONS"))
+    {
+        const auto& perms = obj.at("PERMISSIONS").as_object();
+        for (const auto& [key, value] : perms)
+        {
+            protocol.permissions_[std::string(key)] =
+                static_cast<uint32_t>(value.as_int64());
+        }
+    }
+
+    // Also generate tx-level permission values (tx type code + 1)
+    for (const auto& [name, code] : protocol.transactionTypes_)
+    {
+        protocol.permissions_[name] = static_cast<uint32_t>(code) + 1;
+    }
+
     return protocol;
 }
 

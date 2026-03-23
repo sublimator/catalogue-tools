@@ -752,6 +752,92 @@ INSTANTIATE_TEST_SUITE_P(
             std::to_string(info.param);
     });
 
+// ===========================================================================
+// Codec round-trip fixtures from xrpl.js — {binary, json} pairs
+// ===========================================================================
+
+class CodecRoundtripTxTest : public ::testing::TestWithParam<size_t>
+{
+};
+
+TEST_P(CodecRoundtripTxTest, EncodeMatchesBinary)
+{
+    static auto fixtures = load_json_fixture("codec-roundtrip-fixtures.json");
+    auto const& data = FixtureData::instance();
+    auto const& entries = fixtures.as_object().at("transactions").as_array();
+    auto const& entry = entries[GetParam()].as_object();
+
+    auto const& tx_json = entry.at("json").as_object();
+    auto expected_hex = std::string(entry.at("binary").as_string());
+
+    auto result = serialize_object(tx_json, data.protocol);
+    auto result_hex = to_upper_hex(result);
+
+    EXPECT_EQ(result_hex, expected_hex)
+        << "TX[" << GetParam() << "] "
+        << tx_json.at("TransactionType").as_string();
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    CodecRoundtrip,
+    CodecRoundtripTxTest,
+    ::testing::Range(
+        size_t(0),
+        []() -> size_t {
+            static auto f = load_json_fixture("codec-roundtrip-fixtures.json");
+            return f.as_object().at("transactions").as_array().size();
+        }()),
+    [](auto const& info) -> std::string {
+        static auto f = load_json_fixture("codec-roundtrip-fixtures.json");
+        auto const& e = f.as_object()
+                            .at("transactions")
+                            .as_array()[info.param]
+                            .as_object();
+        auto tt = std::string(e.at("json").as_object().at("TransactionType").as_string());
+        return "crt_" + tt + "_" + std::to_string(info.param);
+    });
+
+class CodecRoundtripSLETest : public ::testing::TestWithParam<size_t>
+{
+};
+
+TEST_P(CodecRoundtripSLETest, EncodeMatchesBinary)
+{
+    static auto fixtures = load_json_fixture("codec-roundtrip-fixtures.json");
+    auto const& data = FixtureData::instance();
+    auto const& entries = fixtures.as_object().at("accountState").as_array();
+    auto const& entry = entries[GetParam()].as_object();
+
+    auto const& sle_json = entry.at("json").as_object();
+    auto expected_hex = std::string(entry.at("binary").as_string());
+
+    auto result = serialize_object(sle_json, data.protocol);
+    auto result_hex = to_upper_hex(result);
+
+    EXPECT_EQ(result_hex, expected_hex)
+        << "SLE[" << GetParam() << "] "
+        << sle_json.at("LedgerEntryType").as_string();
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    CodecRoundtrip,
+    CodecRoundtripSLETest,
+    ::testing::Range(
+        size_t(0),
+        []() -> size_t {
+            static auto f = load_json_fixture("codec-roundtrip-fixtures.json");
+            return f.as_object().at("accountState").as_array().size();
+        }()),
+    [](auto const& info) -> std::string {
+        static auto f = load_json_fixture("codec-roundtrip-fixtures.json");
+        auto const& e = f.as_object()
+                            .at("accountState")
+                            .as_array()[info.param]
+                            .as_object();
+        auto let = std::string(e.at("json").as_object().at("LedgerEntryType").as_string());
+        return "crs_" + let + "_" + std::to_string(info.param);
+    });
+
 TEST(LedgerSHAMap, Ledger38129)
 {
     auto const& data = FixtureData::instance();
@@ -763,3 +849,46 @@ TEST(LedgerSHAMap, Ledger40000)
     auto const& data = FixtureData::instance();
     run_ledger_test("ledger-full-40000.json", data.protocol);
 }
+
+// ===========================================================================
+// Transaction type fixtures from xrpl.js — encode tx_json, compare to binary
+// ===========================================================================
+
+class TxTypeTest : public ::testing::TestWithParam<size_t>
+{
+};
+
+TEST_P(TxTypeTest, EncodeMatchesBinary)
+{
+    static auto tx_fixtures = load_json_fixture("tx-type-fixtures.json");
+    auto const& data = FixtureData::instance();
+    auto const& entries = tx_fixtures.as_array();
+    auto const& entry = entries[GetParam()].as_object();
+
+    auto const& tx_json = entry.at("tx_json").as_object();
+    auto expected_hex = std::string(entry.at("binary").as_string());
+
+    auto result = serialize_object(tx_json, data.protocol);
+    auto result_hex = to_upper_hex(result);
+
+    EXPECT_EQ(result_hex, expected_hex)
+        << "Fixture: " << entry.at("name").as_string();
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    TxTypes,
+    TxTypeTest,
+    ::testing::Range(
+        size_t(0),
+        []() -> size_t {
+            static auto f = load_json_fixture("tx-type-fixtures.json");
+            return f.as_array().size();
+        }()),
+    [](auto const& info) -> std::string {
+        static auto f = load_json_fixture("tx-type-fixtures.json");
+        auto name = std::string(
+            f.as_array()[info.param].as_object().at("name").as_string());
+        // GTest doesn't allow dashes in param names
+        std::replace(name.begin(), name.end(), '-', '_');
+        return name;
+    });

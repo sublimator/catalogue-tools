@@ -65,7 +65,7 @@ field_value_encoded_size(
     if (t == FieldTypes::Amount)
         return AmountCodec::encoded_size(v);
     if (t == FieldTypes::AccountID)
-        return AccountIDCodec::fixed_size;
+        return AccountIDCodec::encoded_size(v);
     if (t == FieldTypes::Currency)
         return CurrencyCodec::fixed_size;
     if (t == FieldTypes::Issue)
@@ -84,6 +84,14 @@ field_value_encoded_size(
         return STObjectCodec::encoded_size(v, protocol, false);
     if (t == FieldTypes::STArray)
         return STArrayCodec::encoded_size(v, protocol);
+
+    // Fallback: fixed-size types → treat as hex blob
+    if (field.meta.type.fixed_size > 0)
+        return field.meta.type.fixed_size;
+
+    // VL-encoded unknown types → treat as hex blob
+    if (field.meta.is_vl_encoded)
+        return BlobCodec::encoded_size(v);
 
     throw EncodeError(
         CodecErrorCode::invalid_value,
@@ -109,6 +117,8 @@ decode_field_value(
         return LedgerEntryTypeCodec::decode(data, protocol);
     if (field.code == EnumFieldCodes::TransactionResult)
         return TransactionResultCodec::decode(data, protocol);
+    if (field.code == EnumFieldCodes::PermissionValue)
+        return PermissionValueCodec::decode(data, protocol);
 
     if (t == FieldTypes::UInt8)
         return UInt8Codec::decode(data);
@@ -181,6 +191,10 @@ encode_field_value(
     else if (field.code == EnumFieldCodes::TransactionResult)
     {
         TransactionResultCodec::encode(s, v, protocol, path);
+    }
+    else if (field.code == EnumFieldCodes::PermissionValue)
+    {
+        PermissionValueCodec::encode(s, v, protocol, path);
     }
     else if (t == FieldTypes::UInt8)
     {
@@ -277,6 +291,11 @@ encode_field_value(
     else if (t == FieldTypes::STArray)
     {
         STArrayCodec::encode(s, v, protocol, path);
+    }
+    else if (field.meta.type.fixed_size > 0 || field.meta.is_vl_encoded)
+    {
+        // Fallback: unknown type with known size → treat as hex blob
+        BlobCodec::encode(s, v);
     }
     else
     {

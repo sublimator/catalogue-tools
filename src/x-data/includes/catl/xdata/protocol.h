@@ -106,6 +106,13 @@ public:
     std::optional<std::string>
     get_ledger_entry_type_name(uint16_t leTypeCode) const;
 
+    // Access granular permission mappings
+    const std::unordered_map<std::string, uint32_t>&
+    permissions() const
+    {
+        return permissions_;
+    }
+
     // Check if a type was inferred as VL-encoded
     bool
     is_inferred_vl_type(uint16_t type_code) const
@@ -156,6 +163,9 @@ private:
 
     // Transaction result mappings
     std::unordered_map<std::string, int32_t> transactionResults_;
+
+    // Granular permission mappings
+    std::unordered_map<std::string, uint32_t> permissions_;
 
     // Field lookup indices for performance
     std::unordered_map<std::string, size_t> fieldNameIndex_;

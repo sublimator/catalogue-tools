@@ -199,8 +199,8 @@ struct STObjectCodec
 
             if (entry.def.meta.is_vl_encoded)
             {
-                size_t val_size =
-                    field_value_encoded_size(entry.def, *entry.val, protocol);
+                size_t val_size = field_value_encoded_size(
+                    entry.def, *entry.val, protocol);
                 s.add_vl_prefix(val_size);
             }
 

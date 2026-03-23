@@ -11,9 +11,14 @@ struct AccountIDCodec
 {
     static constexpr size_t fixed_size = 20;
 
+    static constexpr std::string_view ZERO_ACCOUNT_B58 =
+        "rrrrrrrrrrrrrrrrrrrrrhoLvTp";
+
     static size_t
-    encoded_size(boost::json::value const&)
+    encoded_size(boost::json::value const& v)
     {
+        if (v.is_string() && v.as_string() == ZERO_ACCOUNT_B58)
+            return 0;
         return 20;
     }
 
@@ -25,7 +30,23 @@ struct AccountIDCodec
         s.add_raw(std::span<const uint8_t>{data.data(), 20});
     }
 
-    // From base58 string
+    // Check if 20 bytes are all zero (default/absent account)
+    static bool
+    is_zero_account(const uint8_t* data, size_t size)
+    {
+        if (size != 20)
+            return false;
+        for (size_t i = 0; i < 20; ++i)
+        {
+            if (data[i] != 0)
+                return false;
+        }
+        return true;
+    }
+
+    // From base58 string.
+    // Zero account (rrrrrrrrrrrrrrrrrrrrrhoLvTp) writes nothing — the caller
+    // (STObjectCodec) writes VL(0). Non-zero accounts write 20 bytes.
     template <ByteSink Sink>
     static void
     encode(
@@ -33,6 +54,10 @@ struct AccountIDCodec
         std::string_view base58_addr,
         std::string const& path = {})
     {
+        // Zero account → write nothing (VL prefix will be 0)
+        if (base58_addr == ZERO_ACCOUNT_B58)
+            return;
+
         auto decoded = base58::decode_account_id(base58_addr);
         if (!decoded || decoded->size() != 20)
         {
@@ -67,6 +92,13 @@ struct AccountIDCodec
     static boost::json::value
     decode(Slice const& data)
     {
+        // Empty VL = zero/default account (e.g. pseudo-transactions)
+        if (data.empty())
+        {
+            static const uint8_t zeros[20] = {};
+            return boost::json::string(
+                base58::encode_account_id(zeros, 20));
+        }
         return boost::json::string(
             base58::encode_account_id(data.data(), data.size()));
     }

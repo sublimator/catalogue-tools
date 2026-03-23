@@ -142,7 +142,7 @@ inline const FieldType XChainBridge{
     "XChainBridge",
     25,
     {{Networks::XRPL, Networks::XAHAU}},
-    40};  // 20 + 20 account IDs
+    0};  // Variable: 2 AccountIDs + 2 Issues (80-120 bytes)
 
 // TODO: we don't actually know this type yet, it might not be the 160-bit
 // encoding per the Amount

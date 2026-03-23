@@ -13,6 +13,7 @@ namespace EnumFieldCodes {
 inline constexpr uint32_t TransactionType = 0x00010002;   // UInt16, nth=2
 inline constexpr uint32_t LedgerEntryType = 0x00010001;   // UInt16, nth=1
 inline constexpr uint32_t TransactionResult = 0x00100003; // UInt8,  nth=3
+inline constexpr uint32_t PermissionValue = 0x00020034;   // UInt32, nth=52
 }  // namespace EnumFieldCodes
 
 // Check if a field is one of the enum fields (integer compare, no strings)
@@ -175,6 +176,63 @@ struct TransactionResultCodec
                 return boost::json::string(name);
         }
         return static_cast<std::int64_t>(code);
+    }
+};
+
+struct PermissionValueCodec
+{
+    static constexpr size_t fixed_size = 4;
+
+    static size_t
+    encoded_size(boost::json::value const&)
+    {
+        return 4;
+    }
+
+    // PermissionValue is UInt32 on wire. JSON is a string enum name
+    // (either a tx type like "Payment" or a granular permission like
+    // "AccountDomainSet"), resolved via Protocol::permissions().
+    template <ByteSink Sink>
+    static void
+    encode(
+        Serializer<Sink>& s,
+        boost::json::value const& v,
+        Protocol const& protocol,
+        std::string const& path = {})
+    {
+        if (v.is_string())
+        {
+            auto sv = std::string_view(v.as_string());
+            auto const& perms = protocol.permissions();
+            auto it = perms.find(std::string(sv));
+            if (it != perms.end())
+            {
+                s.add_u32(it->second);
+                return;
+            }
+            throw EncodeError(
+                CodecErrorCode::unknown_enum,
+                "PermissionValue",
+                "unknown: " + std::string(sv),
+                path);
+        }
+        UInt32Codec::encode(s, v);
+    }
+
+    static boost::json::value
+    decode(Slice const& data, Protocol const& protocol)
+    {
+        uint32_t raw = (static_cast<uint32_t>(data.data()[0]) << 24) |
+                       (static_cast<uint32_t>(data.data()[1]) << 16) |
+                       (static_cast<uint32_t>(data.data()[2]) << 8) |
+                        static_cast<uint32_t>(data.data()[3]);
+        auto const& perms = protocol.permissions();
+        for (auto const& [name, code] : perms)
+        {
+            if (code == raw)
+                return boost::json::string(name);
+        }
+        return static_cast<std::uint64_t>(raw);
     }
 };
 
