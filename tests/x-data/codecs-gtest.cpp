@@ -311,6 +311,50 @@ TEST(CodecUnit, VLPrefix_TwoByte)
     ASSERT_EQ(buf.size(), 2u);
 }
 
+// ---------------------------------------------------------------------------
+// Number codec tests from rippled
+// ---------------------------------------------------------------------------
+
+class NumberCodecTest : public ::testing::TestWithParam<size_t>
+{
+};
+
+TEST_P(NumberCodecTest, EncodeMatchesRippled)
+{
+    static auto num_fixtures = load_json_fixture("number-fixtures.json");
+    auto const& entries = num_fixtures.as_array();
+    auto const& entry = entries[GetParam()].as_object();
+
+    auto input = std::string(entry.at("input").as_string());
+    auto expected_hex = std::string(entry.at("hex").as_string());
+
+    std::vector<uint8_t> buf;
+    VectorSink vs(buf);
+    Serializer<VectorSink> s(vs);
+    NumberCodec::encode(s, boost::json::value(input));
+
+    auto result_hex = to_upper_hex(buf);
+    EXPECT_EQ(result_hex, expected_hex) << "Number: " << input;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Numbers,
+    NumberCodecTest,
+    ::testing::Range(
+        size_t(0),
+        []() -> size_t {
+            static auto f = load_json_fixture("number-fixtures.json");
+            return f.as_array().size();
+        }()),
+    [](auto const& info) -> std::string {
+        static auto f = load_json_fixture("number-fixtures.json");
+        auto input = std::string(
+            f.as_array()[info.param].as_object().at("input").as_string());
+        std::replace(input.begin(), input.end(), '-', 'n');
+        std::replace(input.begin(), input.end(), '.', 'd');
+        return "num_" + input;
+    });
+
 TEST(CodecUnit, AddHexStreaming)
 {
     std::vector<uint8_t> buf;
@@ -789,11 +833,10 @@ INSTANTIATE_TEST_SUITE_P(
         }()),
     [](auto const& info) -> std::string {
         static auto f = load_json_fixture("codec-roundtrip-fixtures.json");
-        auto const& e = f.as_object()
-                            .at("transactions")
-                            .as_array()[info.param]
-                            .as_object();
-        auto tt = std::string(e.at("json").as_object().at("TransactionType").as_string());
+        auto const& e =
+            f.as_object().at("transactions").as_array()[info.param].as_object();
+        auto tt = std::string(
+            e.at("json").as_object().at("TransactionType").as_string());
         return "crt_" + tt + "_" + std::to_string(info.param);
     });
 
@@ -830,11 +873,10 @@ INSTANTIATE_TEST_SUITE_P(
         }()),
     [](auto const& info) -> std::string {
         static auto f = load_json_fixture("codec-roundtrip-fixtures.json");
-        auto const& e = f.as_object()
-                            .at("accountState")
-                            .as_array()[info.param]
-                            .as_object();
-        auto let = std::string(e.at("json").as_object().at("LedgerEntryType").as_string());
+        auto const& e =
+            f.as_object().at("accountState").as_array()[info.param].as_object();
+        auto let = std::string(
+            e.at("json").as_object().at("LedgerEntryType").as_string());
         return "crs_" + let + "_" + std::to_string(info.param);
     });
 

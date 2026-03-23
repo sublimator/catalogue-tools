@@ -1,0 +1,114 @@
+[
+  {
+    "input": "0",
+    "hex": "000000000000000080000000"
+  },
+  {
+    "input": "1",
+    "hex": "0DE0B6B3A7640000FFFFFFEE"
+  },
+  {
+    "input": "-1",
+    "hex": "F21F494C589C0000FFFFFFEE"
+  },
+  {
+    "input": "42",
+    "hex": "3A4965BF58A40000FFFFFFEF"
+  },
+  {
+    "input": "-42",
+    "hex": "C5B69A40A75C0000FFFFFFEF"
+  },
+  {
+    "input": "1.5",
+    "hex": "14D1120D7B160000FFFFFFEE"
+  },
+  {
+    "input": "-1.5",
+    "hex": "EB2EEDF284EA0000FFFFFFEE"
+  },
+  {
+    "input": "0.5",
+    "hex": "4563918244F40000FFFFFFED"
+  },
+  {
+    "input": "0.001",
+    "hex": "0DE0B6B3A7640000FFFFFFEB"
+  },
+  {
+    "input": "1000000",
+    "hex": "0DE0B6B3A7640000FFFFFFF4"
+  },
+  {
+    "input": "-1000000",
+    "hex": "F21F494C589C0000FFFFFFF4"
+  },
+  {
+    "input": "999999999999999999",
+    "hex": "0DE0B6B3A763FFFF00000000"
+  },
+  {
+    "input": "1000000000000000000",
+    "hex": "0DE0B6B3A764000000000000"
+  },
+  {
+    "input": "9999999999999999999",
+    "hex": "0DE0B6B3A764000000000001"
+  },
+  {
+    "input": "9999999999999999e80",
+    "hex": "0DE0B6B3A763FF9C0000004E"
+  },
+  {
+    "input": "9999999999999999e-80",
+    "hex": "0DE0B6B3A763FF9CFFFFFFAE"
+  },
+  {
+    "input": "1e18",
+    "hex": "0DE0B6B3A764000000000000"
+  },
+  {
+    "input": "1e-18",
+    "hex": "0DE0B6B3A7640000FFFFFFDC"
+  },
+  {
+    "input": "1e80",
+    "hex": "0DE0B6B3A76400000000003E"
+  },
+  {
+    "input": "1e-80",
+    "hex": "0DE0B6B3A7640000FFFFFF9E"
+  },
+  {
+    "input": "0.1",
+    "hex": "0DE0B6B3A7640000FFFFFFED"
+  },
+  {
+    "input": "0.01",
+    "hex": "0DE0B6B3A7640000FFFFFFEC"
+  },
+  {
+    "input": "0.123456789012345678",
+    "hex": "112210F47DE9810CFFFFFFED"
+  },
+  {
+    "input": "12345678901234567890",
+    "hex": "112210F47DE9811500000001"
+  },
+  {
+    "input": "-12345678901234567890",
+    "hex": "EEDDEF0B82167EEB00000001"
+  },
+  {
+    "input": "100",
+    "hex": "0DE0B6B3A7640000FFFFFFF0"
+  },
+  {
+    "input": "1000",
+    "hex": "0DE0B6B3A7640000FFFFFFF1"
+  },
+  {
+    "input": "10000",
+    "hex": "0DE0B6B3A7640000FFFFFFF2"
+  }
+]
