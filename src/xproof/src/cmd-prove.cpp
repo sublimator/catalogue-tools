@@ -48,21 +48,18 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
             auto build_result = co_await xproof::build_proof(
                 io, rpc_host, rpc_port, peer_host, peer_port, opts.tx_hash);
 
+            // Write output files
+            std::string json_path, bin_path;
+            size_t json_size = 0, bin_size = 0;
+
             if (opts.binary)
             {
+                // Binary only
                 auto binary = xproof::to_binary(
                     build_result.chain, {.compress = opts.compress});
-                std::string path = opts.output + ".bin";
-                write_file(path, binary);
-                PLOGI(
-                    log_,
-                    "Wrote binary proof: ",
-                    path,
-                    " (",
-                    binary.size(),
-                    " bytes",
-                    opts.compress ? ", zlib compressed" : "",
-                    ")");
+                bin_path = opts.output + ".bin";
+                write_file(bin_path, binary);
+                bin_size = binary.size();
             }
             else
             {
@@ -70,34 +67,45 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
                 auto chain_json = xproof::to_json(build_result.chain);
                 catl::xdata::pretty_print(std::cout, chain_json);
 
-                std::string json_path = opts.output + ".json";
+                json_path = opts.output + ".json";
                 {
                     std::ofstream out(json_path);
                     catl::xdata::pretty_print(out, chain_json);
                 }
-                PLOGI(log_, "Wrote JSON proof: ", json_path);
+                json_size = boost::json::serialize(chain_json).size();
 
-                // Also write binary alongside for comparison
-                auto binary = xproof::to_binary(build_result.chain);
+                // Also write compressed binary alongside
                 auto compressed =
                     xproof::to_binary(build_result.chain, {.compress = true});
-                std::string bin_path = opts.output + ".bin";
+                bin_path = opts.output + ".bin";
                 write_file(bin_path, compressed);
-
-                PLOGI(
-                    log_,
-                    "Wrote binary proof: ",
-                    bin_path,
-                    " (binary=",
-                    binary.size(),
-                    ", zlib=",
-                    compressed.size(),
-                    " bytes)");
+                bin_size = compressed.size();
             }
 
             // Verify
             xproof::resolve_proof_chain(
                 build_result.chain, protocol, build_result.publisher_key_hex);
+
+            // Summary at the end
+            PLOGI(log_, "");
+            PLOGI(log_, "Output:");
+            if (!json_path.empty())
+            {
+                PLOGI(
+                    log_, "  ", json_path, " (", json_size, " bytes)");
+            }
+            if (!bin_path.empty())
+            {
+                PLOGI(
+                    log_,
+                    "  ",
+                    bin_path,
+                    " (",
+                    bin_size,
+                    " bytes",
+                    opts.compress || json_path.empty() ? "" : ", zlib",
+                    ")");
+            }
 
             result = 0;
         },
