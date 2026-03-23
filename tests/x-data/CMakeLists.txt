@@ -1,6 +1,6 @@
 include(GoogleTest)
 
-add_executable(xdata_gtest xdata-gtest.cpp)
+add_executable(xdata_gtest xdata-gtest.cpp codecs-gtest.cpp)
 
 target_link_libraries(
   xdata_gtest

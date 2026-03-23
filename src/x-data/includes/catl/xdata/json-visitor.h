@@ -265,6 +265,7 @@ private:
     mutable std::stack<boost::json::value> stack_;
     boost::json::value result_;
 
+    //@@start format-dispatch
     // Format a field value based on its type
     boost::json::value
     format_field_value(const FieldDef& field, const Slice& data)
@@ -399,6 +400,7 @@ private:
         // Default: hex encode
         return boost::json::string(to_hex(data));
     }
+    //@@end format-dispatch
 
     // Format currency code
     boost::json::value

@@ -1,0 +1,277 @@
+#pragma once
+
+// All codecs
+#include "catl/xdata/codec-error.h"
+#include "catl/xdata/codecs/account_id.h"
+#include "catl/xdata/codecs/amount.h"
+#include "catl/xdata/codecs/blob.h"
+#include "catl/xdata/codecs/currency.h"
+#include "catl/xdata/codecs/hash.h"
+#include "catl/xdata/codecs/int.h"
+#include "catl/xdata/codecs/issue.h"
+#include "catl/xdata/codecs/number.h"
+#include "catl/xdata/codecs/pathset.h"
+#include "catl/xdata/codecs/starray.h"
+#include "catl/xdata/codecs/stobject.h"
+#include "catl/xdata/codecs/uint.h"
+#include "catl/xdata/codecs/vector256.h"
+#include "catl/xdata/codecs/xchain_bridge.h"
+
+#include "catl/xdata/protocol.h"
+#include "catl/xdata/types.h"
+
+namespace catl::xdata::codecs {
+
+// ---------------------------------------------------------------------------
+// Type dispatch: FieldType → codec encoded_size / encode
+// ---------------------------------------------------------------------------
+
+// Compute encoded size for a field value (value bytes only, no header/VL)
+inline size_t
+field_value_encoded_size(
+    FieldDef const& field,
+    boost::json::value const& v,
+    Protocol const& protocol)
+{
+    auto const& t = field.meta.type;
+
+    if (t == FieldTypes::UInt8)
+        return UInt8Codec::fixed_size;
+    if (t == FieldTypes::UInt16)
+        return UInt16Codec::fixed_size;
+    if (t == FieldTypes::UInt32)
+        return UInt32Codec::fixed_size;
+    if (t == FieldTypes::UInt64)
+        return UInt64Codec::fixed_size;
+    if (t == FieldTypes::Int32)
+        return Int32Codec::fixed_size;
+    if (t == FieldTypes::Int64)
+        return Int64Codec::fixed_size;
+    if (t == FieldTypes::Hash128)
+        return Hash128Codec::fixed_size;
+    if (t == FieldTypes::Hash160)
+        return Hash160Codec::fixed_size;
+    if (t == FieldTypes::Hash192)
+        return Hash192Codec::fixed_size;
+    if (t == FieldTypes::Hash256)
+        return Hash256Codec::fixed_size;
+    if (t == FieldTypes::UInt96)
+        return UInt96Codec::fixed_size;
+    if (t == FieldTypes::UInt384)
+        return UInt384Codec::fixed_size;
+    if (t == FieldTypes::UInt512)
+        return UInt512Codec::fixed_size;
+    if (t == FieldTypes::Amount)
+        return AmountCodec::encoded_size(v);
+    if (t == FieldTypes::AccountID)
+        return AccountIDCodec::fixed_size;
+    if (t == FieldTypes::Currency)
+        return CurrencyCodec::fixed_size;
+    if (t == FieldTypes::Issue)
+        return IssueCodec::encoded_size(v);
+    if (t == FieldTypes::Number)
+        return NumberCodec::fixed_size;
+    if (t == FieldTypes::XChainBridge)
+        return XChainBridgeCodec::encoded_size(v);
+    if (t == FieldTypes::Vector256)
+        return Vector256Codec::encoded_size(v);
+    if (t == FieldTypes::PathSet)
+        return PathSetCodec::encoded_size(v);
+    if (t == FieldTypes::Blob)
+        return BlobCodec::encoded_size(v);
+    if (t == FieldTypes::STObject)
+        return STObjectCodec::encoded_size(v, protocol, false);
+    if (t == FieldTypes::STArray)
+        return STArrayCodec::encoded_size(v, protocol);
+
+    throw EncodeError(
+        CodecErrorCode::invalid_value,
+        std::string(field.meta.type.name),
+        "unknown type code " + std::to_string(field.meta.type.code));
+}
+
+// Encode a field value (value bytes only, no header/VL)
+template <ByteSink Sink>
+void
+encode_field_value(
+    Serializer<Sink>& s,
+    FieldDef const& field,
+    boost::json::value const& v,
+    Protocol const& protocol,
+    std::string const& path)
+{
+    auto const& t = field.meta.type;
+
+    if (t == FieldTypes::UInt8)
+    {
+        UInt8Codec::encode(s, v);
+    }
+    else if (t == FieldTypes::UInt16)
+    {
+        if (v.is_string())
+        {
+            auto sv = std::string_view(v.as_string());
+            std::optional<uint16_t> code;
+            if (field.name == "TransactionType")
+            {
+                for (auto const& [name, c] : protocol.transactionTypes())
+                {
+                    if (name == sv)
+                    {
+                        code = c;
+                        break;
+                    }
+                }
+            }
+            else if (field.name == "LedgerEntryType")
+            {
+                for (auto const& [name, c] : protocol.ledgerEntryTypes())
+                {
+                    if (name == sv)
+                    {
+                        code = c;
+                        break;
+                    }
+                }
+            }
+            if (!code)
+            {
+                throw EncodeError(
+                    CodecErrorCode::unknown_enum,
+                    "UInt16",
+                    "unknown enum value: " + std::string(sv),
+                    path);
+            }
+            UInt16Codec::encode(s, *code);
+        }
+        else
+        {
+            UInt16Codec::encode(s, v);
+        }
+    }
+    else if (t == FieldTypes::UInt32)
+    {
+        UInt32Codec::encode(s, v);
+    }
+    else if (t == FieldTypes::UInt64)
+    {
+        UInt64Codec::encode(s, v);
+    }
+    else if (t == FieldTypes::Int32)
+    {
+        Int32Codec::encode(s, v);
+    }
+    else if (t == FieldTypes::Int64)
+    {
+        Int64Codec::encode(s, v);
+    }
+    else if (t == FieldTypes::Hash128)
+    {
+        Hash128Codec::encode(s, v);
+    }
+    else if (t == FieldTypes::Hash160)
+    {
+        Hash160Codec::encode(s, v);
+    }
+    else if (t == FieldTypes::Hash192)
+    {
+        Hash192Codec::encode(s, v);
+    }
+    else if (t == FieldTypes::Hash256)
+    {
+        Hash256Codec::encode(s, v);
+    }
+    else if (t == FieldTypes::UInt96)
+    {
+        UInt96Codec::encode(s, v);
+    }
+    else if (t == FieldTypes::UInt384)
+    {
+        UInt384Codec::encode(s, v);
+    }
+    else if (t == FieldTypes::UInt512)
+    {
+        UInt512Codec::encode(s, v);
+    }
+    else if (t == FieldTypes::Amount)
+    {
+        AmountCodec::encode(s, v, path);
+    }
+    else if (t == FieldTypes::AccountID)
+    {
+        AccountIDCodec::encode(s, v, path);
+    }
+    else if (t == FieldTypes::Blob)
+    {
+        BlobCodec::encode(s, v);
+    }
+    else if (t == FieldTypes::Currency)
+    {
+        CurrencyCodec::encode(s, v, path);
+    }
+    else if (t == FieldTypes::Issue)
+    {
+        IssueCodec::encode(s, v, path);
+    }
+    else if (t == FieldTypes::Number)
+    {
+        NumberCodec::encode(s, v);
+    }
+    else if (t == FieldTypes::XChainBridge)
+    {
+        XChainBridgeCodec::encode(s, v);
+    }
+    else if (t == FieldTypes::Vector256)
+    {
+        Vector256Codec::encode(s, v);
+    }
+    else if (t == FieldTypes::PathSet)
+    {
+        PathSetCodec::encode(s, v);
+    }
+    else if (t == FieldTypes::STObject)
+    {
+        STObjectCodec::encode(s, v, protocol, false, path);
+    }
+    else if (t == FieldTypes::STArray)
+    {
+        STArrayCodec::encode(s, v, protocol, path);
+    }
+    else
+    {
+        throw EncodeError(
+            CodecErrorCode::invalid_value,
+            std::string(field.meta.type.name),
+            "unknown type code " + std::to_string(field.meta.type.code),
+            path);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Top-level convenience: serialize a JSON object to bytes
+// ---------------------------------------------------------------------------
+
+inline std::vector<uint8_t>
+serialize_object(
+    boost::json::object const& obj,
+    Protocol const& protocol,
+    bool only_signing = false)
+{
+    // Pass 1: count bytes
+    CountingSink counter;
+    Serializer<CountingSink> cs(counter);
+    boost::json::value v(obj);
+    STObjectCodec::encode(cs, v, protocol, only_signing);
+    size_t total = counter.count();
+
+    // Pass 2: encode into pre-allocated buffer
+    std::vector<uint8_t> buf;
+    buf.reserve(total);
+    VectorSink vs(buf);
+    Serializer<VectorSink> s(vs);
+    STObjectCodec::encode(s, v, protocol, only_signing);
+
+    return buf;
+}
+
+}  // namespace catl::xdata::codecs

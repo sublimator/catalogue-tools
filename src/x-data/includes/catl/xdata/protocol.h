@@ -122,9 +122,11 @@ private:
     // Types that were inferred as VL-encoded during loading
     std::unordered_set<uint16_t> inferred_vl_types_;
 
+    //@@start fast-lookup
     // Fast lookup table for common cases (type < 256, field_id < 256)
     // Uses raw pointers for speed, nullptr = not present
     const FieldDef* fast_lookup_[256][256] = {};
+    //@@end fast-lookup
 
     // Type name to code mappings
     std::unordered_map<std::string, uint16_t> types_;

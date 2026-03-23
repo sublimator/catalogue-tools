@@ -203,6 +203,7 @@ parse_with_visitor_impl(
             // Create FieldSlice with empty data (not parsed yet)
             FieldSlice start_slice{field, header_slice, Slice{}};
 
+            //@@start selective-descent
             // Ask visitor if they want to descend
             if (visitor.visit_object_start(path, start_slice))
             {
@@ -219,6 +220,7 @@ parse_with_visitor_impl(
                 // Skip the object
                 skip_object(ctx, protocol);
             }
+            //@@end selective-descent
             // Create FieldSlice with complete object data
             size_t end_pos = ctx.cursor.pos;
             size_t object_size = end_pos - start_pos - header_slice.size();
@@ -347,6 +349,7 @@ parse_with_visitor_impl(
         }
         else
         {
+            //@@start leaf-field
             // Leaf field - determine size and read
             size_t field_size;
 
@@ -390,6 +393,7 @@ parse_with_visitor_impl(
             visitor.visit_field(
                 path, FieldSlice{field, header_slice, field_data});
             path.pop_back();
+            //@@end leaf-field
         }
     }
 }
