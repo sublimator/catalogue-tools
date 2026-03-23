@@ -6,6 +6,7 @@
 // After verification, the narrative renderer walks the steps
 // and produces human-readable output.
 
+#include <cstdint>
 #include <string>
 #include <variant>
 #include <vector>
