@@ -1235,17 +1235,10 @@ PeerSet::wait_for_peer(
         tracker_->size(),
         " known, Ctrl-C to cancel)");
 
-    boost::asio::steady_timer timer(strand_);
     for (int elapsed_ms = 0; elapsed_ms < timeout_secs * 1000;
          elapsed_ms += 200)
     {
-        timer.expires_after(std::chrono::milliseconds(200));
-        boost::system::error_code ec;
-        co_await timer.async_wait(
-            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-
-        // Re-hop to strand after co_await — coroutine may resume off-strand
-        co_await asio::post(strand_, asio::use_awaitable);
+        co_await strand_sleep(strand_, std::chrono::milliseconds(200));
 
         if (auto p = peer_for(ledger_seq, excluded))
         {
