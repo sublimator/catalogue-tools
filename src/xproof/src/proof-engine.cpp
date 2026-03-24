@@ -27,7 +27,7 @@ static LogPartition log_("engine", LogLevel::INFO);
 ProofEngine::ProofEngine(asio::io_context& io, NetworkConfig config)
     : io_(io)
     , config_(std::move(config))
-    , protocol_(catl::xdata::Protocol::load_embedded_xrpl_protocol())
+    , protocol_(config_.load_protocol())
 {
     config_.apply_defaults();
 }
@@ -67,6 +67,14 @@ ProofEngine::start()
 
     // Bootstrap peer discovery
     peers_->bootstrap();
+
+    // Push UNL to validation buffer on every VL load (initial + refresh).
+    // set_unl() clears the quorum cache, so this must only fire on actual
+    // VL changes — not per-request.
+    vl_cache_->set_on_refresh(
+        [vbuf](catl::vl::ValidatorList const& vl) {
+            vbuf->set_unl(vl.validators);
+        });
 
     // Try the configured initial peer
     auto self = shared_from_this();
@@ -118,12 +126,12 @@ ProofEngine::start()
 asio::awaitable<ProofEngine::ProveResult>
 ProofEngine::prove(std::string const& tx_hash)
 {
-    // Step 1: Ensure VL is loaded and push UNL to validation buffer
+    // Step 1: Ensure VL is loaded (UNL push happens once in start(),
+    // not per-request — set_unl clears the quorum cache)
     auto vl = co_await vl_cache_->co_get();
-    val_buffer_->set_unl(vl.validators);
 
     // Step 2: Wait for a quorum (may already have one)
-    auto quorum = co_await val_buffer_->co_wait_quorum(90, 30);
+    auto quorum = co_await val_buffer_->co_wait_quorum(30);
 
     PLOGI(
         log_,
@@ -204,11 +212,7 @@ asio::awaitable<ProofEngine::Status>
 ProofEngine::co_health()
 {
     Status status;
-
-    // TODO: When PeerSet gets its own strand (step 3), this needs to
-    // hop to that strand. For now PeerSet is single-threaded so
-    // size() is safe from the same io_context.
-    status.peer_count = peers_->size();
+    status.peer_count = co_await peers_->co_size();
 
     status.vl_loaded = co_await vl_cache_->co_is_loaded();
 

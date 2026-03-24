@@ -42,6 +42,9 @@ ValidationCollector::ValidationCollector(catl::xdata::Protocol const& protocol)
 void
 ValidationCollector::set_unl(std::vector<catl::vl::Manifest> const& validators)
 {
+    // Clear old keys first — a VL refresh may remove validators.
+    // Without this, revoked validators stay trusted forever.
+    unl_signing_keys.clear();
     unl_size = static_cast<int>(validators.size());
     for (auto const& v : validators)
     {

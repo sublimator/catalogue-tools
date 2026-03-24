@@ -7,6 +7,7 @@
 // endpoints for each chain.
 
 #include <catl/peer-client/peer-set.h>
+#include <catl/xdata/protocol.h>
 
 #include <cstdint>
 #include <string>
@@ -34,6 +35,10 @@ struct NetworkConfig
     /// Fill any empty fields with defaults for this network_id.
     void
     apply_defaults();
+
+    /// Load the correct protocol definitions for this network.
+    catl::xdata::Protocol
+    load_protocol() const;
 
     /// Create a config with all defaults for a network.
     static NetworkConfig

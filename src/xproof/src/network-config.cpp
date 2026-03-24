@@ -49,6 +49,10 @@ NetworkConfig::apply_defaults()
                 vl_host = "vl.xahau.org";
             if (vl_port == 0)
                 vl_port = 443;
+            if (publisher_key.empty())
+                publisher_key =
+                    "EDA46E9C39B1389894E690E58914DC1029602870370A0993E5B87C4A"
+                    "24EAF4A8E8";
             if (rpc_host.empty())
                 rpc_host = "xahau.network";
             if (rpc_port == 0)
@@ -65,6 +69,18 @@ NetworkConfig::apply_defaults()
 
     if (peer_cache_path.empty())
         peer_cache_path = default_peer_cache_path();
+}
+
+catl::xdata::Protocol
+NetworkConfig::load_protocol() const
+{
+    switch (network_id)
+    {
+        case 21337:
+            return catl::xdata::Protocol::load_embedded_xahau_protocol();
+        default:
+            return catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    }
 }
 
 NetworkConfig

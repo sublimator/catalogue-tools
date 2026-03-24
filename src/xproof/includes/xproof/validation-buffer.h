@@ -59,33 +59,43 @@ public:
 
     /// Awaitable: wait until we have a quorum, return the latest.
     /// Does NOT take a hash — the caller doesn't know the anchor upfront.
+    /// Uses 90% quorum threshold (matching XRPL consensus requirements).
     boost::asio::awaitable<QuorumEntry>
-    co_wait_quorum(int percent = 90, int timeout_secs = 30);
+    co_wait_quorum(int timeout_secs = 30);
 
     /// Awaitable: snapshot of latest quorum for health checks.
     boost::asio::awaitable<std::optional<QuorumEntry>>
-    co_latest_quorum(int percent = 90);
+    co_latest_quorum();
 
 private:
     ValidationBuffer(
         boost::asio::io_context& io,
         catl::xdata::Protocol const& protocol);
 
+    static constexpr int kQuorumPercent = 90;
+
     void
-    check_for_new_quorum(int percent = 90);
+    check_for_new_quorum();
 
     void
     prune_old_entries();
+
+    void
+    wake_waiters();
 
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
 
     // Strand-owned state:
     ValidationCollector collector_;
     std::deque<QuorumEntry> recent_quorums_;  // newest at back
-    boost::asio::steady_timer signal_;        // wake waiters on new quorum
     Hash256 last_quorum_hash_;                // dedup: don't re-add same quorum
 
+    // Per-waiter signals — each co_wait_quorum() call gets its own timer.
+    // wake_waiters() cancels all of them when a new quorum arrives.
+    std::vector<std::shared_ptr<boost::asio::steady_timer>> waiters_;
+
     static constexpr size_t kMaxQuorumEntries = 30;
+    static constexpr size_t kMaxCollectorLedgers = 64;
     static constexpr auto kMaxQuorumAge = std::chrono::seconds(120);
 
     static LogPartition log_;

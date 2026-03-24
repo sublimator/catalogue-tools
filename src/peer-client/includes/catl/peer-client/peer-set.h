@@ -137,6 +137,16 @@ public:
         return connections_.size();
     }
 
+    /// Awaitable peer count — safe for multi-threaded callers.
+    /// When PeerSet gets its own strand, this will hop to it.
+    boost::asio::awaitable<size_t>
+    co_size() const
+    {
+        // Single-threaded today — just return the value.
+        // Future: co_await asio::post(strand_, use_awaitable); return size();
+        co_return connections_.size();
+    }
+
     void
     set_unsolicited_handler(UnsolicitedHandler handler)
     {

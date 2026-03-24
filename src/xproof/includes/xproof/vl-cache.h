@@ -18,6 +18,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -58,6 +59,15 @@ public:
         refresh_interval_ = interval;
     }
 
+    /// Called on every successful VL fetch (initial + refresh).
+    using RefreshCallback =
+        std::function<void(catl::vl::ValidatorList const&)>;
+    void
+    set_on_refresh(RefreshCallback cb)
+    {
+        on_refresh_ = std::move(cb);
+    }
+
 private:
     VlCache(boost::asio::io_context& io, std::string vl_host, uint16_t vl_port);
 
@@ -78,6 +88,7 @@ private:
     boost::asio::steady_timer refresh_;           // periodic refresh
     std::chrono::seconds refresh_interval_{900};  // 15 minutes
     bool fetch_in_progress_ = false;
+    RefreshCallback on_refresh_;
 
     static LogPartition log_;
 };

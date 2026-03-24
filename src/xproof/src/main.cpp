@@ -3,6 +3,7 @@
 #include <catl/core/logger.h>
 #include <catl/peer-client/endpoint-tracker.h>
 #include <catl/xdata/protocol.h>
+#include <xproof/network-config.h>
 
 #include <cstring>
 #include <iostream>
@@ -270,7 +271,6 @@ main(int argc, char* argv[])
 
     if (command == "prove" || command == "prove-tx")
     {
-        auto protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
         ProveOptions opts;
         std::string tx_hash;
 
@@ -330,23 +330,67 @@ main(int argc, char* argv[])
         }
 
         opts.tx_hash = tx_hash;
+        auto net_config = xproof::NetworkConfig::for_network(opts.network_id);
+        auto protocol = net_config.load_protocol();
         return cmd_prove(opts, protocol);
     }
 
     if (command == "verify")
     {
-        auto protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
-        if (command_args.size() < 1)
+        std::string proof_path;
+        std::string explicit_key;
+        uint32_t verify_network_id = 0;
+
+        std::size_t pos = 0;
+        while (pos < command_args.size())
         {
-            std::cerr << "Usage: xproof verify <proof_file> [publisher_key]\n";
+            std::string const& arg = command_args[pos];
+            if (arg == "--network" && pos + 1 < command_args.size())
+            {
+                verify_network_id = std::stoul(command_args[pos + 1]);
+                pos += 2;
+            }
+            else if (arg[0] == '-')
+            {
+                std::cerr << "Unknown option: " << arg << "\n";
+                return 1;
+            }
+            else if (proof_path.empty())
+            {
+                proof_path = arg;
+                pos++;
+            }
+            else
+            {
+                explicit_key = arg;
+                pos++;
+            }
+        }
+
+        if (proof_path.empty())
+        {
+            std::cerr
+                << "Usage: xproof verify <proof_file> [publisher_key] "
+                   "[--network N]\n";
             return 1;
         }
 
-        std::string proof_path = command_args[0];
-        std::string trusted_key = (command_args.size() >= 2)
-            ? command_args[1]
-            : std::string(DEFAULT_PUBLISHER_KEY);
+        // Resolve publisher key: explicit arg > network default
+        std::string trusted_key;
+        if (!explicit_key.empty())
+        {
+            trusted_key = explicit_key;
+        }
+        else
+        {
+            auto net_config =
+                xproof::NetworkConfig::for_network(verify_network_id);
+            trusted_key = net_config.publisher_key;
+        }
 
+        auto net_config =
+            xproof::NetworkConfig::for_network(verify_network_id);
+        auto protocol = net_config.load_protocol();
         return cmd_verify(proof_path, trusted_key, protocol);
     }
 

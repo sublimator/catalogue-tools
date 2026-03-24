@@ -64,6 +64,12 @@ VlCache::do_fetch()
                     // Wake anyone waiting in co_get()
                     self->signal_.cancel();
                 }
+
+                // Notify subscriber (e.g. ValidationBuffer) on every load
+                if (self->on_refresh_)
+                {
+                    self->on_refresh_(*self->vl_);
+                }
             }
             else
             {
