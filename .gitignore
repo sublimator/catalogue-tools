@@ -27,3 +27,5 @@ build-hbb
 test-nudb
 .gemini-clipboard
 peermon.log
+proof.bin
+proof.json
