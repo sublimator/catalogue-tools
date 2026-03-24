@@ -6,11 +6,33 @@
 #include <catl/xdata/slice-visitor.h>
 
 #include <iomanip>
+#include <optional>
 #include <sstream>
+#include <unordered_set>
 
 namespace xproof {
 
 static LogPartition log_("xproof", LogLevel::INFO);
+
+namespace {
+
+std::string
+entry_key_hex(ValidationCollector::Entry const& entry)
+{
+    return entry.signing_key_hex;
+}
+
+std::string
+lower_hex(std::span<const uint8_t> data)
+{
+    std::ostringstream oss;
+    for (auto b : data)
+        oss << std::hex << std::setfill('0') << std::setw(2)
+            << static_cast<int>(b);
+    return oss.str();
+}
+
+}  // namespace
 
 ValidationCollector::ValidationCollector(catl::xdata::Protocol const& protocol)
     : protocol_(protocol)
@@ -25,7 +47,7 @@ ValidationCollector::set_unl(std::vector<catl::vl::Manifest> const& validators)
     {
         if (!v.signing_public_key.empty())
         {
-            unl_signing_keys.insert(v.signing_key_hex());
+            unl_signing_keys.insert(lower_hex(v.signing_public_key));
         }
     }
     PLOGI(
@@ -36,7 +58,8 @@ ValidationCollector::set_unl(std::vector<catl::vl::Manifest> const& validators)
         unl_size,
         " validators");
 
-    check_all_for_quorum();
+    filter_buffer_to_unl();
+    recompute_quorum_state();
 }
 
 std::vector<uint8_t>
@@ -153,27 +176,18 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     auto hash = entry.ledger_hash;
     auto seq = entry.ledger_seq;
 
-    // Only keep validations from UNL signing keys
-    if (!unl_signing_keys.empty())
-    {
-        std::ostringstream oss;
-        for (auto b : entry.signing_key)
-        {
-            oss << std::hex << std::setfill('0') << std::setw(2)
-                << static_cast<int>(b);
-        }
-        if (!unl_signing_keys.count(oss.str()))
-        {
-            return;
-        }
-    }
+    entry.signing_key_hex = lower_hex(entry.signing_key);
 
-    by_ledger[hash].push_back(std::move(entry));
+    if (!insert_entry(std::move(entry)))
+    {
+        return;
+    }
 
     auto count = by_ledger[hash].size();
     PLOGD(
         log_,
-        "  UNL validation for seq=",
+        unl_signing_keys.empty() ? "  Buffered validation for seq="
+                                 : "  UNL validation for seq=",
         seq,
         " hash=",
         hash.hex().substr(0, 16),
@@ -183,76 +197,216 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
         unl_size,
         ")");
 
-    check_quorum_for(hash);
-}
-
-std::vector<ValidationCollector::Entry> const&
-ValidationCollector::quorum_validations() const
-{
-    static std::vector<Entry> empty;
-    auto it = by_ledger.find(quorum_hash);
-    if (it != by_ledger.end())
-        return it->second;
-    return empty;
-}
-
-void
-ValidationCollector::check_all_for_quorum()
-{
-    for (auto const& [hash, entries] : by_ledger)
+    if (!unl_signing_keys.empty())
     {
-        check_quorum_for(hash);
-        if (quorum_reached)
-            return;
+        recompute_quorum_state();
     }
 }
 
-void
-ValidationCollector::check_quorum_for(Hash256 const& hash)
+std::vector<ValidationCollector::Entry>
+ValidationCollector::get_quorum(int percent) const
 {
-    if (quorum_reached || unl_signing_keys.empty())
-        return;
+    auto hash = select_quorum_hash(percent);
+    if (!hash)
+    {
+        return {};
+    }
 
-    auto it = by_ledger.find(hash);
+    auto it = by_ledger.find(*hash);
     if (it == by_ledger.end())
-        return;
-
-    int matched = 0;
-    for (auto const& e : it->second)
     {
-        std::ostringstream oss;
-        for (auto b : e.signing_key)
+        return {};
+    }
+
+    std::vector<Entry> result;
+    auto const threshold = threshold_for(percent);
+    result.reserve(
+        std::min<int>(threshold, static_cast<int>(it->second.size())));
+
+    for (auto const& entry : it->second)
+    {
+        result.push_back(entry);
+        if (static_cast<int>(result.size()) >= threshold)
         {
-            oss << std::hex << std::setfill('0') << std::setw(2)
-                << static_cast<int>(b);
-        }
-        if (unl_signing_keys.count(oss.str()))
-        {
-            matched++;
+            break;
         }
     }
 
-    // 80% is XRPL consensus threshold, 90% gives us a strong proof
-    // while not waiting for stragglers
-    int threshold = (unl_size * 9 + 9) / 10;  // ceil(90%)
-    if (matched >= threshold)
+    return result;
+}
+
+bool
+ValidationCollector::has_quorum(int percent) const
+{
+    return select_quorum_hash(percent).has_value();
+}
+
+void
+ValidationCollector::filter_buffer_to_unl()
+{
+    if (unl_signing_keys.empty())
     {
-        quorum_reached = true;
-        quorum_hash = hash;
-        quorum_count = matched;
-        auto seq = it->second.empty() ? 0 : it->second[0].ledger_seq;
+        return;
+    }
+
+    for (auto it = by_ledger.begin(); it != by_ledger.end();)
+    {
+        std::vector<Entry> filtered;
+        std::unordered_set<std::string> seen;
+        filtered.reserve(it->second.size());
+
+        for (auto const& entry : it->second)
+        {
+            auto const& key_hex = entry_key_hex(entry);
+            if (key_hex.empty() || !unl_signing_keys.count(key_hex))
+            {
+                continue;
+            }
+            if (!seen.insert(key_hex).second)
+            {
+                continue;
+            }
+            filtered.push_back(entry);
+        }
+
+        if (filtered.empty())
+        {
+            it = by_ledger.erase(it);
+            continue;
+        }
+
+        it->second = std::move(filtered);
+        ++it;
+    }
+}
+
+void
+ValidationCollector::recompute_quorum_state(int percent)
+{
+    auto const previous_reached = quorum_reached;
+    auto const previous_hash = quorum_hash;
+
+    quorum_reached = false;
+    quorum_hash = Hash256();
+    quorum_count = 0;
+
+    auto best_hash = select_quorum_hash(percent);
+    if (!best_hash)
+    {
+        return;
+    }
+
+    auto it = by_ledger.find(*best_hash);
+    if (it == by_ledger.end() || it->second.empty())
+    {
+        return;
+    }
+
+    quorum_reached = true;
+    quorum_hash = *best_hash;
+    quorum_count = static_cast<int>(it->second.size());
+
+    if (!previous_reached || previous_hash != quorum_hash)
+    {
+        auto const seq = it->second.front().ledger_seq;
         PLOGI(
             log_,
             "  QUORUM reached for seq=",
             seq,
             " hash=",
-            hash.hex().substr(0, 16),
+            quorum_hash.hex().substr(0, 16),
             "... (",
-            matched,
+            quorum_count,
             "/",
             unl_size,
-            " UNL validators)");
+            " UNL validators available)");
     }
+}
+
+bool
+ValidationCollector::insert_entry(Entry entry)
+{
+    auto const& key_hex = entry_key_hex(entry);
+    if (key_hex.empty())
+    {
+        return false;
+    }
+
+    if (!unl_signing_keys.empty() && !unl_signing_keys.count(key_hex))
+    {
+        return false;
+    }
+
+    auto& entries = by_ledger[entry.ledger_hash];
+    for (auto const& existing : entries)
+    {
+        if (entry_key_hex(existing) == key_hex)
+        {
+            return false;
+        }
+    }
+
+    entries.push_back(std::move(entry));
+    return true;
+}
+
+int
+ValidationCollector::threshold_for(int percent) const
+{
+    if (unl_size <= 0)
+    {
+        return 0;
+    }
+
+    if (percent < 1)
+    {
+        percent = 1;
+    }
+    if (percent > 100)
+    {
+        percent = 100;
+    }
+
+    return (unl_size * percent + 99) / 100;
+}
+
+std::optional<Hash256>
+ValidationCollector::select_quorum_hash(int percent) const
+{
+    if (unl_signing_keys.empty())
+    {
+        return std::nullopt;
+    }
+
+    auto const threshold = threshold_for(percent);
+    std::optional<Hash256> best_hash;
+    uint32_t best_seq = 0;
+    int best_count = 0;
+
+    for (auto const& [hash, entries] : by_ledger)
+    {
+        if (entries.empty())
+        {
+            continue;
+        }
+
+        auto const matched = static_cast<int>(entries.size());
+        if (matched < threshold)
+        {
+            continue;
+        }
+
+        auto const seq = entries.front().ledger_seq;
+        if (!best_hash || seq > best_seq ||
+            (seq == best_seq && matched > best_count))
+        {
+            best_hash = hash;
+            best_seq = seq;
+            best_count = matched;
+        }
+    }
+
+    return best_hash;
 }
 
 }  // namespace xproof

@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -25,6 +26,7 @@ public:
     {
         std::vector<uint8_t> raw;          // full STValidation bytes
         std::vector<uint8_t> signing_key;  // sfSigningPubKey
+        std::string signing_key_hex;       // lowercase hex of sfSigningPubKey
         std::vector<uint8_t> signature;    // sfSignature
         Hash256 ledger_hash;               // sfLedgerHash
         uint32_t ledger_seq = 0;           // sfLedgerSequence
@@ -42,8 +44,11 @@ public:
     on_packet(uint16_t type, std::vector<uint8_t> const& data);
 
     /// Get the validations for the quorum ledger.
-    std::vector<Entry> const&
-    quorum_validations() const;
+    std::vector<Entry>
+    get_quorum(int percent = 90) const;
+
+    bool
+    has_quorum(int percent = 90) const;
 
     /// Parse a raw protobuf TMValidation and extract the STValidation.
     static std::vector<uint8_t>
@@ -61,10 +66,19 @@ private:
     catl::xdata::Protocol const& protocol_;
 
     void
-    check_all_for_quorum();
+    filter_buffer_to_unl();
 
     void
-    check_quorum_for(Hash256 const& hash);
+    recompute_quorum_state(int percent = 90);
+
+    bool
+    insert_entry(Entry entry);
+
+    int
+    threshold_for(int percent) const;
+
+    std::optional<Hash256>
+    select_quorum_hash(int percent) const;
 };
 
 }  // namespace xproof

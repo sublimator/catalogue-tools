@@ -31,6 +31,7 @@ using xproof::upper_hex;
 namespace xproof {
 
 static LogPartition log_("xproof", LogLevel::INFO);
+static constexpr int kAnchorQuorumPercent = 90;
 
 /// Build a proof-format on_leaf callback for trie_json.
 static catl::shamap::LeafJsonCallback
@@ -282,15 +283,15 @@ build_proof(
     std::unordered_map<std::string, std::chrono::steady_clock::time_point>
         peer_cooldowns;
 
-    auto peer_covers_ledger =
-        [](std::shared_ptr<PeerClient> const& peer, uint32_t ledger_seq) {
-            if (!peer || !peer->is_ready())
-                return false;
-            auto const first = peer->peer_first_seq();
-            auto const last = peer->peer_last_seq();
-            return first != 0 && last != 0 && ledger_seq >= first &&
-                ledger_seq <= last;
-        };
+    auto peer_covers_ledger = [](std::shared_ptr<PeerClient> const& peer,
+                                 uint32_t ledger_seq) {
+        if (!peer || !peer->is_ready())
+            return false;
+        auto const first = peer->peer_first_seq();
+        auto const last = peer->peer_last_seq();
+        return first != 0 && last != 0 && ledger_seq >= first &&
+            ledger_seq <= last;
+    };
 
     auto collect_excluded_peers = [&]() {
         std::unordered_set<std::string> excluded;
@@ -308,10 +309,9 @@ build_proof(
         return excluded;
     };
 
-    auto acquire_peer =
-        [&](std::shared_ptr<PeerClient>& current,
-            std::optional<uint32_t> required_ledger,
-            std::string const& purpose)
+    auto acquire_peer = [&](std::shared_ptr<PeerClient>& current,
+                            std::optional<uint32_t> required_ledger,
+                            std::string const& purpose)
         -> boost::asio::awaitable<std::shared_ptr<PeerClient>> {
         for (;;)
         {
@@ -346,7 +346,8 @@ build_proof(
                 {
                     peer_retry_counts[current->endpoint()] = 0;
                 }
-                PLOGI(log_, "Using peer ", current->endpoint(), " for ", purpose);
+                PLOGI(
+                    log_, "Using peer ", current->endpoint(), " for ", purpose);
                 co_return current;
             }
 
@@ -388,11 +389,10 @@ build_proof(
         }
     };
 
-    auto with_peer_failover =
-        [&](std::shared_ptr<PeerClient>& current,
-            std::optional<uint32_t> required_ledger,
-            std::string const& purpose,
-            auto op) -> decltype(op(current)) {
+    auto with_peer_failover = [&](std::shared_ptr<PeerClient>& current,
+                                  std::optional<uint32_t> required_ledger,
+                                  std::string const& purpose,
+                                  auto op) -> decltype(op(current)) {
         for (;;)
         {
             current = co_await acquire_peer(current, required_ledger, purpose);
@@ -450,8 +450,7 @@ build_proof(
                 }
 
                 failures = 0;
-                peer_cooldowns[endpoint] =
-                    std::chrono::steady_clock::now() +
+                peer_cooldowns[endpoint] = std::chrono::steady_clock::now() +
                     peer_retry_policy.cooldown;
                 PLOGW(
                     log_,
@@ -521,7 +520,7 @@ build_proof(
     }
     else
     {
-        PLOGW(log_, "VL fetch failed: ", vl_error);
+        throw std::runtime_error("VL fetch failed: " + vl_error);
     }
 
     // Wait for quorum
@@ -543,33 +542,27 @@ build_proof(
     }
 
     // Determine anchor
-    uint32_t anchor_seq;
-    Hash256 anchor_hash;
-    if (val_collector.quorum_reached)
+    auto anchor_validations = val_collector.get_quorum(kAnchorQuorumPercent);
+    if (anchor_validations.empty())
     {
-        anchor_hash = val_collector.quorum_hash;
-        anchor_seq = val_collector.quorum_validations()[0].ledger_seq;
-        PLOGI(
-            log_,
-            "Using validated anchor: seq=",
-            anchor_seq,
-            " hash=",
-            anchor_hash.hex().substr(0, 16),
-            "... (",
-            val_collector.quorum_count,
-            "/",
-            val_collector.unl_size,
-            " validators)");
+        throw std::runtime_error(
+            "Timed out waiting for validation quorum at " +
+            std::to_string(kAnchorQuorumPercent) + "%");
     }
-    else
-    {
-        anchor_seq = client->peer_ledger_seq();
-        PLOGW(
-            log_,
-            "No quorum — using peer's ledger ",
-            client->peer_ledger_seq(),
-            " as unvalidated anchor");
-    }
+
+    uint32_t anchor_seq = anchor_validations.front().ledger_seq;
+    Hash256 anchor_hash = anchor_validations.front().ledger_hash;
+    PLOGI(
+        log_,
+        "Using validated anchor: seq=",
+        anchor_seq,
+        " hash=",
+        anchor_hash.hex().substr(0, 16),
+        "... (",
+        anchor_validations.size(),
+        "/",
+        val_collector.unl_size,
+        " validators in proof)");
 
     auto anchor_hdr = co_await with_peer_failover(
         client,
@@ -873,10 +866,9 @@ build_proof(
             anchor.blob_signature = vl_data->blob_signature;
         }
 
-        auto const& qvals = val_collector.quorum_validations();
-        for (auto const& v : qvals)
+        for (auto const& v : anchor_validations)
         {
-            anchor.validations[bytes_hex(v.signing_key)] = v.raw;
+            anchor.validations[v.signing_key_hex] = v.raw;
         }
 
         proof_chain.steps.push_back(std::move(anchor));
