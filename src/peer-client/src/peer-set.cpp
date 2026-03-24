@@ -62,9 +62,11 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 
     PLOGI(log_, "Connecting to ", key, "...");
 
+    // Create PeerClient first so we can access redirect_ips on failure
+    std::shared_ptr<PeerClient> client;
+
     try
     {
-        std::shared_ptr<PeerClient> client;
         co_await co_connect(io_, host, port, network_id_, client);
         client->set_tracker(tracker_);
         if (unsolicited_handler_)
@@ -88,6 +90,23 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
         PLOGD(log_, "Failed to connect to ", key, ": ", e.what());
         // Mark as attempted so undiscovered() doesn't retry
         connections_[key] = nullptr;
+
+        // Check for 503 redirect IPs from the failed connection
+        if (client)
+        {
+            auto const& ips = client->raw_connection().redirect_ips();
+            if (!ips.empty())
+            {
+                PLOGI(
+                    log_,
+                    "Got ", ips.size(), " redirect peers from ", key);
+                for (auto const& ip : ips)
+                {
+                    tracker_->add_discovered(ip);
+                }
+            }
+        }
+
         co_return nullptr;
     }
 }

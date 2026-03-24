@@ -5,6 +5,7 @@
 
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+#include <boost/json.hpp>
 #include <chrono>
 #include <openssl/ssl.h>
 #include <utility>
@@ -348,12 +349,32 @@ peer_connection::handle_http_response(const connection_handler& handler)
                 field.name_string(), ": ", field.value());
         }
 
-        // Log body if present (rippled sends error reason here)
+        // Parse body — 503 responses include {"peer-ips": [...]} redirects
         if (!http_response_.body().empty())
         {
-            PLOGI(log_, 
+            PLOGD(log_,
                 "[", config_.host, ":", config_.port, "]   body: ",
                 http_response_.body());
+
+            try
+            {
+                auto jv = boost::json::parse(http_response_.body());
+                if (jv.is_object() && jv.as_object().contains("peer-ips"))
+                {
+                    auto const& ips = jv.as_object().at("peer-ips").as_array();
+                    for (auto const& ip : ips)
+                    {
+                        redirect_ips_.insert(std::string(ip.as_string()));
+                    }
+                    PLOGI(log_,
+                        "[", config_.host, ":", config_.port, "] ",
+                        "503 redirect: ", redirect_ips_.size(), " peer-ips");
+                }
+            }
+            catch (...)
+            {
+                // Not JSON or no peer-ips — that's fine
+            }
         }
 
         handler(boost::asio::error::invalid_argument);

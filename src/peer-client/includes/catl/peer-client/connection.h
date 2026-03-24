@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <vector>
 
 namespace catl::peer_client {
@@ -113,6 +114,13 @@ public:
         return *socket_;
     }
 
+    /// Peer IPs from a 503 redirect response. Populated on failed connect.
+    std::set<std::string> const&
+    redirect_ips() const
+    {
+        return redirect_ips_;
+    }
+
 private:
     void
     handle_connect(
@@ -182,6 +190,9 @@ private:
 
     // Disconnect handler
     disconnect_handler disconnect_handler_;
+
+    // Redirect IPs from 503 response
+    std::set<std::string> redirect_ips_;
 
     // Helper methods
     void
