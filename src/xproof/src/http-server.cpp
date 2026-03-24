@@ -238,6 +238,7 @@ HttpServer::handle_session(tcp::socket socket)
                 req.method() == http::verb::get)
             {
                 auto status = co_await engine_->co_health();
+                auto cs = engine_->cache_stats();
                 boost::json::object body;
                 body["peer_count"] = status.peer_count;
                 body["vl_loaded"] = status.vl_loaded;
@@ -245,6 +246,12 @@ HttpServer::handle_session(tcp::socket socket)
                 {
                     body["latest_quorum_seq"] = *status.latest_quorum_seq;
                 }
+                boost::json::object cache;
+                cache["entries"] = cs.entries;
+                cache["max_entries"] = cs.max_entries;
+                cache["hits"] = cs.hits;
+                cache["misses"] = cs.misses;
+                body["cache"] = cache;
 
                 stream.expires_after(opts_.write_timeout);
                 co_await http::async_write(

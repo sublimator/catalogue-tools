@@ -139,6 +139,13 @@ ProofEngine::stop()
 asio::awaitable<ProofEngine::ProveResult>
 ProofEngine::prove(std::string const& tx_hash)
 {
+    // Check cache first
+    if (auto const* cached = cache_get(tx_hash))
+    {
+        PLOGI(log_, "Cache hit for ", tx_hash.substr(0, 16), "...");
+        co_return *cached;
+    }
+
     // Step 1: Ensure VL is loaded (UNL push happens once in start(),
     // not per-request — set_unl clears the quorum cache)
     auto vl = co_await vl_cache_->co_get();
@@ -172,10 +179,70 @@ ProofEngine::prove(std::string const& tx_hash)
     auto result = co_await build_proof(svc, tx_hash);
     result.chain.network_id = config_.network_id;
 
-    co_return ProveResult{
+    ProveResult prove_result{
         std::move(result.chain),
         result.tx_ledger_seq,
         result.publisher_key_hex};
+
+    cache_put(tx_hash, prove_result);
+    co_return prove_result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Proof cache
+// ═══════════════════════════════════════════════════════════════════════
+
+void
+ProofEngine::cache_put(
+    std::string const& tx_hash,
+    ProveResult const& result)
+{
+    auto it = cache_map_.find(tx_hash);
+    if (it != cache_map_.end())
+    {
+        // Already cached — move to front
+        cache_lru_.splice(cache_lru_.begin(), cache_lru_, it->second);
+        return;
+    }
+
+    // Evict LRU if at capacity
+    while (cache_lru_.size() >= kMaxCacheEntries)
+    {
+        auto& back = cache_lru_.back();
+        cache_map_.erase(back.first);
+        cache_lru_.pop_back();
+    }
+
+    cache_lru_.emplace_front(tx_hash, result);
+    cache_map_[tx_hash] = cache_lru_.begin();
+    PLOGD(log_, "Cached proof for ", tx_hash.substr(0, 16), "... (", cache_lru_.size(), " entries)");
+}
+
+ProofEngine::ProveResult const*
+ProofEngine::cache_get(std::string const& tx_hash)
+{
+    auto it = cache_map_.find(tx_hash);
+    if (it == cache_map_.end())
+    {
+        cache_misses_++;
+        return nullptr;
+    }
+
+    cache_hits_++;
+    // Move to front (most recently used)
+    cache_lru_.splice(cache_lru_.begin(), cache_lru_, it->second);
+    return &it->second->second;
+}
+
+ProofEngine::CacheStats
+ProofEngine::cache_stats() const
+{
+    return {
+        .entries = cache_lru_.size(),
+        .max_entries = kMaxCacheEntries,
+        .hits = cache_hits_,
+        .misses = cache_misses_,
+    };
 }
 
 // ═══════════════════════════════════════════════════════════════════════

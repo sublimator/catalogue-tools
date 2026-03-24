@@ -22,9 +22,11 @@
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
+#include <list>
 #include <memory>
 #include <span>
 #include <string>
+#include <unordered_map>
 
 namespace xproof {
 
@@ -107,6 +109,17 @@ public:
         return protocol_;
     }
 
+    /// Cache stats for /health.
+    struct CacheStats
+    {
+        size_t entries = 0;
+        size_t max_entries = 0;
+        size_t hits = 0;
+        size_t misses = 0;
+    };
+    CacheStats
+    cache_stats() const;
+
 private:
     ProofEngine(boost::asio::io_context& io, NetworkConfig config);
 
@@ -117,6 +130,21 @@ private:
     std::shared_ptr<catl::peer_client::PeerSet> peers_;
     std::shared_ptr<VlCache> vl_cache_;
     std::shared_ptr<ValidationBuffer> val_buffer_;
+
+    // LRU proof cache: tx_hash → ProveResult.
+    // Proofs are immutable — a tx is in exactly one ledger forever.
+    static constexpr size_t kMaxCacheEntries = 256;
+    using CacheList = std::list<std::pair<std::string, ProveResult>>;
+    CacheList cache_lru_;  // front = most recently used
+    std::unordered_map<std::string, CacheList::iterator> cache_map_;
+    size_t cache_hits_ = 0;
+    size_t cache_misses_ = 0;
+
+    void
+    cache_put(std::string const& tx_hash, ProveResult const& result);
+
+    ProveResult const*
+    cache_get(std::string const& tx_hash);
 };
 
 }  // namespace xproof
