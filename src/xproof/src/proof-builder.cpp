@@ -249,9 +249,32 @@ build_proof(
             val_collector.on_packet(type, data);
         });
 
-    auto client = co_await peers.add(peer_host, peer_port);
-    auto peer_seq = client->peer_ledger_seq();
-    PLOGI(log_, "Connected to peer, peer at ledger ", peer_seq);
+    // Try to connect to the specified peer — may fail (503 etc)
+    // but redirect IPs get fed into the tracker automatically.
+    auto initial_client = co_await peers.try_connect(peer_host, peer_port);
+    if (initial_client)
+    {
+        PLOGI(
+            log_,
+            "Connected to peer, peer at ledger ",
+            initial_client->peer_ledger_seq());
+    }
+    else
+    {
+        PLOGW(
+            log_,
+            "Initial peer ",
+            peer_host, ":", peer_port,
+            " failed — bootstrapping...");
+        co_await peers.bootstrap();
+        initial_client = peers.any_peer();
+        if (!initial_client)
+        {
+            throw std::runtime_error(
+                "No peers available. Check network connectivity.");
+        }
+    }
+    auto client = initial_client;
     PLOGI(log_, "Listening for validations...");
 
     // Wait for VL
@@ -314,11 +337,11 @@ build_proof(
     }
     else
     {
-        anchor_seq = peer_seq;
+        anchor_seq = client->peer_ledger_seq();
         PLOGW(
             log_,
             "No quorum — using peer's ledger ",
-            peer_seq,
+            client->peer_ledger_seq(),
             " as unvalidated anchor");
     }
 

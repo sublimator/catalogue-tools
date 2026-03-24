@@ -94,6 +94,11 @@ public:
         }
     }
 
+    /// Try to connect to an endpoint. Returns nullptr on failure.
+    /// Redirect IPs from 503 responses are fed into the tracker.
+    boost::asio::awaitable<std::shared_ptr<PeerClient>>
+    try_connect(std::string const& host, uint16_t port);
+
 private:
     boost::asio::io_context& io_;
     uint32_t network_id_;
@@ -106,10 +111,6 @@ private:
     {
         return host + ":" + std::to_string(port);
     }
-
-    /// Try to connect to an endpoint. Returns nullptr on failure.
-    boost::asio::awaitable<std::shared_ptr<PeerClient>>
-    try_connect(std::string const& host, uint16_t port);
 };
 
 }  // namespace catl::peer_client
