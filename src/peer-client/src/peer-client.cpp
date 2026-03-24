@@ -722,16 +722,28 @@ PeerClient::handle_endpoints(std::vector<uint8_t> const& payload)
     int added = 0;
     for (auto const& ep : msg.endpoints_v2())
     {
-        if (ep.hops() <= 1)
-        {
-            tracker_->add_discovered(ep.endpoint());
-            PLOGD(
-                log_,
-                "[", endpoint_str_, "] TMEndpoints: ",
-                ep.endpoint(),
-                " (hops=", ep.hops(), ")");
-            added++;
-        }
+        if (ep.hops() > 1)
+            continue;
+
+        auto const& addr = ep.endpoint();
+
+        // Skip useless wildcard bind addresses
+        if (addr.find("[::]:") == 0 || addr.find("0.0.0.0:") == 0)
+            continue;
+
+        // Must be parseable
+        std::string host;
+        uint16_t port = 0;
+        if (!EndpointTracker::parse_endpoint(addr, host, port))
+            continue;
+
+        tracker_->add_discovered(addr);
+        PLOGD(
+            log_,
+            "[", endpoint_str_, "] TMEndpoints: ",
+            addr,
+            " (hops=", ep.hops(), ")");
+        added++;
     }
 
     if (added > 0)

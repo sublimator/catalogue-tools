@@ -55,10 +55,12 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 
     // Already connected?
     auto it = connections_.find(key);
-    if (it != connections_.end() && it->second->is_ready())
+    if (it != connections_.end())
     {
-        co_return it->second;
+        co_return it->second->is_ready() ? it->second : nullptr;
     }
+
+    PLOGI(log_, "Connecting to ", key, "...");
 
     try
     {
@@ -84,6 +86,8 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
     catch (std::exception const& e)
     {
         PLOGD(log_, "Failed to connect to ", key, ": ", e.what());
+        // Mark as attempted so undiscovered() doesn't retry
+        connections_[key] = nullptr;
         co_return nullptr;
     }
 }
@@ -168,7 +172,7 @@ PeerSet::peer_for(uint32_t ledger_seq) const
 {
     for (auto const& [key, client] : connections_)
     {
-        if (!client->is_ready())
+        if (!client || !client->is_ready())
             continue;
         if (client->peer_first_seq() != 0 &&
             ledger_seq >= client->peer_first_seq() &&
@@ -276,9 +280,9 @@ PeerSet::wait_for_peer(uint32_t ledger_seq, int timeout_secs)
 std::shared_ptr<PeerClient>
 PeerSet::any_peer() const
 {
-    for (auto& [_, client] : connections_)
+    for (auto const& [_, client] : connections_)
     {
-        if (client->is_ready())
+        if (client && client->is_ready())
             return client;
     }
     return nullptr;
