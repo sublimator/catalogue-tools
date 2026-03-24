@@ -172,6 +172,11 @@ private:
     /// Check if we're at the connection cap.
     bool
     at_connection_cap() const;
+
+    /// Try to evict an idle peer that doesn't cover the target ledger.
+    /// Returns true if a peer was evicted (freeing a slot).
+    bool
+    evict_for(uint32_t target_ledger_seq);
     PeerSet(boost::asio::io_context& io, PeerSetOptions const& options);
 
     /// Schedule a background connect attempt (deduped, fire-and-forget).
@@ -276,7 +281,10 @@ private:
     std::set<std::string> crawl_queued_;
     std::set<std::string> crawled_;
     std::vector<std::string> pending_crawls_;
-    std::optional<uint32_t> preferred_ledger_seq_;
+    // Active target ledgers from in-flight wait_for_peer calls.
+    // Used by should_connect_endpoint and evict_for to prioritize
+    // candidates that cover any active target.
+    std::set<uint32_t> wanted_ledgers_;
     mutable std::mutex unsolicited_handler_mutex_;
     UnsolicitedHandler unsolicited_handler_;
 };

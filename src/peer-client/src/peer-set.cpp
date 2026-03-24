@@ -21,13 +21,26 @@ static LogPartition log_("peer-set", LogLevel::INHERIT);
 namespace {
 
 std::string
+strip_ipv4_mapped(std::string const& host)
+{
+    // ::ffff:1.2.3.4 → 1.2.3.4
+    static constexpr auto prefix = std::string_view("::ffff:");
+    if (host.size() > prefix.size() &&
+        host.compare(0, prefix.size(), prefix) == 0)
+    {
+        return host.substr(prefix.size());
+    }
+    return host;
+}
+
+std::string
 canonical_endpoint(std::string const& endpoint)
 {
     std::string host;
     uint16_t port = 0;
     if (EndpointTracker::parse_endpoint(endpoint, host, port))
     {
-        return host + ":" + std::to_string(port);
+        return strip_ipv4_mapped(host) + ":" + std::to_string(port);
     }
     return endpoint;
 }
@@ -219,12 +232,18 @@ PeerSet::choose_crawl_status(std::vector<CrawlLedgerRange> const& ranges) const
 
     auto better_range = [this](
                             CrawlLedgerRange const& lhs,
-                            CrawlLedgerRange const& rhs) {
-        auto const preferred = preferred_ledger_seq_;
-        auto const lhs_covers =
-            preferred && *preferred >= lhs.first_seq && *preferred <= lhs.last_seq;
-        auto const rhs_covers =
-            preferred && *preferred >= rhs.first_seq && *preferred <= rhs.last_seq;
+                            CrawlLedgerRange const& rhs) -> bool {
+        // Check if either range covers any wanted ledger
+        auto covers_wanted = [&](CrawlLedgerRange const& r) {
+            for (auto seq : wanted_ledgers_)
+            {
+                if (seq >= r.first_seq && seq <= r.last_seq)
+                    return true;
+            }
+            return false;
+        };
+        auto const lhs_covers = covers_wanted(lhs);
+        auto const rhs_covers = covers_wanted(rhs);
         if (lhs_covers != rhs_covers)
         {
             return lhs_covers;
@@ -272,7 +291,7 @@ PeerSet::endpoint_has_range(std::string const& endpoint) const
 bool
 PeerSet::endpoint_covers_preferred_ledger(std::string const& endpoint) const
 {
-    if (!preferred_ledger_seq_)
+    if (wanted_ledgers_.empty())
         return false;
 
     auto key = canonical_endpoint(endpoint);
@@ -281,17 +300,20 @@ PeerSet::endpoint_covers_preferred_ledger(std::string const& endpoint) const
         return false;
 
     auto const& status = it->second.status;
-    return status.first_seq != 0 && status.last_seq != 0 &&
-        *preferred_ledger_seq_ >= status.first_seq &&
-        *preferred_ledger_seq_ <= status.last_seq;
+    if (status.first_seq == 0 || status.last_seq == 0)
+        return false;
+
+    for (auto seq : wanted_ledgers_)
+    {
+        if (seq >= status.first_seq && seq <= status.last_seq)
+            return true;
+    }
+    return false;
 }
 
 bool
 PeerSet::should_connect_endpoint(std::string const& endpoint) const
 {
-    if (at_connection_cap())
-        return false;
-
     auto key = canonical_endpoint(endpoint);
 
     if (connections_.count(key) || in_flight_.count(key) || queued_.count(key))
@@ -301,8 +323,13 @@ PeerSet::should_connect_endpoint(std::string const& endpoint) const
     auto const has_success =
         it != endpoint_stats_.end() && it->second.last_success_at > 0;
 
+    // If this candidate covers the target ledger, always queue it —
+    // try_connect will handle eviction if we're at cap.
     if (endpoint_covers_preferred_ledger(key))
         return true;
+
+    if (at_connection_cap())
+        return false;
 
     // If crawl already had a chance and still did not give us range data,
     // fall back to a real peer handshake rather than starving on crawl-only
@@ -331,17 +358,24 @@ PeerSet::candidate_better(std::string const& lhs, std::string const& rhs) const
     auto const& rhs_stats =
         rhs_it != endpoint_stats_.end() ? rhs_it->second : empty;
 
-    auto const ledger = preferred_ledger_seq_;
     auto const lhs_has_range =
         lhs_stats.status.first_seq != 0 && lhs_stats.status.last_seq != 0;
     auto const rhs_has_range =
         rhs_stats.status.first_seq != 0 && rhs_stats.status.last_seq != 0;
-    auto const lhs_covers = ledger && lhs_has_range &&
-        *ledger >= lhs_stats.status.first_seq &&
-        *ledger <= lhs_stats.status.last_seq;
-    auto const rhs_covers = ledger && rhs_has_range &&
-        *ledger >= rhs_stats.status.first_seq &&
-        *ledger <= rhs_stats.status.last_seq;
+
+    // Check if either covers any wanted ledger
+    auto covers_any_wanted = [&](EndpointStats const& stats) {
+        if (stats.status.first_seq == 0 || stats.status.last_seq == 0)
+            return false;
+        for (auto seq : wanted_ledgers_)
+        {
+            if (seq >= stats.status.first_seq && seq <= stats.status.last_seq)
+                return true;
+        }
+        return false;
+    };
+    auto const lhs_covers = covers_any_wanted(lhs_stats);
+    auto const rhs_covers = covers_any_wanted(rhs_stats);
 
     if (lhs_covers != rhs_covers)
         return lhs_covers;
@@ -720,16 +754,28 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
         co_return (it->second && it->second->is_ready()) ? it->second : nullptr;
     }
 
-    // Don't exceed connection cap
+    // If at connection cap, try to evict an idle peer that doesn't
+    // cover the preferred ledger. If no eviction possible, skip.
     if (at_connection_cap())
     {
-        PLOGD(
-            log_,
-            "Connection cap reached (",
-            options_.max_connected_peers,
-            "), skipping ",
-            key);
-        co_return nullptr;
+        // Try to evict for any wanted ledger (pick the first)
+        auto evict_target = wanted_ledgers_.empty()
+            ? 0u
+            : *wanted_ledgers_.begin();
+        if (evict_target != 0 && evict_for(evict_target))
+        {
+            PLOGD(log_, "Evicted idle peer, connecting to ", key);
+        }
+        else
+        {
+            PLOGD(
+                log_,
+                "Connection cap reached (",
+                options_.max_connected_peers,
+                "), no evictable peer, skipping ",
+                key);
+            co_return nullptr;
+        }
     }
 
     PLOGI(log_, "Connecting to ", key, "...");
@@ -951,7 +997,12 @@ void
 PeerSet::prioritize_ledger(uint32_t ledger_seq)
 {
     ASSERT_ON_STRAND();
-    preferred_ledger_seq_ = ledger_seq;
+    wanted_ledgers_.insert(ledger_seq);
+    // Cap at 10 entries — evict oldest if needed
+    while (wanted_ledgers_.size() > 10)
+    {
+        wanted_ledgers_.erase(wanted_ledgers_.begin());
+    }
     sort_pending_connects();
     sort_pending_crawls();
     pump_crawls();
@@ -1125,8 +1176,13 @@ PeerSet::wait_for_peer(
     // Hop to strand — all PeerSet state access must be serialized
     co_await asio::post(strand_, asio::use_awaitable);
 
+    // Register this ledger as a wanted target so should_connect_endpoint
+    // and evict_for can prioritize candidates that cover it.
+    wanted_ledgers_.insert(ledger_seq);
+
     if (auto p = peer_for(ledger_seq, excluded))
     {
+        wanted_ledgers_.erase(ledger_seq);
         co_return p;
     }
 
@@ -1157,11 +1213,18 @@ PeerSet::wait_for_peer(
         if (auto p = peer_for(ledger_seq, excluded))
         {
             PLOGI(log_, "Found peer for ledger ", ledger_seq);
+            wanted_ledgers_.erase(ledger_seq);
             co_return p;
         }
 
         if (((elapsed_ms + 200) % 1000) == 0)
         {
+            // If we're capped and nobody has this ledger, evict to
+            // make room for a better candidate
+            if (at_connection_cap())
+            {
+                evict_for(ledger_seq);
+            }
             try_candidates_for(ledger_seq);
         }
 
@@ -1181,6 +1244,7 @@ PeerSet::wait_for_peer(
         }
     }
 
+    wanted_ledgers_.erase(ledger_seq);
     PLOGW(
         log_,
         "No peer found with ledger ",
@@ -1240,6 +1304,66 @@ bool
 PeerSet::at_connection_cap() const
 {
     return connected_count() >= options_.max_connected_peers;
+}
+
+bool
+PeerSet::evict_for(uint32_t target_ledger_seq)
+{
+    ASSERT_ON_STRAND();
+
+    // Find the least useful idle peer that doesn't cover the target.
+    std::string worst_key;
+    uint32_t worst_range_span = std::numeric_limits<uint32_t>::max();
+
+    for (auto const& [key, client] : connections_)
+    {
+        if (!client || !client->is_ready())
+            continue;
+
+        // Don't evict peers with in-flight requests
+        if (client->pending_count() > 0)
+            continue;
+
+        auto first = client->peer_first_seq();
+        auto last = client->peer_last_seq();
+
+        // Don't evict if this peer covers the target
+        if (first != 0 && last != 0 &&
+            target_ledger_seq >= first && target_ledger_seq <= last)
+        {
+            continue;
+        }
+
+        // Score by range span — narrower range = less useful
+        uint32_t span = (first != 0 && last != 0) ? (last - first) : 0;
+        if (worst_key.empty() || span < worst_range_span)
+        {
+            worst_key = key;
+            worst_range_span = span;
+        }
+    }
+
+    if (worst_key.empty())
+        return false;
+
+    PLOGI(
+        log_,
+        "Evicting idle peer ",
+        worst_key,
+        " (range span ",
+        worst_range_span,
+        ") to make room for ledger ",
+        target_ledger_seq);
+
+    // Close the connection and remove
+    auto it = connections_.find(worst_key);
+    if (it != connections_.end() && it->second)
+    {
+        it->second->cancel_all();
+        it->second->raw_connection().close();
+    }
+    remove_peer(worst_key);
+    return true;
 }
 
 void
