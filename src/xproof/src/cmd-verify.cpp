@@ -1,5 +1,6 @@
 #include "commands.h"
 
+#include "xproof/network-config.h"
 #include "xproof/proof-chain-binary.h"
 #include "xproof/proof-chain-json.h"
 #include "xproof/proof-resolver.h"
@@ -25,20 +26,17 @@ cmd_verify(
         return 1;
     }
 
-    // Read entire file
     std::string file_data(
         (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     in.close();
 
     xproof::ProofChain proof;
 
-    // Auto-detect format: binary starts with "XPRF" magic, JSON starts with '['
     bool is_binary = file_data.size() >= 4 && file_data[0] == 'X' &&
         file_data[1] == 'P' && file_data[2] == 'R' && file_data[3] == 'F';
 
     if (!is_binary)
     {
-        // JSON format
         try
         {
             auto jv = boost::json::parse(file_data);
@@ -59,7 +57,6 @@ cmd_verify(
     }
     else
     {
-        // Binary format
         try
         {
             auto data = reinterpret_cast<const uint8_t*>(file_data.data());
@@ -81,8 +78,33 @@ cmd_verify(
         }
     }
 
-    PLOGI(log_, "Trusted publisher key: ", trusted_key.substr(0, 16), "...");
+    // Use the proof's embedded network_id for protocol and publisher key,
+    // unless the caller explicitly provided them via --network or positional arg.
+    auto effective_key = trusted_key;
+    auto effective_protocol = protocol;
 
-    bool ok = xproof::resolve_proof_chain(proof, protocol, trusted_key);
+    if (proof.network_id != 0 || trusted_key.empty())
+    {
+        auto proof_config =
+            xproof::NetworkConfig::for_network(proof.network_id);
+        if (trusted_key.empty())
+        {
+            effective_key = proof_config.publisher_key;
+        }
+        // Always use the proof's network for protocol — the proof knows
+        // which chain it came from.
+        effective_protocol = proof_config.load_protocol();
+    }
+
+    PLOGI(
+        log_,
+        "Verifying (network_id=",
+        proof.network_id,
+        ", publisher=",
+        effective_key.substr(0, 16),
+        "...)");
+
+    bool ok =
+        xproof::resolve_proof_chain(proof, effective_protocol, effective_key);
     return ok ? 0 : 1;
 }

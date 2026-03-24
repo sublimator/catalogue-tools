@@ -190,8 +190,6 @@ ProofEngine::verify(
     VerifyResult result;
     try
     {
-        auto key = trusted_key.empty() ? config_.publisher_key : trusted_key;
-
         // Auto-detect format
         ProofChain chain;
         if (data.size() >= 4 && data[0] == 'X' && data[1] == 'P' &&
@@ -206,7 +204,13 @@ ProofEngine::verify(
             chain = from_json(json);
         }
 
-        result.ok = resolve_proof_chain(chain, protocol_, key);
+        // Use the proof's embedded network_id to select protocol and
+        // publisher key, unless the caller explicitly overrides the key.
+        auto proof_config = NetworkConfig::for_network(chain.network_id);
+        auto protocol = proof_config.load_protocol();
+        auto key = trusted_key.empty() ? proof_config.publisher_key : trusted_key;
+
+        result.ok = resolve_proof_chain(chain, protocol, key);
         if (!result.ok)
             result.error = "verification failed";
     }
