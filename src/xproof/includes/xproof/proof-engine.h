@@ -24,6 +24,7 @@
 #include <boost/asio/io_context.hpp>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -140,8 +141,10 @@ private:
 
     // LRU proof cache: tx_hash → ProveResult.
     // Proofs are immutable — a tx is in exactly one ledger forever.
+    // Mutex-protected — prove() runs on arbitrary threads.
     static constexpr size_t kMaxCacheEntries = 256;
     using CacheList = std::list<std::pair<std::string, ProveResult>>;
+    mutable std::mutex cache_mutex_;
     CacheList cache_lru_;  // front = most recently used
     std::unordered_map<std::string, CacheList::iterator> cache_map_;
     bool cache_enabled_ = true;

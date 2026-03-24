@@ -206,15 +206,15 @@ ProofEngine::cache_put(
     std::string const& tx_hash,
     ProveResult const& result)
 {
+    std::lock_guard lock(cache_mutex_);
+
     auto it = cache_map_.find(tx_hash);
     if (it != cache_map_.end())
     {
-        // Already cached — move to front
         cache_lru_.splice(cache_lru_.begin(), cache_lru_, it->second);
         return;
     }
 
-    // Evict LRU if at capacity
     while (cache_lru_.size() >= kMaxCacheEntries)
     {
         auto& back = cache_lru_.back();
@@ -230,6 +230,8 @@ ProofEngine::cache_put(
 std::optional<ProofEngine::ProveResult>
 ProofEngine::cache_get(std::string const& tx_hash)
 {
+    std::lock_guard lock(cache_mutex_);
+
     auto it = cache_map_.find(tx_hash);
     if (it == cache_map_.end())
     {
@@ -239,12 +241,13 @@ ProofEngine::cache_get(std::string const& tx_hash)
 
     cache_hits_++;
     cache_lru_.splice(cache_lru_.begin(), cache_lru_, it->second);
-    return it->second->second;  // return by value
+    return it->second->second;
 }
 
 ProofEngine::CacheStats
 ProofEngine::cache_stats() const
 {
+    std::lock_guard lock(cache_mutex_);
     return {
         .entries = cache_lru_.size(),
         .max_entries = kMaxCacheEntries,

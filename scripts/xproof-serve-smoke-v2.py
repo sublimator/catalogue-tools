@@ -506,6 +506,8 @@ class TestConfig:
     verify_concurrency: int
     prove_concurrency: int
     soak_seconds: float
+    server_threads: int
+    no_cache: bool
 
     @property
     def bind(self) -> str:
@@ -622,6 +624,10 @@ class RunningServer:
             cmd += ["--peer", self.config.peer]
         if self.config.peer_cache_path:
             cmd += ["--peer-cache-path", str(self.config.peer_cache_path)]
+        if self.config.server_threads > 1:
+            cmd += ["--threads", str(self.config.server_threads)]
+        if self.config.no_cache:
+            cmd += ["--no-cache"]
 
         LOG.info("starting xproof serve: %s", shlex.join(cmd))
         self.proc = subprocess.Popen(
@@ -975,6 +981,8 @@ def config(tmp_path_factory: pytest.TempPathFactory) -> TestConfig:
         verify_concurrency=env_int("XPROOF_VERIFY_CONCURRENCY") or harsh_default(8, 20),
         prove_concurrency=env_int("XPROOF_PROVE_CONCURRENCY") or harsh_default(2, 6),
         soak_seconds=env_float("XPROOF_SOAK_SECONDS", 0.0),
+        server_threads=env_int("XPROOF_THREADS") or 1,
+        no_cache=env_bool("XPROOF_NO_CACHE"),
     )
     LOG.info(
         "artifact_dir=%s session_server_log=%s session_runner_log=%s index=%s",
@@ -1816,6 +1824,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Increase default burst sizes for harsher concurrency testing",
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        help="Number of server I/O threads (maps to XPROOF_THREADS)",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable proof cache on the server (maps to XPROOF_NO_CACHE)",
+    )
     return parser
 
 
@@ -1850,6 +1868,9 @@ def main(argv: list[str] | None = None) -> int:
     set_env_if("XPROOF_VERIFY_CONCURRENCY", args.verify_concurrency)
     set_env_if("XPROOF_PROVE_CONCURRENCY", args.prove_concurrency)
     set_env_if("XPROOF_SOAK_SECONDS", args.soak_seconds)
+    set_env_if("XPROOF_THREADS", args.threads)
+    if args.no_cache:
+        set_env_if("XPROOF_NO_CACHE", "1")
     if args.keep_server:
         os.environ["XPROOF_KEEP_SERVER"] = "1"
     if args.log_output:
