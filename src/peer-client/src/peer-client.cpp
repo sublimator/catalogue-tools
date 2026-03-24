@@ -663,13 +663,15 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
     if (status.has_ledgerseq())
     {
         peer_ledger_seq_ = status.ledgerseq();
-        PLOGD(
+        PLOGT(
             log_,
             "[", endpoint_str_, "] at ledger ", peer_ledger_seq_.load());
     }
 
     if (status.has_firstseq() && status.has_lastseq())
     {
+        auto old_first = peer_first_seq_;
+        auto old_last = peer_last_seq_;
         peer_first_seq_ = status.firstseq();
         peer_last_seq_ = status.lastseq();
         if (peer_last_seq_ < peer_first_seq_ || peer_first_seq_ == 0 ||
@@ -678,14 +680,27 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
             peer_first_seq_ = 0;
             peer_last_seq_ = 0;
         }
-        else
+        else if (old_first != peer_first_seq_ || old_last != peer_last_seq_)
         {
-            PLOGD(
-                log_,
-                "[", endpoint_str_, "] range: ",
-                peer_first_seq_,
-                " - ",
-                peer_last_seq_);
+            // Only log when range actually changes
+            if (old_first == 0)
+            {
+                PLOGI(
+                    log_,
+                    "[", endpoint_str_, "] range: ",
+                    peer_first_seq_,
+                    " - ",
+                    peer_last_seq_);
+            }
+            else
+            {
+                PLOGD(
+                    log_,
+                    "[", endpoint_str_, "] range: ",
+                    peer_first_seq_,
+                    " - ",
+                    peer_last_seq_);
+            }
         }
 
         // Feed the shared tracker if one is set

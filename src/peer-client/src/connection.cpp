@@ -337,6 +337,23 @@ peer_connection::handle_http_response(const connection_handler& handler)
             "[", config_.host, ":", config_.port, "] ",
             "HTTP upgrade failed with status: ",
             static_cast<int>(http_response_.result()));
+
+        // Log response headers — may contain redirect or error info
+        for (auto const& field : http_response_)
+        {
+            LOGD(
+                "[", config_.host, ":", config_.port, "]   ",
+                field.name_string(), ": ", field.value());
+        }
+
+        // Log body if present (rippled sends error reason here)
+        if (!http_response_.body().empty())
+        {
+            LOGD(
+                "[", config_.host, ":", config_.port, "]   body: ",
+                http_response_.body());
+        }
+
         handler(boost::asio::error::invalid_argument);
         return;
     }
