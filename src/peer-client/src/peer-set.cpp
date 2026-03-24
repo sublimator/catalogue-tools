@@ -6,7 +6,13 @@
 #include <algorithm>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <cassert>
 #include <limits>
+
+// Assert that we're running on the PeerSet strand.
+// Fires in debug/TSAN builds, zero cost in release.
+#define ASSERT_ON_STRAND() \
+    assert(strand_.running_in_this_thread() && "PeerSet method called off-strand")
 
 namespace catl::peer_client {
 
@@ -144,6 +150,7 @@ PeerSet::update_endpoint_stats(PeerEndpointCache::Entry const& entry)
 void
 PeerSet::note_discovered(std::string const& endpoint)
 {
+    ASSERT_ON_STRAND();
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     stats.last_seen_at = now_unix();
@@ -161,6 +168,7 @@ PeerSet::note_discovered(std::string const& endpoint)
 void
 PeerSet::note_status(std::string const& endpoint, PeerStatus const& status)
 {
+    ASSERT_ON_STRAND();
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     stats.status = status;
@@ -181,6 +189,7 @@ PeerSet::note_connect_success(
     std::string const& endpoint,
     PeerStatus const& status)
 {
+    ASSERT_ON_STRAND();
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     auto const now = now_unix();
@@ -194,6 +203,7 @@ PeerSet::note_connect_success(
 void
 PeerSet::note_connect_failure(std::string const& endpoint)
 {
+    ASSERT_ON_STRAND();
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     stats.last_failure_at = now_unix();
@@ -408,6 +418,7 @@ PeerSet::sort_pending_crawls()
 void
 PeerSet::queue_connect(std::string const& endpoint)
 {
+    ASSERT_ON_STRAND();
     auto key = canonical_endpoint(endpoint);
     auto const now = std::chrono::steady_clock::now();
 
@@ -432,6 +443,7 @@ PeerSet::queue_connect(std::string const& endpoint)
 void
 PeerSet::queue_crawl(std::string const& endpoint)
 {
+    ASSERT_ON_STRAND();
     if (options_.max_in_flight_crawls == 0)
         return;
 
@@ -450,6 +462,7 @@ PeerSet::queue_crawl(std::string const& endpoint)
 void
 PeerSet::pump_connects()
 {
+    ASSERT_ON_STRAND();
     while (in_flight_.size() < options_.max_in_flight_connects &&
            !pending_connects_.empty())
     {
@@ -493,6 +506,7 @@ PeerSet::pump_connects()
 void
 PeerSet::pump_crawls()
 {
+    ASSERT_ON_STRAND();
     while (crawl_in_flight_.size() < options_.max_in_flight_crawls &&
            !pending_crawls_.empty())
     {
@@ -744,6 +758,11 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 
         co_await co_connect(
             io_, host, port, std::move(connect_opts), client);
+
+        // Re-hop to strand — co_connect resumes on whatever executor
+        // the signal timer uses, which may not be our strand.
+        co_await asio::post(strand_, asio::use_awaitable);
+
         connections_[key] = client;
         failed_at_.erase(key);
         note_connect_success(
@@ -1220,6 +1239,7 @@ PeerSet::at_connection_cap() const
 void
 PeerSet::remove_peer(std::string const& key)
 {
+    ASSERT_ON_STRAND();
     auto it = connections_.find(key);
     if (it != connections_.end())
     {
