@@ -5,6 +5,7 @@
 # peer-client instead.
 
 find_package(Protobuf REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 # ripple.proto is a local copy of lesser-peer's — they must stay in sync until
 # we consolidate to a shared proto target.
@@ -17,6 +18,7 @@ add_library(
   src/connection.cpp
   src/crypto-utils.cpp
   src/endpoint-tracker.cpp
+  src/peer-endpoint-cache.cpp
   src/peer-set.cpp
   src/tree-walk-state.cpp
   ${PROTO_SRCS}
@@ -40,6 +42,7 @@ target_link_libraries(
   # PRIVATE: implementation-only deps (crypto, protobuf, base58 encoding)
   PRIVATE libsodium::libsodium
           protobuf::libprotobuf
+          SQLite::SQLite3
           catl::base58
           catl::crypto)
 

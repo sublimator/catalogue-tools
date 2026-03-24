@@ -27,7 +27,7 @@ namespace http = beast::http;
 namespace ssl = asio::ssl;
 using tcp = asio::ip::tcp;
 
-LogPartition VlClient::log_("vl-client", LogLevel::DEBUG);
+LogPartition VlClient::log_("vl-client", LogLevel::INHERIT);
 
 //------------------------------------------------------------------------------
 // Helpers

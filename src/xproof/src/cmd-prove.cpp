@@ -12,6 +12,8 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 
@@ -27,6 +29,24 @@ write_file(std::string const& path, std::vector<uint8_t> const& data)
     out.close();
 }
 
+static std::string
+default_peer_cache_path()
+{
+#ifdef _WIN32
+    return {};
+#else
+    namespace fs = std::filesystem;
+    auto const* home = std::getenv("HOME");
+    if (!home || *home == '\0')
+    {
+        return {};
+    }
+
+    return (fs::path(home) / ".config" / "xproof" / "peer-endpoints.sqlite3")
+        .string();
+#endif
+}
+
 int
 cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
 {
@@ -39,6 +59,10 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
         return 1;
     }
 
+    auto peer_cache_path = opts.peer_cache_path.empty()
+        ? default_peer_cache_path()
+        : opts.peer_cache_path;
+
     boost::asio::io_context io;
     int result = 1;
 
@@ -46,7 +70,13 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
         io,
         [&]() -> boost::asio::awaitable<void> {
             auto build_result = co_await xproof::build_proof(
-                io, rpc_host, rpc_port, peer_host, peer_port, opts.tx_hash);
+                io,
+                rpc_host,
+                rpc_port,
+                peer_host,
+                peer_port,
+                peer_cache_path,
+                opts.tx_hash);
 
             // Write output files
             std::string json_path, bin_path;
@@ -91,8 +121,7 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
             PLOGI(log_, "Output:");
             if (!json_path.empty())
             {
-                PLOGI(
-                    log_, "  ", json_path, " (", json_size, " bytes)");
+                PLOGI(log_, "  ", json_path, " (", json_size, " bytes)");
             }
             if (!bin_path.empty())
             {

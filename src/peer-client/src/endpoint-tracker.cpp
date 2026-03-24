@@ -1,15 +1,25 @@
 #include <catl/peer-client/endpoint-tracker.h>
 
 #include <algorithm>
+#include <cctype>
 
 namespace catl::peer_client {
 
 void
 EndpointTracker::update(std::string const& endpoint, PeerStatus status)
 {
-    std::lock_guard lock(mutex_);
-    status.last_seen = std::chrono::steady_clock::now();
-    peers_[endpoint] = status;
+    StatusObserver observer;
+    {
+        std::lock_guard lock(mutex_);
+        status.last_seen = std::chrono::steady_clock::now();
+        peers_[endpoint] = status;
+        observer = status_observer_;
+    }
+
+    if (observer)
+    {
+        observer(endpoint, status);
+    }
 }
 
 void
@@ -106,13 +116,17 @@ EndpointTracker::size() const
 void
 EndpointTracker::add_discovered(std::string const& endpoint)
 {
-    std::lock_guard lock(mutex_);
-    // Only add if not already tracked
-    if (peers_.find(endpoint) == peers_.end())
+    DiscoveredObserver observer;
     {
-        PeerStatus s;
-        s.last_seen = std::chrono::steady_clock::now();
-        peers_[endpoint] = s;
+        std::lock_guard lock(mutex_);
+        auto& status = peers_[endpoint];
+        status.last_seen = std::chrono::steady_clock::now();
+        observer = discovered_observer_;
+    }
+
+    if (observer)
+    {
+        observer(endpoint);
     }
 }
 
@@ -135,11 +149,40 @@ EndpointTracker::undiscovered() const
     return result;
 }
 
+std::vector<std::string>
+EndpointTracker::all_endpoints() const
+{
+    std::lock_guard lock(mutex_);
+
+    std::vector<std::string> result;
+    result.reserve(peers_.size());
+    for (auto const& [endpoint, _] : peers_)
+    {
+        result.push_back(endpoint);
+    }
+
+    return result;
+}
+
 void
 EndpointTracker::clear()
 {
     std::lock_guard lock(mutex_);
     peers_.clear();
+}
+
+void
+EndpointTracker::set_discovered_observer(DiscoveredObserver observer)
+{
+    std::lock_guard lock(mutex_);
+    discovered_observer_ = std::move(observer);
+}
+
+void
+EndpointTracker::set_status_observer(StatusObserver observer)
+{
+    std::lock_guard lock(mutex_);
+    status_observer_ = std::move(observer);
 }
 
 bool
@@ -163,8 +206,8 @@ EndpointTracker::parse_endpoint(
             return false;
         try
         {
-            port = static_cast<uint16_t>(
-                std::stoul(endpoint.substr(close + 2)));
+            port =
+                static_cast<uint16_t>(std::stoul(endpoint.substr(close + 2)));
             return true;
         }
         catch (...)
@@ -173,12 +216,41 @@ EndpointTracker::parse_endpoint(
         }
     }
 
-    // Count colons — if more than one, it's bare IPv6 without port
+    // Count colons — if more than one, it may be IPv4-mapped IPv6 with an
+    // appended port (for example ::ffff:1.2.3.4:51235).
     auto colons = std::count(endpoint.begin(), endpoint.end(), ':');
     if (colons > 1)
     {
-        // Bare IPv6 without brackets — can't extract port
-        return false;
+        auto colon = endpoint.rfind(':');
+        if (colon == std::string::npos)
+            return false;
+
+        auto const port_part = endpoint.substr(colon + 1);
+        if (port_part.empty() ||
+            !std::all_of(
+                port_part.begin(), port_part.end(), [](unsigned char ch) {
+                    return std::isdigit(ch) != 0;
+                }))
+        {
+            return false;
+        }
+
+        host = endpoint.substr(0, colon);
+        if (host.find('.') == std::string::npos)
+        {
+            // Still looks like a bare IPv6 literal without bracket notation.
+            return false;
+        }
+
+        try
+        {
+            port = static_cast<uint16_t>(std::stoul(port_part));
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
     }
 
     // IPv4 or hostname: host:port

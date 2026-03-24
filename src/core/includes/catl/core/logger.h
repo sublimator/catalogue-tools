@@ -8,6 +8,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <algorithm>
 #include <ranges>
@@ -62,6 +63,8 @@ enum class LogLevel {
     DEBUG = 3,
     TRACE = 4
 };
+
+class LogPartition;
 
 class Logger
 {
@@ -132,6 +135,9 @@ private:
     }
 
 public:
+    static bool
+    try_parse_level(std::string_view level, LogLevel& out_level);
+
     static void
     set_level(LogLevel level);
 
@@ -160,6 +166,22 @@ public:
     // Use relative timestamps from program start instead of wall clock
     static void
     set_relative_time(bool enabled);
+
+    // Partition registry helpers.
+    static bool
+    set_partition_level(std::string_view name, LogLevel level);
+
+    static bool
+    set_partition_level(std::string_view name, std::string_view level);
+
+    static std::size_t
+    set_partition_prefix_level(std::string_view prefix, LogLevel level);
+
+    static std::size_t
+    set_partition_prefix_level(std::string_view prefix, std::string_view level);
+
+    static std::vector<std::string>
+    partition_names();
 
     // Log with efficient formatting using variadic templates
     template <typename... Args>
@@ -261,6 +283,15 @@ public:
             : (output_stream_ ? *output_stream_ : std::cout);
         out << oss.str() << std::endl;
     }
+
+private:
+    friend class LogPartition;
+
+    static void
+    register_partition(LogPartition* partition);
+
+    static void
+    unregister_partition(LogPartition* partition);
 };
 
 // Update your detection approach
@@ -333,7 +364,20 @@ public:
     LogPartition(const std::string& name, LogLevel level = LogLevel::INHERIT)
         : name_(name), level_(level)
     {
+        Logger::register_partition(this);
     }
+
+    ~LogPartition()
+    {
+        Logger::unregister_partition(this);
+    }
+
+    LogPartition(LogPartition const&) = delete;
+    LogPartition&
+    operator=(LogPartition const&) = delete;
+    LogPartition(LogPartition&&) = delete;
+    LogPartition&
+    operator=(LogPartition&&) = delete;
 
     const std::string&
     name() const
@@ -344,32 +388,34 @@ public:
     LogLevel
     level() const
     {
-        return (level_ == LogLevel::INHERIT) ? Logger::get_level() : level_;
+        auto configured = level_.load(std::memory_order_relaxed);
+        return (configured == LogLevel::INHERIT) ? Logger::get_level()
+                                                 : configured;
     }
 
     void
     set_level(LogLevel level)
     {
-        level_ = level;
+        level_.store(level, std::memory_order_relaxed);
     }
 
     // Convenience methods for enabling/disabling
     void
     enable(LogLevel level = LogLevel::DEBUG)
     {
-        level_ = level;
+        level_.store(level, std::memory_order_relaxed);
     }
 
     void
     disable()
     {
-        level_ = LogLevel::NONE;
+        level_.store(LogLevel::NONE, std::memory_order_relaxed);
     }
 
     void
     inherit()
     {
-        level_ = LogLevel::INHERIT;
+        level_.store(LogLevel::INHERIT, std::memory_order_relaxed);
     }
 
     bool
@@ -399,7 +445,7 @@ public:
 
 private:
     std::string name_;
-    LogLevel level_;
+    std::atomic<LogLevel> level_;
 };
 
 // Super concise class-aware logging macros

@@ -18,7 +18,7 @@ namespace http = beast::http;
 namespace ssl = asio::ssl;
 using tcp = asio::ip::tcp;
 
-LogPartition RpcClient::log_("rpc-client", LogLevel::DEBUG);
+LogPartition RpcClient::log_("rpc-client", LogLevel::INHERIT);
 
 RpcClient::RpcClient(asio::io_context& io, std::string host, uint16_t port)
     : io_(io), host_(std::move(host)), port_(port)

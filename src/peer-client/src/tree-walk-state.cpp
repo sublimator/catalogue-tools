@@ -3,7 +3,7 @@
 
 namespace catl::peer_client {
 
-LogPartition TreeWalkState::log_("tree-walk", LogLevel::DEBUG);
+LogPartition TreeWalkState::log_("tree-walk", LogLevel::INHERIT);
 
 TreeWalkState::TreeWalkState(TreeType type) : type_(type)
 {

@@ -27,6 +27,7 @@ struct ProveOptions
 {
     std::string rpc_endpoint = DEFAULT_RPC;
     std::string peer_endpoint = DEFAULT_PEER;
+    std::string peer_cache_path;
     std::string tx_hash;
     bool binary = false;
     bool compress = false;

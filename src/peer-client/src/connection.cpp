@@ -12,7 +12,7 @@
 
 namespace catl::peer_client {
 
-static LogPartition log_("peer-conn", LogLevel::INFO);
+static LogPartition log_("peer-conn", LogLevel::INHERIT);
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -336,24 +336,76 @@ peer_connection::handle_http_response(const connection_handler& handler)
 {
     if (http_response_.result() != http::status::switching_protocols)
     {
-        PLOGE(log_, 
-            "[", config_.host, ":", config_.port, "] ",
-            "HTTP upgrade failed with status: ",
-            static_cast<int>(http_response_.result()));
+        auto const status = http_response_.result();
+        auto const routine_http_response =
+            status == http::status::service_unavailable ||
+            status == http::status::bad_request;
+        auto const status_code = static_cast<int>(status);
+
+        if (routine_http_response)
+        {
+            PLOGD(
+                log_,
+                "[",
+                config_.host,
+                ":",
+                config_.port,
+                "] HTTP upgrade returned status: ",
+                status_code);
+        }
+        else
+        {
+            PLOGE(
+                log_,
+                "[",
+                config_.host,
+                ":",
+                config_.port,
+                "] HTTP upgrade failed with status: ",
+                status_code);
+        }
 
         // Log response headers — may contain redirect or error info
         for (auto const& field : http_response_)
         {
-            PLOGI(log_, 
-                "[", config_.host, ":", config_.port, "]   ",
-                field.name_string(), ": ", field.value());
+            if (routine_http_response)
+            {
+                PLOGT(
+                    log_,
+                    "[",
+                    config_.host,
+                    ":",
+                    config_.port,
+                    "]   ",
+                    field.name_string(),
+                    ": ",
+                    field.value());
+            }
+            else
+            {
+                PLOGD(
+                    log_,
+                    "[",
+                    config_.host,
+                    ":",
+                    config_.port,
+                    "]   ",
+                    field.name_string(),
+                    ": ",
+                    field.value());
+            }
         }
 
         // Parse body — 503 responses include {"peer-ips": [...]} redirects
         if (!http_response_.body().empty())
         {
-            PLOGD(log_,
-                "[", config_.host, ":", config_.port, "]   body: ",
+            PLOGD(
+                log_,
+                "[",
+                config_.host,
+                ":",
+                config_.port,
+                "]   body: ",
                 http_response_.body());
 
             try
@@ -366,9 +418,15 @@ peer_connection::handle_http_response(const connection_handler& handler)
                     {
                         redirect_ips_.insert(std::string(ip.as_string()));
                     }
-                    PLOGI(log_,
-                        "[", config_.host, ":", config_.port, "] ",
-                        "503 redirect: ", redirect_ips_.size(), " peer-ips");
+                    PLOGD(
+                        log_,
+                        "[",
+                        config_.host,
+                        ":",
+                        config_.port,
+                        "] 503 redirect: ",
+                        redirect_ips_.size(),
+                        " peer-ips");
                 }
             }
             catch (...)
@@ -474,7 +532,7 @@ peer_connection::async_read_header()
             boost::system::error_code ec, std::size_t bytes_transferred) {
             if (!ec)
             {
-                PLOGD(log_, "Read header: ", bytes_transferred, " bytes");
+                PLOGT(log_, "Read header: ", bytes_transferred, " bytes");
             }
             self->handle_read_header(ec, bytes_transferred);
         });
@@ -488,7 +546,13 @@ peer_connection::handle_read_header(
     if (ec)
     {
         // Log exact error code for debugging disconnects
-        PLOGE(log_, "Error reading header: ", ec.message(), " (val=", ec.value(), ")");
+        PLOGE(
+            log_,
+            "Error reading header: ",
+            ec.message(),
+            " (val=",
+            ec.value(),
+            ")");
 
         if (ec != asio::error::operation_aborted)
         {
@@ -513,14 +577,16 @@ peer_connection::handle_read_header(
 
     if (current_header_.compressed)
     {
-        PLOGD(log_, 
+        PLOGT(
+            log_,
             "Compressed packet detected, need to read additional header bytes");
     }
 
     current_header_.payload_size = payload_size;
     current_header_.type = (header_buffer_[4] << 8) | header_buffer_[5];
 
-    PLOGD(log_, 
+    PLOGT(
+        log_,
         "Header parsed: type=",
         current_header_.type,
         " payload_size=",
@@ -538,7 +604,8 @@ peer_connection::handle_read_header(
                 boost::system::error_code ec, std::size_t) {
                 if (ec)
                 {
-                    PLOGE(log_, 
+                    PLOGE(
+                        log_,
                         "Error reading compressed header extension: ",
                         ec.message());
                     if (ec != asio::error::operation_aborted)
@@ -599,8 +666,13 @@ peer_connection::handle_read_payload(
 {
     if (ec)
     {
-        PLOGE(log_, 
-            "Error reading payload: ", ec.message(), " (val=", ec.value(), ")");
+        PLOGE(
+            log_,
+            "Error reading payload: ",
+            ec.message(),
+            " (val=",
+            ec.value(),
+            ")");
         // Check if it's EOF or connection closed
         if (ec != asio::error::operation_aborted)
         {
@@ -614,7 +686,8 @@ peer_connection::handle_read_payload(
         return;
     }
 
-    PLOGD(log_, 
+    PLOGT(
+        log_,
         "Read payload: ",
         bytes_read,
         " bytes for packet type ",
@@ -759,7 +832,8 @@ peer_connection::send_transaction_query(
     // Only log if not in query mode
     if (!tx_hash.empty())
     {
-        PLOGD(log_, 
+        PLOGD(
+            log_,
             "Sending query for tx ",
             tx_hash.substr(0, 16),
             "... with seq=",
@@ -788,7 +862,11 @@ peer_connection::send_transaction_query(
             }
         }
         query.set_ledgerhash(ledger_bytes.data(), ledger_bytes.size());
-        PLOGD(log_, "  Including ledger hash: ", ledger_hash.substr(0, 16), "...");
+        PLOGD(
+            log_,
+            "  Including ledger hash: ",
+            ledger_hash.substr(0, 16),
+            "...");
     }
 
     // Add the transaction hash to query
@@ -812,7 +890,8 @@ peer_connection::send_transaction_query(
         [tx_hash, seq](boost::system::error_code ec) {
             if (ec)
             {
-                PLOGE(log_, 
+                PLOGE(
+                    log_,
                     "Failed to send query for tx ",
                     tx_hash.substr(0, 16),
                     "... (seq=",
@@ -822,7 +901,8 @@ peer_connection::send_transaction_query(
             }
             else
             {
-                PLOGD(log_, 
+                PLOGD(
+                    log_,
                     "Successfully sent query for tx ",
                     tx_hash.substr(0, 16),
                     "... (seq=",
@@ -872,7 +952,8 @@ peer_connection::send_transaction_query(
             [tx_hash, seq2](boost::system::error_code ec) {
                 if (ec)
                 {
-                    PLOGE(log_, 
+                    PLOGE(
+                        log_,
                         "Failed to send node query for tx ",
                         tx_hash.substr(0, 16),
                         "... (seq=",
@@ -882,7 +963,8 @@ peer_connection::send_transaction_query(
                 }
                 else
                 {
-                    PLOGD(log_, 
+                    PLOGD(
+                        log_,
                         "Successfully sent node query for tx ",
                         tx_hash.substr(0, 16),
                         "... (seq=",
@@ -930,7 +1012,8 @@ peer_connection::request_transaction_set(const std::string& tx_set_hash)
     root_node_id += '\0';                // depth = 0 (root)
     *(request.add_nodeids()) = root_node_id;
 
-    PLOGI(log_, "Requesting transaction set: ", tx_set_hash.substr(0, 16), "...");
+    PLOGI(
+        log_, "Requesting transaction set: ", tx_set_hash.substr(0, 16), "...");
     PLOGI(log_, "  Full hash: ", tx_set_hash);
     PLOGI(log_, "  Using itype=", protocol::liTS_CANDIDATE, " (TS_CANDIDATE)");
     PLOGI(log_, "  Query depth: 3");
@@ -944,8 +1027,13 @@ peer_connection::request_transaction_set(const std::string& tx_set_hash)
         return;
     }
 
-    PLOGI(log_, "Requesting transaction set: ", tx_set_hash.substr(0, 16), "...");
-    PLOGI(log_, "  itype=", protocol::liTS_CANDIDATE, " querydepth=3 root_node=yes");
+    PLOGI(
+        log_, "Requesting transaction set: ", tx_set_hash.substr(0, 16), "...");
+    PLOGI(
+        log_,
+        "  itype=",
+        protocol::liTS_CANDIDATE,
+        " querydepth=3 root_node=yes");
 
     // Send the request
     async_send_packet(
@@ -954,7 +1042,8 @@ peer_connection::request_transaction_set(const std::string& tx_set_hash)
         [tx_set_hash](boost::system::error_code ec) {
             if (ec)
             {
-                PLOGE(log_, 
+                PLOGE(
+                    log_,
                     "Failed to request transaction set ",
                     tx_set_hash.substr(0, 16),
                     "...: ",
@@ -962,7 +1051,8 @@ peer_connection::request_transaction_set(const std::string& tx_set_hash)
             }
             else
             {
-                PLOGD(log_, 
+                PLOGD(
+                    log_,
                     "Successfully requested transaction set ",
                     tx_set_hash.substr(0, 16),
                     "...");
@@ -983,7 +1073,8 @@ peer_connection::request_transaction_set_nodes(
 
     if (node_ids_wire.empty())
     {
-        PLOGW(log_, "request_transaction_set_nodes called with empty node list");
+        PLOGW(
+            log_, "request_transaction_set_nodes called with empty node list");
         return;
     }
 
@@ -1012,7 +1103,8 @@ peer_connection::request_transaction_set_nodes(
         *(request.add_nodeids()) = node_id_wire;
     }
 
-    PLOGD(log_, 
+    PLOGD(
+        log_,
         "Requesting ",
         node_ids_wire.size(),
         " nodes from tx set ",
@@ -1033,7 +1125,10 @@ peer_connection::request_transaction_set_nodes(
         [](boost::system::error_code ec) {
             if (ec)
             {
-                PLOGE(log_, "Failed to request transaction set nodes: ", ec.message());
+                PLOGE(
+                    log_,
+                    "Failed to request transaction set nodes: ",
+                    ec.message());
             }
         });
 }

@@ -8,11 +8,12 @@
 //
 // Usage:
 //   EndpointTracker tracker;
-//   tracker.update("s1.ripple.com:51235", {.first_seq = 32570, .last_seq = 103000000});
-//   auto peer = tracker.best_peer_for(99000000);
+//   tracker.update("s1.ripple.com:51235", {.first_seq = 32570, .last_seq =
+//   103000000}); auto peer = tracker.best_peer_for(99000000);
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -23,15 +24,19 @@ namespace catl::peer_client {
 
 struct PeerStatus
 {
-    uint32_t first_seq = 0;   // from TMStatusChange.firstSeq
-    uint32_t last_seq = 0;    // from TMStatusChange.lastSeq
-    uint32_t current_seq = 0; // from TMStatusChange.ledgerSeq
+    uint32_t first_seq = 0;    // from TMStatusChange.firstSeq
+    uint32_t last_seq = 0;     // from TMStatusChange.lastSeq
+    uint32_t current_seq = 0;  // from TMStatusChange.ledgerSeq
     std::chrono::steady_clock::time_point last_seen;
 };
 
 class EndpointTracker
 {
 public:
+    using DiscoveredObserver = std::function<void(std::string const& endpoint)>;
+    using StatusObserver = std::function<
+        void(std::string const& endpoint, PeerStatus const& status)>;
+
     /// Update a peer's status. Called from TMStatusChange handler.
     void
     update(std::string const& endpoint, PeerStatus status);
@@ -71,6 +76,11 @@ public:
     std::vector<std::string>
     undiscovered() const;
 
+    /// Get every known endpoint, including cached/discovered ones whose
+    /// ledger range is still unknown.
+    std::vector<std::string>
+    all_endpoints() const;
+
     /// Clear all tracked peers.
     void
     clear();
@@ -84,9 +94,17 @@ public:
         std::string& host,
         uint16_t& port);
 
+    void
+    set_discovered_observer(DiscoveredObserver observer);
+
+    void
+    set_status_observer(StatusObserver observer);
+
 private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, PeerStatus> peers_;
+    DiscoveredObserver discovered_observer_;
+    StatusObserver status_observer_;
 };
 
 }  // namespace catl::peer_client

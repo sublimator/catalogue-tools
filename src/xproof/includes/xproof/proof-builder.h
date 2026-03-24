@@ -32,6 +32,7 @@ build_proof(
     uint16_t rpc_port,
     std::string const& peer_host,
     uint16_t peer_port,
+    std::string const& peer_cache_path,
     std::string const& tx_hash_str);
 
 }  // namespace xproof

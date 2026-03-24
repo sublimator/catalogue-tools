@@ -110,6 +110,7 @@ build_proof(
     uint16_t rpc_port,
     std::string const& peer_host,
     uint16_t peer_port,
+    std::string const& peer_cache_path,
     std::string const& tx_hash_str)
 {
     auto tx_hash = hash_from_hex(tx_hash_str);
@@ -241,38 +242,49 @@ build_proof(
     }
 
     // ── Step 2: Peer — connect and collect validations ──
-    PeerSet peers(io);
+    PeerSetOptions peer_options;
+    peer_options.endpoint_cache_path = peer_cache_path;
+    auto peers = PeerSet::create(io, peer_options);
+    peers->prioritize_ledger(tx_ledger_seq);
 
     ValidationCollector val_collector(protocol);
-    peers.set_unsolicited_handler(
+    peers->set_unsolicited_handler(
         [&val_collector](uint16_t type, std::vector<uint8_t> const& data) {
             val_collector.on_packet(type, data);
         });
 
     // Try to connect to the specified peer — may fail (503 etc)
     // but redirect IPs get fed into the tracker automatically.
-    auto initial_client = co_await peers.try_connect(peer_host, peer_port);
+    auto initial_client = co_await peers->try_connect(peer_host, peer_port);
     if (initial_client)
     {
         PLOGI(
             log_,
             "Connected to peer, peer at ledger ",
             initial_client->peer_ledger_seq());
+        PLOGI(
+            log_,
+            "Bootstrapping archival peers in background for ledger ",
+            tx_ledger_seq);
+        peers->bootstrap();
     }
     else
     {
         PLOGW(
             log_,
             "Initial peer ",
-            peer_host, ":", peer_port,
+            peer_host,
+            ":",
+            peer_port,
             " failed — bootstrapping...");
-        co_await peers.bootstrap();
-        initial_client = peers.any_peer();
-        if (!initial_client)
+        peers->bootstrap();
+        auto found_peer = co_await peers->wait_for_any_peer();
+        if (!found_peer)
         {
             throw std::runtime_error(
                 "No peers available. Check network connectivity.");
         }
+        initial_client = *found_peer;
     }
     auto client = initial_client;
     PLOGI(log_, "Listening for validations...");
@@ -360,23 +372,20 @@ build_proof(
         "...");
 
     // ── Step 2b: Find a peer with the target ledger range ──
-    if (auto p = peers.peer_for(tx_ledger_seq))
+    if (auto p = peers->peer_for(tx_ledger_seq))
     {
         client = *p;
     }
     else
     {
         PLOGI(
-            log_,
-            "No peer has ledger ",
-            tx_ledger_seq,
-            " — bootstrapping...");
-        co_await peers.bootstrap();
+            log_, "No peer has ledger ", tx_ledger_seq, " — bootstrapping...");
+        peers->bootstrap();
 
         // Loop until we find one — Ctrl-C to cancel
         while (true)
         {
-            auto found = co_await peers.wait_for_peer(tx_ledger_seq);
+            auto found = co_await peers->wait_for_peer(tx_ledger_seq);
             if (found)
             {
                 client = *found;

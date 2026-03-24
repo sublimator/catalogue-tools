@@ -5,7 +5,7 @@
 
 namespace catl::peer_client {
 
-LogPartition PeerClient::log_("peer-client", LogLevel::DEBUG);
+LogPartition PeerClient::log_("peer-client", LogLevel::INHERIT);
 
 // ═══════════════════════════════════════════════════════════════════════
 // Canonical key computation
@@ -565,10 +565,12 @@ PeerClient::connect(
     std::string const& host,
     uint16_t port,
     uint32_t network_id,
-    ReadyCallback on_ready)
+    ReadyCallback on_ready,
+    ConnectCompletionCallback on_complete)
 {
     auto client = std::shared_ptr<PeerClient>(new PeerClient(io_context));
-    client->do_connect(host, port, network_id, std::move(on_ready));
+    client->do_connect(
+        host, port, network_id, std::move(on_ready), std::move(on_complete));
     return client;
 }
 
@@ -577,10 +579,12 @@ PeerClient::do_connect(
     std::string const& host,
     uint16_t port,
     uint32_t network_id,
-    ReadyCallback on_ready)
+    ReadyCallback on_ready,
+    ConnectCompletionCallback on_complete)
 {
     state_ = State::Connecting;
     endpoint_str_ = host + ":" + std::to_string(port);
+    connect_completion_callback_ = std::move(on_complete);
 
     ssl_context_ =
         std::make_unique<asio::ssl::context>(asio::ssl::context::tlsv12);
@@ -601,19 +605,76 @@ PeerClient::do_connect(
     PLOGI(log_, "Connecting to ", host, ":", port, "...");
 
     auto self = shared_from_this();
+    connection_->set_disconnect_handler([self](boost::system::error_code ec) {
+        if (self->state_ == State::Ready || self->state_ == State::Failed)
+        {
+            return;
+        }
+
+        if (ec == boost::asio::error::invalid_argument ||
+            ec == boost::asio::error::operation_aborted)
+        {
+            PLOGD(
+                PeerClient::log_,
+                "[",
+                self->endpoint_str_,
+                "] Connection lost before ready: ",
+                ec.message());
+        }
+        else
+        {
+            PLOGE(
+                PeerClient::log_,
+                "[",
+                self->endpoint_str_,
+                "] Connection lost before ready: ",
+                ec.message());
+        }
+        self->state_ = State::Failed;
+        self->complete_connect(ec);
+    });
+
     connection_->async_connect([self, on_ready = std::move(on_ready)](
                                    boost::system::error_code ec) mutable {
         if (ec)
         {
-            PLOGE(
-                PeerClient::log_,
-                "[", self->endpoint_str_, "] Connection failed: ",
-                ec.message());
+            if (ec == boost::asio::error::invalid_argument ||
+                ec == boost::asio::error::operation_aborted)
+            {
+                PLOGD(
+                    PeerClient::log_,
+                    "[",
+                    self->endpoint_str_,
+                    "] Connection failed: ",
+                    ec.message());
+            }
+            else
+            {
+                PLOGE(
+                    PeerClient::log_,
+                    "[",
+                    self->endpoint_str_,
+                    "] Connection failed: ",
+                    ec.message());
+            }
             self->state_ = State::Failed;
+            self->complete_connect(ec);
             return;
         }
         self->on_connected(std::move(on_ready));
     });
+}
+
+void
+PeerClient::complete_connect(boost::system::error_code ec)
+{
+    if (!connect_completion_callback_)
+    {
+        return;
+    }
+
+    auto cb = std::move(connect_completion_callback_);
+    cb(ec, peer_ledger_seq_.load());
 }
 
 void
@@ -664,8 +725,7 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
     {
         peer_ledger_seq_ = status.ledgerseq();
         PLOGT(
-            log_,
-            "[", endpoint_str_, "] at ledger ", peer_ledger_seq_.load());
+            log_, "[", endpoint_str_, "] at ledger ", peer_ledger_seq_.load());
     }
 
     if (status.has_firstseq() && status.has_lastseq())
@@ -687,7 +747,9 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
             {
                 PLOGI(
                     log_,
-                    "[", endpoint_str_, "] range: ",
+                    "[",
+                    endpoint_str_,
+                    "] range: ",
                     peer_first_seq_,
                     " - ",
                     peer_last_seq_);
@@ -696,7 +758,9 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
             {
                 PLOGD(
                     log_,
-                    "[", endpoint_str_, "] range: ",
+                    "[",
+                    endpoint_str_,
+                    "] range: ",
                     peer_first_seq_,
                     " - ",
                     peer_last_seq_);
@@ -758,9 +822,13 @@ PeerClient::handle_endpoints(std::vector<uint8_t> const& payload)
         tracker_->add_discovered(addr);
         PLOGD(
             log_,
-            "[", endpoint_str_, "] TMEndpoints: ",
+            "[",
+            endpoint_str_,
+            "] TMEndpoints: ",
             addr,
-            " (hops=", ep.hops(), ")");
+            " (hops=",
+            ep.hops(),
+            ")");
         added++;
     }
 
@@ -768,8 +836,11 @@ PeerClient::handle_endpoints(std::vector<uint8_t> const& payload)
     {
         PLOGI(
             log_,
-            "[", endpoint_str_, "] discovered ",
-            added, " peer endpoints");
+            "[",
+            endpoint_str_,
+            "] discovered ",
+            added,
+            " peer endpoints");
     }
 }
 
@@ -788,6 +859,8 @@ PeerClient::become_ready()
         cb(peer_ledger_seq_);
         PLOGD(log_, "become_ready: ready_callback_ returned");
     }
+
+    complete_connect({});
 }
 
 // ═══════════════════════════════════════════════════════════════════════

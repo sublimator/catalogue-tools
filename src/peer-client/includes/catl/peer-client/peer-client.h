@@ -28,6 +28,10 @@ using Callback = std::function<void(Error, T)>;
 /// Called when the client becomes ready (status exchange complete)
 using ReadyCallback = std::function<void(uint32_t peer_ledger_seq)>;
 
+/// Called exactly once when initial setup either becomes ready or fails.
+using ConnectCompletionCallback =
+    std::function<void(boost::system::error_code, uint32_t peer_ledger_seq)>;
+
 /// Called for messages PeerClient doesn't handle internally
 using UnsolicitedHandler =
     std::function<void(uint16_t type, std::vector<uint8_t> const& data)>;
@@ -112,7 +116,8 @@ public:
         std::string const& host,
         uint16_t port,
         uint32_t network_id = 0,
-        ReadyCallback on_ready = nullptr);
+        ReadyCallback on_ready = nullptr,
+        ConnectCompletionCallback on_complete = nullptr);
 
     ~PeerClient();
 
@@ -255,10 +260,14 @@ private:
         std::string const& host,
         uint16_t port,
         uint32_t network_id,
-        ReadyCallback on_ready);
+        ReadyCallback on_ready,
+        ConnectCompletionCallback on_complete);
 
     void
     on_connected(ReadyCallback on_ready);
+
+    void
+    complete_connect(boost::system::error_code ec);
 
     void
     send_monitoring_status();
@@ -401,6 +410,7 @@ private:
     std::shared_ptr<peer_connection> connection_;
     UnsolicitedHandler unsolicited_handler_;
     ReadyCallback ready_callback_;
+    ConnectCompletionCallback connect_completion_callback_;
 
     std::atomic<State> state_{State::Disconnected};
     std::atomic<uint32_t> peer_ledger_seq_{0};

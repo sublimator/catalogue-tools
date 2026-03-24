@@ -3,26 +3,30 @@
 // PeerSet — manages multiple peer connections with ledger range awareness.
 //
 // Wraps EndpointTracker (knows ranges) with live PeerClient connections.
-// peer_for(ledger_seq) returns a connected peer that has the requested
-// ledger, connecting on demand if needed.
+// bootstrap() and try_undiscovered() launch background connection attempts,
+// while wait_for_any_peer()/wait_for_peer() wait for usable results.
 //
-// Usage:
-//   PeerSet peers(io);
-//   co_await peers.add("s1.ripple.com", 51235);  // connect + learn range
-//   auto client = co_await peers.peer_for(103053705);
-//   auto hdr = co_await co_get_ledger_header(client, 103053705);
+// The intended xproof usage is single-threaded on one io_context. Detached
+// connect coroutines keep PeerSet alive by capturing shared_ptr<PeerSet>.
 
 #include "endpoint-tracker.h"
 #include "peer-client.h"
+#include "peer-endpoint-cache.h"
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <chrono>
+#include <cstddef>
 #include <map>
 #include <memory>
+#include <optional>
+#include <set>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace catl::peer_client {
 
@@ -37,10 +41,31 @@ struct BootstrapPeer
 std::vector<BootstrapPeer> const&
 get_bootstrap_peers(uint32_t network_id);
 
-class PeerSet
+struct PeerSetOptions
+{
+    uint32_t network_id = 0;
+    std::string endpoint_cache_path;
+    std::size_t cached_endpoint_limit = 64;
+    std::size_t max_in_flight_connects = 8;
+    std::chrono::seconds retry_backoff{5};
+};
+
+class PeerSet : public std::enable_shared_from_this<PeerSet>
 {
 public:
-    explicit PeerSet(boost::asio::io_context& io, uint32_t network_id = 0);
+    static std::shared_ptr<PeerSet>
+    create(boost::asio::io_context& io, PeerSetOptions const& options = {})
+    {
+        return std::shared_ptr<PeerSet>(new PeerSet(io, options));
+    }
+
+    static std::shared_ptr<PeerSet>
+    create(boost::asio::io_context& io, uint32_t network_id)
+    {
+        PeerSetOptions options;
+        options.network_id = network_id;
+        return create(io, options);
+    }
 
     /// The shared tracker — peers feed it via TMStatusChange.
     std::shared_ptr<EndpointTracker>
@@ -49,68 +74,145 @@ public:
         return tracker_;
     }
 
-    /// Connect to a peer and add it to the set.
-    /// Returns the PeerClient once ready.
+    /// Connect to a peer and add it to the set (awaitable).
     boost::asio::awaitable<std::shared_ptr<PeerClient>>
     add(std::string const& host, uint16_t port);
 
-    /// Connect to all bootstrap peers for the configured network.
-    /// Connects in parallel, waits for all to complete (or fail).
-    /// Returns number of successful connections.
-    boost::asio::awaitable<int>
+    /// Start connecting to all bootstrap peers in parallel.
+    /// Returns immediately — connections complete in background.
+    void
     bootstrap();
 
-    /// Get a connected peer that has the given ledger sequence.
-    /// Checks existing connections only. Returns nullopt if none found.
+    /// Start connecting to all undiscovered tracker endpoints in parallel.
+    /// Deduplicates against in-flight and completed connections.
+    void
+    try_undiscovered();
+
+    /// Set the current target ledger so queued peers are ranked toward the
+    /// most promising archival candidates first.
+    void
+    prioritize_ledger(uint32_t ledger_seq);
+
+    /// Synchronous check: any connected peer with this ledger?
     std::optional<std::shared_ptr<PeerClient>>
     peer_for(uint32_t ledger_seq) const;
 
-    /// Wait until a peer with the given ledger sequence is available.
-    /// Polls existing connections every second. New connections may
-    /// appear from bootstrap() or TMEndpoints gossip in the background.
-    /// Returns nullopt on timeout.
+    /// Wait until any ready peer is available.
+    boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+    wait_for_any_peer(int timeout_secs = 15);
+
+    /// Wait until a peer with the given ledger is available.
     boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
     wait_for_peer(uint32_t ledger_seq, int timeout_secs = 300);
 
-    /// Get any ready peer (e.g. for current-ledger operations).
+    /// Get any ready peer.
     std::shared_ptr<PeerClient>
     any_peer() const;
 
-    /// Number of active connections.
     size_t
     size() const
     {
         return connections_.size();
     }
 
-    /// Set an unsolicited handler on ALL current and future connections.
     void
     set_unsolicited_handler(UnsolicitedHandler handler)
     {
         unsolicited_handler_ = std::move(handler);
         for (auto& [_, client] : connections_)
         {
-            client->set_unsolicited_handler(unsolicited_handler_);
+            if (client)
+            {
+                client->set_unsolicited_handler(unsolicited_handler_);
+            }
         }
     }
 
     /// Try to connect to an endpoint. Returns nullptr on failure.
-    /// Redirect IPs from 503 responses are fed into the tracker.
+    /// Redirect IPs from 503 are fed into the tracker + tried immediately.
     boost::asio::awaitable<std::shared_ptr<PeerClient>>
     try_connect(std::string const& host, uint16_t port);
 
 private:
-    boost::asio::io_context& io_;
-    uint32_t network_id_;
-    std::shared_ptr<EndpointTracker> tracker_;
-    std::map<std::string, std::shared_ptr<PeerClient>> connections_;
-    UnsolicitedHandler unsolicited_handler_;
+    PeerSet(boost::asio::io_context& io, PeerSetOptions const& options);
+
+    /// Schedule a background connect attempt (deduped, fire-and-forget).
+    void
+    start_connect(std::string const& host, uint16_t port);
+
+    void
+    start_connect(std::string const& endpoint);
+
+    void
+    queue_connect(std::string const& endpoint);
+
+    void
+    pump_connects();
+
+    void
+    sort_pending_connects();
+
+    void
+    load_cached_endpoints();
+
+    void
+    configure_tracker_persistence();
+
+    void
+    start_tracked_endpoints();
+
+    void
+    try_candidates_for(uint32_t ledger_seq);
+
+    void
+    update_endpoint_stats(PeerEndpointCache::Entry const& entry);
+
+    void
+    note_discovered(std::string const& endpoint);
+
+    void
+    note_status(std::string const& endpoint, PeerStatus const& status);
+
+    void
+    note_connect_success(std::string const& endpoint, PeerStatus const& status);
+
+    void
+    note_connect_failure(std::string const& endpoint);
+
+    bool
+    candidate_better(std::string const& lhs, std::string const& rhs) const;
+
+    static std::int64_t
+    now_unix();
 
     static std::string
     make_key(std::string const& host, uint16_t port)
     {
         return host + ":" + std::to_string(port);
     }
+
+    boost::asio::io_context& io_;
+    PeerSetOptions options_;
+    uint32_t network_id_;
+    std::shared_ptr<EndpointTracker> tracker_;
+    std::shared_ptr<PeerEndpointCache> endpoint_cache_;
+    struct EndpointStats
+    {
+        PeerStatus status;
+        std::int64_t last_seen_at = 0;
+        std::int64_t last_success_at = 0;
+        std::int64_t last_failure_at = 0;
+        std::uint64_t success_count = 0;
+        std::uint64_t failure_count = 0;
+    };
+    std::unordered_map<std::string, EndpointStats> endpoint_stats_;
+    std::map<std::string, std::shared_ptr<PeerClient>> connections_;
+    std::map<std::string, std::chrono::steady_clock::time_point> failed_at_;
+    std::set<std::string> in_flight_;  // currently connecting
+    std::set<std::string> queued_;
+    std::vector<std::string> pending_connects_;
+    std::optional<uint32_t> preferred_ledger_seq_;
+    UnsolicitedHandler unsolicited_handler_;
 };
 
 }  // namespace catl::peer_client

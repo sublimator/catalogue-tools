@@ -1,14 +1,32 @@
-#include <catl/peer-client/peer-set.h>
 #include <catl/peer-client/peer-client-coro.h>
+#include <catl/peer-client/peer-set.h>
 
 #include <catl/core/logger.h>
 
+#include <algorithm>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <limits>
 
 namespace catl::peer_client {
 
-static LogPartition log_("peer-set", LogLevel::INFO);
+static LogPartition log_("peer-set", LogLevel::INHERIT);
+
+namespace {
+
+std::string
+canonical_endpoint(std::string const& endpoint)
+{
+    std::string host;
+    uint16_t port = 0;
+    if (EndpointTracker::parse_endpoint(endpoint, host, port))
+    {
+        return host + ":" + std::to_string(port);
+    }
+    return endpoint;
+}
+
+}  // namespace
 
 // ── Bootstrap peers by network ──────────────────────────────────
 
@@ -41,11 +59,350 @@ get_bootstrap_peers(uint32_t network_id)
 
 // ── PeerSet ─────────────────────────────────────────────────────
 
-PeerSet::PeerSet(boost::asio::io_context& io, uint32_t network_id)
+PeerSet::PeerSet(boost::asio::io_context& io, PeerSetOptions const& options)
     : io_(io)
-    , network_id_(network_id)
+    , options_(options)
+    , network_id_(options.network_id)
     , tracker_(std::make_shared<EndpointTracker>())
 {
+    if (!options_.endpoint_cache_path.empty())
+    {
+        try
+        {
+            endpoint_cache_ =
+                PeerEndpointCache::open(options_.endpoint_cache_path);
+            load_cached_endpoints();
+        }
+        catch (std::exception const& e)
+        {
+            PLOGW(
+                log_,
+                "Peer cache disabled (",
+                options_.endpoint_cache_path,
+                "): ",
+                e.what());
+        }
+    }
+
+    configure_tracker_persistence();
+}
+
+std::int64_t
+PeerSet::now_unix()
+{
+    using clock = std::chrono::system_clock;
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               clock::now().time_since_epoch())
+        .count();
+}
+
+void
+PeerSet::update_endpoint_stats(PeerEndpointCache::Entry const& entry)
+{
+    auto key = canonical_endpoint(entry.endpoint);
+    auto& stats = endpoint_stats_[key];
+    stats.status = entry.status;
+    stats.last_seen_at = entry.last_seen_at;
+    stats.last_success_at = entry.last_success_at;
+    stats.last_failure_at = entry.last_failure_at;
+    stats.success_count = entry.success_count;
+    stats.failure_count = entry.failure_count;
+}
+
+void
+PeerSet::note_discovered(std::string const& endpoint)
+{
+    auto key = canonical_endpoint(endpoint);
+    auto& stats = endpoint_stats_[key];
+    stats.last_seen_at = now_unix();
+    sort_pending_connects();
+}
+
+void
+PeerSet::note_status(std::string const& endpoint, PeerStatus const& status)
+{
+    auto key = canonical_endpoint(endpoint);
+    auto& stats = endpoint_stats_[key];
+    stats.status = status;
+    stats.last_seen_at = now_unix();
+    sort_pending_connects();
+}
+
+void
+PeerSet::note_connect_success(
+    std::string const& endpoint,
+    PeerStatus const& status)
+{
+    auto key = canonical_endpoint(endpoint);
+    auto& stats = endpoint_stats_[key];
+    auto const now = now_unix();
+    stats.status = status;
+    stats.last_seen_at = now;
+    stats.last_success_at = now;
+    stats.success_count++;
+    sort_pending_connects();
+}
+
+void
+PeerSet::note_connect_failure(std::string const& endpoint)
+{
+    auto key = canonical_endpoint(endpoint);
+    auto& stats = endpoint_stats_[key];
+    stats.last_failure_at = now_unix();
+    stats.failure_count++;
+    sort_pending_connects();
+}
+
+bool
+PeerSet::candidate_better(std::string const& lhs, std::string const& rhs) const
+{
+    static EndpointStats const empty{};
+
+    auto lhs_it = endpoint_stats_.find(lhs);
+    auto rhs_it = endpoint_stats_.find(rhs);
+    auto const& lhs_stats =
+        lhs_it != endpoint_stats_.end() ? lhs_it->second : empty;
+    auto const& rhs_stats =
+        rhs_it != endpoint_stats_.end() ? rhs_it->second : empty;
+
+    auto const ledger = preferred_ledger_seq_;
+    auto const lhs_has_range =
+        lhs_stats.status.first_seq != 0 && lhs_stats.status.last_seq != 0;
+    auto const rhs_has_range =
+        rhs_stats.status.first_seq != 0 && rhs_stats.status.last_seq != 0;
+    auto const lhs_covers = ledger && lhs_has_range &&
+        *ledger >= lhs_stats.status.first_seq &&
+        *ledger <= lhs_stats.status.last_seq;
+    auto const rhs_covers = ledger && rhs_has_range &&
+        *ledger >= rhs_stats.status.first_seq &&
+        *ledger <= rhs_stats.status.last_seq;
+
+    if (lhs_covers != rhs_covers)
+        return lhs_covers;
+
+    auto const lhs_success = lhs_stats.last_success_at > 0;
+    auto const rhs_success = rhs_stats.last_success_at > 0;
+    if (lhs_success != rhs_success)
+        return lhs_success;
+
+    if (lhs_has_range != rhs_has_range)
+        return lhs_has_range;
+
+    if (lhs_stats.last_success_at != rhs_stats.last_success_at)
+    {
+        return lhs_stats.last_success_at > rhs_stats.last_success_at;
+    }
+
+    if (lhs_stats.failure_count != rhs_stats.failure_count)
+    {
+        return lhs_stats.failure_count < rhs_stats.failure_count;
+    }
+
+    auto const lhs_failure = lhs_stats.last_failure_at == 0
+        ? std::numeric_limits<std::int64_t>::min()
+        : lhs_stats.last_failure_at;
+    auto const rhs_failure = rhs_stats.last_failure_at == 0
+        ? std::numeric_limits<std::int64_t>::min()
+        : rhs_stats.last_failure_at;
+    if (lhs_failure != rhs_failure)
+    {
+        return lhs_failure < rhs_failure;
+    }
+
+    if (lhs_stats.success_count != rhs_stats.success_count)
+    {
+        return lhs_stats.success_count > rhs_stats.success_count;
+    }
+
+    if (lhs_stats.status.current_seq != rhs_stats.status.current_seq)
+    {
+        return lhs_stats.status.current_seq > rhs_stats.status.current_seq;
+    }
+
+    if (lhs_stats.last_seen_at != rhs_stats.last_seen_at)
+    {
+        return lhs_stats.last_seen_at > rhs_stats.last_seen_at;
+    }
+
+    return lhs < rhs;
+}
+
+void
+PeerSet::sort_pending_connects()
+{
+    std::sort(
+        pending_connects_.begin(),
+        pending_connects_.end(),
+        [this](std::string const& lhs, std::string const& rhs) {
+            return candidate_better(lhs, rhs);
+        });
+}
+
+void
+PeerSet::queue_connect(std::string const& endpoint)
+{
+    auto key = canonical_endpoint(endpoint);
+    auto const now = std::chrono::steady_clock::now();
+
+    if (connections_.count(key) || in_flight_.count(key) || queued_.count(key))
+        return;
+
+    auto failed = failed_at_.find(key);
+    if (failed != failed_at_.end())
+    {
+        if (now - failed->second < options_.retry_backoff)
+        {
+            return;
+        }
+        failed_at_.erase(failed);
+    }
+
+    pending_connects_.push_back(key);
+    queued_.insert(key);
+    sort_pending_connects();
+}
+
+void
+PeerSet::pump_connects()
+{
+    while (in_flight_.size() < options_.max_in_flight_connects &&
+           !pending_connects_.empty())
+    {
+        auto key = pending_connects_.front();
+        pending_connects_.erase(pending_connects_.begin());
+        queued_.erase(key);
+
+        std::string host;
+        uint16_t port = 0;
+        if (!EndpointTracker::parse_endpoint(key, host, port))
+            continue;
+
+        auto const now = std::chrono::steady_clock::now();
+        if (connections_.count(key) || in_flight_.count(key))
+            continue;
+
+        auto failed = failed_at_.find(key);
+        if (failed != failed_at_.end())
+        {
+            if (now - failed->second < options_.retry_backoff)
+            {
+                continue;
+            }
+            failed_at_.erase(failed);
+        }
+
+        in_flight_.insert(key);
+
+        auto self = shared_from_this();
+        boost::asio::co_spawn(
+            io_,
+            [self, host, port, key]() -> boost::asio::awaitable<void> {
+                co_await self->try_connect(host, port);
+                self->in_flight_.erase(key);
+                self->pump_connects();
+            },
+            boost::asio::detached);
+    }
+}
+
+void
+PeerSet::load_cached_endpoints()
+{
+    if (!endpoint_cache_ || options_.cached_endpoint_limit == 0)
+        return;
+
+    std::size_t total_cached = 0;
+    try
+    {
+        total_cached = endpoint_cache_->count_endpoints(network_id_);
+    }
+    catch (std::exception const& e)
+    {
+        PLOGW(log_, "Peer cache count failed: ", e.what());
+        return;
+    }
+
+    auto cached = endpoint_cache_->load_bootstrap_candidates(
+        network_id_, options_.cached_endpoint_limit);
+    PLOGI(
+        log_,
+        "Peer cache has ",
+        total_cached,
+        " endpoints for network ",
+        network_id_,
+        "; loading ",
+        cached.size(),
+        " into bootstrap");
+
+    for (auto const& entry : cached)
+    {
+        update_endpoint_stats(entry);
+        if (entry.status.first_seq != 0 && entry.status.last_seq != 0)
+        {
+            tracker_->update(entry.endpoint, entry.status);
+        }
+        else
+        {
+            tracker_->add_discovered(entry.endpoint);
+        }
+    }
+    if (!cached.empty())
+    {
+        PLOGI(log_, "Peer cache path: ", endpoint_cache_->path());
+    }
+}
+
+void
+PeerSet::configure_tracker_persistence()
+{
+    if (!endpoint_cache_)
+        return;
+
+    auto cache = endpoint_cache_;
+    auto const network_id = network_id_;
+
+    tracker_->set_discovered_observer([this, cache, network_id](
+                                          std::string const& endpoint) {
+        note_discovered(endpoint);
+        try
+        {
+            cache->remember_discovered(network_id, endpoint);
+        }
+        catch (std::exception const& e)
+        {
+            PLOGW(
+                log_, "Peer cache write failed for ", endpoint, ": ", e.what());
+        }
+    });
+
+    tracker_->set_status_observer([this, cache, network_id](
+                                      std::string const& endpoint,
+                                      PeerStatus const& status) {
+        note_status(endpoint, status);
+        try
+        {
+            cache->remember_status(network_id, endpoint, status);
+        }
+        catch (std::exception const& e)
+        {
+            PLOGW(
+                log_, "Peer cache write failed for ", endpoint, ": ", e.what());
+        }
+    });
+}
+
+void
+PeerSet::start_connect(std::string const& endpoint)
+{
+    queue_connect(endpoint);
+    pump_connects();
+}
+
+void
+PeerSet::start_connect(std::string const& host, uint16_t port)
+{
+    queue_connect(make_key(host, port));
+    pump_connects();
 }
 
 boost::asio::awaitable<std::shared_ptr<PeerClient>>
@@ -53,7 +410,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 {
     auto key = make_key(host, port);
 
-    // Already connected (or already failed)?
+    // Already connected?
     auto it = connections_.find(key);
     if (it != connections_.end())
     {
@@ -62,7 +419,6 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 
     PLOGI(log_, "Connecting to ", key, "...");
 
-    // Create PeerClient first so we can access redirect_ips on failure
     std::shared_ptr<PeerClient> client;
 
     try
@@ -74,6 +430,29 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
             client->set_unsolicited_handler(unsolicited_handler_);
         }
         connections_[key] = client;
+        failed_at_.erase(key);
+        note_connect_success(
+            key,
+            {.first_seq = client->peer_first_seq(),
+             .last_seq = client->peer_last_seq(),
+             .current_seq = client->peer_ledger_seq()});
+        if (endpoint_cache_)
+        {
+            try
+            {
+                endpoint_cache_->remember_connect_success(
+                    network_id_,
+                    key,
+                    {.first_seq = client->peer_first_seq(),
+                     .last_seq = client->peer_last_seq(),
+                     .current_seq = client->peer_ledger_seq()});
+            }
+            catch (std::exception const& e)
+            {
+                PLOGW(
+                    log_, "Peer cache write failed for ", key, ": ", e.what());
+            }
+        }
         PLOGI(
             log_,
             "Connected to ",
@@ -88,22 +467,38 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
     catch (std::exception const& e)
     {
         PLOGD(log_, "Failed to connect to ", key, ": ", e.what());
-        // Mark as attempted so undiscovered() doesn't retry
-        connections_[key] = nullptr;
+        failed_at_[key] = std::chrono::steady_clock::now();
+        note_connect_failure(key);
+        if (endpoint_cache_)
+        {
+            try
+            {
+                endpoint_cache_->remember_connect_failure(network_id_, key);
+            }
+            catch (std::exception const& cache_error)
+            {
+                PLOGW(
+                    log_,
+                    "Peer cache write failed for ",
+                    key,
+                    ": ",
+                    cache_error.what());
+            }
+        }
 
-        // Check for 503 redirect IPs from the failed connection
+        // Harvest 503 redirect IPs
         if (client)
         {
             auto const& ips = client->raw_connection().redirect_ips();
             if (!ips.empty())
             {
-                PLOGI(
-                    log_,
-                    "Got ", ips.size(), " redirect peers from ", key);
+                PLOGI(log_, "Got ", ips.size(), " redirect peers from ", key);
                 for (auto const& ip : ips)
                 {
                     tracker_->add_discovered(ip);
                 }
+                // Immediately try the redirect peers
+                try_undiscovered();
             }
         }
 
@@ -111,42 +506,107 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
     }
 }
 
-boost::asio::awaitable<int>
+void
 PeerSet::bootstrap()
 {
     auto const& boot_peers = get_bootstrap_peers(network_id_);
-    if (boot_peers.empty())
+    auto tracked_endpoints = tracker_->all_endpoints();
+
+    if (boot_peers.empty() && tracked_endpoints.empty())
     {
         PLOGW(log_, "No bootstrap peers for network ", network_id_);
-        co_return 0;
+        return;
     }
 
     PLOGI(
         log_,
-        "Bootstrapping with ",
+        "Bootstrapping: ",
         boot_peers.size(),
-        " peers for network ",
-        network_id_);
+        " built-in seeds, ",
+        tracked_endpoints.size(),
+        " cached/discovered endpoints");
 
-    int connected = 0;
     for (auto const& bp : boot_peers)
     {
-        auto client = co_await try_connect(bp.host, bp.port);
-        if (client)
+        queue_connect(make_key(bp.host, bp.port));
+    }
+
+    for (auto const& endpoint : tracked_endpoints)
+    {
+        queue_connect(endpoint);
+    }
+
+    pump_connects();
+}
+
+void
+PeerSet::start_tracked_endpoints()
+{
+    auto endpoints = tracker_->all_endpoints();
+    for (auto const& endpoint : endpoints)
+    {
+        queue_connect(endpoint);
+    }
+    pump_connects();
+}
+
+void
+PeerSet::try_undiscovered()
+{
+    auto candidates = tracker_->undiscovered();
+    if (candidates.empty())
+        return;
+
+    int queued = 0;
+    for (auto const& ep : candidates)
+    {
+        auto const before = queued_.size();
+        queue_connect(ep);
+        if (queued_.size() != before)
         {
-            connected++;
+            queued++;
         }
     }
 
-    PLOGI(
-        log_,
-        "Bootstrap complete: ",
-        connected,
-        "/",
-        boot_peers.size(),
-        " peers connected");
+    if (queued > 0)
+    {
+        PLOGI(
+            log_,
+            "Queued ",
+            queued,
+            " newly discovered endpoints (",
+            in_flight_.size(),
+            "/",
+            options_.max_in_flight_connects,
+            " in flight)");
+    }
 
-    co_return connected;
+    pump_connects();
+}
+
+void
+PeerSet::prioritize_ledger(uint32_t ledger_seq)
+{
+    preferred_ledger_seq_ = ledger_seq;
+    sort_pending_connects();
+    pump_connects();
+}
+
+void
+PeerSet::try_candidates_for(uint32_t ledger_seq)
+{
+    prioritize_ledger(ledger_seq);
+
+    auto candidates = tracker_->all_endpoints();
+    for (auto const& endpoint : candidates)
+    {
+        queue_connect(endpoint);
+    }
+
+    // Keep expanding the graph even when cached range data is incomplete.
+    try_undiscovered();
+    sort_pending_connects();
+    pump_connects();
 }
 
 boost::asio::awaitable<std::shared_ptr<PeerClient>>
@@ -179,13 +639,76 @@ PeerSet::peer_for(uint32_t ledger_seq) const
 }
 
 boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+PeerSet::wait_for_any_peer(int timeout_secs)
+{
+    if (auto client = any_peer())
+    {
+        co_return client;
+    }
+
+    // Pick up any redirect or TMEndpoints discoveries we already know about
+    // before we begin waiting.
+    start_tracked_endpoints();
+    try_undiscovered();
+
+    PLOGI(
+        log_,
+        "Waiting for any ready peer (",
+        connections_.size(),
+        " connected, ",
+        in_flight_.size(),
+        " in-flight, ",
+        tracker_->size(),
+        " known, Ctrl-C to cancel)");
+
+    boost::asio::steady_timer timer(io_);
+    for (int elapsed_ms = 0; elapsed_ms < timeout_secs * 1000;
+         elapsed_ms += 200)
+    {
+        timer.expires_after(std::chrono::milliseconds(200));
+        boost::system::error_code ec;
+        co_await timer.async_wait(
+            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+
+        if (auto client = any_peer())
+        {
+            co_return client;
+        }
+
+        if (((elapsed_ms + 200) % 1000) == 0)
+        {
+            start_tracked_endpoints();
+            try_undiscovered();
+        }
+
+        if (((elapsed_ms + 200) % 5000) == 0)
+        {
+            PLOGI(
+                log_,
+                "Still waiting for any peer (",
+                connections_.size(),
+                " connected, ",
+                in_flight_.size(),
+                " in-flight, ",
+                tracker_->size(),
+                " known)");
+        }
+    }
+
+    PLOGW(log_, "No ready peer found after ", timeout_secs, "s");
+    co_return std::nullopt;
+}
+
+boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
 PeerSet::wait_for_peer(uint32_t ledger_seq, int timeout_secs)
 {
-    // Check immediately
     if (auto p = peer_for(ledger_seq))
     {
         co_return p;
     }
+
+    // Immediately try any undiscovered endpoints
+    try_candidates_for(ledger_seq);
 
     PLOGI(
         log_,
@@ -193,71 +716,46 @@ PeerSet::wait_for_peer(uint32_t ledger_seq, int timeout_secs)
         ledger_seq,
         " (",
         connections_.size(),
-        " peers connected, Ctrl-C to cancel)");
+        " connected, ",
+        in_flight_.size(),
+        " in-flight, ",
+        tracker_->size(),
+        " known, Ctrl-C to cancel)");
 
-    // Poll every 5 seconds — new peers may appear from bootstrap()
-    // or TMEndpoints gossip running in the background
     boost::asio::steady_timer timer(io_);
-    for (int elapsed = 0; elapsed < timeout_secs; elapsed += 5)
+    for (int elapsed_ms = 0; elapsed_ms < timeout_secs * 1000;
+         elapsed_ms += 200)
     {
-        timer.expires_after(std::chrono::seconds(5));
+        timer.expires_after(std::chrono::milliseconds(200));
         boost::system::error_code ec;
         co_await timer.async_wait(
             boost::asio::redirect_error(boost::asio::use_awaitable, ec));
 
         if (auto p = peer_for(ledger_seq))
         {
-            PLOGI(
-                log_,
-                "Found peer for ledger ",
-                ledger_seq,
-                " after ",
-                elapsed + 5,
-                "s");
+            PLOGI(log_, "Found peer for ledger ", ledger_seq);
             co_return p;
         }
 
-        // Try connecting to any undiscovered endpoints from tracker
-        auto candidates = tracker_->undiscovered();
-        if (!candidates.empty())
+        if (((elapsed_ms + 200) % 1000) == 0)
         {
-            int parseable = 0;
-            for (auto const& ep : candidates)
-            {
-                std::string host;
-                uint16_t port = 0;
-                if (!EndpointTracker::parse_endpoint(ep, host, port))
-                    continue;
-                parseable++;
-                boost::asio::co_spawn(
-                    io_,
-                    [this, host, port]() -> boost::asio::awaitable<void> {
-                        co_await try_connect(host, port);
-                    },
-                    boost::asio::detached);
-            }
-            if (parseable > 0)
-            {
-                PLOGI(
-                    log_,
-                    "Trying ",
-                    parseable,
-                    " discovered endpoints...");
-            }
+            try_candidates_for(ledger_seq);
         }
 
-        // Log progress
-        PLOGI(
-            log_,
-            "Still waiting for ledger ",
-            ledger_seq,
-            " (",
-            elapsed + 5,
-            "s elapsed, ",
-            connections_.size(),
-            " peers, ",
-            tracker_->size(),
-            " known endpoints)");
+        if (((elapsed_ms + 200) % 5000) == 0)
+        {
+            PLOGI(
+                log_,
+                "Still waiting for ledger ",
+                ledger_seq,
+                " (",
+                connections_.size(),
+                " connected, ",
+                in_flight_.size(),
+                " in-flight, ",
+                tracker_->size(),
+                " known)");
+        }
     }
 
     PLOGW(

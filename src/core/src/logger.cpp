@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "catl/core/logger.h"
 
@@ -54,7 +55,48 @@ get_level_string(const LogLevel& level)
             throw std::runtime_error("Invalid log level");
     }
 }
+
+struct PartitionRegistry
+{
+    std::mutex mutex;
+    std::vector<LogPartition*> partitions;
+};
+
+PartitionRegistry&
+partition_registry()
+{
+    // Intentionally leaked so late static destruction cannot race with
+    // LogPartition destructors in other translation units.
+    static auto* registry = new PartitionRegistry();
+    return *registry;
+}
 }  // namespace
+
+bool
+Logger::try_parse_level(std::string_view level, LogLevel& out_level)
+{
+    static const std::unordered_map<std::string, LogLevel> levelMap = {
+        {"none", LogLevel::NONE},
+        {"inherit", LogLevel::INHERIT},
+        {"error", LogLevel::ERROR},
+        {"warn", LogLevel::WARNING},
+        {"warning", LogLevel::WARNING},
+        {"info", LogLevel::INFO},
+        {"debug", LogLevel::DEBUG},
+        {"trace", LogLevel::TRACE}};
+
+    std::string lowered(level);
+    std::ranges::transform(lowered, lowered.begin(), ::tolower);
+
+    auto const it = levelMap.find(lowered);
+    if (it == levelMap.end())
+    {
+        return false;
+    }
+
+    out_level = it->second;
+    return true;
+}
 
 void
 Logger::set_level(LogLevel level)
@@ -79,25 +121,13 @@ Logger::set_level(LogLevel level)
 bool
 Logger::set_level(const std::string& levelStr)
 {
-    static const std::unordered_map<std::string, LogLevel> levelMap = {
-        {"error", LogLevel::ERROR},
-        {"warn", LogLevel::WARNING},
-        {"warning", LogLevel::WARNING},
-        {"info", LogLevel::INFO},
-        {"debug", LogLevel::DEBUG},
-        {"trace", LogLevel::TRACE}};
-
-    // Convert input to lowercase
-    std::string lower_level_str = levelStr;
-    std::ranges::transform(lower_level_str, lower_level_str.begin(), ::tolower);
-
-    const auto it = levelMap.find(lower_level_str);
-    if (it == levelMap.end())
+    LogLevel level;
+    if (!try_parse_level(levelStr, level) || level == LogLevel::INHERIT)
     {
         return false;
     }
 
-    set_level(it->second);
+    set_level(level);
     return true;
 }
 
@@ -147,4 +177,102 @@ Logger::set_relative_time(bool enabled)
     {
         start_time_ = std::chrono::steady_clock::now();
     }
+}
+
+void
+Logger::register_partition(LogPartition* partition)
+{
+    auto& registry = partition_registry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    registry.partitions.push_back(partition);
+}
+
+void
+Logger::unregister_partition(LogPartition* partition)
+{
+    auto& registry = partition_registry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    std::erase(registry.partitions, partition);
+}
+
+bool
+Logger::set_partition_level(std::string_view name, LogLevel level)
+{
+    auto& registry = partition_registry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+
+    bool changed = false;
+    for (auto* partition : registry.partitions)
+    {
+        if (partition && partition->name() == name)
+        {
+            partition->set_level(level);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+bool
+Logger::set_partition_level(std::string_view name, std::string_view level)
+{
+    LogLevel parsed;
+    if (!try_parse_level(level, parsed))
+    {
+        return false;
+    }
+    return set_partition_level(name, parsed);
+}
+
+std::size_t
+Logger::set_partition_prefix_level(std::string_view prefix, LogLevel level)
+{
+    auto& registry = partition_registry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+
+    std::size_t changed = 0;
+    for (auto* partition : registry.partitions)
+    {
+        if (partition &&
+            std::string_view(partition->name()).starts_with(prefix))
+        {
+            partition->set_level(level);
+            ++changed;
+        }
+    }
+    return changed;
+}
+
+std::size_t
+Logger::set_partition_prefix_level(
+    std::string_view prefix,
+    std::string_view level)
+{
+    LogLevel parsed;
+    if (!try_parse_level(level, parsed))
+    {
+        return 0;
+    }
+    return set_partition_prefix_level(prefix, parsed);
+}
+
+std::vector<std::string>
+Logger::partition_names()
+{
+    auto& registry = partition_registry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+
+    std::vector<std::string> names;
+    names.reserve(registry.partitions.size());
+    for (auto* partition : registry.partitions)
+    {
+        if (partition)
+        {
+            names.push_back(partition->name());
+        }
+    }
+
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    return names;
 }

@@ -66,8 +66,7 @@ public:
     }
 
     explicit PeerClientException(Error e)
-        : std::runtime_error("PeerClient: " + error_name(e))
-        , error(e)
+        : std::runtime_error("PeerClient: " + error_name(e)), error(e)
     {
     }
 };
@@ -220,15 +219,17 @@ co_connect(
         host,
         port,
         network_id,
-        [signal, peer_seq](uint32_t seq) {
-            *peer_seq = seq;
+        nullptr,
+        [signal, peer_seq](boost::system::error_code ec, uint32_t seq) {
+            if (!ec)
+            {
+                *peer_seq = seq;
+            }
             signal->cancel();
         });
 
-    // Timeout — if connection fails, State::Failed is set but nobody
-    // cancels the signal. Use a deadline instead.
-    asio::steady_timer deadline(
-        executor, std::chrono::seconds(timeout_secs));
+    // Keep a deadline as a safety net for truly stuck connection setup.
+    asio::steady_timer deadline(executor, std::chrono::seconds(timeout_secs));
     deadline.async_wait([signal](boost::system::error_code ec) {
         if (!ec)
             signal->cancel();  // timeout fires
