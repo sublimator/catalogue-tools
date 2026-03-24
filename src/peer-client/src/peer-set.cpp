@@ -697,14 +697,25 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 
     try
     {
-        co_await co_connect(io_, host, port, network_id_, client);
-        client->set_tracker(tracker_);
-        if (unsolicited_handler_)
+        // Pass all handlers via ConnectOptions so they're installed
+        // before the read loop starts — no cross-strand races.
+        PeerClient::ConnectOptions connect_opts;
+        connect_opts.network_id = network_id_;
+        connect_opts.tracker = tracker_;
+        connect_opts.unsolicited_handler = unsolicited_handler_;
         {
-            client->set_unsolicited_handler(unsolicited_handler_);
+            auto self2 = shared_from_this();
+            auto owned_key2 = key;
+            connect_opts.on_disconnect = [self2, owned_key2]() {
+                asio::post(self2->strand_, [self2, owned_key2]() {
+                    self2->remove_peer(owned_key2);
+                });
+            };
         }
+
+        co_await co_connect(
+            io_, host, port, std::move(connect_opts), client);
         connections_[key] = client;
-        watch_peer_disconnect(key, client);
         failed_at_.erase(key);
         note_connect_success(
             key,
@@ -1187,32 +1198,6 @@ PeerSet::remove_peer(std::string const& key)
         connections_.erase(it);
         tracker_->remove(key);
     }
-}
-
-void
-PeerSet::watch_peer_disconnect(
-    std::string const& key,
-    std::shared_ptr<PeerClient> const& client)
-{
-    // Chain with PeerClient's existing disconnect handler — don't replace it.
-    // PeerClient sets its handler in do_connect() for state management.
-    // We wrap it so both fire.
-    auto self = shared_from_this();
-    auto owned_key = key;
-    auto existing = client->raw_connection().disconnect_handler_copy();
-    client->raw_connection().set_disconnect_handler(
-        [self, owned_key, existing](boost::system::error_code ec) {
-            // Fire PeerClient's handler first (state update)
-            if (existing)
-            {
-                existing(ec);
-            }
-            // Post removal onto PeerSet's strand — disconnect callback
-            // fires on the connection's thread, not our strand.
-            asio::post(self->strand_, [self, owned_key]() {
-                self->remove_peer(owned_key);
-            });
-        });
 }
 
 }  // namespace catl::peer_client

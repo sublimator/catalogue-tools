@@ -26,7 +26,8 @@ cmd_header(std::string const& endpoint, uint32_t ledger_seq)
     bool done = false;
 
     std::shared_ptr<PeerClient> client;
-    client = PeerClient::connect(io, host, port, 0, [&](uint32_t peer_seq) {
+    PeerClient::ConnectOptions connect_opts;
+    connect_opts.on_ready = [&](uint32_t peer_seq) {
         PLOGI(log_, "Ready! Peer at ledger ", peer_seq);
 
         uint32_t seq = ledger_seq == 0 ? peer_seq : ledger_seq;
@@ -77,7 +78,8 @@ cmd_header(std::string const& endpoint, uint32_t ledger_seq)
                 done = true;
                 io.stop();
             });
-    });
+    };
+    client = PeerClient::connect(io, host, port, std::move(connect_opts));
 
     boost::asio::steady_timer timer(io, std::chrono::seconds(15));
     timer.async_wait([&](boost::system::error_code) {

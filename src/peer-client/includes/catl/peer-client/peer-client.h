@@ -108,17 +108,38 @@ enum class State {
 class PeerClient : public std::enable_shared_from_this<PeerClient>
 {
 public:
-    /// Connect to a peer. Returns immediately. Calls on_ready when status
-    /// exchange completes and requests can be made. Any get_* calls before
-    /// ready are queued and flushed automatically.
+    using DisconnectCallback = std::function<void()>;
+
+    /// Pre-connect configuration. Set these before the read loop starts
+    /// to avoid cross-strand races.
+    struct ConnectOptions
+    {
+        uint32_t network_id{};
+        ReadyCallback on_ready{};
+        ConnectCompletionCallback on_complete{};
+        std::shared_ptr<EndpointTracker> tracker{};
+        UnsolicitedHandler unsolicited_handler{};
+        DisconnectCallback on_disconnect{};
+    };
+
+    /// Connect to a peer. Returns immediately. All handlers are installed
+    /// before the read loop starts — no cross-strand races.
     static std::shared_ptr<PeerClient>
     connect(
         asio::io_context& io_context,
         std::string const& host,
         uint16_t port,
-        uint32_t network_id = 0,
-        ReadyCallback on_ready = nullptr,
-        ConnectCompletionCallback on_complete = nullptr);
+        ConnectOptions opts);
+
+    /// Legacy overload for backward compat.
+    static std::shared_ptr<PeerClient>
+    connect(
+        asio::io_context& io_context,
+        std::string const& host,
+        uint16_t port,
+        uint32_t network_id,
+        ReadyCallback on_ready,
+        ConnectCompletionCallback on_complete);
 
     ~PeerClient();
 
@@ -215,6 +236,7 @@ public:
     {
         tracker_ = std::move(tracker);
     }
+
 
     /// Peer's advertised ledger range (from TMStatusChange).
     uint32_t
@@ -428,6 +450,8 @@ private:
 
     /// Optional shared tracker — fed from TMStatusChange.
     std::shared_ptr<EndpointTracker> tracker_;
+
+    DisconnectCallback on_disconnect_;
 
     static LogPartition log_;
 };

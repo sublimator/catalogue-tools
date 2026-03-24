@@ -26,7 +26,8 @@ cmd_ping(std::string const& endpoint)
     bool done = false;
 
     std::shared_ptr<PeerClient> client;
-    client = PeerClient::connect(io, host, port, 0, [&](uint32_t peer_seq) {
+    PeerClient::ConnectOptions opts;
+    opts.on_ready = [&](uint32_t peer_seq) {
         PLOGI(log_, "Ready! Peer at ledger ", peer_seq);
         PLOGI(log_, "Sending ping...");
 
@@ -42,7 +43,8 @@ cmd_ping(std::string const& endpoint)
             done = true;
             io.stop();
         });
-    });
+    };
+    client = PeerClient::connect(io, host, port, std::move(opts));
 
     boost::asio::steady_timer timer(io, std::chrono::seconds(15));
     timer.async_wait([&](boost::system::error_code) {

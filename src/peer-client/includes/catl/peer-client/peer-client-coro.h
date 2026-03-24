@@ -205,40 +205,43 @@ co_connect(
     asio::io_context& io_context,
     std::string const& host,
     uint16_t port,
-    uint32_t network_id,
+    PeerClient::ConnectOptions opts,
     std::shared_ptr<PeerClient>& out_client,
     int timeout_secs = 10)
 {
     auto executor = co_await asio::this_coro::executor;
+
+    // Both timers as shared_ptr — they may outlive this coroutine frame
+    // if cancel() races with async_wait completion on a different strand.
     auto signal = std::make_shared<asio::steady_timer>(
         executor, asio::steady_timer::time_point::max());
+    auto deadline = std::make_shared<asio::steady_timer>(
+        executor, std::chrono::seconds(timeout_secs));
     auto peer_seq = std::make_shared<uint32_t>(0);
 
-    out_client = PeerClient::connect(
-        io_context,
-        host,
-        port,
-        network_id,
-        nullptr,
+    // Install the completion callback into opts — it fires on
+    // PeerClient's strand and cancels the signal (thread-safe op).
+    opts.on_complete =
         [signal, peer_seq](boost::system::error_code ec, uint32_t seq) {
             if (!ec)
             {
                 *peer_seq = seq;
             }
-            signal->cancel();
-        });
+            signal->cancel();  // thread-safe timer cancel
+        };
 
-    // Keep a deadline as a safety net for truly stuck connection setup.
-    asio::steady_timer deadline(executor, std::chrono::seconds(timeout_secs));
-    deadline.async_wait([signal](boost::system::error_code ec) {
+    out_client = PeerClient::connect(
+        io_context, host, port, std::move(opts));
+
+    deadline->async_wait([signal](boost::system::error_code ec) {
         if (!ec)
-            signal->cancel();  // timeout fires
+            signal->cancel();
     });
 
     boost::system::error_code ec;
     co_await signal->async_wait(asio::redirect_error(asio::use_awaitable, ec));
 
-    deadline.cancel();
+    deadline->cancel();
 
     if (out_client->state() == State::Failed ||
         out_client->state() != State::Ready)
@@ -247,6 +250,22 @@ co_connect(
     }
 
     co_return *peer_seq;
+}
+
+/// Legacy overload — wraps into ConnectOptions.
+inline asio::awaitable<uint32_t>
+co_connect(
+    asio::io_context& io_context,
+    std::string const& host,
+    uint16_t port,
+    uint32_t network_id,
+    std::shared_ptr<PeerClient>& out_client,
+    int timeout_secs = 10)
+{
+    PeerClient::ConnectOptions opts;
+    opts.network_id = network_id;
+    co_return co_await co_connect(
+        io_context, host, port, std::move(opts), out_client, timeout_secs);
 }
 
 }  // namespace catl::peer_client

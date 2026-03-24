@@ -565,14 +565,36 @@ PeerClient::connect(
     asio::io_context& io_context,
     std::string const& host,
     uint16_t port,
+    ConnectOptions opts)
+{
+    auto client = std::shared_ptr<PeerClient>(new PeerClient(io_context));
+    // Install handlers BEFORE the read loop starts — no cross-strand race.
+    client->tracker_ = std::move(opts.tracker);
+    client->unsolicited_handler_ = std::move(opts.unsolicited_handler);
+    client->on_disconnect_ = std::move(opts.on_disconnect);
+    client->do_connect(
+        host,
+        port,
+        opts.network_id,
+        std::move(opts.on_ready),
+        std::move(opts.on_complete));
+    return client;
+}
+
+std::shared_ptr<PeerClient>
+PeerClient::connect(
+    asio::io_context& io_context,
+    std::string const& host,
+    uint16_t port,
     uint32_t network_id,
     ReadyCallback on_ready,
     ConnectCompletionCallback on_complete)
 {
-    auto client = std::shared_ptr<PeerClient>(new PeerClient(io_context));
-    client->do_connect(
-        host, port, network_id, std::move(on_ready), std::move(on_complete));
-    return client;
+    ConnectOptions opts;
+    opts.network_id = network_id;
+    opts.on_ready = std::move(on_ready);
+    opts.on_complete = std::move(on_complete);
+    return connect(io_context, host, port, std::move(opts));
 }
 
 void
@@ -606,8 +628,16 @@ PeerClient::do_connect(
     PLOGI(log_, "Connecting to ", host, ":", port, "...");
 
     auto self = shared_from_this();
-    // Disconnect handler fires on the strand (socket is strand-aware)
+    // Disconnect handler fires on the strand (socket is strand-aware).
+    // Notifies both PeerClient (state update) and any registered observer
+    // (PeerSet removal).
     connection_->set_disconnect_handler([self](boost::system::error_code ec) {
+        // Always notify the observer (PeerSet needs to know)
+        if (self->on_disconnect_)
+        {
+            self->on_disconnect_();
+        }
+
         if (self->state_ == State::Ready || self->state_ == State::Failed)
         {
             return;
