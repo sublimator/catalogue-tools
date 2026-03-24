@@ -119,6 +119,19 @@ ProofEngine::start()
         ")");
 }
 
+void
+ProofEngine::stop()
+{
+    PLOGI(log_, "Engine stopping...");
+    if (vl_cache_)
+    {
+        vl_cache_->stop();
+    }
+    // PeerSet and ValidationBuffer stop naturally when io_context stops —
+    // they hold no timers that keep the io_context alive on their own.
+    // The VL refresh timer is the main thing that prevents exit.
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // prove() — build a proof chain using shared services
 // ═══════════════════════════════════════════════════════════════════════

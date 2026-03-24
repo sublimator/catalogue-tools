@@ -82,6 +82,13 @@ VlCache::do_fetch()
 }
 
 void
+VlCache::stop()
+{
+    refresh_.cancel();
+    signal_.cancel();
+}
+
+void
 VlCache::schedule_refresh()
 {
     auto self = shared_from_this();

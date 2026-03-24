@@ -43,6 +43,10 @@ public:
     void
     start();
 
+    /// Cancel refresh timer. Existing fetch completes but no new ones start.
+    void
+    stop();
+
     /// Awaitable: returns a copy of the cached VL.
     /// Blocks until the first fetch completes. Hops to strand internally.
     boost::asio::awaitable<catl::vl::ValidatorList>

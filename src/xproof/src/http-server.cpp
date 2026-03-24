@@ -188,6 +188,9 @@ HttpServer::handle_session(tcp::socket socket)
 
     for (;;)
     {
+        if (is_stopping())
+            break;
+
         // Read request with timeout and body limit
         stream.expires_after(opts_.read_timeout);
 
@@ -198,8 +201,20 @@ HttpServer::handle_session(tcp::socket socket)
         co_await http::async_read(
             stream, buffer, parser,
             asio::redirect_error(asio::use_awaitable, ec));
+
         if (ec)
+        {
+            // Return proper HTTP error for body limit exceeded
+            if (ec == http::error::body_limit)
+            {
+                stream.expires_after(opts_.write_timeout);
+                co_await http::async_write(
+                    stream,
+                    error_response(413, "request body too large", 11, false),
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
             break;
+        }
 
         auto& req = parser.get();
         auto const version = req.version();

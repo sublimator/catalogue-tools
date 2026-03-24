@@ -40,10 +40,15 @@ public:
     void
     start();
 
-    /// Stop accepting new connections. In-flight sessions drain
-    /// naturally (bounded by read/write timeouts).
+    /// Stop accepting new connections and close active sessions.
     void
     stop();
+
+    bool
+    is_stopping() const
+    {
+        return !accepting_;
+    }
 
 private:
     HttpServer(

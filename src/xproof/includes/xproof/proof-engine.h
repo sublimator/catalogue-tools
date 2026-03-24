@@ -45,6 +45,11 @@ public:
     void
     start();
 
+    /// Stop background services (cancel VL refresh, etc).
+    /// Does not drain in-flight prove() calls — those complete or timeout.
+    void
+    stop();
+
     /// Result from prove() — chain + metadata the caller needs.
     struct ProveResult
     {

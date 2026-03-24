@@ -54,11 +54,13 @@ cmd_serve(ServeOptions const& opts)
     auto server = xproof::HttpServer::create(io, engine, http_opts);
     server->start();
 
-    // SIGINT/SIGTERM → stop accepting, let in-flight drain
+    // SIGINT/SIGTERM → stop server, stop engine, stop io
     boost::asio::signal_set signals(io, SIGINT, SIGTERM);
     signals.async_wait([&](boost::system::error_code, int sig) {
         PLOGI(log_, "Signal ", sig, " received, shutting down...");
         server->stop();
+        engine->stop();
+        io.stop();
     });
 
     io.run();

@@ -441,6 +441,11 @@ main(int argc, char* argv[])
                 opts.peer_endpoint = command_args[pos + 1];
                 pos += 2;
             }
+            else if (arg == "--peer-cache" && pos + 1 < command_args.size())
+            {
+                opts.peer_cache_path = command_args[pos + 1];
+                pos += 2;
+            }
             else if (arg[0] == '-')
             {
                 std::cerr << "Unknown option: " << arg << "\n";
