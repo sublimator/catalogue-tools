@@ -49,6 +49,7 @@ struct ServeOptions
     std::string bind_address = "127.0.0.1";
     uint16_t port = 8080;
     unsigned int threads = 1;
+    bool no_cache = false;
     std::string rpc_endpoint;
     std::string peer_endpoint;
     std::string peer_cache_path;

@@ -121,6 +121,12 @@ public:
     CacheStats
     cache_stats() const;
 
+    void
+    set_cache_enabled(bool enabled)
+    {
+        cache_enabled_ = enabled;
+    }
+
 private:
     ProofEngine(boost::asio::io_context& io, NetworkConfig config);
 
@@ -138,6 +144,7 @@ private:
     using CacheList = std::list<std::pair<std::string, ProveResult>>;
     CacheList cache_lru_;  // front = most recently used
     std::unordered_map<std::string, CacheList::iterator> cache_map_;
+    bool cache_enabled_ = true;
     size_t cache_hits_ = 0;
     size_t cache_misses_ = 0;
 

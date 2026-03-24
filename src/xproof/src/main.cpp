@@ -451,6 +451,11 @@ main(int argc, char* argv[])
                 opts.peer_endpoint = command_args[pos + 1];
                 pos += 2;
             }
+            else if (arg == "--no-cache")
+            {
+                opts.no_cache = true;
+                ++pos;
+            }
             else if (
                 (arg == "--peer-cache" || arg == "--peer-cache-path") &&
                 pos + 1 < command_args.size())

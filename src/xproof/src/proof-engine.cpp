@@ -143,10 +143,13 @@ asio::awaitable<ProofEngine::ProveResult>
 ProofEngine::prove(std::string const& tx_hash)
 {
     // Check cache first — returns by value, safe across co_await
-    if (auto cached = cache_get(tx_hash))
+    if (cache_enabled_)
     {
-        PLOGI(log_, "Cache hit for ", tx_hash.substr(0, 16), "...");
-        co_return *cached;
+        if (auto cached = cache_get(tx_hash))
+        {
+            PLOGI(log_, "Cache hit for ", tx_hash.substr(0, 16), "...");
+            co_return *cached;
+        }
     }
 
     // Step 1: Ensure VL is loaded (UNL push happens once in start(),
@@ -187,7 +190,10 @@ ProofEngine::prove(std::string const& tx_hash)
         result.tx_ledger_seq,
         result.publisher_key_hex};
 
-    cache_put(tx_hash, prove_result);
+    if (cache_enabled_)
+    {
+        cache_put(tx_hash, prove_result);
+    }
     co_return prove_result;
 }
 

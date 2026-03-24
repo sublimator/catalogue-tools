@@ -47,6 +47,10 @@ cmd_serve(ServeOptions const& opts)
     boost::asio::io_context io;
 
     auto engine = xproof::ProofEngine::create(io, std::move(config));
+    if (opts.no_cache)
+    {
+        engine->set_cache_enabled(false);
+    }
     engine->start();
 
     xproof::HttpServerOptions http_opts;
