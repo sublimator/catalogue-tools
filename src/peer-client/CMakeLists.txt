@@ -17,6 +17,7 @@ add_library(
   src/connection.cpp
   src/crypto-utils.cpp
   src/endpoint-tracker.cpp
+  src/peer-set.cpp
   src/tree-walk-state.cpp
   ${PROTO_SRCS}
   ${PROTO_HDRS})
