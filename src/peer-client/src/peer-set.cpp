@@ -128,50 +128,25 @@ PeerSet::bootstrap()
         " peers for network ",
         network_id_);
 
-    // Connect to all bootstrap peers in parallel
-    auto connected = std::make_shared<std::atomic<int>>(0);
-    auto remaining = std::make_shared<std::atomic<int>>(
-        static_cast<int>(boot_peers.size()));
-
-    // Signal when all attempts complete
-    auto signal = std::make_shared<boost::asio::steady_timer>(
-        io_, boost::asio::steady_timer::time_point::max());
-
+    int connected = 0;
     for (auto const& bp : boot_peers)
     {
-        boost::asio::co_spawn(
-            io_,
-            [this, bp, connected, remaining, signal]()
-                -> boost::asio::awaitable<void> {
-                auto client = co_await try_connect(bp.host, bp.port);
-                if (client)
-                {
-                    connected->fetch_add(1);
-                }
-                if (remaining->fetch_sub(1) == 1)
-                {
-                    // Last one done — wake up the caller
-                    signal->cancel();
-                }
-            },
-            boost::asio::detached);
+        auto client = co_await try_connect(bp.host, bp.port);
+        if (client)
+        {
+            connected++;
+        }
     }
 
-    // Wait for all to complete
-    boost::system::error_code ec;
-    co_await signal->async_wait(
-        boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-
-    int result = connected->load();
     PLOGI(
         log_,
         "Bootstrap complete: ",
-        result,
+        connected,
         "/",
         boot_peers.size(),
         " peers connected");
 
-    co_return result;
+    co_return connected;
 }
 
 boost::asio::awaitable<std::shared_ptr<PeerClient>>
