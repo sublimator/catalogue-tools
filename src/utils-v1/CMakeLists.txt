@@ -17,11 +17,6 @@ set(SOURCES_CATL_SLICE
     ${UTILS_SRC_DIR}/slicer/catl1-slice.cpp
     ${UTILS_SRC_DIR}/slicer/arg-options.cpp ${UTILS_SRC_DIR}/slicer/utils.cpp)
 
-# Define the nudb-to-catl1 executable and its sources
-set(EXECUTABLE_NUDB_TO_CATL1 nudb-to-catl1)
-set(SOURCES_NUDB_TO_CATL1 ${UTILS_SRC_DIR}/nudb/nudb-to-catl1.cpp
-                          ${UTILS_SRC_DIR}/nudb/nudb-to-catl1-arg-options.cpp)
-
 # Define the catl1-to-nudb executable and its sources
 set(EXECUTABLE_CATL1_TO_NUDB catl1-to-nudb)
 set(SOURCES_CATL1_TO_NUDB
@@ -79,18 +74,6 @@ target_link_libraries(
           Boost::filesystem
           Boost::program_options
           Boost::iostreams
-          OpenSSL::SSL)
-
-# nudb-to-catl1
-add_executable(${EXECUTABLE_NUDB_TO_CATL1} ${SOURCES_NUDB_TO_CATL1})
-target_include_directories(${EXECUTABLE_NUDB_TO_CATL1}
-                           PRIVATE ${UTILS_INCLUDE_DIR} ${CATL_INCLUDE_DIR})
-target_link_libraries(
-  ${EXECUTABLE_NUDB_TO_CATL1}
-  PRIVATE catl_catalogue_v1 # Brings in catl_core, catl_shamap
-          NuDB
-          Boost::filesystem
-          Boost::program_options
           OpenSSL::SSL)
 
 # catl1-to-nudb
