@@ -194,6 +194,7 @@ private:
 
     // Disconnect handler
     disconnect_handler disconnect_handler_;
+    bool closing_ = false;  // idempotent shutdown guard
 
     // Redirect IPs from 503 response
     std::set<std::string> redirect_ips_;
@@ -214,6 +215,15 @@ private:
 
     void
     fail_queued_writes(boost::system::error_code ec);
+
+    /// Strand-only: close socket, fail writes, fire disconnect handler.
+    /// Idempotent — guarded by closing_.
+    void
+    close_impl();
+
+    /// Strand-only: centralized error teardown.
+    void
+    fail_and_close(boost::system::error_code ec);
 
     // Helper methods
     void

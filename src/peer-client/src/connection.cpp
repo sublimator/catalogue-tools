@@ -29,7 +29,12 @@ peer_connection::peer_connection(
 
 peer_connection::~peer_connection()
 {
-    close();
+    if (socket_ && socket_->lowest_layer().is_open())
+    {
+        PLOGW(log_, "Socket still open in destructor — was close() not called?");
+        boost::system::error_code ec;
+        socket_->lowest_layer().close(ec);
+    }
 }
 
 void
@@ -557,11 +562,7 @@ peer_connection::handle_read_header(
         if (ec != asio::error::operation_aborted)
         {
             PLOGI(log_, "Connection closed during header read");
-            close();
-            if (disconnect_handler_)
-            {
-                disconnect_handler_(ec);
-            }
+            fail_and_close(ec);
         }
         return;
     }
@@ -610,11 +611,7 @@ peer_connection::handle_read_header(
                         ec.message());
                     if (ec != asio::error::operation_aborted)
                     {
-                        self->close();
-                        if (self->disconnect_handler_)
-                        {
-                            self->disconnect_handler_(ec);
-                        }
+                        self->fail_and_close(ec);
                     }
                     return;
                 }
@@ -677,11 +674,7 @@ peer_connection::handle_read_payload(
         if (ec != asio::error::operation_aborted)
         {
             PLOGI(log_, "Connection closed during payload read");
-            close();
-            if (disconnect_handler_)
-            {
-                disconnect_handler_(ec);
-            }
+            fail_and_close(ec);
         }
         return;
     }
@@ -769,12 +762,7 @@ peer_connection::do_write()
                 if (ec != asio::error::operation_aborted)
                 {
                     PLOGI(log_, "Connection lost during write");
-                    self->fail_queued_writes(ec);
-                    self->close();
-                    if (self->disconnect_handler_)
-                    {
-                        self->disconnect_handler_(ec);
-                    }
+                    self->fail_and_close(ec);
                 }
                 return;
             }
@@ -1181,22 +1169,50 @@ peer_connection::set_disconnect_handler(disconnect_handler handler)
 void
 peer_connection::close()
 {
+    if (!strand_.running_in_this_thread())
+    {
+        auto self = shared_from_this();
+        asio::post(strand_, [self]() { self->close_impl(); });
+        return;
+    }
+    close_impl();
+}
+
+void
+peer_connection::close_impl()
+{
+    if (closing_)
+        return;
+    closing_ = true;
     connected_ = false;
 
     if (socket_ && socket_->lowest_layer().is_open())
     {
         boost::system::error_code ec;
-
-        // Cancel any pending operations
         socket_->lowest_layer().cancel(ec);
-
-        // Close the socket
         socket_->lowest_layer().close(ec);
 
         if (ec && ec != boost::asio::error::not_connected)
         {
             PLOGD(log_, "Error closing socket: ", ec.message());
         }
+    }
+}
+
+void
+peer_connection::fail_and_close(boost::system::error_code ec)
+{
+    if (closing_)
+        return;
+
+    PLOGD(log_, "fail_and_close: ", ec.message());
+    fail_queued_writes(ec);
+    close_impl();
+
+    if (disconnect_handler_)
+    {
+        auto handler = std::move(disconnect_handler_);
+        handler(ec);
     }
 }
 
