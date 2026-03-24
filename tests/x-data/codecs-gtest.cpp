@@ -7,11 +7,38 @@
 #include <catl/xdata/parser.h>
 #include <catl/xdata/protocol.h>
 #include <catl/xdata/serialize.h>
+#include <cstdlib>
 #include <fstream>
 #include <gtest/gtest.h>
 
 using namespace catl::xdata;
 using namespace catl::xdata::codecs;
+
+static boost::json::value
+load_json_fixture(std::string const& filename);
+
+namespace {
+
+bool
+skip_slow_rippled_number_codec_tests()
+{
+    auto const* env = std::getenv("CATL_SKIP_SLOW_RIPPLED_NUMBER_CODEC_TESTS");
+    return env && env[0] != '\0' && env[0] != '0';
+}
+
+size_t
+number_codec_fixture_count()
+{
+    if (skip_slow_rippled_number_codec_tests())
+    {
+        return 0;
+    }
+
+    static auto f = load_json_fixture("number-fixtures.json");
+    return f.as_array().size();
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -319,6 +346,8 @@ class NumberCodecTest : public ::testing::TestWithParam<size_t>
 {
 };
 
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(NumberCodecTest);
+
 TEST_P(NumberCodecTest, EncodeMatchesRippled)
 {
     static auto num_fixtures = load_json_fixture("number-fixtures.json");
@@ -340,12 +369,7 @@ TEST_P(NumberCodecTest, EncodeMatchesRippled)
 INSTANTIATE_TEST_SUITE_P(
     Numbers,
     NumberCodecTest,
-    ::testing::Range(
-        size_t(0),
-        []() -> size_t {
-            static auto f = load_json_fixture("number-fixtures.json");
-            return f.as_array().size();
-        }()),
+    ::testing::Range(size_t(0), number_codec_fixture_count()),
     [](auto const& info) -> std::string {
         static auto f = load_json_fixture("number-fixtures.json");
         auto input = std::string(

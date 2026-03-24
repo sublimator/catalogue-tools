@@ -14,6 +14,8 @@ CACHE_NAME="${IMAGE_NAME}-cache"
 CONAN_DEPS="${CONAN_DEPS:-missing}"
 DIAGNOSTICS="${DIAGNOSTICS:-0}"
 FORCE_CLEAR_CACHE="${FORCE_CLEAR_CACHE:-0}"
+SKIP_TESTS="${SKIP_TESTS:-0}"
+BUILD_TARGET="${BUILD_TARGET:-}"
 
 # Change to repo root (script is in scripts/ subdirectory)
 cd "$(dirname "$0")/.."
@@ -45,6 +47,8 @@ if ! docker run --rm --platform linux/amd64 \
   -e BUILD_CORES="$BUILD_CORES" \
   -e CONAN_DEPS="$CONAN_DEPS" \
   -e DIAGNOSTICS="$DIAGNOSTICS" \
+  -e SKIP_TESTS="$SKIP_TESTS" \
+  -e BUILD_TARGET="$BUILD_TARGET" \
   "$IMAGE_NAME" \
   /hbb_exe/activate-exec /usr/local/bin/hbb-build; then
   echo ""
@@ -69,3 +73,9 @@ echo "  rm -rf build-hbb"
 echo ""
 echo "To force clear all caches (conan + ccache) on next build:"
 echo "  FORCE_CLEAR_CACHE=1 ./scripts/build-hbb.sh"
+echo ""
+echo "To skip tests inside HBB:"
+echo "  SKIP_TESTS=1 ./scripts/build-hbb.sh"
+echo ""
+echo "To build only a specific target inside HBB:"
+echo "  BUILD_TARGET=xproof ./scripts/build-hbb.sh"

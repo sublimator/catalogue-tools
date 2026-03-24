@@ -2,6 +2,12 @@
 # Build script that runs inside the HBB Docker container
 set -euo pipefail
 
+# HBB is materially slower than native builds, so skip the large rippled
+# number-codec parity matrix by default inside this environment.
+export CATL_SKIP_SLOW_RIPPLED_NUMBER_CODEC_TESTS="${CATL_SKIP_SLOW_RIPPLED_NUMBER_CODEC_TESTS:-1}"
+SKIP_TESTS="${SKIP_TESTS:-0}"
+BUILD_TARGET="${BUILD_TARGET:-}"
+
 echo '>>> Build environment'
 env | sort
 echo ''
@@ -127,8 +133,17 @@ if ! cmake -G Ninja \
 fi
 cd ..
 
-echo '>>> Building with Ninja (using ccache)'
-if ! ninja -C build-hbb -j${BUILD_CORES}; then
+if [ -n "$BUILD_TARGET" ] && [ "$SKIP_TESTS" = "0" ]; then
+  echo ">>> BUILD_TARGET=$BUILD_TARGET implies SKIP_TESTS=1 for partial builds"
+  SKIP_TESTS=1
+fi
+
+if [ -n "$BUILD_TARGET" ]; then
+  echo ">>> Building target '$BUILD_TARGET' with Ninja (using ccache)"
+else
+  echo '>>> Building with Ninja (using ccache)'
+fi
+if ! ninja -C build-hbb -j${BUILD_CORES} ${BUILD_TARGET:+$BUILD_TARGET}; then
   echo 'ERROR: Ninja build failed!'
   exit 1
 fi
@@ -137,10 +152,14 @@ echo '>>> ccache stats'
 ccache -s
 
 echo ''
-echo '>>> Running tests'
-if ! ctest --test-dir build-hbb --verbose; then
-  echo 'ERROR: Tests failed!'
-  exit 1
+if [ "$SKIP_TESTS" = "1" ]; then
+  echo '>>> Skipping tests (SKIP_TESTS=1)'
+else
+  echo '>>> Running tests'
+  if ! ctest --test-dir build-hbb --verbose; then
+    echo 'ERROR: Tests failed!'
+    exit 1
+  fi
 fi
 
 echo ''
