@@ -43,6 +43,19 @@ cmd_verify(
     std::string const& trusted_key,
     catl::xdata::Protocol const& protocol);
 
+struct ServeOptions
+{
+    uint32_t network_id = 0;
+    std::string bind_address = "127.0.0.1";
+    uint16_t port = 8080;
+    std::string rpc_endpoint;
+    std::string peer_endpoint;
+    std::string peer_cache_path;
+};
+
+int
+cmd_serve(ServeOptions const& opts);
+
 // Dev commands (unlisted)
 int
 cmd_dev_check_ledger(

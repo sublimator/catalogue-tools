@@ -195,18 +195,25 @@ print_usage()
         << "Usage:\n"
         << "  xproof prove <tx_hash> [options]    build a proof chain\n"
         << "  xproof verify <proof_file> [key]    verify a proof chain\n"
+        << "  xproof serve [options]              run HTTP proof server\n"
         << "  xproof ping <peer:port>             peer protocol ping\n"
         << "  xproof header <peer:port> <seq>     fetch ledger header\n"
         << "\n"
-        << "Options for prove:\n"
+        << "Options for prove/serve:\n"
         << "  --rpc <host:port>   RPC endpoint (default: " << DEFAULT_RPC
         << ")\n"
         << "  --peer <host:port>  peer endpoint (default: " << DEFAULT_PEER
         << ")\n"
+        << "  --network <id>      network ID (0=XRPL, 21337=Xahau)\n"
+        << "\n"
+        << "Options for prove:\n"
         << "  --binary            output binary format only\n"
         << "  --gzip              output compressed binary format only\n"
         << "  --output <stem>     output file stem (default: "
            "proof-<ledger>-<txid12>)\n"
+        << "\n"
+        << "Options for serve:\n"
+        << "  --bind <addr:port>  listen address (default: 127.0.0.1:8080)\n"
         << "\n"
         << "Logging options:\n"
         << "  --debug                 enable DEBUG for xproof partitions\n"
@@ -392,6 +399,61 @@ main(int argc, char* argv[])
             xproof::NetworkConfig::for_network(verify_network_id);
         auto protocol = net_config.load_protocol();
         return cmd_verify(proof_path, trusted_key, protocol);
+    }
+
+    if (command == "serve")
+    {
+        ServeOptions opts;
+
+        std::size_t pos = 0;
+        while (pos < command_args.size())
+        {
+            std::string const& arg = command_args[pos];
+
+            if (arg == "--bind" && pos + 1 < command_args.size())
+            {
+                auto bind_str = command_args[pos + 1];
+                auto colon = bind_str.rfind(':');
+                if (colon != std::string::npos)
+                {
+                    opts.bind_address = bind_str.substr(0, colon);
+                    opts.port = static_cast<uint16_t>(
+                        std::stoul(bind_str.substr(colon + 1)));
+                }
+                else
+                {
+                    opts.bind_address = bind_str;
+                }
+                pos += 2;
+            }
+            else if (arg == "--network" && pos + 1 < command_args.size())
+            {
+                opts.network_id = std::stoul(command_args[pos + 1]);
+                pos += 2;
+            }
+            else if (arg == "--rpc" && pos + 1 < command_args.size())
+            {
+                opts.rpc_endpoint = command_args[pos + 1];
+                pos += 2;
+            }
+            else if (arg == "--peer" && pos + 1 < command_args.size())
+            {
+                opts.peer_endpoint = command_args[pos + 1];
+                pos += 2;
+            }
+            else if (arg[0] == '-')
+            {
+                std::cerr << "Unknown option: " << arg << "\n";
+                return 1;
+            }
+            else
+            {
+                std::cerr << "Unexpected argument: " << arg << "\n";
+                return 1;
+            }
+        }
+
+        return cmd_serve(opts);
     }
 
     // Unlisted dev commands

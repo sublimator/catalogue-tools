@@ -21,6 +21,8 @@ add_executable(
   src/cmd-prove.cpp
   src/cmd-verify.cpp
   src/cmd-dev.cpp
+  src/cmd-serve.cpp
+  src/http-server.cpp
   src/anchor-verifier.cpp
   src/network-config.cpp
   src/proof-builder.cpp
