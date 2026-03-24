@@ -247,6 +247,9 @@ PeerSet::endpoint_covers_preferred_ledger(std::string const& endpoint) const
 bool
 PeerSet::should_connect_endpoint(std::string const& endpoint) const
 {
+    if (at_connection_cap())
+        return false;
+
     auto key = canonical_endpoint(endpoint);
 
     if (connections_.count(key) || in_flight_.count(key) || queued_.count(key))
@@ -645,6 +648,18 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
         co_return (it->second && it->second->is_ready()) ? it->second : nullptr;
     }
 
+    // Don't exceed connection cap
+    if (at_connection_cap())
+    {
+        PLOGD(
+            log_,
+            "Connection cap reached (",
+            options_.max_connected_peers,
+            "), skipping ",
+            key);
+        co_return nullptr;
+    }
+
     PLOGI(log_, "Connecting to ", key, "...");
 
     std::shared_ptr<PeerClient> client;
@@ -658,6 +673,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
             client->set_unsolicited_handler(unsolicited_handler_);
         }
         connections_[key] = client;
+        watch_peer_disconnect(key, client);
         failed_at_.erase(key);
         note_connect_success(
             key,
@@ -1098,6 +1114,51 @@ PeerSet::any_peer(std::unordered_set<std::string> const& excluded) const
         }
     }
     return best;
+}
+
+size_t
+PeerSet::connected_count() const
+{
+    size_t count = 0;
+    for (auto const& [_, client] : connections_)
+    {
+        if (client && client->is_ready())
+        {
+            count++;
+        }
+    }
+    return count;
+}
+
+bool
+PeerSet::at_connection_cap() const
+{
+    return connected_count() >= options_.max_connected_peers;
+}
+
+void
+PeerSet::remove_peer(std::string const& key)
+{
+    auto it = connections_.find(key);
+    if (it != connections_.end())
+    {
+        PLOGI(log_, "Removing dead peer: ", key);
+        connections_.erase(it);
+        tracker_->remove(key);
+    }
+}
+
+void
+PeerSet::watch_peer_disconnect(
+    std::string const& key,
+    std::shared_ptr<PeerClient> const& client)
+{
+    auto self = shared_from_this();
+    auto owned_key = key;
+    client->raw_connection().set_disconnect_handler(
+        [self, owned_key](boost::system::error_code) {
+            self->remove_peer(owned_key);
+        });
 }
 
 }  // namespace catl::peer_client

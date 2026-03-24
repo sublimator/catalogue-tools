@@ -413,6 +413,7 @@ private:
     // ---------------------------------------------------------------
 
     asio::io_context& io_context_;
+    asio::strand<asio::io_context::executor_type> strand_;
     std::unique_ptr<asio::ssl::context> ssl_context_;
     std::shared_ptr<peer_connection> connection_;
     UnsolicitedHandler unsolicited_handler_;

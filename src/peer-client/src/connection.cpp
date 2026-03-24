@@ -716,47 +716,86 @@ peer_connection::async_send_packet(
     std::vector<std::uint8_t> const& data,
     std::function<void(boost::system::error_code)> handler)
 {
-    // Create header
+    // Build the wire packet: header(6) + payload
     std::vector<std::uint8_t> packet;
     packet.reserve(6 + data.size());
 
-    // Payload size (big-endian) - for uncompressed, first 4 bits are 0
     std::uint32_t payload_size = static_cast<std::uint32_t>(data.size());
-    packet.push_back(
-        (payload_size >> 24) & 0x0F);  // Top 4 bits are 0 for uncompressed
+    packet.push_back((payload_size >> 24) & 0x0F);
     packet.push_back((payload_size >> 16) & 0xFF);
     packet.push_back((payload_size >> 8) & 0xFF);
     packet.push_back(payload_size & 0xFF);
 
-    // Packet type (big-endian)
     std::uint16_t type_val = static_cast<std::uint16_t>(type);
     packet.push_back((type_val >> 8) & 0xFF);
     packet.push_back(type_val & 0xFF);
 
-    // Append payload
     packet.insert(packet.end(), data.begin(), data.end());
 
-    // Send packet
+    // Enqueue and pump — only one async_write in flight at a time
+    write_queue_.push_back({std::move(packet), std::move(handler)});
+    if (!write_in_progress_)
+    {
+        do_write();
+    }
+}
+
+void
+peer_connection::do_write()
+{
+    if (write_queue_.empty())
+    {
+        write_in_progress_ = false;
+        return;
+    }
+    write_in_progress_ = true;
+
+    auto& front = write_queue_.front();
     asio::async_write(
         *socket_,
-        asio::buffer(packet),
-        [self = shared_from_this(), handler](
+        asio::buffer(front.packet),
+        [self = shared_from_this()](
             boost::system::error_code ec, std::size_t) {
-            if (handler)
+            auto entry = std::move(self->write_queue_.front());
+            self->write_queue_.pop_front();
+
+            if (entry.handler)
             {
-                handler(ec);
+                entry.handler(ec);
             }
-            // Detect connection errors and trigger disconnect
-            if (ec && ec != asio::error::operation_aborted)
+
+            if (ec)
             {
-                PLOGI(log_, "Connection lost during write");
-                self->close();
-                if (self->disconnect_handler_)
+                if (ec != asio::error::operation_aborted)
                 {
-                    self->disconnect_handler_(ec);
+                    PLOGI(log_, "Connection lost during write");
+                    self->fail_queued_writes(ec);
+                    self->close();
+                    if (self->disconnect_handler_)
+                    {
+                        self->disconnect_handler_(ec);
+                    }
                 }
+                return;
             }
+
+            self->do_write();
         });
+}
+
+void
+peer_connection::fail_queued_writes(boost::system::error_code ec)
+{
+    while (!write_queue_.empty())
+    {
+        auto entry = std::move(write_queue_.front());
+        write_queue_.pop_front();
+        if (entry.handler)
+        {
+            entry.handler(ec);
+        }
+    }
+    write_in_progress_ = false;
 }
 
 void

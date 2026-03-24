@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <boost/beast.hpp>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -193,6 +194,23 @@ private:
 
     // Redirect IPs from 503 response
     std::set<std::string> redirect_ips_;
+
+    // Outbound write queue — serializes async_write calls.
+    // Without this, concurrent sends (status mirror, ping reply,
+    // request) can overlap and garble frames.
+    struct PendingWrite
+    {
+        std::vector<std::uint8_t> packet;
+        std::function<void(boost::system::error_code)> handler;
+    };
+    std::deque<PendingWrite> write_queue_;
+    bool write_in_progress_ = false;
+
+    void
+    do_write();
+
+    void
+    fail_queued_writes(boost::system::error_code ec);
 
     // Helper methods
     void

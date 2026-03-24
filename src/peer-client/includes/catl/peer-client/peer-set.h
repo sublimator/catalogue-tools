@@ -50,6 +50,7 @@ struct PeerSetOptions
     std::size_t cached_endpoint_limit = 64;
     std::size_t max_in_flight_connects = 8;
     std::size_t max_in_flight_crawls = 4;
+    std::size_t max_connected_peers = 20;  // hard cap on live connections
     std::chrono::seconds retry_backoff{5};
 };
 
@@ -165,7 +166,24 @@ public:
     boost::asio::awaitable<std::shared_ptr<PeerClient>>
     try_connect(std::string const& host, uint16_t port);
 
+    /// Number of live (ready) peer connections.
+    size_t
+    connected_count() const;
+
 private:
+    /// Remove a dead peer from the connection map.
+    void
+    remove_peer(std::string const& key);
+
+    /// Wire disconnect detection for a newly connected peer.
+    void
+    watch_peer_disconnect(
+        std::string const& key,
+        std::shared_ptr<PeerClient> const& client);
+
+    /// Check if we're at the connection cap.
+    bool
+    at_connection_cap() const;
     PeerSet(boost::asio::io_context& io, PeerSetOptions const& options);
 
     /// Schedule a background connect attempt (deduped, fire-and-forget).

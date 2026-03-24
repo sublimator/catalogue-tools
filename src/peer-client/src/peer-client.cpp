@@ -115,7 +115,7 @@ PeerClient::register_callback(
             " existing_callbacks=",
             it->second.callbacks.size());
         auto timer =
-            std::make_unique<asio::steady_timer>(io_context_, opts.timeout);
+            std::make_unique<asio::steady_timer>(strand_, opts.timeout);
         auto* tp = timer.get();
         it->second.callbacks.push_back({std::move(callback), std::move(timer)});
         auto idx = it->second.callbacks.size() - 1;
@@ -163,7 +163,7 @@ PeerClient::register_callback(
         static_cast<bool>(callback));
     PendingEntry<T> entry;
     auto timer =
-        std::make_unique<asio::steady_timer>(io_context_, opts.timeout);
+        std::make_unique<asio::steady_timer>(strand_, opts.timeout);
     auto* tp = timer.get();
     entry.callbacks.push_back({std::move(callback), std::move(timer)});
     PLOGT(
@@ -549,7 +549,8 @@ ProofPathResult::leaf_data() const
 // PeerClient — lifecycle
 // ═══════════════════════════════════════════════════════════════════════
 
-PeerClient::PeerClient(asio::io_context& io_context) : io_context_(io_context)
+PeerClient::PeerClient(asio::io_context& io_context)
+    : io_context_(io_context), strand_(asio::make_strand(io_context))
 {
 }
 
@@ -606,38 +607,12 @@ PeerClient::do_connect(
 
     auto self = shared_from_this();
     connection_->set_disconnect_handler([self](boost::system::error_code ec) {
-        if (self->state_ == State::Ready || self->state_ == State::Failed)
-        {
-            return;
-        }
+        asio::dispatch(self->strand_, [self, ec]() {
+            if (self->state_ == State::Ready || self->state_ == State::Failed)
+            {
+                return;
+            }
 
-        if (ec == boost::asio::error::invalid_argument ||
-            ec == boost::asio::error::operation_aborted)
-        {
-            PLOGD(
-                PeerClient::log_,
-                "[",
-                self->endpoint_str_,
-                "] Connection lost before ready: ",
-                ec.message());
-        }
-        else
-        {
-            PLOGE(
-                PeerClient::log_,
-                "[",
-                self->endpoint_str_,
-                "] Connection lost before ready: ",
-                ec.message());
-        }
-        self->state_ = State::Failed;
-        self->complete_connect(ec);
-    });
-
-    connection_->async_connect([self, on_ready = std::move(on_ready)](
-                                   boost::system::error_code ec) mutable {
-        if (ec)
-        {
             if (ec == boost::asio::error::invalid_argument ||
                 ec == boost::asio::error::operation_aborted)
             {
@@ -645,7 +620,7 @@ PeerClient::do_connect(
                     PeerClient::log_,
                     "[",
                     self->endpoint_str_,
-                    "] Connection failed: ",
+                    "] Connection lost before ready: ",
                     ec.message());
             }
             else
@@ -654,14 +629,47 @@ PeerClient::do_connect(
                     PeerClient::log_,
                     "[",
                     self->endpoint_str_,
-                    "] Connection failed: ",
+                    "] Connection lost before ready: ",
                     ec.message());
             }
             self->state_ = State::Failed;
             self->complete_connect(ec);
-            return;
-        }
-        self->on_connected(std::move(on_ready));
+        });
+    });
+
+    connection_->async_connect([self, on_ready = std::move(on_ready)](
+                                   boost::system::error_code ec) mutable {
+        // Dispatch onto strand — connect callback may fire on any thread
+        asio::dispatch(
+            self->strand_,
+            [self, ec, on_ready = std::move(on_ready)]() mutable {
+                if (ec)
+                {
+                    if (ec == boost::asio::error::invalid_argument ||
+                        ec == boost::asio::error::operation_aborted)
+                    {
+                        PLOGD(
+                            PeerClient::log_,
+                            "[",
+                            self->endpoint_str_,
+                            "] Connection failed: ",
+                            ec.message());
+                    }
+                    else
+                    {
+                        PLOGE(
+                            PeerClient::log_,
+                            "[",
+                            self->endpoint_str_,
+                            "] Connection failed: ",
+                            ec.message());
+                    }
+                    self->state_ = State::Failed;
+                    self->complete_connect(ec);
+                    return;
+                }
+                self->on_connected(std::move(on_ready));
+            });
     });
 }
 
@@ -686,10 +694,18 @@ PeerClient::on_connected(ReadyCallback on_ready)
     auto self = shared_from_this();
     ready_callback_ = std::move(on_ready);
 
+    // Dispatch on_packet onto our strand so pending maps, state, and
+    // queue are only touched from the strand — safe even if the
+    // connection's read completes on a different thread.
     connection_->start_read(
         [self](
             packet_header const& header, std::vector<uint8_t> const& payload) {
-            self->on_packet(header, payload);
+            // Copy payload so it survives the post
+            auto hdr = header;
+            auto data = std::make_shared<std::vector<uint8_t>>(payload);
+            asio::dispatch(self->strand_, [self, hdr, data]() {
+                self->on_packet(hdr, *data);
+            });
         });
 
     send_monitoring_status();
