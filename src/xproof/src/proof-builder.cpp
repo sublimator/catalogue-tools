@@ -243,6 +243,24 @@ build_proof(
     std::shared_ptr<PeerClient> client;
     auto peer_seq = co_await co_connect(io, peer_host, peer_port, 0, client);
     PLOGI(log_, "Connected to peer, peer at ledger ", peer_seq);
+    if (client->peer_first_seq() != 0)
+    {
+        PLOGI(
+            log_,
+            "Peer ledger range: ",
+            client->peer_first_seq(),
+            " - ",
+            client->peer_last_seq());
+        if (tx_ledger_seq < client->peer_first_seq() ||
+            tx_ledger_seq > client->peer_last_seq())
+        {
+            PLOGW(
+                log_,
+                "Target ledger ",
+                tx_ledger_seq,
+                " may be outside peer's range!");
+        }
+    }
 
     ValidationCollector val_collector(protocol);
     client->set_unsolicited_handler(

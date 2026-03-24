@@ -580,6 +580,7 @@ PeerClient::do_connect(
     ReadyCallback on_ready)
 {
     state_ = State::Connecting;
+    endpoint_str_ = host + ":" + std::to_string(port);
 
     ssl_context_ =
         std::make_unique<asio::ssl::context>(asio::ssl::context::tlsv12);
@@ -660,6 +661,37 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
     {
         peer_ledger_seq_ = status.ledgerseq();
         PLOGD(log_, "Peer at ledger ", peer_ledger_seq_.load());
+    }
+
+    if (status.has_firstseq() && status.has_lastseq())
+    {
+        peer_first_seq_ = status.firstseq();
+        peer_last_seq_ = status.lastseq();
+        if (peer_last_seq_ < peer_first_seq_ || peer_first_seq_ == 0 ||
+            peer_last_seq_ == 0)
+        {
+            peer_first_seq_ = 0;
+            peer_last_seq_ = 0;
+        }
+        else
+        {
+            PLOGD(
+                log_,
+                "Peer ledger range: ",
+                peer_first_seq_,
+                " - ",
+                peer_last_seq_);
+        }
+
+        // Feed the shared tracker if one is set
+        if (tracker_ && !endpoint_str_.empty())
+        {
+            tracker_->update(
+                endpoint_str_,
+                {.first_seq = peer_first_seq_,
+                 .last_seq = peer_last_seq_,
+                 .current_seq = peer_ledger_seq_});
+        }
     }
 
     // Mirror status back

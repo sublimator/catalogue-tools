@@ -1,6 +1,7 @@
 #pragma once
 
 #include "connection.h"
+#include "endpoint-tracker.h"
 #include "types.h"
 
 #include <catl/core/logger.h>
@@ -201,6 +202,27 @@ public:
         unsolicited_handler_ = std::move(handler);
     }
 
+    /// Set a shared endpoint tracker. TMStatusChange updates will
+    /// be fed into it automatically.
+    void
+    set_tracker(std::shared_ptr<EndpointTracker> tracker)
+    {
+        tracker_ = std::move(tracker);
+    }
+
+    /// Peer's advertised ledger range (from TMStatusChange).
+    uint32_t
+    peer_first_seq() const
+    {
+        return peer_first_seq_;
+    }
+
+    uint32_t
+    peer_last_seq() const
+    {
+        return peer_last_seq_;
+    }
+
     void
     cancel_all();
 
@@ -379,6 +401,12 @@ private:
 
     std::atomic<State> state_{State::Disconnected};
     std::atomic<uint32_t> peer_ledger_seq_{0};
+    uint32_t peer_first_seq_{0};
+    uint32_t peer_last_seq_{0};
+    std::string endpoint_str_;  // "host:port" for tracker
+
+    /// Optional shared tracker — fed from TMStatusChange.
+    std::shared_ptr<EndpointTracker> tracker_;
 
     static LogPartition log_;
 };
