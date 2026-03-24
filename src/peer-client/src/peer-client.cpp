@@ -569,8 +569,11 @@ PeerClient::connect(
 {
     auto client = std::shared_ptr<PeerClient>(new PeerClient(io_context));
     // Install handlers BEFORE the read loop starts — no cross-strand race.
-    client->tracker_ = std::move(opts.tracker);
-    client->unsolicited_handler_ = std::move(opts.unsolicited_handler);
+    {
+        std::lock_guard lock(client->handler_mutex_);
+        client->tracker_ = std::move(opts.tracker);
+        client->unsolicited_handler_ = std::move(opts.unsolicited_handler);
+    }
     client->on_disconnect_ = std::move(opts.on_disconnect);
     client->do_connect(
         host,
@@ -595,6 +598,20 @@ PeerClient::connect(
     opts.on_ready = std::move(on_ready);
     opts.on_complete = std::move(on_complete);
     return connect(io_context, host, port, std::move(opts));
+}
+
+void
+PeerClient::set_unsolicited_handler(UnsolicitedHandler handler)
+{
+    std::lock_guard lock(handler_mutex_);
+    unsolicited_handler_ = std::move(handler);
+}
+
+void
+PeerClient::set_tracker(std::shared_ptr<EndpointTracker> tracker)
+{
+    std::lock_guard lock(handler_mutex_);
+    tracker_ = std::move(tracker);
 }
 
 void
@@ -803,9 +820,14 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
         }
 
         // Feed the shared tracker if one is set
-        if (tracker_ && !endpoint_str_.empty())
+        std::shared_ptr<EndpointTracker> tracker;
         {
-            tracker_->update(
+            std::lock_guard lock(handler_mutex_);
+            tracker = tracker_;
+        }
+        if (tracker && !endpoint_str_.empty())
+        {
+            tracker->update(
                 endpoint_str_,
                 {.first_seq = peer_first_seq_,
                  .last_seq = peer_last_seq_,
@@ -826,7 +848,12 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
 void
 PeerClient::handle_endpoints(std::vector<uint8_t> const& payload)
 {
-    if (!tracker_)
+    std::shared_ptr<EndpointTracker> tracker;
+    {
+        std::lock_guard lock(handler_mutex_);
+        tracker = tracker_;
+    }
+    if (!tracker)
         return;
 
     protocol::TMEndpoints msg;
@@ -854,7 +881,7 @@ PeerClient::handle_endpoints(std::vector<uint8_t> const& payload)
         if (!EndpointTracker::parse_endpoint(addr, host, port))
             continue;
 
-        tracker_->add_discovered(addr);
+        tracker->add_discovered(addr);
         PLOGD(
             log_,
             "[",
@@ -935,8 +962,13 @@ PeerClient::on_packet(
             return;
         default:
             PLOGT(log_, "  unhandled packet type=", header.type);
-            if (unsolicited_handler_)
-                unsolicited_handler_(header.type, payload);
+            UnsolicitedHandler handler;
+            {
+                std::lock_guard lock(handler_mutex_);
+                handler = unsolicited_handler_;
+            }
+            if (handler)
+                handler(header.type, payload);
             return;
     }
 }

@@ -15,6 +15,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace catl::peer_client {
@@ -224,18 +225,12 @@ public:
     }
 
     void
-    set_unsolicited_handler(UnsolicitedHandler handler)
-    {
-        unsolicited_handler_ = std::move(handler);
-    }
+    set_unsolicited_handler(UnsolicitedHandler handler);
 
     /// Set a shared endpoint tracker. TMStatusChange updates will
     /// be fed into it automatically.
     void
-    set_tracker(std::shared_ptr<EndpointTracker> tracker)
-    {
-        tracker_ = std::move(tracker);
-    }
+    set_tracker(std::shared_ptr<EndpointTracker> tracker);
 
 
     /// Peer's advertised ledger range (from TMStatusChange).
@@ -427,8 +422,9 @@ private:
     PendingMap<PingResult> pending_pings_;
     PendingMap<ProofPathResult> pending_proof_paths_;
 
-    // No mutex — all operations must be on the io_context thread.
-    // Use asio::post(io_context_, ...) if calling from another thread.
+    // Request state assumes strand affinity. Late-bound handler pointers
+    // are separately mutex-protected so callers do not reintroduce races
+    // by updating them after async work has started.
 
     // ---------------------------------------------------------------
     // Members
@@ -438,6 +434,7 @@ private:
     asio::strand<asio::io_context::executor_type> strand_;
     std::unique_ptr<asio::ssl::context> ssl_context_;
     std::shared_ptr<peer_connection> connection_;
+    mutable std::mutex handler_mutex_;
     UnsolicitedHandler unsolicited_handler_;
     ReadyCallback ready_callback_;
     ConnectCompletionCallback connect_completion_callback_;

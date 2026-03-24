@@ -1,0 +1,23 @@
+{
+  "network_id": 0,
+  "hot_set": [
+    {
+      "label": "ledger-57900089-a",
+      "ledger_index": 57900089,
+      "tx_hash": "0FB184FC737FE7348B2674BA0E557BEDD0E57B24C2CEC5FBF1738E1551478943"
+    },
+    {
+      "label": "ledger-57900089-b",
+      "ledger_index": 57900089,
+      "tx_hash": "12ADA9562BD59CDC315124F892F242E8C90DBEEC56B7264A211E55879DD3C42C"
+    }
+  ],
+  "cold_set": [
+    {
+      "label": "ledger-57900089-c",
+      "ledger_index": 57900089,
+      "tx_hash": "15B94CD145500B523C2164DB30A8A8BCC65BFF1E38FFDFE3F04CD0B2924333FA"
+    }
+  ],
+  "bad_set": []
+}

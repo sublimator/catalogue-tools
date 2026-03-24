@@ -93,6 +93,32 @@ PeerSet::start()
     configure_tracker_persistence();
 }
 
+void
+PeerSet::set_unsolicited_handler(UnsolicitedHandler handler)
+{
+    {
+        std::lock_guard lock(unsolicited_handler_mutex_);
+        unsolicited_handler_ = std::move(handler);
+    }
+
+    auto self = shared_from_this();
+    asio::post(strand_, [self]() {
+        UnsolicitedHandler current_handler;
+        {
+            std::lock_guard lock(self->unsolicited_handler_mutex_);
+            current_handler = self->unsolicited_handler_;
+        }
+
+        for (auto& [_, client] : self->connections_)
+        {
+            if (client)
+            {
+                client->set_unsolicited_handler(current_handler);
+            }
+        }
+    });
+}
+
 std::int64_t
 PeerSet::now_unix()
 {
@@ -702,7 +728,10 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
         PeerClient::ConnectOptions connect_opts;
         connect_opts.network_id = network_id_;
         connect_opts.tracker = tracker_;
-        connect_opts.unsolicited_handler = unsolicited_handler_;
+        {
+            std::lock_guard lock(unsolicited_handler_mutex_);
+            connect_opts.unsolicited_handler = unsolicited_handler_;
+        }
         {
             auto self2 = shared_from_this();
             auto owned_key2 = key;
@@ -908,7 +937,7 @@ PeerSet::prioritize_ledger(uint32_t ledger_seq)
 }
 
 void
-PeerSet::try_candidates_for(uint32_t ledger_seq)
+PeerSet::try_candidates_for(uint32_t /*ledger_seq*/)
 {
     // Don't call prioritize_ledger() — with concurrent prove() calls,
     // overwriting the shared preference would retune discovery for all.
@@ -1018,7 +1047,7 @@ PeerSet::wait_for_any_peer(
         tracker_->size(),
         " known, Ctrl-C to cancel)");
 
-    boost::asio::steady_timer timer(io_);
+    boost::asio::steady_timer timer(strand_);
     for (int elapsed_ms = 0; elapsed_ms < timeout_secs * 1000;
          elapsed_ms += 200)
     {
@@ -1092,7 +1121,7 @@ PeerSet::wait_for_peer(
         tracker_->size(),
         " known, Ctrl-C to cancel)");
 
-    boost::asio::steady_timer timer(io_);
+    boost::asio::steady_timer timer(strand_);
     for (int elapsed_ms = 0; elapsed_ms < timeout_secs * 1000;
          elapsed_ms += 200)
     {

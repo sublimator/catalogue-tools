@@ -19,6 +19,7 @@ Compared to v1, this version writes durable artifacts:
 
 Examples:
     scripts/xproof-serve-smoke-v2.py --xproof build/src/xproof/xproof -q
+    scripts/xproof-serve-smoke-v2.py --one prove_json_shape --threads 4
     scripts/xproof-serve-smoke-v2.py --xproof build/src/xproof/xproof \
       --trace-http --log-level DEBUG --harsh-winds -q
     scripts/xproof-serve-smoke-v2.py --tx-corpus scripts/xproof-tx-corpus.sample.json -q
@@ -47,7 +48,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -508,6 +509,8 @@ class TestConfig:
     soak_seconds: float
     server_threads: int
     no_cache: bool
+    server_scope: str
+    explicit_peer_cache_path: bool
 
     @property
     def bind(self) -> str:

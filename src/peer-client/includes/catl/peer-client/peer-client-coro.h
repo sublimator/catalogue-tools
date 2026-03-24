@@ -217,17 +217,31 @@ co_connect(
         executor, asio::steady_timer::time_point::max());
     auto deadline = std::make_shared<asio::steady_timer>(
         executor, std::chrono::seconds(timeout_secs));
-    auto peer_seq = std::make_shared<uint32_t>(0);
+    auto peer_seq = std::make_shared<std::atomic<uint32_t>>(0);
+
+    auto signal_executor = signal->get_executor();
+    auto user_on_complete = std::move(opts.on_complete);
 
     // Install the completion callback into opts — it fires on
-    // PeerClient's strand and cancels the signal (thread-safe op).
+    // PeerClient's strand, then reposts the wakeup onto this coroutine's
+    // executor so the timer is only touched from its owning executor.
     opts.on_complete =
-        [signal, peer_seq](boost::system::error_code ec, uint32_t seq) {
+        [peer_seq,
+         signal_executor,
+         signal,
+         user_on_complete = std::move(user_on_complete)](
+            boost::system::error_code ec, uint32_t seq) mutable {
             if (!ec)
             {
-                *peer_seq = seq;
+                peer_seq->store(seq);
             }
-            signal->cancel();  // thread-safe timer cancel
+            if (user_on_complete)
+            {
+                user_on_complete(ec, seq);
+            }
+            asio::post(signal_executor, [signal]() {
+                signal->cancel();
+            });
         };
 
     out_client = PeerClient::connect(
@@ -235,7 +249,9 @@ co_connect(
 
     deadline->async_wait([signal](boost::system::error_code ec) {
         if (!ec)
+        {
             signal->cancel();
+        }
     });
 
     boost::system::error_code ec;
@@ -249,7 +265,7 @@ co_connect(
         throw PeerClientException(Error::Disconnected);
     }
 
-    co_return *peer_seq;
+    co_return peer_seq->load();
 }
 
 /// Legacy overload — wraps into ConnectOptions.

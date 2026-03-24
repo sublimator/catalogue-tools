@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -152,17 +153,7 @@ public:
     }
 
     void
-    set_unsolicited_handler(UnsolicitedHandler handler)
-    {
-        unsolicited_handler_ = std::move(handler);
-        for (auto& [_, client] : connections_)
-        {
-            if (client)
-            {
-                client->set_unsolicited_handler(unsolicited_handler_);
-            }
-        }
-    }
+    set_unsolicited_handler(UnsolicitedHandler handler);
 
     /// Try to connect to an endpoint. Returns nullptr on failure.
     /// Redirect IPs from 503 are fed into the tracker + tried immediately.
@@ -177,12 +168,6 @@ private:
     /// Remove a dead peer from the connection map.
     void
     remove_peer(std::string const& key);
-
-    /// Wire disconnect detection for a newly connected peer.
-    void
-    watch_peer_disconnect(
-        std::string const& key,
-        std::shared_ptr<PeerClient> const& client);
 
     /// Check if we're at the connection cap.
     bool
@@ -291,6 +276,7 @@ private:
     std::set<std::string> crawled_;
     std::vector<std::string> pending_crawls_;
     std::optional<uint32_t> preferred_ledger_seq_;
+    mutable std::mutex unsolicited_handler_mutex_;
     UnsolicitedHandler unsolicited_handler_;
 };
 
