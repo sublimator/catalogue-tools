@@ -117,6 +117,7 @@ co_get_ledger_header(
     uint32_t ledger_seq,
     RequestOptions opts = {})
 {
+    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<LedgerHeaderResult>(
         [&](Callback<LedgerHeaderResult> cb) {
             client->get_ledger_header(ledger_seq, std::move(cb), opts);
@@ -129,6 +130,7 @@ co_get_ledger_header(
     Hash256 const& ledger_hash,
     RequestOptions opts = {})
 {
+    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<LedgerHeaderResult>(
         [&](Callback<LedgerHeaderResult> cb) {
             client->get_ledger_header(ledger_hash, std::move(cb), opts);
@@ -142,6 +144,7 @@ co_get_state_nodes(
     std::vector<SHAMapNodeID> const& node_ids,
     RequestOptions opts = {})
 {
+    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<LedgerNodesResult>(
         [&](Callback<LedgerNodesResult> cb) {
             client->get_state_nodes(ledger_hash, node_ids, std::move(cb), opts);
@@ -155,6 +158,7 @@ co_get_tx_nodes(
     std::vector<SHAMapNodeID> const& node_ids,
     RequestOptions opts = {})
 {
+    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<LedgerNodesResult>(
         [&](Callback<LedgerNodesResult> cb) {
             client->get_tx_nodes(ledger_hash, node_ids, std::move(cb), opts);
@@ -168,6 +172,7 @@ co_get_tx_proof_path(
     Hash256 const& key,
     RequestOptions opts = {})
 {
+    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<ProofPathResult>(
         [&](Callback<ProofPathResult> cb) {
             client->get_tx_proof_path(ledger_hash, key, std::move(cb), opts);
@@ -181,6 +186,7 @@ co_get_state_proof_path(
     Hash256 const& key,
     RequestOptions opts = {})
 {
+    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<ProofPathResult>(
         [&](Callback<ProofPathResult> cb) {
             client->get_state_proof_path(ledger_hash, key, std::move(cb), opts);
@@ -190,6 +196,7 @@ co_get_state_proof_path(
 inline asio::awaitable<PingResult>
 co_ping(std::shared_ptr<PeerClient> client, RequestOptions opts = {})
 {
+    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<PingResult>(
         [&](Callback<PingResult> cb) { client->ping(std::move(cb), opts); });
 }

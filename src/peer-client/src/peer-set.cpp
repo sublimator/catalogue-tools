@@ -1320,7 +1320,11 @@ PeerSet::evict_for(uint32_t target_ledger_seq)
         if (!client || !client->is_ready())
             continue;
 
-        // Don't evict peers with in-flight requests
+        // Don't evict peers with in-flight requests.
+        // pending_count() reads PeerClient state — safe because
+        // the request methods now hop to PeerClient's strand,
+        // and atomics/size() are safe to read cross-strand.
+        // But skip eviction entirely if the peer was recently active.
         if (client->pending_count() > 0)
             continue;
 

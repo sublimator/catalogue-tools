@@ -264,6 +264,14 @@ public:
         return *connection_;
     }
 
+    /// The PeerClient's strand. Callers can use this to hop to the
+    /// strand before calling request methods.
+    asio::strand<asio::io_context::executor_type>&
+    strand()
+    {
+        return strand_;
+    }
+
 private:
     /// Pairs a callback with its timeout timer.
     template <typename T>
