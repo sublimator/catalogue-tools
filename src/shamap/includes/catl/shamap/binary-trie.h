@@ -1,15 +1,25 @@
 #pragma once
 
-// Binary trie encoding/decoding for SHAMap abbreviated trees.
+// Binary trie encoding/decoding for SHAMap trees.
+//
+// Compact serialization of 16-way radix tries. Used by XPRF proof format
+// for map proofs (tx and state trees). An abbreviated tree with 1 leaf
+// and ~20 placeholders typically encodes to ~500-700 bytes.
 //
 // Format: 2-bit-per-branch headers (uint32 LE) with depth-first traversal.
-// See xpop-2-py SPEC.md section 3.4.
 //
-// Branch types (2 bits each, branch 0 in bits 0-1, branch 1 in bits 2-3, ...):
+// Branch types (2 bits each, branch 0 in bits 0-1, branch 1 in bits 2-3):
 //   00 = empty
-//   01 = leaf     → [key: 32][data_len: varint][data]
+//   01 = leaf     → [key: 32][data_len: varint][data: canonical binary]
 //   10 = inner    → recurse (another branch header + children)
-//   11 = hash     → [32 bytes] (pruned placeholder)
+//   11 = hash     → [32 bytes] (pruned subtree placeholder)
+//
+// Leaf data is raw canonical XRPL binary — the verifier hashes it directly
+// without re-serialization (unlike the JSON trie which requires decode→
+// re-encode). This makes binary tries both smaller and faster to verify.
+//
+// See also: sink_trie_binary() on SHAMapInnerNodeT, trie_binary() /
+// from_trie_binary() on SHAMapT.
 
 #include <cstddef>
 #include <cstdint>

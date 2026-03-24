@@ -462,7 +462,15 @@ write_tlv(
 }
 
 /// Encode the TLV body (no file header).
-/// Anchor core goes first (hash + signatures), UNL blob goes last.
+///
+/// TLV ordering for progressive verification:
+///   1. Anchor core (0x01) — hash + publisher key + validation signatures
+///   2. Headers + map proofs (0x02, 0x03, 0x04) — the actual proof chain
+///   3. Anchor UNL (0x05) — VL blob, only needed if no cached UNL
+///
+/// A verifier with a cached UNL can verify after reading (1) + (2),
+/// without ever touching (3). For QR codes this means the customer
+/// can pull the phone away after the first few frames.
 static std::vector<uint8_t>
 encode_tlv_body(ProofChain const& chain)
 {

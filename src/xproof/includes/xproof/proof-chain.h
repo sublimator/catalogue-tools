@@ -64,11 +64,13 @@ struct TrieData
     enum class TreeType { tx, state };
     TreeType tree = TreeType::tx;
 
-    // The trie — stored as JSON for now, binary in the future.
-    // Both forms can reconstruct the abbreviated SHAMap for
-    // root hash verification.
-    boost::json::value trie_json;       // JSON trie (current)
-    std::vector<uint8_t> trie_binary;   // binary trie (future)
+    // Two representations of the same abbreviated SHAMap.
+    // The builder populates both; serializers use whichever they need.
+    // JSON form: human-readable, leaves are decoded XRPL objects.
+    // Binary form: compact, leaves are raw canonical binary (no re-serialization
+    //   needed for hash verification).
+    boost::json::value trie_json;
+    std::vector<uint8_t> trie_binary;
 };
 
 //------------------------------------------------------------------------------
