@@ -11,6 +11,8 @@
 
 namespace catl::peer_client {
 
+static LogPartition log_("peer-conn", LogLevel::INFO);
+
 namespace beast = boost::beast;
 namespace http = beast::http;
 
@@ -34,7 +36,7 @@ peer_connection::async_connect(const connection_handler& handler)
 {
     if (config_.listen_mode)
     {
-        LOGE("Cannot call async_connect in listen mode");
+        PLOGE(log_, "Cannot call async_connect in listen mode");
         handler(boost::asio::error::invalid_argument);
         return;
     }
@@ -79,7 +81,7 @@ peer_connection::async_accept(
 {
     if (!config_.listen_mode)
     {
-        LOGE("Cannot call async_accept when not in listen mode");
+        PLOGE(log_, "Cannot call async_accept when not in listen mode");
         handler(boost::asio::error::invalid_argument);
         return;
     }
@@ -333,7 +335,7 @@ peer_connection::handle_http_response(const connection_handler& handler)
 {
     if (http_response_.result() != http::status::switching_protocols)
     {
-        LOGE(
+        PLOGE(log_, 
             "[", config_.host, ":", config_.port, "] ",
             "HTTP upgrade failed with status: ",
             static_cast<int>(http_response_.result()));
@@ -341,7 +343,7 @@ peer_connection::handle_http_response(const connection_handler& handler)
         // Log response headers — may contain redirect or error info
         for (auto const& field : http_response_)
         {
-            LOGD(
+            PLOGI(log_, 
                 "[", config_.host, ":", config_.port, "]   ",
                 field.name_string(), ": ", field.value());
         }
@@ -349,7 +351,7 @@ peer_connection::handle_http_response(const connection_handler& handler)
         // Log body if present (rippled sends error reason here)
         if (!http_response_.body().empty())
         {
-            LOGD(
+            PLOGI(log_, 
                 "[", config_.host, ":", config_.port, "]   body: ",
                 http_response_.body());
         }
@@ -359,19 +361,19 @@ peer_connection::handle_http_response(const connection_handler& handler)
     }
 
     // Log important response headers
-    LOGI("HTTP upgrade successful - examining response headers:");
+    PLOGI(log_, "HTTP upgrade successful - examining response headers:");
 
     // Check protocol version
     if (auto it = http_response_.find("Upgrade"); it != http_response_.end())
     {
-        LOGI("  Protocol version: ", it->value());
+        PLOGI(log_, "  Protocol version: ", it->value());
         protocol_version_ = std::string(it->value());
     }
 
     // Check server version
     if (auto it = http_response_.find("Server"); it != http_response_.end())
     {
-        LOGI("  Server: ", it->value());
+        PLOGI(log_, "  Server: ", it->value());
         server_version_ = std::string(it->value());
     }
 
@@ -379,34 +381,34 @@ peer_connection::handle_http_response(const connection_handler& handler)
     if (auto it = http_response_.find("X-Protocol-Ctl");
         it != http_response_.end())
     {
-        LOGI("  Protocol features: ", it->value());
+        PLOGI(log_, "  Protocol features: ", it->value());
         // TODO: Parse features like LEDGER_REPLAY=1
     }
 
     // Check network ID
     if (auto it = http_response_.find("Network-ID"); it != http_response_.end())
     {
-        LOGI("  Network ID: ", it->value());
+        PLOGI(log_, "  Network ID: ", it->value());
         network_id_ = std::string(it->value());
     }
 
     // Check public key
     if (auto it = http_response_.find("Public-Key"); it != http_response_.end())
     {
-        LOGI("  Node public key: ", it->value());
+        PLOGI(log_, "  Node public key: ", it->value());
     }
 
     // Check closed ledger info
     if (auto it = http_response_.find("Closed-Ledger");
         it != http_response_.end())
     {
-        LOGI("  Closed ledger: ", it->value());
+        PLOGI(log_, "  Closed ledger: ", it->value());
     }
 
     if (auto it = http_response_.find("Previous-Ledger");
         it != http_response_.end())
     {
-        LOGI("  Previous ledger: ", it->value());
+        PLOGI(log_, "  Previous ledger: ", it->value());
     }
 
     // Log any other headers we might not know about
@@ -422,7 +424,7 @@ peer_connection::handle_http_response(const connection_handler& handler)
             field.name_string() != "Connection" &&
             field.name_string() != "Connect-As")
         {
-            LOGD("  ", field.name_string(), ": ", field.value());
+            PLOGD(log_, "  ", field.name_string(), ": ", field.value());
         }
     }
 
@@ -451,7 +453,7 @@ peer_connection::async_read_header()
             boost::system::error_code ec, std::size_t bytes_transferred) {
             if (!ec)
             {
-                LOGD("Read header: ", bytes_transferred, " bytes");
+                PLOGD(log_, "Read header: ", bytes_transferred, " bytes");
             }
             self->handle_read_header(ec, bytes_transferred);
         });
@@ -465,11 +467,11 @@ peer_connection::handle_read_header(
     if (ec)
     {
         // Log exact error code for debugging disconnects
-        LOGE("Error reading header: ", ec.message(), " (val=", ec.value(), ")");
+        PLOGE(log_, "Error reading header: ", ec.message(), " (val=", ec.value(), ")");
 
         if (ec != asio::error::operation_aborted)
         {
-            LOGI("Connection closed during header read");
+            PLOGI(log_, "Connection closed during header read");
             close();
             if (disconnect_handler_)
             {
@@ -490,14 +492,14 @@ peer_connection::handle_read_header(
 
     if (current_header_.compressed)
     {
-        LOGD(
+        PLOGD(log_, 
             "Compressed packet detected, need to read additional header bytes");
     }
 
     current_header_.payload_size = payload_size;
     current_header_.type = (header_buffer_[4] << 8) | header_buffer_[5];
 
-    LOGD(
+    PLOGD(log_, 
         "Header parsed: type=",
         current_header_.type,
         " payload_size=",
@@ -515,7 +517,7 @@ peer_connection::handle_read_header(
                 boost::system::error_code ec, std::size_t) {
                 if (ec)
                 {
-                    LOGE(
+                    PLOGE(log_, 
                         "Error reading compressed header extension: ",
                         ec.message());
                     if (ec != asio::error::operation_aborted)
@@ -576,12 +578,12 @@ peer_connection::handle_read_payload(
 {
     if (ec)
     {
-        LOGE(
+        PLOGE(log_, 
             "Error reading payload: ", ec.message(), " (val=", ec.value(), ")");
         // Check if it's EOF or connection closed
         if (ec != asio::error::operation_aborted)
         {
-            LOGI("Connection closed during payload read");
+            PLOGI(log_, "Connection closed during payload read");
             close();
             if (disconnect_handler_)
             {
@@ -591,7 +593,7 @@ peer_connection::handle_read_payload(
         return;
     }
 
-    LOGD(
+    PLOGD(log_, 
         "Read payload: ",
         bytes_read,
         " bytes for packet type ",
@@ -606,7 +608,7 @@ peer_connection::handle_read_payload(
         }
         catch (std::exception const& e)
         {
-            LOGE("Exception in packet handler: ", e.what());
+            PLOGE(log_, "Exception in packet handler: ", e.what());
         }
     }
 
@@ -653,7 +655,7 @@ peer_connection::async_send_packet(
             // Detect connection errors and trigger disconnect
             if (ec && ec != asio::error::operation_aborted)
             {
-                LOGI("Connection lost during write");
+                PLOGI(log_, "Connection lost during write");
                 self->close();
                 if (self->disconnect_handler_)
                 {
@@ -673,7 +675,7 @@ peer_connection::send_initial_ping()
         packet_type::ping, ping_data, [](boost::system::error_code ec) {
             if (ec)
             {
-                LOGE("Failed to send initial ping: ", ec.message());
+                PLOGE(log_, "Failed to send initial ping: ", ec.message());
             }
         });
 }
@@ -708,7 +710,7 @@ peer_connection::send_transaction_query(
 {
     if (!connected_ || !socket_)
     {
-        LOGE("Cannot send transaction query: not connected");
+        PLOGE(log_, "Cannot send transaction query: not connected");
         return;
     }
 
@@ -736,7 +738,7 @@ peer_connection::send_transaction_query(
     // Only log if not in query mode
     if (!tx_hash.empty())
     {
-        LOGD(
+        PLOGD(log_, 
             "Sending query for tx ",
             tx_hash.substr(0, 16),
             "... with seq=",
@@ -765,7 +767,7 @@ peer_connection::send_transaction_query(
             }
         }
         query.set_ledgerhash(ledger_bytes.data(), ledger_bytes.size());
-        LOGD("  Including ledger hash: ", ledger_hash.substr(0, 16), "...");
+        PLOGD(log_, "  Including ledger hash: ", ledger_hash.substr(0, 16), "...");
     }
 
     // Add the transaction hash to query
@@ -776,12 +778,12 @@ peer_connection::send_transaction_query(
     std::string serialized;
     if (!query.SerializeToString(&serialized))
     {
-        LOGE("Failed to serialize transaction query");
+        PLOGE(log_, "Failed to serialize transaction query");
         return;
     }
 
     // Send the query using async_send_packet
-    LOGD("  Serialized size: ", serialized.size(), " bytes");
+    PLOGD(log_, "  Serialized size: ", serialized.size(), " bytes");
 
     async_send_packet(
         packet_type::get_objects,
@@ -789,7 +791,7 @@ peer_connection::send_transaction_query(
         [tx_hash, seq](boost::system::error_code ec) {
             if (ec)
             {
-                LOGE(
+                PLOGE(log_, 
                     "Failed to send query for tx ",
                     tx_hash.substr(0, 16),
                     "... (seq=",
@@ -799,7 +801,7 @@ peer_connection::send_transaction_query(
             }
             else
             {
-                LOGD(
+                PLOGD(log_, 
                     "Successfully sent query for tx ",
                     tx_hash.substr(0, 16),
                     "... (seq=",
@@ -842,14 +844,14 @@ peer_connection::send_transaction_query(
     std::string serialized2;
     if (query2.SerializeToString(&serialized2))
     {
-        LOGD("Also trying as TRANSACTION_NODE (seq=", seq2, ")");
+        PLOGD(log_, "Also trying as TRANSACTION_NODE (seq=", seq2, ")");
         async_send_packet(
             packet_type::get_objects,
             std::vector<uint8_t>(serialized2.begin(), serialized2.end()),
             [tx_hash, seq2](boost::system::error_code ec) {
                 if (ec)
                 {
-                    LOGE(
+                    PLOGE(log_, 
                         "Failed to send node query for tx ",
                         tx_hash.substr(0, 16),
                         "... (seq=",
@@ -859,7 +861,7 @@ peer_connection::send_transaction_query(
                 }
                 else
                 {
-                    LOGD(
+                    PLOGD(log_, 
                         "Successfully sent node query for tx ",
                         tx_hash.substr(0, 16),
                         "... (seq=",
@@ -875,7 +877,7 @@ peer_connection::request_transaction_set(const std::string& tx_set_hash)
 {
     if (!connected_ || !socket_)
     {
-        LOGE("Cannot request transaction set: not connected");
+        PLOGE(log_, "Cannot request transaction set: not connected");
         return;
     }
 
@@ -907,22 +909,22 @@ peer_connection::request_transaction_set(const std::string& tx_set_hash)
     root_node_id += '\0';                // depth = 0 (root)
     *(request.add_nodeids()) = root_node_id;
 
-    LOGI("Requesting transaction set: ", tx_set_hash.substr(0, 16), "...");
-    LOGI("  Full hash: ", tx_set_hash);
-    LOGI("  Using itype=", protocol::liTS_CANDIDATE, " (TS_CANDIDATE)");
-    LOGI("  Query depth: 3");
-    LOGI("  Starting from: ROOT node");
+    PLOGI(log_, "Requesting transaction set: ", tx_set_hash.substr(0, 16), "...");
+    PLOGI(log_, "  Full hash: ", tx_set_hash);
+    PLOGI(log_, "  Using itype=", protocol::liTS_CANDIDATE, " (TS_CANDIDATE)");
+    PLOGI(log_, "  Query depth: 3");
+    PLOGI(log_, "  Starting from: ROOT node");
 
     // Serialize the message
     std::string serialized;
     if (!request.SerializeToString(&serialized))
     {
-        LOGE("Failed to serialize TMGetLedger request");
+        PLOGE(log_, "Failed to serialize TMGetLedger request");
         return;
     }
 
-    LOGI("Requesting transaction set: ", tx_set_hash.substr(0, 16), "...");
-    LOGI("  itype=", protocol::liTS_CANDIDATE, " querydepth=3 root_node=yes");
+    PLOGI(log_, "Requesting transaction set: ", tx_set_hash.substr(0, 16), "...");
+    PLOGI(log_, "  itype=", protocol::liTS_CANDIDATE, " querydepth=3 root_node=yes");
 
     // Send the request
     async_send_packet(
@@ -931,7 +933,7 @@ peer_connection::request_transaction_set(const std::string& tx_set_hash)
         [tx_set_hash](boost::system::error_code ec) {
             if (ec)
             {
-                LOGE(
+                PLOGE(log_, 
                     "Failed to request transaction set ",
                     tx_set_hash.substr(0, 16),
                     "...: ",
@@ -939,7 +941,7 @@ peer_connection::request_transaction_set(const std::string& tx_set_hash)
             }
             else
             {
-                LOGD(
+                PLOGD(log_, 
                     "Successfully requested transaction set ",
                     tx_set_hash.substr(0, 16),
                     "...");
@@ -954,13 +956,13 @@ peer_connection::request_transaction_set_nodes(
 {
     if (!connected_ || !socket_)
     {
-        LOGE("Cannot request transaction set nodes: not connected");
+        PLOGE(log_, "Cannot request transaction set nodes: not connected");
         return;
     }
 
     if (node_ids_wire.empty())
     {
-        LOGW("request_transaction_set_nodes called with empty node list");
+        PLOGW(log_, "request_transaction_set_nodes called with empty node list");
         return;
     }
 
@@ -989,7 +991,7 @@ peer_connection::request_transaction_set_nodes(
         *(request.add_nodeids()) = node_id_wire;
     }
 
-    LOGD(
+    PLOGD(log_, 
         "Requesting ",
         node_ids_wire.size(),
         " nodes from tx set ",
@@ -1000,7 +1002,7 @@ peer_connection::request_transaction_set_nodes(
     std::string serialized;
     if (!request.SerializeToString(&serialized))
     {
-        LOGE("Failed to serialize TMGetLedger nodes request");
+        PLOGE(log_, "Failed to serialize TMGetLedger nodes request");
         return;
     }
 
@@ -1010,7 +1012,7 @@ peer_connection::request_transaction_set_nodes(
         [](boost::system::error_code ec) {
             if (ec)
             {
-                LOGE("Failed to request transaction set nodes: ", ec.message());
+                PLOGE(log_, "Failed to request transaction set nodes: ", ec.message());
             }
         });
 }
@@ -1038,7 +1040,7 @@ peer_connection::close()
 
         if (ec && ec != boost::asio::error::not_connected)
         {
-            LOGD("Error closing socket: ", ec.message());
+            PLOGD(log_, "Error closing socket: ", ec.message());
         }
     }
 }
