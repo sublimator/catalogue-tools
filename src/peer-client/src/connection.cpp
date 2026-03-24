@@ -18,11 +18,11 @@ namespace beast = boost::beast;
 namespace http = beast::http;
 
 peer_connection::peer_connection(
-    asio::io_context& io_context,
+    strand_type strand,
     asio::ssl::context& ssl_context,
     peer_config config)
-    : io_context_(io_context)
-    , socket_(std::make_unique<ssl_socket>(io_context, ssl_context))
+    : strand_(std::move(strand))
+    , socket_(std::make_unique<ssl_socket>(strand_, ssl_context))
     , config_(std::move(config))
 {
 }
@@ -43,7 +43,7 @@ peer_connection::async_connect(const connection_handler& handler)
     }
 
     // Resolve the host asynchronously
-    auto resolver = std::make_shared<tcp::resolver>(io_context_);
+    auto resolver = std::make_shared<tcp::resolver>(strand_);
     resolver->async_resolve(
         config_.host,
         std::to_string(config_.port),

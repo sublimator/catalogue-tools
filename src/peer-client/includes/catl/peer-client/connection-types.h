@@ -17,7 +17,9 @@ namespace catl::peer_client {
 
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
-using ssl_socket = asio::ssl::stream<tcp::socket>;
+using strand_type = asio::strand<asio::io_context::executor_type>;
+using strand_tcp_socket = asio::basic_stream_socket<tcp, strand_type>;
+using ssl_socket = asio::ssl::stream<strand_tcp_socket>;
 
 struct packet_stats
 {

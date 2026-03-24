@@ -24,8 +24,10 @@ public:
         void(packet_header const&, std::vector<std::uint8_t> const&)>;
     using disconnect_handler = std::function<void(boost::system::error_code)>;
 
+    /// Strand-based construction. All async operations complete on the
+    /// strand, so all callbacks fire on it automatically.
     peer_connection(
-        asio::io_context& io_context,
+        strand_type strand,
         asio::ssl::context& ssl_context,
         peer_config config);
 
@@ -158,7 +160,7 @@ private:
     generate_node_keys();
 
 private:
-    asio::io_context& io_context_;
+    strand_type strand_;
     std::unique_ptr<ssl_socket> socket_;
     peer_config config_;
     packet_handler packet_handler_;
