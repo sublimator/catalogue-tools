@@ -61,11 +61,16 @@ public:
     bootstrap();
 
     /// Get a connected peer that has the given ledger sequence.
-    /// Tries existing connections first, then discovered endpoints.
-    /// Waits up to `discovery_timeout` seconds for TMEndpoints gossip.
-    /// Throws if no peer can be found.
-    boost::asio::awaitable<std::shared_ptr<PeerClient>>
-    peer_for(uint32_t ledger_seq, int discovery_timeout_secs = 5);
+    /// Checks existing connections only. Returns nullopt if none found.
+    std::optional<std::shared_ptr<PeerClient>>
+    peer_for(uint32_t ledger_seq) const;
+
+    /// Wait until a peer with the given ledger sequence is available.
+    /// Polls existing connections every second. New connections may
+    /// appear from bootstrap() or TMEndpoints gossip in the background.
+    /// Returns nullopt on timeout.
+    boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+    wait_for_peer(uint32_t ledger_seq, int timeout_secs = 60);
 
     /// Get any ready peer (e.g. for current-ledger operations).
     std::shared_ptr<PeerClient>

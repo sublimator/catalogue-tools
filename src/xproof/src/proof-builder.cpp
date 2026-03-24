@@ -337,9 +337,30 @@ build_proof(
         "...");
 
     // ── Step 2b: Find a peer with the target ledger range ──
-    // peer_for() checks existing connections first, then tries
-    // discovered peers from TMEndpoints gossip. Throws if none found.
-    client = co_await peers.peer_for(tx_ledger_seq);
+    // Check if current peer has it, otherwise bootstrap and wait.
+    if (!peers.peer_for(tx_ledger_seq))
+    {
+        PLOGI(
+            log_,
+            "No peer has ledger ",
+            tx_ledger_seq,
+            " — bootstrapping...");
+        co_await peers.bootstrap();
+
+        auto found = co_await peers.wait_for_peer(tx_ledger_seq, 30);
+        if (!found)
+        {
+            throw std::runtime_error(
+                "No peer found with ledger " +
+                std::to_string(tx_ledger_seq) +
+                ". Try --peer with a full-history node.");
+        }
+        client = *found;
+    }
+    else
+    {
+        client = *peers.peer_for(tx_ledger_seq);
+    }
 
     // ── Step 3: Determine hop path ──
     uint32_t distance = anchor_hdr.seq() - tx_ledger_seq;

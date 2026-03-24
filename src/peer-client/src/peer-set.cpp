@@ -163,11 +163,10 @@ PeerSet::add(std::string const& host, uint16_t port)
     co_return client;
 }
 
-boost::asio::awaitable<std::shared_ptr<PeerClient>>
-PeerSet::peer_for(uint32_t ledger_seq, int discovery_timeout_secs)
+std::optional<std::shared_ptr<PeerClient>>
+PeerSet::peer_for(uint32_t ledger_seq) const
 {
-    // 1. Check existing connections
-    for (auto& [key, client] : connections_)
+    for (auto const& [key, client] : connections_)
     {
         if (!client->is_ready())
             continue;
@@ -175,51 +174,92 @@ PeerSet::peer_for(uint32_t ledger_seq, int discovery_timeout_secs)
             ledger_seq >= client->peer_first_seq() &&
             ledger_seq <= client->peer_last_seq())
         {
-            PLOGD(log_, "Using existing peer ", key, " for ledger ", ledger_seq);
-            co_return client;
+            return client;
         }
     }
+    return std::nullopt;
+}
 
-    // 2. Check tracker for known peers we haven't connected to
-    auto best = tracker_->best_peer_for(ledger_seq);
-    if (best)
+boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+PeerSet::wait_for_peer(uint32_t ledger_seq, int timeout_secs)
+{
+    // Check immediately
+    if (auto p = peer_for(ledger_seq))
     {
-        auto colon = best->rfind(':');
-        if (colon != std::string::npos)
+        co_return p;
+    }
+
+    PLOGI(
+        log_,
+        "Waiting for a peer with ledger ",
+        ledger_seq,
+        " (timeout: ",
+        timeout_secs,
+        "s, ",
+        connections_.size(),
+        " peers connected)");
+
+    // Poll every second — new peers may appear from bootstrap()
+    // or TMEndpoints gossip running in the background
+    boost::asio::steady_timer timer(io_);
+    for (int elapsed = 0; elapsed < timeout_secs; elapsed++)
+    {
+        timer.expires_after(std::chrono::seconds(1));
+        boost::system::error_code ec;
+        co_await timer.async_wait(
+            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+
+        if (auto p = peer_for(ledger_seq))
         {
-            auto host = best->substr(0, colon);
-            auto port = static_cast<uint16_t>(
-                std::stoul(best->substr(colon + 1)));
-            auto client = co_await try_connect(host, port);
-            if (client && client->peer_first_seq() != 0 &&
-                ledger_seq >= client->peer_first_seq() &&
-                ledger_seq <= client->peer_last_seq())
+            PLOGI(
+                log_,
+                "Found peer for ledger ",
+                ledger_seq,
+                " after ",
+                elapsed + 1,
+                "s");
+            co_return p;
+        }
+
+        // Try connecting to any undiscovered endpoints from tracker
+        auto candidates = tracker_->undiscovered();
+        for (auto const& ep : candidates)
+        {
+            auto colon = ep.rfind(':');
+            if (colon == std::string::npos)
+                continue;
+            auto host = ep.substr(0, colon);
+            uint16_t port = 0;
+            try
             {
-                co_return client;
+                port = static_cast<uint16_t>(
+                    std::stoul(ep.substr(colon + 1)));
             }
+            catch (...)
+            {
+                continue;
+            }
+            // Fire and forget — try_connect adds to connections_ on success
+            boost::asio::co_spawn(
+                io_,
+                [this, host, port]() -> boost::asio::awaitable<void> {
+                    co_await try_connect(host, port);
+                },
+                boost::asio::detached);
         }
     }
 
-    // 3. Bootstrap: connect to well-known peers in parallel
-    PLOGI(log_, "No existing peer has ledger ", ledger_seq, " — bootstrapping");
-    co_await bootstrap();
+    PLOGW(
+        log_,
+        "No peer found with ledger ",
+        ledger_seq,
+        " after ",
+        timeout_secs,
+        "s (",
+        connections_.size(),
+        " peers checked)");
 
-    // Check again after bootstrap
-    for (auto& [key, c] : connections_)
-    {
-        if (!c->is_ready())
-            continue;
-        if (c->peer_first_seq() != 0 &&
-            ledger_seq >= c->peer_first_seq() &&
-            ledger_seq <= c->peer_last_seq())
-        {
-            PLOGI(log_, "Found peer ", key, " for ledger ", ledger_seq);
-            co_return c;
-        }
-    }
-
-    throw std::runtime_error(
-        "PeerSet: no peer found with ledger " + std::to_string(ledger_seq));
+    co_return std::nullopt;
 }
 
 std::shared_ptr<PeerClient>
