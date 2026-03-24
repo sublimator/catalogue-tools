@@ -11,8 +11,23 @@
 
 // Assert that we're running on the PeerSet strand.
 // Fires in debug/TSAN builds, zero cost in release.
+// Log + assert strand affinity. In release builds, logs but doesn't crash.
 #define ASSERT_ON_STRAND() \
-    assert(strand_.running_in_this_thread() && "PeerSet method called off-strand")
+    do { \
+        if (!strand_.running_in_this_thread()) { \
+            PLOGE(log_, "OFF-STRAND: ", __func__, " at ", __FILE__, ":", __LINE__); \
+        } \
+    } while (0)
+
+// Auto-repost onto strand if called from off-strand. Use for public methods.
+// The method must be callable via shared_from_this().
+#define ENSURE_ON_STRAND(method_call) \
+    do { \
+        if (!strand_.running_in_this_thread()) { \
+            asio::post(strand_, [self = shared_from_this()]() { self->method_call; }); \
+            return; \
+        } \
+    } while (0)
 
 namespace catl::peer_client {
 
@@ -150,6 +165,7 @@ PeerSet::now_unix()
 void
 PeerSet::update_endpoint_stats(PeerEndpointCache::Entry const& entry)
 {
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), entry]() { self->update_endpoint_stats(entry); }); return; }
     auto key = canonical_endpoint(entry.endpoint);
     auto& stats = endpoint_stats_[key];
     stats.status = entry.status;
@@ -163,7 +179,7 @@ PeerSet::update_endpoint_stats(PeerEndpointCache::Entry const& entry)
 void
 PeerSet::note_discovered(std::string const& endpoint)
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint]() { self->note_discovered(endpoint); }); return; }
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     stats.last_seen_at = now_unix();
@@ -181,7 +197,7 @@ PeerSet::note_discovered(std::string const& endpoint)
 void
 PeerSet::note_status(std::string const& endpoint, PeerStatus const& status)
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint, status]() { self->note_status(endpoint, status); }); return; }
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     stats.status = status;
@@ -202,7 +218,7 @@ PeerSet::note_connect_success(
     std::string const& endpoint,
     PeerStatus const& status)
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint, status]() { self->note_connect_success(endpoint, status); }); return; }
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     auto const now = now_unix();
@@ -216,7 +232,7 @@ PeerSet::note_connect_success(
 void
 PeerSet::note_connect_failure(std::string const& endpoint)
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint]() { self->note_connect_failure(endpoint); }); return; }
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     stats.last_failure_at = now_unix();
@@ -279,6 +295,7 @@ PeerSet::choose_crawl_status(std::vector<CrawlLedgerRange> const& ranges) const
 bool
 PeerSet::endpoint_has_range(std::string const& endpoint) const
 {
+    ASSERT_ON_STRAND();
     auto key = canonical_endpoint(endpoint);
     auto it = endpoint_stats_.find(key);
     if (it == endpoint_stats_.end())
@@ -291,6 +308,7 @@ PeerSet::endpoint_has_range(std::string const& endpoint) const
 bool
 PeerSet::endpoint_covers_preferred_ledger(std::string const& endpoint) const
 {
+    ASSERT_ON_STRAND();
     if (wanted_ledgers_.empty())
         return false;
 
@@ -314,6 +332,7 @@ PeerSet::endpoint_covers_preferred_ledger(std::string const& endpoint) const
 bool
 PeerSet::should_connect_endpoint(std::string const& endpoint) const
 {
+    ASSERT_ON_STRAND();
     auto key = canonical_endpoint(endpoint);
 
     if (connections_.count(key) || in_flight_.count(key) || queued_.count(key))
@@ -349,6 +368,7 @@ PeerSet::should_connect_endpoint(std::string const& endpoint) const
 bool
 PeerSet::candidate_better(std::string const& lhs, std::string const& rhs) const
 {
+    ASSERT_ON_STRAND();
     static EndpointStats const empty{};
 
     auto lhs_it = endpoint_stats_.find(lhs);
@@ -430,6 +450,7 @@ PeerSet::candidate_better(std::string const& lhs, std::string const& rhs) const
 void
 PeerSet::sort_pending_connects()
 {
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->sort_pending_connects(); }); return; }
     std::sort(
         pending_connects_.begin(),
         pending_connects_.end(),
@@ -441,6 +462,7 @@ PeerSet::sort_pending_connects()
 void
 PeerSet::sort_pending_crawls()
 {
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->sort_pending_crawls(); }); return; }
     std::sort(
         pending_crawls_.begin(),
         pending_crawls_.end(),
@@ -452,7 +474,7 @@ PeerSet::sort_pending_crawls()
 void
 PeerSet::queue_connect(std::string const& endpoint)
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint]() { self->queue_connect(endpoint); }); return; }
     auto key = canonical_endpoint(endpoint);
     auto const now = std::chrono::steady_clock::now();
 
@@ -477,7 +499,7 @@ PeerSet::queue_connect(std::string const& endpoint)
 void
 PeerSet::queue_crawl(std::string const& endpoint)
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint]() { self->queue_crawl(endpoint); }); return; }
     if (options_.max_in_flight_crawls == 0)
         return;
 
@@ -496,7 +518,7 @@ PeerSet::queue_crawl(std::string const& endpoint)
 void
 PeerSet::pump_connects()
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->pump_connects(); }); return; }
     while (in_flight_.size() < options_.max_in_flight_connects &&
            !pending_connects_.empty())
     {
@@ -540,7 +562,7 @@ PeerSet::pump_connects()
 void
 PeerSet::pump_crawls()
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->pump_crawls(); }); return; }
     while (crawl_in_flight_.size() < options_.max_in_flight_crawls &&
            !pending_crawls_.empty())
     {
@@ -727,7 +749,7 @@ PeerSet::configure_tracker_persistence()
 void
 PeerSet::start_connect(std::string const& endpoint)
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint]() { self->start_connect(endpoint); }); return; }
     queue_connect(endpoint);
     pump_connects();
 }
@@ -735,6 +757,7 @@ PeerSet::start_connect(std::string const& endpoint)
 void
 PeerSet::start_connect(std::string const& host, uint16_t port)
 {
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), host, port]() { self->start_connect(host, port); }); return; }
     queue_connect(make_key(host, port));
     pump_connects();
 }
@@ -890,7 +913,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 void
 PeerSet::bootstrap()
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->bootstrap(); }); return; }
     auto const& boot_peers = get_bootstrap_peers(network_id_);
     auto tracked_endpoints = tracker_->all_endpoints();
 
@@ -930,7 +953,7 @@ PeerSet::bootstrap()
 void
 PeerSet::start_tracked_endpoints()
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->start_tracked_endpoints(); }); return; }
     auto endpoints = tracker_->all_endpoints();
     for (auto const& endpoint : endpoints)
     {
@@ -947,7 +970,7 @@ PeerSet::start_tracked_endpoints()
 void
 PeerSet::try_undiscovered()
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->try_undiscovered(); }); return; }
     auto candidates = tracker_->undiscovered();
     if (candidates.empty())
         return;
@@ -996,7 +1019,7 @@ PeerSet::try_undiscovered()
 void
 PeerSet::prioritize_ledger(uint32_t ledger_seq)
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), ledger_seq]() { self->prioritize_ledger(ledger_seq); }); return; }
     wanted_ledgers_.insert(ledger_seq);
     // Cap at 10 entries — evict oldest if needed
     while (wanted_ledgers_.size() > 10)
@@ -1010,9 +1033,9 @@ PeerSet::prioritize_ledger(uint32_t ledger_seq)
 }
 
 void
-PeerSet::try_candidates_for(uint32_t /*ledger_seq*/)
+PeerSet::try_candidates_for(uint32_t ledger_seq)
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), ledger_seq]() { self->try_candidates_for(ledger_seq); }); return; }
     // Don't call prioritize_ledger() — with concurrent prove() calls,
     // overwriting the shared preference would retune discovery for all.
     // Just queue/pump without reranking.
@@ -1050,6 +1073,7 @@ PeerSet::add(std::string const& host, uint16_t port)
 std::optional<std::shared_ptr<PeerClient>>
 PeerSet::peer_for(uint32_t ledger_seq) const
 {
+    ASSERT_ON_STRAND();
     static std::unordered_set<std::string> const empty;
     return peer_for(ledger_seq, empty);
 }
@@ -1131,6 +1155,9 @@ PeerSet::wait_for_any_peer(
         co_await timer.async_wait(
             boost::asio::redirect_error(boost::asio::use_awaitable, ec));
 
+        // Re-hop to strand after co_await
+        co_await asio::post(strand_, asio::use_awaitable);
+
         if (auto client = any_peer(excluded))
         {
             co_return client;
@@ -1210,6 +1237,9 @@ PeerSet::wait_for_peer(
         co_await timer.async_wait(
             boost::asio::redirect_error(boost::asio::use_awaitable, ec));
 
+        // Re-hop to strand after co_await — coroutine may resume off-strand
+        co_await asio::post(strand_, asio::use_awaitable);
+
         if (auto p = peer_for(ledger_seq, excluded))
         {
             PLOGI(log_, "Found peer for ledger ", ledger_seq);
@@ -1259,6 +1289,7 @@ PeerSet::wait_for_peer(
 std::shared_ptr<PeerClient>
 PeerSet::any_peer() const
 {
+    ASSERT_ON_STRAND();
     static std::unordered_set<std::string> const empty;
     return any_peer(empty);
 }
@@ -1289,6 +1320,7 @@ PeerSet::any_peer(std::unordered_set<std::string> const& excluded) const
 size_t
 PeerSet::connected_count() const
 {
+    ASSERT_ON_STRAND();
     size_t count = 0;
     for (auto const& [_, client] : connections_)
     {
@@ -1303,13 +1335,14 @@ PeerSet::connected_count() const
 bool
 PeerSet::at_connection_cap() const
 {
+    ASSERT_ON_STRAND();
     return connected_count() >= options_.max_connected_peers;
 }
 
 bool
 PeerSet::evict_for(uint32_t target_ledger_seq)
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), target_ledger_seq]() { self->evict_for(target_ledger_seq); }); return {}; }
 
     // Find the least useful idle peer that doesn't cover the target.
     std::string worst_key;
@@ -1373,7 +1406,7 @@ PeerSet::evict_for(uint32_t target_ledger_seq)
 void
 PeerSet::remove_peer(std::string const& key)
 {
-    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), key]() { self->remove_peer(key); }); return; }
     auto it = connections_.find(key);
     if (it != connections_.end())
     {
