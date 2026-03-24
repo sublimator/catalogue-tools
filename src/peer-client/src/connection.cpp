@@ -331,6 +331,7 @@ peer_connection::handle_http_response(const connection_handler& handler)
     if (http_response_.result() != http::status::switching_protocols)
     {
         LOGE(
+            "[", config_.host, ":", config_.port, "] ",
             "HTTP upgrade failed with status: ",
             static_cast<int>(http_response_.result()));
         handler(boost::asio::error::invalid_argument);

@@ -605,7 +605,10 @@ PeerClient::do_connect(
                                    boost::system::error_code ec) mutable {
         if (ec)
         {
-            PLOGE(PeerClient::log_, "Connection failed: ", ec.message());
+            PLOGE(
+                PeerClient::log_,
+                "[", self->endpoint_str_, "] Connection failed: ",
+                ec.message());
             self->state_ = State::Failed;
             return;
         }
