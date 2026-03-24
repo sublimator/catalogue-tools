@@ -139,8 +139,8 @@ ProofEngine::stop()
 asio::awaitable<ProofEngine::ProveResult>
 ProofEngine::prove(std::string const& tx_hash)
 {
-    // Check cache first
-    if (auto const* cached = cache_get(tx_hash))
+    // Check cache first — returns by value, safe across co_await
+    if (auto cached = cache_get(tx_hash))
     {
         PLOGI(log_, "Cache hit for ", tx_hash.substr(0, 16), "...");
         co_return *cached;
@@ -218,20 +218,19 @@ ProofEngine::cache_put(
     PLOGD(log_, "Cached proof for ", tx_hash.substr(0, 16), "... (", cache_lru_.size(), " entries)");
 }
 
-ProofEngine::ProveResult const*
+std::optional<ProofEngine::ProveResult>
 ProofEngine::cache_get(std::string const& tx_hash)
 {
     auto it = cache_map_.find(tx_hash);
     if (it == cache_map_.end())
     {
         cache_misses_++;
-        return nullptr;
+        return std::nullopt;
     }
 
     cache_hits_++;
-    // Move to front (most recently used)
     cache_lru_.splice(cache_lru_.begin(), cache_lru_, it->second);
-    return &it->second->second;
+    return it->second->second;  // return by value
 }
 
 ProofEngine::CacheStats

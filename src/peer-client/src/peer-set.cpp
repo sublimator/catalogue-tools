@@ -1153,10 +1153,20 @@ PeerSet::watch_peer_disconnect(
     std::string const& key,
     std::shared_ptr<PeerClient> const& client)
 {
+    // Chain with PeerClient's existing disconnect handler — don't replace it.
+    // PeerClient sets its handler in do_connect() for state management.
+    // We wrap it so both fire.
     auto self = shared_from_this();
     auto owned_key = key;
+    auto existing = client->raw_connection().disconnect_handler_copy();
     client->raw_connection().set_disconnect_handler(
-        [self, owned_key](boost::system::error_code) {
+        [self, owned_key, existing](boost::system::error_code ec) {
+            // Fire PeerClient's handler first (state update)
+            if (existing)
+            {
+                existing(ec);
+            }
+            // Then remove from PeerSet's map
             self->remove_peer(owned_key);
         });
 }

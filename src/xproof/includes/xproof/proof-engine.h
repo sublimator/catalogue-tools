@@ -24,6 +24,7 @@
 #include <boost/asio/io_context.hpp>
 #include <list>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -143,7 +144,7 @@ private:
     void
     cache_put(std::string const& tx_hash, ProveResult const& result);
 
-    ProveResult const*
+    std::optional<ProveResult>
     cache_get(std::string const& tx_hash);
 };
 

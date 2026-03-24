@@ -108,6 +108,13 @@ public:
     void
     set_disconnect_handler(disconnect_handler handler);
 
+    // Get a copy of the current disconnect handler (for chaining).
+    disconnect_handler
+    disconnect_handler_copy() const
+    {
+        return disconnect_handler_;
+    }
+
     // Get socket for accept operations
     ssl_socket&
     socket()
