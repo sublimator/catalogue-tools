@@ -1392,11 +1392,11 @@ PeerSet::evict_for(uint32_t target_ledger_seq)
         ") to make room for ledger ",
         target_ledger_seq);
 
-    // Close the connection and remove
+    // Close the connection via strand-safe close() and remove.
+    // close() posts to the connection's strand if called off-strand.
     auto it = connections_.find(worst_key);
     if (it != connections_.end() && it->second)
     {
-        it->second->cancel_all();
         it->second->raw_connection().close();
     }
     remove_peer(worst_key);

@@ -749,6 +749,11 @@ peer_connection::do_write()
         asio::buffer(front.packet),
         [self = shared_from_this()](
             boost::system::error_code ec, std::size_t) {
+            // If closing_ is set, fail_and_close already drained the
+            // queue. The front entry we were writing is gone.
+            if (self->closing_)
+                return;
+
             auto entry = std::move(self->write_queue_.front());
             self->write_queue_.pop_front();
 
@@ -1185,6 +1190,9 @@ peer_connection::close_impl()
         return;
     closing_ = true;
     connected_ = false;
+
+    // Drain queued writes so no handlers are left stranded
+    fail_queued_writes(asio::error::operation_aborted);
 
     if (socket_ && socket_->lowest_layer().is_open())
     {

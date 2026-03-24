@@ -216,7 +216,7 @@ private:
     void
     fail_queued_writes(boost::system::error_code ec);
 
-    /// Strand-only: close socket, fail writes, fire disconnect handler.
+    /// Strand-only: close socket and fail queued writes.
     /// Idempotent — guarded by closing_.
     void
     close_impl();
