@@ -33,6 +33,20 @@ namespace catl::peer_client {
 
 static LogPartition log_("peer-set", LogLevel::INHERIT);
 
+/// Sleep on a strand with automatic re-hop. After co_await, the coroutine
+/// is guaranteed to be running on the strand — unlike a bare timer co_await
+/// which resumes on the coroutine's birth executor.
+static asio::awaitable<void>
+strand_sleep(
+    asio::strand<asio::io_context::executor_type>& strand,
+    std::chrono::milliseconds ms)
+{
+    asio::steady_timer timer(strand, ms);
+    boost::system::error_code ec;
+    co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+    co_await asio::post(strand, asio::use_awaitable);
+}
+
 namespace {
 
 std::string
@@ -1146,17 +1160,10 @@ PeerSet::wait_for_any_peer(
         tracker_->size(),
         " known, Ctrl-C to cancel)");
 
-    boost::asio::steady_timer timer(strand_);
     for (int elapsed_ms = 0; elapsed_ms < timeout_secs * 1000;
          elapsed_ms += 200)
     {
-        timer.expires_after(std::chrono::milliseconds(200));
-        boost::system::error_code ec;
-        co_await timer.async_wait(
-            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-
-        // Re-hop to strand after co_await
-        co_await asio::post(strand_, asio::use_awaitable);
+        co_await strand_sleep(strand_, std::chrono::milliseconds(200));
 
         if (auto client = any_peer(excluded))
         {
