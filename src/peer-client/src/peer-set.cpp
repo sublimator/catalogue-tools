@@ -899,7 +899,9 @@ PeerSet::prioritize_ledger(uint32_t ledger_seq)
 void
 PeerSet::try_candidates_for(uint32_t ledger_seq)
 {
-    prioritize_ledger(ledger_seq);
+    // Don't call prioritize_ledger() — with concurrent prove() calls,
+    // overwriting the shared preference would retune discovery for all.
+    // Just queue/pump without reranking.
 
     auto candidates = tracker_->all_endpoints();
     for (auto const& endpoint : candidates)
