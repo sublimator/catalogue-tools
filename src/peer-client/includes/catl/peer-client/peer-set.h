@@ -70,7 +70,7 @@ public:
     /// appear from bootstrap() or TMEndpoints gossip in the background.
     /// Returns nullopt on timeout.
     boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
-    wait_for_peer(uint32_t ledger_seq, int timeout_secs = 60);
+    wait_for_peer(uint32_t ledger_seq, int timeout_secs = 300);
 
     /// Get any ready peer (e.g. for current-ledger operations).
     std::shared_ptr<PeerClient>

@@ -124,11 +124,8 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
             io.stop();
         });
 
-    boost::asio::steady_timer timer(io, std::chrono::seconds(60));
-    timer.async_wait([&](boost::system::error_code) {
-        PLOGE(log_, "Timeout");
-        io.stop();
-    });
+    // No outer timeout — peer discovery and wait_for_peer have their
+    // own timeouts. Use Ctrl-C to cancel.
 
     io.run();
     return result;

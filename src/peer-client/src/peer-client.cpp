@@ -660,7 +660,9 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
     if (status.has_ledgerseq())
     {
         peer_ledger_seq_ = status.ledgerseq();
-        PLOGD(log_, "Peer at ledger ", peer_ledger_seq_.load());
+        PLOGD(
+            log_,
+            "[", endpoint_str_, "] at ledger ", peer_ledger_seq_.load());
     }
 
     if (status.has_firstseq() && status.has_lastseq())
@@ -677,7 +679,7 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
         {
             PLOGD(
                 log_,
-                "Peer ledger range: ",
+                "[", endpoint_str_, "] range: ",
                 peer_first_seq_,
                 " - ",
                 peer_last_seq_);
@@ -723,13 +725,21 @@ PeerClient::handle_endpoints(std::vector<uint8_t> const& payload)
         if (ep.hops() <= 1)
         {
             tracker_->add_discovered(ep.endpoint());
+            PLOGD(
+                log_,
+                "[", endpoint_str_, "] TMEndpoints: ",
+                ep.endpoint(),
+                " (hops=", ep.hops(), ")");
             added++;
         }
     }
 
     if (added > 0)
     {
-        PLOGD(log_, "Discovered ", added, " peer endpoints via TMEndpoints");
+        PLOGI(
+            log_,
+            "[", endpoint_str_, "] discovered ",
+            added, " peer endpoints");
     }
 }
 

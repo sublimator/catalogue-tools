@@ -193,18 +193,16 @@ PeerSet::wait_for_peer(uint32_t ledger_seq, int timeout_secs)
         log_,
         "Waiting for a peer with ledger ",
         ledger_seq,
-        " (timeout: ",
-        timeout_secs,
-        "s, ",
+        " (",
         connections_.size(),
-        " peers connected)");
+        " peers connected, Ctrl-C to cancel)");
 
-    // Poll every second — new peers may appear from bootstrap()
+    // Poll every 5 seconds — new peers may appear from bootstrap()
     // or TMEndpoints gossip running in the background
     boost::asio::steady_timer timer(io_);
-    for (int elapsed = 0; elapsed < timeout_secs; elapsed++)
+    for (int elapsed = 0; elapsed < timeout_secs; elapsed += 5)
     {
-        timer.expires_after(std::chrono::seconds(1));
+        timer.expires_after(std::chrono::seconds(5));
         boost::system::error_code ec;
         co_await timer.async_wait(
             boost::asio::redirect_error(boost::asio::use_awaitable, ec));
@@ -216,37 +214,57 @@ PeerSet::wait_for_peer(uint32_t ledger_seq, int timeout_secs)
                 "Found peer for ledger ",
                 ledger_seq,
                 " after ",
-                elapsed + 1,
+                elapsed + 5,
                 "s");
             co_return p;
         }
 
         // Try connecting to any undiscovered endpoints from tracker
         auto candidates = tracker_->undiscovered();
-        for (auto const& ep : candidates)
+        if (!candidates.empty())
         {
-            auto colon = ep.rfind(':');
-            if (colon == std::string::npos)
-                continue;
-            auto host = ep.substr(0, colon);
-            uint16_t port = 0;
-            try
+            PLOGI(
+                log_,
+                "Trying ",
+                candidates.size(),
+                " discovered endpoints...");
+            for (auto const& ep : candidates)
             {
-                port = static_cast<uint16_t>(
-                    std::stoul(ep.substr(colon + 1)));
+                auto colon = ep.rfind(':');
+                if (colon == std::string::npos)
+                    continue;
+                auto host = ep.substr(0, colon);
+                uint16_t port = 0;
+                try
+                {
+                    port = static_cast<uint16_t>(
+                        std::stoul(ep.substr(colon + 1)));
+                }
+                catch (...)
+                {
+                    continue;
+                }
+                boost::asio::co_spawn(
+                    io_,
+                    [this, host, port]() -> boost::asio::awaitable<void> {
+                        co_await try_connect(host, port);
+                    },
+                    boost::asio::detached);
             }
-            catch (...)
-            {
-                continue;
-            }
-            // Fire and forget — try_connect adds to connections_ on success
-            boost::asio::co_spawn(
-                io_,
-                [this, host, port]() -> boost::asio::awaitable<void> {
-                    co_await try_connect(host, port);
-                },
-                boost::asio::detached);
         }
+
+        // Log progress
+        PLOGI(
+            log_,
+            "Still waiting for ledger ",
+            ledger_seq,
+            " (",
+            elapsed + 5,
+            "s elapsed, ",
+            connections_.size(),
+            " peers, ",
+            tracker_->size(),
+            " known endpoints)");
     }
 
     PLOGW(
@@ -255,9 +273,7 @@ PeerSet::wait_for_peer(uint32_t ledger_seq, int timeout_secs)
         ledger_seq,
         " after ",
         timeout_secs,
-        "s (",
-        connections_.size(),
-        " peers checked)");
+        "s");
 
     co_return std::nullopt;
 }
