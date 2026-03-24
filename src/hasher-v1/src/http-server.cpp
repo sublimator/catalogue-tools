@@ -59,6 +59,7 @@ private:
     std::vector<std::thread> threads_;
     bool running_;
 
+    //@@start beast-session
     // HTTP session class
     class Session : public std::enable_shared_from_this<Session>
     {
@@ -161,6 +162,7 @@ private:
                 });
         }
     };
+    //@@end beast-session
 
 public:
     Impl(std::shared_ptr<HttpRequestHandler> handler, unsigned short port)

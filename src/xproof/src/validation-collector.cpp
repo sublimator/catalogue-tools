@@ -89,7 +89,7 @@ ValidationCollector::extract_stvalidation(std::vector<uint8_t> const& data)
 void
 ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
 {
-    if (type != 41 || quorum_reached)
+    if (type != 41 || (!continuous && quorum_reached))
         return;
 
     auto val_bytes = extract_stvalidation(data);

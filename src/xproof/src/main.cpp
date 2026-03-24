@@ -204,7 +204,8 @@ print_usage()
         << ")\n"
         << "  --binary            output binary format only\n"
         << "  --gzip              output compressed binary format only\n"
-        << "  --output <stem>     output file stem (default: proof-<ledger>-<txid12>)\n"
+        << "  --output <stem>     output file stem (default: "
+           "proof-<ledger>-<txid12>)\n"
         << "\n"
         << "Logging options:\n"
         << "  --debug                 enable DEBUG for xproof partitions\n"
@@ -297,6 +298,11 @@ main(int argc, char* argv[])
             else if (arg == "--peer" && pos + 1 < command_args.size())
             {
                 opts.peer_endpoint = command_args[pos + 1];
+                pos += 2;
+            }
+            else if (arg == "--network" && pos + 1 < command_args.size())
+            {
+                opts.network_id = std::stoul(command_args[pos + 1]);
                 pos += 2;
             }
             else if (arg == "--output" && pos + 1 < command_args.size())

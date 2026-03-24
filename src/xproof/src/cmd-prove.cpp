@@ -1,9 +1,8 @@
 #include "commands.h"
 
-#include "xproof/hex-utils.h"
-#include "xproof/proof-builder.h"
 #include "xproof/proof-chain-binary.h"
 #include "xproof/proof-chain-json.h"
+#include "xproof/proof-engine.h"
 #include "xproof/proof-resolver.h"
 
 #include <catl/core/logger.h>
@@ -11,9 +10,6 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
-#include <boost/asio/steady_timer.hpp>
-#include <cstdlib>
-#include <filesystem>
 #include <fstream>
 #include <iostream>
 
@@ -30,24 +26,6 @@ write_file(std::string const& path, std::vector<uint8_t> const& data)
 }
 
 static std::string
-default_peer_cache_path()
-{
-#ifdef _WIN32
-    return {};
-#else
-    namespace fs = std::filesystem;
-    auto const* home = std::getenv("HOME");
-    if (!home || *home == '\0')
-    {
-        return {};
-    }
-
-    return (fs::path(home) / ".config" / "xproof" / "peer-endpoints.sqlite3")
-        .string();
-#endif
-}
-
-static std::string
 default_output_stem(
     uint32_t tx_ledger_seq,
     std::string const& tx_hash,
@@ -58,7 +36,8 @@ default_output_stem(
         return configured_output;
     }
 
-    std::string tx_hash_short = tx_hash.substr(0, std::min<size_t>(12, tx_hash.size()));
+    std::string tx_hash_short =
+        tx_hash.substr(0, std::min<size_t>(12, tx_hash.size()));
     for (char& ch : tx_hash_short)
     {
         ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
@@ -70,36 +49,48 @@ default_output_stem(
 int
 cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
 {
-    std::string rpc_host, peer_host;
-    uint16_t rpc_port, peer_port;
-    if (!parse_endpoint(opts.rpc_endpoint, rpc_host, rpc_port) ||
-        !parse_endpoint(opts.peer_endpoint, peer_host, peer_port))
+    // Build NetworkConfig from CLI options
+    xproof::NetworkConfig config;
+    config.network_id = opts.network_id;
+
+    if (!opts.rpc_endpoint.empty())
     {
-        std::cerr << "Invalid endpoint(s)\n";
-        return 1;
+        if (!parse_endpoint(
+                opts.rpc_endpoint, config.rpc_host, config.rpc_port))
+        {
+            std::cerr << "Invalid RPC endpoint: " << opts.rpc_endpoint << "\n";
+            return 1;
+        }
     }
 
-    auto peer_cache_path = opts.peer_cache_path.empty()
-        ? default_peer_cache_path()
-        : opts.peer_cache_path;
+    if (!opts.peer_endpoint.empty())
+    {
+        if (!parse_endpoint(
+                opts.peer_endpoint, config.peer_host, config.peer_port))
+        {
+            std::cerr << "Invalid peer endpoint: " << opts.peer_endpoint
+                      << "\n";
+            return 1;
+        }
+    }
+
+    config.peer_cache_path = opts.peer_cache_path;
+    config.apply_defaults();
 
     boost::asio::io_context io;
     int result = 1;
 
+    auto engine = xproof::ProofEngine::create(io, std::move(config));
+    engine->start();
+
     boost::asio::co_spawn(
         io,
-        [&]() -> boost::asio::awaitable<void> {
-            auto build_result = co_await xproof::build_proof(
-                io,
-                rpc_host,
-                rpc_port,
-                peer_host,
-                peer_port,
-                peer_cache_path,
-                opts.tx_hash);
+        [&, engine]() -> boost::asio::awaitable<void> {
+            auto prove_result = co_await engine->prove(opts.tx_hash);
+            auto& chain = prove_result.chain;
 
             auto const output_stem = default_output_stem(
-                build_result.tx_ledger_seq, opts.tx_hash, opts.output);
+                prove_result.tx_ledger_seq, opts.tx_hash, opts.output);
 
             // Write output files
             std::string json_path, bin_path;
@@ -107,19 +98,15 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
 
             if (opts.binary)
             {
-                // Binary only
-                auto binary = xproof::to_binary(
-                    build_result.chain, {.compress = opts.compress});
+                auto binary =
+                    xproof::to_binary(chain, {.compress = opts.compress});
                 bin_path = output_stem + ".bin";
                 write_file(bin_path, binary);
                 bin_size = binary.size();
             }
             else
             {
-                // JSON is written to disk; stdout is reserved for progress and
-                // summary output.
-                auto chain_json = xproof::to_json(build_result.chain);
-
+                auto chain_json = xproof::to_json(chain);
                 json_path = output_stem + ".json";
                 {
                     std::ofstream out(json_path);
@@ -127,19 +114,17 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
                 }
                 json_size = boost::json::serialize(chain_json).size();
 
-                // Also write compressed binary alongside
-                auto compressed =
-                    xproof::to_binary(build_result.chain, {.compress = true});
+                auto compressed = xproof::to_binary(chain, {.compress = true});
                 bin_path = output_stem + ".bin";
                 write_file(bin_path, compressed);
                 bin_size = compressed.size();
             }
 
-            // Verify
+            // Verify using the actual publisher key from the VL fetch
             xproof::resolve_proof_chain(
-                build_result.chain, protocol, build_result.publisher_key_hex);
+                chain, protocol, prove_result.publisher_key_hex);
 
-            // Summary at the end
+            // Summary
             PLOGI(log_, "");
             PLOGI(log_, "Output:");
             if (!json_path.empty())
@@ -175,9 +160,6 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
             }
             io.stop();
         });
-
-    // No outer timeout — peer discovery and wait_for_peer have their
-    // own timeouts. Use Ctrl-C to cancel.
 
     io.run();
     return result;

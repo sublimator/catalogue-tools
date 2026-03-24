@@ -7,10 +7,9 @@
 
 // Shared helpers and command declarations for xproof CLI.
 
-// Well-known defaults
+// Well-known defaults (kept for backward compat in ping/header/dev commands)
 inline constexpr auto DEFAULT_RPC = "s1.ripple.com:443";
 inline constexpr auto DEFAULT_PEER = "s1.ripple.com:51235";
-// vl.ripple.com publisher master key
 inline constexpr auto DEFAULT_PUBLISHER_KEY =
     "ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F4734";
 
@@ -25,8 +24,9 @@ cmd_header(std::string const& endpoint, uint32_t ledger_seq);
 
 struct ProveOptions
 {
-    std::string rpc_endpoint = DEFAULT_RPC;
-    std::string peer_endpoint = DEFAULT_PEER;
+    uint32_t network_id = 0;
+    std::string rpc_endpoint;   // empty = use NetworkConfig default
+    std::string peer_endpoint;  // empty = use NetworkConfig default
     std::string peer_cache_path;
     std::string tx_hash;
     bool binary = false;

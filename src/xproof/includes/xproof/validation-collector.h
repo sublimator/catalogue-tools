@@ -62,6 +62,10 @@ public:
     bool quorum_reached = false;
     int quorum_count = 0;
 
+    /// When true, on_packet() keeps collecting after quorum is reached.
+    /// Used by ValidationBuffer for continuous collection.
+    bool continuous = false;
+
 private:
     catl::xdata::Protocol const& protocol_;
 
