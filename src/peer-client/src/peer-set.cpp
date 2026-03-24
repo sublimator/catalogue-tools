@@ -223,33 +223,28 @@ PeerSet::wait_for_peer(uint32_t ledger_seq, int timeout_secs)
         auto candidates = tracker_->undiscovered();
         if (!candidates.empty())
         {
-            PLOGI(
-                log_,
-                "Trying ",
-                candidates.size(),
-                " discovered endpoints...");
+            int parseable = 0;
             for (auto const& ep : candidates)
             {
-                auto colon = ep.rfind(':');
-                if (colon == std::string::npos)
-                    continue;
-                auto host = ep.substr(0, colon);
+                std::string host;
                 uint16_t port = 0;
-                try
-                {
-                    port = static_cast<uint16_t>(
-                        std::stoul(ep.substr(colon + 1)));
-                }
-                catch (...)
-                {
+                if (!EndpointTracker::parse_endpoint(ep, host, port))
                     continue;
-                }
+                parseable++;
                 boost::asio::co_spawn(
                     io_,
                     [this, host, port]() -> boost::asio::awaitable<void> {
                         co_await try_connect(host, port);
                     },
                     boost::asio::detached);
+            }
+            if (parseable > 0)
+            {
+                PLOGI(
+                    log_,
+                    "Trying ",
+                    parseable,
+                    " discovered endpoints...");
             }
         }
 

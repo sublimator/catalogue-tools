@@ -1,5 +1,7 @@
 #include <catl/peer-client/endpoint-tracker.h>
 
+#include <algorithm>
+
 namespace catl::peer_client {
 
 void
@@ -138,6 +140,61 @@ EndpointTracker::clear()
 {
     std::lock_guard lock(mutex_);
     peers_.clear();
+}
+
+bool
+EndpointTracker::parse_endpoint(
+    std::string const& endpoint,
+    std::string& host,
+    uint16_t& port)
+{
+    if (endpoint.empty())
+        return false;
+
+    // IPv6 bracket notation: [::ffff:1.2.3.4]:51235
+    if (endpoint[0] == '[')
+    {
+        auto close = endpoint.find(']');
+        if (close == std::string::npos)
+            return false;
+        host = endpoint.substr(1, close - 1);
+        // Expect ]:port
+        if (close + 1 >= endpoint.size() || endpoint[close + 1] != ':')
+            return false;
+        try
+        {
+            port = static_cast<uint16_t>(
+                std::stoul(endpoint.substr(close + 2)));
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    // Count colons — if more than one, it's bare IPv6 without port
+    auto colons = std::count(endpoint.begin(), endpoint.end(), ':');
+    if (colons > 1)
+    {
+        // Bare IPv6 without brackets — can't extract port
+        return false;
+    }
+
+    // IPv4 or hostname: host:port
+    auto colon = endpoint.rfind(':');
+    if (colon == std::string::npos)
+        return false;
+    host = endpoint.substr(0, colon);
+    try
+    {
+        port = static_cast<uint16_t>(std::stoul(endpoint.substr(colon + 1)));
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
 }
 
 }  // namespace catl::peer_client

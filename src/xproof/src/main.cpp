@@ -1,5 +1,6 @@
 #include "commands.h"
 
+#include <catl/peer-client/endpoint-tracker.h>
 #include <catl/xdata/protocol.h>
 
 #include <cstring>
@@ -9,12 +10,8 @@
 bool
 parse_endpoint(std::string const& endpoint, std::string& host, uint16_t& port)
 {
-    auto colon = endpoint.rfind(':');
-    if (colon == std::string::npos)
-        return false;
-    host = endpoint.substr(0, colon);
-    port = static_cast<uint16_t>(std::stoul(endpoint.substr(colon + 1)));
-    return true;
+    return catl::peer_client::EndpointTracker::parse_endpoint(
+        endpoint, host, port);
 }
 
 static void

@@ -75,6 +75,15 @@ public:
     void
     clear();
 
+    /// Parse an endpoint string into host + port.
+    /// Handles IPv4 ("1.2.3.4:51235"), IPv6 ("[::ffff:1.2.3.4]:51235"),
+    /// and hostnames ("host.com:51235").
+    static bool
+    parse_endpoint(
+        std::string const& endpoint,
+        std::string& host,
+        uint16_t& port);
+
 private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, PeerStatus> peers_;
