@@ -102,6 +102,38 @@ EndpointTracker::size() const
 }
 
 void
+EndpointTracker::add_discovered(std::string const& endpoint)
+{
+    std::lock_guard lock(mutex_);
+    // Only add if not already tracked
+    if (peers_.find(endpoint) == peers_.end())
+    {
+        PeerStatus s;
+        s.last_seen = std::chrono::steady_clock::now();
+        peers_[endpoint] = s;
+    }
+}
+
+std::vector<std::string>
+EndpointTracker::undiscovered() const
+{
+    std::lock_guard lock(mutex_);
+
+    std::vector<std::string> result;
+    for (auto const& [endpoint, status] : peers_)
+    {
+        // No range info yet — never got a TMStatusChange
+        if (status.first_seq == 0 && status.last_seq == 0 &&
+            status.current_seq == 0)
+        {
+            result.push_back(endpoint);
+        }
+    }
+
+    return result;
+}
+
+void
 EndpointTracker::clear()
 {
     std::lock_guard lock(mutex_);

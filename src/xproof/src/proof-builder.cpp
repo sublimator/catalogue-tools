@@ -240,9 +240,15 @@ build_proof(
     }
 
     // ── Step 2: Peer — connect and collect validations ──
+    auto tracker = std::make_shared<EndpointTracker>();
+
     std::shared_ptr<PeerClient> client;
     auto peer_seq = co_await co_connect(io, peer_host, peer_port, 0, client);
+    client->set_tracker(tracker);
     PLOGI(log_, "Connected to peer, peer at ledger ", peer_seq);
+
+    // Check if this peer has the target ledger range
+    bool peer_has_range = true;
     if (client->peer_first_seq() != 0)
     {
         PLOGI(
@@ -254,11 +260,12 @@ build_proof(
         if (tx_ledger_seq < client->peer_first_seq() ||
             tx_ledger_seq > client->peer_last_seq())
         {
+            peer_has_range = false;
             PLOGW(
                 log_,
                 "Target ledger ",
                 tx_ledger_seq,
-                " may be outside peer's range!");
+                " outside peer's range — will try to find a better peer");
         }
     }
 
@@ -350,6 +357,99 @@ build_proof(
         " hash=",
         anchor_hash.hex().substr(0, 16),
         "...");
+
+    // ── Step 2b: Find a peer with the target ledger range ──
+    if (!peer_has_range)
+    {
+        // Give TMEndpoints a moment to arrive
+        {
+            boost::asio::steady_timer ep_timer(io, std::chrono::seconds(2));
+            boost::system::error_code ec;
+            co_await ep_timer.async_wait(
+                boost::asio::redirect_error(
+                    boost::asio::use_awaitable, ec));
+        }
+
+        auto candidates = tracker->undiscovered();
+        PLOGI(
+            log_,
+            "Discovered ",
+            candidates.size(),
+            " peer endpoints, trying to find one with ledger ",
+            tx_ledger_seq);
+
+        bool found_peer = false;
+        for (auto const& ep : candidates)
+        {
+            // Parse endpoint
+            auto colon = ep.rfind(':');
+            if (colon == std::string::npos)
+                continue;
+            auto host = ep.substr(0, colon);
+            uint16_t port = 0;
+            try
+            {
+                port = static_cast<uint16_t>(std::stoul(ep.substr(colon + 1)));
+            }
+            catch (...)
+            {
+                continue;
+            }
+
+            PLOGD(log_, "  Trying ", ep, "...");
+            try
+            {
+                std::shared_ptr<PeerClient> candidate;
+                auto cand_seq =
+                    co_await co_connect(io, host, port, 0, candidate);
+                candidate->set_tracker(tracker);
+
+                if (candidate->peer_first_seq() != 0 &&
+                    tx_ledger_seq >= candidate->peer_first_seq() &&
+                    tx_ledger_seq <= candidate->peer_last_seq())
+                {
+                    PLOGI(
+                        log_,
+                        "Found peer with range: ",
+                        ep,
+                        " (",
+                        candidate->peer_first_seq(),
+                        " - ",
+                        candidate->peer_last_seq(),
+                        ")");
+                    // Replace the client for tree walks
+                    client = candidate;
+                    found_peer = true;
+                    break;
+                }
+                else
+                {
+                    PLOGD(
+                        log_,
+                        "  ",
+                        ep,
+                        " range ",
+                        candidate->peer_first_seq(),
+                        "-",
+                        candidate->peer_last_seq(),
+                        " — no good");
+                }
+            }
+            catch (std::exception const& e)
+            {
+                PLOGD(log_, "  ", ep, " failed: ", e.what());
+            }
+        }
+
+        if (!found_peer)
+        {
+            PLOGW(
+                log_,
+                "No peer found with ledger ",
+                tx_ledger_seq,
+                " — continuing with original peer (may fail)");
+        }
+    }
 
     // ── Step 3: Determine hop path ──
     uint32_t distance = anchor_hdr.seq() - tx_ledger_seq;

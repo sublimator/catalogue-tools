@@ -705,6 +705,35 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
 }
 
 void
+PeerClient::handle_endpoints(std::vector<uint8_t> const& payload)
+{
+    if (!tracker_)
+        return;
+
+    protocol::TMEndpoints msg;
+    if (!msg.ParseFromArray(payload.data(), payload.size()))
+    {
+        PLOGD(log_, "handle_endpoints: parse failed");
+        return;
+    }
+
+    int added = 0;
+    for (auto const& ep : msg.endpoints_v2())
+    {
+        if (ep.hops() <= 1)
+        {
+            tracker_->add_discovered(ep.endpoint());
+            added++;
+        }
+    }
+
+    if (added > 0)
+    {
+        PLOGD(log_, "Discovered ", added, " peer endpoints via TMEndpoints");
+    }
+}
+
+void
 PeerClient::become_ready()
 {
     state_ = State::Ready;
@@ -746,6 +775,9 @@ PeerClient::on_packet(
             return;
         case packet_type::status_change:
             handle_status_change(payload);
+            return;
+        case packet_type::endpoints:
+            handle_endpoints(payload);
             return;
         case packet_type::ledger_data:
             dispatch_ledger_data(payload);

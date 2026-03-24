@@ -267,6 +267,9 @@ private:
     handle_status_change(std::vector<uint8_t> const& payload);
 
     void
+    handle_endpoints(std::vector<uint8_t> const& payload);
+
+    void
     become_ready();
 
     // ---------------------------------------------------------------

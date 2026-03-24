@@ -61,6 +61,16 @@ public:
     size_t
     size() const;
 
+    /// Add a discovered endpoint (from TMEndpoints gossip).
+    /// Only records the address — range unknown until we connect.
+    void
+    add_discovered(std::string const& endpoint);
+
+    /// Get all discovered endpoints that we haven't connected to yet
+    /// (have no range info).
+    std::vector<std::string>
+    undiscovered() const;
+
     /// Clear all tracked peers.
     void
     clear();
