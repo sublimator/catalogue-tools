@@ -667,6 +667,9 @@ PeerSet::start_connect(std::string const& host, uint16_t port)
 boost::asio::awaitable<std::shared_ptr<PeerClient>>
 PeerSet::try_connect(std::string const& host, uint16_t port)
 {
+    // Hop to strand — touches connections_, in_flight_, etc.
+    co_await asio::post(strand_, asio::use_awaitable);
+
     auto key = make_key(host, port);
 
     // Already connected?
@@ -884,6 +887,8 @@ PeerSet::try_undiscovered()
 void
 PeerSet::prioritize_ledger(uint32_t ledger_seq)
 {
+    // Note: this sets a shared preference. With concurrent prove() calls,
+    // the last writer wins. This is acceptable — it's a hint, not a contract.
     preferred_ledger_seq_ = ledger_seq;
     sort_pending_connects();
     sort_pending_crawls();
@@ -977,6 +982,9 @@ PeerSet::wait_for_any_peer(
     int timeout_secs,
     std::unordered_set<std::string> const& excluded)
 {
+    // Hop to strand — all PeerSet state access must be serialized
+    co_await asio::post(strand_, asio::use_awaitable);
+
     if (auto client = any_peer(excluded))
     {
         co_return client;
@@ -1048,6 +1056,9 @@ PeerSet::wait_for_peer(
     int timeout_secs,
     std::unordered_set<std::string> const& excluded)
 {
+    // Hop to strand — all PeerSet state access must be serialized
+    co_await asio::post(strand_, asio::use_awaitable);
+
     if (auto p = peer_for(ledger_seq, excluded))
     {
         co_return p;
@@ -1194,8 +1205,11 @@ PeerSet::watch_peer_disconnect(
             {
                 existing(ec);
             }
-            // Then remove from PeerSet's map
-            self->remove_peer(owned_key);
+            // Post removal onto PeerSet's strand — disconnect callback
+            // fires on the connection's thread, not our strand.
+            asio::post(self->strand_, [self, owned_key]() {
+                self->remove_peer(owned_key);
+            });
         });
 }
 

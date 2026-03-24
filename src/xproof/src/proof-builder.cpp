@@ -1207,8 +1207,9 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
         }
     };
 
-    // Prioritize the target ledger for peer discovery
-    peers->prioritize_ledger(tx_ledger_seq);
+    // Don't call prioritize_ledger() — with concurrent prove() calls,
+    // it would retune peer discovery away from other requests' targets.
+    // wait_for_peer(seq) already searches by the specific seq needed.
 
     // ── Step 3: Fetch anchor header ──
     std::shared_ptr<PeerClient> client;
