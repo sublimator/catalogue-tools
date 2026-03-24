@@ -30,8 +30,11 @@ import concurrent.futures
 import contextlib
 import http.client
 import json
+import logging
 import os
 import signal
+import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -49,6 +52,21 @@ DEFAULT_TX_HASH = (
     "8AF2DE8804721B0EC9E11FD66B9EF3C30962E71DC0D707CA1F4CDE4655751420"
 )
 MAX_REQUEST_BODY = 512 * 1024
+LOG_FORMAT = "[%(asctime)s] [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s"
+LOG = logging.getLogger("xproof-serve-smoke")
+
+
+def configure_logging(level_name: str | None = None) -> None:
+    level_text = (level_name or os.environ.get("XPROOF_TEST_LOG_LEVEL", "INFO")).upper()
+    level = getattr(logging, level_text, logging.INFO)
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(level=level, format=LOG_FORMAT, datefmt="%H:%M:%S")
+    root.setLevel(level)
+    LOG.setLevel(level)
+
+
+configure_logging()
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -70,6 +88,10 @@ def env_float(name: str, default: float) -> float:
     if raw is None or raw == "":
         return default
     return float(raw)
+
+
+def harsh_default(normal: int, harsh: int) -> int:
+    return harsh if env_bool("XPROOF_HARSH_WINDS") else normal
 
 
 def find_free_port(host: str) -> int:
@@ -105,6 +127,36 @@ def binary_network_id(data: bytes) -> int:
     return int.from_bytes(data[6:10], "little")
 
 
+def sample_fd_count(pid: int) -> int | None:
+    proc_fd = Path(f"/proc/{pid}/fd")
+    if proc_fd.exists():
+        try:
+            return len(list(proc_fd.iterdir()))
+        except OSError:
+            return None
+
+    lsof = shutil.which("lsof")
+    if not lsof:
+        return None
+
+    try:
+        result = subprocess.run(
+            [lsof, "-n", "-P", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if result.returncode != 0 or not result.stdout:
+        return None
+
+    lines = result.stdout.splitlines()
+    return max(0, len(lines) - 1)
+
+
 def run_concurrently(
     count: int,
     *,
@@ -133,6 +185,10 @@ class TestConfig:
     shutdown_timeout: float
     keep_server: bool
     log_output: bool
+    trace_http: bool
+    health_burst_count: int
+    mixed_burst_count: int
+    soak_seconds: float
 
     @property
     def bind(self) -> str:
@@ -179,27 +235,37 @@ class RunningServer:
             stdout = self.log_file
             stderr = self.log_file
 
+        LOG.info("starting xproof serve: %s", shlex.join(cmd))
         self.proc = subprocess.Popen(
             cmd,
             cwd=Path.cwd(),
             stdout=stdout,
             stderr=stderr,
         )
+        LOG.info(
+            "spawned xproof serve pid=%s bind=%s fd_count=%s",
+            self.proc.pid,
+            self.config.bind,
+            self.fd_count(),
+        )
 
         try:
             self._wait_for_port()
             self.health = self._wait_for_health()
+            self.log_snapshot("server ready")
         except Exception:
             self._terminate(force=True)
             raise
 
     def stop(self) -> None:
         if self.config.keep_server:
+            self.log_snapshot("server left running")
             print(
                 f"[xproof-serve-smoke] leaving server running on {self.config.bind}",
                 file=sys.stderr,
             )
             return
+        self.log_snapshot("server stopping")
         self._terminate(force=False)
 
     def _terminate(self, *, force: bool) -> None:
@@ -238,13 +304,45 @@ class RunningServer:
             return text
         return text[-limit:]
 
+    def all_logs(self) -> str:
+        if self.log_file is None:
+            return ""
+        self.log_file.flush()
+        self.log_file.seek(0)
+        data = self.log_file.read()
+        if not data:
+            return ""
+        return data.decode("utf-8", errors="replace")
+
+    def logs_contain(self, text: str) -> bool:
+        if self.log_file is None:
+            return False
+        return text in self.all_logs()
+
+    def fd_count(self) -> int | None:
+        if self.proc is None or self.proc.poll() is not None:
+            return None
+        return sample_fd_count(self.proc.pid)
+
+    def log_snapshot(self, label: str) -> None:
+        proc = self.proc
+        LOG.info(
+            "%s: pid=%s rc=%s bind=%s fd_count=%s",
+            label,
+            None if proc is None else proc.pid,
+            None if proc is None else proc.poll(),
+            self.config.bind,
+            self.fd_count(),
+        )
+
     def _failure_context(self) -> str:
         proc = self.proc
         status = "not started" if proc is None else f"pid={proc.pid} rc={proc.poll()}"
+        fd_count = self.fd_count()
         logs = self.tail_logs()
         if not logs:
-            return f"server_status={status}"
-        return f"server_status={status}\n[xproof output]\n{logs}"
+            return f"server_status={status} fd_count={fd_count}"
+        return f"server_status={status} fd_count={fd_count}\n[xproof output]\n{logs}"
 
     def _wait_for_port(self) -> None:
         deadline = time.monotonic() + self.config.startup_timeout
@@ -308,15 +406,28 @@ class RunningServer:
     ) -> HttpResult:
         close_conn = connection is None
         conn = connection or self.open_connection(timeout=timeout)
+        started = time.monotonic()
         try:
             conn.request(method, path, body=body, headers=headers or {})
             resp = conn.getresponse()
             data = resp.read()
-            return HttpResult(
+            result = HttpResult(
                 status=resp.status,
                 headers={k.lower(): v for k, v in resp.getheaders()},
                 body=data,
             )
+            if self.config.trace_http:
+                elapsed_ms = (time.monotonic() - started) * 1000.0
+                LOG.info(
+                    "HTTP %s %s -> %s bytes=%s ms=%.1f fd_count=%s",
+                    method,
+                    path,
+                    result.status,
+                    len(data),
+                    elapsed_ms,
+                    self.fd_count(),
+                )
+            return result
         except Exception as exc:  # noqa: BLE001
             raise AssertionError(
                 f"{method} {path} failed: {exc}\n{self._failure_context()}"
@@ -349,7 +460,7 @@ def config(tmp_path_factory: pytest.TempPathFactory) -> TestConfig:
         peer_cache_dir = tmp_path_factory.mktemp("xproof-serve-peer-cache")
         peer_cache_path = peer_cache_dir / "peer-endpoints.sqlite3"
 
-    return TestConfig(
+    cfg = TestConfig(
         xproof=xproof,
         tx_hash=os.environ.get("XPROOF_TX_HASH", DEFAULT_TX_HASH),
         bind_address=bind_address,
@@ -363,7 +474,23 @@ def config(tmp_path_factory: pytest.TempPathFactory) -> TestConfig:
         shutdown_timeout=env_float("XPROOF_SHUTDOWN_TIMEOUT", 10.0),
         keep_server=env_bool("XPROOF_KEEP_SERVER"),
         log_output=env_bool("XPROOF_LOG_OUTPUT"),
+        trace_http=env_bool("XPROOF_TRACE_HTTP"),
+        health_burst_count=env_int("XPROOF_HEALTH_BURST") or harsh_default(32, 96),
+        mixed_burst_count=env_int("XPROOF_MIXED_BURST") or harsh_default(24, 64),
+        soak_seconds=env_float("XPROOF_SOAK_SECONDS", 0.0),
     )
+    LOG.info(
+        "test config: xproof=%s bind=%s network=%s trace_http=%s "
+        "health_burst=%s mixed_burst=%s soak_seconds=%.1f",
+        cfg.xproof,
+        cfg.bind,
+        cfg.network,
+        cfg.trace_http,
+        cfg.health_burst_count,
+        cfg.mixed_burst_count,
+        cfg.soak_seconds,
+    )
+    return cfg
 
 
 @pytest.fixture(scope="session")
@@ -372,6 +499,24 @@ def server(config: TestConfig) -> RunningServer:
     handle.start()
     yield handle
     handle.stop()
+
+
+@pytest.fixture(autouse=True)
+def log_test_case(request: pytest.FixtureRequest) -> None:
+    file_path, lineno, _ = request.node.location
+    started = time.monotonic()
+    LOG.info(
+        "START %s (%s:%s)",
+        request.node.nodeid,
+        file_path,
+        lineno + 1,
+    )
+    yield
+    LOG.info(
+        "END %s duration=%.2fs",
+        request.node.nodeid,
+        time.monotonic() - started,
+    )
 
 
 @pytest.fixture(scope="session")
@@ -435,6 +580,13 @@ def assert_error_response(
             f"expected {message_substring!r} in error {body['error']!r}"
         )
     return body
+
+
+def assert_no_emfile(server: RunningServer) -> None:
+    if server.logs_contain("Too many open files"):
+        pytest.fail(
+            "server log contains 'Too many open files'\n" + server._failure_context()
+        )
 
 
 def test_health_shape(health: dict[str, Any]) -> None:
@@ -681,6 +833,162 @@ def test_concurrent_prove_requests(
     assert any(kind == "bin" for kind, _ in results)
 
 
+def test_health_burst_survives_without_emfile(
+    server: RunningServer,
+    config: TestConfig,
+) -> None:
+    request_count = config.health_burst_count
+    server.log_snapshot("before health burst")
+
+    def do_request(index: int) -> bool:
+        result = server.request(
+            "GET",
+            "/health",
+            timeout=min(config.request_timeout, 10.0),
+        )
+        assert result.status == 200, (
+            f"health burst request {index} failed: {result.status} "
+            f"body={result.body[:300]!r}"
+        )
+        assert_json_content_type(result)
+        body = decode_json_bytes(result.body, context=f"health burst {index}")
+        assert isinstance(body, dict)
+        assert "peer_count" in body
+        return True
+
+    results = run_concurrently(
+        request_count,
+        max_workers=min(request_count, 32),
+        fn=do_request,
+    )
+    assert all(results)
+    server.log_snapshot("after health burst")
+    assert_no_emfile(server)
+
+
+def test_mixed_burst_survives_without_emfile(
+    server: RunningServer,
+    config: TestConfig,
+    proof_json_response: HttpResult,
+    proof_bin_response: HttpResult,
+    prove_path: str,
+) -> None:
+    request_count = config.mixed_burst_count
+    server.log_snapshot("before mixed burst")
+
+    def do_request(index: int) -> str:
+        mode = index % 6
+        if mode == 0:
+            result = server.request("GET", "/health", timeout=min(config.request_timeout, 10.0))
+            assert result.status == 200
+            return "health"
+        if mode == 1:
+            result = server.request("GET", "/nope", timeout=min(config.request_timeout, 10.0))
+            assert_error_response(result, status=404, message_substring="not found")
+            return "404"
+        if mode == 2:
+            result = server.request(
+                "POST",
+                "/verify",
+                body=proof_json_response.body,
+                headers={"Content-Type": "application/json"},
+                timeout=config.request_timeout,
+            )
+            body = decode_json_bytes(result.body, context="mixed burst verify json")
+            assert result.status == 200 and body.get("verified") is True
+            return "verify-json"
+        if mode == 3:
+            result = server.request(
+                "POST",
+                "/verify",
+                body=proof_bin_response.body,
+                headers={"Content-Type": "application/octet-stream"},
+                timeout=config.request_timeout,
+            )
+            body = decode_json_bytes(result.body, context="mixed burst verify bin")
+            assert result.status == 200 and body.get("verified") is True
+            return "verify-bin"
+        if mode == 4:
+            result = server.request(
+                "GET",
+                prove_path,
+                timeout=config.request_timeout,
+            )
+            assert result.status == 200
+            assert_json_content_type(result)
+            body = decode_json_bytes(result.body, context="mixed burst prove json")
+            assert body["network_id"] == config.network
+            return "prove-json"
+
+        result = server.request(
+            "GET",
+            prove_path + "&format=bin",
+            timeout=config.request_timeout,
+        )
+        assert result.status == 200
+        assert_octet_stream_content_type(result)
+        assert binary_network_id(result.body) == config.network
+        return "prove-bin"
+
+    results = run_concurrently(
+        request_count,
+        max_workers=min(request_count, 24),
+        fn=do_request,
+    )
+    assert len(results) == request_count
+    server.log_snapshot("after mixed burst")
+    assert_no_emfile(server)
+
+
+def test_optional_soak_loop(
+    server: RunningServer,
+    config: TestConfig,
+    proof_json_response: HttpResult,
+    proof_bin_response: HttpResult,
+) -> None:
+    if config.soak_seconds <= 0:
+        pytest.skip("set XPROOF_SOAK_SECONDS > 0 to enable soak mode")
+
+    deadline = time.monotonic() + config.soak_seconds
+    iterations = 0
+    last_snapshot = 0.0
+    server.log_snapshot("before soak loop")
+
+    while time.monotonic() < deadline:
+        health = server.request("GET", "/health", timeout=min(config.request_timeout, 10.0))
+        assert health.status == 200
+
+        json_verify = server.request(
+            "POST",
+            "/verify",
+            body=proof_json_response.body,
+            headers={"Content-Type": "application/json"},
+            timeout=config.request_timeout,
+        )
+        json_body = decode_json_bytes(json_verify.body, context="soak verify json")
+        assert json_verify.status == 200 and json_body.get("verified") is True
+
+        bin_verify = server.request(
+            "POST",
+            "/verify",
+            body=proof_bin_response.body,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=config.request_timeout,
+        )
+        bin_body = decode_json_bytes(bin_verify.body, context="soak verify bin")
+        assert bin_verify.status == 200 and bin_body.get("verified") is True
+
+        iterations += 1
+        now = time.monotonic()
+        if now - last_snapshot >= 5.0:
+            server.log_snapshot(f"soak loop iteration={iterations}")
+            last_snapshot = now
+
+    LOG.info("completed soak loop iterations=%s", iterations)
+    server.log_snapshot("after soak loop")
+    assert_no_emfile(server)
+
+
 def test_verify_malformed_json_reports_failure(server: RunningServer) -> None:
     result = server.request(
         "POST",
@@ -761,6 +1069,35 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Inherit server stdout/stderr instead of capturing it",
     )
+    parser.add_argument(
+        "--trace-http",
+        action="store_true",
+        help="Log every test-side HTTP request/response",
+    )
+    parser.add_argument(
+        "--log-level",
+        help="Python-side log level (DEBUG, INFO, WARNING, ERROR)",
+    )
+    parser.add_argument(
+        "--health-burst",
+        type=int,
+        help="Concurrent request count for the /health burst test",
+    )
+    parser.add_argument(
+        "--mixed-burst",
+        type=int,
+        help="Concurrent request count for the mixed burst test",
+    )
+    parser.add_argument(
+        "--soak-seconds",
+        type=float,
+        help="Optional soak duration in seconds",
+    )
+    parser.add_argument(
+        "--harsh-winds",
+        action="store_true",
+        help="Increase default burst sizes for harsher concurrency testing",
+    )
     return parser
 
 
@@ -774,6 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_cli_parser()
     args, pytest_args = parser.parse_known_args(argv)
 
+    configure_logging(args.log_level)
     os.environ["XPROOF_RUN_E2E"] = "1"
     set_env_if("XPROOF_BIN", args.xproof)
     set_env_if("XPROOF_TX_HASH", args.tx_hash)
@@ -786,10 +1124,25 @@ def main(argv: list[str] | None = None) -> int:
     set_env_if("XPROOF_STARTUP_TIMEOUT", args.startup_timeout)
     set_env_if("XPROOF_REQUEST_TIMEOUT", args.request_timeout)
     set_env_if("XPROOF_SHUTDOWN_TIMEOUT", args.shutdown_timeout)
+    set_env_if("XPROOF_TEST_LOG_LEVEL", args.log_level)
+    set_env_if("XPROOF_HEALTH_BURST", args.health_burst)
+    set_env_if("XPROOF_MIXED_BURST", args.mixed_burst)
+    set_env_if("XPROOF_SOAK_SECONDS", args.soak_seconds)
     if args.keep_server:
         os.environ["XPROOF_KEEP_SERVER"] = "1"
     if args.log_output:
         os.environ["XPROOF_LOG_OUTPUT"] = "1"
+    if args.trace_http:
+        os.environ["XPROOF_TRACE_HTTP"] = "1"
+    if args.harsh_winds:
+        os.environ["XPROOF_HARSH_WINDS"] = "1"
+
+    LOG.info(
+        "invoking pytest args=%s harsh_winds=%s trace_http=%s",
+        pytest_args,
+        args.harsh_winds,
+        args.trace_http,
+    )
 
     return pytest.main([__file__, *pytest_args])
 
