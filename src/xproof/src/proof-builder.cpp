@@ -337,8 +337,11 @@ build_proof(
         "...");
 
     // ── Step 2b: Find a peer with the target ledger range ──
-    // Check if current peer has it, otherwise bootstrap and wait.
-    if (!peers.peer_for(tx_ledger_seq))
+    if (auto p = peers.peer_for(tx_ledger_seq))
+    {
+        client = *p;
+    }
+    else
     {
         PLOGI(
             log_,
@@ -347,19 +350,21 @@ build_proof(
             " — bootstrapping...");
         co_await peers.bootstrap();
 
-        auto found = co_await peers.wait_for_peer(tx_ledger_seq, 30);
-        if (!found)
+        // Loop until we find one — Ctrl-C to cancel
+        while (true)
         {
-            throw std::runtime_error(
-                "No peer found with ledger " +
-                std::to_string(tx_ledger_seq) +
-                ". Try --peer with a full-history node.");
+            auto found = co_await peers.wait_for_peer(tx_ledger_seq);
+            if (found)
+            {
+                client = *found;
+                break;
+            }
+            PLOGI(
+                log_,
+                "Still searching for peer with ledger ",
+                tx_ledger_seq,
+                "...");
         }
-        client = *found;
-    }
-    else
-    {
-        client = *peers.peer_for(tx_ledger_seq);
     }
 
     // ── Step 3: Determine hop path ──
