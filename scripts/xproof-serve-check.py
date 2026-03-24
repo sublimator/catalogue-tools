@@ -83,6 +83,8 @@ class RunConfig:
     tx_case: TxCase
     concurrency: int
     server_log_tail: int
+    tmux: bool
+    lldb: bool
 
     @property
     def bind(self) -> str:
@@ -116,6 +118,16 @@ class RunningServer:
             cmd += ["--no-cache"]
 
         self.config.artifact_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.config.tmux:
+            self._start_tmux(cmd)
+        else:
+            self._start_direct(cmd)
+
+        self._wait_for_port()
+        self._wait_for_health()
+
+    def _start_direct(self, cmd: list[str]) -> None:
         self.log_handle = self.config.server_log.open("wb")
         self.proc = subprocess.Popen(
             cmd,
@@ -124,30 +136,74 @@ class RunningServer:
             stderr=subprocess.STDOUT,
             bufsize=0,
         )
-        self._wait_for_port()
-        self._wait_for_health()
+
+    def _start_tmux(self, cmd: list[str]) -> None:
+        import shlex
+
+        self.tmux_session = f"xproof-check-{self.config.port}"
+        server_cmd = shlex.join(cmd) + f" 2>&1 | tee {self.config.server_log}"
+        if self.config.lldb:
+            server_cmd = f"lldb -o run -- {shlex.join(cmd)}"
+
+        # Kill existing session if any
+        subprocess.run(
+            ["tmux", "kill-session", "-t", self.tmux_session],
+            capture_output=True,
+        )
+        subprocess.run(
+            ["tmux", "new-session", "-d", "-s", self.tmux_session, server_cmd],
+            check=True,
+        )
+        # Get the tmux pane's PID for cleanup
+        result = subprocess.run(
+            ["tmux", "list-panes", "-t", self.tmux_session, "-F", "#{pane_pid}"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Store a fake Popen-like for stop()
+            self._tmux_pid = int(result.stdout.strip())
+
+        print(
+            f"TMUX: tmux attach -t {self.tmux_session}",
+            file=sys.stderr,
+        )
 
     def stop(self) -> None:
-        if self.proc is None:
-            return
         if self.config.keep_server:
             print(
                 f"[xproof-serve-check] leaving server running on {self.config.bind}",
                 file=sys.stderr,
             )
+            if self.config.tmux:
+                print(
+                    f"TMUX: tmux attach -t {getattr(self, 'tmux_session', '?')}",
+                    file=sys.stderr,
+                )
             return
 
-        if self.proc.poll() is None:
-            self.proc.send_signal(signal.SIGINT)
-            try:
-                self.proc.wait(timeout=self.config.shutdown_timeout)
-            except subprocess.TimeoutExpired:
-                self.proc.terminate()
+        if self.config.tmux and hasattr(self, "tmux_session"):
+            subprocess.run(
+                ["tmux", "send-keys", "-t", self.tmux_session, "C-c", ""],
+                capture_output=True,
+            )
+            time.sleep(1)
+            subprocess.run(
+                ["tmux", "kill-session", "-t", self.tmux_session],
+                capture_output=True,
+            )
+        elif self.proc is not None:
+            if self.proc.poll() is None:
+                self.proc.send_signal(signal.SIGINT)
                 try:
-                    self.proc.wait(timeout=5)
+                    self.proc.wait(timeout=self.config.shutdown_timeout)
                 except subprocess.TimeoutExpired:
-                    self.proc.kill()
-                    self.proc.wait(timeout=5)
+                    self.proc.terminate()
+                    try:
+                        self.proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.proc.kill()
+                        self.proc.wait(timeout=5)
 
         if self.log_handle is not None:
             self.log_handle.close()
@@ -486,6 +542,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-timeout", type=float, default=120.0, help="Seconds to allow per request")
     parser.add_argument("--shutdown-timeout", type=float, default=10.0, help="Seconds to wait after SIGINT")
     parser.add_argument("--keep-server", action="store_true", help="Leave server running after the case")
+    parser.add_argument("--tmux", action="store_true", help="Run server in a tmux session you can attach to")
+    parser.add_argument("--lldb", action="store_true", help="Run server under lldb in tmux (implies --tmux --keep-server)")
     parser.add_argument("--tx", help="Transaction hash to use")
     parser.add_argument("--tx-corpus", help="Optional tx corpus JSON file")
     parser.add_argument(
@@ -553,17 +611,23 @@ def main(argv: list[str] | None = None) -> int:
         shutdown_timeout=args.shutdown_timeout,
         threads=args.threads,
         no_cache=args.no_cache,
-        keep_server=args.keep_server,
+        keep_server=args.keep_server or args.lldb,
         tx_case=tx_case,
         concurrency=max(1, args.concurrency),
         server_log_tail=args.server_log_tail,
+        tmux=args.tmux or args.lldb,
+        lldb=args.lldb,
     )
 
-    print(f"CASE: {args.case}")
-    print(f"XPROOF: {config.xproof}")
-    print(f"BIND: {config.bind}")
-    print(f"TX: {config.tx_case.tx_hash} ({config.tx_case.label})")
-    print(f"ARTIFACT_DIR: {config.artifact_dir}")
+    print(f"CASE: {args.case}", flush=True)
+    print(f"XPROOF: {config.xproof}", flush=True)
+    print(f"BIND: {config.bind}", flush=True)
+    print(f"TX: {config.tx_case.tx_hash} ({config.tx_case.label})", flush=True)
+    print(f"ARTIFACT_DIR: {config.artifact_dir}", flush=True)
+    print(f"SERVER_LOG: {config.server_log}", flush=True)
+    if config.peer_cache_path is not None:
+        print(f"PEER_CACHE: {config.peer_cache_path}", flush=True)
+    print(f"TAIL: tail -f {shlex.quote(str(config.server_log))}", flush=True)
 
     server = RunningServer(config)
     try:
