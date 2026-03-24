@@ -4,9 +4,10 @@
 //
 // File layout:
 //   [magic: 4 bytes "XPRF"]
-//   [version: 1 byte, currently 0x01]
+//   [version: 1 byte, currently 0x02]
 //   [flags: 1 byte]
 //     bit 0: zlib compressed body
+//   [network_id: 4 bytes LE]  (added in v2)
 //   [body: concatenated TLV records]
 //
 // TLV record: [type: 1 byte][length: LEB128 varint][payload]

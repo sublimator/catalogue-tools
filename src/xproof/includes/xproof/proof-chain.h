@@ -81,6 +81,7 @@ using ChainStep = std::variant<AnchorData, HeaderData, TrieData>;
 
 struct ProofChain
 {
+    uint32_t network_id = 0;  // 0=XRPL, 21337=Xahau
     std::vector<ChainStep> steps;
 };
 

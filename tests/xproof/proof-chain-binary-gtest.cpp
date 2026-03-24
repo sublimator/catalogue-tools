@@ -80,17 +80,23 @@ TEST(ProofChainBinary, HeaderRoundTrip)
 
     auto binary = to_binary(chain);
 
-    // Header(6) + TLV: 1 type + varint(118) + 118 payload = 126 bytes
-    EXPECT_EQ(binary.size(), 126u);
+    // Header(10) + TLV: 1 type + varint(118) + 118 payload = 130 bytes
+    EXPECT_EQ(binary.size(), 130u);
     // Check magic
     EXPECT_EQ(binary[0], 'X');
     EXPECT_EQ(binary[1], 'P');
     EXPECT_EQ(binary[2], 'R');
     EXPECT_EQ(binary[3], 'F');
-    EXPECT_EQ(binary[4], 0x01);  // version
+    EXPECT_EQ(binary[4], 0x02);  // version
     EXPECT_EQ(binary[5], 0x00);  // flags (uncompressed)
+    // bytes 6-9: network_id LE (0)
+    EXPECT_EQ(binary[6], 0x00);
+    EXPECT_EQ(binary[7], 0x00);
+    EXPECT_EQ(binary[8], 0x00);
+    EXPECT_EQ(binary[9], 0x00);
 
     auto decoded = from_binary(binary);
+    EXPECT_EQ(decoded.network_id, 0u);
     ASSERT_EQ(decoded.steps.size(), 1u);
     auto& dh = std::get<HeaderData>(decoded.steps[0]);
 
@@ -103,6 +109,36 @@ TEST(ProofChainBinary, HeaderRoundTrip)
     EXPECT_EQ(dh.close_time, h.close_time);
     EXPECT_EQ(dh.close_time_resolution, h.close_time_resolution);
     EXPECT_EQ(dh.close_flags, h.close_flags);
+}
+
+// ─── Network ID round-trip ──────────────────────────────────────
+
+TEST(ProofChainBinary, NetworkIdRoundTrip)
+{
+    ProofChain chain;
+    chain.network_id = 21337;  // Xahau
+    HeaderData h;
+    h.seq = 1;
+    chain.steps.push_back(h);
+
+    // Binary
+    auto binary = to_binary(chain);
+    EXPECT_EQ(binary[6], 0x59);   // 21337 = 0x5359 LE
+    EXPECT_EQ(binary[7], 0x53);
+    EXPECT_EQ(binary[8], 0x00);
+    EXPECT_EQ(binary[9], 0x00);
+
+    auto decoded_bin = from_binary(binary);
+    EXPECT_EQ(decoded_bin.network_id, 21337u);
+
+    // JSON
+    auto json_obj = to_json(chain);
+    EXPECT_EQ(json_obj.at("network_id").to_number<uint32_t>(), 21337u);
+    EXPECT_TRUE(json_obj.at("steps").is_array());
+
+    auto decoded_json = from_json(json_obj);
+    EXPECT_EQ(decoded_json.network_id, 21337u);
+    ASSERT_EQ(decoded_json.steps.size(), 1u);
 }
 
 // ─── Anchor round-trip ──────────────────────────────────────────
@@ -326,7 +362,7 @@ TEST(ProofChainBinary, RealProofRoundTrip)
     std::stringstream buf;
     buf << f.rdbuf();
     auto jv = boost::json::parse(buf.str());
-    auto chain = from_json(jv.as_array());
+    auto chain = from_json(jv);
 
     ASSERT_EQ(chain.steps.size(), 7u);
 

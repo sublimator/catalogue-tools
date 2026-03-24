@@ -69,8 +69,8 @@ trie_to_json(TrieData const& t)
     return obj;
 }
 
-boost::json::array
-to_json(ProofChain const& chain)
+static boost::json::array
+steps_to_json(ProofChain const& chain)
 {
     boost::json::array arr;
     for (auto const& s : chain.steps)
@@ -94,6 +94,15 @@ to_json(ProofChain const& chain)
             s);
     }
     return arr;
+}
+
+boost::json::object
+to_json(ProofChain const& chain)
+{
+    boost::json::object obj;
+    obj["network_id"] = chain.network_id;
+    obj["steps"] = steps_to_json(chain);
+    return obj;
 }
 
 //------------------------------------------------------------------------------
@@ -187,21 +196,17 @@ trie_from_json(boost::json::object const& obj)
     return t;
 }
 
-ProofChain
-from_json(boost::json::array const& arr)
+static ProofChain
+parse_steps_array(boost::json::array const& arr)
 {
     ProofChain chain;
     for (auto const& step_val : arr)
     {
         if (!step_val.is_object())
-        {
             continue;
-        }
         auto const& obj = step_val.as_object();
         if (!obj.contains("type"))
-        {
             continue;
-        }
 
         auto type = std::string(obj.at("type").as_string());
         if (type == "anchor")
@@ -216,9 +221,32 @@ from_json(boost::json::array const& arr)
         {
             chain.steps.push_back(trie_from_json(obj));
         }
-        // Unknown types silently skipped
     }
     return chain;
+}
+
+ProofChain
+from_json(boost::json::value const& json)
+{
+    // New format: {"network_id": N, "steps": [...]}
+    if (json.is_object())
+    {
+        auto const& obj = json.as_object();
+        auto chain = parse_steps_array(obj.at("steps").as_array());
+        if (obj.contains("network_id"))
+        {
+            chain.network_id = obj.at("network_id").to_number<uint32_t>();
+        }
+        return chain;
+    }
+
+    // Legacy format: bare array [...]
+    if (json.is_array())
+    {
+        return parse_steps_array(json.as_array());
+    }
+
+    throw std::runtime_error("proof JSON: expected object or array");
 }
 
 }  // namespace xproof

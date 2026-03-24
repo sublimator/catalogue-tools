@@ -28,7 +28,7 @@ namespace xproof {
 
 // File header
 static constexpr uint8_t MAGIC[4] = {'X', 'P', 'R', 'F'};
-static constexpr uint8_t VERSION = 0x01;
+static constexpr uint8_t VERSION = 0x02;
 static constexpr uint8_t FLAG_ZLIB = 0x01;
 
 // TLV type bytes
@@ -533,9 +533,9 @@ to_binary(ProofChain const& chain, BinaryOptions const& opts)
     auto body = encode_tlv_body(chain);
 
     std::vector<uint8_t> out;
-    out.reserve(6 + body.size());
+    out.reserve(10 + body.size());
 
-    // File header
+    // File header: magic(4) + version(1) + flags(1) + network_id(4 LE)
     write_bytes(out, MAGIC, 4);
     out.push_back(VERSION);
 
@@ -543,6 +543,13 @@ to_binary(ProofChain const& chain, BinaryOptions const& opts)
     if (opts.compress)
         flags |= FLAG_ZLIB;
     out.push_back(flags);
+
+    // Network ID (little-endian u32, added in v2)
+    uint32_t net = chain.network_id;
+    out.push_back(static_cast<uint8_t>(net & 0xFF));
+    out.push_back(static_cast<uint8_t>((net >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>((net >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((net >> 24) & 0xFF));
 
     // Body
     if (opts.compress)
@@ -827,22 +834,41 @@ from_binary(std::span<const uint8_t> data)
         throw std::runtime_error("binary proof: bad magic (expected XPRF)");
 
     uint8_t version = data[4];
-    if (version != VERSION)
+    if (version != 0x01 && version != 0x02)
         throw std::runtime_error(
             "binary proof: unsupported version " + std::to_string(version));
 
     uint8_t flags = data[5];
-    auto body_span = data.subspan(6);
 
+    // v2 adds network_id (4 bytes LE) after flags
+    uint32_t network_id = 0;
+    size_t header_size = 6;
+    if (version >= 0x02)
+    {
+        if (data.size() < 10)
+            throw std::runtime_error("binary proof: v2 header too short");
+        network_id = static_cast<uint32_t>(data[6]) |
+            (static_cast<uint32_t>(data[7]) << 8) |
+            (static_cast<uint32_t>(data[8]) << 16) |
+            (static_cast<uint32_t>(data[9]) << 24);
+        header_size = 10;
+    }
+
+    auto body_span = data.subspan(header_size);
+
+    ProofChain chain;
     if (flags & FLAG_ZLIB)
     {
         auto decompressed = zlib_decompress(body_span);
-        return decode_tlv_body(decompressed);
+        chain = decode_tlv_body(decompressed);
     }
     else
     {
-        return decode_tlv_body(body_span);
+        chain = decode_tlv_body(body_span);
     }
+
+    chain.network_id = network_id;
+    return chain;
 }
 
 }  // namespace xproof

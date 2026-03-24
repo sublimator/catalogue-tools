@@ -220,10 +220,11 @@ resolve_proof_chain(
                     {
                         // Re-serialize anchor to JSON for AnchorVerifier
                         // (it still operates on JSON for now)
-                        auto anchor_json = to_json(ProofChain{{data}});
+                        auto anchor_json = to_json(ProofChain{.steps = {data}});
+                        auto const& steps = anchor_json.at("steps").as_array();
                         std::vector<std::string> av_narrative;
                         auto av_result = AnchorVerifier::verify(
-                            anchor_json[0].as_object(),
+                            steps[0].as_object(),
                             trusted_publisher_key,
                             av_narrative);
 

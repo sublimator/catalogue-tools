@@ -6,12 +6,15 @@
 
 namespace xproof {
 
-/// Serialize a ProofChain to a JSON array.
-boost::json::array
+/// Serialize a ProofChain to JSON.
+/// Returns {"network_id": N, "steps": [...]}.
+boost::json::object
 to_json(ProofChain const& chain);
 
-/// Deserialize a JSON array into a ProofChain.
+/// Deserialize JSON into a ProofChain.
+/// Accepts both the new object format {"network_id":..., "steps":[...]}
+/// and the legacy bare array format.
 ProofChain
-from_json(boost::json::array const& arr);
+from_json(boost::json::value const& json);
 
 }  // namespace xproof

@@ -170,6 +170,7 @@ ProofEngine::prove(std::string const& tx_hash)
     };
 
     auto result = co_await build_proof(svc, tx_hash);
+    result.chain.network_id = config_.network_id;
 
     co_return ProveResult{
         std::move(result.chain),
@@ -202,7 +203,7 @@ ProofEngine::verify(
         {
             auto json = boost::json::parse(std::string_view(
                 reinterpret_cast<const char*>(data.data()), data.size()));
-            chain = from_json(json.as_array());
+            chain = from_json(json);
         }
 
         result.ok = resolve_proof_chain(chain, protocol_, key);

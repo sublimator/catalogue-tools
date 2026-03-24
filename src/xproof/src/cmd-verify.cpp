@@ -42,17 +42,14 @@ cmd_verify(
         try
         {
             auto jv = boost::json::parse(file_data);
-            auto const& chain = jv.as_array();
             PLOGI(
                 log_,
                 "Loaded JSON proof from ",
                 proof_path,
                 " (",
-                chain.size(),
-                " steps, ",
                 file_data.size(),
                 " bytes)");
-            proof = xproof::from_json(chain);
+            proof = xproof::from_json(jv);
         }
         catch (std::exception const& e)
         {
