@@ -231,13 +231,16 @@ peer_connection::send_http_request(const connection_handler& handler)
     auto req = std::make_shared<http::request<http::string_body>>(
         http::verb::get, "/", 11);
     req->set(http::field::user_agent, "xahaud-2025.11.4-HEAD+2427");
-    req->set(http::field::upgrade, "XRPL/2.2");
+    req->set(http::field::upgrade, "XRPL/2.1, XRPL/2.2");
     req->set(http::field::connection, "Upgrade");
     req->set("Connect-As", "Peer");
     req->set("Crawl", "private");
 
-    // Network ID (configurable)
-    req->set("Network-ID", std::to_string(config_.network_id));
+    // Network ID — only send if non-zero (mainnet nodes may not expect it)
+    if (config_.network_id != 0)
+    {
+        req->set("Network-ID", std::to_string(config_.network_id));
+    }
 
     // Add network time (seconds since Ripple epoch - Jan 1, 2000)
     // Ripple epoch is Unix timestamp 946684800
