@@ -61,6 +61,7 @@ get_bootstrap_peers(uint32_t network_id)
 
 PeerSet::PeerSet(boost::asio::io_context& io, PeerSetOptions const& options)
     : io_(io)
+    , strand_(asio::make_strand(io))
     , options_(options)
     , network_id_(options.network_id)
     , tracker_(std::make_shared<EndpointTracker>())
@@ -83,7 +84,12 @@ PeerSet::PeerSet(boost::asio::io_context& io, PeerSetOptions const& options)
                 e.what());
         }
     }
+    // Observer wiring deferred to start() — needs shared_from_this()
+}
 
+void
+PeerSet::start()
+{
     configure_tracker_persistence();
 }
 
@@ -448,7 +454,7 @@ PeerSet::pump_connects()
 
         auto self = shared_from_this();
         boost::asio::co_spawn(
-            io_,
+            strand_,
             [self, host, port, key]() -> boost::asio::awaitable<void> {
                 co_await self->try_connect(host, port);
                 self->in_flight_.erase(key);
@@ -480,7 +486,7 @@ PeerSet::pump_crawls()
 
         auto self = shared_from_this();
         boost::asio::co_spawn(
-            io_,
+            strand_,
             [self, host, port, key]() -> boost::asio::awaitable<void> {
                 try
                 {
@@ -586,40 +592,62 @@ PeerSet::load_cached_endpoints()
 void
 PeerSet::configure_tracker_persistence()
 {
-    if (!endpoint_cache_)
-        return;
-
+    auto self = shared_from_this();
     auto cache = endpoint_cache_;
     auto const network_id = network_id_;
 
-    tracker_->set_discovered_observer([this, cache, network_id](
-                                          std::string const& endpoint) {
-        note_discovered(endpoint);
-        try
-        {
-            cache->remember_discovered(network_id, endpoint);
-        }
-        catch (std::exception const& e)
-        {
-            PLOGW(
-                log_, "Peer cache write failed for ", endpoint, ": ", e.what());
-        }
-    });
+    // Observers fire from PeerClient strands (TMStatusChange/TMEndpoints).
+    // Repost onto our strand so note_discovered/note_status touch PeerSet
+    // state safely.
+    tracker_->set_discovered_observer(
+        [self, cache, network_id](std::string const& endpoint) {
+            asio::post(self->strand_, [self, cache, network_id, endpoint]() {
+                self->note_discovered(endpoint);
+                if (cache)
+                {
+                    try
+                    {
+                        cache->remember_discovered(network_id, endpoint);
+                    }
+                    catch (std::exception const& e)
+                    {
+                        PLOGW(
+                            log_,
+                            "Peer cache write failed for ",
+                            endpoint,
+                            ": ",
+                            e.what());
+                    }
+                }
+            });
+        });
 
-    tracker_->set_status_observer([this, cache, network_id](
-                                      std::string const& endpoint,
-                                      PeerStatus const& status) {
-        note_status(endpoint, status);
-        try
-        {
-            cache->remember_status(network_id, endpoint, status);
-        }
-        catch (std::exception const& e)
-        {
-            PLOGW(
-                log_, "Peer cache write failed for ", endpoint, ": ", e.what());
-        }
-    });
+    tracker_->set_status_observer(
+        [self, cache, network_id](
+            std::string const& endpoint, PeerStatus const& status) {
+            asio::post(
+                self->strand_,
+                [self, cache, network_id, endpoint, status]() {
+                    self->note_status(endpoint, status);
+                    if (cache)
+                    {
+                        try
+                        {
+                            cache->remember_status(
+                                network_id, endpoint, status);
+                        }
+                        catch (std::exception const& e)
+                        {
+                            PLOGW(
+                                log_,
+                                "Peer cache write failed for ",
+                                endpoint,
+                                ": ",
+                                e.what());
+                        }
+                    }
+                });
+        });
 }
 
 void

@@ -265,6 +265,7 @@ build_proof(
     PeerSetOptions peer_options;
     peer_options.endpoint_cache_path = peer_cache_path;
     auto peers = PeerSet::create(io, peer_options);
+    peers->start();
     peers->prioritize_ledger(tx_ledger_seq);
 
     ValidationCollector val_collector(protocol);

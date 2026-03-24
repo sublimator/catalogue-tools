@@ -65,6 +65,9 @@ ProofEngine::start()
             vbuf->on_packet(type, data);
         });
 
+    // Wire observer repost (must be after create, uses shared_from_this)
+    peers_->start();
+
     // Bootstrap peer discovery
     peers_->bootstrap();
 

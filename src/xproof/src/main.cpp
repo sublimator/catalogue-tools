@@ -214,6 +214,7 @@ print_usage()
         << "\n"
         << "Options for serve:\n"
         << "  --bind <addr:port>  listen address (default: 127.0.0.1:8080)\n"
+        << "  --threads <N>       I/O threads (default: 1)\n"
         << "\n"
         << "Logging options:\n"
         << "  --debug                 enable DEBUG for xproof partitions\n"
@@ -429,6 +430,15 @@ main(int argc, char* argv[])
             else if (arg == "--network" && pos + 1 < command_args.size())
             {
                 opts.network_id = std::stoul(command_args[pos + 1]);
+                pos += 2;
+            }
+            else if (arg == "--threads" && pos + 1 < command_args.size())
+            {
+                opts.threads = std::stoul(command_args[pos + 1]);
+                if (opts.threads == 0)
+                {
+                    opts.threads = 1;
+                }
                 pos += 2;
             }
             else if (arg == "--rpc" && pos + 1 < command_args.size())

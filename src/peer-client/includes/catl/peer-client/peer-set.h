@@ -71,6 +71,11 @@ public:
         return create(io, options);
     }
 
+    /// Wire observer callbacks (must be called after create).
+    /// Uses shared_from_this — unsafe in constructor.
+    void
+    start();
+
     /// The shared tracker — peers feed it via TMStatusChange.
     std::shared_ptr<EndpointTracker>
     tracker()
@@ -138,13 +143,11 @@ public:
         return connections_.size();
     }
 
-    /// Awaitable peer count — safe for multi-threaded callers.
-    /// When PeerSet gets its own strand, this will hop to it.
+    /// Awaitable peer count — hops to strand for safe read.
     boost::asio::awaitable<size_t>
-    co_size() const
+    co_size()
     {
-        // Single-threaded today — just return the value.
-        // Future: co_await asio::post(strand_, use_awaitable); return size();
+        co_await boost::asio::post(strand_, boost::asio::use_awaitable);
         co_return connections_.size();
     }
 
@@ -263,6 +266,7 @@ private:
     }
 
     boost::asio::io_context& io_;
+    boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     PeerSetOptions options_;
     uint32_t network_id_;
     std::shared_ptr<EndpointTracker> tracker_;

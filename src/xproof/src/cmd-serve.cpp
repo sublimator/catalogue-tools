@@ -9,6 +9,8 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <iostream>
+#include <thread>
+#include <vector>
 
 static LogPartition log_("xproof", LogLevel::INFO);
 
@@ -63,6 +65,25 @@ cmd_serve(ServeOptions const& opts)
         io.stop();
     });
 
-    io.run();
+    // Run io_context on N threads
+    auto const n_threads = opts.threads;
+    if (n_threads > 1)
+    {
+        PLOGI(log_, "Running with ", n_threads, " threads");
+    }
+
+    std::vector<std::thread> threads;
+    for (unsigned int i = 1; i < n_threads; ++i)
+    {
+        threads.emplace_back([&io]() { io.run(); });
+    }
+
+    io.run();  // main thread participates
+
+    for (auto& t : threads)
+    {
+        t.join();
+    }
+
     return 0;
 }
