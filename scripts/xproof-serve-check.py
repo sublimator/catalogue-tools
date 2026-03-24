@@ -140,7 +140,7 @@ class RunningServer:
     def _start_tmux(self, cmd: list[str]) -> None:
         import shlex
 
-        self.tmux_session = f"xproof-check-{self.config.port}"
+        self.tmux_session = "xproof"
         server_cmd = shlex.join(cmd) + f" 2>&1 | tee {self.config.server_log}"
         if self.config.lldb:
             server_cmd = f"lldb -o run -- {shlex.join(cmd)}"
