@@ -115,7 +115,15 @@ PeerSet::note_discovered(std::string const& endpoint)
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     stats.last_seen_at = now_unix();
+    queue_crawl(key);
+    if (should_connect_endpoint(key))
+    {
+        queue_connect(key);
+    }
     sort_pending_connects();
+    sort_pending_crawls();
+    pump_crawls();
+    pump_connects();
 }
 
 void
@@ -125,7 +133,15 @@ PeerSet::note_status(std::string const& endpoint, PeerStatus const& status)
     auto& stats = endpoint_stats_[key];
     stats.status = status;
     stats.last_seen_at = now_unix();
+    queue_crawl(key);
+    if (should_connect_endpoint(key))
+    {
+        queue_connect(key);
+    }
     sort_pending_connects();
+    sort_pending_crawls();
+    pump_crawls();
+    pump_connects();
 }
 
 void
@@ -151,6 +167,111 @@ PeerSet::note_connect_failure(std::string const& endpoint)
     stats.last_failure_at = now_unix();
     stats.failure_count++;
     sort_pending_connects();
+}
+
+std::optional<PeerStatus>
+PeerSet::choose_crawl_status(std::vector<CrawlLedgerRange> const& ranges) const
+{
+    if (ranges.empty())
+        return std::nullopt;
+
+    auto better_range = [this](
+                            CrawlLedgerRange const& lhs,
+                            CrawlLedgerRange const& rhs) {
+        auto const preferred = preferred_ledger_seq_;
+        auto const lhs_covers =
+            preferred && *preferred >= lhs.first_seq && *preferred <= lhs.last_seq;
+        auto const rhs_covers =
+            preferred && *preferred >= rhs.first_seq && *preferred <= rhs.last_seq;
+        if (lhs_covers != rhs_covers)
+        {
+            return lhs_covers;
+        }
+
+        auto const lhs_span = lhs.last_seq - lhs.first_seq;
+        auto const rhs_span = rhs.last_seq - rhs.first_seq;
+        if (lhs.last_seq != rhs.last_seq)
+        {
+            return lhs.last_seq > rhs.last_seq;
+        }
+        if (lhs_span != rhs_span)
+        {
+            return lhs_span > rhs_span;
+        }
+        return lhs.first_seq < rhs.first_seq;
+    };
+
+    auto best = std::max_element(
+        ranges.begin(), ranges.end(), [&](auto const& lhs, auto const& rhs) {
+            return better_range(rhs, lhs);
+        });
+    if (best == ranges.end())
+        return std::nullopt;
+
+    return PeerStatus{
+        .first_seq = best->first_seq,
+        .last_seq = best->last_seq,
+        .current_seq = best->last_seq,
+        .last_seen = std::chrono::steady_clock::now()};
+}
+
+bool
+PeerSet::endpoint_has_range(std::string const& endpoint) const
+{
+    auto key = canonical_endpoint(endpoint);
+    auto it = endpoint_stats_.find(key);
+    if (it == endpoint_stats_.end())
+        return false;
+
+    auto const& status = it->second.status;
+    return status.first_seq != 0 && status.last_seq != 0;
+}
+
+bool
+PeerSet::endpoint_covers_preferred_ledger(std::string const& endpoint) const
+{
+    if (!preferred_ledger_seq_)
+        return false;
+
+    auto key = canonical_endpoint(endpoint);
+    auto it = endpoint_stats_.find(key);
+    if (it == endpoint_stats_.end())
+        return false;
+
+    auto const& status = it->second.status;
+    return status.first_seq != 0 && status.last_seq != 0 &&
+        *preferred_ledger_seq_ >= status.first_seq &&
+        *preferred_ledger_seq_ <= status.last_seq;
+}
+
+bool
+PeerSet::should_connect_endpoint(std::string const& endpoint) const
+{
+    auto key = canonical_endpoint(endpoint);
+
+    if (connections_.count(key) || in_flight_.count(key) || queued_.count(key))
+        return false;
+
+    auto it = endpoint_stats_.find(key);
+    auto const has_success =
+        it != endpoint_stats_.end() && it->second.last_success_at > 0;
+
+    if (endpoint_covers_preferred_ledger(key))
+        return true;
+
+    // If crawl already had a chance and still did not give us range data,
+    // fall back to a real peer handshake rather than starving on crawl-only
+    // nodes.
+    if (crawled_.count(key) && !endpoint_has_range(key))
+        return true;
+
+    // We still need at least one ready peer for validations and anchor work,
+    // so allow known-good cached peers to race in even before they have been
+    // proven to cover the target ledger.
+    if (!any_peer() && (endpoint_has_range(key) || has_success))
+        return true;
+
+    return false;
 }
 
 bool
@@ -239,6 +360,17 @@ PeerSet::sort_pending_connects()
 }
 
 void
+PeerSet::sort_pending_crawls()
+{
+    std::sort(
+        pending_crawls_.begin(),
+        pending_crawls_.end(),
+        [this](std::string const& lhs, std::string const& rhs) {
+            return candidate_better(lhs, rhs);
+        });
+}
+
+void
 PeerSet::queue_connect(std::string const& endpoint)
 {
     auto key = canonical_endpoint(endpoint);
@@ -260,6 +392,24 @@ PeerSet::queue_connect(std::string const& endpoint)
     pending_connects_.push_back(key);
     queued_.insert(key);
     sort_pending_connects();
+}
+
+void
+PeerSet::queue_crawl(std::string const& endpoint)
+{
+    if (options_.max_in_flight_crawls == 0)
+        return;
+
+    auto key = canonical_endpoint(endpoint);
+    if (key.empty() || crawl_in_flight_.count(key) || crawl_queued_.count(key) ||
+        crawled_.count(key))
+    {
+        return;
+    }
+
+    pending_crawls_.push_back(key);
+    crawl_queued_.insert(key);
+    sort_pending_crawls();
 }
 
 void
@@ -299,6 +449,84 @@ PeerSet::pump_connects()
             [self, host, port, key]() -> boost::asio::awaitable<void> {
                 co_await self->try_connect(host, port);
                 self->in_flight_.erase(key);
+                self->pump_connects();
+            },
+            boost::asio::detached);
+    }
+}
+
+void
+PeerSet::pump_crawls()
+{
+    while (crawl_in_flight_.size() < options_.max_in_flight_crawls &&
+           !pending_crawls_.empty())
+    {
+        auto key = pending_crawls_.front();
+        pending_crawls_.erase(pending_crawls_.begin());
+        crawl_queued_.erase(key);
+
+        std::string host;
+        uint16_t port = 0;
+        if (!EndpointTracker::parse_endpoint(key, host, port))
+            continue;
+
+        if (crawl_in_flight_.count(key) || crawled_.count(key))
+            continue;
+
+        crawl_in_flight_.insert(key);
+
+        auto self = shared_from_this();
+        boost::asio::co_spawn(
+            io_,
+            [self, host, port, key]() -> boost::asio::awaitable<void> {
+                try
+                {
+                    auto response = co_await co_fetch_peer_crawl(host, port);
+
+                    std::size_t ranged = 0;
+                    for (auto const& peer : response.peers)
+                    {
+                        if (peer.endpoint.empty())
+                            continue;
+
+                        if (auto status =
+                                self->choose_crawl_status(peer.complete_ledgers))
+                        {
+                            ++ranged;
+                            self->tracker_->update(peer.endpoint, *status);
+                        }
+                        else
+                        {
+                            self->tracker_->add_discovered(peer.endpoint);
+                        }
+                    }
+
+                    PLOGD(
+                        log_,
+                        "Crawled ",
+                        key,
+                        " via ",
+                        response.used_tls ? "HTTPS" : "HTTP",
+                        ": ",
+                        response.peers.size(),
+                        " public peers, ",
+                        ranged,
+                        " with ledger ranges");
+                }
+                catch (std::exception const& e)
+                {
+                    PLOGD(log_, "Crawl failed for ", key, ": ", e.what());
+                }
+
+                self->crawl_in_flight_.erase(key);
+                self->crawled_.insert(key);
+
+                if (self->should_connect_endpoint(key))
+                {
+                    self->queue_connect(key);
+                }
+
+                self->pump_crawls();
                 self->pump_connects();
             },
             boost::asio::detached);
@@ -528,14 +756,20 @@ PeerSet::bootstrap()
 
     for (auto const& bp : boot_peers)
     {
+        queue_crawl(make_key(bp.host, bp.port));
         queue_connect(make_key(bp.host, bp.port));
     }
 
     for (auto const& endpoint : tracked_endpoints)
     {
-        queue_connect(endpoint);
+        queue_crawl(endpoint);
+        if (should_connect_endpoint(endpoint))
+        {
+            queue_connect(endpoint);
+        }
     }
 
+    pump_crawls();
     pump_connects();
 }
 
@@ -545,8 +779,13 @@ PeerSet::start_tracked_endpoints()
     auto endpoints = tracker_->all_endpoints();
     for (auto const& endpoint : endpoints)
     {
-        queue_connect(endpoint);
+        queue_crawl(endpoint);
+        if (should_connect_endpoint(endpoint))
+        {
+            queue_connect(endpoint);
+        }
     }
+    pump_crawls();
     pump_connects();
 }
 
@@ -557,30 +796,44 @@ PeerSet::try_undiscovered()
     if (candidates.empty())
         return;
 
-    int queued = 0;
+    int crawls = 0;
+    int connects = 0;
     for (auto const& ep : candidates)
     {
-        auto const before = queued_.size();
-        queue_connect(ep);
-        if (queued_.size() != before)
+        auto const before_crawls = crawl_queued_.size();
+        queue_crawl(ep);
+        if (crawl_queued_.size() != before_crawls)
         {
-            queued++;
+            crawls++;
+        }
+
+        auto const before_connects = queued_.size();
+        if (should_connect_endpoint(ep))
+        {
+            queue_connect(ep);
+        }
+        if (queued_.size() != before_connects)
+        {
+            connects++;
         }
     }
 
-    if (queued > 0)
+    if (crawls > 0 || connects > 0)
     {
         PLOGI(
             log_,
             "Queued ",
-            queued,
-            " newly discovered endpoints (",
+            crawls,
+            " crawl jobs and ",
+            connects,
+            " connect attempts from discovered endpoints (",
             in_flight_.size(),
             "/",
             options_.max_in_flight_connects,
             " in flight)");
     }
 
+    pump_crawls();
     pump_connects();
 }
 
@@ -589,6 +842,8 @@ PeerSet::prioritize_ledger(uint32_t ledger_seq)
 {
     preferred_ledger_seq_ = ledger_seq;
     sort_pending_connects();
+    sort_pending_crawls();
+    pump_crawls();
     pump_connects();
 }
 
@@ -600,12 +855,18 @@ PeerSet::try_candidates_for(uint32_t ledger_seq)
     auto candidates = tracker_->all_endpoints();
     for (auto const& endpoint : candidates)
     {
-        queue_connect(endpoint);
+        queue_crawl(endpoint);
+        if (should_connect_endpoint(endpoint))
+        {
+            queue_connect(endpoint);
+        }
     }
 
     // Keep expanding the graph even when cached range data is incomplete.
     try_undiscovered();
     sort_pending_connects();
+    sort_pending_crawls();
+    pump_crawls();
     pump_connects();
 }
 
@@ -624,16 +885,38 @@ PeerSet::add(std::string const& host, uint16_t port)
 std::optional<std::shared_ptr<PeerClient>>
 PeerSet::peer_for(uint32_t ledger_seq) const
 {
+    static std::unordered_set<std::string> const empty;
+    return peer_for(ledger_seq, empty);
+}
+
+std::optional<std::shared_ptr<PeerClient>>
+PeerSet::peer_for(
+    uint32_t ledger_seq,
+    std::unordered_set<std::string> const& excluded) const
+{
+    std::shared_ptr<PeerClient> best;
+    std::string best_key;
+
     for (auto const& [key, client] : connections_)
     {
+        if (excluded.count(key))
+            continue;
         if (!client || !client->is_ready())
             continue;
         if (client->peer_first_seq() != 0 &&
             ledger_seq >= client->peer_first_seq() &&
             ledger_seq <= client->peer_last_seq())
         {
-            return client;
+            if (!best || candidate_better(key, best_key))
+            {
+                best = client;
+                best_key = key;
+            }
         }
+    }
+    if (best)
+    {
+        return best;
     }
     return std::nullopt;
 }
@@ -641,7 +924,16 @@ PeerSet::peer_for(uint32_t ledger_seq) const
 boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
 PeerSet::wait_for_any_peer(int timeout_secs)
 {
-    if (auto client = any_peer())
+    static std::unordered_set<std::string> const empty;
+    co_return co_await wait_for_any_peer(timeout_secs, empty);
+}
+
+boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+PeerSet::wait_for_any_peer(
+    int timeout_secs,
+    std::unordered_set<std::string> const& excluded)
+{
+    if (auto client = any_peer(excluded))
     {
         co_return client;
     }
@@ -670,7 +962,7 @@ PeerSet::wait_for_any_peer(int timeout_secs)
         co_await timer.async_wait(
             boost::asio::redirect_error(boost::asio::use_awaitable, ec));
 
-        if (auto client = any_peer())
+        if (auto client = any_peer(excluded))
         {
             co_return client;
         }
@@ -702,7 +994,17 @@ PeerSet::wait_for_any_peer(int timeout_secs)
 boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
 PeerSet::wait_for_peer(uint32_t ledger_seq, int timeout_secs)
 {
-    if (auto p = peer_for(ledger_seq))
+    static std::unordered_set<std::string> const empty;
+    co_return co_await wait_for_peer(ledger_seq, timeout_secs, empty);
+}
+
+boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+PeerSet::wait_for_peer(
+    uint32_t ledger_seq,
+    int timeout_secs,
+    std::unordered_set<std::string> const& excluded)
+{
+    if (auto p = peer_for(ledger_seq, excluded))
     {
         co_return p;
     }
@@ -731,7 +1033,7 @@ PeerSet::wait_for_peer(uint32_t ledger_seq, int timeout_secs)
         co_await timer.async_wait(
             boost::asio::redirect_error(boost::asio::use_awaitable, ec));
 
-        if (auto p = peer_for(ledger_seq))
+        if (auto p = peer_for(ledger_seq, excluded))
         {
             PLOGI(log_, "Found peer for ledger ", ledger_seq);
             co_return p;
@@ -772,12 +1074,30 @@ PeerSet::wait_for_peer(uint32_t ledger_seq, int timeout_secs)
 std::shared_ptr<PeerClient>
 PeerSet::any_peer() const
 {
-    for (auto const& [_, client] : connections_)
+    static std::unordered_set<std::string> const empty;
+    return any_peer(empty);
+}
+
+std::shared_ptr<PeerClient>
+PeerSet::any_peer(std::unordered_set<std::string> const& excluded) const
+{
+    std::shared_ptr<PeerClient> best;
+    std::string best_key;
+
+    for (auto const& [key, client] : connections_)
     {
+        if (excluded.count(key))
+            continue;
         if (client && client->is_ready())
-            return client;
+        {
+            if (!best || candidate_better(key, best_key))
+            {
+                best = client;
+                best_key = key;
+            }
+        }
     }
-    return nullptr;
+    return best;
 }
 
 }  // namespace catl::peer_client

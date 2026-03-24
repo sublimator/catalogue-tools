@@ -15,6 +15,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <string>
 
 namespace catl::peer_client {
 
@@ -233,6 +234,12 @@ public:
 
     size_t
     pending_count() const;
+
+    std::string const&
+    endpoint() const
+    {
+        return endpoint_str_;
+    }
 
     peer_connection&
     raw_connection()

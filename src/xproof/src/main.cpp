@@ -204,7 +204,7 @@ print_usage()
         << ")\n"
         << "  --binary            output binary format only\n"
         << "  --gzip              output compressed binary format only\n"
-        << "  --output <name>     output file base name (default: proof)\n"
+        << "  --output <stem>     output file stem (default: proof-<ledger>-<txid12>)\n"
         << "\n"
         << "Logging options:\n"
         << "  --debug                 enable DEBUG for xproof partitions\n"

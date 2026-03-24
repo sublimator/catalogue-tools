@@ -10,6 +10,7 @@
 // connect coroutines keep PeerSet alive by capturing shared_ptr<PeerSet>.
 
 #include "endpoint-tracker.h"
+#include "peer-crawl-client.h"
 #include "peer-client.h"
 #include "peer-endpoint-cache.h"
 
@@ -26,6 +27,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace catl::peer_client {
@@ -47,6 +49,7 @@ struct PeerSetOptions
     std::string endpoint_cache_path;
     std::size_t cached_endpoint_limit = 64;
     std::size_t max_in_flight_connects = 8;
+    std::size_t max_in_flight_crawls = 4;
     std::chrono::seconds retry_backoff{5};
 };
 
@@ -97,17 +100,36 @@ public:
     std::optional<std::shared_ptr<PeerClient>>
     peer_for(uint32_t ledger_seq) const;
 
+    std::optional<std::shared_ptr<PeerClient>>
+    peer_for(
+        uint32_t ledger_seq,
+        std::unordered_set<std::string> const& excluded) const;
+
     /// Wait until any ready peer is available.
     boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
     wait_for_any_peer(int timeout_secs = 15);
+
+    boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+    wait_for_any_peer(
+        int timeout_secs,
+        std::unordered_set<std::string> const& excluded);
 
     /// Wait until a peer with the given ledger is available.
     boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
     wait_for_peer(uint32_t ledger_seq, int timeout_secs = 300);
 
+    boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+    wait_for_peer(
+        uint32_t ledger_seq,
+        int timeout_secs,
+        std::unordered_set<std::string> const& excluded);
+
     /// Get any ready peer.
     std::shared_ptr<PeerClient>
     any_peer() const;
+
+    std::shared_ptr<PeerClient>
+    any_peer(std::unordered_set<std::string> const& excluded) const;
 
     size_t
     size() const
@@ -147,10 +169,19 @@ private:
     queue_connect(std::string const& endpoint);
 
     void
+    queue_crawl(std::string const& endpoint);
+
+    void
     pump_connects();
 
     void
+    pump_crawls();
+
+    void
     sort_pending_connects();
+
+    void
+    sort_pending_crawls();
 
     void
     load_cached_endpoints();
@@ -178,6 +209,18 @@ private:
 
     void
     note_connect_failure(std::string const& endpoint);
+
+    std::optional<PeerStatus>
+    choose_crawl_status(std::vector<CrawlLedgerRange> const& ranges) const;
+
+    bool
+    endpoint_has_range(std::string const& endpoint) const;
+
+    bool
+    endpoint_covers_preferred_ledger(std::string const& endpoint) const;
+
+    bool
+    should_connect_endpoint(std::string const& endpoint) const;
 
     bool
     candidate_better(std::string const& lhs, std::string const& rhs) const;
@@ -211,6 +254,10 @@ private:
     std::set<std::string> in_flight_;  // currently connecting
     std::set<std::string> queued_;
     std::vector<std::string> pending_connects_;
+    std::set<std::string> crawl_in_flight_;
+    std::set<std::string> crawl_queued_;
+    std::set<std::string> crawled_;
+    std::vector<std::string> pending_crawls_;
     std::optional<uint32_t> preferred_ledger_seq_;
     UnsolicitedHandler unsolicited_handler_;
 };

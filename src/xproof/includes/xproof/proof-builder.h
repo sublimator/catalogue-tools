@@ -23,6 +23,7 @@ struct BuildResult
 {
     ProofChain chain;
     std::string publisher_key_hex;  // from VL, for resolver
+    uint32_t tx_ledger_seq = 0;
 };
 
 boost::asio::awaitable<BuildResult>

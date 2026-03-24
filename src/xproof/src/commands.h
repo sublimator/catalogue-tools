@@ -31,7 +31,7 @@ struct ProveOptions
     std::string tx_hash;
     bool binary = false;
     bool compress = false;
-    std::string output = "proof";
+    std::string output;
 };
 
 int

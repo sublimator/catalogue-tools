@@ -47,6 +47,26 @@ default_peer_cache_path()
 #endif
 }
 
+static std::string
+default_output_stem(
+    uint32_t tx_ledger_seq,
+    std::string const& tx_hash,
+    std::string const& configured_output)
+{
+    if (!configured_output.empty())
+    {
+        return configured_output;
+    }
+
+    std::string tx_hash_short = tx_hash.substr(0, std::min<size_t>(12, tx_hash.size()));
+    for (char& ch : tx_hash_short)
+    {
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    }
+
+    return "proof-" + std::to_string(tx_ledger_seq) + "-" + tx_hash_short;
+}
+
 int
 cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
 {
@@ -78,6 +98,9 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
                 peer_cache_path,
                 opts.tx_hash);
 
+            auto const output_stem = default_output_stem(
+                build_result.tx_ledger_seq, opts.tx_hash, opts.output);
+
             // Write output files
             std::string json_path, bin_path;
             size_t json_size = 0, bin_size = 0;
@@ -87,17 +110,17 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
                 // Binary only
                 auto binary = xproof::to_binary(
                     build_result.chain, {.compress = opts.compress});
-                bin_path = opts.output + ".bin";
+                bin_path = output_stem + ".bin";
                 write_file(bin_path, binary);
                 bin_size = binary.size();
             }
             else
             {
-                // JSON to stdout + file
+                // JSON is written to disk; stdout is reserved for progress and
+                // summary output.
                 auto chain_json = xproof::to_json(build_result.chain);
-                catl::xdata::pretty_print(std::cout, chain_json);
 
-                json_path = opts.output + ".json";
+                json_path = output_stem + ".json";
                 {
                     std::ofstream out(json_path);
                     catl::xdata::pretty_print(out, chain_json);
@@ -107,7 +130,7 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
                 // Also write compressed binary alongside
                 auto compressed =
                     xproof::to_binary(build_result.chain, {.compress = true});
-                bin_path = opts.output + ".bin";
+                bin_path = output_stem + ".bin";
                 write_file(bin_path, compressed);
                 bin_size = compressed.size();
             }

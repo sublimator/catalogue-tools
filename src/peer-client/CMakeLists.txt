@@ -15,6 +15,7 @@ protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS
 add_library(
   catl_peer_client
   src/peer-client.cpp
+  src/peer-crawl-client.cpp
   src/connection.cpp
   src/crypto-utils.cpp
   src/endpoint-tracker.cpp
@@ -35,6 +36,7 @@ target_link_libraries(
   catl_peer_client
   # PUBLIC: headers expose boost::asio, openssl types, core types
   PUBLIC Boost::boost
+         Boost::json
          OpenSSL::SSL
          OpenSSL::Crypto
          catl::core
