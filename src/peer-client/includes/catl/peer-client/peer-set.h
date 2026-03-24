@@ -251,7 +251,8 @@ private:
     }
 
     boost::asio::io_context& io_;
-    boost::asio::strand<boost::asio::io_context::executor_type> strand_;
+    // TODO: mutable only for ASSERT_ON_STRAND() in const methods — revisit
+    mutable boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     PeerSetOptions options_;
     uint32_t network_id_;
     std::shared_ptr<EndpointTracker> tracker_;

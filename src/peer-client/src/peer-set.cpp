@@ -693,6 +693,7 @@ PeerSet::configure_tracker_persistence()
 void
 PeerSet::start_connect(std::string const& endpoint)
 {
+    ASSERT_ON_STRAND();
     queue_connect(endpoint);
     pump_connects();
 }
@@ -843,6 +844,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 void
 PeerSet::bootstrap()
 {
+    ASSERT_ON_STRAND();
     auto const& boot_peers = get_bootstrap_peers(network_id_);
     auto tracked_endpoints = tracker_->all_endpoints();
 
@@ -882,6 +884,7 @@ PeerSet::bootstrap()
 void
 PeerSet::start_tracked_endpoints()
 {
+    ASSERT_ON_STRAND();
     auto endpoints = tracker_->all_endpoints();
     for (auto const& endpoint : endpoints)
     {
@@ -898,6 +901,7 @@ PeerSet::start_tracked_endpoints()
 void
 PeerSet::try_undiscovered()
 {
+    ASSERT_ON_STRAND();
     auto candidates = tracker_->undiscovered();
     if (candidates.empty())
         return;
@@ -946,8 +950,7 @@ PeerSet::try_undiscovered()
 void
 PeerSet::prioritize_ledger(uint32_t ledger_seq)
 {
-    // Note: this sets a shared preference. With concurrent prove() calls,
-    // the last writer wins. This is acceptable — it's a hint, not a contract.
+    ASSERT_ON_STRAND();
     preferred_ledger_seq_ = ledger_seq;
     sort_pending_connects();
     sort_pending_crawls();
@@ -958,6 +961,7 @@ PeerSet::prioritize_ledger(uint32_t ledger_seq)
 void
 PeerSet::try_candidates_for(uint32_t /*ledger_seq*/)
 {
+    ASSERT_ON_STRAND();
     // Don't call prioritize_ledger() — with concurrent prove() calls,
     // overwriting the shared preference would retune discovery for all.
     // Just queue/pump without reranking.
@@ -1004,6 +1008,7 @@ PeerSet::peer_for(
     uint32_t ledger_seq,
     std::unordered_set<std::string> const& excluded) const
 {
+    ASSERT_ON_STRAND();
     std::shared_ptr<PeerClient> best;
     std::string best_key;
 
@@ -1197,6 +1202,7 @@ PeerSet::any_peer() const
 std::shared_ptr<PeerClient>
 PeerSet::any_peer(std::unordered_set<std::string> const& excluded) const
 {
+    ASSERT_ON_STRAND();
     std::shared_ptr<PeerClient> best;
     std::string best_key;
 
