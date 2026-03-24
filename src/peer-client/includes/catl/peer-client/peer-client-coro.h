@@ -207,61 +207,45 @@ co_connect(
     std::string const& host,
     uint16_t port,
     uint32_t network_id,
-    std::shared_ptr<PeerClient>& out_client)
+    std::shared_ptr<PeerClient>& out_client,
+    int timeout_secs = 10)
 {
     auto executor = co_await asio::this_coro::executor;
     auto signal = std::make_shared<asio::steady_timer>(
         executor, asio::steady_timer::time_point::max());
-
-    uint32_t peer_seq = 0;
-    bool failed = false;
+    auto peer_seq = std::make_shared<uint32_t>(0);
 
     out_client = PeerClient::connect(
         io_context,
         host,
         port,
         network_id,
-        [signal, &peer_seq](uint32_t seq) {
-            peer_seq = seq;
+        [signal, peer_seq](uint32_t seq) {
+            *peer_seq = seq;
             signal->cancel();
         });
 
-    // Poll for failure — PeerClient goes to State::Failed if connection
-    // or handshake fails, but there's no failure callback, so we check.
-    asio::steady_timer poll_timer(executor);
-    auto client_weak = std::weak_ptr<PeerClient>(out_client);
-    std::function<void(boost::system::error_code)> check_failed;
-    check_failed = [&, signal](boost::system::error_code ec) {
-        if (ec)
-            return;
-        auto c = client_weak.lock();
-        if (!c)
-            return;
-        if (c->state() == State::Failed)
-        {
-            failed = true;
-            signal->cancel();
-            return;
-        }
-        if (c->state() == State::Ready)
-            return;  // signal already cancelled by ready callback
-        poll_timer.expires_after(std::chrono::milliseconds(50));
-        poll_timer.async_wait(check_failed);
-    };
-    poll_timer.expires_after(std::chrono::milliseconds(50));
-    poll_timer.async_wait(check_failed);
+    // Timeout — if connection fails, State::Failed is set but nobody
+    // cancels the signal. Use a deadline instead.
+    asio::steady_timer deadline(
+        executor, std::chrono::seconds(timeout_secs));
+    deadline.async_wait([signal](boost::system::error_code ec) {
+        if (!ec)
+            signal->cancel();  // timeout fires
+    });
 
     boost::system::error_code ec;
     co_await signal->async_wait(asio::redirect_error(asio::use_awaitable, ec));
 
-    poll_timer.cancel();
+    deadline.cancel();
 
-    if (failed)
+    if (out_client->state() == State::Failed ||
+        out_client->state() != State::Ready)
     {
         throw PeerClientException(Error::Disconnected);
     }
 
-    co_return peer_seq;
+    co_return *peer_seq;
 }
 
 }  // namespace catl::peer_client

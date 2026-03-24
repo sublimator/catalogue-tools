@@ -53,11 +53,11 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 {
     auto key = make_key(host, port);
 
-    // Already connected?
+    // Already connected (or already failed)?
     auto it = connections_.find(key);
     if (it != connections_.end())
     {
-        co_return it->second->is_ready() ? it->second : nullptr;
+        co_return (it->second && it->second->is_ready()) ? it->second : nullptr;
     }
 
     PLOGI(log_, "Connecting to ", key, "...");
