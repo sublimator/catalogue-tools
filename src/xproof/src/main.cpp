@@ -8,6 +8,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <sys/resource.h>
 #include <vector>
 
 bool
@@ -232,6 +233,22 @@ print_usage()
 int
 main(int argc, char* argv[])
 {
+    // Raise file descriptor limit — macOS defaults to 256 which is
+    // easily exhausted with concurrent peer + RPC connections.
+    {
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_NOFILE, &rl) == 0)
+        {
+            auto old_soft = rl.rlim_cur;
+            rl.rlim_cur = rl.rlim_max;  // raise soft to hard limit
+            if (setrlimit(RLIMIT_NOFILE, &rl) == 0 && old_soft != rl.rlim_cur)
+            {
+                std::cerr << "fd limit: " << old_soft << " → " << rl.rlim_cur
+                          << "\n";
+            }
+        }
+    }
+
     if (argc < 2)
     {
         print_usage();
