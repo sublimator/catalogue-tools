@@ -1031,8 +1031,7 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     };
 
     // ── Step 1: RPC — look up tx ──
-    catl::rpc::RpcClient rpc(io, svc.rpc_host, svc.rpc_port);
-    auto tx_result = co_await catl::rpc::co_tx(rpc, tx_hash_str);
+    auto tx_result = co_await catl::rpc::co_tx(*svc.rpc, tx_hash_str);
     auto const& tx_obj = tx_result.as_object();
 
     uint32_t tx_ledger_seq = 0;

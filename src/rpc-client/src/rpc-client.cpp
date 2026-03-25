@@ -20,10 +20,21 @@ using tcp = asio::ip::tcp;
 
 LogPartition RpcClient::log_("rpc-client", LogLevel::INHERIT);
 
-RpcClient::RpcClient(asio::io_context& io, std::string host, uint16_t port)
-    : io_(io), host_(std::move(host)), port_(port)
+RpcClient::RpcClient(
+    asio::io_context& io,
+    std::string host,
+    uint16_t port,
+    int max_concurrent)
+    : io_(io)
+    , host_(std::move(host))
+    , port_(port)
+    , max_concurrent_(max_concurrent)
+    , slot_signal_(std::make_shared<asio::steady_timer>(
+          io,
+          asio::steady_timer::time_point::max()))
 {
 }
+
 
 void
 RpcClient::call(
@@ -44,11 +55,17 @@ RpcClient::call(
     // Run the HTTP request as a coroutine, deliver result via callback
     auto host = host_;
     auto port = port_;
+    auto* in_flight = &in_flight_;
+    auto max_concurrent = max_concurrent_;
+    auto slot_signal = slot_signal_;
 
     boost::asio::co_spawn(
         io_,
         [host,
          port,
+         in_flight,
+         max_concurrent,
+         slot_signal,
          body_str = std::move(body_str),
          callback = std::move(callback)]() mutable -> asio::awaitable<void> {
             RpcResult rpc_result;
@@ -56,6 +73,16 @@ RpcClient::call(
             try
             {
                 auto executor = co_await asio::this_coro::executor;
+
+                // Concurrency gate — wait for a slot via signal
+                while (in_flight->load() >= max_concurrent)
+                {
+                    boost::system::error_code ec;
+                    co_await slot_signal->async_wait(
+                        asio::redirect_error(asio::use_awaitable, ec));
+                    // ec == operation_aborted means a slot opened — re-check
+                }
+                in_flight->fetch_add(1);
 
                 // SSL context
                 ssl::context ctx(ssl::context::tlsv12_client);
@@ -155,6 +182,12 @@ RpcClient::call(
                 rpc_result.error = e.what();
                 rpc_result.success = false;
             }
+
+            // Release concurrency slot and wake next waiter
+            in_flight->fetch_sub(1);
+            slot_signal->cancel();
+            slot_signal->expires_at(
+                asio::steady_timer::time_point::max());
 
             callback(std::move(rpc_result));
         },

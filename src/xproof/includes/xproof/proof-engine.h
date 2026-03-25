@@ -19,6 +19,7 @@
 
 #include <catl/peer-client/node-cache.h>
 #include <catl/peer-client/peer-set.h>
+#include <catl/rpc-client/rpc-client.h>
 #include <catl/xdata/protocol.h>
 
 #include <boost/asio/awaitable.hpp>
@@ -138,6 +139,7 @@ private:
 
     std::shared_ptr<catl::peer_client::PeerSet> peers_;
     std::shared_ptr<catl::peer_client::NodeCache> node_cache_;
+    std::shared_ptr<catl::rpc::RpcClient> rpc_;
     std::shared_ptr<VlCache> vl_cache_;
     std::shared_ptr<ValidationBuffer> val_buffer_;
 

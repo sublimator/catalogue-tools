@@ -41,8 +41,7 @@ struct BuildServices
     std::vector<ValidationCollector::Entry> const& anchor_validations;
     catl::xdata::Protocol const& protocol;
     std::shared_ptr<catl::peer_client::NodeCache> node_cache;
-    std::string rpc_host;
-    uint16_t rpc_port = 443;
+    std::shared_ptr<catl::rpc::RpcClient> rpc;
 };
 
 /// Build using shared services (ProofEngine path).

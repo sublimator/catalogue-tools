@@ -14,9 +14,12 @@
 #include <catl/core/logger.h>
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/json.hpp>
+#include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 
 namespace catl::rpc {
@@ -68,10 +71,15 @@ using RpcCallback = std::function<void(RpcResult)>;
 
 /// Minimal XRPL JSON-RPC client.
 /// One instance per (host, port) pair. Connections are per-call (no pooling).
+/// Limits concurrent connections to avoid fd exhaustion under load.
 class RpcClient
 {
 public:
-    RpcClient(asio::io_context& io, std::string host, uint16_t port);
+    RpcClient(
+        asio::io_context& io,
+        std::string host,
+        uint16_t port,
+        int max_concurrent = 8);
 
     // ─── Callback API ────────────────────────────────────────────
 
@@ -107,6 +115,11 @@ private:
     asio::io_context& io_;
     std::string host_;
     uint16_t port_;
+    int max_concurrent_;
+    std::atomic<int> in_flight_{0};
+    // Signal for waiters — cancelled when a slot opens up.
+    // Shared so it survives across coroutine lifetimes.
+    std::shared_ptr<asio::steady_timer> slot_signal_;
 
     static LogPartition log_;
 };

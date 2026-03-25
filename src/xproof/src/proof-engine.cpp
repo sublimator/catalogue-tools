@@ -55,6 +55,10 @@ ProofEngine::start()
     // Node cache (content-addressed wire node store)
     node_cache_ = NodeCache::create(io_);
 
+    // Shared RPC client with concurrency limiter (max 8 concurrent connections)
+    rpc_ = std::make_shared<catl::rpc::RpcClient>(
+        io_, config_.rpc_host, config_.rpc_port);
+
     // Peer set
     PeerSetOptions peer_opts;
     peer_opts.network_id = config_.network_id;
@@ -211,8 +215,7 @@ ProofEngine::prove(std::string const& tx_hash)
         .anchor_validations = quorum.validations,
         .protocol = protocol_,
         .node_cache = node_cache_,
-        .rpc_host = config_.rpc_host,
-        .rpc_port = config_.rpc_port,
+        .rpc = rpc_,
     };
 
     auto result = co_await build_proof(svc, tx_hash);
