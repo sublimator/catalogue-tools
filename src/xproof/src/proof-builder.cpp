@@ -1039,7 +1039,8 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     if (tx_obj.contains("ledger_index"))
         tx_ledger_seq = tx_obj.at("ledger_index").to_number<uint32_t>();
     if (tx_ledger_seq == 0)
-        throw std::runtime_error("tx not found or no ledger_index");
+        throw std::runtime_error(
+            "tx " + tx_hash_str.substr(0, 16) + "... not found or no ledger_index");
 
     PLOGI(
         log_,

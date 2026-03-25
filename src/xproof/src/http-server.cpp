@@ -3,6 +3,8 @@
 #include "xproof/proof-chain-json.h"
 
 #include <catl/core/logger.h>
+#include <catl/peer-client/peer-client-coro.h>
+#include <catl/rpc-client/rpc-client.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -35,7 +37,8 @@ split_target(std::string_view target)
     auto q = target.find('?');
     if (q == std::string_view::npos)
         return {std::string(target), {}};
-    return {std::string(target.substr(0, q)), std::string(target.substr(q + 1))};
+    return {
+        std::string(target.substr(0, q)), std::string(target.substr(q + 1))};
 }
 
 static std::map<std::string, std::string>
@@ -83,8 +86,7 @@ error_response(
     unsigned version,
     bool keep_alive)
 {
-    return json_response(
-        status, {{"error", message}}, version, keep_alive);
+    return json_response(status, {{"error", message}}, version, keep_alive);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -95,10 +97,7 @@ HttpServer::HttpServer(
     asio::io_context& io,
     std::shared_ptr<ProofEngine> engine,
     HttpServerOptions opts)
-    : io_(io)
-    , engine_(std::move(engine))
-    , opts_(std::move(opts))
-    , acceptor_(io)
+    : io_(io), engine_(std::move(engine)), opts_(std::move(opts)), acceptor_(io)
 {
 }
 
@@ -115,8 +114,8 @@ HttpServer::create(
 void
 HttpServer::start()
 {
-    auto endpoint = tcp::endpoint(
-        asio::ip::make_address(opts_.bind_address), opts_.port);
+    auto endpoint =
+        tcp::endpoint(asio::ip::make_address(opts_.bind_address), opts_.port);
 
     acceptor_.open(endpoint.protocol());
     acceptor_.set_option(asio::socket_base::reuse_address(true));
@@ -124,15 +123,11 @@ HttpServer::start()
     acceptor_.listen(asio::socket_base::max_listen_connections);
     accepting_ = true;
 
-    PLOGI(
-        log_,
-        "Listening on ",
-        opts_.bind_address,
-        ":",
-        opts_.port);
+    PLOGI(log_, "Listening on ", opts_.bind_address, ":", opts_.port);
 
     auto self = shared_from_this();
-    asio::co_spawn(io_, [self]() { return self->accept_loop(); }, asio::detached);
+    asio::co_spawn(
+        io_, [self]() { return self->accept_loop(); }, asio::detached);
 }
 
 void
@@ -199,7 +194,9 @@ HttpServer::handle_session(tcp::socket socket)
 
         boost::system::error_code ec;
         co_await http::async_read(
-            stream, buffer, parser,
+            stream,
+            buffer,
+            parser,
             asio::redirect_error(asio::use_awaitable, ec));
 
         if (ec)
@@ -223,19 +220,14 @@ HttpServer::handle_session(tcp::socket socket)
         auto [path, query_string] = split_target(req.target());
         auto params = parse_query(query_string);
 
-        PLOGD(
-            log_,
-            req.method_string(),
-            " ",
-            req.target());
+        PLOGD(log_, req.method_string(), " ", req.target());
 
         // ── Route dispatch ────────────────────────────────────────
 
         std::optional<http::response<http::string_body>> caught_error;
         try
         {
-            if (path == "/health" &&
-                req.method() == http::verb::get)
+            if (path == "/health" && req.method() == http::verb::get)
             {
                 auto status = co_await engine_->co_health();
                 auto cs = engine_->cache_stats();
@@ -259,9 +251,60 @@ HttpServer::handle_session(tcp::socket socket)
                     json_response(200, body, version, keep_alive),
                     asio::redirect_error(asio::use_awaitable, ec));
             }
-            else if (
-                path == "/prove" &&
-                req.method() == http::verb::get)
+            else if (path == "/peers" && req.method() == http::verb::get)
+            {
+                auto snapshot = co_await engine_->peers()->co_snapshot();
+
+                boost::json::object body;
+                body["known_endpoints"] = snapshot.known_endpoints;
+                body["tracked_endpoints"] = snapshot.tracked_endpoints;
+                body["connected_peers"] = snapshot.connected_peers;
+                body["ready_peers"] = snapshot.ready_peers;
+                body["in_flight_connects"] = snapshot.in_flight_connects;
+                body["queued_connects"] = snapshot.queued_connects;
+                body["crawl_in_flight"] = snapshot.crawl_in_flight;
+                body["queued_crawls"] = snapshot.queued_crawls;
+
+                boost::json::array wanted_ledgers;
+                for (auto ledger_seq : snapshot.wanted_ledgers)
+                {
+                    wanted_ledgers.push_back(ledger_seq);
+                }
+                body["wanted_ledgers"] = std::move(wanted_ledgers);
+
+                boost::json::array peers;
+                for (auto const& peer : snapshot.peers)
+                {
+                    boost::json::object item;
+                    item["endpoint"] = peer.endpoint;
+                    item["connected"] = peer.connected;
+                    item["ready"] = peer.ready;
+                    item["in_flight"] = peer.in_flight;
+                    item["queued_connect"] = peer.queued_connect;
+                    item["crawl_in_flight"] = peer.crawl_in_flight;
+                    item["queued_crawl"] = peer.queued_crawl;
+                    item["crawled"] = peer.crawled;
+                    item["first_seq"] = peer.first_seq;
+                    item["last_seq"] = peer.last_seq;
+                    item["current_seq"] = peer.current_seq;
+                    item["last_seen_at"] = peer.last_seen_at;
+                    item["last_success_at"] = peer.last_success_at;
+                    item["last_failure_at"] = peer.last_failure_at;
+                    item["success_count"] = peer.success_count;
+                    item["failure_count"] = peer.failure_count;
+                    item["selection_count"] = peer.selection_count;
+                    item["last_selected_ticket"] = peer.last_selected_ticket;
+                    peers.push_back(std::move(item));
+                }
+                body["peers"] = std::move(peers);
+
+                stream.expires_after(opts_.write_timeout);
+                co_await http::async_write(
+                    stream,
+                    json_response(200, body, version, keep_alive),
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
+            else if (path == "/prove" && req.method() == http::verb::get)
             {
                 auto tx_it = params.find("tx");
                 if (tx_it == params.end() || tx_it->second.empty())
@@ -284,8 +327,7 @@ HttpServer::handle_session(tcp::socket socket)
 
                     if (binary)
                     {
-                        auto data = to_binary(
-                            result.chain, {.compress = true});
+                        auto data = to_binary(result.chain, {.compress = true});
                         http::response<http::vector_body<uint8_t>> res{
                             http::status::ok, version};
                         res.set(
@@ -296,7 +338,8 @@ HttpServer::handle_session(tcp::socket socket)
                         res.body() = std::move(data);
                         res.prepare_payload();
                         co_await http::async_write(
-                            stream, res,
+                            stream,
+                            res,
                             asio::redirect_error(asio::use_awaitable, ec));
                     }
                     else
@@ -305,21 +348,19 @@ HttpServer::handle_session(tcp::socket socket)
                         auto body_str = boost::json::serialize(chain_json);
                         http::response<http::string_body> res{
                             http::status::ok, version};
-                        res.set(
-                            http::field::content_type, "application/json");
+                        res.set(http::field::content_type, "application/json");
                         res.set(http::field::server, "xproof");
                         res.keep_alive(keep_alive);
                         res.body() = std::move(body_str);
                         res.prepare_payload();
                         co_await http::async_write(
-                            stream, res,
+                            stream,
+                            res,
                             asio::redirect_error(asio::use_awaitable, ec));
                     }
                 }
             }
-            else if (
-                path == "/verify" &&
-                req.method() == http::verb::post)
+            else if (path == "/verify" && req.method() == http::verb::post)
             {
                 auto const& body = req.body();
                 if (body.empty())
@@ -359,9 +400,28 @@ HttpServer::handle_session(tcp::socket socket)
                     asio::redirect_error(asio::use_awaitable, ec));
             }
         }
+        catch (catl::rpc::RpcTxNotFound const& e)
+        {
+            PLOGW(log_, "TX not found: ", e.what());
+            caught_error = error_response(404, e.what(), version, keep_alive);
+        }
+        catch (catl::rpc::RpcTransientError const& e)
+        {
+            PLOGW(log_, "RPC transient error: ", e.what());
+            caught_error = error_response(503, e.what(), version, keep_alive);
+        }
+        catch (catl::rpc::RpcConnectionError const& e)
+        {
+            PLOGE(log_, "RPC connection error: ", e.what());
+            caught_error = error_response(502, e.what(), version, keep_alive);
+        }
+        catch (catl::peer_client::PeerClientException const& e)
+        {
+            PLOGW(log_, "Peer error: ", e.what());
+            caught_error = error_response(504, e.what(), version, keep_alive);
+        }
         catch (std::exception const& e)
         {
-            // Can't co_await in catch — stash the error response
             PLOGE(log_, "Request failed: ", e.what());
             caught_error = error_response(500, e.what(), version, keep_alive);
         }
@@ -371,7 +431,8 @@ HttpServer::handle_session(tcp::socket socket)
         {
             stream.expires_after(opts_.write_timeout);
             co_await http::async_write(
-                stream, *caught_error,
+                stream,
+                *caught_error,
                 asio::redirect_error(asio::use_awaitable, ec));
         }
 

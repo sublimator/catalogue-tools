@@ -23,6 +23,39 @@ namespace catl::rpc {
 
 namespace asio = boost::asio;
 
+// ─── Exception hierarchy ─────────────────────────────────────────────
+
+/// Base for all RPC errors. Carries the tx hash (if applicable) for
+/// diagnostics. The HTTP server can catch these to return proper status
+/// codes instead of generic 500.
+class RpcException : public std::runtime_error
+{
+public:
+    using std::runtime_error::runtime_error;
+};
+
+/// RPC endpoint returned an error or malformed response (retryable).
+/// e.g. "no 'result' field", "server too busy", rate limiting.
+class RpcTransientError : public RpcException
+{
+public:
+    using RpcException::RpcException;
+};
+
+/// Transaction not found (permanent for this tx hash).
+class RpcTxNotFound : public RpcException
+{
+public:
+    using RpcException::RpcException;
+};
+
+/// Network/DNS/connection error reaching the RPC endpoint.
+class RpcConnectionError : public RpcException
+{
+public:
+    using RpcException::RpcException;
+};
+
 /// Result of an RPC call.
 struct RpcResult
 {
