@@ -74,13 +74,12 @@ def serialize_leaf(leaf_json, is_tx: bool) -> bytes:
     from xrpl.core.binarycodec import encode
 
     if is_tx:
-        if "blob" in leaf_json:
-            return bytes.fromhex(leaf_json["blob"])
         tx_bytes = bytes.fromhex(encode(leaf_json["tx"]))
         meta_bytes = bytes.fromhex(encode(leaf_json["meta"]))
         return vl_encode(tx_bytes) + vl_encode(meta_bytes)
     else:
-        return bytes.fromhex(encode(leaf_json))
+        clean = {k: v for k, v in leaf_json.items() if k not in ("blob", "index")}
+        return bytes.fromhex(encode(clean))
 
 
 def hash_trie(node, is_tx: bool) -> bytes:
@@ -95,7 +94,7 @@ def hash_trie(node, is_tx: bool) -> bytes:
     if isinstance(node, dict):
         children = [ZERO_HASH] * 16
         for k, v in node.items():
-            if len(k) == 1 and k in "0123456789abcdef":
+            if len(k) == 1 and k in "0123456789abcdefABCDEF":
                 children[int(k, 16)] = hash_trie(v, is_tx)
         return hash_inner(children)
 
@@ -123,7 +122,7 @@ def count_nodes(node, d=0):
     if isinstance(node, dict):
         s = {"i": 1, "l": 0, "p": 0, "d": d}
         for k, v in node.items():
-            if k == "__depth__" or len(k) != 1:
+            if len(k) != 1 or k not in "0123456789abcdefABCDEF":
                 continue
             c = count_nodes(v, d + 1)
             s["i"] += c["i"]; s["l"] += c["l"]; s["p"] += c["p"]
