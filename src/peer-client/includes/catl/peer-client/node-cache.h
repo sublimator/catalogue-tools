@@ -139,6 +139,14 @@ public:
     Stats
     stats() const;
 
+    /// Fetch a ledger header, with cache + in-flight dedup.
+    /// First requester fetches via co_get_ledger_header, others wait.
+    asio::awaitable<LedgerHeaderResult>
+    get_header(
+        uint32_t ledger_seq,
+        std::shared_ptr<PeerSet> peers,
+        std::shared_ptr<PeerClient> peer = nullptr);
+
     /// Number of present entries in the cache.
     size_t
     size() const;
@@ -170,17 +178,23 @@ private:
         uint32_t ledger_seq,
         int tree_type,
         SHAMapNodeID position,
+        Hash256 const& target_key,
+        int speculative_depth,
         std::shared_ptr<PeerSet> peers,
         std::shared_ptr<PeerClient> peer);
 
-    /// Fetch a single node from a peer, insert all response nodes into cache.
-    /// Returns true if the expected node was populated.
+    /// Fetch node(s) from a peer, insert all response nodes into cache.
+    /// Sends the primary position plus speculative deeper positions
+    /// along the target key path in one TMGetLedger request.
+    /// Returns true if the expected (primary) node was populated.
     asio::awaitable<bool>
     fetch_node(
         Hash256 expected_hash,
         Hash256 ledger_hash,
         int tree_type,
         SHAMapNodeID position,
+        Hash256 const& target_key,
+        int speculative_depth,
         std::shared_ptr<PeerClient> peer);
 
     /// Compute the content hash of an inner wire node.
@@ -210,6 +224,15 @@ private:
 
     mutable std::mutex mutex_;
     std::map<Hash256, Entry> store_;
+
+    // Ledger header cache: keyed by seq (cast to Hash256 for simplicity)
+    struct HeaderEntry
+    {
+        LedgerHeaderResult result;
+        std::shared_ptr<asio::steady_timer> signal;  // non-null while in-flight
+        bool present = false;
+    };
+    std::map<uint32_t, HeaderEntry> header_cache_;
 
     // LRU tracking: front = most recently accessed
     using LruList = std::list<Hash256>;

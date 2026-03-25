@@ -6,7 +6,6 @@
 #include <catl/core/logger.h>
 #include <catl/peer-client/peer-client-coro.h>
 #include <catl/peer-client/peer-set.h>
-#include <catl/peer-client/tree-walker.h>
 #include <catl/rpc-client/rpc-client-coro.h>
 #include <catl/shamap/shamap-hashprefix.h>
 #include <catl/shamap/shamap-nodeid.h>
@@ -107,8 +106,12 @@ sle_hashes_contain(
     }
 }
 
+// Legacy self-contained build_proof removed — all callers use
+// build_proof(BuildServices) via ProofEngine.
+
+#if 0  // DEAD CODE — kept temporarily for reference, will be deleted
 boost::asio::awaitable<BuildResult>
-build_proof(
+build_proof_DEAD(
     boost::asio::io_context& io,
     std::string const& rpc_host,
     uint16_t rpc_port,
@@ -649,7 +652,7 @@ build_proof(
     {
         PLOGI(log_, "Long skip list (2-hop, distance=", distance, ")");
 
-        uint32_t flag_seq = ((tx_ledger_seq + 255) / 256) * 256;
+        uint32_t flag_seq = flag_ledger_for(tx_ledger_seq);
         PLOGI(log_, "  Flag ledger: ", flag_seq);
 
         auto long_skip_key = skip_list_key(flag_seq);
@@ -672,14 +675,8 @@ build_proof(
             state_proofs.emplace_back(long_skip_key, std::move(sp));
         }
 
-        flag_hdr_result = co_await with_peer_failover(
-            client,
-            flag_seq,
-            "fetch flag ledger header",
-            [&](std::shared_ptr<PeerClient> peer)
-                -> boost::asio::awaitable<LedgerHeaderResult> {
-                co_return co_await co_get_ledger_header(peer, flag_seq);
-            });
+        flag_hdr_result =
+            co_await node_cache->get_header(flag_seq, peers, client);
         auto flag_hash = flag_hdr_result->ledger_hash256();
         auto flag_header = flag_hdr_result->header();
 
@@ -738,14 +735,8 @@ build_proof(
     // ── Step 4: Get target ledger header ──
     if (!target_hdr_result)
     {
-        target_hdr_result = co_await with_peer_failover(
-            client,
-            tx_ledger_seq,
-            "fetch target ledger header",
-            [&](std::shared_ptr<PeerClient> peer)
-                -> boost::asio::awaitable<LedgerHeaderResult> {
-                co_return co_await co_get_ledger_header(peer, tx_ledger_seq);
-            });
+        target_hdr_result =
+            co_await node_cache->get_header(tx_ledger_seq, peers, client);
     }
     auto const& target_hdr = *target_hdr_result;
     auto target_header = target_hdr.header();
@@ -889,7 +880,7 @@ build_proof(
                 make_trie_data(sp.tree, false, TrieData::TreeType::state));
         }
         {
-            uint32_t flag_seq = ((tx_ledger_seq + 255) / 256) * 256;
+            uint32_t flag_seq = flag_ledger_for(tx_ledger_seq);
             if (!flag_hdr_result)
             {
                 flag_hdr_result = co_await with_peer_failover(
@@ -928,6 +919,8 @@ build_proof(
         vl_data ? vl_data->publisher_key_hex : "",
         tx_ledger_seq};
 }
+
+#endif  // DEAD CODE
 
 // ═══════════════════════════════════════════════════════════════════════
 // build_proof(BuildServices) — uses shared PeerSet, VL, validations
@@ -1217,19 +1210,9 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     client =
         co_await acquire_peer(client, anchor_seq, "fetch anchor ledger header");
 
-    auto anchor_hdr = co_await with_peer_failover(
-        client,
-        anchor_seq,
-        "fetch anchor ledger header",
-        [anchor_seq](std::shared_ptr<PeerClient> peer)
-            -> boost::asio::awaitable<LedgerHeaderResult> {
-            co_return co_await co_get_ledger_header(peer, anchor_seq);
-        });
+    auto anchor_hdr =
+        co_await node_cache->get_header(anchor_seq, peers, client);
     auto anchor_header = anchor_hdr.header();
-
-    // ── Step 4: Acquire peer for target ledger ──
-    client = co_await acquire_peer(
-        client, tx_ledger_seq, "proof fetches for target ledger");
 
     // ── Step 5: Determine hop path ──
     uint32_t distance = anchor_hdr.seq() - tx_ledger_seq;
@@ -1264,14 +1247,8 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             build_state_proof(wr, skip_key_val, anchor_header.account_hash());
         state_proofs.emplace_back(skip_key_val, std::move(sp));
 
-        target_hdr_result = co_await with_peer_failover(
-            client,
-            tx_ledger_seq,
-            "fetch target ledger header",
-            [&](std::shared_ptr<PeerClient> peer)
-                -> boost::asio::awaitable<LedgerHeaderResult> {
-                co_return co_await co_get_ledger_header(peer, tx_ledger_seq);
-            });
+        target_hdr_result =
+            co_await node_cache->get_header(tx_ledger_seq, peers, client);
         target_ledger_hash = target_hdr_result->ledger_hash256();
 
         Slice sle_leaf(wr.leaf_data.data(), wr.leaf_data.size());
@@ -1288,7 +1265,11 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     {
         PLOGI(log_, "Long skip list (2-hop, distance=", distance, ")");
 
-        uint32_t flag_seq = ((tx_ledger_seq + 255) / 256) * 256;
+        // Flag ledger: the nearest multiple of 256 AT OR ABOVE the target.
+        // When the target IS a flag ledger (target % 256 == 0), the flag's
+        // own short skip list doesn't contain its own hash — it only has
+        // hashes of the 256 ledgers BEFORE it. So bump to the next flag.
+        uint32_t flag_seq = flag_ledger_for(tx_ledger_seq);
         PLOGI(log_, "  Flag ledger: ", flag_seq);
 
         auto long_skip_key = skip_list_key(flag_seq);
@@ -1311,14 +1292,8 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             state_proofs.emplace_back(long_skip_key, std::move(sp));
         }
 
-        flag_hdr_result = co_await with_peer_failover(
-            client,
-            flag_seq,
-            "fetch flag ledger header",
-            [&](std::shared_ptr<PeerClient> peer)
-                -> boost::asio::awaitable<LedgerHeaderResult> {
-                co_return co_await co_get_ledger_header(peer, flag_seq);
-            });
+        flag_hdr_result =
+            co_await node_cache->get_header(flag_seq, peers, client);
         auto flag_hash = flag_hdr_result->ledger_hash256();
         auto flag_header = flag_hdr_result->header();
 
@@ -1353,14 +1328,8 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             state_proofs.emplace_back(short_skip_key, std::move(sp));
         }
 
-        target_hdr_result = co_await with_peer_failover(
-            client,
-            tx_ledger_seq,
-            "fetch target ledger header",
-            [&](std::shared_ptr<PeerClient> peer)
-                -> boost::asio::awaitable<LedgerHeaderResult> {
-                co_return co_await co_get_ledger_header(peer, tx_ledger_seq);
-            });
+        target_hdr_result =
+            co_await node_cache->get_header(tx_ledger_seq, peers, client);
         target_ledger_hash = target_hdr_result->ledger_hash256();
 
         Slice short_sle(wr2.leaf_data.data(), wr2.leaf_data.size());
@@ -1377,14 +1346,8 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     // ── Step 6: Target header ──
     if (!target_hdr_result)
     {
-        target_hdr_result = co_await with_peer_failover(
-            client,
-            tx_ledger_seq,
-            "fetch target ledger header",
-            [&](std::shared_ptr<PeerClient> peer)
-                -> boost::asio::awaitable<LedgerHeaderResult> {
-                co_return co_await co_get_ledger_header(peer, tx_ledger_seq);
-            });
+        target_hdr_result =
+            co_await node_cache->get_header(tx_ledger_seq, peers, client);
     }
     auto const& target_hdr = *target_hdr_result;
     auto target_header = target_hdr.header();
@@ -1497,17 +1460,11 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
                 make_trie_data(sp.tree, false, TrieData::TreeType::state));
         }
         {
-            uint32_t flag_seq = ((tx_ledger_seq + 255) / 256) * 256;
+            uint32_t flag_seq = flag_ledger_for(tx_ledger_seq);
             if (!flag_hdr_result)
             {
-                flag_hdr_result = co_await with_peer_failover(
-                    client,
-                    flag_seq,
-                    "re-fetch flag header",
-                    [&](std::shared_ptr<PeerClient> peer)
-                        -> boost::asio::awaitable<LedgerHeaderResult> {
-                        co_return co_await co_get_ledger_header(peer, flag_seq);
-                    });
+                flag_hdr_result =
+                    co_await node_cache->get_header(flag_seq, peers, client);
             }
             proof_chain.steps.push_back(make_header(*flag_hdr_result));
         }

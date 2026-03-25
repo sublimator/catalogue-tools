@@ -49,16 +49,7 @@ struct BuildServices
 boost::asio::awaitable<BuildResult>
 build_proof(BuildServices const& svc, std::string const& tx_hash_str);
 
-/// Self-contained build (legacy/dev path). Creates its own PeerSet, VL,
-/// validation collector.
-boost::asio::awaitable<BuildResult>
-build_proof(
-    boost::asio::io_context& io,
-    std::string const& rpc_host,
-    uint16_t rpc_port,
-    std::string const& peer_host,
-    uint16_t peer_port,
-    std::string const& peer_cache_path,
-    std::string const& tx_hash_str);
+// Legacy self-contained build_proof removed — all callers use
+// build_proof(BuildServices) via ProofEngine.
 
 }  // namespace xproof

@@ -43,4 +43,21 @@ skip_list_key(uint32_t ledger_seq)
     return h.finalize();
 }
 
+/// Compute the flag ledger for a 2-hop skip list path.
+///
+/// The flag is the nearest multiple of 256 ABOVE the target. The flag's
+/// short skip list contains hashes of the 256 ledgers BEFORE it.
+///
+/// Edge case: when target IS a multiple of 256, a ledger's skip list
+/// does NOT contain its own hash. So we bump to the next flag (target + 256)
+/// whose short skip list WILL contain the target's hash.
+inline uint32_t
+flag_ledger_for(uint32_t target_seq)
+{
+    uint32_t flag = ((target_seq + 255) / 256) * 256;
+    if (flag == target_seq)
+        flag += 256;
+    return flag;
+}
+
 }  // namespace xproof

@@ -48,6 +48,10 @@ NodeCache::walk_to(
     Hash256 cursor = root_hash;
     auto pos = SHAMapNodeID::root();
 
+    // Speculative depth: request multiple depths in one TMGetLedger.
+    // Halves each round: 8 → 4 → 2 → 1 (same strategy as old TreeWalker).
+    int spec_depth = (tree_type == 2) ? 8 : 4;  // state=8, tx=4
+
     PLOGI(
         log_,
         "walk_to: root=",
@@ -57,12 +61,20 @@ NodeCache::walk_to(
         " ledger=",
         ledger_hash.hex().substr(0, 16),
         " type=",
-        tree_type);
+        tree_type,
+        " spec=",
+        spec_depth);
 
     for (int depth = 0; depth < 64; ++depth)
     {
         auto const* wire =
-            co_await ensure_present(cursor, ledger_hash, ledger_seq, tree_type, pos, peers, peer);
+            co_await ensure_present(
+                cursor, ledger_hash, ledger_seq, tree_type, pos,
+                target_key, spec_depth, peers, peer);
+
+        // Halve speculation after each fetch round
+        if (spec_depth > 1)
+            spec_depth = std::max(1, spec_depth / 2);
 
         if (!wire)
         {
@@ -162,6 +174,8 @@ NodeCache::ensure_present(
     uint32_t ledger_seq,
     int tree_type,
     SHAMapNodeID position,
+    Hash256 const& target_key,
+    int speculative_depth,
     std::shared_ptr<PeerSet> peers,
     std::shared_ptr<PeerClient> peer)
 {
@@ -284,9 +298,10 @@ NodeCache::ensure_present(
         co_return nullptr;
     }
 
-    // Fetch
+    // Fetch — includes speculative deeper nodes along the key path
     bool ok = co_await fetch_node(
-        expected_hash, ledger_hash, tree_type, position, peer);
+        expected_hash, ledger_hash, tree_type, position,
+        target_key, speculative_depth, peer);
 
     if (ok)
     {
@@ -320,6 +335,8 @@ NodeCache::fetch_node(
     Hash256 ledger_hash,
     int tree_type,
     SHAMapNodeID position,
+    Hash256 const& target_key,
+    int speculative_depth,
     std::shared_ptr<PeerClient> peer)
 {
     fetches_++;
@@ -327,7 +344,28 @@ NodeCache::fetch_node(
     // Ensure the response handler is installed on this peer
     ensure_response_handler(peer);
 
+    // Build nodeid list: primary + speculative deeper positions
     std::vector<SHAMapNodeID> node_ids = {position};
+
+    if (speculative_depth > 1)
+    {
+        auto spec = position;
+        for (int d = 1; d < speculative_depth; ++d)
+        {
+            uint8_t next_depth = spec.depth + 1;
+            if (next_depth >= 64)
+                break;
+
+            // Compute the nibble from target_key at current depth
+            int byte_idx = spec.depth / 2;
+            int nibble = (spec.depth % 2 == 0)
+                ? (target_key.data()[byte_idx] >> 4) & 0xF
+                : target_key.data()[byte_idx] & 0xF;
+
+            spec = spec.child(nibble);
+            node_ids.push_back(spec);
+        }
+    }
 
     PLOGD(
         log_,
@@ -335,6 +373,8 @@ NodeCache::fetch_node(
         expected_hash.hex().substr(0, 16),
         " depth=",
         static_cast<int>(position.depth),
+        " nodeids=",
+        node_ids.size(),
         " peer=",
         peer->endpoint());
 
@@ -586,6 +626,121 @@ NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
     {
         waiter_wakeups_++;
         signal->cancel();
+    }
+}
+
+asio::awaitable<LedgerHeaderResult>
+NodeCache::get_header(
+    uint32_t ledger_seq,
+    std::shared_ptr<PeerSet> peers,
+    std::shared_ptr<PeerClient> peer)
+{
+    // Fast path: already cached
+    {
+        std::lock_guard lock(mutex_);
+        auto it = header_cache_.find(ledger_seq);
+        if (it != header_cache_.end() && it->second.present)
+        {
+            PLOGD(log_, "  get_header: HIT seq=", ledger_seq);
+            co_return it->second.result;
+        }
+    }
+
+    // Check if in-flight — wait on signal
+    {
+        std::shared_ptr<asio::steady_timer> signal;
+        {
+            std::lock_guard lock(mutex_);
+            auto it = header_cache_.find(ledger_seq);
+            if (it != header_cache_.end() && !it->second.present && it->second.signal)
+            {
+                PLOGD(log_, "  get_header: IN-FLIGHT seq=", ledger_seq);
+                signal = it->second.signal;
+            }
+        }
+
+        if (signal)
+        {
+            boost::system::error_code ec;
+            co_await signal->async_wait(
+                asio::redirect_error(asio::use_awaitable, ec));
+
+            std::lock_guard lock(mutex_);
+            auto it = header_cache_.find(ledger_seq);
+            if (it != header_cache_.end() && it->second.present)
+                co_return it->second.result;
+
+            throw PeerClientException(Error::Timeout);
+        }
+    }
+
+    // Miss — create in-flight entry and fetch
+    {
+        std::lock_guard lock(mutex_);
+        auto& entry = header_cache_[ledger_seq];
+        entry.signal = std::make_shared<asio::steady_timer>(
+            io_, std::chrono::seconds(30));
+        entry.present = false;
+    }
+
+    PLOGD(log_, "  get_header: MISS seq=", ledger_seq, " — fetching");
+
+    // Pick a peer
+    if (!peer || !peer->is_ready())
+    {
+        if (peers)
+            peer = co_await peers->wait_for_peer(ledger_seq, 10);
+    }
+
+    if (!peer || !peer->is_ready())
+    {
+        std::lock_guard lock(mutex_);
+        header_cache_.erase(ledger_seq);
+        throw PeerClientException(Error::Timeout);
+    }
+
+    try
+    {
+        auto result = co_await co_get_ledger_header(peer, ledger_seq);
+
+        // Populate cache and wake waiters
+        std::shared_ptr<asio::steady_timer> signal;
+        {
+            std::lock_guard lock(mutex_);
+            auto& entry = header_cache_[ledger_seq];
+            signal = entry.signal;
+            entry.result = result;
+            entry.present = true;
+            entry.signal = nullptr;
+        }
+
+        if (signal)
+            signal->cancel();
+
+        PLOGD(
+            log_,
+            "  get_header: fetched seq=",
+            ledger_seq,
+            " hash=",
+            result.ledger_hash256().hex().substr(0, 16));
+        co_return result;
+    }
+    catch (...)
+    {
+        // Clean up and rethrow
+        std::shared_ptr<asio::steady_timer> signal;
+        {
+            std::lock_guard lock(mutex_);
+            auto it = header_cache_.find(ledger_seq);
+            if (it != header_cache_.end())
+            {
+                signal = it->second.signal;
+                header_cache_.erase(it);
+            }
+        }
+        if (signal)
+            signal->cancel();
+        throw;
     }
 }
 
