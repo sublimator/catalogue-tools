@@ -14,6 +14,7 @@
 
 #include "network-config.h"
 #include "proof-chain.h"
+#include "request-context.h"
 #include "validation-buffer.h"
 #include "vl-cache.h"
 
@@ -67,8 +68,11 @@ public:
 
     /// Build a proof chain for a transaction. Safe to call concurrently
     /// (each call runs its own coroutine, borrows shared services).
+    /// Pass a RequestContext for per-request cancellation.
     boost::asio::awaitable<ProveResult>
-    prove(std::string const& tx_hash);
+    prove(
+        std::string const& tx_hash,
+        std::shared_ptr<RequestContext> ctx = nullptr);
 
     /// Verify a proof chain. Sync pure function — no shared state.
     VerifyResult

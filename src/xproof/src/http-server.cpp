@@ -5,6 +5,7 @@
 #include <catl/core/logger.h>
 #include <catl/peer-client/peer-client-coro.h>
 #include <catl/rpc-client/rpc-client.h>
+#include <xproof/request-context.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -232,6 +233,9 @@ HttpServer::handle_session(tcp::socket socket)
 
         PLOGD(log_, req.method_string(), " ", req.target());
 
+        // Per-request context for cancellation + future session state
+        auto request_ctx = std::make_shared<RequestContext>();
+
         // ── Route dispatch ────────────────────────────────────────
 
         std::optional<http::response<http::string_body>> caught_error;
@@ -340,32 +344,8 @@ HttpServer::handle_session(tcp::socket socket)
                 }
                 else
                 {
-                    // Race prove against session cancel timer.
-                    // The timer is set to max — it only fires when
-                    // cancel()->cancel() is called (on session error/close).
-                    // The || operator cancels the loser automatically.
-                    auto wait_cancel =
-                        [&session_cancel]()
-                            -> asio::awaitable<ProofEngine::ProveResult> {
-                        co_await asio::this_coro::reset_cancellation_state(
-                            asio::enable_total_cancellation());
-                        boost::system::error_code ec;
-                        co_await session_cancel->async_wait(
-                            asio::redirect_error(asio::use_awaitable, ec));
-                        co_return ProofEngine::ProveResult{};  // sentinel
-                    };
-
-                    auto rv = co_await (
-                        engine_->prove(tx_it->second) || wait_cancel());
-
-                    if (rv.index() == 1)
-                    {
-                        // Cancel won — client disconnected
-                        PLOGD(log_, "Client disconnected during prove");
-                        break;
-                    }
-
-                    auto& result = std::get<0>(rv);
+                    auto result = co_await engine_->prove(
+                        tx_it->second, request_ctx);
                     auto format_it = params.find("format");
                     bool binary =
                         format_it != params.end() && format_it->second == "bin";
@@ -467,14 +447,18 @@ HttpServer::handle_session(tcp::socket socket)
             PLOGW(log_, "Peer error: ", e.what());
             caught_error = error_response(504, e.what(), version, keep_alive);
         }
+        catch (RequestCancelled const&)
+        {
+            // Client disconnected during prove — no response needed.
+            PLOGD(log_, "Request cancelled (client disconnected)");
+            break;
+        }
         catch (boost::system::system_error const& e)
         {
             if (e.code() == asio::error::operation_aborted)
             {
-                // Client disconnected during prove — no response needed.
-                // 499 = nginx convention for "client closed request".
-                PLOGD(log_, "Client disconnected: ", e.what());
-                break;  // exit keep-alive loop, close session
+                PLOGD(log_, "Operation aborted: ", e.what());
+                break;
             }
             PLOGE(log_, "System error: ", e.what());
             caught_error = error_response(500, e.what(), version, keep_alive);
@@ -499,7 +483,9 @@ HttpServer::handle_session(tcp::socket socket)
             break;
     }
 
-    // Session ending — cancel any in-flight proves racing against us
+    // Session ending — no in-flight proves to cancel (request_ctx is
+    // per-iteration and already out of scope). The session_cancel timer
+    // is kept for future use with the || operator pattern.
     session_cancel->cancel();
 }
 

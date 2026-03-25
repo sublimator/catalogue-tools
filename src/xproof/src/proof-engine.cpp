@@ -177,8 +177,12 @@ ProofEngine::stop()
 // ═══════════════════════════════════════════════════════════════════════
 
 asio::awaitable<ProofEngine::ProveResult>
-ProofEngine::prove(std::string const& tx_hash)
+ProofEngine::prove(std::string const& tx_hash, std::shared_ptr<RequestContext> ctx)
 {
+    // Create a default context if none provided (CLI usage)
+    if (!ctx)
+        ctx = std::make_shared<RequestContext>();
+
     // TODO: enable_total_cancellation causes segfaults in ValidationBuffer
     // when cancellation fires during check_for_new_quorum on worker threads.
     // Need to audit all shared state for cancellation safety before enabling.
@@ -213,6 +217,8 @@ ProofEngine::prove(std::string const& tx_hash)
         vl.validators.size(),
         " validators)");
 
+    ctx->check();  // cancel check before anchor
+
     // Step 3: Get anchor bundle (future-based — built once, shared)
     auto anchor = co_await get_anchor_bundle(
         quorum.ledger_seq, quorum.ledger_hash);
@@ -220,6 +226,8 @@ ProofEngine::prove(std::string const& tx_hash)
     // Step 4: Build proof using shared services
     // Check tx→ledger_seq cache (avoids RPC lookup on repeated requests)
     auto cached_seq = tx_ledger_get(tx_hash);
+
+    ctx->check();  // cancel check before build
 
     BuildServices svc{
         .io = io_,
@@ -229,6 +237,7 @@ ProofEngine::prove(std::string const& tx_hash)
         .protocol = protocol_,
         .node_cache = node_cache_,
         .rpc = rpc_,
+        .ctx = ctx,
         .tx_ledger_seq_hint = cached_seq.value_or(0),
         .anchor_hdr = anchor.header_result,
         .anchor_hash = anchor.anchor_hash,
