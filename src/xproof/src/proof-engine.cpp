@@ -112,12 +112,41 @@ ProofEngine::start()
         },
         asio::detached);
 
+    // Pre-resolve RPC hostname so concurrent proves don't hammer DNS.
+    // RPC host doesn't change at runtime — resolve once, use IP forever.
+    try
+    {
+        boost::asio::ip::tcp::resolver resolver(io_);
+        auto results = resolver.resolve(
+            config_.rpc_host, std::to_string(config_.rpc_port));
+        if (!results.empty())
+        {
+            auto resolved_ip = results.begin()->endpoint().address().to_string();
+            PLOGI(
+                log_,
+                "Resolved RPC host ",
+                config_.rpc_host,
+                " → ",
+                resolved_ip);
+            config_.rpc_host = resolved_ip;
+        }
+    }
+    catch (std::exception const& e)
+    {
+        PLOGW(log_, "Failed to pre-resolve RPC host: ", e.what());
+        // Continue with hostname — individual requests will resolve
+    }
+
     PLOGI(
         log_,
         "Engine started (network=",
         config_.network_id,
         ", vl=",
         config_.vl_host,
+        ", rpc=",
+        config_.rpc_host,
+        ":",
+        config_.rpc_port,
         ", peer=",
         config_.peer_host,
         ":",
