@@ -29,12 +29,75 @@ import sys
 from binascii import hexlify, unhexlify
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import xrpl.core.keypairs
 from xrpl.core.binarycodec import decode, encode, encode_for_signing
 
-# ─── Types ───────────────────────────────────────────────────────────
+# ─── JSON proof shape ────────────────────────────────────────────────
+#
+# A proof JSON has the structure:
+#   { "network_id": 0, "steps": [AnchorStep, HeaderStep, MapProofStep, ...] }
+#
+# Steps are discriminated by "type" field.
+
+
+class UNLData(TypedDict, total=False):
+    """Validator list data embedded in the anchor."""
+
+    public_key: str  # publisher master key (hex)
+    manifest: str  # publisher manifest (hex)
+    blob: str  # signed JSON blob containing validator list (hex)
+    signature: str  # blob signature (hex)
+
+
+class AnchorStep(TypedDict, total=False):
+    """Anchor step: trusted starting point with UNL + validations."""
+
+    type: str  # "anchor"
+    ledger_hash: str  # trusted ledger hash (hex)
+    ledger_index: int
+    unl: UNLData
+    validations: dict[str, str]  # signing_key_hex → raw STValidation hex
+
+
+class LedgerHeader(TypedDict):
+    """Ledger header fields (nested under HeaderStep.header)."""
+
+    seq: int
+    drops: str  # string representation of uint64
+    parent_hash: str  # hex
+    tx_hash: str  # hex
+    account_hash: str  # hex
+    parent_close_time: int
+    close_time: int
+    close_time_resolution: int
+    close_flags: int
+
+
+class HeaderStep(TypedDict):
+    """Ledger header step: provides tx_hash and account_hash."""
+
+    type: str  # "ledger_header"
+    header: LedgerHeader
+
+
+class MapProofStep(TypedDict, total=False):
+    """SHAMap trie proof step: state or tx tree."""
+
+    type: str  # "map_proof"
+    tree: str  # "state" or "tx"
+    trie: str | list[Any] | dict[str, Any]  # TrieNode
+
+
+class Proof(TypedDict):
+    """Top-level proof document."""
+
+    network_id: int
+    steps: list[AnchorStep | HeaderStep | MapProofStep]
+
+
+# ─── Internal types ──────────────────────────────────────────────────
 
 # A 32-byte hash (SHA512-Half result, ledger hash, tree root, etc.)
 Hash256 = bytes
