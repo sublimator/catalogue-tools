@@ -932,6 +932,10 @@ build_proof_DEAD(
 boost::asio::awaitable<BuildResult>
 build_proof(BuildServices const& svc, std::string const& tx_hash_str)
 {
+    // Propagate cancellation from prove() → HTTP session || operator
+    co_await boost::asio::this_coro::reset_cancellation_state(
+        boost::asio::enable_total_cancellation());
+
     auto tx_hash = hash_from_hex(tx_hash_str);
     auto& io = svc.io;
     auto& peers = svc.peers;

@@ -20,19 +20,22 @@ inline asio::awaitable<RpcResult>
 callback_to_awaitable(std::function<void(RpcCallback)> initiator)
 {
     auto executor = co_await asio::this_coro::executor;
-    asio::steady_timer signal(executor, asio::steady_timer::time_point::max());
 
-    RpcResult rpc_result;
+    // Signal and result are shared_ptr so they survive coroutine
+    // destruction if cancellation fires while the callback is in-flight.
+    auto signal = std::make_shared<asio::steady_timer>(
+        executor, asio::steady_timer::time_point::max());
+    auto rpc_result = std::make_shared<RpcResult>();
 
-    initiator([&signal, &rpc_result](RpcResult r) {
-        rpc_result = std::move(r);
-        signal.cancel();
+    initiator([signal, rpc_result](RpcResult r) {
+        *rpc_result = std::move(r);
+        signal->cancel();
     });
 
     boost::system::error_code ec;
-    co_await signal.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+    co_await signal->async_wait(asio::redirect_error(asio::use_awaitable, ec));
 
-    co_return std::move(rpc_result);
+    co_return std::move(*rpc_result);
 }
 
 }  // namespace detail

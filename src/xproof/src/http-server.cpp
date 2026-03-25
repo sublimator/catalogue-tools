@@ -8,8 +8,12 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/redirect_error.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
+
+using namespace boost::asio::experimental::awaitable_operators;
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
@@ -330,7 +334,63 @@ HttpServer::handle_session(tcp::socket socket)
                 }
                 else
                 {
-                    auto result = co_await engine_->prove(tx_it->second);
+                    // Cancel timer: set to max, cancelled by socket
+                    // watcher when the client disconnects.
+                    auto cancel = std::make_shared<asio::steady_timer>(
+                        stream.get_executor(),
+                        asio::steady_timer::time_point::max());
+
+                    // Socket watcher: the socket is idle during prove
+                    // (HTTP read completed, write hasn't started).
+                    // When client closes, async_wait(wait_read) fires
+                    // and cancels the timer.
+                    auto watcher_done =
+                        std::make_shared<std::atomic<bool>>(false);
+                    co_spawn(
+                        stream.get_executor(),
+                        [&stream, cancel, watcher_done]()
+                            -> asio::awaitable<void> {
+                            boost::system::error_code wec;
+                            co_await beast::get_lowest_layer(stream)
+                                .socket()
+                                .async_wait(
+                                    asio::ip::tcp::socket::wait_read,
+                                    asio::redirect_error(
+                                        asio::use_awaitable, wec));
+                            if (!watcher_done->load())
+                                cancel->cancel();
+                        },
+                        asio::detached);
+
+                    // Wait for cancel: returns sentinel when timer
+                    // is cancelled (client disconnect).
+                    auto wait_cancel =
+                        [cancel]()
+                            -> asio::awaitable<ProofEngine::ProveResult> {
+                        co_await asio::this_coro::reset_cancellation_state(
+                            asio::enable_total_cancellation());
+                        boost::system::error_code ec;
+                        co_await cancel->async_wait(
+                            asio::redirect_error(asio::use_awaitable, ec));
+                        co_return ProofEngine::ProveResult{};
+                    };
+
+                    // Race prove against disconnect
+                    auto rv = co_await (
+                        engine_->prove(tx_it->second) || wait_cancel());
+
+                    // Cancel the socket watcher before touching stream
+                    watcher_done->store(true);
+                    beast::get_lowest_layer(stream).socket().cancel();
+
+                    if (rv.index() == 1)
+                    {
+                        // Client disconnected
+                        PLOGD(log_, "Client disconnected during prove");
+                        break;
+                    }
+
+                    auto& result = std::get<0>(rv);
                     auto format_it = params.find("format");
                     bool binary =
                         format_it != params.end() && format_it->second == "bin";

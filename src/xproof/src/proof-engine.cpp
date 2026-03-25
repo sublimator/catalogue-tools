@@ -178,6 +178,11 @@ ProofEngine::stop()
 asio::awaitable<ProofEngine::ProveResult>
 ProofEngine::prove(std::string const& tx_hash)
 {
+    // Enable cancellation so the || operator in the HTTP session can
+    // abort this coroutine when the client disconnects.
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::enable_total_cancellation());
+
     // Check cache first — returns by value, safe across co_await
     if (cache_enabled_)
     {

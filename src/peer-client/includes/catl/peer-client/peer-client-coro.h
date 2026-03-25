@@ -80,29 +80,33 @@ public:
 
 namespace detail {
 
+/// Bridge callback API to awaitable. Signal and result are shared_ptr
+/// so they survive coroutine destruction if cancellation fires while
+/// the callback is still in-flight (e.g. || operator cancels the prove
+/// but the peer hasn't responded yet).
 template <typename T>
 asio::awaitable<T>
 callback_to_awaitable(std::function<void(Callback<T>)> initiator)
 {
     auto executor = co_await asio::this_coro::executor;
-    asio::steady_timer signal(executor, asio::steady_timer::time_point::max());
+    auto signal = std::make_shared<asio::steady_timer>(
+        executor, asio::steady_timer::time_point::max());
+    auto err = std::make_shared<Error>(Error::Success);
+    auto result = std::make_shared<T>();
 
-    Error err = Error::Success;
-    T result;
-
-    initiator([&signal, &err, &result](Error e, T r) {
-        err = e;
-        result = std::move(r);
-        signal.cancel();
+    initiator([signal, err, result](Error e, T r) {
+        *err = e;
+        *result = std::move(r);
+        signal->cancel();
     });
 
     boost::system::error_code ec;
-    co_await signal.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+    co_await signal->async_wait(asio::redirect_error(asio::use_awaitable, ec));
 
-    if (err != Error::Success)
-        throw PeerClientException(err);
+    if (*err != Error::Success)
+        throw PeerClientException(*err);
 
-    co_return std::move(result);
+    co_return std::move(*result);
 }
 
 }  // namespace detail
