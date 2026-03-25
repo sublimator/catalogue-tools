@@ -20,6 +20,7 @@ class CatalogueToolsConan(ConanFile):
         self.requires("sqlite3/3.49.1")
         self.requires("ftxui/6.1.9@catalogue-tools/stable")
         self.requires("libsecp256k1/0.6.0@catalogue-tools/stable")
+        self.requires("tomlplusplus/3.4.0")
 
     def build_requirements(self):
         self.tool_requires("protobuf/3.21.12")

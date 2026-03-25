@@ -1,4 +1,5 @@
 #include "commands.h"
+#include "config.h"
 
 #include <catl/core/logger.h>
 #include <catl/peer-client/endpoint-tracker.h>
@@ -421,8 +422,22 @@ main(int argc, char* argv[])
 
     if (command == "serve")
     {
-        ServeOptions opts;
+        // Pre-scan for --network to determine which config section to load
+        uint32_t network_hint = 0;
+        for (size_t i = 0; i + 1 < command_args.size(); ++i)
+        {
+            if (command_args[i] == "--network")
+            {
+                network_hint = std::stoul(command_args[i + 1]);
+                break;
+            }
+        }
 
+        // Load config: defaults → config.toml → env vars
+        auto config = xproof::load_config(network_hint);
+        ServeOptions opts = xproof::to_serve_options(config);
+
+        // CLI flags override everything
         std::size_t pos = 0;
         while (pos < command_args.size())
         {

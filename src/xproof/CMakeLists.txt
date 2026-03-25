@@ -16,6 +16,7 @@ target_link_libraries(
 add_executable(
   xproof
   src/main.cpp
+  src/config.cpp
   src/cmd-ping.cpp
   src/cmd-header.cpp
   src/cmd-prove.cpp
@@ -45,4 +46,5 @@ target_link_libraries(
           catl::crypto
           catl_shamap_abbreviated
           catl::xdata
-          Boost::iostreams)
+          Boost::iostreams
+          tomlplusplus::tomlplusplus)
