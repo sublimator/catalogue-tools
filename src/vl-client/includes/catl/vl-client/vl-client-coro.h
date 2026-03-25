@@ -11,26 +11,29 @@
 
 namespace catl::vl {
 
+/// Cancellation-safe: signal + result are shared_ptr so they survive
+/// coroutine frame destruction if cancellation fires while the VL
+/// fetch callback is still in-flight.
 inline asio::awaitable<ValidatorList>
 co_fetch_vl(VlClient& client)
 {
     auto executor = co_await asio::this_coro::executor;
-    asio::steady_timer signal(executor, asio::steady_timer::time_point::max());
+    auto signal = std::make_shared<asio::steady_timer>(
+        executor, asio::steady_timer::time_point::max());
+    auto result = std::make_shared<VlResult>();
 
-    VlResult result;
-
-    client.fetch([&signal, &result](VlResult r) {
-        result = std::move(r);
-        signal.cancel();
+    client.fetch([signal, result](VlResult r) {
+        *result = std::move(r);
+        signal->cancel();
     });
 
     boost::system::error_code ec;
-    co_await signal.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+    co_await signal->async_wait(asio::redirect_error(asio::use_awaitable, ec));
 
-    if (!result.success)
-        throw std::runtime_error("VL fetch failed: " + result.error);
+    if (!result->success)
+        throw std::runtime_error("VL fetch failed: " + result->error);
 
-    co_return std::move(result.vl);
+    co_return std::move(result->vl);
 }
 
 }  // namespace catl::vl

@@ -340,8 +340,13 @@ HttpServer::handle_session(tcp::socket socket)
                         stream.get_executor(),
                         asio::steady_timer::time_point::max());
 
-                    // Socket watcher: the socket is idle during prove
-                    // (HTTP read completed, write hasn't started).
+                    // Socket watcher: captures &stream by reference.
+                    // Safe because: stream lives in handle_session, which
+                    // is blocked on co_await (||) below. The watcher is
+                    // killed via socket.cancel() after prove completes,
+                    // before stream is used again or goes out of scope.
+                    // The socket is idle during prove (HTTP read completed,
+                    // write hasn't started).
                     // When client closes, async_wait(wait_read) fires
                     // and cancels the timer.
                     auto watcher_done =

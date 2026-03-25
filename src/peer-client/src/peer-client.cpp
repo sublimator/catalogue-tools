@@ -737,25 +737,14 @@ PeerClient::do_connect(
                                    boost::system::error_code ec) mutable {
         if (ec)
         {
-            if (ec == boost::asio::error::invalid_argument ||
-                ec == boost::asio::error::operation_aborted)
-            {
-                PLOGD(
-                    PeerClient::log_,
-                    "[",
-                    self->endpoint_str_,
-                    "] Connection failed: ",
-                    ec.message());
-            }
-            else
-            {
-                PLOGE(
-                    PeerClient::log_,
-                    "[",
-                    self->endpoint_str_,
-                    "] Connection failed: ",
-                    ec.message());
-            }
+            // Connection failures are routine (503 redirect, timeout,
+            // refused). Only unexpected errors are worth logging loudly.
+            PLOGD(
+                PeerClient::log_,
+                "[",
+                self->endpoint_str_,
+                "] Connection failed: ",
+                ec.message());
             self->state_ = State::Failed;
             self->complete_connect(ec);
             return;
