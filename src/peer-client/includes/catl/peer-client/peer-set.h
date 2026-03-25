@@ -51,13 +51,12 @@ struct PeerSetOptions
     std::size_t cached_endpoint_limit = 64;
     std::size_t max_in_flight_connects = 8;
     std::size_t max_in_flight_crawls = 4;
-    std::size_t max_connected_peers = 20;  // hard cap on live connections
+    std::size_t max_connected_peers = 20;  // hub peer cap
     std::chrono::seconds retry_backoff{5};
 
-    /// Minimum archival peer connections to maintain. When below this
-    /// count, archival peers discovered via crawl are connected even
-    /// at the connection cap (evicting a hub peer to make room).
-    std::size_t min_archival_peers = 5;
+    /// Separate pool for archival peers (wide ledger range). These don't
+    /// count against max_connected_peers — they have their own budget.
+    std::size_t max_archival_peers = 5;
 
     /// A peer is considered "archival" if its ledger range span exceeds
     /// this threshold. Default 1M ledgers (~40 days of history).
@@ -211,7 +210,7 @@ public:
     boost::asio::awaitable<std::shared_ptr<PeerClient>>
     try_connect(std::string const& host, uint16_t port);
 
-    /// Number of live (ready) peer connections.
+    /// Number of live (ready) peer connections (all types).
     size_t
     connected_count() const;
 
@@ -219,14 +218,26 @@ public:
     size_t
     archival_peer_count() const;
 
+    /// Number of connected non-archival (hub) peers.
+    size_t
+    hub_peer_count() const;
+
 private:
     /// Remove a dead peer from the connection map.
     void
     remove_peer(std::string const& key);
 
-    /// Check if we're at the connection cap.
+    /// Check if we're at the hub connection cap.
     bool
     at_connection_cap() const;
+
+    /// Check if we're at the archival peer cap.
+    bool
+    at_archival_cap() const;
+
+    /// Check if a known endpoint is archival (from crawl stats).
+    bool
+    is_archival_endpoint(std::string const& key) const;
 
     /// Try to evict an idle peer that doesn't cover the target ledger.
     /// Returns true if a peer was evicted (freeing a slot).

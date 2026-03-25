@@ -525,21 +525,18 @@ PeerSet::should_connect_endpoint(std::string const& endpoint) const
     if (endpoint_covers_preferred_ledger(key))
         return true;
 
-    // Archival peers (wide ledger range) are critical for proof building.
-    // If we don't have enough archival connections, connect even at cap —
-    // try_connect will evict a hub to make room.
-    if (at_connection_cap())
+    // Archival peers have their own pool — separate cap from hubs.
+    if (is_archival_endpoint(key))
     {
-        if (it != endpoint_stats_.end())
-        {
-            auto const& s = it->second.status;
-            bool is_archival = s.first_seq != 0 && s.last_seq != 0 &&
-                (s.last_seq - s.first_seq) > options_.archival_range_threshold;
-            if (is_archival && archival_peer_count() < options_.min_archival_peers)
-                return true;
-        }
-        return false;
+        if (at_archival_cap())
+            return false;
+        // Below archival cap — always connect
+        return true;
     }
+
+    // Hub peers — check hub cap
+    if (at_connection_cap())
+        return false;
 
     // If crawl already had a chance and still did not give us range data,
     // fall back to a real peer handshake rather than starving on crawl-only
@@ -968,37 +965,19 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
         co_return (it->second && it->second->is_ready()) ? it->second : nullptr;
     }
 
-    // If at connection cap, try to evict an idle peer to make room.
-    if (at_connection_cap())
-    {
-        bool evicted = false;
+    // Archival peers have their own pool — skip hub cap check.
+    bool incoming_archival = is_archival_endpoint(key);
 
+    // Check the relevant cap: archival or hub.
+    bool at_cap = incoming_archival ? at_archival_cap() : at_connection_cap();
+
+    if (at_cap)
+    {
         // Try to evict for any wanted ledger (pick the first)
         auto evict_target = wanted_ledgers_.empty()
             ? 0u
             : *wanted_ledgers_.begin();
-        if (evict_target != 0)
-            evicted = evict_for(evict_target);
-
-        // If no wanted-ledger eviction, try evicting a hub for an
-        // archival peer (narrowest-range idle peer gets evicted).
-        if (!evicted && archival_peer_count() < options_.min_archival_peers)
-        {
-            // Check if the incoming peer is archival (from crawl stats)
-            auto stats_it = endpoint_stats_.find(key);
-            if (stats_it != endpoint_stats_.end())
-            {
-                auto const& s = stats_it->second.status;
-                bool incoming_is_archival = s.first_seq != 0 &&
-                    s.last_seq != 0 &&
-                    (s.last_seq - s.first_seq) >
-                        options_.archival_range_threshold;
-                if (incoming_is_archival)
-                    evicted = evict_for(0);  // 0 = evict narrowest
-            }
-        }
-
-        if (evicted)
+        if (evict_target != 0 && evict_for(evict_target))
         {
             PLOGD(log_, "Evicted idle peer, connecting to ", key);
         }
@@ -1007,8 +986,8 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
             PLOGD(
                 log_,
                 "Connection cap reached (",
-                options_.max_connected_peers,
-                "), no evictable peer, skipping ",
+                incoming_archival ? "archival" : "hub",
+                "), skipping ",
                 key);
             co_return nullptr;
         }
@@ -1542,7 +1521,34 @@ bool
 PeerSet::at_connection_cap() const
 {
     ASSERT_ON_STRAND();
-    return connected_count() >= options_.max_connected_peers;
+    // Hub cap only — archival peers have their own budget
+    return hub_peer_count() >= options_.max_connected_peers;
+}
+
+bool
+PeerSet::at_archival_cap() const
+{
+    ASSERT_ON_STRAND();
+    return archival_peer_count() >= options_.max_archival_peers;
+}
+
+bool
+PeerSet::is_archival_endpoint(std::string const& key) const
+{
+    ASSERT_ON_STRAND();
+    auto it = endpoint_stats_.find(key);
+    if (it == endpoint_stats_.end())
+        return false;
+    auto const& s = it->second.status;
+    return s.first_seq != 0 && s.last_seq != 0 &&
+        (s.last_seq - s.first_seq) > options_.archival_range_threshold;
+}
+
+size_t
+PeerSet::hub_peer_count() const
+{
+    ASSERT_ON_STRAND();
+    return connected_count() - archival_peer_count();
 }
 
 size_t
@@ -1677,7 +1683,7 @@ PeerSet::evict_for(uint32_t target_ledger_seq)
             continue;
         }
 
-        // Don't evict archival peers — they're hard to replace
+        // Don't evict archival peers — they have their own pool
         if (first != 0 && last != 0 &&
             (last - first) > options_.archival_range_threshold)
         {
