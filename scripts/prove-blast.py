@@ -195,6 +195,8 @@ def summarize_peers(snapshot: dict) -> str:
   wanted = snapshot.get("wanted_ledgers", [])
   peers = snapshot.get("peers", [])
 
+  ARCHIVAL_THRESHOLD = 1_000_000  # same as PeerSetOptions default
+
   selected = [p for p in peers if p.get("selection_count", 0) > 0]
   selected.sort(
       key=lambda p: (
@@ -209,12 +211,21 @@ def summarize_peers(snapshot: dict) -> str:
       for p in selected[:3]
   ) or "none"
 
+  # Count archival peers (wide range, ready)
+  archival = [
+      p for p in peers
+      if p.get("ready") and p.get("first_seq", 0) > 0 and p.get("last_seq", 0) > 0
+      and (p["last_seq"] - p["first_seq"]) > ARCHIVAL_THRESHOLD
+  ]
+  archival_sel = sum(p.get("selection_count", 0) for p in archival)
+
   wanted_str = ",".join(str(x) for x in wanted[:4])
   if len(wanted) > 4:
       wanted_str += ",..."
 
   return (
-      f"ready={ready}/{connected} in_flight={in_flight} queued={queued} "
+      f"ready={ready}/{connected} archival={len(archival)}(sel={archival_sel}) "
+      f"in_flight={in_flight} queued={queued} "
       f"queued_crawls={crawls} wanted=[{wanted_str}] top={top}"
   )
 
