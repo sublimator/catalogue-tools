@@ -1,0 +1,8 @@
+# ThreadSanitizer suppressions for catalogue-tools
+#
+# macOS kqueue_reactor has a known TSAN false positive where
+# allocate_descriptor_state (with mutex) races with kqueue_reactor::run.
+# The synchronization happens through the kernel's kqueue mechanism
+# which TSAN can't see.
+race:boost::asio::detail::kqueue_reactor::run
+race:boost::asio::detail::kqueue_reactor::allocate_descriptor_state
