@@ -31,6 +31,33 @@ class TxCase:
   label: str
 
 
+class InFlightTracker:
+  """Thread-safe tracker for in-flight requests."""
+  def __init__(self):
+      self._lock = threading.Lock()
+      self._active: dict[int, tuple[float, TxCase]] = {}  # idx → (start_time, case)
+
+  def start(self, idx: int, case: 'TxCase'):
+      with self._lock:
+          self._active[idx] = (time.perf_counter(), case)
+
+  def finish(self, idx: int):
+      with self._lock:
+          self._active.pop(idx, None)
+
+  def snapshot(self) -> list[tuple[int, float, 'TxCase']]:
+      """Returns list of (idx, elapsed_secs, case) sorted by elapsed desc."""
+      now = time.perf_counter()
+      with self._lock:
+          items = [(idx, now - start, case) for idx, (start, case) in self._active.items()]
+      items.sort(key=lambda x: -x[1])
+      return items
+
+  def count(self) -> int:
+      with self._lock:
+          return len(self._active)
+
+
 @dataclass(frozen=True)
 class HitResult:
   idx: int
@@ -83,6 +110,7 @@ def hit(
     format_name: str,
     proof_dir: Path | None,
     xproof: Path | None,
+    tracker: InFlightTracker | None = None,
 ) -> HitResult:
   suffix = "bin" if format_name == "bin" else "json"
   url = (
@@ -90,6 +118,8 @@ def hit(
       f"&format={urllib.parse.quote(format_name)}"
   )
   started = time.perf_counter()
+  if tracker:
+      tracker.start(idx, case)
   req = urllib.request.Request(url, method="GET")
   try:
       with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -145,6 +175,9 @@ def hit(
           skip_reason=type(exc).__name__,
           detail=excerpt(str(exc)),
       )
+  finally:
+      if tracker:
+          tracker.finish(idx)
 
 
 def fetch_json(url: str, timeout: float) -> dict:
@@ -192,6 +225,7 @@ def peers_poller(
     interval: float,
     stop_event: threading.Event,
     started: float,
+    tracker: InFlightTracker | None = None,
 ) -> None:
   if interval <= 0:
       return
@@ -199,7 +233,18 @@ def peers_poller(
       try:
           snapshot = fetch_json(f"{base_url}/peers", timeout=timeout)
           elapsed = time.perf_counter() - started
-          print(f"PEERS +{elapsed:.1f}s {summarize_peers(snapshot)}", flush=True)
+          parts = [f"PEERS +{elapsed:.1f}s {summarize_peers(snapshot)}"]
+          if tracker:
+              inflight = tracker.snapshot()
+              parts.append(f"outstanding={len(inflight)}")
+              if inflight:
+                  laggards = inflight[:5]
+                  lag_strs = [
+                      f"{c.tx_hash[:12]}({e:.1f}s)"
+                      for _, e, c in laggards
+                  ]
+                  parts.append(f"laggards=[{', '.join(lag_strs)}]")
+          print(" ".join(parts), flush=True)
       except Exception as exc:
           elapsed = time.perf_counter() - started
           print(f"PEERS +{elapsed:.1f}s error={exc}", flush=True)
@@ -282,10 +327,11 @@ def main() -> int:
       print(f"proof_dir={proof_dir}")
 
   started = time.perf_counter()
+  tracker = InFlightTracker()
   stop_event = threading.Event()
   poller = threading.Thread(
       target=peers_poller,
-      args=(args.base_url, args.timeout, args.peers_interval, stop_event, started),
+      args=(args.base_url, args.timeout, args.peers_interval, stop_event, started, tracker),
       daemon=True,
   )
   poller.start()
@@ -306,6 +352,7 @@ def main() -> int:
                   args.format,
                   proof_dir,
                   xproof_path,
+                  tracker,
               )
               for i, case in enumerate(jobs)
           ]
