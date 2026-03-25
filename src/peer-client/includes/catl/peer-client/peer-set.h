@@ -62,20 +62,6 @@ struct PeerSetOptions
     /// this threshold. Default 1M ledgers (~40 days of history).
     uint32_t archival_range_threshold = 1'000'000;
 
-    /// Preset for single-shot mode (prove-tx): fewer peers, less crawling.
-    static PeerSetOptions
-    for_single_shot(uint32_t network_id = 0, std::string peer_cache_path = "")
-    {
-        PeerSetOptions opts;
-        opts.network_id = network_id;
-        opts.endpoint_cache_path = std::move(peer_cache_path);
-        opts.max_connected_peers = 5;
-        opts.max_archival_peers = 2;
-        opts.max_in_flight_connects = 4;
-        opts.max_in_flight_crawls = 2;
-        opts.cached_endpoint_limit = 32;
-        return opts;
-    }
 };
 
 class PeerSet : public std::enable_shared_from_this<PeerSet>
