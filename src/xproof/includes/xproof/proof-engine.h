@@ -22,6 +22,7 @@
 #include <catl/rpc-client/rpc-client.h>
 #include <catl/xdata/protocol.h>
 
+#include <atomic>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <list>
@@ -176,12 +177,12 @@ private:
     mutable std::mutex cache_mutex_;
     CacheList cache_lru_;  // front = most recently used
     std::unordered_map<std::string, CacheList::iterator> cache_map_;
-    bool cache_enabled_ = true;
+    std::atomic<bool> cache_enabled_{true};
     size_t node_cache_size_ = 65536;
     int fetch_timeout_secs_ = 5;
     int rpc_max_concurrent_ = 8;
-    size_t cache_hits_ = 0;
-    size_t cache_misses_ = 0;
+    std::atomic<size_t> cache_hits_{0};
+    std::atomic<size_t> cache_misses_{0};
 
     void
     cache_put(std::string const& tx_hash, ProveResult const& result);

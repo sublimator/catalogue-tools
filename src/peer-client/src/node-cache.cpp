@@ -246,7 +246,7 @@ NodeCache::ensure_present(
         co_await signal->async_wait(
             asio::redirect_error(asio::use_awaitable, ec));
 
-        // Re-check after wake
+        // Re-check after wake — NOTE: no co_await allowed in this lock scope
         std::lock_guard lock(mutex_);
         auto it2 = store_.find(expected_hash);
         if (it2 != store_.end() && it2->second.present)

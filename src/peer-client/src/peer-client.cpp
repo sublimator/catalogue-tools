@@ -831,12 +831,12 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
 
     if (status.has_firstseq() && status.has_lastseq())
     {
-        auto old_first = peer_first_seq_;
-        auto old_last = peer_last_seq_;
-        peer_first_seq_ = status.firstseq();
-        peer_last_seq_ = status.lastseq();
-        if (peer_last_seq_ < peer_first_seq_ || peer_first_seq_ == 0 ||
-            peer_last_seq_ == 0)
+        auto old_first = peer_first_seq_.load();
+        auto old_last = peer_last_seq_.load();
+        peer_first_seq_.store(status.firstseq());
+        peer_last_seq_.store(status.lastseq());
+        if (peer_last_seq_.load() < peer_first_seq_.load() ||
+            peer_first_seq_.load() == 0 || peer_last_seq_.load() == 0)
         {
             peer_first_seq_ = 0;
             peer_last_seq_ = 0;

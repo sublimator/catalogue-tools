@@ -261,6 +261,8 @@ public:
     /// Send a raw TMGetLedger for specific node IDs without registering
     /// in pending_nodes. The response will be delivered via the
     /// node_response_handler (if set) and then through normal dispatch.
+    /// Thread-safe: async_send_packet posts to the connection's write
+    /// queue which is strand-serialized internally.
     void
     send_get_nodes(
         Hash256 const& ledger_hash,
@@ -474,8 +476,8 @@ private:
 
     std::atomic<State> state_{State::Disconnected};
     std::atomic<uint32_t> peer_ledger_seq_{0};
-    uint32_t peer_first_seq_{0};
-    uint32_t peer_last_seq_{0};
+    std::atomic<uint32_t> peer_first_seq_{0};
+    std::atomic<uint32_t> peer_last_seq_{0};
     std::string endpoint_str_;  // "host:port" for tracker
 
     /// Optional shared tracker — fed from TMStatusChange.
