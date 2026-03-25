@@ -254,6 +254,167 @@ PeerSet::note_connect_failure(std::string const& endpoint)
     sort_pending_connects();
 }
 
+std::shared_ptr<PeerClient>
+PeerSet::choose_any_peer(std::unordered_set<std::string> const& excluded)
+{
+    ASSERT_ON_STRAND();
+    std::shared_ptr<PeerClient> best;
+    std::string best_key;
+
+    for (auto const& [key, client] : connections_)
+    {
+        if (excluded.count(key))
+            continue;
+        if (!client || !client->is_ready())
+            continue;
+
+        if (!best)
+        {
+            best = client;
+            best_key = key;
+            continue;
+        }
+
+        auto const& lhs_stats = endpoint_stats_[key];
+        auto const& rhs_stats = endpoint_stats_[best_key];
+
+        if (lhs_stats.selection_count != rhs_stats.selection_count)
+        {
+            if (lhs_stats.selection_count < rhs_stats.selection_count)
+            {
+                best = client;
+                best_key = key;
+            }
+            continue;
+        }
+
+        if (lhs_stats.last_selected_ticket != rhs_stats.last_selected_ticket)
+        {
+            if (lhs_stats.last_selected_ticket < rhs_stats.last_selected_ticket)
+            {
+                best = client;
+                best_key = key;
+            }
+            continue;
+        }
+
+        if (candidate_better(key, best_key))
+        {
+            best = client;
+            best_key = key;
+        }
+    }
+
+    if (best)
+    {
+        note_peer_selected(best_key);
+    }
+    return best;
+}
+
+std::shared_ptr<PeerClient>
+PeerSet::choose_peer_for(
+    uint32_t ledger_seq,
+    std::unordered_set<std::string> const& excluded)
+{
+    ASSERT_ON_STRAND();
+    std::shared_ptr<PeerClient> best;
+    std::string best_key;
+    uint32_t best_span = std::numeric_limits<uint32_t>::max();
+
+    for (auto const& [key, client] : connections_)
+    {
+        if (excluded.count(key))
+            continue;
+        if (!client || !client->is_ready())
+            continue;
+
+        auto first = client->peer_first_seq();
+        auto last = client->peer_last_seq();
+        if (first == 0 || last == 0 || ledger_seq < first || ledger_seq > last)
+            continue;
+
+        auto const span = last - first;
+        if (!best)
+        {
+            best = client;
+            best_key = key;
+            best_span = span;
+            continue;
+        }
+
+        if (span != best_span)
+        {
+            if (span < best_span)
+            {
+                best = client;
+                best_key = key;
+                best_span = span;
+            }
+            continue;
+        }
+
+        auto const& lhs_stats = endpoint_stats_[key];
+        auto const& rhs_stats = endpoint_stats_[best_key];
+
+        if (lhs_stats.failure_count != rhs_stats.failure_count)
+        {
+            if (lhs_stats.failure_count < rhs_stats.failure_count)
+            {
+                best = client;
+                best_key = key;
+                best_span = span;
+            }
+            continue;
+        }
+
+        if (lhs_stats.selection_count != rhs_stats.selection_count)
+        {
+            if (lhs_stats.selection_count < rhs_stats.selection_count)
+            {
+                best = client;
+                best_key = key;
+                best_span = span;
+            }
+            continue;
+        }
+
+        if (lhs_stats.last_selected_ticket != rhs_stats.last_selected_ticket)
+        {
+            if (lhs_stats.last_selected_ticket < rhs_stats.last_selected_ticket)
+            {
+                best = client;
+                best_key = key;
+                best_span = span;
+            }
+            continue;
+        }
+
+        if (candidate_better(key, best_key))
+        {
+            best = client;
+            best_key = key;
+            best_span = span;
+        }
+    }
+
+    if (best)
+    {
+        note_peer_selected(best_key);
+        return best;
+    }
+    return nullptr;
+}
+
+void
+PeerSet::note_peer_selected(std::string const& key)
+{
+    ASSERT_ON_STRAND();
+    auto& stats = endpoint_stats_[key];
+    stats.selection_count++;
+    stats.last_selected_ticket = ++next_selection_ticket_;
+}
+
 std::optional<PeerStatus>
 PeerSet::choose_crawl_status(std::vector<CrawlLedgerRange> const& ranges) const
 {
@@ -1084,7 +1245,7 @@ PeerSet::add(std::string const& host, uint16_t port)
     co_return client;
 }
 
-std::optional<std::shared_ptr<PeerClient>>
+std::shared_ptr<PeerClient>
 PeerSet::peer_for(uint32_t ledger_seq) const
 {
     ASSERT_ON_STRAND();
@@ -1092,7 +1253,7 @@ PeerSet::peer_for(uint32_t ledger_seq) const
     return peer_for(ledger_seq, empty);
 }
 
-std::optional<std::shared_ptr<PeerClient>>
+std::shared_ptr<PeerClient>
 PeerSet::peer_for(
     uint32_t ledger_seq,
     std::unordered_set<std::string> const& excluded) const
@@ -1122,17 +1283,17 @@ PeerSet::peer_for(
     {
         return best;
     }
-    return std::nullopt;
+    return nullptr;
 }
 
-boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+boost::asio::awaitable<std::shared_ptr<PeerClient>>
 PeerSet::wait_for_any_peer(int timeout_secs)
 {
     static std::unordered_set<std::string> const empty;
     co_return co_await wait_for_any_peer(timeout_secs, empty);
 }
 
-boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+boost::asio::awaitable<std::shared_ptr<PeerClient>>
 PeerSet::wait_for_any_peer(
     int timeout_secs,
     std::unordered_set<std::string> const& excluded)
@@ -1140,7 +1301,7 @@ PeerSet::wait_for_any_peer(
     // Hop to strand — all PeerSet state access must be serialized
     co_await asio::post(strand_, asio::use_awaitable);
 
-    if (auto client = any_peer(excluded))
+    if (auto client = choose_any_peer(excluded))
     {
         co_return client;
     }
@@ -1165,7 +1326,7 @@ PeerSet::wait_for_any_peer(
     {
         co_await strand_sleep(strand_, std::chrono::milliseconds(200));
 
-        if (auto client = any_peer(excluded))
+        if (auto client = choose_any_peer(excluded))
         {
             co_return client;
         }
@@ -1191,17 +1352,17 @@ PeerSet::wait_for_any_peer(
     }
 
     PLOGW(log_, "No ready peer found after ", timeout_secs, "s");
-    co_return std::nullopt;
+    co_return nullptr;
 }
 
-boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+boost::asio::awaitable<std::shared_ptr<PeerClient>>
 PeerSet::wait_for_peer(uint32_t ledger_seq, int timeout_secs)
 {
     static std::unordered_set<std::string> const empty;
     co_return co_await wait_for_peer(ledger_seq, timeout_secs, empty);
 }
 
-boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+boost::asio::awaitable<std::shared_ptr<PeerClient>>
 PeerSet::wait_for_peer(
     uint32_t ledger_seq,
     int timeout_secs,
@@ -1214,7 +1375,7 @@ PeerSet::wait_for_peer(
     // and evict_for can prioritize candidates that cover it.
     wanted_ledgers_.insert(ledger_seq);
 
-    if (auto p = peer_for(ledger_seq, excluded))
+    if (auto p = choose_peer_for(ledger_seq, excluded))
     {
         wanted_ledgers_.erase(ledger_seq);
         co_return p;
@@ -1240,7 +1401,7 @@ PeerSet::wait_for_peer(
     {
         co_await strand_sleep(strand_, std::chrono::milliseconds(200));
 
-        if (auto p = peer_for(ledger_seq, excluded))
+        if (auto p = choose_peer_for(ledger_seq, excluded))
         {
             PLOGI(log_, "Found peer for ledger ", ledger_seq);
             wanted_ledgers_.erase(ledger_seq);
@@ -1283,7 +1444,7 @@ PeerSet::wait_for_peer(
         timeout_secs,
         "s");
 
-    co_return std::nullopt;
+    co_return nullptr;
 }
 
 std::shared_ptr<PeerClient>
@@ -1317,6 +1478,13 @@ PeerSet::any_peer(std::unordered_set<std::string> const& excluded) const
     return best;
 }
 
+boost::asio::awaitable<PeerSet::Snapshot>
+PeerSet::co_snapshot()
+{
+    co_await asio::post(strand_, asio::use_awaitable);
+    co_return snapshot_unsafe();
+}
+
 size_t
 PeerSet::connected_count() const
 {
@@ -1337,6 +1505,86 @@ PeerSet::at_connection_cap() const
 {
     ASSERT_ON_STRAND();
     return connected_count() >= options_.max_connected_peers;
+}
+
+PeerSet::Snapshot
+PeerSet::snapshot_unsafe() const
+{
+    ASSERT_ON_STRAND();
+
+    Snapshot out;
+    out.known_endpoints = tracker_->size();
+    out.tracked_endpoints = endpoint_stats_.size();
+    out.connected_peers = connections_.size();
+    out.in_flight_connects = in_flight_.size();
+    out.queued_connects = pending_connects_.size();
+    out.crawl_in_flight = crawl_in_flight_.size();
+    out.queued_crawls = pending_crawls_.size();
+    out.wanted_ledgers.assign(wanted_ledgers_.begin(), wanted_ledgers_.end());
+
+    std::set<std::string> endpoints;
+    for (auto const& [key, _] : endpoint_stats_)
+        endpoints.insert(key);
+    for (auto const& [key, _] : connections_)
+        endpoints.insert(key);
+    endpoints.insert(in_flight_.begin(), in_flight_.end());
+    endpoints.insert(queued_.begin(), queued_.end());
+    endpoints.insert(crawl_in_flight_.begin(), crawl_in_flight_.end());
+    endpoints.insert(crawl_queued_.begin(), crawl_queued_.end());
+    endpoints.insert(crawled_.begin(), crawled_.end());
+
+    for (auto const& key : endpoints)
+    {
+        SnapshotEntry entry;
+        entry.endpoint = key;
+        entry.in_flight = in_flight_.count(key) > 0;
+        entry.queued_connect = queued_.count(key) > 0;
+        entry.crawl_in_flight = crawl_in_flight_.count(key) > 0;
+        entry.queued_crawl = crawl_queued_.count(key) > 0;
+        entry.crawled = crawled_.count(key) > 0;
+
+        if (auto stats_it = endpoint_stats_.find(key); stats_it != endpoint_stats_.end())
+        {
+            auto const& stats = stats_it->second;
+            entry.first_seq = stats.status.first_seq;
+            entry.last_seq = stats.status.last_seq;
+            entry.current_seq = stats.status.current_seq;
+            entry.last_seen_at = stats.last_seen_at;
+            entry.last_success_at = stats.last_success_at;
+            entry.last_failure_at = stats.last_failure_at;
+            entry.success_count = stats.success_count;
+            entry.failure_count = stats.failure_count;
+            entry.selection_count = stats.selection_count;
+            entry.last_selected_ticket = stats.last_selected_ticket;
+        }
+
+        if (auto conn_it = connections_.find(key); conn_it != connections_.end())
+        {
+            entry.connected = true;
+            if (conn_it->second && conn_it->second->is_ready())
+            {
+                entry.ready = true;
+                out.ready_peers++;
+            }
+        }
+
+        out.peers.push_back(std::move(entry));
+    }
+
+    std::sort(
+        out.peers.begin(),
+        out.peers.end(),
+        [](SnapshotEntry const& lhs, SnapshotEntry const& rhs) {
+            if (lhs.ready != rhs.ready)
+                return lhs.ready > rhs.ready;
+            if (lhs.connected != rhs.connected)
+                return lhs.connected > rhs.connected;
+            if (lhs.selection_count != rhs.selection_count)
+                return lhs.selection_count > rhs.selection_count;
+            return lhs.endpoint < rhs.endpoint;
+        });
+
+    return out;
 }
 
 bool

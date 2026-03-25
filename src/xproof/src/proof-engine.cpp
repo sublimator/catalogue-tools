@@ -52,6 +52,9 @@ ProofEngine::start()
     // We do this via a one-shot fetch, then the refresh will re-push.
     // For now, the VL co_get in prove() handles the initial UNL push.
 
+    // Node cache (content-addressed wire node store)
+    node_cache_ = NodeCache::create(io_);
+
     // Peer set
     PeerSetOptions peer_opts;
     peer_opts.network_id = config_.network_id;
@@ -178,6 +181,7 @@ ProofEngine::prove(std::string const& tx_hash)
         .vl = vl,
         .anchor_validations = quorum.validations,
         .protocol = protocol_,
+        .node_cache = node_cache_,
         .rpc_host = config_.rpc_host,
         .rpc_port = config_.rpc_port,
     };

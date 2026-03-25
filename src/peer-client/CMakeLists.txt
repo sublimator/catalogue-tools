@@ -22,6 +22,7 @@ add_library(
   src/peer-endpoint-cache.cpp
   src/peer-set.cpp
   src/tree-walk-state.cpp
+  src/node-cache.cpp
   ${PROTO_SRCS}
   ${PROTO_HDRS})
 

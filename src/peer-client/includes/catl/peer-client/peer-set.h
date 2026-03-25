@@ -104,28 +104,31 @@ public:
     prioritize_ledger(uint32_t ledger_seq);
 
     /// Synchronous check: any connected peer with this ledger?
-    std::optional<std::shared_ptr<PeerClient>>
+    /// Returns nullptr if none found.
+    std::shared_ptr<PeerClient>
     peer_for(uint32_t ledger_seq) const;
 
-    std::optional<std::shared_ptr<PeerClient>>
+    std::shared_ptr<PeerClient>
     peer_for(
         uint32_t ledger_seq,
         std::unordered_set<std::string> const& excluded) const;
 
     /// Wait until any ready peer is available.
-    boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+    /// Returns nullptr on timeout.
+    boost::asio::awaitable<std::shared_ptr<PeerClient>>
     wait_for_any_peer(int timeout_secs = 15);
 
-    boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+    boost::asio::awaitable<std::shared_ptr<PeerClient>>
     wait_for_any_peer(
         int timeout_secs,
         std::unordered_set<std::string> const& excluded);
 
     /// Wait until a peer with the given ledger is available.
-    boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+    /// Returns nullptr on timeout.
+    boost::asio::awaitable<std::shared_ptr<PeerClient>>
     wait_for_peer(uint32_t ledger_seq, int timeout_secs = 300);
 
-    boost::asio::awaitable<std::optional<std::shared_ptr<PeerClient>>>
+    boost::asio::awaitable<std::shared_ptr<PeerClient>>
     wait_for_peer(
         uint32_t ledger_seq,
         int timeout_secs,
@@ -151,6 +154,45 @@ public:
         co_await boost::asio::post(strand_, boost::asio::use_awaitable);
         co_return connections_.size();
     }
+
+    struct SnapshotEntry
+    {
+        std::string endpoint;
+        bool connected = false;
+        bool ready = false;
+        bool in_flight = false;
+        bool queued_connect = false;
+        bool crawl_in_flight = false;
+        bool queued_crawl = false;
+        bool crawled = false;
+        uint32_t first_seq = 0;
+        uint32_t last_seq = 0;
+        uint32_t current_seq = 0;
+        std::int64_t last_seen_at = 0;
+        std::int64_t last_success_at = 0;
+        std::int64_t last_failure_at = 0;
+        std::uint64_t success_count = 0;
+        std::uint64_t failure_count = 0;
+        std::uint64_t selection_count = 0;
+        std::uint64_t last_selected_ticket = 0;
+    };
+
+    struct Snapshot
+    {
+        size_t known_endpoints = 0;
+        size_t tracked_endpoints = 0;
+        size_t connected_peers = 0;
+        size_t ready_peers = 0;
+        size_t in_flight_connects = 0;
+        size_t queued_connects = 0;
+        size_t crawl_in_flight = 0;
+        size_t queued_crawls = 0;
+        std::vector<uint32_t> wanted_ledgers;
+        std::vector<SnapshotEntry> peers;
+    };
+
+    boost::asio::awaitable<Snapshot>
+    co_snapshot();
 
     void
     set_unsolicited_handler(UnsolicitedHandler handler);
@@ -231,6 +273,17 @@ private:
     void
     note_connect_failure(std::string const& endpoint);
 
+    std::shared_ptr<PeerClient>
+    choose_any_peer(std::unordered_set<std::string> const& excluded);
+
+    std::shared_ptr<PeerClient>
+    choose_peer_for(
+        uint32_t ledger_seq,
+        std::unordered_set<std::string> const& excluded);
+
+    void
+    note_peer_selected(std::string const& key);
+
     std::optional<PeerStatus>
     choose_crawl_status(std::vector<CrawlLedgerRange> const& ranges) const;
 
@@ -245,6 +298,9 @@ private:
 
     bool
     candidate_better(std::string const& lhs, std::string const& rhs) const;
+
+    Snapshot
+    snapshot_unsafe() const;
 
     static std::int64_t
     now_unix();
@@ -270,8 +326,11 @@ private:
         std::int64_t last_failure_at = 0;
         std::uint64_t success_count = 0;
         std::uint64_t failure_count = 0;
+        std::uint64_t selection_count = 0;
+        std::uint64_t last_selected_ticket = 0;
     };
     std::unordered_map<std::string, EndpointStats> endpoint_stats_;
+    std::uint64_t next_selection_ticket_ = 0;
     std::map<std::string, std::shared_ptr<PeerClient>> connections_;
     std::map<std::string, std::chrono::steady_clock::time_point> failed_at_;
     std::set<std::string> in_flight_;  // currently connecting

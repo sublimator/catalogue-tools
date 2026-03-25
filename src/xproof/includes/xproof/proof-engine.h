@@ -17,6 +17,7 @@
 #include "validation-buffer.h"
 #include "vl-cache.h"
 
+#include <catl/peer-client/node-cache.h>
 #include <catl/peer-client/peer-set.h>
 #include <catl/xdata/protocol.h>
 
@@ -136,6 +137,7 @@ private:
     catl::xdata::Protocol protocol_;
 
     std::shared_ptr<catl::peer_client::PeerSet> peers_;
+    std::shared_ptr<catl::peer_client::NodeCache> node_cache_;
     std::shared_ptr<VlCache> vl_cache_;
     std::shared_ptr<ValidationBuffer> val_buffer_;
 

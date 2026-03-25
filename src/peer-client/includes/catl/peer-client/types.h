@@ -219,6 +219,42 @@ struct SHAMapNodeID
     Hash256 id;
     uint8_t depth = 0;
 
+    /// Root node (depth 0, all-zero path).
+    static SHAMapNodeID
+    root()
+    {
+        return {};
+    }
+
+    /// Extract nibble at a given depth (0 = high nibble of byte 0).
+    int
+    nibble_at(int d) const
+    {
+        int byte_idx = d / 2;
+        if (d % 2 == 0)
+            return (id.data()[byte_idx] >> 4) & 0xF;
+        else
+            return id.data()[byte_idx] & 0xF;
+    }
+
+    /// Get the child NodeID for a given branch at this node's depth.
+    SHAMapNodeID
+    child(int branch) const
+    {
+        SHAMapNodeID c;
+        std::memcpy(c.id.data(), id.data(), 32);
+        int d = depth;
+        int byte_idx = d / 2;
+        if (d % 2 == 0)
+            c.id.data()[byte_idx] =
+                (c.id.data()[byte_idx] & 0x0F) | (branch << 4);
+        else
+            c.id.data()[byte_idx] =
+                (c.id.data()[byte_idx] & 0xF0) | (branch & 0xF);
+        c.depth = d + 1;
+        return c;
+    }
+
     /// Wire format: [32 bytes id][1 byte depth]
     std::string
     to_wire() const

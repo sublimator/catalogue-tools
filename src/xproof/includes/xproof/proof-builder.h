@@ -13,6 +13,7 @@
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
+#include <catl/peer-client/node-cache.h>
 #include <catl/peer-client/peer-set.h>
 #include <catl/rpc-client/rpc-client-coro.h>
 #include <catl/vl-client/vl-client.h>
@@ -39,6 +40,7 @@ struct BuildServices
     catl::vl::ValidatorList const& vl;
     std::vector<ValidationCollector::Entry> const& anchor_validations;
     catl::xdata::Protocol const& protocol;
+    std::shared_ptr<catl::peer_client::NodeCache> node_cache;
     std::string rpc_host;
     uint16_t rpc_port = 443;
 };

@@ -111,6 +111,13 @@ class PeerClient : public std::enable_shared_from_this<PeerClient>
 public:
     using DisconnectCallback = std::function<void()>;
 
+    /// Called for every TMLedgerData node response (liAS_NODE, liTX_NODE)
+    /// BEFORE the pending_nodes dispatch. If set, receives the parsed
+    /// protobuf message. Used by NodeCache to intercept responses and
+    /// feed them into the content-addressed cache.
+    using NodeResponseHandler =
+        std::function<void(std::shared_ptr<protocol::TMLedgerData> const&)>;
+
     /// Pre-connect configuration. Set these before the read loop starts
     /// to avoid cross-strand races.
     struct ConnectOptions
@@ -246,6 +253,20 @@ public:
         return peer_last_seq_;
     }
 
+    /// Set a handler that receives every node-type TMLedgerData response
+    /// (liAS_NODE, liTX_NODE) before the pending_nodes dispatch.
+    void
+    set_node_response_handler(NodeResponseHandler handler);
+
+    /// Send a raw TMGetLedger for specific node IDs without registering
+    /// in pending_nodes. The response will be delivered via the
+    /// node_response_handler (if set) and then through normal dispatch.
+    void
+    send_get_nodes(
+        Hash256 const& ledger_hash,
+        int type,  // liTX_NODE or liAS_NODE
+        std::vector<SHAMapNodeID> const& node_ids);
+
     void
     cancel_all();
 
@@ -373,6 +394,10 @@ private:
             false;          // first callback sends, rest piggyback
         Hash256 match_key;  // secondary key for response matching (e.g.
                             // ledger_key for node requests)
+        std::vector<SHAMapNodeID>
+            requested_nodeids;  // nodeids sent in the request — used to
+                                // match responses when multiple requests
+                                // share the same (ledgerHash, type)
     };
 
     template <typename T>
@@ -457,6 +482,7 @@ private:
     std::shared_ptr<EndpointTracker> tracker_;
 
     DisconnectCallback on_disconnect_;
+    NodeResponseHandler node_response_handler_;
 
     static LogPartition log_;
 };

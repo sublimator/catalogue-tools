@@ -615,6 +615,55 @@ PeerClient::set_tracker(std::shared_ptr<EndpointTracker> tracker)
 }
 
 void
+PeerClient::set_node_response_handler(NodeResponseHandler handler)
+{
+    std::lock_guard lock(handler_mutex_);
+    node_response_handler_ = std::move(handler);
+}
+
+void
+PeerClient::send_get_nodes(
+    Hash256 const& ledger_hash,
+    int type,
+    std::vector<SHAMapNodeID> const& node_ids)
+{
+    if (state_ != State::Ready)
+    {
+        PLOGD(log_, "send_get_nodes: not ready, dropping");
+        return;
+    }
+
+    protocol::TMGetLedger request;
+    request.set_itype(static_cast<protocol::TMLedgerInfoType>(type));
+    request.set_ledgerhash(ledger_hash.data(), 32);
+    request.set_querytype(protocol::qtINDIRECT);
+    request.set_querydepth(0);
+    for (auto const& nid : node_ids)
+        request.add_nodeids(nid.to_wire());
+
+    std::vector<uint8_t> data(request.ByteSizeLong());
+    request.SerializeToArray(data.data(), data.size());
+
+    PLOGD(
+        log_,
+        "send_get_nodes: type=",
+        type,
+        " nodeids=",
+        node_ids.size(),
+        " ledger=",
+        ledger_hash.hex().substr(0, 16));
+
+    connection_->async_send_packet(
+        packet_type::get_ledger, data, [](boost::system::error_code ec) {
+            if (ec)
+                PLOGE(
+                    PeerClient::log_,
+                    "send_get_nodes failed: ",
+                    ec.message());
+        });
+}
+
+void
 PeerClient::do_connect(
     std::string const& host,
     uint16_t port,
@@ -1033,6 +1082,21 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         " has_cookie=",
         msg->has_requestcookie());
 
+    // Feed node responses to the NodeCache interceptor FIRST.
+    // This handles responses from send_get_nodes() which bypass pending_nodes.
+    if (msg->type() != protocol::liBASE && !msg->has_error())
+    {
+        NodeResponseHandler handler;
+        {
+            std::lock_guard lock(handler_mutex_);
+            handler = node_response_handler_;
+        }
+        if (handler)
+        {
+            handler(msg);
+        }
+    }
+
     if (msg->ledgerhash().size() == 32)
     {
         Hash256 lh(reinterpret_cast<const uint8_t*>(msg->ledgerhash().data()));
@@ -1105,10 +1169,98 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         return nullptr;
     };
 
-    // For nodes: match via match_key since the pending key includes node_ids
-    // which aren't in the response. match_key is ledger_key(hash, type).
+    //@@start find-node-key
+    // For nodes: match response to the correct pending entry using the
+    // per-node nodeids in the response. Each response nodeid must be a
+    // descendant-or-equal of one of the entry's requested nodeids.
+    // This handles: exact matches, speculative depth (leaf terminates
+    // early → fewer nodes returned), and single-child chain traversal
+    // (queryDepth=0 still follows bc==1 chains → extra descendants).
+    //
+    // Fallback to match_key scan for error responses (no nodes).
+    auto is_descendant_or_equal =
+        [](SHAMapNodeID const& child, SHAMapNodeID const& ancestor) -> bool {
+        if (child.depth < ancestor.depth)
+            return false;
+        if (child.depth == ancestor.depth)
+            return child.id == ancestor.id;
+        // Check that the first ancestor.depth nibbles match
+        for (uint8_t d = 0; d < ancestor.depth; ++d)
+        {
+            int byte_idx = d / 2;
+            uint8_t c_nibble = (d % 2 == 0)
+                ? (child.id.data()[byte_idx] >> 4) & 0xF
+                : child.id.data()[byte_idx] & 0xF;
+            uint8_t a_nibble = (d % 2 == 0)
+                ? (ancestor.id.data()[byte_idx] >> 4) & 0xF
+                : ancestor.id.data()[byte_idx] & 0xF;
+            if (c_nibble != a_nibble)
+                return false;
+        }
+        return true;
+    };
+
     auto find_node_key = [&]() -> Hash256 const* {
         auto response_match = have_hash_key ? hash_key_val : seq_key;
+
+        // Extract response nodeids
+        std::vector<SHAMapNodeID> response_nids;
+        for (int i = 0; i < msg->nodes_size(); ++i)
+        {
+            if (!msg->nodes(i).has_nodeid() ||
+                msg->nodes(i).nodeid().size() != 33)
+                continue;
+            auto const& nid_bytes = msg->nodes(i).nodeid();
+            SHAMapNodeID nid;
+            std::memcpy(nid.id.data(), nid_bytes.data(), 32);
+            nid.depth = static_cast<uint8_t>(nid_bytes[32]);
+            response_nids.push_back(nid);
+        }
+
+        // If we have response nodeids, find the pending entry whose
+        // requested_nodeids are ancestors of ALL response nodeids
+        if (!response_nids.empty())
+        {
+            Hash256 const* best = nullptr;
+            for (auto const& [k, entry] : pending_nodes_)
+            {
+                if (entry.match_key != response_match)
+                    continue;
+                if (entry.requested_nodeids.empty())
+                    continue;
+
+                // Every response nodeid must descend from at least one
+                // requested nodeid in this entry
+                bool all_match = true;
+                for (auto const& resp_nid : response_nids)
+                {
+                    bool found = false;
+                    for (auto const& req_nid : entry.requested_nodeids)
+                    {
+                        if (is_descendant_or_equal(resp_nid, req_nid))
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found)
+                    {
+                        all_match = false;
+                        break;
+                    }
+                }
+                if (all_match)
+                {
+                    best = &k;
+                    break;
+                }
+            }
+            if (best)
+                return best;
+        }
+
+        // Fallback: scan by match_key only (error responses, no nodeids,
+        // or no descendant match found)
         for (auto const& [k, entry] : pending_nodes_)
         {
             if (entry.match_key == response_match)
@@ -1116,6 +1268,7 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         }
         return nullptr;
     };
+    //@@end find-node-key
 
     if (msg->has_error())
     {
@@ -1377,6 +1530,7 @@ PeerClient::get_state_nodes(
         return;
     }
     pending_nodes_[key].match_key = match;
+    pending_nodes_[key].requested_nodeids = node_ids;
 
     PLOGD(
         log_,
@@ -1441,6 +1595,7 @@ PeerClient::get_tx_nodes(
         return;
     }
     pending_nodes_[key].match_key = match;
+    pending_nodes_[key].requested_nodeids = node_ids;
 
     PLOGD(
         log_,

@@ -328,7 +328,7 @@ build_proof(
                 co_return current;
             }
 
-            std::optional<std::shared_ptr<PeerClient>> found;
+            std::shared_ptr<PeerClient> found;
             if (required_ledger)
             {
                 found = co_await peers->wait_for_peer(
@@ -344,7 +344,7 @@ build_proof(
 
             if (found)
             {
-                current = *found;
+                current = found;
                 if (!current->endpoint().empty())
                 {
                     peer_retry_counts[current->endpoint()] = 0;
@@ -500,7 +500,7 @@ build_proof(
             throw std::runtime_error(
                 "No peers available. Check network connectivity.");
         }
-        initial_client = *found_peer;
+        initial_client = found_peer;
     }
     auto client = initial_client;
     PLOGI(log_, "Listening for validations...");
@@ -943,20 +943,6 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     auto const& vl_data = svc.vl;
     auto const& anchor_validations = svc.anchor_validations;
 
-    // Same helper types as the legacy path
-    struct StateWalkResult
-    {
-        bool found = false;
-        catl::shamap::SHAMapNodeID leaf_nid;
-        std::vector<uint8_t> leaf_data;
-        struct PH
-        {
-            catl::shamap::SHAMapNodeID nid;
-            Hash256 hash;
-        };
-        std::vector<PH> placeholders;
-    };
-
     using AbbrevMap =
         catl::shamap::SHAMapT<catl::shamap::AbbreviatedTreeTraits>;
 
@@ -966,45 +952,54 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
         AbbrevMap tree;
     };
 
-    struct PlaceholderEntry
-    {
-        catl::shamap::SHAMapNodeID nid;
-        Hash256 hash;
-    };
+    auto& node_cache = svc.node_cache;
 
-    struct TxWalkResult
-    {
-        bool found = false;
-        catl::shamap::SHAMapNodeID leaf_nid;
-        std::vector<uint8_t> leaf_data;
-        std::vector<PlaceholderEntry> placeholders;
-    };
-
+    // walk_state uses NodeCache::walk_to — content-addressed, cross-ledger
+    // sharing, concurrent dedup. Needs the tree root hash (account_hash)
+    // in addition to ledger_hash.
     auto walk_state =
-        [&](std::shared_ptr<PeerClient> c,
-            Hash256 const& ledger_hash,
-            Hash256 const& key) -> boost::asio::awaitable<StateWalkResult> {
-        StateWalkResult r;
-        TreeWalker walker(c, ledger_hash, TreeWalkState::TreeType::state);
-        walker.set_speculative_depth(8);
-        walker.add_target(key);
-        walker.set_on_placeholder(
-            [&](std::span<const uint8_t> nid, Hash256 const& h) {
-                r.placeholders.push_back({catl::shamap::SHAMapNodeID(nid), h});
-            });
-        walker.set_on_leaf([&](std::span<const uint8_t> nid,
-                               Hash256 const&,
-                               std::span<const uint8_t> data) {
-            r.found = true;
-            r.leaf_nid = catl::shamap::SHAMapNodeID(nid);
-            r.leaf_data.assign(data.begin(), data.end());
-        });
-        co_await walker.walk();
-        co_return r;
+        [&](Hash256 const& ledger_hash,
+            uint32_t ledger_seq,
+            Hash256 const& state_root_hash,
+            Hash256 const& key,
+            std::shared_ptr<PeerClient> peer = nullptr)
+            -> boost::asio::awaitable<WalkResult> {
+        auto result = co_await node_cache->walk_to(
+            state_root_hash,
+            key,
+            ledger_hash,
+            ledger_seq,
+            2,  // liAS_NODE
+            peers,
+            peer);
+        if (!result.found)
+            throw PeerClientException(Error::Timeout);
+        co_return result;
+    };
+
+    // walk_tx same pattern but liTX_NODE
+    auto walk_tx =
+        [&](Hash256 const& ledger_hash,
+            uint32_t ledger_seq,
+            Hash256 const& tx_root_hash,
+            Hash256 const& key,
+            std::shared_ptr<PeerClient> peer = nullptr)
+            -> boost::asio::awaitable<WalkResult> {
+        auto result = co_await node_cache->walk_to(
+            tx_root_hash,
+            key,
+            ledger_hash,
+            ledger_seq,
+            1,  // liTX_NODE
+            peers,
+            peer);
+        if (!result.found)
+            throw PeerClientException(Error::Timeout);
+        co_return result;
     };
 
     auto build_state_proof =
-        [&](StateWalkResult const& wr,
+        [&](WalkResult const& wr,
             Hash256 const& key,
             Hash256 const& expected_account_hash) -> StateProofResult {
         catl::shamap::SHAMapOptions opts;
@@ -1013,14 +1008,20 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             catl::shamap::ReferenceHashImpl::recursive_simple;
         AbbrevMap abbrev(catl::shamap::tnACCOUNT_STATE, opts);
 
+        // Convert WalkResult leaf_nid (peer_client::SHAMapNodeID) to
+        // shamap::SHAMapNodeID for set_item_at
+        catl::shamap::SHAMapNodeID leaf_pos(
+            Hash256(wr.leaf_nid.id.data()), wr.leaf_nid.depth);
         Slice item_data(wr.leaf_data.data(), wr.leaf_data.size() - 32);
         boost::intrusive_ptr<MmapItem> item(OwnedItem::create(key, item_data));
-        abbrev.set_item_at(wr.leaf_nid, item);
+        abbrev.set_item_at(leaf_pos, item);
 
         for (auto& p : wr.placeholders)
         {
-            if (abbrev.needs_placeholder(p.nid))
-                abbrev.set_placeholder(p.nid, p.hash);
+            catl::shamap::SHAMapNodeID ph_pos(
+                Hash256(p.nodeid.id.data()), p.nodeid.depth);
+            if (abbrev.needs_placeholder(ph_pos))
+                abbrev.set_placeholder(ph_pos, p.hash);
         }
 
         auto computed = abbrev.get_hash();
@@ -1123,7 +1124,7 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
                 co_return current;
             }
 
-            std::optional<std::shared_ptr<PeerClient>> found;
+            std::shared_ptr<PeerClient> found;
             if (required_ledger)
             {
                 found = co_await peers->wait_for_peer(
@@ -1139,7 +1140,7 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
 
             if (found)
             {
-                current = *found;
+                current = found;
                 if (!current->endpoint().empty())
                     peer_retry_counts[current->endpoint()] = 0;
                 PLOGI(
@@ -1251,8 +1252,10 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             anchor_seq,
             "walk short skip list",
             [&](std::shared_ptr<PeerClient> peer)
-                -> boost::asio::awaitable<StateWalkResult> {
-                co_return co_await walk_state(peer, anchor_hash, skip_key_val);
+                -> boost::asio::awaitable<WalkResult> {
+                co_return co_await walk_state(
+                    anchor_hash, anchor_seq,
+                    anchor_header.account_hash(), skip_key_val, peer);
             });
         if (!wr.found)
             throw std::runtime_error("Short skip list not found in state tree");
@@ -1294,8 +1297,10 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             anchor_seq,
             "walk long skip list",
             [&](std::shared_ptr<PeerClient> peer)
-                -> boost::asio::awaitable<StateWalkResult> {
-                co_return co_await walk_state(peer, anchor_hash, long_skip_key);
+                -> boost::asio::awaitable<WalkResult> {
+                co_return co_await walk_state(
+                    anchor_hash, anchor_seq,
+                    anchor_header.account_hash(), long_skip_key, peer);
             });
         if (!wr1.found)
             throw std::runtime_error("Long skip list not found in state tree");
@@ -1333,8 +1338,10 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             flag_seq,
             "walk flag short skip list",
             [&](std::shared_ptr<PeerClient> peer)
-                -> boost::asio::awaitable<StateWalkResult> {
-                co_return co_await walk_state(peer, flag_hash, short_skip_key);
+                -> boost::asio::awaitable<WalkResult> {
+                co_return co_await walk_state(
+                    flag_hash, flag_seq,
+                    flag_header.account_hash(), short_skip_key, peer);
             });
         if (!wr2.found)
             throw std::runtime_error(
@@ -1391,25 +1398,10 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
         tx_ledger_seq,
         "walk transaction tree",
         [&](std::shared_ptr<PeerClient> peer)
-            -> boost::asio::awaitable<TxWalkResult> {
-            TxWalkResult result;
-            TreeWalker walker(peer, ledger_hash, TreeWalkState::TreeType::tx);
-            walker.set_speculative_depth(4);
-            walker.add_target(tx_hash);
-            walker.set_on_placeholder(
-                [&](std::span<const uint8_t> nid, Hash256 const& hash) {
-                    result.placeholders.push_back(
-                        {catl::shamap::SHAMapNodeID(nid), hash});
-                });
-            walker.set_on_leaf([&](std::span<const uint8_t> nid,
-                                   Hash256 const&,
-                                   std::span<const uint8_t> data) {
-                result.leaf_nid = catl::shamap::SHAMapNodeID(nid);
-                result.leaf_data.assign(data.begin(), data.end());
-                result.found = true;
-            });
-            co_await walker.walk();
-            co_return result;
+            -> boost::asio::awaitable<WalkResult> {
+            co_return co_await walk_tx(
+                ledger_hash, tx_ledger_seq,
+                target_header.tx_hash(), tx_hash, peer);
         });
 
     if (!tx_walk.found)
@@ -1422,18 +1414,22 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
         catl::shamap::ReferenceHashImpl::recursive_simple;
     AbbrevMap abbrev(catl::shamap::tnTRANSACTION_MD, opts);
 
+    catl::shamap::SHAMapNodeID tx_leaf_pos(
+        Hash256(tx_walk.leaf_nid.id.data()), tx_walk.leaf_nid.depth);
     Slice leaf_item_data(
         tx_walk.leaf_data.data(), tx_walk.leaf_data.size() - 32);
     boost::intrusive_ptr<MmapItem> leaf_item(
         OwnedItem::create(tx_hash, leaf_item_data));
-    abbrev.set_item_at(tx_walk.leaf_nid, leaf_item);
+    abbrev.set_item_at(tx_leaf_pos, leaf_item);
 
     int placed = 0;
     for (auto& p : tx_walk.placeholders)
     {
-        if (abbrev.needs_placeholder(p.nid))
+        catl::shamap::SHAMapNodeID ph_pos(
+            Hash256(p.nodeid.id.data()), p.nodeid.depth);
+        if (abbrev.needs_placeholder(ph_pos))
         {
-            abbrev.set_placeholder(p.nid, p.hash);
+            abbrev.set_placeholder(ph_pos, p.hash);
             placed++;
         }
     }
