@@ -136,84 +136,31 @@ def count_nodes(node, d=0):
 
 # ─── STValidation parsing ───────────────────────────────────────────
 
-def parse_validation(raw: bytes) -> dict | None:
-    """Parse an STValidation, extract signing key, signature, ledger hash,
-    and the serialized bytes with sfSignature stripped (for sig verification)."""
-    pos = 0
-    end = len(raw)
-    sig_start = 0
-    sig_end = 0
-    signing_key = None
-    signature = None
-    ledger_hash = None
+def parse_validation(val_hex: str) -> dict | None:
+    """Decode an STValidation, return signing data with VAL\\0 prefix."""
+    from xrpl.core.binarycodec import decode, encode_for_signing
 
-    while pos < end:
-        byte1 = raw[pos]
-        type_code = byte1 >> 4
-        field_code = byte1 & 0x0F
-        header_start = pos
-        pos += 1
+    try:
+        decoded = decode(val_hex)
+    except Exception:
+        return None
 
-        if type_code == 0 and pos < end:
-            type_code = raw[pos]; pos += 1
-        if field_code == 0 and pos < end:
-            field_code = raw[pos]; pos += 1
-
-        # Field sizes by type
-        if type_code == 1: size = 2          # UInt16
-        elif type_code == 2: size = 4        # UInt32
-        elif type_code == 3: size = 8        # UInt64
-        elif type_code == 4: size = 16       # Hash128
-        elif type_code == 5: size = 32       # Hash256
-        elif type_code == 6:                 # Amount
-            size = 8 if pos < end and (raw[pos] & 0x80) == 0 else 48
-        elif type_code in (7, 8):            # Blob / AccountID (VL-encoded)
-            if pos >= end: break
-            vl = raw[pos]; pos += 1
-            if vl <= 192:
-                size = vl
-            elif vl <= 240 and pos < end:
-                b2 = raw[pos]; pos += 1
-                size = 193 + ((vl - 193) * 256) + b2
-            elif pos + 1 < end:
-                b2 = raw[pos]; pos += 1
-                b3 = raw[pos]; pos += 1
-                size = 12481 + ((vl - 241) * 65536) + (b2 * 256) + b3
-            else:
-                break
-        else:
-            break  # unknown type
-
-        if pos + size > end:
-            break
-
-        # sfLedgerHash: type=5, field=1 (0x51)
-        if type_code == 5 and field_code == 1:
-            ledger_hash = raw[pos:pos + 32].hex().upper()
-
-        # sfSigningPubKey: type=7, field=3 (0x73)
-        elif type_code == 7 and field_code == 3:
-            signing_key = raw[pos:pos + size].hex().upper()
-
-        # sfSignature: type=7, field=6 (0x76)
-        elif type_code == 7 and field_code == 6:
-            signature = raw[pos:pos + size]
-            sig_start = header_start
-            sig_end = pos + size
-
-        pos += size
-
+    signing_key = decoded.get("SigningPubKey", "")
+    signature = decoded.get("Signature", "")
+    ledger_hash = decoded.get("LedgerHash", "")
     if not signing_key or not signature or not ledger_hash:
         return None
 
-    # Strip sfSignature from raw bytes
-    without_sig = raw[:sig_start] + raw[sig_end:]
+    # encode_for_signing strips sfSignature and prefixes with STX\0.
+    # Swap to VAL\0 for validation signing data.
+    signing_hex = encode_for_signing(decoded)
+    signing_bytes = b"VAL\x00" + unhexlify(signing_hex)[4:]
 
     return {
-        "ledger_hash": ledger_hash,
-        "signing_key": signing_key,
-        "signature": signature,
-        "without_signature": without_sig,
+        "ledger_hash": ledger_hash.upper(),
+        "signing_key": signing_key.upper(),
+        "signature": unhexlify(signature),
+        "signing_data": signing_bytes,
     }
 
 
@@ -289,19 +236,16 @@ def verify_anchor(anchor: dict, trusted_key: str) -> tuple[bool, str]:
     counted_keys: set[str] = set()
 
     for _key_hex, val_hex in validations.items():
-        val_bytes = unhexlify(val_hex)
-        parsed = parse_validation(val_bytes)
+        parsed = parse_validation(val_hex)
         if not parsed:
             continue
 
         if parsed["ledger_hash"] != anchor_hash:
             continue
 
-        # Verify: VAL\0 + without_signature
-        signing_data = b"VAL\x00" + parsed["without_signature"]
         try:
             if not xrpl.core.keypairs.is_valid_message(
-                signing_data, parsed["signature"], parsed["signing_key"]
+                parsed["signing_data"], parsed["signature"], parsed["signing_key"]
             ):
                 continue
         except Exception:
