@@ -675,8 +675,12 @@ build_proof_DEAD(
             state_proofs.emplace_back(long_skip_key, std::move(sp));
         }
 
-        flag_hdr_result =
-            co_await node_cache->get_header(flag_seq, peers, client);
+        flag_hdr_result = co_await with_peer_failover(
+            client, flag_seq, "fetch flag ledger header",
+            [&](std::shared_ptr<PeerClient> peer)
+                -> boost::asio::awaitable<LedgerHeaderResult> {
+                co_return co_await node_cache->get_header(flag_seq, peers, peer);
+            });
         auto flag_hash = flag_hdr_result->ledger_hash256();
         auto flag_header = flag_hdr_result->header();
 
@@ -950,13 +954,12 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     // walk_state uses NodeCache::walk_to — content-addressed, cross-ledger
     // sharing, concurrent dedup. Needs the tree root hash (account_hash)
     // in addition to ledger_hash.
-    auto walk_state =
-        [&](Hash256 const& ledger_hash,
-            uint32_t ledger_seq,
-            Hash256 const& state_root_hash,
-            Hash256 const& key,
-            std::shared_ptr<PeerClient> peer = nullptr)
-            -> boost::asio::awaitable<WalkResult> {
+    auto walk_state = [&](Hash256 const& ledger_hash,
+                          uint32_t ledger_seq,
+                          Hash256 const& state_root_hash,
+                          Hash256 const& key,
+                          std::shared_ptr<PeerClient> peer =
+                              nullptr) -> boost::asio::awaitable<WalkResult> {
         auto result = co_await node_cache->walk_to(
             state_root_hash,
             key,
@@ -971,13 +974,12 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     };
 
     // walk_tx same pattern but liTX_NODE
-    auto walk_tx =
-        [&](Hash256 const& ledger_hash,
-            uint32_t ledger_seq,
-            Hash256 const& tx_root_hash,
-            Hash256 const& key,
-            std::shared_ptr<PeerClient> peer = nullptr)
-            -> boost::asio::awaitable<WalkResult> {
+    auto walk_tx = [&](Hash256 const& ledger_hash,
+                       uint32_t ledger_seq,
+                       Hash256 const& tx_root_hash,
+                       Hash256 const& key,
+                       std::shared_ptr<PeerClient> peer =
+                           nullptr) -> boost::asio::awaitable<WalkResult> {
         auto result = co_await node_cache->walk_to(
             tx_root_hash,
             key,
@@ -1210,8 +1212,14 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     client =
         co_await acquire_peer(client, anchor_seq, "fetch anchor ledger header");
 
-    auto anchor_hdr =
-        co_await node_cache->get_header(anchor_seq, peers, client);
+    auto anchor_hdr = co_await with_peer_failover(
+        client,
+        anchor_seq,
+        "fetch anchor ledger header",
+        [&](std::shared_ptr<PeerClient> peer)
+            -> boost::asio::awaitable<LedgerHeaderResult> {
+            co_return co_await node_cache->get_header(anchor_seq, peers, peer);
+        });
     auto anchor_header = anchor_hdr.header();
 
     // ── Step 5: Determine hop path ──
@@ -1237,8 +1245,11 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             [&](std::shared_ptr<PeerClient> peer)
                 -> boost::asio::awaitable<WalkResult> {
                 co_return co_await walk_state(
-                    anchor_hash, anchor_seq,
-                    anchor_header.account_hash(), skip_key_val, peer);
+                    anchor_hash,
+                    anchor_seq,
+                    anchor_header.account_hash(),
+                    skip_key_val,
+                    peer);
             });
         if (!wr.found)
             throw std::runtime_error("Short skip list not found in state tree");
@@ -1247,8 +1258,15 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             build_state_proof(wr, skip_key_val, anchor_header.account_hash());
         state_proofs.emplace_back(skip_key_val, std::move(sp));
 
-        target_hdr_result =
-            co_await node_cache->get_header(tx_ledger_seq, peers, client);
+        target_hdr_result = co_await with_peer_failover(
+            client,
+            tx_ledger_seq,
+            "fetch target ledger header",
+            [&](std::shared_ptr<PeerClient> peer)
+                -> boost::asio::awaitable<LedgerHeaderResult> {
+                co_return co_await node_cache->get_header(
+                    tx_ledger_seq, peers, peer);
+            });
         target_ledger_hash = target_hdr_result->ledger_hash256();
 
         Slice sle_leaf(wr.leaf_data.data(), wr.leaf_data.size());
@@ -1280,8 +1298,11 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             [&](std::shared_ptr<PeerClient> peer)
                 -> boost::asio::awaitable<WalkResult> {
                 co_return co_await walk_state(
-                    anchor_hash, anchor_seq,
-                    anchor_header.account_hash(), long_skip_key, peer);
+                    anchor_hash,
+                    anchor_seq,
+                    anchor_header.account_hash(),
+                    long_skip_key,
+                    peer);
             });
         if (!wr1.found)
             throw std::runtime_error("Long skip list not found in state tree");
@@ -1292,8 +1313,15 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             state_proofs.emplace_back(long_skip_key, std::move(sp));
         }
 
-        flag_hdr_result =
-            co_await node_cache->get_header(flag_seq, peers, client);
+        flag_hdr_result = co_await with_peer_failover(
+            client,
+            flag_seq,
+            "fetch flag ledger header",
+            [&](std::shared_ptr<PeerClient> peer)
+                -> boost::asio::awaitable<LedgerHeaderResult> {
+                co_return co_await node_cache->get_header(
+                    flag_seq, peers, peer);
+            });
         auto flag_hash = flag_hdr_result->ledger_hash256();
         auto flag_header = flag_hdr_result->header();
 
@@ -1315,8 +1343,11 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             [&](std::shared_ptr<PeerClient> peer)
                 -> boost::asio::awaitable<WalkResult> {
                 co_return co_await walk_state(
-                    flag_hash, flag_seq,
-                    flag_header.account_hash(), short_skip_key, peer);
+                    flag_hash,
+                    flag_seq,
+                    flag_header.account_hash(),
+                    short_skip_key,
+                    peer);
             });
         if (!wr2.found)
             throw std::runtime_error(
@@ -1328,8 +1359,15 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             state_proofs.emplace_back(short_skip_key, std::move(sp));
         }
 
-        target_hdr_result =
-            co_await node_cache->get_header(tx_ledger_seq, peers, client);
+        target_hdr_result = co_await with_peer_failover(
+            client,
+            tx_ledger_seq,
+            "fetch target ledger header",
+            [&](std::shared_ptr<PeerClient> peer)
+                -> boost::asio::awaitable<LedgerHeaderResult> {
+                co_return co_await node_cache->get_header(
+                    tx_ledger_seq, peers, peer);
+            });
         target_ledger_hash = target_hdr_result->ledger_hash256();
 
         Slice short_sle(wr2.leaf_data.data(), wr2.leaf_data.size());
@@ -1346,8 +1384,15 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     // ── Step 6: Target header ──
     if (!target_hdr_result)
     {
-        target_hdr_result =
-            co_await node_cache->get_header(tx_ledger_seq, peers, client);
+        target_hdr_result = co_await with_peer_failover(
+            client,
+            tx_ledger_seq,
+            "fetch target ledger header",
+            [&](std::shared_ptr<PeerClient> peer)
+                -> boost::asio::awaitable<LedgerHeaderResult> {
+                co_return co_await node_cache->get_header(
+                    tx_ledger_seq, peers, peer);
+            });
     }
     auto const& target_hdr = *target_hdr_result;
     auto target_header = target_hdr.header();
@@ -1363,8 +1408,11 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
         [&](std::shared_ptr<PeerClient> peer)
             -> boost::asio::awaitable<WalkResult> {
             co_return co_await walk_tx(
-                ledger_hash, tx_ledger_seq,
-                target_header.tx_hash(), tx_hash, peer);
+                ledger_hash,
+                tx_ledger_seq,
+                target_header.tx_hash(),
+                tx_hash,
+                peer);
         });
 
     if (!tx_walk.found)
@@ -1463,8 +1511,15 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
             uint32_t flag_seq = flag_ledger_for(tx_ledger_seq);
             if (!flag_hdr_result)
             {
-                flag_hdr_result =
-                    co_await node_cache->get_header(flag_seq, peers, client);
+                flag_hdr_result = co_await with_peer_failover(
+                    client,
+                    flag_seq,
+                    "re-fetch flag header",
+                    [&](std::shared_ptr<PeerClient> peer)
+                        -> boost::asio::awaitable<LedgerHeaderResult> {
+                        co_return co_await node_cache->get_header(
+                            flag_seq, peers, peer);
+                    });
             }
             proof_chain.steps.push_back(make_header(*flag_hdr_result));
         }

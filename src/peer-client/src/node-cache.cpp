@@ -67,10 +67,16 @@ NodeCache::walk_to(
 
     for (int depth = 0; depth < 64; ++depth)
     {
-        auto const* wire =
-            co_await ensure_present(
-                cursor, ledger_hash, ledger_seq, tree_type, pos,
-                target_key, spec_depth, peers, peer);
+        auto const* wire = co_await ensure_present(
+            cursor,
+            ledger_hash,
+            ledger_seq,
+            tree_type,
+            pos,
+            target_key,
+            spec_depth,
+            peers,
+            peer);
 
         // Halve speculation after each fetch round
         if (spec_depth > 1)
@@ -134,11 +140,7 @@ NodeCache::walk_to(
         if (next_hash == Hash256::zero())
         {
             PLOGD(
-                log_,
-                "  depth=",
-                depth,
-                " DEAD END at nibble ",
-                target_nibble);
+                log_, "  depth=", depth, " DEAD END at nibble ", target_nibble);
             co_return result;  // found=false, branch is empty
         }
 
@@ -300,8 +302,13 @@ NodeCache::ensure_present(
 
     // Fetch — includes speculative deeper nodes along the key path
     bool ok = co_await fetch_node(
-        expected_hash, ledger_hash, tree_type, position,
-        target_key, speculative_depth, peer);
+        expected_hash,
+        ledger_hash,
+        tree_type,
+        position,
+        target_key,
+        speculative_depth,
+        peer);
 
     if (ok)
     {
@@ -652,7 +659,8 @@ NodeCache::get_header(
         {
             std::lock_guard lock(mutex_);
             auto it = header_cache_.find(ledger_seq);
-            if (it != header_cache_.end() && !it->second.present && it->second.signal)
+            if (it != header_cache_.end() && !it->second.present &&
+                it->second.signal)
             {
                 PLOGD(log_, "  get_header: IN-FLIGHT seq=", ledger_seq);
                 signal = it->second.signal;
@@ -678,22 +686,24 @@ NodeCache::get_header(
     {
         std::lock_guard lock(mutex_);
         auto& entry = header_cache_[ledger_seq];
-        entry.signal = std::make_shared<asio::steady_timer>(
-            io_, std::chrono::seconds(30));
+        entry.signal =
+            std::make_shared<asio::steady_timer>(io_, std::chrono::seconds(30));
         entry.present = false;
     }
 
     PLOGD(log_, "  get_header: MISS seq=", ledger_seq, " — fetching");
 
-    // Pick a peer
+    // Use the provided peer. If none, try any ready peer (don't wait —
+    // the caller's failover loop handles peer acquisition).
     if (!peer || !peer->is_ready())
     {
         if (peers)
-            peer = co_await peers->wait_for_peer(ledger_seq, 10);
+            peer = peers->any_peer();
     }
 
     if (!peer || !peer->is_ready())
     {
+        PLOGW(log_, "  get_header: no peer for seq=", ledger_seq);
         std::lock_guard lock(mutex_);
         header_cache_.erase(ledger_seq);
         throw PeerClientException(Error::Timeout);
@@ -860,10 +870,7 @@ NodeCache::evict_if_needed()
                 lru_.splice(lru_.begin(), lru_, std::prev(lru_.end()));
                 continue;
             }
-            PLOGD(
-                log_,
-                "  evict: hash=",
-                victim.hex().substr(0, 16));
+            PLOGD(log_, "  evict: hash=", victim.hex().substr(0, 16));
             store_.erase(it);
         }
         lru_map_.erase(victim);
