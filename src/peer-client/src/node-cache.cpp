@@ -295,11 +295,19 @@ NodeCache::ensure_present(
             ledger_seq,
             " for hash=",
             expected_hash.hex().substr(0, 16));
-        // Clean up in-flight entry
+        // Clean up in-flight entry and wake waiters
+        std::shared_ptr<asio::steady_timer> sig;
         {
             std::lock_guard lock(mutex_);
-            store_.erase(expected_hash);
+            auto it = store_.find(expected_hash);
+            if (it != store_.end())
+            {
+                sig = it->second.signal;
+                store_.erase(it);
+            }
         }
+        if (sig)
+            sig->cancel();
         fetch_errors_++;
         co_return nullptr;
     }
@@ -324,11 +332,19 @@ NodeCache::ensure_present(
         }
     }
 
-    // Fetch failed — clean up
+    // Fetch failed — clean up and wake waiters
+    std::shared_ptr<asio::steady_timer> sig;
     {
         std::lock_guard lock(mutex_);
-        store_.erase(expected_hash);
+        auto it = store_.find(expected_hash);
+        if (it != store_.end())
+        {
+            sig = it->second.signal;
+            store_.erase(it);
+        }
     }
+    if (sig)
+        sig->cancel();
     co_return nullptr;
 }
 
@@ -648,56 +664,56 @@ NodeCache::get_header(
     std::shared_ptr<PeerSet> peers,
     std::shared_ptr<PeerClient> peer)
 {
-    // Fast path: already cached
+    // Single lock: check present → check in-flight → create in-flight.
+    enum class Action { hit, wait, fetch };
+    Action action;
+    std::shared_ptr<asio::steady_timer> signal;
+    LedgerHeaderResult hit_result;
+
     {
+        std::lock_guard lock(mutex_);
+        auto [it, inserted] = header_cache_.try_emplace(ledger_seq);
+
+        if (!inserted && it->second.present)
+        {
+            action = Action::hit;
+            hit_result = it->second.result;
+            PLOGD(log_, "  get_header: HIT seq=", ledger_seq);
+        }
+        else if (!inserted && it->second.signal)
+        {
+            action = Action::wait;
+            signal = it->second.signal;
+            PLOGD(log_, "  get_header: IN-FLIGHT seq=", ledger_seq);
+        }
+        else
+        {
+            it->second.signal = std::make_shared<asio::steady_timer>(
+                io_, std::chrono::seconds(30));
+            it->second.present = false;
+            action = Action::fetch;
+            PLOGD(log_, "  get_header: MISS seq=", ledger_seq, " — fetching");
+        }
+    }  // mutex released
+
+    if (action == Action::hit)
+        co_return hit_result;
+
+    if (action == Action::wait)
+    {
+        boost::system::error_code ec;
+        co_await signal->async_wait(
+            asio::redirect_error(asio::use_awaitable, ec));
+
         std::lock_guard lock(mutex_);
         auto it = header_cache_.find(ledger_seq);
         if (it != header_cache_.end() && it->second.present)
-        {
-            PLOGD(log_, "  get_header: HIT seq=", ledger_seq);
             co_return it->second.result;
-        }
+
+        throw PeerClientException(Error::Timeout);
     }
 
-    // Check if in-flight — wait on signal
-    {
-        std::shared_ptr<asio::steady_timer> signal;
-        {
-            std::lock_guard lock(mutex_);
-            auto it = header_cache_.find(ledger_seq);
-            if (it != header_cache_.end() && !it->second.present &&
-                it->second.signal)
-            {
-                PLOGD(log_, "  get_header: IN-FLIGHT seq=", ledger_seq);
-                signal = it->second.signal;
-            }
-        }
-
-        if (signal)
-        {
-            boost::system::error_code ec;
-            co_await signal->async_wait(
-                asio::redirect_error(asio::use_awaitable, ec));
-
-            std::lock_guard lock(mutex_);
-            auto it = header_cache_.find(ledger_seq);
-            if (it != header_cache_.end() && it->second.present)
-                co_return it->second.result;
-
-            throw PeerClientException(Error::Timeout);
-        }
-    }
-
-    // Miss — create in-flight entry and fetch
-    {
-        std::lock_guard lock(mutex_);
-        auto& entry = header_cache_[ledger_seq];
-        entry.signal =
-            std::make_shared<asio::steady_timer>(io_, std::chrono::seconds(30));
-        entry.present = false;
-    }
-
-    PLOGD(log_, "  get_header: MISS seq=", ledger_seq, " — fetching");
+    // action == Action::fetch
 
     // Use the provided peer. If none, try any ready peer (don't wait —
     // the caller's failover loop handles peer acquisition).
@@ -710,8 +726,18 @@ NodeCache::get_header(
     if (!peer || !peer->is_ready())
     {
         PLOGW(log_, "  get_header: no peer for seq=", ledger_seq);
-        std::lock_guard lock(mutex_);
-        header_cache_.erase(ledger_seq);
+        std::shared_ptr<asio::steady_timer> sig;
+        {
+            std::lock_guard lock(mutex_);
+            auto it = header_cache_.find(ledger_seq);
+            if (it != header_cache_.end())
+            {
+                sig = it->second.signal;
+                header_cache_.erase(it);
+            }
+        }
+        if (sig)
+            sig->cancel();
         throw PeerClientException(Error::Timeout);
     }
 
@@ -768,7 +794,7 @@ NodeCache::has(Hash256 const& hash) const
     return it != store_.end() && it->second.present;
 }
 
-std::vector<uint8_t> const*
+std::shared_ptr<std::vector<uint8_t>>
 NodeCache::get(Hash256 const& hash) const
 {
     std::lock_guard lock(mutex_);
@@ -777,7 +803,7 @@ NodeCache::get(Hash256 const& hash) const
     {
         hits_++;
         touch_lru(hash);
-        return it->second.wire_data.get();
+        return it->second.wire_data;
     }
     misses_++;
     return nullptr;

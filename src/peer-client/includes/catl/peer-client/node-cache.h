@@ -115,7 +115,7 @@ public:
     has(Hash256 const& hash) const;
 
     /// Get the wire data for a hash. Returns nullptr if not cached/present.
-    std::vector<uint8_t> const*
+    std::shared_ptr<std::vector<uint8_t>>
     get(Hash256 const& hash) const;
 
     /// Legacy compatibility: put by hash.
