@@ -210,14 +210,33 @@ NodeCache::ensure_present(
         }
         else if (!inserted && it->second.signal)
         {
-            // IN-FLIGHT — someone else is fetching, wait on their signal
-            signal = it->second.signal;
-            action = Action::wait;
-            PLOGD(
-                log_,
-                "  ensure: IN-FLIGHT hash=",
-                expected_hash.hex().substr(0, 16),
-                " — waiting on signal");
+            // IN-FLIGHT — check if the signal is stale (orphaned by a
+            // cancelled prove). If expired, take over instead of waiting.
+            if (it->second.signal->expiry() <=
+                std::chrono::steady_clock::now())
+            {
+                // Stale — replace with fresh in-flight entry
+                misses_++;
+                it->second.signal = std::make_shared<asio::steady_timer>(
+                    io_, std::chrono::seconds(fetch_timeout_secs_));
+                it->second.present = false;
+                action = Action::fetch;
+                PLOGD(
+                    log_,
+                    "  ensure: STALE in-flight hash=",
+                    expected_hash.hex().substr(0, 16),
+                    " — re-fetching");
+            }
+            else
+            {
+                signal = it->second.signal;
+                action = Action::wait;
+                PLOGD(
+                    log_,
+                    "  ensure: IN-FLIGHT hash=",
+                    expected_hash.hex().substr(0, 16),
+                    " — waiting on signal");
+            }
         }
         else
         {

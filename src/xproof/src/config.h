@@ -46,7 +46,9 @@ struct Config
     /// Per-node fetch timeout in seconds. When a peer doesn't respond
     /// within this window, the request is retried on a different peer.
     /// Lower = faster failover, higher = more tolerant of slow peers.
-    int fetch_timeout_secs = 5;
+    /// Also affects recovery after cancelled requests leave orphaned
+    /// in-flight cache entries.
+    int fetch_timeout_secs = 3;
 
     /// Max concurrent RPC connections. Limits fd usage and avoids
     /// overwhelming the RPC endpoint under high load.
