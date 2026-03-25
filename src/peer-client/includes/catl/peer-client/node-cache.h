@@ -174,24 +174,26 @@ private:
     };
 
     /// Ensure a node is in the cache. Fetches from peer on miss.
+    /// Peer must be pre-acquired by walk_to — no strand hop here.
     /// Returns shared wire data, or nullptr on timeout/error.
     asio::awaitable<std::shared_ptr<std::vector<uint8_t>>>
     ensure_present(
         Hash256 expected_hash,
         Hash256 ledger_hash,
-        uint32_t ledger_seq,
         int tree_type,
         SHAMapNodeID position,
         Hash256 const& target_key,
         int speculative_depth,
-        std::shared_ptr<PeerSet> peers,
         std::shared_ptr<PeerClient> peer);
+
+    /// Fetch result: success (data arrived), timeout (peer didn't respond),
+    /// or cancelled (coroutine cancellation — don't retry, don't erase entry).
+    enum class FetchResult { success, timeout, cancelled };
 
     /// Fetch node(s) from a peer, insert all response nodes into cache.
     /// Sends the primary position plus speculative deeper positions
     /// along the target key path in one TMGetLedger request.
-    /// Returns true if the expected (primary) node was populated.
-    asio::awaitable<bool>
+    asio::awaitable<FetchResult>
     fetch_node(
         Hash256 expected_hash,
         Hash256 ledger_hash,

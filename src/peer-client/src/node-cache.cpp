@@ -6,10 +6,12 @@
 #include <catl/crypto/sha512-half-hasher.h>
 
 #include <boost/asio/redirect_error.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
 #include <cstring>
+#include <unordered_set>
 
 namespace catl::peer_client {
 
@@ -53,6 +55,38 @@ NodeCache::walk_to(
     // Halves each round: 8 → 4 → 2 → 1 (same strategy as old TreeWalker).
     int spec_depth = (tree_type == 2) ? 8 : 4;  // state=8, tx=4
 
+    // ── Acquire peer ONCE up front (single strand hop) ──
+    // This eliminates per-depth strand contention that was causing laggards
+    // with 300+ concurrent proves. On failure mid-walk, we retry with a
+    // different peer (max 2 retries per walk).
+    auto peer_covers = [](std::shared_ptr<PeerClient> const& p, uint32_t seq) {
+        if (!p || !p->is_ready())
+            return false;
+        auto first = p->peer_first_seq();
+        auto last = p->peer_last_seq();
+        return first != 0 && last != 0 && seq >= first && seq <= last;
+    };
+
+    if (!peer_covers(peer, ledger_seq))
+    {
+        if (peers)
+        {
+            PLOGD(
+                log_,
+                "walk_to: peer ",
+                (peer ? peer->endpoint() : "<none>"),
+                " doesn't cover ledger ",
+                ledger_seq,
+                " — acquiring one");
+            peer = co_await peers->wait_for_peer(ledger_seq, 10);
+        }
+        if (!peer || !peer->is_ready())
+        {
+            PLOGW(log_, "walk_to: no peer available for ledger ", ledger_seq);
+            co_return result;
+        }
+    }
+
     PLOGI(
         log_,
         "walk_to: root=",
@@ -64,19 +98,23 @@ NodeCache::walk_to(
         " type=",
         tree_type,
         " spec=",
-        spec_depth);
+        spec_depth,
+        " peer=",
+        peer->endpoint());
+
+    int peer_retries = 0;
+    static constexpr int kMaxPeerRetries = 2;
+    std::unordered_set<std::string> failed_peers;
 
     for (int depth = 0; depth < 64; ++depth)
     {
         auto wire = co_await ensure_present(
             cursor,
             ledger_hash,
-            ledger_seq,
             tree_type,
             pos,
             target_key,
             spec_depth,
-            peers,
             peer);
 
         // Halve speculation after each fetch round
@@ -85,15 +123,60 @@ NodeCache::walk_to(
 
         if (!wire)
         {
+            // Check if we were cancelled (client disconnect). If so,
+            // bail immediately — no retries. The in-flight cache entry
+            // is left alive for other proves and the peer response handler.
+            auto cs = (co_await asio::this_coro::cancellation_state).cancelled();
+            if (cs != asio::cancellation_type::none)
+            {
+                PLOGD(
+                    log_,
+                    "  depth=",
+                    depth,
+                    " CANCELLED — stopping walk");
+                co_return result;
+            }
+
+            // Peer failed — exclude it and try a different one
+            if (peer_retries < kMaxPeerRetries && peers)
+            {
+                if (peer)
+                    failed_peers.insert(peer->endpoint());
+
+                PLOGW(
+                    log_,
+                    "  depth=",
+                    depth,
+                    " MISS hash=",
+                    cursor.hex().substr(0, 16),
+                    " — retrying with different peer (",
+                    peer_retries + 1,
+                    "/",
+                    kMaxPeerRetries,
+                    "), excluded=",
+                    failed_peers.size());
+                auto new_peer = co_await peers->wait_for_peer(
+                    ledger_seq, 10, failed_peers);
+                if (new_peer && new_peer->is_ready())
+                {
+                    peer = new_peer;
+                    ++peer_retries;
+                    --depth;  // retry this depth
+                    continue;
+                }
+            }
             PLOGW(
                 log_,
                 "  depth=",
                 depth,
                 " MISS hash=",
                 cursor.hex().substr(0, 16),
-                " — timeout/error");
+                " — giving up");
             co_return result;  // found=false, caller retries
         }
+
+        // Reset retry counter on success
+        peer_retries = 0;
 
         WireNodeView node(*wire);
 
@@ -174,16 +257,16 @@ asio::awaitable<std::shared_ptr<std::vector<uint8_t>>>
 NodeCache::ensure_present(
     Hash256 expected_hash,
     Hash256 ledger_hash,
-    uint32_t ledger_seq,
     int tree_type,
     SHAMapNodeID position,
     Hash256 const& target_key,
     int speculative_depth,
-    std::shared_ptr<PeerSet> peers,
     std::shared_ptr<PeerClient> peer)
 {
     // Single lock: check present → check in-flight → create in-flight.
     // Eliminates TOCTOU race where two coroutines both create in-flight.
+    //
+    // Peer is pre-acquired by walk_to — no strand hop here.
     enum class Action { hit, wait, fetch };
     Action action;
     std::shared_ptr<asio::steady_timer> signal;
@@ -280,40 +363,12 @@ NodeCache::ensure_present(
         co_return nullptr;
     }
 
-    // action == Action::fetch
-    // Smart peer selection: use provided peer if it covers the ledger,
-    // otherwise find one via wait_for_peer (awaitable, hops to strand).
-    auto peer_covers = [](std::shared_ptr<PeerClient> const& p, uint32_t seq) {
-        if (!p || !p->is_ready())
-            return false;
-        auto first = p->peer_first_seq();
-        auto last = p->peer_last_seq();
-        return first != 0 && last != 0 && seq >= first && seq <= last;
-    };
-
-    if (!peer_covers(peer, ledger_seq))
-    {
-        if (peers)
-        {
-            PLOGD(
-                log_,
-                "  ensure: peer ",
-                (peer ? peer->endpoint() : "<none>"),
-                " doesn't cover ledger ",
-                ledger_seq,
-                " — waiting for one");
-            // wait_for_peer is awaitable and hops to the PeerSet strand
-            peer = co_await peers->wait_for_peer(ledger_seq, 10);
-        }
-    }
-
+    // action == Action::fetch — peer is pre-acquired by walk_to
     if (!peer || !peer->is_ready())
     {
         PLOGW(
             log_,
-            "  ensure: no peer covering ledger ",
-            ledger_seq,
-            " for hash=",
+            "  ensure: peer not ready for hash=",
             expected_hash.hex().substr(0, 16));
         // Clean up in-flight entry and wake waiters
         std::shared_ptr<asio::steady_timer> sig;
@@ -333,7 +388,7 @@ NodeCache::ensure_present(
     }
 
     // Fetch — includes speculative deeper nodes along the key path
-    bool ok = co_await fetch_node(
+    auto fetch_result = co_await fetch_node(
         expected_hash,
         ledger_hash,
         tree_type,
@@ -342,7 +397,7 @@ NodeCache::ensure_present(
         speculative_depth,
         peer);
 
-    if (ok)
+    if (fetch_result == FetchResult::success)
     {
         std::lock_guard lock(mutex_);
         auto it = store_.find(expected_hash);
@@ -352,7 +407,15 @@ NodeCache::ensure_present(
         }
     }
 
-    // Fetch failed — clean up and wake waiters
+    if (fetch_result == FetchResult::cancelled)
+    {
+        // Coroutine cancellation (client disconnect). Do NOT erase the
+        // in-flight entry — the peer response will still arrive and
+        // populate it for other proves waiting on the same hash.
+        co_return nullptr;
+    }
+
+    // Timeout — clean up entry and wake waiters so they can retry
     std::shared_ptr<asio::steady_timer> sig;
     {
         std::lock_guard lock(mutex_);
@@ -365,6 +428,7 @@ NodeCache::ensure_present(
     }
     if (sig)
         sig->cancel();
+    fetch_errors_++;
     co_return nullptr;
 }
 
@@ -376,7 +440,7 @@ NodeCache::ensure_present(
 // on_node_response callback → insert_and_notify → signal fires.
 // ═══════════════════════════════════════════════════════════════════════
 
-asio::awaitable<bool>
+asio::awaitable<NodeCache::FetchResult>
 NodeCache::fetch_node(
     Hash256 expected_hash,
     Hash256 ledger_hash,
@@ -438,7 +502,7 @@ NodeCache::fetch_node(
         if (it != store_.end())
         {
             if (it->second.present)
-                co_return true;  // already populated (race won)
+                co_return FetchResult::success;  // already populated (race won)
             signal = it->second.signal;
         }
     }
@@ -449,19 +513,39 @@ NodeCache::fetch_node(
             log_,
             "  fetch: no signal for hash=",
             expected_hash.hex().substr(0, 16));
-        co_return false;
+        co_return FetchResult::timeout;
     }
 
     boost::system::error_code ec;
     co_await signal->async_wait(asio::redirect_error(asio::use_awaitable, ec));
 
-    // Check if the entry was populated
+    // Distinguish cancellation from timeout/normal wake.
+    // operation_aborted from enable_total_cancellation means the prove
+    // was cancelled (client disconnect). Don't retry, don't erase the
+    // entry — the peer response will still arrive and populate it for
+    // other waiters.
+    if (ec == asio::error::operation_aborted)
+    {
+        // Check if it was actually fulfilled before the cancel landed
+        std::lock_guard lock(mutex_);
+        auto it = store_.find(expected_hash);
+        if (it != store_.end() && it->second.present)
+            co_return FetchResult::success;
+
+        PLOGD(
+            log_,
+            "  fetch: CANCELLED hash=",
+            expected_hash.hex().substr(0, 16));
+        co_return FetchResult::cancelled;
+    }
+
+    // Check if the entry was populated (normal wake from insert_and_notify)
     {
         std::lock_guard lock(mutex_);
         auto it = store_.find(expected_hash);
         if (it != store_.end() && it->second.present)
         {
-            co_return true;
+            co_return FetchResult::success;
         }
     }
 
@@ -469,7 +553,7 @@ NodeCache::fetch_node(
         log_,
         "  fetch: signal fired but entry not present for hash=",
         expected_hash.hex().substr(0, 16));
-    co_return false;
+    co_return FetchResult::timeout;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
