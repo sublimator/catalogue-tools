@@ -672,7 +672,15 @@ PeerSet::queue_connect(std::string const& endpoint)
     auto failed = failed_at_.find(key);
     if (failed != failed_at_.end())
     {
-        if (now - failed->second < options_.retry_backoff)
+        // Exponential backoff based on failure count:
+        // 1 failure → 5s, 2 → 10s, 3 → 20s, 4 → 40s, cap at 5 min.
+        auto stats_it = endpoint_stats_.find(key);
+        uint64_t failures = stats_it != endpoint_stats_.end()
+            ? stats_it->second.failure_count
+            : 1;
+        auto backoff = options_.retry_backoff *
+            std::min<uint64_t>(1u << std::min(failures, uint64_t{6}), 64);
+        if (now - failed->second < backoff)
         {
             return;
         }
