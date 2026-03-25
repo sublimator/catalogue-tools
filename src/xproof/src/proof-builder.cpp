@@ -1163,33 +1163,13 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                 ledger_seq <= last;
         };
 
-        // Don't waste archival peers on recent ledgers — hubs can serve those.
-        // An archival peer has a very wide range (>1M ledgers). If the required
-        // ledger is near the tip (within the peer's last 100K), let
-        // wait_for_peer pick a hub instead.
-        auto is_archival_waste = [](std::shared_ptr<PeerClient> const& peer,
-                                    uint32_t ledger_seq) {
-            if (!peer || !peer->is_ready())
-                return false;
-            auto const first = peer->peer_first_seq();
-            auto const last = peer->peer_last_seq();
-            if (first == 0 || last == 0)
-                return false;
-            auto const span = last - first;
-            // Archival = span > 1M, and the requested ledger is recent
-            // (within last 100K of the peer's range)
-            return span > 1'000'000 && ledger_seq > (last - 100'000);
-        };
-
         for (;;)
         {
             auto excluded = collect_excluded_peers();
             if (current && current->is_ready() &&
                 !excluded.count(current->endpoint()) &&
                 (!required_ledger ||
-                 peer_covers_ledger(current, *required_ledger)) &&
-                (!required_ledger ||
-                 !is_archival_waste(current, *required_ledger)))
+                 peer_covers_ledger(current, *required_ledger)))
             {
                 co_return current;
             }
