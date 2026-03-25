@@ -348,9 +348,14 @@ HttpServer::handle_session(tcp::socket socket)
                     // when the client disconnects. The socket is idle
                     // during prove (read completed, write hasn't started),
                     // so async_wait(wait_read) is safe here.
+                    // Use a shared flag to stop the watcher when prove
+                    // completes normally (avoids dangling async_wait
+                    // conflicting with the next HTTP read).
+                    auto watcher_done = std::make_shared<std::atomic<bool>>(false);
                     co_spawn(
                         stream.get_executor(),
-                        [&stream, request_ctx]() -> asio::awaitable<void> {
+                        [&stream, request_ctx, watcher_done]()
+                            -> asio::awaitable<void> {
                             boost::system::error_code wec;
                             co_await beast::get_lowest_layer(stream)
                                 .socket()
@@ -358,14 +363,24 @@ HttpServer::handle_session(tcp::socket socket)
                                     asio::ip::tcp::socket::wait_read,
                                     asio::redirect_error(
                                         asio::use_awaitable, wec));
-                            // Socket became readable = client closed or
-                            // sent unexpected data. Cancel the prove.
-                            request_ctx->cancel();
+                            if (!watcher_done->load())
+                            {
+                                // Socket became readable before prove
+                                // finished = client disconnected.
+                                request_ctx->cancel();
+                            }
                         },
                         asio::detached);
 
                     auto result = co_await engine_->prove(
                         tx_it->second, request_ctx);
+
+                    // Prove completed — cancel the watcher's async_wait
+                    // before we touch the socket again (write response).
+                    watcher_done->store(true);
+                    beast::get_lowest_layer(stream)
+                        .socket()
+                        .cancel();
                     auto format_it = params.find("format");
                     bool binary =
                         format_it != params.end() && format_it->second == "bin";
