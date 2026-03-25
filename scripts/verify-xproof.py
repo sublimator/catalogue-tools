@@ -29,7 +29,7 @@ import sys
 from binascii import hexlify, unhexlify
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 import xrpl.core.keypairs
 from xrpl.core.binarycodec import decode, encode, encode_for_signing
@@ -51,10 +51,20 @@ class UNLData(TypedDict, total=False):
     signature: str  # blob signature (hex)
 
 
+# A 32-byte hash (SHA512-Half result, ledger hash, tree root, etc.)
+Hash256 = bytes
+
+# JSON trie: placeholder (hex hash), leaf [key_hex, data], or inner {branch: child}
+TriePlaceholder = str
+TrieLeaf = list[Any]  # [key_hex: str, leaf_data: dict]
+TrieInner = dict[str, Any]  # {"0": child, ..., "F": child, "__depth__": int}
+TrieNode = TriePlaceholder | TrieLeaf | TrieInner
+
+
 class AnchorStep(TypedDict, total=False):
     """Anchor step: trusted starting point with UNL + validations."""
 
-    type: str  # "anchor"
+    type: Literal["anchor"]
     ledger_hash: str  # trusted ledger hash (hex)
     ledger_index: int
     unl: UNLData
@@ -66,9 +76,9 @@ class LedgerHeader(TypedDict):
 
     seq: int
     drops: str  # string representation of uint64
-    parent_hash: str  # hex
-    tx_hash: str  # hex
-    account_hash: str  # hex
+    parent_hash: str  # 64-char hex
+    tx_hash: str  # 64-char hex
+    account_hash: str  # 64-char hex
     parent_close_time: int
     close_time: int
     close_time_resolution: int
@@ -78,16 +88,16 @@ class LedgerHeader(TypedDict):
 class HeaderStep(TypedDict):
     """Ledger header step: provides tx_hash and account_hash."""
 
-    type: str  # "ledger_header"
+    type: Literal["ledger_header"]
     header: LedgerHeader
 
 
 class MapProofStep(TypedDict, total=False):
     """SHAMap trie proof step: state or tx tree."""
 
-    type: str  # "map_proof"
-    tree: str  # "state" or "tx"
-    trie: str | list[Any] | dict[str, Any]  # TrieNode
+    type: Literal["map_proof"]
+    tree: Literal["state", "tx"]
+    trie: TrieNode
 
 
 class Proof(TypedDict):
@@ -95,15 +105,6 @@ class Proof(TypedDict):
 
     network_id: int
     steps: list[AnchorStep | HeaderStep | MapProofStep]
-
-
-# ─── Internal types ──────────────────────────────────────────────────
-
-# A 32-byte hash (SHA512-Half result, ledger hash, tree root, etc.)
-Hash256 = bytes
-
-# JSON trie node: str (placeholder hash), list (leaf [key, data]), or dict (inner)
-TrieNode = str | list[Any] | dict[str, Any]
 
 
 @dataclass
