@@ -16,6 +16,9 @@
     do { \
         if (!strand_.running_in_this_thread()) { \
             PLOGE(log_, "OFF-STRAND: ", __func__, " at ", __FILE__, ":", __LINE__); \
+            if (std::getenv("XPROOF_STRAND_FAIL_FAST")) { \
+                std::abort(); \
+            } \
         } \
     } while (0)
 

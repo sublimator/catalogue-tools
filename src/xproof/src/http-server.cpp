@@ -5,16 +5,11 @@
 #include <catl/core/logger.h>
 #include <catl/peer-client/peer-client-coro.h>
 #include <catl/rpc-client/rpc-client.h>
-#include <xproof/request-context.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/redirect_error.hpp>
-#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
-
-using namespace boost::asio::experimental::awaitable_operators;
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
@@ -186,12 +181,6 @@ HttpServer::handle_session(tcp::socket socket)
     beast::tcp_stream stream(std::move(socket));
     beast::flat_buffer buffer;
 
-    // Per-session cancel timer. Set to max — only fires when cancelled.
-    // Shared with prove coroutines via || operator. On session error,
-    // cancel() fires, the || cancels the in-flight prove.
-    auto session_cancel = std::make_shared<asio::steady_timer>(
-        stream.get_executor(), asio::steady_timer::time_point::max());
-
     for (;;)
     {
         if (is_stopping())
@@ -232,9 +221,6 @@ HttpServer::handle_session(tcp::socket socket)
         auto params = parse_query(query_string);
 
         PLOGD(log_, req.method_string(), " ", req.target());
-
-        // Per-request context for cancellation + future session state
-        auto request_ctx = std::make_shared<RequestContext>();
 
         // ── Route dispatch ────────────────────────────────────────
 
@@ -344,43 +330,7 @@ HttpServer::handle_session(tcp::socket socket)
                 }
                 else
                 {
-                    // Spawn a watcher that cancels the request context
-                    // when the client disconnects. The socket is idle
-                    // during prove (read completed, write hasn't started),
-                    // so async_wait(wait_read) is safe here.
-                    // Use a shared flag to stop the watcher when prove
-                    // completes normally (avoids dangling async_wait
-                    // conflicting with the next HTTP read).
-                    auto watcher_done = std::make_shared<std::atomic<bool>>(false);
-                    co_spawn(
-                        stream.get_executor(),
-                        [&stream, request_ctx, watcher_done]()
-                            -> asio::awaitable<void> {
-                            boost::system::error_code wec;
-                            co_await beast::get_lowest_layer(stream)
-                                .socket()
-                                .async_wait(
-                                    asio::ip::tcp::socket::wait_read,
-                                    asio::redirect_error(
-                                        asio::use_awaitable, wec));
-                            if (!watcher_done->load())
-                            {
-                                // Socket became readable before prove
-                                // finished = client disconnected.
-                                request_ctx->cancel();
-                            }
-                        },
-                        asio::detached);
-
-                    auto result = co_await engine_->prove(
-                        tx_it->second, request_ctx);
-
-                    // Prove completed — cancel the watcher's async_wait
-                    // before we touch the socket again (write response).
-                    watcher_done->store(true);
-                    beast::get_lowest_layer(stream)
-                        .socket()
-                        .cancel();
+                    auto result = co_await engine_->prove(tx_it->second);
                     auto format_it = params.find("format");
                     bool binary =
                         format_it != params.end() && format_it->second == "bin";
@@ -482,22 +432,6 @@ HttpServer::handle_session(tcp::socket socket)
             PLOGW(log_, "Peer error: ", e.what());
             caught_error = error_response(504, e.what(), version, keep_alive);
         }
-        catch (RequestCancelled const&)
-        {
-            // Client disconnected during prove — no response needed.
-            PLOGD(log_, "Request cancelled (client disconnected)");
-            break;
-        }
-        catch (boost::system::system_error const& e)
-        {
-            if (e.code() == asio::error::operation_aborted)
-            {
-                PLOGD(log_, "Operation aborted: ", e.what());
-                break;
-            }
-            PLOGE(log_, "System error: ", e.what());
-            caught_error = error_response(500, e.what(), version, keep_alive);
-        }
         catch (std::exception const& e)
         {
             PLOGE(log_, "Request failed: ", e.what());
@@ -517,11 +451,6 @@ HttpServer::handle_session(tcp::socket socket)
         if (ec || !keep_alive)
             break;
     }
-
-    // Session ending — no in-flight proves to cancel (request_ctx is
-    // per-iteration and already out of scope). The session_cancel timer
-    // is kept for future use with the || operator pattern.
-    session_cancel->cancel();
 }
 
 }  // namespace xproof

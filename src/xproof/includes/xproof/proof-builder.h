@@ -9,7 +9,6 @@
 //      Used by the engine for persistent peer pool + cached VL.
 
 #include "proof-chain.h"
-#include "request-context.h"
 #include "validation-buffer.h"
 
 #include <boost/asio/awaitable.hpp>
@@ -43,7 +42,6 @@ struct BuildServices
     catl::xdata::Protocol const& protocol;
     std::shared_ptr<catl::peer_client::NodeCache> node_cache;
     std::shared_ptr<catl::rpc::RpcClient> rpc;
-    std::shared_ptr<RequestContext> ctx;  // per-request cancel + session state
 
     // Cached tx → ledger_seq (0 = not cached, must do RPC lookup)
     uint32_t tx_ledger_seq_hint = 0;

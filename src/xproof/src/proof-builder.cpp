@@ -16,7 +16,6 @@
 
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <optional>
 #include <unordered_map>
@@ -933,8 +932,6 @@ build_proof_DEAD(
 boost::asio::awaitable<BuildResult>
 build_proof(BuildServices const& svc, std::string const& tx_hash_str)
 {
-    auto const& ctx = svc.ctx;
-
     auto tx_hash = hash_from_hex(tx_hash_str);
     auto& io = svc.io;
     auto& peers = svc.peers;
@@ -1034,7 +1031,6 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     };
 
     // ── Step 1: RPC — look up tx (or use cached ledger_seq) ──
-    if (ctx) ctx->check();
     uint32_t tx_ledger_seq = svc.tx_ledger_seq_hint;
     if (tx_ledger_seq == 0)
     {
@@ -1185,7 +1181,6 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
                                   auto op) -> decltype(op(current)) {
         for (;;)
         {
-            if (ctx) ctx->check();  // cancel check in retry loop
             current = co_await acquire_peer(current, required_ledger, purpose);
             try
             {
@@ -1229,7 +1224,6 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     std::shared_ptr<PeerClient> client;
 
     // ── Step 5: Determine hop path ──
-    if (ctx) ctx->check();
     uint32_t distance = anchor_hdr.seq() - tx_ledger_seq;
     PLOGI(log_, "Distance: ", distance, " ledgers");
 
@@ -1389,7 +1383,6 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     }
 
     // ── Step 6: Target header ──
-    if (ctx) ctx->check();
     if (!target_hdr_result)
     {
         target_hdr_result = co_await with_peer_failover(
@@ -1406,7 +1399,6 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     auto target_header = target_hdr.header();
 
     // ── Step 7: Walk TX tree ──
-    if (ctx) ctx->check();
     auto ledger_hash = target_hdr.ledger_hash256();
     PLOGI(log_, "Walking TX tree for ", tx_hash_str.substr(0, 16), "...");
 
