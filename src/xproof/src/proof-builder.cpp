@@ -16,6 +16,7 @@
 
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <optional>
 #include <unordered_map>
@@ -932,6 +933,10 @@ build_proof_DEAD(
 boost::asio::awaitable<BuildResult>
 build_proof(BuildServices const& svc, std::string const& tx_hash_str)
 {
+    // Propagate cancellation from parent coroutine (prove → HTTP session)
+    co_await boost::asio::this_coro::reset_cancellation_state(
+        boost::asio::enable_total_cancellation());
+
     auto tx_hash = hash_from_hex(tx_hash_str);
     auto& io = svc.io;
     auto& peers = svc.peers;
