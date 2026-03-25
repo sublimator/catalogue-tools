@@ -50,6 +50,7 @@ struct ServeOptions
     uint16_t port = 8080;
     unsigned int threads = 1;
     bool no_cache = false;
+    size_t node_cache_size = 65536;
     std::string rpc_endpoint;
     std::string peer_endpoint;
     std::string peer_cache_path;

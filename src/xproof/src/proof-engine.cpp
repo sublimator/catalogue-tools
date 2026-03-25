@@ -53,7 +53,7 @@ ProofEngine::start()
     // For now, the VL co_get in prove() handles the initial UNL push.
 
     // Node cache (content-addressed wire node store)
-    node_cache_ = NodeCache::create(io_);
+    node_cache_ = NodeCache::create(io_, node_cache_size_);
 
     // Shared RPC client with concurrency limiter (max 8 concurrent connections)
     rpc_ = std::make_shared<catl::rpc::RpcClient>(

@@ -130,6 +130,12 @@ public:
         cache_enabled_ = enabled;
     }
 
+    void
+    set_node_cache_size(size_t max_entries)
+    {
+        node_cache_size_ = max_entries;
+    }
+
 private:
     ProofEngine(boost::asio::io_context& io, NetworkConfig config);
 
@@ -152,6 +158,7 @@ private:
     CacheList cache_lru_;  // front = most recently used
     std::unordered_map<std::string, CacheList::iterator> cache_map_;
     bool cache_enabled_ = true;
+    size_t node_cache_size_ = 65536;
     size_t cache_hits_ = 0;
     size_t cache_misses_ = 0;
 

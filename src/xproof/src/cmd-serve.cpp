@@ -52,6 +52,7 @@ cmd_serve(ServeOptions const& opts)
     {
         engine->set_cache_enabled(false);
     }
+    engine->set_node_cache_size(opts.node_cache_size);
     engine->start();
 
     xproof::HttpServerOptions http_opts;

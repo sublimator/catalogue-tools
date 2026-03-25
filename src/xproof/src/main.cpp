@@ -474,6 +474,14 @@ main(int argc, char* argv[])
                 ++pos;
             }
             else if (
+                arg == "--node-cache-size" &&
+                pos + 1 < command_args.size())
+            {
+                opts.node_cache_size =
+                    std::stoull(command_args[++pos]);
+                ++pos;
+            }
+            else if (
                 (arg == "--peer-cache" || arg == "--peer-cache-path") &&
                 pos + 1 < command_args.size())
             {
