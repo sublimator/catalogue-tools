@@ -5,9 +5,17 @@
 import argparse
 import json
 import random
+import resource
 import subprocess
 import threading
 import tempfile
+
+# Raise fd limit — macOS defaults to 256
+try:
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+except Exception:
+    pass
 import time
 import urllib.parse
 import urllib.request
