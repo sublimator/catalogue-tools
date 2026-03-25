@@ -243,7 +243,19 @@ HttpServer::handle_session(tcp::socket socket)
                 cache["max_entries"] = cs.max_entries;
                 cache["hits"] = cs.hits;
                 cache["misses"] = cs.misses;
-                body["cache"] = cache;
+                body["proof_cache"] = cache;
+
+                auto ncs = engine_->node_cache_stats();
+                boost::json::object nc;
+                nc["entries"] = ncs.entries;
+                nc["max_entries"] = ncs.max_entries;
+                nc["hits"] = ncs.hits;
+                nc["misses"] = ncs.misses;
+                nc["fetches"] = ncs.fetches;
+                nc["fetch_errors"] = ncs.fetch_errors;
+                nc["hash_mismatches"] = ncs.hash_mismatches;
+                nc["waiter_wakeups"] = ncs.waiter_wakeups;
+                body["node_cache"] = nc;
 
                 stream.expires_after(opts_.write_timeout);
                 co_await http::async_write(

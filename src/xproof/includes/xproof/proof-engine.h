@@ -124,6 +124,13 @@ public:
     CacheStats
     cache_stats() const;
 
+    catl::peer_client::NodeCache::Stats
+    node_cache_stats() const
+    {
+        return node_cache_ ? node_cache_->stats()
+                           : catl::peer_client::NodeCache::Stats{};
+    }
+
     void
     set_cache_enabled(bool enabled)
     {

@@ -244,6 +244,18 @@ def peers_poller(
                       for _, e, c in laggards
                   ]
                   parts.append(f"laggards=[{', '.join(lag_strs)}]")
+          # Node cache stats from /health
+          try:
+              health = fetch_json(f"{base_url}/health", timeout=timeout)
+              nc = health.get("node_cache", {})
+              if nc:
+                  parts.append(
+                      f"ncache={nc.get('entries',0)}/{nc.get('max_entries',0)}"
+                      f" hit={nc.get('hits',0)} miss={nc.get('misses',0)}"
+                      f" fetch={nc.get('fetches',0)}"
+                  )
+          except Exception:
+              pass
           print(" ".join(parts), flush=True)
       except Exception as exc:
           elapsed = time.perf_counter() - started
