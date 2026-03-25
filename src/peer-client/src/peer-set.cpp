@@ -804,6 +804,14 @@ PeerSet::pump_crawls()
                         if (peer.endpoint.empty())
                             continue;
 
+                        // Mark as seen in crawl
+                        if (self->endpoint_cache_)
+                        {
+                            try { self->endpoint_cache_->remember_seen_crawl(
+                                self->network_id_, peer.endpoint); }
+                            catch (...) {}
+                        }
+
                         if (auto status =
                                 self->choose_crawl_status(peer.complete_ledgers))
                         {
@@ -914,6 +922,7 @@ PeerSet::configure_tracker_persistence()
                     try
                     {
                         cache->remember_discovered(network_id, endpoint);
+                        cache->remember_seen_endpoints(network_id, endpoint);
                     }
                     catch (std::exception const& e)
                     {

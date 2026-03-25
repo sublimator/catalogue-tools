@@ -30,6 +30,9 @@ public:
         std::int64_t last_failure_at = 0;
         std::uint64_t success_count = 0;
         std::uint64_t failure_count = 0;
+        bool seen_crawl = false;      // appeared in /crawl response
+        bool seen_endpoints = false;  // arrived via TMEndpoints message
+        bool connected_ok = false;    // we successfully connected
     };
 
     static std::shared_ptr<PeerEndpointCache>
@@ -60,6 +63,14 @@ public:
 
     void
     remember_connect_failure(uint32_t network_id, std::string const& endpoint);
+
+    /// Mark a peer as seen in a /crawl response.
+    void
+    remember_seen_crawl(uint32_t network_id, std::string const& endpoint);
+
+    /// Mark a peer as seen in a TMEndpoints message.
+    void
+    remember_seen_endpoints(uint32_t network_id, std::string const& endpoint);
 
     std::string const&
     path() const

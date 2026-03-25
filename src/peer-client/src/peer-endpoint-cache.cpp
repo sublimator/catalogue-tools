@@ -119,8 +119,26 @@ PeerEndpointCache::initialize_schema()
         "  last_failure_at INTEGER NOT NULL DEFAULT 0,"
         "  success_count INTEGER NOT NULL DEFAULT 0,"
         "  failure_count INTEGER NOT NULL DEFAULT 0,"
+        "  seen_crawl INTEGER NOT NULL DEFAULT 0,"
+        "  seen_endpoints INTEGER NOT NULL DEFAULT 0,"
+        "  connected_ok INTEGER NOT NULL DEFAULT 0,"
         "  PRIMARY KEY(network_id, endpoint)"
         ");");
+
+    // Migrate existing databases — ADD COLUMN is safe if column exists
+    // (SQLite returns error which we silently ignore).
+    auto try_add_column = [this](char const* sql) {
+        char* err = nullptr;
+        sqlite3_exec(db_, sql, nullptr, nullptr, &err);
+        if (err)
+            sqlite3_free(err);
+    };
+    try_add_column(
+        "ALTER TABLE peer_endpoints ADD COLUMN seen_crawl INTEGER NOT NULL DEFAULT 0");
+    try_add_column(
+        "ALTER TABLE peer_endpoints ADD COLUMN seen_endpoints INTEGER NOT NULL DEFAULT 0");
+    try_add_column(
+        "ALTER TABLE peer_endpoints ADD COLUMN connected_ok INTEGER NOT NULL DEFAULT 0");
 
     exec_sql(
         db_,
@@ -170,11 +188,13 @@ PeerEndpointCache::load_bootstrap_candidates(
             db_,
             "SELECT endpoint, first_seq, last_seq, current_seq, last_seen_at, "
             "       last_success_at, last_failure_at, success_count, "
-            "       failure_count "
+            "       failure_count, seen_crawl, seen_endpoints, connected_ok "
             "FROM peer_endpoints "
             "WHERE network_id = ? "
             "ORDER BY "
+            "  connected_ok DESC, "
             "  CASE WHEN last_success_at > 0 THEN 1 ELSE 0 END DESC, "
+            "  (seen_crawl + seen_endpoints) DESC, "
             "  last_success_at DESC, "
             "  last_seen_at DESC, "
             "  success_count DESC, "
@@ -210,6 +230,9 @@ PeerEndpointCache::load_bootstrap_candidates(
                 static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 7));
             entry.failure_count =
                 static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 8));
+            entry.seen_crawl = sqlite3_column_int(stmt.get(), 9) != 0;
+            entry.seen_endpoints = sqlite3_column_int(stmt.get(), 10) != 0;
+            entry.connected_ok = sqlite3_column_int(stmt.get(), 11) != 0;
             result.push_back(std::move(entry));
         }
 
@@ -349,15 +372,16 @@ PeerEndpointCache::remember_connect_success(
             db_,
             "INSERT INTO peer_endpoints("
             "  network_id, endpoint, first_seq, last_seq, current_seq, "
-            "  last_seen_at, last_success_at, success_count"
-            ") VALUES(?, ?, ?, ?, ?, ?, ?, 1) "
+            "  last_seen_at, last_success_at, success_count, connected_ok"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, 1, 1) "
             "ON CONFLICT(network_id, endpoint) DO UPDATE SET "
             "  first_seq = excluded.first_seq, "
             "  last_seq = excluded.last_seq, "
             "  current_seq = excluded.current_seq, "
             "  last_seen_at = excluded.last_seen_at, "
             "  last_success_at = excluded.last_success_at, "
-            "  success_count = peer_endpoints.success_count + 1;");
+            "  success_count = peer_endpoints.success_count + 1, "
+            "  connected_ok = 1;");
 
         sqlite3_bind_int(stmt.get(), 1, static_cast<int>(network_id));
         sqlite3_bind_text(
@@ -408,6 +432,80 @@ PeerEndpointCache::remember_connect_failure(
         sqlite3_bind_text(
             stmt.get(), 2, endpoint.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt.get(), 3, now);
+
+        if (sqlite3_step(stmt.get()) != SQLITE_DONE)
+        {
+            throw std::runtime_error(sqlite3_errmsg(db_));
+        }
+    }
+    catch (...)
+    {
+        disable();
+        throw;
+    }
+}
+
+void
+PeerEndpointCache::remember_seen_crawl(
+    uint32_t network_id,
+    std::string const& endpoint)
+{
+    std::lock_guard lock(mutex_);
+    if (is_disabled())
+        return;
+
+    try
+    {
+        Statement stmt(
+            db_,
+            "INSERT INTO peer_endpoints("
+            "  network_id, endpoint, last_seen_at, seen_crawl"
+            ") VALUES(?, ?, ?, 1) "
+            "ON CONFLICT(network_id, endpoint) DO UPDATE SET "
+            "  last_seen_at = excluded.last_seen_at, "
+            "  seen_crawl = 1;");
+
+        sqlite3_bind_int(stmt.get(), 1, static_cast<int>(network_id));
+        sqlite3_bind_text(
+            stmt.get(), 2, endpoint.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt.get(), 3, now_unix());
+
+        if (sqlite3_step(stmt.get()) != SQLITE_DONE)
+        {
+            throw std::runtime_error(sqlite3_errmsg(db_));
+        }
+    }
+    catch (...)
+    {
+        disable();
+        throw;
+    }
+}
+
+void
+PeerEndpointCache::remember_seen_endpoints(
+    uint32_t network_id,
+    std::string const& endpoint)
+{
+    std::lock_guard lock(mutex_);
+    if (is_disabled())
+        return;
+
+    try
+    {
+        Statement stmt(
+            db_,
+            "INSERT INTO peer_endpoints("
+            "  network_id, endpoint, last_seen_at, seen_endpoints"
+            ") VALUES(?, ?, ?, 1) "
+            "ON CONFLICT(network_id, endpoint) DO UPDATE SET "
+            "  last_seen_at = excluded.last_seen_at, "
+            "  seen_endpoints = 1;");
+
+        sqlite3_bind_int(stmt.get(), 1, static_cast<int>(network_id));
+        sqlite3_bind_text(
+            stmt.get(), 2, endpoint.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt.get(), 3, now_unix());
 
         if (sqlite3_step(stmt.get()) != SQLITE_DONE)
         {
