@@ -80,7 +80,7 @@ canonical_endpoint(std::string const& endpoint)
 
 static const std::vector<BootstrapPeer> XRPL_BOOTSTRAP = {
     {"r.ripple.com", 51235},
-    {"sahyadri.isrdc.in", 51235},
+    {"s1.ripple.com", 51235},
     {"hubs.xrpkuwait.com", 51235},
     {"hub.xrpl-commons.org", 51235},
 };
