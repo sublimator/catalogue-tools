@@ -101,4 +101,8 @@ to_serve_options(Config const& config);
 NetworkConfig
 to_network_config(Config const& config);
 
+/// Dump resolved config as TOML to a stream (cout, log, file, etc).
+void
+dump_config(Config const& config, std::ostream& os);
+
 }  // namespace xproof

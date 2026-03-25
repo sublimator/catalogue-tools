@@ -515,6 +515,20 @@ main(int argc, char* argv[])
             }
         }
 
+        // Dump final resolved config (after all layers applied)
+        {
+            // Reconstruct Config from final ServeOptions for dump
+            xproof::Config final_config = config;
+            final_config.no_cache = opts.no_cache;
+            final_config.node_cache_size = opts.node_cache_size;
+            final_config.fetch_timeout_secs = opts.fetch_timeout_secs;
+            final_config.rpc_max_concurrent = opts.rpc_max_concurrent;
+            final_config.bind_address = opts.bind_address;
+            final_config.port = opts.port;
+            final_config.threads = opts.threads;
+            xproof::dump_config(final_config, std::cerr);
+        }
+
         return cmd_serve(opts);
     }
 

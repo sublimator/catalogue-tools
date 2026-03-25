@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
 
 // toml++ — header-only TOML parser
@@ -239,19 +240,6 @@ load_config(uint32_t network_id_hint)
     if (config.publisher_key.empty())
         config.publisher_key = net.publisher_key;
 
-    PLOGD(
-        log_,
-        "Config resolved: network=",
-        config.network_id,
-        " rpc=",
-        config.rpc_host,
-        ":",
-        config.rpc_port,
-        " peer=",
-        config.peer_host,
-        ":",
-        config.peer_port);
-
     return config;
 }
 
@@ -288,6 +276,38 @@ to_network_config(Config const& config)
     nc.publisher_key = config.publisher_key;
     nc.peer_cache_path = config.peer_cache_path;
     return nc;
+}
+
+void
+dump_config(Config const& config, std::ostream& os)
+{
+    os << "# Resolved xproof configuration\n";
+    os << "# Layers: defaults → config.toml → env vars → CLI flags\n\n";
+    os << "network_id = " << config.network_id << "\n\n";
+
+    os << "[server]\n";
+    os << "bind = \"" << config.bind_address << "\"\n";
+    os << "port = " << config.port << "\n";
+    os << "threads = " << config.threads << "\n\n";
+
+    os << "[cache]\n";
+    os << "enabled = " << (config.no_cache ? "false" : "true") << "\n";
+    os << "node_cache_size = " << config.node_cache_size << "\n";
+    os << "fetch_timeout = " << config.fetch_timeout_secs << "\n";
+    os << "rpc_max_concurrent = " << config.rpc_max_concurrent << "\n";
+    if (!config.peer_cache_path.empty())
+        os << "peer_cache_path = \"" << config.peer_cache_path << "\"\n";
+    os << "\n";
+
+    os << "[network." << config.network_id << "]\n";
+    os << "rpc_host = \"" << config.rpc_host << "\"\n";
+    os << "rpc_port = " << config.rpc_port << "\n";
+    os << "peer_host = \"" << config.peer_host << "\"\n";
+    os << "peer_port = " << config.peer_port << "\n";
+    os << "vl_host = \"" << config.vl_host << "\"\n";
+    os << "vl_port = " << config.vl_port << "\n";
+    if (!config.publisher_key.empty())
+        os << "publisher_key = \"" << config.publisher_key << "\"\n";
 }
 
 }  // namespace xproof
