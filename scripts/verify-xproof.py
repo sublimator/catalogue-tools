@@ -25,6 +25,10 @@ import sys
 from binascii import hexlify, unhexlify
 from pathlib import Path
 
+import xrpl.core.binarycodec
+import xrpl.core.keypairs
+from xrpl.core.binarycodec import decode, encode, encode_for_signing
+
 
 # ─── SHA512-Half ─────────────────────────────────────────────────────
 
@@ -78,8 +82,6 @@ def vl_encode(data: bytes) -> bytes:
 
 
 def serialize_leaf(leaf_json, is_tx: bool) -> bytes:
-    from xrpl.core.binarycodec import encode
-
     if is_tx:
         tx_bytes = bytes.fromhex(encode(leaf_json["tx"]))
         meta_bytes = bytes.fromhex(encode(leaf_json["meta"]))
@@ -138,8 +140,6 @@ def count_nodes(node, d=0):
 
 def parse_validation(val_hex: str) -> dict | None:
     """Decode an STValidation, return signing data with VAL\\0 prefix."""
-    from xrpl.core.binarycodec import decode, encode_for_signing
-
     try:
         decoded = decode(val_hex)
     except Exception:
@@ -172,9 +172,6 @@ XRPL_VL_KEY = "ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F473
 def verify_anchor(anchor: dict, trusted_key: str) -> tuple[bool, str]:
     """Verify anchor: VL signature + validation signatures + quorum.
     Returns (ok, message)."""
-    import xrpl.core.binarycodec
-    import xrpl.core.keypairs
-
     unl = anchor.get("unl")
     if not unl:
         return False, "no UNL data"
@@ -190,7 +187,7 @@ def verify_anchor(anchor: dict, trusted_key: str) -> tuple[bool, str]:
     if not manifest_hex:
         return False, "no manifest"
     manifest_bytes = unhexlify(manifest_hex)
-    manifest = xrpl.core.binarycodec.decode(hexlify(manifest_bytes).decode())
+    manifest = decode(hexlify(manifest_bytes).decode())
     signing_key = manifest.get("SigningPubKey", "")
     if not signing_key:
         return False, "manifest has no SigningPubKey"
@@ -218,7 +215,7 @@ def verify_anchor(anchor: dict, trusted_key: str) -> tuple[bool, str]:
         if not m_b64:
             continue
         m_bytes = base64.b64decode(m_b64)
-        m = xrpl.core.binarycodec.decode(hexlify(m_bytes).decode())
+        m = decode(hexlify(m_bytes).decode())
         sk = m.get("SigningPubKey", "").upper()
         mk = m.get("PublicKey", "").upper()
         if sk:
