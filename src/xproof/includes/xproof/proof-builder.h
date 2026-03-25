@@ -42,6 +42,11 @@ struct BuildServices
     catl::xdata::Protocol const& protocol;
     std::shared_ptr<catl::peer_client::NodeCache> node_cache;
     std::shared_ptr<catl::rpc::RpcClient> rpc;
+
+    // Pre-built anchor bundle — shared across concurrent proves
+    catl::peer_client::LedgerHeaderResult anchor_hdr;
+    Hash256 anchor_hash;
+    Hash256 anchor_account_hash;  // for state walks
 };
 
 /// Build using shared services (ProofEngine path).

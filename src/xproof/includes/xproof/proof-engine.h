@@ -174,6 +174,35 @@ private:
 
     std::optional<ProveResult>
     cache_get(std::string const& tx_hash);
+
+    // ── Anchor bundle cache (future-based) ──────────────────────────
+    // Built once per quorum window, shared across all concurrent proves.
+    // Contains everything build_proof needs from the anchor step:
+    // the header result, anchor hash, and account_hash for state walks.
+    struct AnchorBundle
+    {
+        catl::peer_client::LedgerHeaderResult header_result;
+        Hash256 anchor_hash;
+        Hash256 account_hash;  // header.account_hash() for state walks
+        uint32_t seq = 0;
+    };
+
+    struct AnchorEntry
+    {
+        AnchorBundle bundle;
+        std::shared_ptr<boost::asio::steady_timer> signal;
+        bool present = false;
+    };
+
+    std::map<uint32_t, AnchorEntry> anchor_cache_;
+    // Uses cache_mutex_ (same lock as proof cache)
+
+    /// Get or build anchor bundle for a given seq. First caller builds,
+    /// others co_await the signal.
+    boost::asio::awaitable<AnchorBundle>
+    get_anchor_bundle(
+        uint32_t anchor_seq,
+        Hash256 anchor_hash);
 };
 
 }  // namespace xproof

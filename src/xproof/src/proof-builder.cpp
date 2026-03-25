@@ -1053,14 +1053,11 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
         throw std::runtime_error("No anchor validations provided");
 
     uint32_t anchor_seq = anchor_validations.front().ledger_seq;
-    Hash256 anchor_hash = anchor_validations.front().ledger_hash;
     PLOGI(
         log_,
         "Using validated anchor: seq=",
         anchor_seq,
-        " hash=",
-        anchor_hash.hex().substr(0, 16),
-        "... (",
+        " (",
         anchor_validations.size(),
         " validators in proof)");
 
@@ -1206,20 +1203,12 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
     // it would retune peer discovery away from other requests' targets.
     // wait_for_peer(seq) already searches by the specific seq needed.
 
-    // ── Step 3: Fetch anchor header ──
-    std::shared_ptr<PeerClient> client;
-    client =
-        co_await acquire_peer(client, anchor_seq, "fetch anchor ledger header");
-
-    auto anchor_hdr = co_await with_peer_failover(
-        client,
-        anchor_seq,
-        "fetch anchor ledger header",
-        [&](std::shared_ptr<PeerClient> peer)
-            -> boost::asio::awaitable<LedgerHeaderResult> {
-            co_return co_await node_cache->get_header(anchor_seq, peers, peer);
-        });
+    // ── Step 3: Use pre-built anchor bundle (shared across concurrent proves) ──
+    auto const& anchor_hdr = svc.anchor_hdr;
     auto anchor_header = anchor_hdr.header();
+    auto anchor_hash = svc.anchor_hash;
+
+    std::shared_ptr<PeerClient> client;
 
     // ── Step 5: Determine hop path ──
     uint32_t distance = anchor_hdr.seq() - tx_ledger_seq;

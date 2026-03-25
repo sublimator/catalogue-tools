@@ -207,7 +207,11 @@ ProofEngine::prove(std::string const& tx_hash)
         vl.validators.size(),
         " validators)");
 
-    // Step 3: Build proof using shared services
+    // Step 3: Get anchor bundle (future-based — built once, shared)
+    auto anchor = co_await get_anchor_bundle(
+        quorum.ledger_seq, quorum.ledger_hash);
+
+    // Step 4: Build proof using shared services
     BuildServices svc{
         .io = io_,
         .peers = peers_,
@@ -216,6 +220,9 @@ ProofEngine::prove(std::string const& tx_hash)
         .protocol = protocol_,
         .node_cache = node_cache_,
         .rpc = rpc_,
+        .anchor_hdr = anchor.header_result,
+        .anchor_hash = anchor.anchor_hash,
+        .anchor_account_hash = anchor.account_hash,
     };
 
     auto result = co_await build_proof(svc, tx_hash);
@@ -353,6 +360,112 @@ ProofEngine::co_health()
         status.latest_quorum_seq = latest->ledger_seq;
 
     co_return status;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Anchor bundle cache — future-based, built once per quorum
+// ═══════════════════════════════════════════════════════════════════════
+
+asio::awaitable<ProofEngine::AnchorBundle>
+ProofEngine::get_anchor_bundle(uint32_t anchor_seq, Hash256 anchor_hash)
+{
+    enum class Action { hit, wait, fetch };
+    Action action;
+    std::shared_ptr<asio::steady_timer> signal;
+    AnchorBundle hit_bundle;
+
+    {
+        std::lock_guard lock(cache_mutex_);
+        auto [it, inserted] = anchor_cache_.try_emplace(anchor_seq);
+
+        if (!inserted && it->second.present)
+        {
+            action = Action::hit;
+            hit_bundle = it->second.bundle;
+            PLOGD(log_, "anchor_bundle: HIT seq=", anchor_seq);
+        }
+        else if (!inserted && it->second.signal)
+        {
+            action = Action::wait;
+            signal = it->second.signal;
+            PLOGD(log_, "anchor_bundle: IN-FLIGHT seq=", anchor_seq);
+        }
+        else
+        {
+            it->second.signal = std::make_shared<asio::steady_timer>(
+                io_, std::chrono::seconds(30));
+            it->second.present = false;
+            action = Action::fetch;
+            PLOGD(log_, "anchor_bundle: MISS seq=", anchor_seq, " — building");
+        }
+    }
+
+    if (action == Action::hit)
+        co_return hit_bundle;
+
+    if (action == Action::wait)
+    {
+        boost::system::error_code ec;
+        co_await signal->async_wait(
+            asio::redirect_error(asio::use_awaitable, ec));
+
+        std::lock_guard lock(cache_mutex_);
+        auto it = anchor_cache_.find(anchor_seq);
+        if (it != anchor_cache_.end() && it->second.present)
+            co_return it->second.bundle;
+
+        throw std::runtime_error("anchor bundle fetch failed");
+    }
+
+    // Build: fetch the anchor header
+    try
+    {
+        auto hdr = co_await node_cache_->get_header(anchor_seq, peers_);
+
+        AnchorBundle bundle;
+        bundle.header_result = hdr;
+        bundle.anchor_hash = anchor_hash;
+        bundle.account_hash = hdr.header().account_hash();
+        bundle.seq = anchor_seq;
+
+        // Populate cache and wake waiters
+        std::shared_ptr<asio::steady_timer> sig;
+        {
+            std::lock_guard lock(cache_mutex_);
+            auto& entry = anchor_cache_[anchor_seq];
+            sig = entry.signal;
+            entry.bundle = bundle;
+            entry.present = true;
+            entry.signal = nullptr;
+        }
+        if (sig)
+            sig->cancel();
+
+        PLOGI(
+            log_,
+            "anchor_bundle: built seq=",
+            anchor_seq,
+            " hash=",
+            anchor_hash.hex().substr(0, 16));
+        co_return bundle;
+    }
+    catch (...)
+    {
+        // Clean up and wake waiters
+        std::shared_ptr<asio::steady_timer> sig;
+        {
+            std::lock_guard lock(cache_mutex_);
+            auto it = anchor_cache_.find(anchor_seq);
+            if (it != anchor_cache_.end())
+            {
+                sig = it->second.signal;
+                anchor_cache_.erase(it);
+            }
+        }
+        if (sig)
+            sig->cancel();
+        throw;
+    }
 }
 
 }  // namespace xproof
