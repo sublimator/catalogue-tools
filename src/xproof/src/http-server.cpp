@@ -8,8 +8,11 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/use_awaitable.hpp>
+
+using namespace boost::asio::experimental::awaitable_operators;
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
@@ -330,7 +333,28 @@ HttpServer::handle_session(tcp::socket socket)
                 }
                 else
                 {
-                    auto result = co_await engine_->prove(tx_it->second);
+                    // Race prove against client disconnect.
+                    // wait_read completes when the socket becomes
+                    // readable (client closed or sent unexpected data).
+                    // The || operator cancels the loser automatically.
+                    auto detect_disconnect =
+                        [&stream]() -> asio::awaitable<ProofEngine::ProveResult> {
+                        co_await beast::get_lowest_layer(stream)
+                            .socket()
+                            .async_wait(
+                                asio::ip::tcp::socket::wait_read,
+                                asio::use_awaitable);
+                        throw boost::system::system_error(
+                            asio::error::operation_aborted,
+                            "client disconnected during prove");
+                    };
+
+                    auto rv = co_await (
+                        engine_->prove(tx_it->second) ||
+                        detect_disconnect());
+
+                    // Prove won (disconnect throws, never returns index 1)
+                    auto& result = std::get<0>(rv);
                     auto format_it = params.find("format");
                     bool binary =
                         format_it != params.end() && format_it->second == "bin";
@@ -431,6 +455,18 @@ HttpServer::handle_session(tcp::socket socket)
         {
             PLOGW(log_, "Peer error: ", e.what());
             caught_error = error_response(504, e.what(), version, keep_alive);
+        }
+        catch (boost::system::system_error const& e)
+        {
+            if (e.code() == asio::error::operation_aborted)
+            {
+                // Client disconnected during prove — no response needed.
+                // 499 = nginx convention for "client closed request".
+                PLOGD(log_, "Client disconnected: ", e.what());
+                break;  // exit keep-alive loop, close session
+            }
+            PLOGE(log_, "System error: ", e.what());
+            caught_error = error_response(500, e.what(), version, keep_alive);
         }
         catch (std::exception const& e)
         {
