@@ -42,14 +42,11 @@ namespace asio = boost::asio;
 // ─────────────────────────────────────────────────────────────────────
 
 /// A node on the walk path with its tree position.
-// TODO: zero-copy path — make Entry::wire_data a shared_ptr<vector<uint8_t>>
-// and store the shared_ptr here instead of copying. Eviction releases the map
-// entry but the data lives until all PathNode holders drop their shared_ptr.
 struct PathNode
 {
-    SHAMapNodeID nodeid;              // position in tree
-    Hash256 hash;                     // content hash
-    std::vector<uint8_t> wire_data;   // owned copy of wire bytes
+    SHAMapNodeID nodeid;                          // position in tree
+    Hash256 hash;                                 // content hash
+    std::shared_ptr<std::vector<uint8_t>> wire;   // shared with cache — zero-copy
 };
 
 /// Sibling branch at a depth — becomes a placeholder in the abbreviated tree.
@@ -168,14 +165,14 @@ private:
 
     struct Entry
     {
-        std::vector<uint8_t> wire_data;
+        std::shared_ptr<std::vector<uint8_t>> wire_data;
         std::shared_ptr<asio::steady_timer> signal;  // non-null while in-flight
         bool present = false;
     };
 
     /// Ensure a node is in the cache. Fetches from peer on miss.
-    /// Returns pointer to entry wire data, or nullptr on timeout/error.
-    asio::awaitable<std::vector<uint8_t> const*>
+    /// Returns shared wire data, or nullptr on timeout/error.
+    asio::awaitable<std::shared_ptr<std::vector<uint8_t>>>
     ensure_present(
         Hash256 expected_hash,
         Hash256 ledger_hash,

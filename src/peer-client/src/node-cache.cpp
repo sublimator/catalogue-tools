@@ -67,7 +67,7 @@ NodeCache::walk_to(
 
     for (int depth = 0; depth < 64; ++depth)
     {
-        auto const* wire = co_await ensure_present(
+        auto wire = co_await ensure_present(
             cursor,
             ledger_hash,
             ledger_seq,
@@ -103,7 +103,7 @@ NodeCache::walk_to(
             auto leaf = node.leaf();
             auto data = leaf.data();
             result.leaf_data.assign(data.begin(), data.end());
-            result.path.push_back({pos, cursor, *wire});
+            result.path.push_back({pos, cursor, wire});
 
             PLOGI(
                 log_,
@@ -117,8 +117,8 @@ NodeCache::walk_to(
             co_return result;
         }
 
-        // Inner node — record it on the path (copy wire data to avoid dangling)
-        result.path.push_back({pos, cursor, *wire});
+        // Inner node — record it on the path (zero-copy via shared_ptr)
+        result.path.push_back({pos, cursor, wire});
 
         // Collect sibling placeholders at this depth
         auto inner = node.inner();
@@ -169,7 +169,7 @@ NodeCache::walk_to(
 // ensure_present — cache check + fetch on miss
 // ═══════════════════════════════════════════════════════════════════════
 
-asio::awaitable<std::vector<uint8_t> const*>
+asio::awaitable<std::shared_ptr<std::vector<uint8_t>>>
 NodeCache::ensure_present(
     Hash256 expected_hash,
     Hash256 ledger_hash,
@@ -186,7 +186,7 @@ NodeCache::ensure_present(
     enum class Action { hit, wait, fetch };
     Action action;
     std::shared_ptr<asio::steady_timer> signal;
-    std::vector<uint8_t> const* hit_data = nullptr;
+    std::shared_ptr<std::vector<uint8_t>> hit_data;
 
     {
         std::lock_guard lock(mutex_);
@@ -197,14 +197,14 @@ NodeCache::ensure_present(
             // HIT — already cached
             hits_++;
             touch_lru(expected_hash);
-            hit_data = &it->second.wire_data;
+            hit_data = it->second.wire_data;
             action = Action::hit;
             PLOGD(
                 log_,
                 "  ensure: HIT hash=",
                 expected_hash.hex().substr(0, 16),
                 " (",
-                it->second.wire_data.size(),
+                hit_data->size(),
                 "B)");
         }
         else if (!inserted && it->second.signal)
@@ -251,7 +251,7 @@ NodeCache::ensure_present(
         if (it2 != store_.end() && it2->second.present)
         {
             waiter_wakeups_++;
-            co_return &it2->second.wire_data;
+            co_return it2->second.wire_data;
         }
         PLOGD(
             log_,
@@ -320,7 +320,7 @@ NodeCache::ensure_present(
         auto it = store_.find(expected_hash);
         if (it != store_.end() && it->second.present)
         {
-            co_return &it->second.wire_data;
+            co_return it->second.wire_data;
         }
     }
 
@@ -581,7 +581,8 @@ NodeCache::insert(Hash256 const& hash, std::vector<uint8_t> data)
     auto [it, inserted] = store_.try_emplace(hash);
     if (inserted || !it->second.present)
     {
-        it->second.wire_data = std::move(data);
+        it->second.wire_data =
+            std::make_shared<std::vector<uint8_t>>(std::move(data));
         it->second.present = true;
         it->second.signal = nullptr;
         touch_lru(hash);
@@ -592,7 +593,7 @@ NodeCache::insert(Hash256 const& hash, std::vector<uint8_t> data)
             "  insert: hash=",
             hash.hex().substr(0, 16),
             " (",
-            it->second.wire_data.size(),
+            it->second.wire_data->size(),
             "B) store_size=",
             store_.size());
         return true;
@@ -616,7 +617,8 @@ NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
         }
 
         signal = it->second.signal;  // may be null if no waiters
-        it->second.wire_data = std::move(data);
+        it->second.wire_data =
+            std::make_shared<std::vector<uint8_t>>(std::move(data));
         it->second.present = true;
         it->second.signal = nullptr;
         touch_lru(hash);
@@ -775,7 +777,7 @@ NodeCache::get(Hash256 const& hash) const
     {
         hits_++;
         touch_lru(hash);
-        return &it->second.wire_data;
+        return it->second.wire_data.get();
     }
     misses_++;
     return nullptr;
@@ -801,8 +803,8 @@ NodeCache::bytes() const
     size_t total = 0;
     for (auto const& [_, e] : store_)
     {
-        if (e.present)
-            total += e.wire_data.size();
+        if (e.present && e.wire_data)
+            total += e.wire_data->size();
     }
     return total;
 }
