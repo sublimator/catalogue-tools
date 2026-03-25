@@ -983,17 +983,30 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
         }
         else
         {
-            PLOGD(
+            PLOGI(
                 log_,
                 "Connection cap reached (",
                 incoming_archival ? "archival" : "hub",
-                "), skipping ",
+                " pool), skipping ",
                 key);
             co_return nullptr;
         }
     }
 
-    PLOGI(log_, "Connecting to ", key, "...");
+    PLOGI(
+        log_,
+        "Connecting to ",
+        key,
+        incoming_archival ? " (archival)" : "",
+        " [hubs=",
+        hub_peer_count(),
+        "/",
+        options_.max_connected_peers,
+        " archival=",
+        archival_peer_count(),
+        "/",
+        options_.max_archival_peers,
+        "]");
 
     std::shared_ptr<PeerClient> client;
 
@@ -1062,7 +1075,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
     }
     catch (std::exception const& e)
     {
-        PLOGD(log_, "Failed to connect to ", key, ": ", e.what());
+        PLOGW(log_, "Failed to connect to ", key, ": ", e.what());
         failed_at_[key] = std::chrono::steady_clock::now();
         note_connect_failure(key);
         if (endpoint_cache_)
