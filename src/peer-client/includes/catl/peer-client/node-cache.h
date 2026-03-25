@@ -26,6 +26,7 @@
 
 #include <chrono>
 #include <list>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <map>
@@ -43,9 +44,9 @@ namespace asio = boost::asio;
 /// A node on the walk path with its tree position.
 struct PathNode
 {
-    SHAMapNodeID nodeid;       // position in tree
-    Hash256 hash;                      // content hash
-    std::vector<uint8_t> const* wire;  // pointer into cache entry
+    SHAMapNodeID nodeid;              // position in tree
+    Hash256 hash;                     // content hash
+    std::vector<uint8_t> wire_data;   // owned copy of wire bytes
 };
 
 /// Sibling branch at a depth — becomes a placeholder in the abbreviated tree.
@@ -234,21 +235,21 @@ private:
     };
     std::map<uint32_t, HeaderEntry> header_cache_;
 
-    // LRU tracking: front = most recently accessed
+    // LRU tracking: front = most recently accessed (mutable for const get())
     using LruList = std::list<Hash256>;
-    LruList lru_;
-    std::map<Hash256, LruList::iterator> lru_map_;
+    mutable LruList lru_;
+    mutable std::map<Hash256, LruList::iterator> lru_map_;
 
     void
-    touch_lru(Hash256 const& hash);
+    touch_lru(Hash256 const& hash) const;
 
-    // Stats (mutable for const accessors)
-    mutable size_t hits_ = 0;
-    mutable size_t misses_ = 0;
-    size_t fetches_ = 0;
-    size_t fetch_errors_ = 0;
-    size_t hash_mismatches_ = 0;
-    size_t waiter_wakeups_ = 0;
+    // Stats — atomic for lock-free concurrent access
+    mutable std::atomic<size_t> hits_{0};
+    mutable std::atomic<size_t> misses_{0};
+    std::atomic<size_t> fetches_{0};
+    std::atomic<size_t> fetch_errors_{0};
+    std::atomic<size_t> hash_mismatches_{0};
+    std::atomic<size_t> waiter_wakeups_{0};
 
     static LogPartition log_;
 };

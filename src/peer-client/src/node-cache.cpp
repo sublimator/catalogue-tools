@@ -103,7 +103,7 @@ NodeCache::walk_to(
             auto leaf = node.leaf();
             auto data = leaf.data();
             result.leaf_data.assign(data.begin(), data.end());
-            result.path.push_back({pos, cursor, wire});
+            result.path.push_back({pos, cursor, *wire});
 
             PLOGI(
                 log_,
@@ -117,8 +117,8 @@ NodeCache::walk_to(
             co_return result;
         }
 
-        // Inner node — record it on the path
-        result.path.push_back({pos, cursor, wire});
+        // Inner node — record it on the path (copy wire data to avoid dangling)
+        result.path.push_back({pos, cursor, *wire});
 
         // Collect sibling placeholders at this depth
         auto inner = node.inner();
@@ -181,14 +181,24 @@ NodeCache::ensure_present(
     std::shared_ptr<PeerSet> peers,
     std::shared_ptr<PeerClient> peer)
 {
-    // Fast path: already cached
+    // Single lock: check present → check in-flight → create in-flight.
+    // Eliminates TOCTOU race where two coroutines both create in-flight.
+    enum class Action { hit, wait, fetch };
+    Action action;
+    std::shared_ptr<asio::steady_timer> signal;
+    std::vector<uint8_t> const* hit_data = nullptr;
+
     {
         std::lock_guard lock(mutex_);
-        auto it = store_.find(expected_hash);
-        if (it != store_.end() && it->second.present)
+        auto [it, inserted] = store_.try_emplace(expected_hash);
+
+        if (!inserted && it->second.present)
         {
+            // HIT — already cached
             hits_++;
             touch_lru(expected_hash);
+            hit_data = &it->second.wire_data;
+            action = Action::hit;
             PLOGD(
                 log_,
                 "  ensure: HIT hash=",
@@ -196,67 +206,61 @@ NodeCache::ensure_present(
                 " (",
                 it->second.wire_data.size(),
                 "B)");
-            co_return &it->second.wire_data;
         }
-    }
-
-    // Check if in-flight — wait on existing signal
-    {
-        std::shared_ptr<asio::steady_timer> signal;
+        else if (!inserted && it->second.signal)
         {
-            std::lock_guard lock(mutex_);
-            auto it = store_.find(expected_hash);
-            if (it != store_.end() && !it->second.present && it->second.signal)
-            {
-                PLOGD(
-                    log_,
-                    "  ensure: IN-FLIGHT hash=",
-                    expected_hash.hex().substr(0, 16),
-                    " — waiting on signal");
-                signal = it->second.signal;  // copy shared_ptr
-            }
-        }  // mutex released BEFORE co_await
-
-        if (signal)
-        {
-            boost::system::error_code ec;
-            co_await signal->async_wait(
-                asio::redirect_error(asio::use_awaitable, ec));
-
-            // Re-check after wake
-            std::lock_guard lock(mutex_);
-            auto it2 = store_.find(expected_hash);
-            if (it2 != store_.end() && it2->second.present)
-            {
-                waiter_wakeups_++;
-                co_return &it2->second.wire_data;
-            }
+            // IN-FLIGHT — someone else is fetching, wait on their signal
+            signal = it->second.signal;
+            action = Action::wait;
             PLOGD(
                 log_,
-                "  ensure: woke but entry gone/not-present hash=",
-                expected_hash.hex().substr(0, 16));
-            co_return nullptr;
+                "  ensure: IN-FLIGHT hash=",
+                expected_hash.hex().substr(0, 16),
+                " — waiting on signal");
         }
-    }
+        else
+        {
+            // MISS — we create the in-flight entry (inserted or stale)
+            misses_++;
+            it->second.signal = std::make_shared<asio::steady_timer>(
+                io_, std::chrono::seconds(30));
+            it->second.present = false;
+            action = Action::fetch;
+            PLOGD(
+                log_,
+                "  ensure: MISS hash=",
+                expected_hash.hex().substr(0, 16),
+                " depth=",
+                static_cast<int>(position.depth),
+                " — fetching");
+        }
+    }  // mutex released
 
-    // Miss — create in-flight entry and fetch
-    misses_++;
+    if (action == Action::hit)
+        co_return hit_data;
+
+    if (action == Action::wait)
     {
+        boost::system::error_code ec;
+        co_await signal->async_wait(
+            asio::redirect_error(asio::use_awaitable, ec));
+
+        // Re-check after wake
         std::lock_guard lock(mutex_);
-        auto& entry = store_[expected_hash];
-        entry.signal = std::make_shared<asio::steady_timer>(
-            io_, std::chrono::seconds(30));  // timeout
-        entry.present = false;
+        auto it2 = store_.find(expected_hash);
+        if (it2 != store_.end() && it2->second.present)
+        {
+            waiter_wakeups_++;
+            co_return &it2->second.wire_data;
+        }
         PLOGD(
             log_,
-            "  ensure: MISS hash=",
-            expected_hash.hex().substr(0, 16),
-            " depth=",
-            static_cast<int>(position.depth),
-            " — fetching");
+            "  ensure: woke but entry gone/not-present hash=",
+            expected_hash.hex().substr(0, 16));
+        co_return nullptr;
     }
 
-    // Pick a peer if none provided
+    // action == Action::fetch
     // Smart peer selection: use provided peer if it covers the ledger,
     // otherwise find one via wait_for_peer (awaitable, hops to strand).
     auto peer_covers = [](std::shared_ptr<PeerClient> const& p, uint32_t seq) {
@@ -770,6 +774,7 @@ NodeCache::get(Hash256 const& hash) const
     if (it != store_.end() && it->second.present)
     {
         hits_++;
+        touch_lru(hash);
         return &it->second.wire_data;
     }
     misses_++;
@@ -838,7 +843,7 @@ NodeCache::stats() const
 // ═══════════════════════════════════════════════════════════════════════
 
 void
-NodeCache::touch_lru(Hash256 const& hash)
+NodeCache::touch_lru(Hash256 const& hash) const
 {
     // Must be called under lock
     auto it = lru_map_.find(hash);
@@ -858,7 +863,7 @@ NodeCache::evict_if_needed()
 {
     // Must be called under lock
     size_t attempts = 0;
-    while (store_.size() > max_entries_ && !lru_.empty())
+    while (lru_.size() > max_entries_ && !lru_.empty())
     {
         // Guard against infinite loop if all entries are in-flight
         if (++attempts > lru_.size())
