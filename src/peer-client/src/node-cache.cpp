@@ -857,9 +857,15 @@ void
 NodeCache::evict_if_needed()
 {
     // Must be called under lock
+    size_t attempts = 0;
     while (store_.size() > max_entries_ && !lru_.empty())
     {
-        auto const& victim = lru_.back();
+        // Guard against infinite loop if all entries are in-flight
+        if (++attempts > lru_.size())
+            break;
+
+        // Copy hash before pop_back — the reference would dangle
+        auto victim = lru_.back();
         auto it = store_.find(victim);
         if (it != store_.end())
         {
