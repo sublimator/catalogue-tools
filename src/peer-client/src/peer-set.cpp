@@ -1106,7 +1106,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
     }
     catch (std::exception const& e)
     {
-        PLOGW(log_, "Failed to connect to ", key, ": ", e.what());
+        PLOGD(log_, "Failed to connect to ", key, ": ", e.what());
         failed_at_[key] = std::chrono::steady_clock::now();
         note_connect_failure(key);
         if (endpoint_cache_)

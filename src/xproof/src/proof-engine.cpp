@@ -59,10 +59,16 @@ ProofEngine::start()
     rpc_ = std::make_shared<catl::rpc::RpcClient>(
         io_, config_.rpc_host, config_.rpc_port, rpc_max_concurrent_);
 
-    // Peer set
-    PeerSetOptions peer_opts;
-    peer_opts.network_id = config_.network_id;
-    peer_opts.endpoint_cache_path = config_.peer_cache_path;
+    // Peer set — single-shot mode uses fewer peers
+    auto peer_opts = single_shot_
+        ? PeerSetOptions::for_single_shot(
+              config_.network_id, config_.peer_cache_path)
+        : [&] {
+              PeerSetOptions opts;
+              opts.network_id = config_.network_id;
+              opts.endpoint_cache_path = config_.peer_cache_path;
+              return opts;
+          }();
     peers_ = PeerSet::create(io_, peer_opts);
 
     // Wire peers → validation buffer: unsolicited validations

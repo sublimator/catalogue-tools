@@ -81,6 +81,7 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
     int result = 1;
 
     auto engine = xproof::ProofEngine::create(io, std::move(config));
+    engine->set_single_shot(true);
     engine->start();
 
     boost::asio::co_spawn(

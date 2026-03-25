@@ -162,6 +162,14 @@ public:
         rpc_max_concurrent_ = n;
     }
 
+    /// Set single-shot mode (fewer peers, less crawling).
+    /// Must be called before start().
+    void
+    set_single_shot(bool enabled)
+    {
+        single_shot_ = enabled;
+    }
+
 private:
     ProofEngine(boost::asio::io_context& io, NetworkConfig config);
 
@@ -187,6 +195,7 @@ private:
     size_t node_cache_size_ = 65536;
     int fetch_timeout_secs_ = 5;
     int rpc_max_concurrent_ = 8;
+    bool single_shot_ = false;
     std::atomic<size_t> cache_hits_{0};
     std::atomic<size_t> cache_misses_{0};
 
