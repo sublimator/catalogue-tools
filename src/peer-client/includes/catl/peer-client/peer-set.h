@@ -53,6 +53,15 @@ struct PeerSetOptions
     std::size_t max_in_flight_crawls = 4;
     std::size_t max_connected_peers = 20;  // hard cap on live connections
     std::chrono::seconds retry_backoff{5};
+
+    /// Minimum archival peer connections to maintain. When below this
+    /// count, archival peers discovered via crawl are connected even
+    /// at the connection cap (evicting a hub peer to make room).
+    std::size_t min_archival_peers = 5;
+
+    /// A peer is considered "archival" if its ledger range span exceeds
+    /// this threshold. Default 1M ledgers (~40 days of history).
+    uint32_t archival_range_threshold = 1'000'000;
 };
 
 class PeerSet : public std::enable_shared_from_this<PeerSet>
@@ -205,6 +214,10 @@ public:
     /// Number of live (ready) peer connections.
     size_t
     connected_count() const;
+
+    /// Number of connected archival peers (range > archival_range_threshold).
+    size_t
+    archival_peer_count() const;
 
 private:
     /// Remove a dead peer from the connection map.

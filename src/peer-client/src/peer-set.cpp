@@ -525,8 +525,21 @@ PeerSet::should_connect_endpoint(std::string const& endpoint) const
     if (endpoint_covers_preferred_ledger(key))
         return true;
 
+    // Archival peers (wide ledger range) are critical for proof building.
+    // If we don't have enough archival connections, connect even at cap —
+    // try_connect will evict a hub to make room.
     if (at_connection_cap())
+    {
+        if (it != endpoint_stats_.end())
+        {
+            auto const& s = it->second.status;
+            bool is_archival = s.first_seq != 0 && s.last_seq != 0 &&
+                (s.last_seq - s.first_seq) > options_.archival_range_threshold;
+            if (is_archival && archival_peer_count() < options_.min_archival_peers)
+                return true;
+        }
         return false;
+    }
 
     // If crawl already had a chance and still did not give us range data,
     // fall back to a real peer handshake rather than starving on crawl-only
@@ -955,15 +968,37 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
         co_return (it->second && it->second->is_ready()) ? it->second : nullptr;
     }
 
-    // If at connection cap, try to evict an idle peer that doesn't
-    // cover the preferred ledger. If no eviction possible, skip.
+    // If at connection cap, try to evict an idle peer to make room.
     if (at_connection_cap())
     {
+        bool evicted = false;
+
         // Try to evict for any wanted ledger (pick the first)
         auto evict_target = wanted_ledgers_.empty()
             ? 0u
             : *wanted_ledgers_.begin();
-        if (evict_target != 0 && evict_for(evict_target))
+        if (evict_target != 0)
+            evicted = evict_for(evict_target);
+
+        // If no wanted-ledger eviction, try evicting a hub for an
+        // archival peer (narrowest-range idle peer gets evicted).
+        if (!evicted && archival_peer_count() < options_.min_archival_peers)
+        {
+            // Check if the incoming peer is archival (from crawl stats)
+            auto stats_it = endpoint_stats_.find(key);
+            if (stats_it != endpoint_stats_.end())
+            {
+                auto const& s = stats_it->second.status;
+                bool incoming_is_archival = s.first_seq != 0 &&
+                    s.last_seq != 0 &&
+                    (s.last_seq - s.first_seq) >
+                        options_.archival_range_threshold;
+                if (incoming_is_archival)
+                    evicted = evict_for(0);  // 0 = evict narrowest
+            }
+        }
+
+        if (evicted)
         {
             PLOGD(log_, "Evicted idle peer, connecting to ", key);
         }
@@ -1510,6 +1545,26 @@ PeerSet::at_connection_cap() const
     return connected_count() >= options_.max_connected_peers;
 }
 
+size_t
+PeerSet::archival_peer_count() const
+{
+    ASSERT_ON_STRAND();
+    size_t count = 0;
+    for (auto const& [_, client] : connections_)
+    {
+        if (!client || !client->is_ready())
+            continue;
+        auto first = client->peer_first_seq();
+        auto last = client->peer_last_seq();
+        if (first != 0 && last != 0 &&
+            (last - first) > options_.archival_range_threshold)
+        {
+            count++;
+        }
+    }
+    return count;
+}
+
 PeerSet::Snapshot
 PeerSet::snapshot_unsafe() const
 {
@@ -1616,8 +1671,15 @@ PeerSet::evict_for(uint32_t target_ledger_seq)
         auto last = client->peer_last_seq();
 
         // Don't evict if this peer covers the target
-        if (first != 0 && last != 0 &&
+        if (target_ledger_seq != 0 && first != 0 && last != 0 &&
             target_ledger_seq >= first && target_ledger_seq <= last)
+        {
+            continue;
+        }
+
+        // Don't evict archival peers — they're hard to replace
+        if (first != 0 && last != 0 &&
+            (last - first) > options_.archival_range_threshold)
         {
             continue;
         }
