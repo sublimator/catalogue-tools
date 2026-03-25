@@ -344,6 +344,26 @@ HttpServer::handle_session(tcp::socket socket)
                 }
                 else
                 {
+                    // Spawn a watcher that cancels the request context
+                    // when the client disconnects. The socket is idle
+                    // during prove (read completed, write hasn't started),
+                    // so async_wait(wait_read) is safe here.
+                    co_spawn(
+                        stream.get_executor(),
+                        [&stream, request_ctx]() -> asio::awaitable<void> {
+                            boost::system::error_code wec;
+                            co_await beast::get_lowest_layer(stream)
+                                .socket()
+                                .async_wait(
+                                    asio::ip::tcp::socket::wait_read,
+                                    asio::redirect_error(
+                                        asio::use_awaitable, wec));
+                            // Socket became readable = client closed or
+                            // sent unexpected data. Cancel the prove.
+                            request_ctx->cancel();
+                        },
+                        asio::detached);
+
                     auto result = co_await engine_->prove(
                         tx_it->second, request_ctx);
                     auto format_it = params.find("format");
