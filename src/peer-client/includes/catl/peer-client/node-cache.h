@@ -81,7 +81,10 @@ class NodeCache : public std::enable_shared_from_this<NodeCache>
 {
 public:
     static std::shared_ptr<NodeCache>
-    create(asio::io_context& io, size_t max_entries = 65536);
+    create(
+        asio::io_context& io,
+        size_t max_entries = 65536,
+        int fetch_timeout_secs = 5);
 
     /// Walk a SHAMap from root hash to target key, fetching on miss.
     ///
@@ -161,7 +164,7 @@ public:
     clear();
 
 private:
-    NodeCache(asio::io_context& io, size_t max_entries);
+    NodeCache(asio::io_context& io, size_t max_entries, int fetch_timeout_secs);
 
     struct Entry
     {
@@ -222,6 +225,7 @@ private:
 
     asio::io_context& io_;
     size_t max_entries_;
+    int fetch_timeout_secs_;
 
     mutable std::mutex mutex_;
     std::map<Hash256, Entry> store_;

@@ -143,6 +143,18 @@ public:
         node_cache_size_ = max_entries;
     }
 
+    void
+    set_fetch_timeout(int secs)
+    {
+        fetch_timeout_secs_ = secs;
+    }
+
+    void
+    set_rpc_max_concurrent(int n)
+    {
+        rpc_max_concurrent_ = n;
+    }
+
 private:
     ProofEngine(boost::asio::io_context& io, NetworkConfig config);
 
@@ -166,6 +178,8 @@ private:
     std::unordered_map<std::string, CacheList::iterator> cache_map_;
     bool cache_enabled_ = true;
     size_t node_cache_size_ = 65536;
+    int fetch_timeout_secs_ = 5;
+    int rpc_max_concurrent_ = 8;
     size_t cache_hits_ = 0;
     size_t cache_misses_ = 0;
 

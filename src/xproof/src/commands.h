@@ -51,6 +51,8 @@ struct ServeOptions
     unsigned int threads = 1;
     bool no_cache = false;
     size_t node_cache_size = 65536;
+    int fetch_timeout_secs = 5;
+    int rpc_max_concurrent = 8;
     std::string rpc_endpoint;
     std::string peer_endpoint;
     std::string peer_cache_path;

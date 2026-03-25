@@ -121,6 +121,10 @@ load_config_file(std::string const& path, uint32_t network_id_hint)
                 config.no_cache = !*v;
             if (auto v = (*s)["node_cache_size"].value<int64_t>())
                 config.node_cache_size = static_cast<size_t>(*v);
+            if (auto v = (*s)["fetch_timeout"].value<int64_t>())
+                config.fetch_timeout_secs = static_cast<int>(*v);
+            if (auto v = (*s)["rpc_max_concurrent"].value<int64_t>())
+                config.rpc_max_concurrent = static_cast<int>(*v);
             if (auto v = (*s)["peer_cache_path"].value<std::string>())
                 config.peer_cache_path = *v;
         }
@@ -188,6 +192,10 @@ apply_env_overrides(Config& config)
         config.no_cache = *v;
     if (auto v = env_size("XPROOF_NODE_CACHE_SIZE"))
         config.node_cache_size = *v;
+    if (auto v = env_u32("XPROOF_FETCH_TIMEOUT"))
+        config.fetch_timeout_secs = static_cast<int>(*v);
+    if (auto v = env_u32("XPROOF_RPC_MAX_CONCURRENT"))
+        config.rpc_max_concurrent = static_cast<int>(*v);
     if (auto v = env_str("XPROOF_PEER_CACHE_PATH"))
         config.peer_cache_path = *v;
 }
@@ -257,6 +265,8 @@ to_serve_options(Config const& config)
     opts.threads = config.threads;
     opts.no_cache = config.no_cache;
     opts.node_cache_size = config.node_cache_size;
+    opts.fetch_timeout_secs = config.fetch_timeout_secs;
+    opts.rpc_max_concurrent = config.rpc_max_concurrent;
     opts.rpc_endpoint = config.rpc_host + ":" + std::to_string(config.rpc_port);
     opts.peer_endpoint =
         config.peer_host + ":" + std::to_string(config.peer_port);

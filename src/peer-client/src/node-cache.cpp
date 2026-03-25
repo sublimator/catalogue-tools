@@ -19,15 +19,16 @@ LogPartition NodeCache::log_("node-cache", LogLevel::INHERIT);
 // Lifecycle
 // ═══════════════════════════════════════════════════════════════════════
 
-NodeCache::NodeCache(asio::io_context& io, size_t max_entries)
-    : io_(io), max_entries_(max_entries)
+NodeCache::NodeCache(asio::io_context& io, size_t max_entries, int fetch_timeout_secs)
+    : io_(io), max_entries_(max_entries), fetch_timeout_secs_(fetch_timeout_secs)
 {
 }
 
 std::shared_ptr<NodeCache>
-NodeCache::create(asio::io_context& io, size_t max_entries)
+NodeCache::create(asio::io_context& io, size_t max_entries, int fetch_timeout_secs)
 {
-    return std::shared_ptr<NodeCache>(new NodeCache(io, max_entries));
+    return std::shared_ptr<NodeCache>(
+        new NodeCache(io, max_entries, fetch_timeout_secs));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -223,7 +224,7 @@ NodeCache::ensure_present(
             // MISS — we create the in-flight entry (inserted or stale)
             misses_++;
             it->second.signal = std::make_shared<asio::steady_timer>(
-                io_, std::chrono::seconds(30));
+                io_, std::chrono::seconds(fetch_timeout_secs_));
             it->second.present = false;
             action = Action::fetch;
             PLOGD(
@@ -689,7 +690,7 @@ NodeCache::get_header(
         else
         {
             it->second.signal = std::make_shared<asio::steady_timer>(
-                io_, std::chrono::seconds(30));
+                io_, std::chrono::seconds(fetch_timeout_secs_));
             it->second.present = false;
             action = Action::fetch;
             PLOGD(log_, "  get_header: MISS seq=", ledger_seq, " — fetching");
