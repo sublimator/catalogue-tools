@@ -176,7 +176,9 @@ ProofEngine::stop()
 // ═══════════════════════════════════════════════════════════════════════
 
 asio::awaitable<ProofEngine::ProveResult>
-ProofEngine::prove(std::string const& tx_hash)
+ProofEngine::prove(
+    std::string const& tx_hash,
+    std::shared_ptr<std::atomic<bool>> cancel_token)
 {
     // Enable cancellation so the || operator in the HTTP session can
     // abort this coroutine when the client disconnects.
@@ -232,6 +234,7 @@ ProofEngine::prove(std::string const& tx_hash)
         .anchor_hdr = anchor.header_result,
         .anchor_hash = anchor.anchor_hash,
         .anchor_account_hash = anchor.account_hash,
+        .cancel_token = cancel_token,
     };
 
     auto result = co_await build_proof(svc, tx_hash);

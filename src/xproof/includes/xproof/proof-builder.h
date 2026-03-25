@@ -18,6 +18,7 @@
 #include <catl/rpc-client/rpc-client-coro.h>
 #include <catl/vl-client/vl-client.h>
 #include <catl/xdata/protocol.h>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -50,6 +51,11 @@ struct BuildServices
     catl::peer_client::LedgerHeaderResult anchor_hdr;
     Hash256 anchor_hash;
     Hash256 anchor_account_hash;  // for state walks
+
+    // Cancel token — set by HTTP session on client disconnect.
+    // Checked at cancellation boundaries (walk_to, with_peer_failover)
+    // to stop work without disrupting shared NodeCache state.
+    std::shared_ptr<std::atomic<bool>> cancel_token;
 };
 
 /// Build using shared services (ProofEngine path).

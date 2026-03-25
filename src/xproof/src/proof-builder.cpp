@@ -977,6 +977,9 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         // is not default-constructible (raw pointer), so we store the value.
         Hash256 anchor_account_hash;
 
+        // Cancel token — checked at cancellation boundaries
+        std::shared_ptr<std::atomic<bool>> cancel_token;
+
         // Per-prove mutable results
         Hash256 target_ledger_hash;
         std::optional<LedgerHeaderResult> flag_hdr_result;
@@ -994,6 +997,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     ctx->anchor_hdr = svc.anchor_hdr;
     ctx->anchor_account_hash = ctx->anchor_hdr.header().account_hash();
     ctx->anchor_hash = svc.anchor_hash;
+    ctx->cancel_token = svc.cancel_token;
 
     // Convenience references for non-lambda, non-suspending code in this frame.
     // These are safe to use between co_awaits only when accessed directly
@@ -1017,7 +1021,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             ledger_seq,
             2,  // liAS_NODE
             ctx->peers,
-            peer);
+            peer,
+            ctx->cancel_token);
         if (!result.found)
             throw PeerClientException(Error::Timeout);
         co_return result;
@@ -1037,7 +1042,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             ledger_seq,
             1,  // liTX_NODE
             ctx->peers,
-            peer);
+            peer,
+            ctx->cancel_token);
         if (!result.found)
             throw PeerClientException(Error::Timeout);
         co_return result;
@@ -1223,6 +1229,13 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             auto op) -> decltype(op(current)) {
         for (;;)
         {
+            // Don't start new work if cancelled
+            if (ctx->cancel_token &&
+                ctx->cancel_token->load(std::memory_order_relaxed))
+            {
+                throw PeerClientException(Error::Timeout);
+            }
+
             current = co_await acquire_peer(current, required_ledger, purpose);
             try
             {
@@ -1230,6 +1243,14 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             }
             catch (PeerClientException const& e)
             {
+                // Don't retry if cancelled — the failure was from
+                // walk_to bailing, not a real peer error
+                if (ctx->cancel_token &&
+                    ctx->cancel_token->load(std::memory_order_relaxed))
+                {
+                    throw;
+                }
+
                 if (!is_retryable_peer_error(e))
                     throw;
 

@@ -95,6 +95,7 @@ public:
     /// @param tree_type   liTX_NODE (1) or liAS_NODE (2)
     /// @param peers       Peer pool for fetching
     /// @param peer        Preferred peer (may be null — will use peers)
+    /// @param cancel      Cancel token — checked between depths to stop early
     asio::awaitable<WalkResult>
     walk_to(
         Hash256 root_hash,
@@ -103,7 +104,8 @@ public:
         uint32_t ledger_seq,
         int tree_type,
         std::shared_ptr<PeerSet> peers,
-        std::shared_ptr<PeerClient> peer = nullptr);
+        std::shared_ptr<PeerClient> peer = nullptr,
+        std::shared_ptr<std::atomic<bool>> cancel = nullptr);
 
     /// Insert a node into the cache by hash. Returns true if newly inserted.
     bool

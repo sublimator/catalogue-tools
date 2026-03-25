@@ -334,6 +334,12 @@ HttpServer::handle_session(tcp::socket socket)
                 }
                 else
                 {
+                    // Cancel token: atomic flag checked at cancellation
+                    // boundaries (walk_to, with_peer_failover) for fast
+                    // exit without disrupting shared NodeCache state.
+                    auto cancel_token =
+                        std::make_shared<std::atomic<bool>>(false);
+
                     // Cancel timer: set to max, cancelled by socket
                     // watcher when the client disconnects.
                     auto cancel = std::make_shared<asio::steady_timer>(
@@ -353,7 +359,7 @@ HttpServer::handle_session(tcp::socket socket)
                         std::make_shared<std::atomic<bool>>(false);
                     co_spawn(
                         stream.get_executor(),
-                        [&stream, cancel, watcher_done]()
+                        [&stream, cancel, cancel_token, watcher_done]()
                             -> asio::awaitable<void> {
                             boost::system::error_code wec;
                             co_await beast::get_lowest_layer(stream)
@@ -363,7 +369,10 @@ HttpServer::handle_session(tcp::socket socket)
                                     asio::redirect_error(
                                         asio::use_awaitable, wec));
                             if (!watcher_done->load())
+                            {
+                                cancel_token->store(true);
                                 cancel->cancel();
+                            }
                         },
                         asio::detached);
 
@@ -382,7 +391,8 @@ HttpServer::handle_session(tcp::socket socket)
 
                     // Race prove against disconnect
                     auto rv = co_await (
-                        engine_->prove(tx_it->second) || wait_cancel());
+                        engine_->prove(tx_it->second, cancel_token) ||
+                        wait_cancel());
 
                     // Cancel the socket watcher before touching stream
                     watcher_done->store(true);

@@ -6,7 +6,7 @@
 #include <catl/crypto/sha512-half-hasher.h>
 
 #include <boost/asio/redirect_error.hpp>
-#include <boost/asio/this_coro.hpp>
+#include <boost/asio/this_coro.hpp>  // for reset_cancellation_state
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
@@ -45,8 +45,18 @@ NodeCache::walk_to(
     uint32_t ledger_seq,
     int tree_type,
     std::shared_ptr<PeerSet> peers,
-    std::shared_ptr<PeerClient> peer)
+    std::shared_ptr<PeerClient> peer,
+    std::shared_ptr<std::atomic<bool>> cancel)
 {
+    // ── CANCELLATION BOUNDARY ──
+    // Shield all inner co_awaits (ensure_present, fetch_node, signal timers)
+    // from the || operator's enable_total_cancellation. Without this,
+    // operation_aborted propagates into shared NodeCache signal timers,
+    // causing retry loops and orphaned entries.
+    // Manual cancel token checked between depths for fast exit.
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::disable_cancellation());
+
     WalkResult result;
     Hash256 cursor = root_hash;
     auto pos = SHAMapNodeID::root();
@@ -108,6 +118,13 @@ NodeCache::walk_to(
 
     for (int depth = 0; depth < 64; ++depth)
     {
+        // Cancel checkpoint — fast atomic load, no strand hop
+        if (cancel && cancel->load(std::memory_order_relaxed))
+        {
+            PLOGD(log_, "  depth=", depth, " CANCELLED before fetch");
+            co_return result;
+        }
+
         auto wire = co_await ensure_present(
             cursor,
             ledger_hash,
@@ -123,11 +140,10 @@ NodeCache::walk_to(
 
         if (!wire)
         {
-            // Check if we were cancelled (client disconnect). If so,
-            // bail immediately — no retries. The in-flight cache entry
-            // is left alive for other proves and the peer response handler.
-            auto cs = (co_await asio::this_coro::cancellation_state).cancelled();
-            if (cs != asio::cancellation_type::none)
+            // Check cancel token (client disconnect). Bail immediately —
+            // no retries. In-flight cache entries stay alive for other
+            // proves and the peer response handler.
+            if (cancel && cancel->load(std::memory_order_relaxed))
             {
                 PLOGD(
                     log_,

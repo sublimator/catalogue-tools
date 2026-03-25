@@ -67,8 +67,14 @@ public:
 
     /// Build a proof chain for a transaction. Safe to call concurrently
     /// (each call runs its own coroutine, borrows shared services).
+    /// @param cancel_token  Optional cancel flag — set by HTTP session on
+    ///                      client disconnect. Checked at cancellation
+    ///                      boundaries to stop work without disrupting
+    ///                      shared NodeCache state.
     boost::asio::awaitable<ProveResult>
-    prove(std::string const& tx_hash);
+    prove(
+        std::string const& tx_hash,
+        std::shared_ptr<std::atomic<bool>> cancel_token = nullptr);
 
     /// Verify a proof chain. Sync pure function — no shared state.
     VerifyResult
