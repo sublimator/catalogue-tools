@@ -933,9 +933,7 @@ build_proof_DEAD(
 boost::asio::awaitable<BuildResult>
 build_proof(BuildServices const& svc, std::string const& tx_hash_str)
 {
-    // Propagate cancellation from parent coroutine (prove → HTTP session)
-    co_await boost::asio::this_coro::reset_cancellation_state(
-        boost::asio::enable_total_cancellation());
+    // TODO: cancellation disabled — see proof-engine.cpp comment
 
     auto tx_hash = hash_from_hex(tx_hash_str);
     auto& io = svc.io;
