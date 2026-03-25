@@ -123,7 +123,6 @@ PeerSet::PeerSet(boost::asio::io_context& io, PeerSetOptions const& options)
         {
             endpoint_cache_ =
                 PeerEndpointCache::open(options_.endpoint_cache_path);
-            load_cached_endpoints();
         }
         catch (std::exception const& e)
         {
@@ -135,12 +134,27 @@ PeerSet::PeerSet(boost::asio::io_context& io, PeerSetOptions const& options)
                 e.what());
         }
     }
-    // Observer wiring deferred to start() — needs shared_from_this()
+    // load_cached_endpoints + observer wiring deferred to start() —
+    // both need shared_from_this() which is unsafe in the constructor.
 }
 
 void
 PeerSet::start()
 {
+    if (endpoint_cache_)
+    {
+        try
+        {
+            load_cached_endpoints();
+        }
+        catch (std::exception const& e)
+        {
+            PLOGW(
+                log_,
+                "Peer cache load failed: ",
+                e.what());
+        }
+    }
     configure_tracker_persistence();
 }
 
