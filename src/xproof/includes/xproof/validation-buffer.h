@@ -61,7 +61,7 @@ public:
     /// Does NOT take a hash — the caller doesn't know the anchor upfront.
     /// Uses 90% quorum threshold (matching XRPL consensus requirements).
     boost::asio::awaitable<QuorumEntry>
-    co_wait_quorum(int timeout_secs = 30);
+    co_wait_quorum(std::chrono::seconds timeout = std::chrono::seconds(30));
 
     /// Awaitable: snapshot of latest quorum for health checks.
     boost::asio::awaitable<std::optional<QuorumEntry>>

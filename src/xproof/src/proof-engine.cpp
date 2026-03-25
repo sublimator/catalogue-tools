@@ -160,7 +160,7 @@ ProofEngine::prove(std::string const& tx_hash)
     auto vl = co_await vl_cache_->co_get();
 
     // Step 2: Wait for a quorum (may already have one)
-    auto quorum = co_await val_buffer_->co_wait_quorum(30);
+    auto quorum = co_await val_buffer_->co_wait_quorum(std::chrono::seconds(30));
 
     PLOGI(
         log_,

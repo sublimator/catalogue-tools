@@ -30,7 +30,6 @@ using xproof::upper_hex;
 namespace xproof {
 
 static LogPartition log_("xproof", LogLevel::INFO);
-static constexpr int kAnchorQuorumPercent = 90;
 
 /// Build a proof-format on_leaf callback for trie_json.
 static catl::shamap::LeafJsonCallback

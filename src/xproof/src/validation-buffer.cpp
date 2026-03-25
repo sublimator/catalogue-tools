@@ -191,7 +191,7 @@ ValidationBuffer::wake_waiters()
 }
 
 asio::awaitable<QuorumEntry>
-ValidationBuffer::co_wait_quorum(int timeout_secs)
+ValidationBuffer::co_wait_quorum(std::chrono::seconds timeout)
 {
     auto self = shared_from_this();
 
@@ -210,7 +210,7 @@ ValidationBuffer::co_wait_quorum(int timeout_secs)
     waiters_.push_back(signal);
 
     // Deadline
-    asio::steady_timer deadline(strand_, std::chrono::seconds(timeout_secs));
+    asio::steady_timer deadline(strand_, timeout);
     deadline.async_wait([signal](boost::system::error_code ec) {
         if (!ec)
         {
@@ -237,7 +237,7 @@ ValidationBuffer::co_wait_quorum(int timeout_secs)
             std::erase(waiters_, signal);
             throw std::runtime_error(
                 "Timed out waiting for validation quorum (" +
-                std::to_string(timeout_secs) + "s)");
+                std::to_string(timeout.count()) + "s)");
         }
     }
 
