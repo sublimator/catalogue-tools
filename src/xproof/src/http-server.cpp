@@ -10,6 +10,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/redirect_error.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 using namespace boost::asio::experimental::awaitable_operators;
@@ -184,6 +185,12 @@ HttpServer::handle_session(tcp::socket socket)
     beast::tcp_stream stream(std::move(socket));
     beast::flat_buffer buffer;
 
+    // Per-session cancel timer. Set to max — only fires when cancelled.
+    // Shared with prove coroutines via || operator. On session error,
+    // cancel() fires, the || cancels the in-flight prove.
+    auto session_cancel = std::make_shared<asio::steady_timer>(
+        stream.get_executor(), asio::steady_timer::time_point::max());
+
     for (;;)
     {
         if (is_stopping())
@@ -333,27 +340,31 @@ HttpServer::handle_session(tcp::socket socket)
                 }
                 else
                 {
-                    // Race prove against client disconnect.
-                    // wait_read completes when the socket becomes
-                    // readable (client closed or sent unexpected data).
+                    // Race prove against session cancel timer.
+                    // The timer is set to max — it only fires when
+                    // cancel()->cancel() is called (on session error/close).
                     // The || operator cancels the loser automatically.
-                    auto detect_disconnect =
-                        [&stream]() -> asio::awaitable<ProofEngine::ProveResult> {
-                        co_await beast::get_lowest_layer(stream)
-                            .socket()
-                            .async_wait(
-                                asio::ip::tcp::socket::wait_read,
-                                asio::use_awaitable);
-                        throw boost::system::system_error(
-                            asio::error::operation_aborted,
-                            "client disconnected during prove");
+                    auto wait_cancel =
+                        [&session_cancel]()
+                            -> asio::awaitable<ProofEngine::ProveResult> {
+                        co_await asio::this_coro::reset_cancellation_state(
+                            asio::enable_total_cancellation());
+                        boost::system::error_code ec;
+                        co_await session_cancel->async_wait(
+                            asio::redirect_error(asio::use_awaitable, ec));
+                        co_return ProofEngine::ProveResult{};  // sentinel
                     };
 
                     auto rv = co_await (
-                        engine_->prove(tx_it->second) ||
-                        detect_disconnect());
+                        engine_->prove(tx_it->second) || wait_cancel());
 
-                    // Prove won (disconnect throws, never returns index 1)
+                    if (rv.index() == 1)
+                    {
+                        // Cancel won — client disconnected
+                        PLOGD(log_, "Client disconnected during prove");
+                        break;
+                    }
+
                     auto& result = std::get<0>(rv);
                     auto format_it = params.find("format");
                     bool binary =
@@ -487,6 +498,9 @@ HttpServer::handle_session(tcp::socket socket)
         if (ec || !keep_alive)
             break;
     }
+
+    // Session ending — cancel any in-flight proves racing against us
+    session_cancel->cancel();
 }
 
 }  // namespace xproof
