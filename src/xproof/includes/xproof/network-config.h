@@ -32,6 +32,19 @@ struct NetworkConfig
     std::string peer_cache_path;  // empty = platform default
     std::vector<catl::peer_client::BootstrapPeer> extra_bootstrap;
 
+    // Peer pool settings — mode-dependent (server vs CLI)
+    struct PeerPool
+    {
+        size_t max_hub_peers = 20;
+        size_t max_archival_peers = 5;
+        size_t max_in_flight_connects = 8;
+        size_t max_in_flight_crawls = 4;
+    };
+    PeerPool peers_server;
+    PeerPool peers_cli{5, 2, 4, 2};
+    uint32_t archival_range_threshold = 1'000'000;
+    unsigned int fd_limit = 8192;
+
     /// Fill any empty fields with defaults for this network_id.
     void
     apply_defaults();

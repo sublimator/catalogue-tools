@@ -130,6 +130,37 @@ load_config_file(std::string const& path, uint32_t network_id_hint)
                 config.peer_cache_path = *v;
         }
 
+        // Peers section — shared + per-mode pools
+        if (auto s = tbl["peers"].as_table())
+        {
+            if (auto v = (*s)["archival_range_threshold"].value<int64_t>())
+                config.archival_range_threshold = static_cast<uint32_t>(*v);
+
+            // Helper to load a PeerPool from a TOML sub-table
+            auto load_pool = [](toml::table const& t, Config::PeerPool& pool) {
+                if (auto v = t["max_hub_peers"].value<int64_t>())
+                    pool.max_hub_peers = static_cast<size_t>(*v);
+                if (auto v = t["max_archival_peers"].value<int64_t>())
+                    pool.max_archival_peers = static_cast<size_t>(*v);
+                if (auto v = t["max_in_flight_connects"].value<int64_t>())
+                    pool.max_in_flight_connects = static_cast<size_t>(*v);
+                if (auto v = t["max_in_flight_crawls"].value<int64_t>())
+                    pool.max_in_flight_crawls = static_cast<size_t>(*v);
+            };
+
+            if (auto sub = (*s)["server"].as_table())
+                load_pool(*sub, config.peers_server);
+            if (auto sub = (*s)["cli"].as_table())
+                load_pool(*sub, config.peers_cli);
+        }
+
+        // Server section (continued)
+        if (auto s = tbl["server"].as_table())
+        {
+            if (auto v = (*s)["fd_limit"].value<int64_t>())
+                config.fd_limit = static_cast<unsigned int>(*v);
+        }
+
         // Per-network section
         auto net_key = std::to_string(config.network_id);
         if (auto n = tbl["network"][net_key].as_table())
@@ -199,6 +230,8 @@ apply_env_overrides(Config& config)
         config.rpc_max_concurrent = static_cast<int>(*v);
     if (auto v = env_str("XPROOF_PEER_CACHE_PATH"))
         config.peer_cache_path = *v;
+    if (auto v = env_u32("XPROOF_FD_LIMIT"))
+        config.fd_limit = *v;
 }
 
 // ─── Public API ──────────────────────────────────────────────────────
@@ -243,25 +276,6 @@ load_config(uint32_t network_id_hint)
     return config;
 }
 
-ServeOptions
-to_serve_options(Config const& config)
-{
-    ServeOptions opts;
-    opts.network_id = config.network_id;
-    opts.bind_address = config.bind_address;
-    opts.port = config.port;
-    opts.threads = config.threads;
-    opts.no_cache = config.no_cache;
-    opts.node_cache_size = config.node_cache_size;
-    opts.fetch_timeout_secs = config.fetch_timeout_secs;
-    opts.rpc_max_concurrent = config.rpc_max_concurrent;
-    opts.rpc_endpoint = config.rpc_host + ":" + std::to_string(config.rpc_port);
-    opts.peer_endpoint =
-        config.peer_host + ":" + std::to_string(config.peer_port);
-    opts.peer_cache_path = config.peer_cache_path;
-    return opts;
-}
-
 NetworkConfig
 to_network_config(Config const& config)
 {
@@ -275,6 +289,18 @@ to_network_config(Config const& config)
     nc.vl_port = config.vl_port;
     nc.publisher_key = config.publisher_key;
     nc.peer_cache_path = config.peer_cache_path;
+    nc.peers_server = {
+        config.peers_server.max_hub_peers,
+        config.peers_server.max_archival_peers,
+        config.peers_server.max_in_flight_connects,
+        config.peers_server.max_in_flight_crawls};
+    nc.peers_cli = {
+        config.peers_cli.max_hub_peers,
+        config.peers_cli.max_archival_peers,
+        config.peers_cli.max_in_flight_connects,
+        config.peers_cli.max_in_flight_crawls};
+    nc.archival_range_threshold = config.archival_range_threshold;
+    nc.fd_limit = config.fd_limit;
     return nc;
 }
 
@@ -288,7 +314,8 @@ dump_config(Config const& config, std::ostream& os)
     os << "[server]\n";
     os << "bind = \"" << config.bind_address << "\"\n";
     os << "port = " << config.port << "\n";
-    os << "threads = " << config.threads << "\n\n";
+    os << "threads = " << config.threads << "\n";
+    os << "fd_limit = " << config.fd_limit << "\n\n";
 
     os << "[cache]\n";
     os << "enabled = " << (config.no_cache ? "false" : "true") << "\n";
@@ -298,6 +325,19 @@ dump_config(Config const& config, std::ostream& os)
     if (!config.peer_cache_path.empty())
         os << "peer_cache_path = \"" << config.peer_cache_path << "\"\n";
     os << "\n";
+
+    os << "[peers]\n";
+    os << "archival_range_threshold = " << config.archival_range_threshold << "\n\n";
+
+    auto dump_pool = [&](char const* name, Config::PeerPool const& pool) {
+        os << "[peers." << name << "]\n";
+        os << "max_hub_peers = " << pool.max_hub_peers << "\n";
+        os << "max_archival_peers = " << pool.max_archival_peers << "\n";
+        os << "max_in_flight_connects = " << pool.max_in_flight_connects << "\n";
+        os << "max_in_flight_crawls = " << pool.max_in_flight_crawls << "\n\n";
+    };
+    dump_pool("server", config.peers_server);
+    dump_pool("cli", config.peers_cli);
 
     os << "[network." << config.network_id << "]\n";
     os << "rpc_host = \"" << config.rpc_host << "\"\n";

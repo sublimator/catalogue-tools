@@ -43,23 +43,11 @@ cmd_verify(
     std::string const& trusted_key,
     catl::xdata::Protocol const& protocol);
 
-struct ServeOptions
-{
-    uint32_t network_id = 0;
-    std::string bind_address = "127.0.0.1";
-    uint16_t port = 8080;
-    unsigned int threads = 1;
-    bool no_cache = false;
-    size_t node_cache_size = 65536;
-    int fetch_timeout_secs = 5;
-    int rpc_max_concurrent = 8;
-    std::string rpc_endpoint;
-    std::string peer_endpoint;
-    std::string peer_cache_path;
-};
+// cmd_serve takes Config directly — no intermediate ServeOptions.
+// Config has everything: network, peers, cache, server, fd_limit.
 
 int
-cmd_serve(ServeOptions const& opts);
+cmd_serve();
 
 // Dev commands (unlisted)
 int

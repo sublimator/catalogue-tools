@@ -59,16 +59,29 @@ ProofEngine::start()
     rpc_ = std::make_shared<catl::rpc::RpcClient>(
         io_, config_.rpc_host, config_.rpc_port, rpc_max_concurrent_);
 
-    // Peer set — single-shot mode uses fewer peers
-    auto peer_opts = single_shot_
-        ? PeerSetOptions::for_single_shot(
-              config_.network_id, config_.peer_cache_path)
-        : [&] {
-              PeerSetOptions opts;
-              opts.network_id = config_.network_id;
-              opts.endpoint_cache_path = config_.peer_cache_path;
-              return opts;
-          }();
+    // Peer set — pick pool based on mode (server vs single-shot CLI)
+    auto const& pool = single_shot_
+        ? config_.peers_cli : config_.peers_server;
+    PeerSetOptions peer_opts;
+    peer_opts.network_id = config_.network_id;
+    peer_opts.endpoint_cache_path = config_.peer_cache_path;
+    peer_opts.max_connected_peers = pool.max_hub_peers;
+    peer_opts.max_archival_peers = pool.max_archival_peers;
+    peer_opts.max_in_flight_connects = pool.max_in_flight_connects;
+    peer_opts.max_in_flight_crawls = pool.max_in_flight_crawls;
+    peer_opts.archival_range_threshold = config_.archival_range_threshold;
+    PLOGI(
+        log_,
+        "Peer pool (",
+        single_shot_ ? "cli" : "server",
+        "): hubs=",
+        pool.max_hub_peers,
+        " archival=",
+        pool.max_archival_peers,
+        " connects=",
+        pool.max_in_flight_connects,
+        " crawls=",
+        pool.max_in_flight_crawls);
     peers_ = PeerSet::create(io_, peer_opts);
 
     // Wire peers → validation buffer: unsolicited validations

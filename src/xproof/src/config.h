@@ -7,7 +7,6 @@
 //   auto config = xproof::load_config();       // loads file + env
 //   // then apply CLI flags on top in main.cpp
 
-#include "commands.h"
 #include <xproof/network-config.h>
 
 #include <cstdint>
@@ -58,6 +57,27 @@ struct Config
     /// (~/.config/xproof/peer-endpoints.sqlite3).
     std::string peer_cache_path;
 
+    // ── Peer management ─────────────────────────────────────────────
+
+    /// Peer pool settings — separate presets for server vs CLI mode.
+    struct PeerPool
+    {
+        size_t max_hub_peers = 20;
+        size_t max_archival_peers = 5;
+        size_t max_in_flight_connects = 8;
+        size_t max_in_flight_crawls = 4;
+    };
+
+    PeerPool peers_server;  // [peers.server] — defaults for serve mode
+    PeerPool peers_cli{5, 2, 4, 2};  // [peers.cli] — lighter defaults
+
+    /// Ledger range span threshold for "archival" classification.
+    /// Shared between server and CLI modes.
+    uint32_t archival_range_threshold = 1'000'000;
+
+    /// File descriptor soft limit for serve mode. 0 = don't touch.
+    unsigned int fd_limit = 8192;
+
     /// RPC host for transaction lookups (e.g., "s1.ripple.com").
     std::string rpc_host;
 
@@ -94,10 +114,6 @@ config_file_path();
 /// CLI flags are NOT applied here.
 Config
 load_config(uint32_t network_id_hint = 0);
-
-/// Populate ServeOptions from resolved Config.
-ServeOptions
-to_serve_options(Config const& config);
 
 /// Populate NetworkConfig from resolved Config.
 NetworkConfig

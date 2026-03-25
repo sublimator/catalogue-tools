@@ -1,7 +1,7 @@
 #include "commands.h"
+#include "config.h"
 
 #include "xproof/http-server.h"
-#include "xproof/network-config.h"
 #include "xproof/proof-engine.h"
 
 #include <catl/core/logger.h>
@@ -10,56 +10,51 @@
 #include <boost/asio/signal_set.hpp>
 #include <iostream>
 #include <pthread.h>
+#include <sys/resource.h>
 #include <thread>
 #include <vector>
 
 static LogPartition log_("xproof", LogLevel::INFO);
 
 int
-cmd_serve(ServeOptions const& opts)
+cmd_serve()
 {
-    xproof::NetworkConfig config;
-    config.network_id = opts.network_id;
+    // Load full config: defaults → config.toml → env vars
+    // CLI flags are applied by main.cpp before calling us.
+    auto config = xproof::load_config();
 
-    if (!opts.rpc_endpoint.empty())
+    // Dump resolved config
+    xproof::dump_config(config, std::cerr);
+
+    // Raise fd limit for server mode
+    if (config.fd_limit > 0)
     {
-        if (!parse_endpoint(
-                opts.rpc_endpoint, config.rpc_host, config.rpc_port))
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_NOFILE, &rl) == 0)
         {
-            std::cerr << "Invalid RPC endpoint: " << opts.rpc_endpoint << "\n";
-            return 1;
+            auto old_soft = rl.rlim_cur;
+            rl.rlim_cur = std::min<rlim_t>(rl.rlim_max, config.fd_limit);
+            if (setrlimit(RLIMIT_NOFILE, &rl) == 0 && old_soft != rl.rlim_cur)
+            {
+                PLOGI(log_, "fd limit: ", old_soft, " → ", rl.rlim_cur);
+            }
         }
     }
 
-    if (!opts.peer_endpoint.empty())
-    {
-        if (!parse_endpoint(
-                opts.peer_endpoint, config.peer_host, config.peer_port))
-        {
-            std::cerr << "Invalid peer endpoint: " << opts.peer_endpoint
-                      << "\n";
-            return 1;
-        }
-    }
-
-    config.peer_cache_path = opts.peer_cache_path;
-    config.apply_defaults();
-
+    auto net_config = xproof::to_network_config(config);
     boost::asio::io_context io;
 
-    auto engine = xproof::ProofEngine::create(io, std::move(config));
-    if (opts.no_cache)
-    {
+    auto engine = xproof::ProofEngine::create(io, std::move(net_config));
+    if (config.no_cache)
         engine->set_cache_enabled(false);
-    }
-    engine->set_node_cache_size(opts.node_cache_size);
-    engine->set_fetch_timeout(opts.fetch_timeout_secs);
-    engine->set_rpc_max_concurrent(opts.rpc_max_concurrent);
+    engine->set_node_cache_size(config.node_cache_size);
+    engine->set_fetch_timeout(config.fetch_timeout_secs);
+    engine->set_rpc_max_concurrent(config.rpc_max_concurrent);
     engine->start();
 
     xproof::HttpServerOptions http_opts;
-    http_opts.bind_address = opts.bind_address;
-    http_opts.port = opts.port;
+    http_opts.bind_address = config.bind_address;
+    http_opts.port = config.port;
 
     auto server = xproof::HttpServer::create(io, engine, http_opts);
     server->start();
@@ -74,7 +69,7 @@ cmd_serve(ServeOptions const& opts)
     });
 
     // Run io_context on N threads
-    auto const n_threads = opts.threads;
+    auto const n_threads = config.threads;
     if (n_threads > 1)
     {
         PLOGI(log_, "Running with ", n_threads, " threads");

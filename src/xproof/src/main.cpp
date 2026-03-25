@@ -9,7 +9,6 @@
 #include <cstring>
 #include <iostream>
 #include <string>
-#include <sys/resource.h>
 #include <vector>
 
 bool
@@ -234,21 +233,8 @@ print_usage()
 int
 main(int argc, char* argv[])
 {
-    // Raise file descriptor limit — macOS defaults to 256 which is
-    // easily exhausted with concurrent peer + RPC connections.
-    {
-        struct rlimit rl;
-        if (getrlimit(RLIMIT_NOFILE, &rl) == 0)
-        {
-            auto old_soft = rl.rlim_cur;
-            rl.rlim_cur = rl.rlim_max;  // raise soft to hard limit
-            if (setrlimit(RLIMIT_NOFILE, &rl) == 0 && old_soft != rl.rlim_cur)
-            {
-                std::cerr << "fd limit: " << old_soft << " → " << rl.rlim_cur
-                          << "\n";
-            }
-        }
-    }
+    // Raise fd limit for serve mode (deferred — done in cmd_serve).
+    // Single-shot commands don't need elevated limits.
 
     if (argc < 2)
     {
@@ -422,22 +408,8 @@ main(int argc, char* argv[])
 
     if (command == "serve")
     {
-        // Pre-scan for --network to determine which config section to load
-        uint32_t network_hint = 0;
-        for (size_t i = 0; i + 1 < command_args.size(); ++i)
-        {
-            if (command_args[i] == "--network")
-            {
-                network_hint = std::stoul(command_args[i + 1]);
-                break;
-            }
-        }
-
-        // Load config: defaults → config.toml → env vars
-        auto config = xproof::load_config(network_hint);
-        ServeOptions opts = xproof::to_serve_options(config);
-
-        // CLI flags override everything
+        // CLI flags applied as env vars — Config layering handles the rest.
+        // This keeps main.cpp thin: just map flags → env → call cmd_serve().
         std::size_t pos = 0;
         while (pos < command_args.size())
         {
@@ -449,58 +421,68 @@ main(int argc, char* argv[])
                 auto colon = bind_str.rfind(':');
                 if (colon != std::string::npos)
                 {
-                    opts.bind_address = bind_str.substr(0, colon);
-                    opts.port = static_cast<uint16_t>(
-                        std::stoul(bind_str.substr(colon + 1)));
+                    setenv("XPROOF_BIND", bind_str.substr(0, colon).c_str(), 1);
+                    setenv("XPROOF_PORT", bind_str.substr(colon + 1).c_str(), 1);
                 }
                 else
                 {
-                    opts.bind_address = bind_str;
+                    setenv("XPROOF_BIND", bind_str.c_str(), 1);
                 }
                 pos += 2;
             }
             else if (arg == "--network" && pos + 1 < command_args.size())
             {
-                opts.network_id = std::stoul(command_args[pos + 1]);
+                setenv("XPROOF_NETWORK_ID", command_args[pos + 1].c_str(), 1);
                 pos += 2;
             }
             else if (arg == "--threads" && pos + 1 < command_args.size())
             {
-                opts.threads = std::stoul(command_args[pos + 1]);
-                if (opts.threads == 0)
-                {
-                    opts.threads = 1;
-                }
+                setenv("XPROOF_THREADS", command_args[pos + 1].c_str(), 1);
                 pos += 2;
             }
             else if (arg == "--rpc" && pos + 1 < command_args.size())
             {
-                opts.rpc_endpoint = command_args[pos + 1];
+                // Parse host:port into separate env vars
+                std::string host;
+                uint16_t port;
+                if (parse_endpoint(command_args[pos + 1], host, port))
+                {
+                    setenv("XPROOF_RPC_HOST", host.c_str(), 1);
+                    setenv("XPROOF_RPC_PORT", std::to_string(port).c_str(), 1);
+                }
                 pos += 2;
             }
             else if (arg == "--peer" && pos + 1 < command_args.size())
             {
-                opts.peer_endpoint = command_args[pos + 1];
+                std::string host;
+                uint16_t port;
+                if (parse_endpoint(command_args[pos + 1], host, port))
+                {
+                    setenv("XPROOF_PEER_HOST", host.c_str(), 1);
+                    setenv("XPROOF_PEER_PORT", std::to_string(port).c_str(), 1);
+                }
                 pos += 2;
             }
             else if (arg == "--no-cache")
             {
-                opts.no_cache = true;
+                setenv("XPROOF_NO_CACHE", "1", 1);
                 ++pos;
             }
-            else if (
-                arg == "--node-cache-size" &&
-                pos + 1 < command_args.size())
+            else if (arg == "--node-cache-size" && pos + 1 < command_args.size())
             {
-                opts.node_cache_size =
-                    std::stoull(command_args[++pos]);
-                ++pos;
+                setenv("XPROOF_NODE_CACHE_SIZE", command_args[pos + 1].c_str(), 1);
+                pos += 2;
             }
             else if (
                 (arg == "--peer-cache" || arg == "--peer-cache-path") &&
                 pos + 1 < command_args.size())
             {
-                opts.peer_cache_path = command_args[pos + 1];
+                setenv("XPROOF_PEER_CACHE_PATH", command_args[pos + 1].c_str(), 1);
+                pos += 2;
+            }
+            else if (arg == "--fd-limit" && pos + 1 < command_args.size())
+            {
+                setenv("XPROOF_FD_LIMIT", command_args[pos + 1].c_str(), 1);
                 pos += 2;
             }
             else if (arg[0] == '-')
@@ -515,21 +497,7 @@ main(int argc, char* argv[])
             }
         }
 
-        // Dump final resolved config (after all layers applied)
-        {
-            // Reconstruct Config from final ServeOptions for dump
-            xproof::Config final_config = config;
-            final_config.no_cache = opts.no_cache;
-            final_config.node_cache_size = opts.node_cache_size;
-            final_config.fetch_timeout_secs = opts.fetch_timeout_secs;
-            final_config.rpc_max_concurrent = opts.rpc_max_concurrent;
-            final_config.bind_address = opts.bind_address;
-            final_config.port = opts.port;
-            final_config.threads = opts.threads;
-            xproof::dump_config(final_config, std::cerr);
-        }
-
-        return cmd_serve(opts);
+        return cmd_serve();
     }
 
     // Unlisted dev commands
