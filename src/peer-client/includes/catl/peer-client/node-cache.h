@@ -81,7 +81,7 @@ class NodeCache : public std::enable_shared_from_this<NodeCache>
 {
 public:
     static std::shared_ptr<NodeCache>
-    create(asio::io_context& io, size_t max_entries = 4096);
+    create(asio::io_context& io, size_t max_entries = 65536);
 
     /// Walk a SHAMap from root hash to target key, fetching on miss.
     ///
