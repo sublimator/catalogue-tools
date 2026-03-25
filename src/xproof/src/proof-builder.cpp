@@ -1030,23 +1030,36 @@ build_proof(BuildServices const& svc, std::string const& tx_hash_str)
         return {ok, std::move(abbrev)};
     };
 
-    // ── Step 1: RPC — look up tx ──
-    auto tx_result = co_await catl::rpc::co_tx(*svc.rpc, tx_hash_str);
-    auto const& tx_obj = tx_result.as_object();
-
-    uint32_t tx_ledger_seq = 0;
-    if (tx_obj.contains("ledger_index"))
-        tx_ledger_seq = tx_obj.at("ledger_index").to_number<uint32_t>();
+    // ── Step 1: RPC — look up tx (or use cached ledger_seq) ──
+    uint32_t tx_ledger_seq = svc.tx_ledger_seq_hint;
     if (tx_ledger_seq == 0)
-        throw std::runtime_error(
-            "tx " + tx_hash_str.substr(0, 16) + "... not found or no ledger_index");
-
-    PLOGI(
-        log_,
-        "TX ",
-        tx_hash_str.substr(0, 16),
-        "... is in ledger ",
-        tx_ledger_seq);
+    {
+        auto tx_result = co_await catl::rpc::co_tx(*svc.rpc, tx_hash_str);
+        auto const& tx_obj = tx_result.as_object();
+        if (tx_obj.contains("ledger_index"))
+            tx_ledger_seq = tx_obj.at("ledger_index").to_number<uint32_t>();
+        if (tx_ledger_seq == 0)
+            throw std::runtime_error(
+                "tx " + tx_hash_str.substr(0, 16) +
+                "... not found or no ledger_index");
+        PLOGI(
+            log_,
+            "TX ",
+            tx_hash_str.substr(0, 16),
+            "... is in ledger ",
+            tx_ledger_seq,
+            " (RPC)");
+    }
+    else
+    {
+        PLOGI(
+            log_,
+            "TX ",
+            tx_hash_str.substr(0, 16),
+            "... is in ledger ",
+            tx_ledger_seq,
+            " (cached)");
+    }
 
     // ── Step 2: Anchor from provided validations ──
     if (anchor_validations.empty())

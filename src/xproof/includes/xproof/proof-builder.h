@@ -43,6 +43,9 @@ struct BuildServices
     std::shared_ptr<catl::peer_client::NodeCache> node_cache;
     std::shared_ptr<catl::rpc::RpcClient> rpc;
 
+    // Cached tx → ledger_seq (0 = not cached, must do RPC lookup)
+    uint32_t tx_ledger_seq_hint = 0;
+
     // Pre-built anchor bundle — shared across concurrent proves
     catl::peer_client::LedgerHeaderResult anchor_hdr;
     Hash256 anchor_hash;

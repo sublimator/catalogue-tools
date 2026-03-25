@@ -175,6 +175,20 @@ private:
     std::optional<ProveResult>
     cache_get(std::string const& tx_hash);
 
+    // ── TX → ledger_seq LRU cache ─────────────────────────────────
+    // A tx is in exactly one ledger forever. Cache the RPC lookup.
+    static constexpr size_t kMaxTxLedgerCache = 4096;
+    using TxLedgerList = std::list<std::pair<std::string, uint32_t>>;
+    TxLedgerList tx_ledger_lru_;
+    std::unordered_map<std::string, TxLedgerList::iterator> tx_ledger_map_;
+    // Uses cache_mutex_
+
+    void
+    tx_ledger_put(std::string const& tx_hash, uint32_t seq);
+
+    std::optional<uint32_t>
+    tx_ledger_get(std::string const& tx_hash);
+
     // ── Anchor bundle cache (future-based) ──────────────────────────
     // Built once per quorum window, shared across all concurrent proves.
     // Contains everything build_proof needs from the anchor step:

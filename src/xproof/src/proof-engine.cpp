@@ -212,6 +212,9 @@ ProofEngine::prove(std::string const& tx_hash)
         quorum.ledger_seq, quorum.ledger_hash);
 
     // Step 4: Build proof using shared services
+    // Check tx→ledger_seq cache (avoids RPC lookup on repeated requests)
+    auto cached_seq = tx_ledger_get(tx_hash);
+
     BuildServices svc{
         .io = io_,
         .peers = peers_,
@@ -220,6 +223,7 @@ ProofEngine::prove(std::string const& tx_hash)
         .protocol = protocol_,
         .node_cache = node_cache_,
         .rpc = rpc_,
+        .tx_ledger_seq_hint = cached_seq.value_or(0),
         .anchor_hdr = anchor.header_result,
         .anchor_hash = anchor.anchor_hash,
         .anchor_account_hash = anchor.account_hash,
@@ -227,6 +231,9 @@ ProofEngine::prove(std::string const& tx_hash)
 
     auto result = co_await build_proof(svc, tx_hash);
     result.chain.network_id = config_.network_id;
+
+    // Cache the tx→ledger mapping for future requests
+    tx_ledger_put(tx_hash, result.tx_ledger_seq);
 
     ProveResult prove_result{
         std::move(result.chain),
@@ -341,6 +348,41 @@ ProofEngine::verify(
         result.error = e.what();
     }
     return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TX → ledger_seq LRU cache
+// ═══════════════════════════════════════════════════════════════════════
+
+void
+ProofEngine::tx_ledger_put(std::string const& tx_hash, uint32_t seq)
+{
+    std::lock_guard lock(cache_mutex_);
+    auto it = tx_ledger_map_.find(tx_hash);
+    if (it != tx_ledger_map_.end())
+    {
+        tx_ledger_lru_.splice(tx_ledger_lru_.begin(), tx_ledger_lru_, it->second);
+        return;
+    }
+    while (tx_ledger_lru_.size() >= kMaxTxLedgerCache)
+    {
+        auto& back = tx_ledger_lru_.back();
+        tx_ledger_map_.erase(back.first);
+        tx_ledger_lru_.pop_back();
+    }
+    tx_ledger_lru_.emplace_front(tx_hash, seq);
+    tx_ledger_map_[tx_hash] = tx_ledger_lru_.begin();
+}
+
+std::optional<uint32_t>
+ProofEngine::tx_ledger_get(std::string const& tx_hash)
+{
+    std::lock_guard lock(cache_mutex_);
+    auto it = tx_ledger_map_.find(tx_hash);
+    if (it == tx_ledger_map_.end())
+        return std::nullopt;
+    tx_ledger_lru_.splice(tx_ledger_lru_.begin(), tx_ledger_lru_, it->second);
+    return it->second->second;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
