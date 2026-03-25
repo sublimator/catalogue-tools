@@ -29,3 +29,4 @@ test-nudb
 peermon.log
 proof.bin
 proof.json
+build-tsan/

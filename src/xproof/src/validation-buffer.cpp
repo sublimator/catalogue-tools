@@ -226,7 +226,8 @@ ValidationBuffer::co_wait_quorum(std::chrono::seconds timeout)
         co_await signal->async_wait(
             asio::redirect_error(asio::use_awaitable, ec));
 
-        // Re-hop to strand — co_await resumes on birth executor, not strand
+        // co_await resumes on birth executor, not strand.
+        // Re-hop to strand before touching shared state.
         co_await asio::post(strand_, asio::use_awaitable);
 
         if (!recent_quorums_.empty())

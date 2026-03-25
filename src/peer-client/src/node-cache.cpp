@@ -716,9 +716,15 @@ NodeCache::get_header(
 
     // action == Action::fetch
 
-    // Use the provided peer. The caller's failover loop (with_peer_failover)
-    // handles peer acquisition — we don't call any_peer() here because
-    // it requires PeerSet strand affinity and we're on the io_context.
+    // Use the provided peer if available. Otherwise find one via
+    // wait_for_peer (awaitable — hops to PeerSet strand internally,
+    // safe to call from any executor).
+    if (!peer || !peer->is_ready())
+    {
+        if (peers)
+            peer = co_await peers->wait_for_peer(ledger_seq, 10);
+    }
+
     if (!peer || !peer->is_ready())
     {
         PLOGW(log_, "  get_header: no peer for seq=", ledger_seq);
