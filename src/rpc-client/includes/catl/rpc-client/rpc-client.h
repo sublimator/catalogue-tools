@@ -117,8 +117,15 @@ private:
     uint16_t port_;
     int max_concurrent_;
     std::atomic<int> in_flight_{0};
-    // Signal for waiters — cancelled when a slot opens up.
-    // Shared so it survives across coroutine lifetimes.
+
+    /// Concurrency gate signal. Single shared timer used by all waiters.
+    ///
+    /// Pattern (avoids TOCTOU between releaser cancel + re-arm):
+    ///   Waiter: set expires_at(max) → co_await → wakes → re-check
+    ///           in_flight → if still full, re-arm and await again.
+    ///   Releaser: just cancel(). Waiter owns the re-arm.
+    ///
+    /// Shared_ptr so coroutines can outlive RpcClient if needed.
     std::shared_ptr<asio::steady_timer> slot_signal_;
 
     static LogPartition log_;

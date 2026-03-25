@@ -29,10 +29,9 @@ RpcClient::RpcClient(
     , host_(std::move(host))
     , port_(port)
     , max_concurrent_(max_concurrent)
-    , slot_signal_(std::make_shared<asio::steady_timer>(
-          io,
-          asio::steady_timer::time_point::max()))
+    , slot_signal_(std::make_shared<asio::steady_timer>(io))
 {
+    // Timer starts expired — first waiter will re-arm with expires_at(max).
 }
 
 
@@ -74,13 +73,16 @@ RpcClient::call(
             {
                 auto executor = co_await asio::this_coro::executor;
 
-                // Concurrency gate — wait for a slot via signal
+                // Concurrency gate — wait for a slot via signal.
+                // Waiter re-arms the timer; releaser just cancel()s.
+                // No TOCTOU: only the waiter touches expires_at.
                 while (in_flight->load() >= max_concurrent)
                 {
+                    slot_signal->expires_at(
+                        asio::steady_timer::time_point::max());
                     boost::system::error_code ec;
                     co_await slot_signal->async_wait(
                         asio::redirect_error(asio::use_awaitable, ec));
-                    // ec == operation_aborted means a slot opened — re-check
                 }
                 in_flight->fetch_add(1);
 
@@ -183,11 +185,10 @@ RpcClient::call(
                 rpc_result.success = false;
             }
 
-            // Release concurrency slot and wake next waiter
+            // Release concurrency slot and wake next waiter.
+            // Just cancel() — the waiter re-arms the timer itself.
             in_flight->fetch_sub(1);
             slot_signal->cancel();
-            slot_signal->expires_at(
-                asio::steady_timer::time_point::max());
 
             callback(std::move(rpc_result));
         },
