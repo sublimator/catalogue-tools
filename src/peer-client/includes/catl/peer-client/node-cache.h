@@ -42,6 +42,9 @@ namespace asio = boost::asio;
 // ─────────────────────────────────────────────────────────────────────
 
 /// A node on the walk path with its tree position.
+// TODO: zero-copy path — make Entry::wire_data a shared_ptr<vector<uint8_t>>
+// and store the shared_ptr here instead of copying. Eviction releases the map
+// entry but the data lives until all PathNode holders drop their shared_ptr.
 struct PathNode
 {
     SHAMapNodeID nodeid;              // position in tree
