@@ -930,7 +930,7 @@ build_proof_DEAD(
 // ═══════════════════════════════════════════════════════════════════════
 
 boost::asio::awaitable<BuildResult>
-build_proof(BuildServices const& svc, std::string const& tx_hash_str)
+build_proof(BuildServices svc, std::string const& tx_hash_str)
 {
     // Propagate cancellation from prove() → HTTP session || operator
     co_await boost::asio::this_coro::reset_cancellation_state(

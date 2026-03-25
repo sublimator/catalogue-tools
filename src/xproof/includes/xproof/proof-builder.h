@@ -54,7 +54,7 @@ struct BuildServices
 
 /// Build using shared services (ProofEngine path).
 boost::asio::awaitable<BuildResult>
-build_proof(BuildServices const& svc, std::string const& tx_hash_str);
+build_proof(BuildServices svc, std::string const& tx_hash_str);
 
 // Legacy self-contained build_proof removed — all callers use
 // build_proof(BuildServices) via ProofEngine.
