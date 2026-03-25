@@ -16,6 +16,7 @@ Usage:
   ./scripts/verify-xproof.py proof.json
   ./scripts/verify-xproof.py proof.json --trusted-key ED2677AB...
 """
+
 import base64
 import hashlib
 import json
@@ -32,11 +33,13 @@ from xrpl.core.binarycodec import decode, encode, encode_for_signing
 
 # ─── SHA512-Half ─────────────────────────────────────────────────────
 
+
 def sha512half(data: bytes) -> bytes:
     return hashlib.sha512(data).digest()[:32]
 
 
 # ─── Ledger header hashing ──────────────────────────────────────────
+
 
 def hash_header(hdr: dict) -> bytes:
     buf = b"LWR\x00"
@@ -130,13 +133,16 @@ def count_nodes(node, d=0):
             if len(k) != 1 or k not in HEX_CHARS:
                 continue
             c = count_nodes(v, d + 1)
-            s["i"] += c["i"]; s["l"] += c["l"]; s["p"] += c["p"]
+            s["i"] += c["i"]
+            s["l"] += c["l"]
+            s["p"] += c["p"]
             s["d"] = max(s["d"], c["d"])
         return s
     return {"i": 0, "l": 0, "p": 0, "d": d}
 
 
 # ─── STValidation parsing ───────────────────────────────────────────
+
 
 def parse_validation(val_hex: str) -> dict | None:
     """Decode an STValidation, return signing data with VAL\\0 prefix."""
@@ -179,7 +185,10 @@ def verify_anchor(anchor: dict, trusted_key: str) -> tuple[bool, str]:
     # Step 1: publisher key matches trusted key
     proof_key = unl.get("public_key", "")
     if proof_key.lower() != trusted_key.lower():
-        return False, f"publisher key mismatch: {proof_key[:16]}... != {trusted_key[:16]}..."
+        return (
+            False,
+            f"publisher key mismatch: {proof_key[:16]}... != {trusted_key[:16]}...",
+        )
     print(f"    A1: Publisher key {proof_key[:16]}... matches trusted key")
 
     # Step 2: parse publisher manifest → get signing key
@@ -268,6 +277,7 @@ def verify_anchor(anchor: dict, trusted_key: str) -> tuple[bool, str]:
 
 # ─── Verifier ────────────────────────────────────────────────────────
 
+
 def verify(proof: dict, trusted_key: str | None = None) -> bool:
     steps = proof["steps"]
     trusted_hash: bytes | None = None
@@ -289,8 +299,10 @@ def verify(proof: dict, trusted_key: str | None = None) -> bool:
         if t == "anchor":
             trusted_hash = bytes.fromhex(step["ledger_hash"])
             n_val = len(step.get("validations", {}))
-            print(f"\n  Step {i}: ANCHOR seq={step.get('ledger_index','?')} "
-                  f"hash={step['ledger_hash'][:16]}... ({n_val} validations)")
+            print(
+                f"\n  Step {i}: ANCHOR seq={step.get('ledger_index', '?')} "
+                f"hash={step['ledger_hash'][:16]}... ({n_val} validations)"
+            )
 
             anchor_ok, anchor_msg = verify_anchor(step, trusted_key)
             if anchor_ok:
@@ -305,11 +317,13 @@ def verify(proof: dict, trusted_key: str | None = None) -> bool:
             h = computed.hex().upper()
 
             print(f"\n  Step {i}: HEADER seq={hdr['seq']}")
-            print(f"    Hash={h[:16]}... tx={hdr['tx_hash'][:16]}... ac={hdr['account_hash'][:16]}...")
+            print(
+                f"    Hash={h[:16]}... tx={hdr['tx_hash'][:16]}... ac={hdr['account_hash'][:16]}..."
+            )
 
             if trusted_hash is not None:
                 if computed == trusted_hash:
-                    print(f"    [PASS] matches anchor hash")
+                    print("    [PASS] matches anchor hash")
                 else:
                     print(f"    [FAIL] expected {trusted_hash.hex().upper()[:16]}...")
                     ok = False
@@ -318,7 +332,7 @@ def verify(proof: dict, trusted_key: str | None = None) -> bool:
                 if h in skip_hashes:
                     print(f"    [PASS] found in skip list ({len(skip_hashes)} entries)")
                 else:
-                    print(f"    [FAIL] not in skip list!")
+                    print("    [FAIL] not in skip list!")
                     ok = False
                 skip_hashes = None
 
@@ -333,23 +347,29 @@ def verify(proof: dict, trusted_key: str | None = None) -> bool:
             print(f"\n  Step {i}: {'TX' if is_tx else 'STATE'} TREE")
 
             if trie is None:
-                print(f"    [SKIP] no trie")
+                print("    [SKIP] no trie")
                 continue
 
             s = count_nodes(trie)
-            print(f"    {s['i']} inners, {s['p']} placeholders, {s['l']} leaves (depth {s['d']})")
+            print(
+                f"    {s['i']} inners, {s['p']} placeholders, {s['l']} leaves (depth {s['d']})"
+            )
 
             expected = tx_hash if is_tx else ac_hash
             if expected is None:
-                print(f"    [SKIP] no expected hash")
+                print("    [SKIP] no expected hash")
                 continue
 
             try:
                 root = hash_trie(trie, is_tx)
                 if root == expected:
-                    print(f"    [PASS] root {root.hex().upper()[:16]}... matches {'tx' if is_tx else 'account'}_hash")
+                    print(
+                        f"    [PASS] root {root.hex().upper()[:16]}... matches {'tx' if is_tx else 'account'}_hash"
+                    )
                 else:
-                    print(f"    [FAIL] root {root.hex().upper()[:16]}... != {expected.hex().upper()[:16]}...")
+                    print(
+                        f"    [FAIL] root {root.hex().upper()[:16]}... != {expected.hex().upper()[:16]}..."
+                    )
                     ok = False
             except Exception as e:
                 print(f"    [ERROR] {e}")
@@ -367,7 +387,9 @@ def verify(proof: dict, trusted_key: str | None = None) -> bool:
                 leaf = find_leaf(trie)
                 if leaf and len(leaf) >= 2 and isinstance(leaf[1], dict):
                     tx_data = leaf[1].get("tx", {})
-                    print(f"    Leaf: {tx_data.get('TransactionType','?')} from {tx_data.get('Account','?')}")
+                    print(
+                        f"    Leaf: {tx_data.get('TransactionType', '?')} from {tx_data.get('Account', '?')}"
+                    )
 
     print(f"\n{'=' * 60}")
     print(f"  {'PASS — all checks verified' if ok else 'FAIL'}")
@@ -377,6 +399,7 @@ def verify(proof: dict, trusted_key: str | None = None) -> bool:
 
 def main():
     import argparse
+
     ap = argparse.ArgumentParser(description="Verify an xproof JSON proof")
     ap.add_argument("proof", help="Path to proof JSON file")
     ap.add_argument("--trusted-key", default=None, help="VL publisher key (hex)")
