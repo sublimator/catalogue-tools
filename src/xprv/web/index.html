@@ -15,7 +15,14 @@ body{display:flex;flex-direction:column;align-items:center;justify-content:cente
 gap:2rem;position:relative;z-index:1}
 h1{font-size:4rem;font-weight:300;letter-spacing:.15em;text-shadow:0 0 40px rgba(255,255,255,0.1)}
 .search{width:min(600px,90vw);position:relative}
-input{width:100%;padding:.8rem 1rem;font-size:1rem;font-family:monospace;
+.clear,.paste{position:absolute;right:0;top:0;bottom:0;
+color:#666;cursor:pointer;background:none;border:none;border-left:1px solid #333;display:none}
+.clear{width:2.5rem;font-size:1.4rem}
+.paste{width:3.5rem;font-size:.75rem;font-family:monospace;letter-spacing:.05em}
+.clear:hover,.paste:hover{color:#fff;background:rgba(255,255,255,0.05)}
+input:not(:placeholder-shown) ~ .clear{display:block}
+input:placeholder-shown ~ .paste:not(.hidden){display:block}
+input{width:100%;padding:.8rem 2.5rem .8rem 1rem;font-size:1rem;font-family:monospace;
 background:rgba(17,17,17,0.85);border:1px solid #333;color:#fff;border-radius:6px;
 outline:none;transition:border-color .2s;backdrop-filter:blur(4px)}
 input:focus{border-color:#555}
@@ -91,6 +98,8 @@ border-left:1px solid #333;margin-left:.2rem;background:rgba(255,255,255,0.02);b
 <h1>xprv.it</h1>
 <div class="search">
   <input type="text" id="tx" placeholder="transaction hash" spellcheck="false" autocomplete="off">
+  <button class="clear" id="clear" onclick="tx.value='';tx.dispatchEvent(new Event('input'));tx.focus()">&times;</button>
+  <button class="paste" id="paste" onclick="doPaste(true)">paste</button>
 </div>
 <div id="details"></div>
 <div class="status" id="status"></div>
@@ -145,31 +154,78 @@ function drawGlobe() {
 
   const cx = canvas.width / 2;
   const cy = canvas.height / 2;
-  const mobile = canvas.width < 500;
-  const r = Math.min(cx, cy) * (mobile ? 0.7 : 0.85);
+  const mobile = window.innerWidth < 600;
+
+  if (mobile) {
+    // Mobile: slow scrolling JSON text, filling screen width
+    const w = canvas.width, h = canvas.height;
+    const totalLines = charGrid.length;
+    if (!totalLines) { rotation += 0.001; requestAnimationFrame(drawGlobe); return; }
+    const sz = 11; // CSS pixels — canvas handles DPR via resize()
+    const lineH = 15;
+    const scrollY = rotation * 150;
+
+    // Measure actual char width
+    ctx.font = `${sz}px monospace`;
+    const charW = ctx.measureText('M').width;
+    const charsPerRow = Math.floor(w / charW);
+
+    // Build wrapped rows from charGrid
+    const visRows = Math.ceil(h / lineH) + 4;
+    const startRow = Math.floor(scrollY / lineH);
+    const yOffset = -(scrollY % lineH);
+
+    for (let row = 0; row < visRows; row++) {
+      // Cycle through charGrid, wrapping long lines across multiple rows
+      const srcLine = (startRow + row) % totalLines;
+      const parsed = charGrid[srcLine];
+      if (!parsed.length) continue;
+
+      const y = row * lineH + yOffset;
+      const edgeFade = Math.min(Math.max(y, 0) / (lineH * 4), Math.max(h - y, 0) / (lineH * 4), 1);
+      if (edgeFade <= 0) continue;
+
+      for (let j = 0; j < charsPerRow && j < parsed.length; j++) {
+        const { ch, isKey } = parsed[j];
+        if (isKey) {
+          ctx.font = `bold ${sz}px monospace`;
+          ctx.fillStyle = `rgba(120,255,230,${0.2 * edgeFade})`;
+        } else {
+          ctx.font = `${sz}px monospace`;
+          ctx.fillStyle = `rgba(30,160,50,${0.08 * edgeFade})`;
+        }
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(ch, j * charW, y);
+      }
+    }
+    rotation += 0.001;
+    requestAnimationFrame(drawGlobe);
+    return;
+  }
+
+  // Desktop: 3D globe
+  const r = Math.min(cx, cy) * 0.85;
   const tiltX = (mouseY - 0.5) * 0.5;
   const tiltY = (mouseX - 0.5) * 0.7;
   const cosX = Math.cos(tiltX), sinX = Math.sin(tiltX);
   const cosY = Math.cos(tiltY), sinY = Math.sin(tiltY);
 
   const totalLines = charGrid.length;
-  // Fewer lines on mobile to reduce visual noise
-  const latLines = Math.min(totalLines, mobile ? 40 : 80);
-  // Spread from equator outward: line 0 at equator, alternating +/-
-  const latSpread = 0.9; // fraction of hemisphere to use
+  const latLines = Math.min(totalLines, 80);
+  const latSpread = 0.9;
 
   for (let i = 0; i < latLines; i++) {
     const lineIdx = i % totalLines;
     const parsed = charGrid[lineIdx];
     if (!parsed.length) continue;
 
-    // Spiral from equator: 0, +1, -1, +2, -2 ...
     const ring = i % 2 === 0 ? i / 2 : -(i + 1) / 2;
     const lat = (ring / latLines) * Math.PI * latSpread;
     const cosLat = Math.cos(lat);
     const sinLat = Math.sin(lat);
 
-    const charsToShow = Math.min(parsed.length, mobile ? 50 : 100);
+    const charsToShow = Math.min(parsed.length, 100);
     for (let j = 0; j < charsToShow; j++) {
       const lon = -(j / charsToShow) * Math.PI * 2 + rotation + i * 0.03;
 
@@ -192,14 +248,14 @@ function drawGlobe() {
       const { ch, isKey } = parsed[j];
 
       if (isKey) {
-        const alpha = (mobile ? 0.1 : 0.15) + depth * depth * (mobile ? 0.35 : 0.55);
-        const sz = Math.round(((mobile ? 10 : 14) + depth * (mobile ? 2 : 4)) * scale);
+        const alpha = 0.15 + depth * depth * 0.55;
+        const sz = Math.round((14 + depth * 4) * scale);
         ctx.font = `bold ${sz}px monospace`;
         ctx.fillStyle = `rgba(120,255,230,${alpha})`;
       } else {
-        const alpha = 0.03 + depth * depth * (mobile ? 0.1 : 0.18);
+        const alpha = 0.03 + depth * depth * 0.18;
         const green = Math.floor(130 + depth * 90);
-        const sz = Math.round(((mobile ? 8 : 11) + depth * 2) * scale);
+        const sz = Math.round((11 + depth * 2) * scale);
         ctx.font = `${sz}px monospace`;
         ctx.fillStyle = `rgba(30,${green},50,${alpha})`;
       }
@@ -216,6 +272,29 @@ function drawGlobe() {
 drawGlobe();
 
 // ── Proof logic ───────────────────────────────────────────────
+// Clipboard: auto-paste on focus only after first successful prove
+let lastCleared = '';
+let clipboardGranted = !!localStorage.getItem('xprv_clip_ok');
+if (clipboardGranted) document.getElementById('paste').classList.add('hidden');
+
+async function doPaste(force) {
+  try {
+    const clip = (await navigator.clipboard.readText()).trim();
+    if (HEX64.test(clip) && (force || clip !== lastCleared)) {
+      tx.value = clip;
+      lastCleared = '';
+      tx.dispatchEvent(new Event('input'));
+    }
+    clipboardGranted = true;
+    localStorage.setItem('xprv_clip_ok', '1');
+    document.getElementById('paste').classList.add('hidden');
+  } catch(e) {}
+}
+
+tx.addEventListener('focus', () => {
+  if (tx.value.trim() || !clipboardGranted) return;
+  doPaste();
+});
 tx.addEventListener('input', () => {
   const v = tx.value.trim();
   tx.classList.remove('valid', 'invalid');
@@ -225,6 +304,7 @@ tx.addEventListener('input', () => {
   details.innerHTML = '';
 
   if (!v) {
+    if (lastProvedHash) lastCleared = lastProvedHash;
     closeModal();
     if (DEV) { localStorage.removeItem('xprv_last_hash'); localStorage.removeItem('xprv_modal_open'); }
     return;
@@ -248,6 +328,7 @@ let lastProofJson = null;
 let lastProofPretty = '';
 let lastDownloadUrl = '';
 let lastFilename = '';
+let lastProvedHash = '';
 
 function showDetails(json, txHash) {
   lastProofJson = json;
@@ -539,7 +620,7 @@ async function showSteps() {
     rendered.push(await describeStep(steps[i], i, steps));
   }
   const footer = lastDownloadUrl
-    ? `<div style="margin-top:1rem;padding-top:.8rem;border-top:1px solid #333;font-size:.75rem;color:#666;text-align:center"><a href="${lastDownloadUrl}" download="${lastFilename}" style="color:#5b5;text-decoration:none">${lastFilename}</a> <span onclick="copyProof()" title="copy JSON" style="cursor:pointer;color:#696;margin-left:.4rem">&#x1F4CB;</span><span style="color:#333;margin:0 .6rem">|</span><a href="/verify-xprv.py" style="color:#555;text-decoration:none">verify-xprv.py</a></div>`
+    ? `<div style="margin-top:1rem;padding-top:.8rem;border-top:1px solid #333;font-size:.75rem;color:#666;text-align:center"><a href="${lastDownloadUrl}" download="${lastFilename}" style="color:#5b5;text-decoration:none" title="${lastFilename}">json</a> <a href="/prove?tx=${lastProofJson?.steps?.[0]?.ledger_hash ? tx.value : ''}&format=bin" download="${lastFilename.replace('.xprv.json','.xprv.bin')}" style="color:#686;text-decoration:none;margin-left:.5rem" title="${lastFilename.replace('.xprv.json','.xprv.bin')}">bin</a> <span onclick="copyProof()" title="copy JSON" style="cursor:pointer;color:#696;margin-left:.4rem">&#x1F4CB;</span><span style="color:#333;margin:0 .6rem">|</span><a href="/verify-xprv.py" style="color:#555;text-decoration:none">verify-xprv.py</a></div>`
     : '';
   body.innerHTML = `<h3>Proof chain \u2014 ${steps.length} steps</h3>` + rendered.join('') + footer;
   modal.className = 'show';
@@ -591,6 +672,7 @@ async function prove(hash) {
       throw new Error(err.error || `HTTP ${res.status}`);
     }
     const json = await res.json();
+    lastProvedHash = hash;
     showDetails(json, hash);
 
     // Globe background
@@ -599,7 +681,7 @@ async function prove(hash) {
     // Filename with ledger index
     const anchor = (json.steps || []).find(s => s.type === 'anchor');
     const seq = anchor ? anchor.ledger_index : 'unknown';
-    const filename = `proof-${seq}-${hash.substring(0, 12).toUpperCase()}.json`;
+    const filename = `proof-${seq}-${hash.substring(0, 12).toUpperCase()}.xprv.json`;
 
     // Create download link
     const blob = new Blob([lastProofPretty], { type: 'application/json' });
@@ -608,7 +690,8 @@ async function prove(hash) {
     lastFilename = filename;
 
     statusEl.className = 'status done';
-    statusEl.innerHTML = `<a href="${url}" download="${filename}" style="color:#2a2;text-decoration:none">${filename}</a> <span onclick="copyProof()" title="copy JSON" style="cursor:pointer;color:#696;font-size:1em;margin-left:.4rem">&#x1F4CB;</span>`;
+    const binFilename = filename.replace('.json', '.xprv.bin');
+    statusEl.innerHTML = `<a href="${url}" download="${filename}" style="color:#2a2;text-decoration:none" title="${filename}">json</a> <a href="/prove?tx=${hash}&format=bin" download="${binFilename}" style="color:#686;text-decoration:none;margin-left:.5rem" title="${binFilename}">bin</a> <span onclick="copyProof()" title="copy JSON" style="cursor:pointer;color:#696;font-size:1em;margin-left:.4rem">&#x1F4CB;</span>`;
 
     // Auto-open the step inspector
     showSteps();
