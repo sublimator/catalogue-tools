@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Filter xproof server logs by partition, level, time range, and text.
+"""Filter xprv server logs by partition, level, time range, and text.
 
 Usage:
     ./scripts/log-filter.py server-logs.txt --partition node-cache
-    ./scripts/log-filter.py server-logs.txt --partition node-cache,engine,xproof
+    ./scripts/log-filter.py server-logs.txt --partition node-cache,engine,xprv
     ./scripts/log-filter.py server-logs.txt --level WARN,ERROR
     ./scripts/log-filter.py server-logs.txt --after 10:11:08 --before 10:11:10
     ./scripts/log-filter.py server-logs.txt --grep "walk_to\|ensure"
@@ -37,7 +37,7 @@ def parse_duration(s):
     return timedelta(seconds=int(s))
 
 def main():
-    p = argparse.ArgumentParser(description='Filter xproof server logs')
+    p = argparse.ArgumentParser(description='Filter xprv server logs')
     p.add_argument('logfile', help='Log file to filter')
     p.add_argument('-p', '--partition', help='Comma-separated partition names')
     p.add_argument('-l', '--level', help='Comma-separated levels (DEBUG,INFO,WARN,ERROR)')

@@ -12,7 +12,7 @@ target_link_libraries(
   PUBLIC catl::shamap catl::test_utils
   PRIVATE OpenSSL::SSL GTest::gtest)
 
-# Abbreviated tree template instantiation (same pattern as xproof)
+# Abbreviated tree template instantiation (same pattern as xprv)
 add_library(catl_shamap_abbreviated_test STATIC shamap-abbreviated.cpp)
 
 target_precompile_headers(catl_shamap_abbreviated_test PRIVATE

@@ -1,0 +1,596 @@
+#include "xprv/http-server.h"
+#include "xprv/proof-chain-binary.h"
+#include "xprv/proof-chain-json.h"
+#include "web_assets.h"
+
+#include <filesystem>
+#include <fstream>
+
+#include <catl/core/logger.h>
+#include <catl/peer-client/peer-client-coro.h>
+#include <catl/rpc-client/rpc-client.h>
+
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/deferred.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/experimental/parallel_group.hpp>
+#include <boost/asio/redirect_error.hpp>
+#include <boost/asio/this_coro.hpp>
+#include <boost/asio/use_awaitable.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+#include <boost/json.hpp>
+
+#include <map>
+#include <string>
+#include <string_view>
+
+namespace xprv {
+
+namespace asio = boost::asio;
+namespace beast = boost::beast;
+namespace http = beast::http;
+using tcp = asio::ip::tcp;
+
+static LogPartition log_("http", LogLevel::INFO);
+
+// ═══════════════════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════════════════
+
+static std::pair<std::string, std::string>
+split_target(std::string_view target)
+{
+    auto q = target.find('?');
+    if (q == std::string_view::npos)
+        return {std::string(target), {}};
+    return {
+        std::string(target.substr(0, q)), std::string(target.substr(q + 1))};
+}
+
+static std::map<std::string, std::string>
+parse_query(std::string_view qs)
+{
+    std::map<std::string, std::string> params;
+    while (!qs.empty())
+    {
+        auto amp = qs.find('&');
+        auto pair = qs.substr(0, amp);
+        auto eq = pair.find('=');
+        if (eq != std::string_view::npos)
+        {
+            params[std::string(pair.substr(0, eq))] =
+                std::string(pair.substr(eq + 1));
+        }
+        if (amp == std::string_view::npos)
+            break;
+        qs = qs.substr(amp + 1);
+    }
+    return params;
+}
+
+static http::response<http::string_body>
+json_response(
+    unsigned status,
+    boost::json::object const& body,
+    unsigned version,
+    bool keep_alive)
+{
+    http::response<http::string_body> res{
+        static_cast<http::status>(status), version};
+    res.set(http::field::content_type, "application/json");
+    res.set(http::field::server, "xprv");
+    res.keep_alive(keep_alive);
+    res.body() = boost::json::serialize(body);
+    res.prepare_payload();
+    return res;
+}
+
+static http::response<http::string_body>
+error_response(
+    unsigned status,
+    std::string const& message,
+    unsigned version,
+    bool keep_alive)
+{
+    return json_response(status, {{"error", message}}, version, keep_alive);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Lifecycle
+// ═══════════════════════════════════════════════════════════════════════
+
+HttpServer::HttpServer(
+    asio::io_context& io,
+    std::shared_ptr<ProofEngine> engine,
+    HttpServerOptions opts)
+    : io_(io), engine_(std::move(engine)), opts_(std::move(opts)), acceptor_(io)
+{
+}
+
+std::shared_ptr<HttpServer>
+HttpServer::create(
+    asio::io_context& io,
+    std::shared_ptr<ProofEngine> engine,
+    HttpServerOptions opts)
+{
+    return std::shared_ptr<HttpServer>(
+        new HttpServer(io, std::move(engine), std::move(opts)));
+}
+
+void
+HttpServer::start()
+{
+    auto endpoint =
+        tcp::endpoint(asio::ip::make_address(opts_.bind_address), opts_.port);
+
+    acceptor_.open(endpoint.protocol());
+    acceptor_.set_option(asio::socket_base::reuse_address(true));
+    acceptor_.bind(endpoint);
+    acceptor_.listen(asio::socket_base::max_listen_connections);
+    accepting_ = true;
+
+    PLOGI(log_, "Listening on ", opts_.bind_address, ":", opts_.port);
+
+    auto self = shared_from_this();
+    asio::co_spawn(
+        io_, [self]() { return self->accept_loop(); }, asio::detached);
+}
+
+void
+HttpServer::stop()
+{
+    accepting_ = false;
+    boost::system::error_code ec;
+    acceptor_.close(ec);
+    PLOGI(log_, "Stopped accepting connections");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Accept loop
+// ═══════════════════════════════════════════════════════════════════════
+
+asio::awaitable<void>
+HttpServer::accept_loop()
+{
+    auto self = shared_from_this();
+
+    while (accepting_)
+    {
+        boost::system::error_code ec;
+        auto socket = co_await acceptor_.async_accept(
+            asio::redirect_error(asio::use_awaitable, ec));
+        if (ec)
+        {
+            if (accepting_)
+            {
+                PLOGE(log_, "Accept error: ", ec.message());
+            }
+            break;
+        }
+
+        asio::co_spawn(
+            io_,
+            [self, s = std::move(socket)]() mutable {
+                return self->handle_session(std::move(s));
+            },
+            asio::detached);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Session handler
+// ═══════════════════════════════════════════════════════════════════════
+
+asio::awaitable<void>
+HttpServer::handle_session(tcp::socket socket)
+{
+    beast::tcp_stream stream(std::move(socket));
+    beast::flat_buffer buffer;
+
+    for (;;)
+    {
+        if (is_stopping())
+            break;
+
+        // Read request with timeout and body limit
+        stream.expires_after(opts_.read_timeout);
+
+        http::request_parser<http::vector_body<uint8_t>> parser;
+        parser.body_limit(opts_.max_request_body);
+
+        boost::system::error_code ec;
+        co_await http::async_read(
+            stream,
+            buffer,
+            parser,
+            asio::redirect_error(asio::use_awaitable, ec));
+
+        if (ec)
+        {
+            // Return proper HTTP error for body limit exceeded
+            if (ec == http::error::body_limit)
+            {
+                stream.expires_after(opts_.write_timeout);
+                co_await http::async_write(
+                    stream,
+                    error_response(413, "request body too large", 11, false),
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
+            break;
+        }
+
+        auto& req = parser.get();
+        auto const version = req.version();
+        auto const keep_alive = req.keep_alive();
+
+        auto [path, query_string] = split_target(req.target());
+        auto params = parse_query(query_string);
+
+        PLOGD(log_, req.method_string(), " ", req.target());
+
+        // ── Route dispatch ────────────────────────────────────────
+
+        std::optional<http::response<http::string_body>> caught_error;
+        try
+        {
+            if (path == "/" && req.method() == http::verb::get)
+            {
+                // Dev mode: serve from disk if available (live reload)
+                std::string html;
+                const auto dev_path =
+                    std::filesystem::path("src/xprv/web/index.html");
+                if (std::filesystem::exists(dev_path))
+                {
+                    std::ifstream f(dev_path);
+                    html.assign(
+                        std::istreambuf_iterator<char>(f),
+                        std::istreambuf_iterator<char>());
+                }
+                else
+                {
+                    html = std::string(web::index);
+                }
+
+                http::response<http::string_body> res{
+                    http::status::ok, version};
+                res.set(http::field::content_type, "text/html; charset=utf-8");
+                res.set(http::field::server, "xprv");
+                res.keep_alive(keep_alive);
+                res.body() = std::move(html);
+                res.prepare_payload();
+                stream.expires_after(opts_.write_timeout);
+                co_await http::async_write(
+                    stream,
+                    res,
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
+            else if (path == "/verify-xprv.py" && req.method() == http::verb::get)
+            {
+                http::response<http::string_body> res{
+                    http::status::ok, version};
+                res.set(http::field::content_type, "text/x-python; charset=utf-8");
+                res.set(http::field::content_disposition,
+                    "attachment; filename=\"verify-xprv.py\"");
+                res.set(http::field::server, "xprv");
+                res.keep_alive(keep_alive);
+                res.body() = std::string(web::verify_xprv);
+                res.prepare_payload();
+                stream.expires_after(opts_.write_timeout);
+                co_await http::async_write(
+                    stream,
+                    res,
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
+            else if (path == "/health" && req.method() == http::verb::get)
+            {
+                auto status = co_await engine_->co_health();
+                auto cs = engine_->cache_stats();
+                boost::json::object body;
+                body["peer_count"] = status.peer_count;
+                body["vl_loaded"] = status.vl_loaded;
+                if (status.latest_quorum_seq)
+                {
+                    body["latest_quorum_seq"] = *status.latest_quorum_seq;
+                }
+                boost::json::object cache;
+                cache["entries"] = cs.entries;
+                cache["max_entries"] = cs.max_entries;
+                cache["hits"] = cs.hits;
+                cache["misses"] = cs.misses;
+                body["proof_cache"] = cache;
+
+                auto ncs = engine_->node_cache_stats();
+                boost::json::object nc;
+                nc["entries"] = ncs.entries;
+                nc["max_entries"] = ncs.max_entries;
+                nc["hits"] = ncs.hits;
+                nc["misses"] = ncs.misses;
+                nc["fetches"] = ncs.fetches;
+                nc["fetch_errors"] = ncs.fetch_errors;
+                nc["hash_mismatches"] = ncs.hash_mismatches;
+                nc["waiter_wakeups"] = ncs.waiter_wakeups;
+                body["node_cache"] = nc;
+
+                stream.expires_after(opts_.write_timeout);
+                co_await http::async_write(
+                    stream,
+                    json_response(200, body, version, keep_alive),
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
+            else if (path == "/peers" && req.method() == http::verb::get)
+            {
+                auto snapshot = co_await engine_->peers()->co_snapshot();
+
+                boost::json::object body;
+                body["known_endpoints"] = snapshot.known_endpoints;
+                body["tracked_endpoints"] = snapshot.tracked_endpoints;
+                body["connected_peers"] = snapshot.connected_peers;
+                body["ready_peers"] = snapshot.ready_peers;
+                body["in_flight_connects"] = snapshot.in_flight_connects;
+                body["queued_connects"] = snapshot.queued_connects;
+                body["crawl_in_flight"] = snapshot.crawl_in_flight;
+                body["queued_crawls"] = snapshot.queued_crawls;
+
+                boost::json::array wanted_ledgers;
+                for (auto ledger_seq : snapshot.wanted_ledgers)
+                {
+                    wanted_ledgers.push_back(ledger_seq);
+                }
+                body["wanted_ledgers"] = std::move(wanted_ledgers);
+
+                boost::json::array peers;
+                for (auto const& peer : snapshot.peers)
+                {
+                    boost::json::object item;
+                    item["endpoint"] = peer.endpoint;
+                    item["connected"] = peer.connected;
+                    item["ready"] = peer.ready;
+                    item["in_flight"] = peer.in_flight;
+                    item["queued_connect"] = peer.queued_connect;
+                    item["crawl_in_flight"] = peer.crawl_in_flight;
+                    item["queued_crawl"] = peer.queued_crawl;
+                    item["crawled"] = peer.crawled;
+                    item["first_seq"] = peer.first_seq;
+                    item["last_seq"] = peer.last_seq;
+                    item["current_seq"] = peer.current_seq;
+                    item["last_seen_at"] = peer.last_seen_at;
+                    item["last_success_at"] = peer.last_success_at;
+                    item["last_failure_at"] = peer.last_failure_at;
+                    item["success_count"] = peer.success_count;
+                    item["failure_count"] = peer.failure_count;
+                    item["selection_count"] = peer.selection_count;
+                    item["last_selected_ticket"] = peer.last_selected_ticket;
+                    peers.push_back(std::move(item));
+                }
+                body["peers"] = std::move(peers);
+
+                stream.expires_after(opts_.write_timeout);
+                co_await http::async_write(
+                    stream,
+                    json_response(200, body, version, keep_alive),
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
+            else if (path == "/prove" && req.method() == http::verb::get)
+            {
+                auto tx_it = params.find("tx");
+                if (tx_it == params.end() || tx_it->second.empty())
+                {
+                    stream.expires_after(opts_.write_timeout);
+                    co_await http::async_write(
+                        stream,
+                        error_response(
+                            400, "missing tx parameter", version, keep_alive),
+                        asio::redirect_error(asio::use_awaitable, ec));
+                }
+                else
+                {
+                    // Cancel token: atomic flag checked at cancellation
+                    // boundaries (walk_to, with_peer_failover) for fast
+                    // exit without disrupting shared NodeCache state.
+                    auto cancel_token =
+                        std::make_shared<std::atomic<bool>>(false);
+
+                    // Cancel timer: set to max, cancelled by socket
+                    // watcher when the client disconnects.
+                    auto cancel = std::make_shared<asio::steady_timer>(
+                        stream.get_executor(),
+                        asio::steady_timer::time_point::max());
+
+                    // Socket watcher: monitors client disconnect.
+                    // Safe: stream lives in handle_session which is
+                    // blocked on the parallel_group below.
+                    auto watcher_done =
+                        std::make_shared<std::atomic<bool>>(false);
+                    co_spawn(
+                        stream.get_executor(),
+                        [&stream, cancel, cancel_token, watcher_done]()
+                            -> asio::awaitable<void> {
+                            boost::system::error_code wec;
+                            co_await beast::get_lowest_layer(stream)
+                                .socket()
+                                .async_wait(
+                                    asio::ip::tcp::socket::wait_read,
+                                    asio::redirect_error(
+                                        asio::use_awaitable, wec));
+                            if (!watcher_done->load())
+                            {
+                                cancel_token->store(true);
+                                cancel->cancel();
+                            }
+                        },
+                        asio::detached);
+
+                    auto ex = stream.get_executor();
+
+                    // Race prove against disconnect using parallel_group
+                    // with wait_for_one(). Unlike ||/wait_for_one_success,
+                    // this cancels the other branch when EITHER completes
+                    // — including when prove throws an exception.
+                    auto [order, ex0, r0, ex1] =
+                        co_await asio::experimental::make_parallel_group(
+                            asio::co_spawn(
+                                ex,
+                                engine_->prove(
+                                    tx_it->second, cancel_token),
+                                asio::deferred),
+                            asio::co_spawn(
+                                ex,
+                                [cancel]()
+                                    -> asio::awaitable<void> {
+                                    co_await asio::this_coro::
+                                        reset_cancellation_state(
+                                            asio::
+                                                enable_total_cancellation());
+                                    boost::system::error_code ec;
+                                    co_await cancel->async_wait(
+                                        asio::redirect_error(
+                                            asio::use_awaitable, ec));
+                                },
+                                asio::deferred))
+                            .async_wait(
+                                asio::experimental::wait_for_one(),
+                                asio::use_awaitable);
+
+                    // Cancel the socket watcher before touching stream
+                    watcher_done->store(true);
+                    beast::get_lowest_layer(stream).socket().cancel();
+
+                    // Check which branch completed first
+                    if (order[0] == 0)
+                    {
+                        // Prove finished first (success or error)
+                        if (ex0)
+                            std::rethrow_exception(ex0); // → caught below
+                    }
+                    else
+                    {
+                        // Cancel branch fired = client disconnected
+                        PLOGD(log_, "Client disconnected during prove");
+                        break;
+                    }
+
+                    auto result = std::move(r0);
+                    auto format_it = params.find("format");
+                    bool binary =
+                        format_it != params.end() && format_it->second == "bin";
+
+                    stream.expires_after(opts_.write_timeout);
+
+                    if (binary)
+                    {
+                        auto data = to_binary(result.chain, {.compress = true});
+                        http::response<http::vector_body<uint8_t>> res{
+                            http::status::ok, version};
+                        res.set(
+                            http::field::content_type,
+                            "application/octet-stream");
+                        res.set(http::field::server, "xprv");
+                        res.keep_alive(keep_alive);
+                        res.body() = std::move(data);
+                        res.prepare_payload();
+                        co_await http::async_write(
+                            stream,
+                            res,
+                            asio::redirect_error(asio::use_awaitable, ec));
+                    }
+                    else
+                    {
+                        auto chain_json = to_json(result.chain);
+                        auto body_str = boost::json::serialize(chain_json);
+                        http::response<http::string_body> res{
+                            http::status::ok, version};
+                        res.set(http::field::content_type, "application/json");
+                        res.set(http::field::server, "xprv");
+                        res.keep_alive(keep_alive);
+                        res.body() = std::move(body_str);
+                        res.prepare_payload();
+                        co_await http::async_write(
+                            stream,
+                            res,
+                            asio::redirect_error(asio::use_awaitable, ec));
+                    }
+                }
+            }
+            else if (path == "/verify" && req.method() == http::verb::post)
+            {
+                auto const& body = req.body();
+                if (body.empty())
+                {
+                    stream.expires_after(opts_.write_timeout);
+                    co_await http::async_write(
+                        stream,
+                        error_response(
+                            400, "empty request body", version, keep_alive),
+                        asio::redirect_error(asio::use_awaitable, ec));
+                }
+                else
+                {
+                    auto vr = engine_->verify(
+                        std::span<const uint8_t>(body.data(), body.size()));
+
+                    boost::json::object result;
+                    result["verified"] = vr.ok;
+                    if (!vr.error.empty())
+                    {
+                        result["error"] = vr.error;
+                    }
+
+                    stream.expires_after(opts_.write_timeout);
+                    co_await http::async_write(
+                        stream,
+                        json_response(200, result, version, keep_alive),
+                        asio::redirect_error(asio::use_awaitable, ec));
+                }
+            }
+            else
+            {
+                stream.expires_after(opts_.write_timeout);
+                co_await http::async_write(
+                    stream,
+                    error_response(404, "not found", version, keep_alive),
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
+        }
+        catch (catl::rpc::RpcTxNotFound const& e)
+        {
+            PLOGW(log_, "TX not found: ", e.what());
+            caught_error = error_response(404, e.what(), version, keep_alive);
+        }
+        catch (catl::rpc::RpcTransientError const& e)
+        {
+            PLOGW(log_, "RPC transient error: ", e.what());
+            caught_error = error_response(503, e.what(), version, keep_alive);
+        }
+        catch (catl::rpc::RpcConnectionError const& e)
+        {
+            PLOGE(log_, "RPC connection error: ", e.what());
+            caught_error = error_response(502, e.what(), version, keep_alive);
+        }
+        catch (catl::peer_client::PeerClientException const& e)
+        {
+            PLOGW(log_, "Peer error: ", e.what());
+            caught_error = error_response(504, e.what(), version, keep_alive);
+        }
+        catch (std::exception const& e)
+        {
+            PLOGE(log_, "Request failed: ", e.what());
+            caught_error = error_response(500, e.what(), version, keep_alive);
+        }
+
+        // Send error response outside the catch block
+        if (caught_error)
+        {
+            stream.expires_after(opts_.write_timeout);
+            co_await http::async_write(
+                stream,
+                *caught_error,
+                asio::redirect_error(asio::use_awaitable, ec));
+        }
+
+        if (ec || !keep_alive)
+            break;
+    }
+}
+
+}  // namespace xprv

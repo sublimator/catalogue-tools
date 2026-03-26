@@ -16,6 +16,9 @@ include(cmake/StrictIncludes.cmake)
 include(cmake/Protobuf.cmake)
 include(cmake/Secp256k1.cmake)
 
+# Python3 for build scripts (web asset embedding)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
 # FTXUI for terminal dashboards (provided by Conan)
 find_package(ftxui REQUIRED)
 
@@ -121,8 +124,8 @@ add_subdirectory(src/vl-client)
 # Add the lesser-peer module
 add_subdirectory(src/lesser-peer)
 
-# Add the xproof tool
-add_subdirectory(src/xproof)
+# Add the xprv tool
+add_subdirectory(src/xprv)
 
 # Add tests if testing is enabled
 option(BUILD_TESTING "Build the testing tree" ON)

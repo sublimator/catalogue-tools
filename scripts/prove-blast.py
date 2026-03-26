@@ -109,7 +109,7 @@ def hit(
     timeout: float,
     format_name: str,
     proof_dir: Path | None,
-    xproof: Path | None,
+    xprv: Path | None,
     tracker: InFlightTracker | None = None,
 ) -> HitResult:
   suffix = "bin" if format_name == "bin" else "json"
@@ -133,9 +133,9 @@ def hit(
           if resp.status == 200 and proof_dir is not None:
               proof_path = proof_dir / f"{idx:04d}-{case.tx_hash[:16]}.{suffix}"
               proof_path.write_bytes(body)
-              if xproof is not None:
+              if xprv is not None:
                   completed = subprocess.run(
-                      [str(xproof), "verify", str(proof_path)],
+                      [str(xprv), "verify", str(proof_path)],
                       capture_output=True,
                       text=True,
                   )
@@ -305,12 +305,12 @@ def main() -> int:
   ap.add_argument(
       "--verify",
       action="store_true",
-      help="save each successful proof and run `xproof verify` on it",
+      help="save each successful proof and run `xprv verify` on it",
   )
   ap.add_argument(
-      "--xproof",
-      default="build/src/xproof/xproof",
-      help="path to xproof binary for --verify",
+      "--xprv",
+      default="build/src/xprv/xprv",
+      help="path to xprv binary for --verify",
   )
   ap.add_argument(
       "--proof-dir",
@@ -337,11 +337,11 @@ def main() -> int:
       )
 
   proof_dir: Path | None = None
-  xproof_path: Path | None = None
+  xprv_path: Path | None = None
   if args.verify:
-      xproof_path = Path(args.xproof)
-      if not xproof_path.exists():
-          raise SystemExit(f"xproof binary not found: {xproof_path}")
+      xprv_path = Path(args.xprv)
+      if not xprv_path.exists():
+          raise SystemExit(f"xprv binary not found: {xprv_path}")
       if args.proof_dir:
           proof_dir = Path(args.proof_dir)
           proof_dir.mkdir(parents=True, exist_ok=True)
@@ -374,7 +374,7 @@ def main() -> int:
                   args.timeout,
                   args.format,
                   proof_dir,
-                  xproof_path,
+                  xprv_path,
                   tracker,
               )
               for i, case in enumerate(jobs)
