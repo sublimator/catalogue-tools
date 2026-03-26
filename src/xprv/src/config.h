@@ -42,16 +42,25 @@ struct Config
     /// entries ≈ 32-64MB depending on tree shape.
     size_t node_cache_size = 65536;
 
-    /// Per-node fetch timeout in seconds. When a peer doesn't respond
-    /// within this window, the request is retried on a different peer.
+    /// Per-caller timeout in seconds for each node fetch. Each waiter
+    /// has their own deadline — timing out returns nullptr but does NOT
+    /// erase the cache entry, so late-arriving responses still get cached.
+    /// The walk_to caller retries with a different peer on timeout.
     /// Lower = faster failover, higher = more tolerant of slow peers.
-    /// Also affects recovery after cancelled requests leave orphaned
-    /// in-flight cache entries.
-    int fetch_timeout_secs = 3;
+    int fetch_timeout_secs = 5;
 
     /// Max concurrent RPC connections. Limits fd usage and avoids
     /// overwhelming the RPC endpoint under high load.
     int rpc_max_concurrent = 8;
+
+    /// Max peer retries per walk_to call. When a node fetch times out,
+    /// the walk retries with a different peer up to this many times.
+    int max_walk_peer_retries = 3;
+
+    /// Stale in-flight multiplier. An in-flight cache entry is
+    /// considered stale when now - last_fetch_at > fetch_timeout *
+    /// this multiplier. A new caller will re-send the request.
+    int fetch_stale_multiplier = 2;
 
     /// Path to the peer endpoint SQLite cache. Empty = platform default
     /// (~/.config/xprv/peer-endpoints.sqlite3).

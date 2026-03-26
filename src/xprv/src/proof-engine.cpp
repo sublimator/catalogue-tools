@@ -25,9 +25,7 @@ static LogPartition log_("engine", LogLevel::INFO);
 // ═══════════════════════════════════════════════════════════════════════
 
 ProofEngine::ProofEngine(asio::io_context& io, NetworkConfig config)
-    : io_(io)
-    , config_(std::move(config))
-    , protocol_(config_.load_protocol())
+    : io_(io), config_(std::move(config)), protocol_(config_.load_protocol())
 {
     config_.apply_defaults();
 }
@@ -53,15 +51,19 @@ ProofEngine::start()
     // For now, the VL co_get in prove() handles the initial UNL push.
 
     // Node cache (content-addressed wire node store)
-    node_cache_ = NodeCache::create(io_, node_cache_size_, fetch_timeout_secs_);
+    node_cache_ = NodeCache::create(
+        io_,
+        {.max_entries = node_cache_size_,
+         .fetch_timeout_secs = fetch_timeout_secs_,
+         .max_walk_peer_retries = max_walk_peer_retries_,
+         .fetch_stale_multiplier = fetch_stale_multiplier_});
 
     // Shared RPC client with concurrency limiter
     rpc_ = std::make_shared<catl::rpc::RpcClient>(
         io_, config_.rpc_host, config_.rpc_port, rpc_max_concurrent_);
 
     // Peer set — pick pool based on mode (server vs single-shot CLI)
-    auto const& pool = single_shot_
-        ? config_.peers_cli : config_.peers_server;
+    auto const& pool = single_shot_ ? config_.peers_cli : config_.peers_server;
     PeerSetOptions peer_opts;
     peer_opts.network_id = config_.network_id;
     peer_opts.endpoint_cache_path = config_.peer_cache_path;
@@ -100,10 +102,9 @@ ProofEngine::start()
     // Push UNL to validation buffer on every VL load (initial + refresh).
     // set_unl() clears the quorum cache, so this must only fire on actual
     // VL changes — not per-request.
-    vl_cache_->set_on_refresh(
-        [vbuf](catl::vl::ValidatorList const& vl) {
-            vbuf->set_unl(vl.validators);
-        });
+    vl_cache_->set_on_refresh([vbuf](catl::vl::ValidatorList const& vl) {
+        vbuf->set_unl(vl.validators);
+    });
 
     // Try the configured initial peer
     auto self = shared_from_this();
@@ -144,7 +145,8 @@ ProofEngine::start()
             config_.rpc_host, std::to_string(config_.rpc_port));
         if (!results.empty())
         {
-            auto resolved_ip = results.begin()->endpoint().address().to_string();
+            auto resolved_ip =
+                results.begin()->endpoint().address().to_string();
             PLOGI(
                 log_,
                 "Resolved RPC host ",
@@ -219,7 +221,8 @@ ProofEngine::prove(
     auto vl = co_await vl_cache_->co_get();
 
     // Step 2: Wait for a quorum (may already have one)
-    auto quorum = co_await val_buffer_->co_wait_quorum(std::chrono::seconds(30));
+    auto quorum =
+        co_await val_buffer_->co_wait_quorum(std::chrono::seconds(30));
 
     PLOGI(
         log_,
@@ -234,8 +237,8 @@ ProofEngine::prove(
         " validators)");
 
     // Step 3: Get anchor bundle (future-based — built once, shared)
-    auto anchor = co_await get_anchor_bundle(
-        quorum.ledger_seq, quorum.ledger_hash);
+    auto anchor =
+        co_await get_anchor_bundle(quorum.ledger_seq, quorum.ledger_hash);
 
     // Step 4: Build proof using shared services
     // Check tx→ledger_seq cache (avoids RPC lookup on repeated requests)
@@ -279,9 +282,7 @@ ProofEngine::prove(
 // ═══════════════════════════════════════════════════════════════════════
 
 void
-ProofEngine::cache_put(
-    std::string const& tx_hash,
-    ProveResult const& result)
+ProofEngine::cache_put(std::string const& tx_hash, ProveResult const& result)
 {
     std::lock_guard lock(cache_mutex_);
 
@@ -301,7 +302,13 @@ ProofEngine::cache_put(
 
     cache_lru_.emplace_front(tx_hash, result);
     cache_map_[tx_hash] = cache_lru_.begin();
-    PLOGD(log_, "Cached proof for ", tx_hash.substr(0, 16), "... (", cache_lru_.size(), " entries)");
+    PLOGD(
+        log_,
+        "Cached proof for ",
+        tx_hash.substr(0, 16),
+        "... (",
+        cache_lru_.size(),
+        " entries)");
 }
 
 std::optional<ProofEngine::ProveResult>
@@ -363,7 +370,8 @@ ProofEngine::verify(
         // publisher key, unless the caller explicitly overrides the key.
         auto proof_config = NetworkConfig::for_network(chain.network_id);
         auto protocol = proof_config.load_protocol();
-        auto key = trusted_key.empty() ? proof_config.publisher_key : trusted_key;
+        auto key =
+            trusted_key.empty() ? proof_config.publisher_key : trusted_key;
 
         result.ok = resolve_proof_chain(chain, protocol, key);
         if (!result.ok)
@@ -388,7 +396,8 @@ ProofEngine::tx_ledger_put(std::string const& tx_hash, uint32_t seq)
     auto it = tx_ledger_map_.find(tx_hash);
     if (it != tx_ledger_map_.end())
     {
-        tx_ledger_lru_.splice(tx_ledger_lru_.begin(), tx_ledger_lru_, it->second);
+        tx_ledger_lru_.splice(
+            tx_ledger_lru_.begin(), tx_ledger_lru_, it->second);
         return;
     }
     while (tx_ledger_lru_.size() >= kMaxTxLedgerCache)

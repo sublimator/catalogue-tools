@@ -24,12 +24,12 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <list>
-#include <atomic>
+#include <map>
 #include <memory>
 #include <mutex>
-#include <map>
 #include <set>
 #include <vector>
 
@@ -44,9 +44,10 @@ namespace asio = boost::asio;
 /// A node on the walk path with its tree position.
 struct PathNode
 {
-    SHAMapNodeID nodeid;                          // position in tree
-    Hash256 hash;                                 // content hash
-    std::shared_ptr<std::vector<uint8_t>> wire;   // shared with cache — zero-copy
+    SHAMapNodeID nodeid;  // position in tree
+    Hash256 hash;         // content hash
+    std::shared_ptr<std::vector<uint8_t>>
+        wire;  // shared with cache — zero-copy
 };
 
 /// Sibling branch at a depth — becomes a placeholder in the abbreviated tree.
@@ -80,15 +81,23 @@ struct WalkResult
 class NodeCache : public std::enable_shared_from_this<NodeCache>
 {
 public:
+    struct Options
+    {
+        size_t max_entries = 65536;
+        int fetch_timeout_secs = 5;
+        int max_walk_peer_retries =
+            3;  // same-peer + different-peer retries per walk
+        int fetch_stale_multiplier =
+            2;  // entry stale when age > timeout * this
+    };
+
     static std::shared_ptr<NodeCache>
-    create(
-        asio::io_context& io,
-        size_t max_entries = 65536,
-        int fetch_timeout_secs = 5);
+    create(asio::io_context& io, Options opts);
 
     /// Walk a SHAMap from root hash to target key, fetching on miss.
     ///
-    /// @param root_hash   Root of the tree (account_hash or tx_hash from header)
+    /// @param root_hash   Root of the tree (account_hash or tx_hash from
+    /// header)
     /// @param target_key  The key to find (tx hash or SLE key)
     /// @param ledger_hash Which ledger to request from peers on miss
     /// @param ledger_seq  Ledger sequence (for peer selection by range)
@@ -166,13 +175,39 @@ public:
     clear();
 
 private:
-    NodeCache(asio::io_context& io, size_t max_entries, int fetch_timeout_secs);
+    NodeCache(asio::io_context& io, Options opts);
 
+    // ── Cache entry ─────────────────────────────────────────────
+    //
+    // Per-caller waiter model: each caller waiting for this entry
+    // creates their own asio::steady_timer with their own deadline.
+    // The entry holds weak_ptr<timer> to each waiter. When data
+    // arrives (insert_and_notify), all waiter timers are cancelled
+    // (async_wait returns operation_aborted → caller checks store).
+    //
+    // Key invariant: entries are NEVER erased on caller timeout.
+    // A timed-out caller returns nullptr, but the entry stays alive
+    // so that late-arriving peer responses still populate it —
+    // fixing the "priming then instant" problem where the first
+    // request times out at 3s, the response arrives at 3.5s with
+    // nowhere to go, and the second request re-fetches needlessly.
+    //
+    // Entries are only removed by LRU eviction (which skips entries
+    // with active waiters).
     struct Entry
     {
         std::shared_ptr<std::vector<uint8_t>> wire_data;
-        std::shared_ptr<asio::steady_timer> signal;  // non-null while in-flight
         bool present = false;
+
+        // Per-caller waiter timers. Uses weak_ptr so expired callers
+        // (timed out, cancelled) are cleaned up lazily.
+        std::vector<std::weak_ptr<asio::steady_timer>> waiters;
+
+        // When the most recent TMGetLedger was sent for this hash.
+        // Used for stale detection: if now - last_fetch_at > 2x timeout,
+        // a new caller will re-send the request to their own peer
+        // (the original sender may have timed out or disconnected).
+        std::chrono::steady_clock::time_point last_fetch_at{};
     };
 
     /// Ensure a node is in the cache. Fetches from peer on miss.
@@ -188,15 +223,12 @@ private:
         int speculative_depth,
         std::shared_ptr<PeerClient> peer);
 
-    /// Fetch result: success (data arrived), timeout (peer didn't respond),
-    /// or cancelled (coroutine cancellation — don't retry, don't erase entry).
-    enum class FetchResult { success, timeout, cancelled };
-
-    /// Fetch node(s) from a peer, insert all response nodes into cache.
-    /// Sends the primary position plus speculative deeper positions
-    /// along the target key path in one TMGetLedger request.
-    asio::awaitable<FetchResult>
-    fetch_node(
+    /// Send a TMGetLedger request for a node (+ speculative deeper nodes).
+    /// Non-coroutine: just builds and sends the request, no waiting.
+    /// The response arrives asynchronously via on_node_response →
+    /// insert_and_notify which wakes all waiters.
+    void
+    send_fetch(
         Hash256 expected_hash,
         Hash256 ledger_hash,
         int tree_type,
@@ -230,16 +262,21 @@ private:
     asio::io_context& io_;
     size_t max_entries_;
     int fetch_timeout_secs_;
+    int max_walk_peer_retries_;
+    int fetch_stale_multiplier_;
 
     mutable std::mutex mutex_;
     std::map<Hash256, Entry> store_;
 
-    // Ledger header cache: keyed by seq (cast to Hash256 for simplicity)
+    // Ledger header cache: keyed by seq
     struct HeaderEntry
     {
         LedgerHeaderResult result;
-        std::shared_ptr<asio::steady_timer> signal;  // non-null while in-flight
+        std::shared_ptr<asio::steady_timer>
+            signal;  // non-null while in-flight (legacy pattern)
         bool present = false;
+        // Note: header cache still uses single-signal pattern.
+        // The main improvement here is not erasing entries on failure.
     };
     std::map<uint32_t, HeaderEntry> header_cache_;
 

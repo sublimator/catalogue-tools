@@ -157,6 +157,18 @@ public:
     }
 
     void
+    set_max_walk_peer_retries(int n)
+    {
+        max_walk_peer_retries_ = n;
+    }
+
+    void
+    set_fetch_stale_multiplier(int n)
+    {
+        fetch_stale_multiplier_ = n;
+    }
+
+    void
     set_rpc_max_concurrent(int n)
     {
         rpc_max_concurrent_ = n;
@@ -194,6 +206,8 @@ private:
     std::atomic<bool> cache_enabled_{true};
     size_t node_cache_size_ = 65536;
     int fetch_timeout_secs_ = 5;
+    int max_walk_peer_retries_ = 3;
+    int fetch_stale_multiplier_ = 2;
     int rpc_max_concurrent_ = 8;
     bool single_shot_ = false;
     std::atomic<size_t> cache_hits_{0};
@@ -244,9 +258,7 @@ private:
     /// Get or build anchor bundle for a given seq. First caller builds,
     /// others co_await the signal.
     boost::asio::awaitable<AnchorBundle>
-    get_anchor_bundle(
-        uint32_t anchor_seq,
-        Hash256 anchor_hash);
+    get_anchor_bundle(uint32_t anchor_seq, Hash256 anchor_hash);
 };
 
 }  // namespace xprv

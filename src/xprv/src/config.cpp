@@ -67,8 +67,7 @@ config_file_path()
 {
     namespace fs = std::filesystem;
 
-    if (auto const* xdg = std::getenv("XDG_CONFIG_HOME");
-        xdg && *xdg != '\0')
+    if (auto const* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg != '\0')
     {
         auto p = fs::path(xdg) / "xprv" / "config.toml";
         if (fs::exists(p))
@@ -126,6 +125,10 @@ load_config_file(std::string const& path, uint32_t network_id_hint)
                 config.fetch_timeout_secs = static_cast<int>(*v);
             if (auto v = (*s)["rpc_max_concurrent"].value<int64_t>())
                 config.rpc_max_concurrent = static_cast<int>(*v);
+            if (auto v = (*s)["max_walk_peer_retries"].value<int64_t>())
+                config.max_walk_peer_retries = static_cast<int>(*v);
+            if (auto v = (*s)["fetch_stale_multiplier"].value<int64_t>())
+                config.fetch_stale_multiplier = static_cast<int>(*v);
             if (auto v = (*s)["peer_cache_path"].value<std::string>())
                 config.peer_cache_path = *v;
         }
@@ -228,6 +231,10 @@ apply_env_overrides(Config& config)
         config.fetch_timeout_secs = static_cast<int>(*v);
     if (auto v = env_u32("XPRV_RPC_MAX_CONCURRENT"))
         config.rpc_max_concurrent = static_cast<int>(*v);
+    if (auto v = env_u32("XPRV_MAX_WALK_PEER_RETRIES"))
+        config.max_walk_peer_retries = static_cast<int>(*v);
+    if (auto v = env_u32("XPRV_FETCH_STALE_MULTIPLIER"))
+        config.fetch_stale_multiplier = static_cast<int>(*v);
     if (auto v = env_str("XPRV_PEER_CACHE_PATH"))
         config.peer_cache_path = *v;
     if (auto v = env_u32("XPRV_FD_LIMIT"))
@@ -322,18 +329,22 @@ dump_config(Config const& config, std::ostream& os)
     os << "node_cache_size = " << config.node_cache_size << "\n";
     os << "fetch_timeout = " << config.fetch_timeout_secs << "\n";
     os << "rpc_max_concurrent = " << config.rpc_max_concurrent << "\n";
+    os << "max_walk_peer_retries = " << config.max_walk_peer_retries << "\n";
+    os << "fetch_stale_multiplier = " << config.fetch_stale_multiplier << "\n";
     if (!config.peer_cache_path.empty())
         os << "peer_cache_path = \"" << config.peer_cache_path << "\"\n";
     os << "\n";
 
     os << "[peers]\n";
-    os << "archival_range_threshold = " << config.archival_range_threshold << "\n\n";
+    os << "archival_range_threshold = " << config.archival_range_threshold
+       << "\n\n";
 
     auto dump_pool = [&](char const* name, Config::PeerPool const& pool) {
         os << "[peers." << name << "]\n";
         os << "max_hub_peers = " << pool.max_hub_peers << "\n";
         os << "max_archival_peers = " << pool.max_archival_peers << "\n";
-        os << "max_in_flight_connects = " << pool.max_in_flight_connects << "\n";
+        os << "max_in_flight_connects = " << pool.max_in_flight_connects
+           << "\n";
         os << "max_in_flight_crawls = " << pool.max_in_flight_crawls << "\n\n";
     };
     dump_pool("server", config.peers_server);

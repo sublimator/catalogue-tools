@@ -49,6 +49,8 @@ cmd_serve()
         engine->set_cache_enabled(false);
     engine->set_node_cache_size(config.node_cache_size);
     engine->set_fetch_timeout(config.fetch_timeout_secs);
+    engine->set_max_walk_peer_retries(config.max_walk_peer_retries);
+    engine->set_fetch_stale_multiplier(config.fetch_stale_multiplier);
     engine->set_rpc_max_concurrent(config.rpc_max_concurrent);
     engine->start();
 
@@ -95,9 +97,8 @@ cmd_serve()
             },
             &io);
         pthread_attr_destroy(&attr);
-        threads.emplace_back(std::thread([tid]() {
-            pthread_join(tid, nullptr);
-        }));
+        threads.emplace_back(
+            std::thread([tid]() { pthread_join(tid, nullptr); }));
     }
 
     io.run();  // main thread participates
