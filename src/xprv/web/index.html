@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xprv.it</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{min-height:100vh;height:100%;overflow:hidden;background:#000;color:#fff;
+font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+
+canvas#globe{position:fixed;inset:0;z-index:0;pointer-events:none}
+
+body{display:flex;flex-direction:column;align-items:center;justify-content:center;
+gap:2rem;position:relative;z-index:1}
+h1{font-size:4rem;font-weight:300;letter-spacing:.15em;text-shadow:0 0 40px rgba(255,255,255,0.1)}
+.search{width:min(600px,90vw);position:relative}
+input{width:100%;padding:.8rem 1rem;font-size:1rem;font-family:monospace;
+background:rgba(17,17,17,0.85);border:1px solid #333;color:#fff;border-radius:6px;
+outline:none;transition:border-color .2s;backdrop-filter:blur(4px)}
+input:focus{border-color:#555}
+input.valid{border-color:#2a2}
+input.invalid{border-color:#a22}
+.status{font-size:.85rem;color:#666;min-height:1.2em;text-align:center;
+padding:.3rem .8rem;border-radius:4px}
+.status:not(:empty){background:rgba(0,0,0,0.6);backdrop-filter:blur(4px)}
+footer{position:fixed;bottom:1rem;font-size:.75rem;color:#444;text-align:center;z-index:1}
+footer a{color:#555;text-decoration:none}
+footer a:hover{color:#7d7;text-decoration:underline}
+.status.error{color:#e44}
+.status.working{color:#fa0}
+.status.done{color:#2a2}
+
+#details{margin-top:.5rem;opacity:0;transition:opacity .4s;
+font-size:.8rem;color:#999;font-family:monospace;
+display:flex;align-items:center;gap:0;flex-wrap:wrap;justify-content:center;
+background:rgba(0,0,0,0.7);border-radius:6px;padding:.4rem .8rem;
+backdrop-filter:blur(6px);max-width:min(600px,90vw)}
+#details.show{opacity:1}
+#details .sep{color:#333;margin:0 .6rem}
+@media(max-width:500px){
+  #details{flex-direction:column;gap:.2rem;padding:.5rem .8rem}
+  #details .sep{display:none}
+  h1{font-size:2.5rem}
+}
+#details a{color:#5b5;text-decoration:none;cursor:pointer}
+#details a:hover{text-decoration:underline;color:#7d7}
+#details .steps{cursor:pointer;color:#8b8}
+#details .steps:hover{color:#afa}
+#details .icon{cursor:pointer;opacity:.5;margin-left:.3rem;font-size:.9em}
+#details .icon:hover{opacity:1}
+
+#modal{display:none;position:fixed;inset:0;z-index:10;
+background:rgba(0,0,0,0.85);backdrop-filter:blur(8px);
+align-items:center;justify-content:center;padding:2rem}
+#modal.show{display:flex}
+#modal-inner{background:#111;border:1px solid #333;border-radius:8px;
+max-width:min(800px,90vw);max-height:80vh;overflow:auto;padding:1.5rem;
+font-family:monospace;font-size:.8rem;line-height:1.6;color:#ccc;
+position:relative}
+#modal-inner h3{color:#fff;font-size:1rem;margin-bottom:1rem;font-family:sans-serif}
+#modal-close{position:absolute;top:.8rem;right:1rem;color:#666;cursor:pointer;
+font-size:1.2rem;background:none;border:none}
+#modal-close:hover{color:#fff}
+.step-block{margin-bottom:1rem;padding:.6rem;border-left:2px solid #333;padding-left:.8rem}
+.step-block.anchor{border-color:#5b5}
+.step-block.header{border-color:#58c}
+.step-block.map{border-color:#c85}
+.step-type{font-weight:bold;margin-bottom:.4rem;font-size:.85rem}
+.step-type.anchor{color:#5b5}
+.step-type.header{color:#58c}
+.step-type.map{color:#c85}
+.step-detail{color:#999;font-size:.75rem;line-height:1.8}
+.step-detail .k{color:#7bb}
+.step-detail .v{color:#bda}
+.step-detail .h{color:#686;font-size:.7rem}
+.step-detail .n{color:#db8}
+.step-detail .sep{color:#444;margin:0 .2rem}
+.step-detail .link-badge{display:inline-flex;align-items:center;justify-content:center;
+width:1.6em;height:1.6em;font-size:.8em;font-weight:900;color:#000;background:#fff;
+border-radius:50%;margin-right:.3rem;vertical-align:middle}
+.step-detail .link-anchor{color:#f80;font-weight:bold}
+.step-detail .link-tx{color:#e66}
+.step-detail .link-state{color:#6af}
+.step-detail .leaf-data{margin-top:.4rem;padding:.4rem .6rem;
+border-left:1px solid #333;margin-left:.2rem;background:rgba(255,255,255,0.02);border-radius:0 4px 4px 0}
+</style>
+</head>
+<body>
+<canvas id="globe"></canvas>
+<h1>xprv.it</h1>
+<div class="search">
+  <input type="text" id="tx" placeholder="transaction hash" spellcheck="false" autocomplete="off">
+</div>
+<div id="details"></div>
+<div class="status" id="status"></div>
+<div id="modal"><div id="modal-inner"><button id="modal-close">&times;</button><div id="modal-body"></div></div></div>
+<footer id="footer"><a href="/verify-xprv.py">verify-xprv.py</a> — standalone proof verifier</footer>
+<script>
+const tx = document.getElementById('tx');
+const statusEl = document.getElementById('status');
+const details = document.getElementById('details');
+const canvas = document.getElementById('globe');
+const ctx = canvas.getContext('2d');
+const HEX64 = /^[0-9a-fA-F]{64}$/;
+let controller = null;
+let mouseX = 0.5, mouseY = 0.5;
+
+// ── Globe JSON background ─────────────────────────────────────
+let rotation = 0;
+let charGrid = []; // [{ch, isKey}] per line
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+document.addEventListener('mousemove', e => {
+  mouseX = e.clientX / window.innerWidth;
+  mouseY = e.clientY / window.innerHeight;
+});
+
+function populateGlobe(jsonStr) {
+  const lines = jsonStr.split('\n').filter(l => l.trim());
+  charGrid = lines.map(line => {
+    const chars = [];
+    const keyRe = /"([^"]+)"\s*:/g;
+    const keyRanges = [];
+    let m;
+    while ((m = keyRe.exec(line)) !== null) {
+      keyRanges.push([m.index + 1, m.index + 1 + m[1].length]);
+    }
+    for (let i = 0; i < line.length; i++) {
+      const isKey = keyRanges.some(([s, e]) => i >= s && i < e);
+      chars.push({ ch: line[i], isKey });
+    }
+    return chars;
+  });
+}
+
+function drawGlobe() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!charGrid.length) { requestAnimationFrame(drawGlobe); return; }
+
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  const mobile = canvas.width < 500;
+  const r = Math.min(cx, cy) * (mobile ? 0.7 : 0.85);
+  const tiltX = (mouseY - 0.5) * 0.5;
+  const tiltY = (mouseX - 0.5) * 0.7;
+  const cosX = Math.cos(tiltX), sinX = Math.sin(tiltX);
+  const cosY = Math.cos(tiltY), sinY = Math.sin(tiltY);
+
+  const totalLines = charGrid.length;
+  // Fewer lines on mobile to reduce visual noise
+  const latLines = Math.min(totalLines, mobile ? 40 : 80);
+  // Spread from equator outward: line 0 at equator, alternating +/-
+  const latSpread = 0.9; // fraction of hemisphere to use
+
+  for (let i = 0; i < latLines; i++) {
+    const lineIdx = i % totalLines;
+    const parsed = charGrid[lineIdx];
+    if (!parsed.length) continue;
+
+    // Spiral from equator: 0, +1, -1, +2, -2 ...
+    const ring = i % 2 === 0 ? i / 2 : -(i + 1) / 2;
+    const lat = (ring / latLines) * Math.PI * latSpread;
+    const cosLat = Math.cos(lat);
+    const sinLat = Math.sin(lat);
+
+    const charsToShow = Math.min(parsed.length, mobile ? 50 : 100);
+    for (let j = 0; j < charsToShow; j++) {
+      const lon = -(j / charsToShow) * Math.PI * 2 + rotation + i * 0.03;
+
+      let x = cosLat * Math.cos(lon);
+      let z = cosLat * Math.sin(lon);
+      let y = sinLat;
+
+      const y2 = y * cosX - z * sinX;
+      const z2 = y * sinX + z * cosX;
+      const x2 = x * cosY - z2 * sinY;
+      const z3 = x * sinY + z2 * cosY;
+
+      if (z3 < -0.05) continue;
+
+      const scale = 1 / (1 + z3 * 0.3);
+      const sx = cx + x2 * r * scale;
+      const sy = cy + y2 * r * scale;
+      const depth = (z3 + 1) / 2;
+
+      const { ch, isKey } = parsed[j];
+
+      if (isKey) {
+        const alpha = (mobile ? 0.1 : 0.15) + depth * depth * (mobile ? 0.35 : 0.55);
+        const sz = Math.round(((mobile ? 10 : 14) + depth * (mobile ? 2 : 4)) * scale);
+        ctx.font = `bold ${sz}px monospace`;
+        ctx.fillStyle = `rgba(120,255,230,${alpha})`;
+      } else {
+        const alpha = 0.03 + depth * depth * (mobile ? 0.1 : 0.18);
+        const green = Math.floor(130 + depth * 90);
+        const sz = Math.round(((mobile ? 8 : 11) + depth * 2) * scale);
+        ctx.font = `${sz}px monospace`;
+        ctx.fillStyle = `rgba(30,${green},50,${alpha})`;
+      }
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(ch, sx, sy);
+    }
+  }
+
+  rotation += 0.002;
+  requestAnimationFrame(drawGlobe);
+}
+drawGlobe();
+
+// ── Proof logic ───────────────────────────────────────────────
+tx.addEventListener('input', () => {
+  const v = tx.value.trim();
+  tx.classList.remove('valid', 'invalid');
+  statusEl.className = 'status';
+  statusEl.textContent = '';
+  details.className = '';
+  details.innerHTML = '';
+
+  if (!v) return;
+  if (!HEX64.test(v)) {
+    if (v.length >= 1) {
+      tx.classList.add('invalid');
+      statusEl.textContent = v.length < 64
+        ? `${v.length}/64 characters`
+        : 'must be 64 hex characters';
+    }
+    return;
+  }
+
+  tx.classList.add('valid');
+  prove(v);
+});
+
+const S = '<span class="sep">|</span>';
+let lastProofJson = null;
+let lastProofPretty = '';
+
+function showDetails(json, txHash) {
+  lastProofJson = json;
+  lastProofPretty = JSON.stringify(json, null, 2);
+  const steps = json.steps || [];
+  const anchor = steps.find(s => s.type === 'anchor');
+
+  const net = json.network_id === 0 ? 'XRPL mainnet' : `network ${json.network_id}`;
+  const seq = anchor ? `<a href="https://xrpscan.com/ledger/${anchor.ledger_index}" target="_blank" rel="noopener">#${anchor.ledger_index}</a>` : '';
+  const tx = `<a href="https://xrpscan.com/tx/${txHash}" target="_blank" rel="noopener">${txHash.substring(0,16)}\u2026</a>`;
+  const stepsLink = `<span class="steps" onclick="showSteps()">${steps.length} steps</span>`;
+
+  details.innerHTML = `${net}${S}${seq}${S}${tx}${S}${stepsLink}`;
+  details.className = 'show';
+}
+
+function copyProof() {
+  navigator.clipboard.writeText(lastProofPretty).then(() => {
+    // Show "copied" toast
+    const toast = document.createElement('div');
+    toast.textContent = 'copied to clipboard';
+    toast.style.cssText = 'position:fixed;bottom:3rem;left:50%;transform:translateX(-50%);background:#2a2;color:#000;padding:.4rem 1rem;border-radius:4px;font-size:.8rem;font-family:monospace;z-index:20;opacity:1;transition:opacity .3s';
+    document.body.appendChild(toast);
+    setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 1200);
+  });
+}
+
+// ── Ledger header hashing (SHA512-Half) ───────────────────────
+async function hashHeader(hdr) {
+  // prefix "LWR\0" + seq(4) + drops(8) + 3×hash(32) + parent_close(4) + close(4) + res(1) + flags(1)
+  const prefix = new Uint8Array([0x4C, 0x57, 0x52, 0x00]);
+  const full = new Uint8Array(4 + 4 + 8 + 32 + 32 + 32 + 4 + 4 + 1 + 1);
+  full.set(prefix, 0);
+
+  const dv = new DataView(full.buffer);
+  let off = 4;
+  dv.setUint32(off, hdr.seq); off += 4;
+  // drops as uint64 (BigInt)
+  dv.setBigUint64(off, BigInt(hdr.drops)); off += 8;
+  // 32-byte hashes
+  for (const field of ['parent_hash', 'tx_hash', 'account_hash']) {
+    const bytes = hexToBytes(hdr[field]);
+    full.set(bytes, off); off += 32;
+  }
+  dv.setUint32(off, hdr.parent_close_time); off += 4;
+  dv.setUint32(off, hdr.close_time); off += 4;
+  full[off++] = hdr.close_time_resolution;
+  full[off++] = hdr.close_flags;
+
+  const digest = await crypto.subtle.digest('SHA-512', full.slice(0, off));
+  // SHA512-Half: first 32 bytes
+  return bytesToHex(new Uint8Array(digest).slice(0, 32)).toUpperCase();
+}
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2)
+    bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+  return bytes;
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+}
+
+const RIPPLE_EPOCH = 946684800;
+const rippleTime = (t) => {
+  if (!t) return '';
+  const d = new Date((t + RIPPLE_EPOCH) * 1000);
+  const s = d.toISOString().replace('T',' ').replace(/:\d{2}\.\d+Z/,' UTC');
+  return `<span class="h">${s}</span>`;
+};
+const kv = (k, v) => `<span class="k">${k}:</span> <span class="v">${v}</span>`;
+const hx = (v, n=20) => `<span class="h">${v.substring(0, n)}\u2026</span>`;
+const num = (v) => `<span class="n">${typeof v === 'number' ? v.toLocaleString() : v}</span>`;
+const sep = () => `<span class="sep">\u2502</span> `;
+
+function findTrieLeaf(node) {
+  if (Array.isArray(node)) return node;
+  if (node && typeof node === 'object') {
+    for (const v of Object.values(node)) {
+      const r = findTrieLeaf(v);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
+function countTrieNodes(node) {
+  if (typeof node === 'string') return {inners:0,leaves:0,placeholders:1};
+  if (Array.isArray(node)) return {inners:0,leaves:1,placeholders:0};
+  if (node && typeof node === 'object') {
+    let s = {inners:1,leaves:0,placeholders:0};
+    for (const [k,v] of Object.entries(node)) {
+      if (k.length === 1) { const c = countTrieNodes(v); s.inners+=c.inners; s.leaves+=c.leaves; s.placeholders+=c.placeholders; }
+    }
+    return s;
+  }
+  return {inners:0,leaves:0,placeholders:0};
+}
+
+let linkNum = 0;
+const lnk = (cls, hash, label) => {
+  const n = Math.floor(linkNum / 2) + 1;
+  linkNum++;
+  const badge = `<span class="link-badge">${n}</span>`;
+  const tag = label ? ` \u2192 ${label}` : '';
+  return `${badge}<span class="${cls}">${hash}</span>${tag}`;
+};
+
+async function describeStep(step, i, allSteps) {
+  const type = step.type || 'unknown';
+  const cls = type === 'anchor' ? 'anchor' : type === 'ledger_header' ? 'header' : 'map';
+  let lines = [];
+
+  if (type === 'anchor') {
+    const nv = Object.keys(step.validations || {}).length;
+    // Decode UNL blob to get real validator count
+    let unlSize = nv;
+    try {
+      const blobHex = step.unl?.blob || '';
+      if (blobHex) {
+        const blobStr = blobHex.match(/.{1,2}/g).map(b => String.fromCharCode(parseInt(b, 16))).join('');
+        unlSize = (JSON.parse(blobStr).validators || []).length;
+      }
+    } catch(e) {}
+    lines.push(kv('ledger', `#${num(step.ledger_index)} ${sep()}${lnk('link-anchor', step.ledger_hash.substring(0,24)+'\u2026', 'header')}`));
+    lines.push(kv('quorum', `${num(nv)}/${num(unlSize)} UNL validators ${sep()}${hx(step.unl?.public_key || '', 16)}`));
+  } else if (type === 'ledger_header') {
+    const h = step.header || {};
+    const computed = await hashHeader(h);
+    const ts = rippleTime(h.close_time);
+    // Check if this header was reached via a skip list (preceding map_proof with Hashes)
+    let skipInfo = '';
+    for (let j = i - 1; j >= 0; j--) {
+      if (allSteps[j].type === 'ledger_header') {
+        const prevH = allSteps[j].header;
+        const skippedLedgers = prevH.seq - h.seq;
+        if (skippedLedgers > 0) {
+          const skippedSecs = prevH.close_time - h.close_time;
+          let timeStr;
+          if (skippedSecs >= 86400) timeStr = `${(skippedSecs / 86400).toFixed(1)}d`;
+          else if (skippedSecs >= 3600) timeStr = `${(skippedSecs / 3600).toFixed(1)}h`;
+          else if (skippedSecs >= 60) timeStr = `${Math.round(skippedSecs / 60)}m`;
+          else timeStr = `${skippedSecs}s`;
+          skipInfo = ` ${sep()}<span class="h">\u0394 ${skippedLedgers.toLocaleString()} ledgers / ${timeStr}</span>`;
+        }
+        break;
+      }
+    }
+    lines.push(kv('ledger', `#${num(h.seq)}${skipInfo} ${sep()}${ts} ${sep()}${lnk('link-anchor', computed.substring(0,24)+'\u2026')}`));
+    // Find what comes next to label the links
+    let nextIsState = false, nextIsTx = false;
+    for (let j = i + 1; j < allSteps.length; j++) {
+      if (allSteps[j].type === 'map_proof') {
+        if (allSteps[j].tree === 'tx') nextIsTx = true;
+        else nextIsState = true;
+        break;
+      }
+    }
+    if (nextIsTx) {
+      lines.push(kv('tx_hash', lnk('link-tx', (h.tx_hash||'').substring(0,24)+'\u2026', 'tx tree')));
+    }
+    if (nextIsState) {
+      lines.push(kv('account_hash', lnk('link-state', (h.account_hash||'').substring(0,24)+'\u2026', 'state tree')));
+    }
+  } else if (type === 'map_proof') {
+    const tree = step.tree || '?';
+    const trie = step.trie;
+    const isTx = tree === 'tx';
+    const linkCls = isTx ? 'link-tx' : 'link-state';
+    // Find preceding header to show what hash this root must match
+    let rootHash = '';
+    for (let j = i - 1; j >= 0; j--) {
+      if (allSteps[j].type === 'ledger_header') {
+        const hdr = allSteps[j].header;
+        rootHash = isTx ? hdr.tx_hash : hdr.account_hash;
+        break;
+      }
+    }
+    const treeName = isTx ? 'transactions' : 'account_state';
+    lines.push(kv(treeName, rootHash ? lnk(linkCls, rootHash.substring(0,24)+'\u2026') : ''));
+
+    if (trie) {
+      const stats = countTrieNodes(trie);
+      lines.push(kv('nodes', `${num(stats.inners)} inners ${sep()}${num(stats.leaves)} leaves ${sep()}${num(stats.placeholders)} placeholders`));
+
+      const leaf = findTrieLeaf(trie);
+      if (leaf && leaf.length >= 2 && typeof leaf[1] === 'object') {
+        const data = leaf[1];
+        const sub = [];
+        if (data.LedgerEntryType) {
+          sub.push(kv('LedgerEntryType', `<span class="v">${data.LedgerEntryType}</span>`));
+        }
+        if (data.Hashes) {
+          const hashes = data.Hashes;
+          let targetHash = null;
+          for (let j = i + 1; j < allSteps.length; j++) {
+            if (allSteps[j].type === 'ledger_header') {
+              targetHash = await hashHeader(allSteps[j].header);
+              break;
+            }
+          }
+          let matchIdx = -1;
+          if (targetHash) {
+            matchIdx = hashes.findIndex(h => h.toUpperCase() === targetHash);
+          }
+          let show;
+          if (matchIdx >= 0) {
+            const matched = lnk('link-anchor', hashes[matchIdx].substring(0,24)+'\u2026', 'header');
+            show = `\u2026${num(matchIdx)} before\u2026, ${matched}, \u2026${num(hashes.length - matchIdx - 1)} after\u2026`;
+          } else {
+            show = hashes.length <= 3
+              ? hashes.map(x => hx(x, 12)).join(', ')
+              : `${hx(hashes[0],12)}, \u2026${num(hashes.length - 2)} more\u2026, ${hx(hashes[hashes.length-1],12)}`;
+          }
+          sub.push(kv('Hashes', `[${show}] (${num(hashes.length)} total)`));
+        }
+        if (data.tx) {
+          const tx = data.tx;
+          if (tx.TransactionType) sub.push(kv('TransactionType', `<span class="v">${tx.TransactionType}</span>`));
+          if (tx.Account) sub.push(kv('Account', `<span class="v">${tx.Account}</span>`));
+          if (tx.Destination) sub.push(kv('Destination', `<span class="v">${tx.Destination}</span>`));
+          if (tx.Amount) {
+            let amt;
+            if (typeof tx.Amount === 'string') {
+              amt = (parseInt(tx.Amount) / 1e6).toFixed(6) + ' XRP';
+            } else {
+              let cur = tx.Amount.currency;
+              if (cur && cur.length === 40) {
+                cur = cur.match(/.{1,2}/g).map(b => {
+                  const c = parseInt(b, 16); return c > 31 && c < 127 ? String.fromCharCode(c) : '';
+                }).join('').replace(/\0+$/, '');
+              }
+              amt = tx.Amount.value + ' ' + cur;
+            }
+            sub.push(kv('Amount', `<span class="n">${amt}</span>`));
+          }
+        }
+        if (data.meta?.TransactionResult) {
+          sub.push(kv('result', `<span class="v">${data.meta.TransactionResult}</span>`));
+        }
+        if (sub.length) {
+          lines.push(`<div class="leaf-data">${sub.join('<br>')}</div>`);
+        }
+      }
+    }
+  }
+
+  return `<div class="step-block ${cls}"><div class="step-type ${cls}">${i + 1}. ${type}</div><div class="step-detail">${lines.join('<br>')}</div></div>`;
+}
+
+async function showSteps() {
+  if (!lastProofJson) return;
+  const modal = document.getElementById('modal');
+  const body = document.getElementById('modal-body');
+  const steps = lastProofJson.steps || [];
+  linkNum = 0;
+  const rendered = [];
+  for (let i = 0; i < steps.length; i++) {
+    rendered.push(await describeStep(steps[i], i, steps));
+  }
+  body.innerHTML = `<h3>Proof chain \u2014 ${steps.length} steps</h3>` + rendered.join('');
+  modal.className = 'show';
+  if (DEV) localStorage.setItem('xprv_modal_open', '1');
+}
+
+function closeModal() {
+  document.getElementById('modal').className = '';
+  if (DEV) localStorage.removeItem('xprv_modal_open');
+}
+document.getElementById('modal-close').onclick = closeModal;
+document.getElementById('modal').onclick = (e) => {
+  if (e.target.id === 'modal') closeModal();
+};
+
+// ── Dev mode ──────────────────────────────────────────────────
+const DEV = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+if (DEV) {
+  const last = localStorage.getItem('xprv_last_hash');
+  if (last) {
+    tx.value = last;
+    tx.classList.add('valid');
+    prove(last).then(() => {
+      if (localStorage.getItem('xprv_modal_open')) showSteps();
+    });
+  }
+}
+// Save hash on successful prove
+const _origProve = prove;
+prove = async function(hash) {
+  if (DEV) localStorage.setItem('xprv_last_hash', hash);
+  return _origProve(hash);
+};
+
+async function prove(hash) {
+  if (controller) controller.abort();
+  controller = new AbortController();
+
+  statusEl.className = 'status working';
+  statusEl.textContent = 'proving\u2026';
+  details.className = '';
+
+  try {
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    const res = await fetch(`/prove?tx=${hash}`, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+    const json = await res.json();
+    showDetails(json, hash);
+
+    // Globe background
+    populateGlobe(lastProofPretty);
+
+    // Filename with ledger index
+    const anchor = (json.steps || []).find(s => s.type === 'anchor');
+    const seq = anchor ? anchor.ledger_index : 'unknown';
+    const filename = `proof-${seq}-${hash.substring(0, 12).toUpperCase()}.json`;
+
+    // Create download link
+    const blob = new Blob([lastProofPretty], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+
+    statusEl.className = 'status done';
+    statusEl.innerHTML = `<a href="${url}" download="${filename}" style="color:#2a2;text-decoration:none">${filename}</a> <span onclick="copyProof()" title="copy JSON" style="cursor:pointer;color:#696;font-size:1em;margin-left:.4rem">&#x1F4CB;</span>`;
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      statusEl.className = 'status error';
+      statusEl.textContent = 'timed out';
+      return;
+    }
+    statusEl.className = 'status error';
+    statusEl.textContent = e.message;
+  }
+}
+</script>
+</body>
+</html>
