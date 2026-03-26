@@ -125,9 +125,11 @@ function resize() {
 }
 resize();
 window.addEventListener('resize', resize);
+// Smooth mouse tracking — lerp toward target to avoid glitchy snaps
+let targetX = 0.5, targetY = 0.5;
 document.addEventListener('mousemove', e => {
-  mouseX = e.clientX / window.innerWidth;
-  mouseY = e.clientY / window.innerHeight;
+  targetX = e.clientX / window.innerWidth;
+  targetY = e.clientY / window.innerHeight;
 });
 
 function populateGlobe(jsonStr) {
@@ -151,6 +153,10 @@ function populateGlobe(jsonStr) {
 function drawGlobe() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!charGrid.length) { requestAnimationFrame(drawGlobe); return; }
+
+  // Smooth lerp toward mouse target (0.03 = slow drift, avoids snap on flyover)
+  mouseX += (targetX - mouseX) * 0.03;
+  mouseY += (targetY - mouseY) * 0.03;
 
   const cx = canvas.width / 2;
   const cy = canvas.height / 2;
@@ -204,7 +210,10 @@ function drawGlobe() {
     return;
   }
 
-  // Desktop: 3D globe
+  // Desktop: 3D globe — font sizes scale with viewport
+  const vw = window.innerWidth;
+  const baseKey = Math.max(8, vw * 0.007);    // ~9px at 1280, ~11px at 1600
+  const baseVal = Math.max(6, vw * 0.005);    // ~6px at 1280, ~8px at 1600
   const r = Math.min(cx, cy) * 0.85;
   const tiltX = (mouseY - 0.5) * 0.5;
   const tiltY = (mouseX - 0.5) * 0.7;
@@ -249,13 +258,13 @@ function drawGlobe() {
 
       if (isKey) {
         const alpha = 0.15 + depth * depth * 0.55;
-        const sz = Math.round((14 + depth * 4) * scale);
+        const sz = Math.round((baseKey + depth * 4) * scale);
         ctx.font = `bold ${sz}px monospace`;
         ctx.fillStyle = `rgba(120,255,230,${alpha})`;
       } else {
         const alpha = 0.03 + depth * depth * 0.18;
         const green = Math.floor(130 + depth * 90);
-        const sz = Math.round((11 + depth * 2) * scale);
+        const sz = Math.round((baseVal + depth * 2) * scale);
         ctx.font = `${sz}px monospace`;
         ctx.fillStyle = `rgba(30,${green},50,${alpha})`;
       }
