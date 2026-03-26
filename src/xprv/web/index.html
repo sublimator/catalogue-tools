@@ -224,7 +224,11 @@ tx.addEventListener('input', () => {
   details.className = '';
   details.innerHTML = '';
 
-  if (!v) return;
+  if (!v) {
+    closeModal();
+    if (DEV) { localStorage.removeItem('xprv_last_hash'); localStorage.removeItem('xprv_modal_open'); }
+    return;
+  }
   if (!HEX64.test(v)) {
     if (v.length >= 1) {
       tx.classList.add('invalid');
@@ -242,6 +246,8 @@ tx.addEventListener('input', () => {
 const S = '<span class="sep">|</span>';
 let lastProofJson = null;
 let lastProofPretty = '';
+let lastDownloadUrl = '';
+let lastFilename = '';
 
 function showDetails(json, txHash) {
   lastProofJson = json;
@@ -504,7 +510,10 @@ async function showSteps() {
   for (let i = 0; i < steps.length; i++) {
     rendered.push(await describeStep(steps[i], i, steps));
   }
-  body.innerHTML = `<h3>Proof chain \u2014 ${steps.length} steps</h3>` + rendered.join('');
+  const footer = lastDownloadUrl
+    ? `<div style="margin-top:1rem;padding-top:.8rem;border-top:1px solid #333;font-size:.75rem;color:#666;text-align:center"><a href="${lastDownloadUrl}" download="${lastFilename}" style="color:#5b5;text-decoration:none">${lastFilename}</a> <span onclick="copyProof()" title="copy JSON" style="cursor:pointer;color:#696;margin-left:.4rem">&#x1F4CB;</span><span style="color:#333;margin:0 .6rem">|</span><a href="/verify-xprv.py" style="color:#555;text-decoration:none">verify-xprv.py</a></div>`
+    : '';
+  body.innerHTML = `<h3>Proof chain \u2014 ${steps.length} steps</h3>` + rendered.join('') + footer;
   modal.className = 'show';
   if (DEV) localStorage.setItem('xprv_modal_open', '1');
 }
@@ -567,9 +576,14 @@ async function prove(hash) {
     // Create download link
     const blob = new Blob([lastProofPretty], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
+    lastDownloadUrl = url;
+    lastFilename = filename;
 
     statusEl.className = 'status done';
     statusEl.innerHTML = `<a href="${url}" download="${filename}" style="color:#2a2;text-decoration:none">${filename}</a> <span onclick="copyProof()" title="copy JSON" style="cursor:pointer;color:#696;font-size:1em;margin-left:.4rem">&#x1F4CB;</span>`;
+
+    // Auto-open the step inspector
+    showSteps();
   } catch (e) {
     if (e.name === 'AbortError') {
       statusEl.className = 'status error';
