@@ -551,9 +551,10 @@ peer_connection::handle_read_header(
     if (ec)
     {
         // Log exact error code for debugging disconnects
-        PLOGE(
+        PLOGD(
             log_,
-            "Error reading header: ",
+            remote_endpoint(),
+            " error reading header: ",
             ec.message(),
             " (val=",
             ec.value(),
@@ -663,9 +664,10 @@ peer_connection::handle_read_payload(
 {
     if (ec)
     {
-        PLOGE(
+        PLOGD(
             log_,
-            "Error reading payload: ",
+            remote_endpoint(),
+            " error reading payload: ",
             ec.message(),
             " (val=",
             ec.value(),

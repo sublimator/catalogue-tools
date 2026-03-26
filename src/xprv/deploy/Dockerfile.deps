@@ -1,0 +1,29 @@
+# Base image with all build tools + Conan dependencies pre-installed.
+# Rebuild only when conanfile.py, conan.sh, or external recipes change.
+#
+# Build:
+#   gcloud builds submit --config src/xprv/deploy/cloudbuild-deps.yaml
+#
+# This produces: us-central1-docker.pkg.dev/xprv-server/xprv/xprv-deps:latest
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    build-essential gcc-13 g++-13 \
+    cmake ninja-build git \
+    libssl-dev libstdc++-14-dev \
+    python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --break-system-packages conan
+
+WORKDIR /src
+
+# Only copy what conan needs — these rarely change
+COPY conanfile.py .
+COPY scripts/conan.sh scripts/
+COPY external/ external/
+
+# Pre-install all deps
+RUN BUILD_TYPE=Release CONFIGURE_GCC_13_PROFILE=1 BUILD_DIR=/src/build ./scripts/conan.sh

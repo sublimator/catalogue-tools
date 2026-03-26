@@ -1,0 +1,14 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - src/xprv/deploy/Dockerfile.deps
+      - -t
+      - us-central1-docker.pkg.dev/xprv-server/xprv/xprv-deps:latest
+      - .
+images:
+  - us-central1-docker.pkg.dev/xprv-server/xprv/xprv-deps:latest
+timeout: 3600s
+options:
+  machineType: E2_HIGHCPU_32

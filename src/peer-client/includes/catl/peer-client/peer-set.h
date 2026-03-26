@@ -6,7 +6,7 @@
 // bootstrap() and try_undiscovered() launch background connection attempts,
 // while wait_for_any_peer()/wait_for_peer() wait for usable results.
 //
-// The intended xproof usage is single-threaded on one io_context. Detached
+// The intended xprv usage is single-threaded on one io_context. Detached
 // connect coroutines keep PeerSet alive by capturing shared_ptr<PeerSet>.
 
 #include "endpoint-tracker.h"

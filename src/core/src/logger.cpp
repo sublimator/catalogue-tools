@@ -8,6 +8,7 @@
 #include <ostream>
 #include <sstream>
 #include <string>
+#include <random>
 #include <unordered_map>
 #include <vector>
 
@@ -21,6 +22,8 @@ std::ostream* Logger::error_stream_ = nullptr;   // nullptr = use std::cerr
 std::atomic<std::uint64_t> Logger::log_counter_{0};
 bool Logger::include_log_counter_ = false;
 bool Logger::use_relative_time_ = false;
+bool Logger::include_run_id_ = false;
+std::string Logger::run_id_;
 std::chrono::steady_clock::time_point Logger::start_time_ =
     std::chrono::steady_clock::now();
 
@@ -176,6 +179,26 @@ Logger::set_relative_time(bool enabled)
     if (enabled)
     {
         start_time_ = std::chrono::steady_clock::now();
+    }
+}
+
+void
+Logger::set_run_id(bool enabled)
+{
+    include_run_id_ = enabled;
+    if (enabled)
+    {
+        static constexpr char hex[] = "0123456789abcdef";
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> dist(0, 15);
+        run_id_.resize(8);
+        for (auto& c : run_id_)
+            c = hex[dist(gen)];
+    }
+    else
+    {
+        run_id_.clear();
     }
 }
 

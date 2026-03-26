@@ -15,7 +15,7 @@ namespace catl::peer_client {
 
 /// Persistent cache of peer endpoints discovered during bootstrap.
 ///
-/// This is intentionally small and synchronous. xproof drives peers from a
+/// This is intentionally small and synchronous. xprv drives peers from a
 /// single io_context thread, so immediate event-driven writes are simple and
 /// keep the bootstrap state fresh across process runs.
 class PeerEndpointCache

@@ -77,6 +77,8 @@ private:
     static std::atomic<std::uint64_t> log_counter_;
     static bool include_log_counter_;
     static bool use_relative_time_;
+    static bool include_run_id_;
+    static std::string run_id_;
     static std::chrono::steady_clock::time_point start_time_;
 
     // Fast level check method
@@ -130,6 +132,11 @@ private:
             oss << "[" << std::setw(8) << std::setfill('0') << count << "]";
         }
 
+        if (include_run_id_)
+        {
+            oss << "[" << run_id_ << "]";
+        }
+
         oss << " ";
         return oss.str();
     }
@@ -166,6 +173,10 @@ public:
     // Use relative timestamps from program start instead of wall clock
     static void
     set_relative_time(bool enabled);
+
+    // Include a random run ID in log prefix (distinguishes container restarts)
+    static void
+    set_run_id(bool enabled);
 
     // Partition registry helpers.
     static bool

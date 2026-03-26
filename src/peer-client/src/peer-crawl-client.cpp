@@ -66,7 +66,7 @@ read_crawl_response(
     http::request<http::empty_body> req(http::verb::get, "/crawl", 11);
     req.set(http::field::host, host);
     req.set(http::field::accept, "application/json");
-    req.set(http::field::user_agent, "catalogue-tools/xproof");
+    req.set(http::field::user_agent, "catalogue-tools/xprv");
 
     tcp_stream.expires_after(std::chrono::seconds(5));
     co_await http::async_write(stream, req, boost::asio::use_awaitable);
