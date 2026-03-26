@@ -52,7 +52,7 @@ NodeCache::walk_to(
     std::shared_ptr<std::atomic<bool>> cancel)
 {
     // ── CANCELLATION BOUNDARY ──
-    // Shield all inner co_awaits (ensure_present, fetch_node, signal timers)
+    // Shield all inner co_awaits (ensure_present, signal timers)
     // from the || operator's enable_total_cancellation. Without this,
     // operation_aborted propagates into shared NodeCache signal timers,
     // causing retry loops and orphaned entries.
@@ -71,7 +71,7 @@ NodeCache::walk_to(
     // ── Acquire peer ONCE up front (single strand hop) ──
     // This eliminates per-depth strand contention that was causing laggards
     // with 300+ concurrent proves. On failure mid-walk, we retry with a
-    // different peer (max 2 retries per walk).
+    // different peer (max retries per walk).
     auto peer_covers = [](std::shared_ptr<PeerClient> const& p, uint32_t seq) {
         if (!p || !p->is_ready())
             return false;
@@ -152,8 +152,8 @@ NodeCache::walk_to(
             }
             // First retry: same peer (packet may have been dropped,
             // peer might still respond to a re-send). The entry stays
-            // in the cache as in-flight, and ensure_present will
-            // re-send via the stale detection path.
+            // in the cache, and ensure_present will re-send via the
+            // stale detection path.
             else if (!same_peer_retried && peer && peer->is_ready())
             {
                 same_peer_retried = true;
@@ -286,14 +286,12 @@ NodeCache::walk_to(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// ensure_present — per-caller waiter model
+// ensure_present — cache check + fetch on miss
 //
-// Each caller creates their own asio::steady_timer with their own
-// deadline. The cache entry holds weak_ptr<timer> to each waiter.
-// When data arrives (insert_and_notify), all waiter timers are
-// cancelled. When a caller times out, only THAT caller gives up —
-// the entry stays alive so late-arriving peer responses still get
-// cached. This fixes the "priming then instant" problem.
+// Single shared signal per entry. All waiters co_await the same timer.
+// When data arrives (insert_and_notify), signal is cancelled — all
+// waiters wake. On timeout, callers return nullptr but the entry stays
+// alive so late-arriving peer responses still get cached.
 // ═══════════════════════════════════════════════════════════════════════
 
 asio::awaitable<std::shared_ptr<std::vector<uint8_t>>>
@@ -308,13 +306,8 @@ NodeCache::ensure_present(
 {
     enum class Action { hit, wait, send_and_wait };
     Action action;
+    std::shared_ptr<asio::steady_timer> signal;
     std::shared_ptr<std::vector<uint8_t>> hit_data;
-
-    // Each caller gets their own deadline timer. When data arrives,
-    // insert_and_notify cancels it (async_wait returns operation_aborted).
-    // When it expires naturally, the caller timed out.
-    auto my_timer = std::make_shared<asio::steady_timer>(
-        io_, std::chrono::seconds(fetch_timeout_secs_));
 
     {
         std::lock_guard lock(mutex_);
@@ -338,20 +331,20 @@ NodeCache::ensure_present(
         else if (!inserted)
         {
             // IN-FLIGHT — entry exists but data hasn't arrived yet.
-            // Register our timer as a waiter. Prune expired ones lazily.
-            std::erase_if(
-                it->second.waiters, [](auto& wp) { return wp.expired(); });
-            it->second.waiters.push_back(my_timer);
-
             // Stale detection: if the last fetch was sent more than
             // N*timeout ago, the original sender likely timed out and
-            // the peer probably dropped the request. Re-send.
+            // the peer probably dropped the request. Re-send with a
+            // fresh signal.
             auto now = std::chrono::steady_clock::now();
             auto stale_threshold = std::chrono::seconds(
                 fetch_timeout_secs_ * fetch_stale_multiplier_);
-            if (now - it->second.last_fetch_at > stale_threshold && peer &&
-                peer->is_ready())
+            if (now - it->second.last_fetch_at > stale_threshold &&
+                peer && peer->is_ready())
             {
+                // Replace with fresh signal
+                it->second.signal = std::make_shared<asio::steady_timer>(
+                    io_, std::chrono::seconds(fetch_timeout_secs_));
+                signal = it->second.signal;
                 action = Action::send_and_wait;
                 PLOGD(
                     log_,
@@ -361,21 +354,22 @@ NodeCache::ensure_present(
             }
             else
             {
+                signal = it->second.signal;
                 action = Action::wait;
                 PLOGD(
                     log_,
                     "  ensure: IN-FLIGHT hash=",
                     expected_hash.hex().substr(0, 16),
-                    " — joining ",
-                    it->second.waiters.size(),
-                    " waiters");
+                    " — waiting on signal");
             }
         }
         else
         {
-            // MISS — new entry, we'll send the first fetch
+            // MISS — new entry, create signal and fetch
             misses_++;
-            it->second.waiters.push_back(my_timer);
+            it->second.signal = std::make_shared<asio::steady_timer>(
+                io_, std::chrono::seconds(fetch_timeout_secs_));
+            signal = it->second.signal;
             action = Action::send_and_wait;
             PLOGD(
                 log_,
@@ -400,34 +394,34 @@ NodeCache::ensure_present(
                 "  ensure: peer not ready for hash=",
                 expected_hash.hex().substr(0, 16));
             fetch_errors_++;
-            // Don't erase the entry — other waiters may have a peer.
-            // Our timer will expire naturally and we'll return nullptr.
+            // Don't erase the entry — leave it for next caller to retry.
+            co_return nullptr;
         }
-        else
-        {
-            send_fetch(
-                expected_hash,
-                ledger_hash,
-                tree_type,
-                position,
-                target_key,
-                speculative_depth,
-                peer);
-        }
+
+        send_fetch(
+            expected_hash,
+            ledger_hash,
+            tree_type,
+            position,
+            target_key,
+            speculative_depth,
+            peer);
     }
 
-    // ── Wait on our personal timer ───────────────────────────────
-    //
-    // Two outcomes:
-    //   operation_aborted → insert_and_notify cancelled our timer → data
-    //   arrived no error → timer expired naturally → we timed out
-    //
-    // In BOTH cases, we check the store. The data might have arrived
-    // between our timer firing and us acquiring the lock.
+    // Wait on the shared signal. Two outcomes:
+    //   operation_aborted → insert_and_notify cancelled signal → data arrived
+    //   no error → timer expired naturally → timeout
+    if (!signal)
+    {
+        // Shouldn't happen, but guard against it
+        co_return nullptr;
+    }
+
     boost::system::error_code ec;
-    co_await my_timer->async_wait(
+    co_await signal->async_wait(
         asio::redirect_error(asio::use_awaitable, ec));
 
+    // Check if data arrived (regardless of how we woke up)
     {
         std::lock_guard lock(mutex_);
         auto it = store_.find(expected_hash);
@@ -442,13 +436,14 @@ NodeCache::ensure_present(
 
     // Timed out and data still not present. Return nullptr but
     // CRUCIALLY do NOT erase the entry. The peer response may still
-    // arrive and populate it via insert_and_notify — benefiting other
-    // waiters and future requests. The entry will be cleaned up by
-    // LRU eviction when it has no active waiters.
+    // arrive and populate it via insert_and_notify — benefiting
+    // future requests. The entry will be cleaned up by LRU eviction.
     if (ec != asio::error::operation_aborted)
     {
         PLOGD(
-            log_, "  ensure: TIMEOUT hash=", expected_hash.hex().substr(0, 16));
+            log_,
+            "  ensure: TIMEOUT hash=",
+            expected_hash.hex().substr(0, 16));
         fetch_errors_++;
     }
     co_return nullptr;
@@ -458,9 +453,9 @@ NodeCache::ensure_present(
 // send_fetch — fire-and-forget TMGetLedger request
 //
 // Sends the request to the peer and records last_fetch_at. Does NOT
-// wait for a response — that's handled by each caller's personal
-// timer in ensure_present. The response arrives asynchronously via
-// on_node_response → insert_and_notify → waiter timers cancelled.
+// wait for a response — that's handled by the shared signal in
+// ensure_present. The response arrives asynchronously via
+// on_node_response → insert_and_notify → signal cancelled.
 // ═══════════════════════════════════════════════════════════════════════
 
 void
@@ -674,7 +669,7 @@ NodeCache::insert(Hash256 const& hash, std::vector<uint8_t> data)
         it->second.wire_data =
             std::make_shared<std::vector<uint8_t>>(std::move(data));
         it->second.present = true;
-        it->second.waiters.clear();
+        it->second.signal = nullptr;
         touch_lru(hash);
         evict_if_needed();
 
@@ -694,10 +689,7 @@ NodeCache::insert(Hash256 const& hash, std::vector<uint8_t> data)
 void
 NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
 {
-    // Collect live waiter timers to cancel outside the lock.
-    // Each waiter's async_wait will return operation_aborted,
-    // prompting them to re-check the store and find the data.
-    std::vector<std::shared_ptr<asio::steady_timer>> to_cancel;
+    std::shared_ptr<asio::steady_timer> signal;
 
     {
         std::lock_guard lock(mutex_);
@@ -706,39 +698,29 @@ NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
         if (!inserted && it->second.present)
             return;  // already populated — skip
 
-        // Move out the waiter list before populating
-        auto pending = std::move(it->second.waiters);
-        it->second.waiters.clear();
-
-        // Populate the entry
+        signal = it->second.signal;  // may be null if no waiters
         it->second.wire_data =
             std::make_shared<std::vector<uint8_t>>(std::move(data));
         it->second.present = true;
+        it->second.signal = nullptr;
         touch_lru(hash);
         evict_if_needed();
-
-        // Collect live timers (weak_ptr → shared_ptr)
-        for (auto& wp : pending)
-        {
-            if (auto sp = wp.lock())
-                to_cancel.push_back(sp);
-        }
 
         PLOGD(
             log_,
             "  insert+notify: hash=",
             hash.hex().substr(0, 16),
             " waiters=",
-            to_cancel.size(),
+            (signal ? "yes" : "no"),
             " store_size=",
             store_.size());
     }
 
-    // Wake all waiters outside the lock
-    for (auto& timer : to_cancel)
+    // Wake waiters outside the lock
+    if (signal)
     {
         waiter_wakeups_++;
-        timer->cancel();
+        signal->cancel();
     }
 }
 
@@ -811,8 +793,7 @@ NodeCache::get_header(
     if (!peer || !peer->is_ready())
     {
         PLOGW(log_, "  get_header: no peer for seq=", ledger_seq);
-        // Don't erase — next caller will see non-present entry with
-        // no signal (treated as a MISS) and retry the fetch.
+        // Don't erase — clear signal so next caller retries.
         std::shared_ptr<asio::steady_timer> sig;
         {
             std::lock_guard lock(mutex_);
@@ -857,7 +838,6 @@ NodeCache::get_header(
     catch (...)
     {
         // Don't erase — clear signal so next caller retries the fetch.
-        // Preserves the entry for in-flight waiters to discover failure.
         std::shared_ptr<asio::steady_timer> signal;
         {
             std::lock_guard lock(mutex_);
@@ -990,24 +970,13 @@ NodeCache::evict_if_needed()
         auto it = store_.find(victim);
         if (it != store_.end())
         {
-            // Don't evict in-flight entries with active waiters —
-            // someone is still waiting for this data to arrive.
-            if (!it->second.present)
+            // Don't evict in-flight entries (non-null signal means
+            // someone sent a fetch and waiters may be listening)
+            if (!it->second.present && it->second.signal)
             {
-                bool has_active = false;
-                for (auto& wp : it->second.waiters)
-                {
-                    if (!wp.expired())
-                    {
-                        has_active = true;
-                        break;
-                    }
-                }
-                if (has_active)
-                {
-                    lru_.splice(lru_.begin(), lru_, std::prev(lru_.end()));
-                    continue;
-                }
+                // Move to front instead of evicting
+                lru_.splice(lru_.begin(), lru_, std::prev(lru_.end()));
+                continue;
             }
             PLOGD(log_, "  evict: hash=", victim.hex().substr(0, 16));
             store_.erase(it);
