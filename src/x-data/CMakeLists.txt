@@ -3,7 +3,7 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # Generate embedded protocol definitions headers
 set(XAHAU_DEFINITIONS_JSON
-    ${CMAKE_SOURCE_DIR}/tests/x-data/fixture/xahau_definitions.json)
+    ${CMAKE_CURRENT_SOURCE_DIR}/definitions/xahau_definitions.json)
 set(XRPL_DEFINITIONS_JSON
     ${CMAKE_SOURCE_DIR}/src/lesser-peer/definitions/xrpl_definitions.json)
 set(GENERATED_XAHAU_HEADER
