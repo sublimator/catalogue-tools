@@ -129,10 +129,12 @@ add_subdirectory(src/xprv)
 
 # Add tests if testing is enabled
 option(BUILD_TESTING "Build the testing tree" ON)
-if(BUILD_TESTING)
+if(BUILD_TESTING AND EXISTS "${CMAKE_SOURCE_DIR}/tests")
   enable_testing()
   add_subdirectory(tests)
   message(STATUS "Tests are enabled")
+elseif(BUILD_TESTING)
+  message(STATUS "Tests requested but tests/ directory not found, skipping")
 endif()
 
 # Print summary
