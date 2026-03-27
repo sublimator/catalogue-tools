@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import subprocess
 import sys
 import tempfile
 import time
@@ -58,35 +57,39 @@ def do_prove(
         return label, fmt, time.monotonic() - start, None, f"request failed: {e}"
 
 
-def do_verify(
+async def do_verify(
     label: str,
     fmt: str,
     data: bytes,
     verifier: Path,
 ) -> tuple[str, str, bool, str]:
-    """Verify proof data. Returns (label, fmt, ok, message)."""
+    """Verify proof data via async subprocess. Returns (label, fmt, ok, message)."""
     suffix = ".xprv.json" if fmt == "json" else ".xprv.bin"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
         f.write(data)
         tmp_path = f.name
 
     try:
-        result = subprocess.run(
-            ["uv", "run", str(verifier), tmp_path],
-            capture_output=True,
-            text=True,
-            timeout=60,
+        proc = await asyncio.create_subprocess_exec(
+            "uv", "run", str(verifier), tmp_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        ok = result.returncode == 0
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return label, fmt, False, "verify timed out"
+
+        ok = proc.returncode == 0
         if ok:
             msg = "PASS"
         else:
-            lines = [l.strip() for l in (result.stdout + result.stderr).split("\n") if l.strip()]
+            output = (stdout.decode() + stderr.decode())
+            lines = [l.strip() for l in output.split("\n") if l.strip()]
             fail_lines = [l for l in lines if "FAIL" in l or "ERROR" in l or "error" in l.lower()]
             msg = fail_lines[0] if fail_lines else (lines[-1] if lines else "unknown error")
         return label, fmt, ok, msg
-    except subprocess.TimeoutExpired:
-        return label, fmt, False, "verify timed out"
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
@@ -126,7 +129,6 @@ async def verify_worker(
     verifier: Path,
     results: list,
     results_lock: asyncio.Lock,
-    loop: asyncio.AbstractEventLoop,
     progress: Progress,
     verify_task_id: int,
     counters: dict,
@@ -137,9 +139,7 @@ async def verify_worker(
             verify_queue.task_done()
             break
         label, fmt, data, result_idx = item
-        label, fmt, ok, msg = await loop.run_in_executor(
-            None, do_verify, label, fmt, data, verifier
-        )
+        label, fmt, ok, msg = await do_verify(label, fmt, data, verifier)
         async with results_lock:
             results[result_idx] = (label, fmt, ok, msg, results[result_idx][4])
             if ok:
@@ -217,7 +217,7 @@ async def main_async(
         verify_workers = [
             asyncio.create_task(
                 verify_worker(verify_queue, verifier, results,
-                              results_lock, loop, progress, verify_tid,
+                              results_lock, progress, verify_tid,
                               counters))
             for _ in range(concurrency)
         ]
