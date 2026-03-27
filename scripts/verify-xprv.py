@@ -41,6 +41,14 @@ import zlib
 import xrpl.core.keypairs
 from xrpl.core.binarycodec import decode, encode, encode_for_signing
 
+# Monkey-patch xrpl-py's broken _calculate_precision (XRPLF/xrpl-py#923).
+# It expands e-notation to full decimal form then counts ALL digits instead
+# of significant figures, rejecting valid values like 9999999999999999e79.
+import xrpl.core.binarycodec.types.amount as _amt
+from decimal import Decimal as _Decimal
+
+_amt._calculate_precision = lambda v: len(_Decimal(v).as_tuple().digits) if not _Decimal(v).is_zero() else 0
+
 # ─── JSON proof shape ────────────────────────────────────────────────
 #
 # A proof JSON has the structure:
