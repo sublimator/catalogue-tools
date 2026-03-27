@@ -390,6 +390,7 @@ HttpServer::handle_session(tcp::socket socket)
                         req[http::field::accept]);
                     bool wants_sse =
                         accept.find("text/event-stream") != std::string::npos;
+                    PLOGI(log_, "Accept: '", accept, "' wants_sse=", wants_sse);
 
                     // Cancel token: atomic flag checked at cancellation
                     // boundaries (walk_to, with_peer_failover) for fast
@@ -399,36 +400,43 @@ HttpServer::handle_session(tcp::socket socket)
 
                     if (wants_sse)
                     {
+                        PLOGI(log_, "Entering SSE path");
                         // ── SSE path ──
-                        // Send headers immediately, then stream steps
-                        // as they become ready via on_step callback.
-                        http::response<http::empty_body> sse_hdr{
-                            http::status::ok, version};
-                        sse_hdr.set(http::field::content_type, "text/event-stream");
-                        sse_hdr.set(http::field::cache_control, "no-cache");
-                        sse_hdr.set(http::field::server, "xprv");
-                        sse_hdr.keep_alive(false);  // SSE — no keep-alive
-                        sse_hdr.chunked(true);
-
-                        // Send headers
-                        http::response_serializer<http::empty_body> sr{sse_hdr};
+                        // Write raw HTTP response + SSE frames directly.
+                        // No chunked encoding — SSE streams are
+                        // connection-scoped, closed when done.
                         stream.expires_never();
-                        co_await http::async_write_header(
-                            stream, sr,
+
+                        // Disable Nagle so each write flushes immediately
+                        beast::get_lowest_layer(stream)
+                            .socket()
+                            .set_option(
+                                asio::ip::tcp::no_delay(true));
+
+                        std::string hdr_str =
+                            "HTTP/1.1 200 OK\r\n"
+                            "Content-Type: text/event-stream\r\n"
+                            "Cache-Control: no-cache\r\n"
+                            "Connection: close\r\n"
+                            "Server: xprv\r\n"
+                            "\r\n";
+                        co_await asio::async_write(
+                            stream,
+                            asio::buffer(hdr_str),
                             asio::redirect_error(asio::use_awaitable, ec));
+                        PLOGI(log_, "SSE headers sent, ec=", ec.message());
                         if (ec) break;
 
                         int step_index = 0;
-                        auto write_sse = [&](std::string const& data)
+                        auto write_sse = [&](std::string data)
                             -> asio::awaitable<void> {
-                            // Chunked frame: size\r\n data\r\n
                             auto frame = "data: " + data + "\n\n";
-                            auto chunk = beast::http::make_chunk(
-                                asio::buffer(frame));
+                            PLOGI(log_, "SSE write: ", frame.size(), "B type=", data.substr(0, 40));
                             co_await asio::async_write(
                                 stream,
-                                chunk,
+                                asio::buffer(frame),
                                 asio::redirect_error(asio::use_awaitable, ec));
+                            PLOGI(log_, "SSE write done, ec=", ec.message());
                         };
 
                         auto on_step = [&](ChainStep const& step)
@@ -447,10 +455,11 @@ HttpServer::handle_session(tcp::socket socket)
                                 tx_it->second, cancel_token,
                                 std::move(on_step));
 
-                            // Send final done event with full proof
+                            // Send done event — client stitches proof
+                            // from streamed steps + network_id
                             boost::json::object done;
                             done["type"] = "done";
-                            done["proof"] = to_json(result.chain);
+                            done["network_id"] = result.chain.network_id;
                             co_await write_sse(boost::json::serialize(done));
                         }
                         catch (std::exception const& e)
@@ -464,11 +473,8 @@ HttpServer::handle_session(tcp::socket socket)
                         if (!sse_error.empty())
                             co_await write_sse(sse_error);
 
-                        // Send final chunk (zero-length = end of chunked)
-                        co_await asio::async_write(
-                            stream,
-                            beast::http::make_chunk_last(),
-                            asio::redirect_error(asio::use_awaitable, ec));
+                        // Close the connection — SSE is done
+                        break;
                     }
                     else
                     {

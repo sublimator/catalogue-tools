@@ -21,7 +21,7 @@ color:#666;cursor:pointer;background:none;border:none;border-left:1px solid #333
 .paste{width:3.5rem;font-size:.75rem;font-family:monospace;letter-spacing:.05em}
 .clear:hover,.paste:hover{color:#fff;background:rgba(255,255,255,0.05)}
 input:not(:placeholder-shown) ~ .clear{display:block}
-input:placeholder-shown ~ .paste:not(.hidden){display:block}
+input:placeholder-shown ~ .paste{display:block}
 input{width:100%;padding:.8rem 2.5rem .8rem 1rem;font-size:1rem;font-family:monospace;
 background:rgba(17,17,17,0.85);border:1px solid #333;color:#fff;border-radius:6px;
 outline:none;transition:border-color .2s;backdrop-filter:blur(4px)}
@@ -62,12 +62,18 @@ background:rgba(0,0,0,0.85);backdrop-filter:blur(8px);
 align-items:center;justify-content:center;padding:2rem}
 #modal.show{display:flex}
 #modal-inner{background:#111;border:1px solid #333;border-radius:8px;
-max-width:min(800px,90vw);max-height:80vh;overflow:auto;padding:1.5rem;
+width:min(1000px,92vw);height:85vh;display:flex;flex-direction:column;
 font-family:monospace;font-size:.8rem;line-height:1.6;color:#ccc;
 position:relative}
+#modal-body{flex:1;overflow-y:auto;padding:1.5rem 2rem}
+#modal-footer{padding:.6rem 2rem;border-top:1px solid #333;font-size:.75rem;color:#666;text-align:center;flex-shrink:0}
+#modal-footer a{color:#5b5;text-decoration:none}
+#modal-footer a:hover{color:#7d7;text-decoration:underline}
+#modal-footer span.act{cursor:pointer;color:#696}
+#modal-footer .msep{color:#333;margin:0 .6rem}
 #modal-inner h3{color:#fff;font-size:1rem;margin-bottom:1rem;font-family:sans-serif}
 #modal-close{position:absolute;top:.8rem;right:1rem;color:#666;cursor:pointer;
-font-size:1.2rem;background:none;border:none}
+font-size:1.2rem;background:none;border:none;z-index:1}
 #modal-close:hover{color:#fff}
 .step-block{margin-bottom:1rem;padding:.6rem;border-left:2px solid #333;padding-left:.8rem}
 .step-block.anchor{border-color:#5b5}
@@ -91,6 +97,18 @@ border-radius:50%;margin-right:.3rem;vertical-align:middle}
 .step-detail .link-state{color:#6af}
 .step-detail .leaf-data{margin-top:.4rem;padding:.4rem .6rem;
 border-left:1px solid #333;margin-left:.2rem;background:rgba(255,255,255,0.02);border-radius:0 4px 4px 0}
+
+.step-skeleton{margin-bottom:1rem;padding:.6rem .8rem;border-left:2px solid #333;
+animation:sk-pulse 1.5s ease-in-out infinite}
+.step-skeleton .sk-label{font-size:.85rem;font-weight:bold;color:#444;margin-bottom:.5rem}
+#sk-elapsed{font-weight:normal;color:#555;font-size:.7rem}
+.step-skeleton .sk-bar{height:.55rem;border-radius:3px;background:rgba(255,255,255,0.05);margin-bottom:.4rem}
+.step-skeleton .sk-bar:nth-child(2){width:70%}
+.step-skeleton .sk-bar:nth-child(3){width:50%}
+@keyframes sk-pulse{0%,100%{opacity:.3}50%{opacity:1}}
+
+.step-block{position:relative}
+.step-time{position:absolute;top:.4rem;right:.4rem;font-size:.65rem;color:#555;font-family:monospace}
 </style>
 </head>
 <body>
@@ -99,11 +117,11 @@ border-left:1px solid #333;margin-left:.2rem;background:rgba(255,255,255,0.02);b
 <div class="search">
   <input type="text" id="tx" placeholder="transaction hash" spellcheck="false" autocomplete="off">
   <button class="clear" id="clear" onclick="tx.value='';tx.dispatchEvent(new Event('input'));tx.focus()">&times;</button>
-  <button class="paste" id="paste" onclick="doPaste(true)">paste</button>
+  <button class="paste" id="paste" onclick="doPaste()">paste</button>
 </div>
 <div id="details"></div>
 <div class="status" id="status"></div>
-<div id="modal"><div id="modal-inner"><button id="modal-close">&times;</button><div id="modal-body"></div></div></div>
+<div id="modal"><div id="modal-inner"><button id="modal-close">&times;</button><div id="modal-body"></div><div id="modal-footer"></div></div></div>
 <footer id="footer"><a href="/verify-xprv.py">verify-xprv.py</a> — standalone proof verifier</footer>
 <script>
 const tx = document.getElementById('tx');
@@ -281,29 +299,17 @@ function drawGlobe() {
 drawGlobe();
 
 // ── Proof logic ───────────────────────────────────────────────
-// Clipboard: auto-paste on focus only after first successful prove
-let lastCleared = '';
-let clipboardGranted = !!localStorage.getItem('xprv_clip_ok');
-if (clipboardGranted) document.getElementById('paste').classList.add('hidden');
 
-async function doPaste(force) {
+async function doPaste() {
   try {
     const clip = (await navigator.clipboard.readText()).trim();
-    if (HEX64.test(clip) && (force || clip !== lastCleared)) {
+    if (clip) {
       tx.value = clip;
-      lastCleared = '';
       tx.dispatchEvent(new Event('input'));
     }
-    clipboardGranted = true;
-    localStorage.setItem('xprv_clip_ok', '1');
-    document.getElementById('paste').classList.add('hidden');
   } catch(e) {}
 }
 
-tx.addEventListener('focus', () => {
-  if (tx.value.trim() || !clipboardGranted) return;
-  doPaste();
-});
 tx.addEventListener('input', () => {
   const v = tx.value.trim();
   tx.classList.remove('valid', 'invalid');
@@ -313,9 +319,7 @@ tx.addEventListener('input', () => {
   details.innerHTML = '';
 
   if (!v) {
-    if (lastProvedHash) lastCleared = lastProvedHash;
     closeModal();
-    if (DEV) { localStorage.removeItem('xprv_last_hash'); localStorage.removeItem('xprv_modal_open'); }
     return;
   }
   if (!HEX64.test(v)) {
@@ -618,51 +622,52 @@ async function describeStep(step, i, allSteps) {
   return `<div class="step-block ${cls}"><div class="step-type ${cls}">${i + 1}. ${type}</div><div class="step-detail">${lines.join('<br>')}</div></div>`;
 }
 
+let skTimer = null;
+function skeletonStep(n) {
+  if (skTimer) clearInterval(skTimer);
+  const html = `<div class="step-skeleton" id="sk-next"><div class="sk-label">${n}. \u2026 <span id="sk-elapsed"></span></div><div class="sk-bar"></div><div class="sk-bar"></div><div class="sk-bar"></div></div>`;
+  // Start ticking after a microtask (element needs to be in DOM)
+  const start = performance.now();
+  skTimer = setInterval(() => {
+    const el = document.getElementById('sk-elapsed');
+    if (!el) { clearInterval(skTimer); skTimer = null; return; }
+    const s = ((performance.now() - start) / 1000).toFixed(1);
+    el.textContent = `${s}s`;
+  }, 100);
+  return html;
+}
+
 async function showSteps() {
   if (!lastProofJson) return;
   const modal = document.getElementById('modal');
   const body = document.getElementById('modal-body');
+  const footer = document.getElementById('modal-footer');
   const steps = lastProofJson.steps || [];
   linkNum = 0;
   const rendered = [];
   for (let i = 0; i < steps.length; i++) {
     rendered.push(await describeStep(steps[i], i, steps));
   }
-  const footer = lastDownloadUrl
-    ? `<div style="margin-top:1rem;padding-top:.8rem;border-top:1px solid #333;font-size:.75rem;color:#666;text-align:center"><a href="${lastDownloadUrl}" download="${lastFilename}" style="color:#5b5;text-decoration:none" title="${lastFilename}">json</a> <a href="/prove?tx=${lastProofJson?.steps?.[0]?.ledger_hash ? tx.value : ''}&format=bin" download="${lastFilename.replace('.xprv.json','.xprv.bin')}" style="color:#686;text-decoration:none;margin-left:.5rem" title="${lastFilename.replace('.xprv.json','.xprv.bin')}">bin</a> <span onclick="copyProof()" title="copy JSON" style="cursor:pointer;color:#696;margin-left:.4rem">&#x1F4CB;</span><span style="color:#333;margin:0 .6rem">|</span><a href="/verify-xprv.py" style="color:#555;text-decoration:none">verify-xprv.py</a></div>`
-    : '';
-  body.innerHTML = `<h3>Proof chain \u2014 ${steps.length} steps</h3>` + rendered.join('') + footer;
+  body.innerHTML = `<h3>Proof chain \u2014 ${steps.length} steps</h3>` + rendered.join('');
+  if (lastDownloadUrl) {
+    const binName = lastFilename.replace('.xprv.json', '.xprv.bin');
+    footer.innerHTML = `<a href="${lastDownloadUrl}" download="${lastFilename}" title="${lastFilename}">json</a> <a href="/prove?tx=${tx.value}&format=bin" download="${binName}" style="color:#686;margin-left:.5rem" title="${binName}">bin</a> <span class="act" onclick="copyProof()" title="copy JSON" style="margin-left:.4rem">&#x1F4CB;</span><span class="msep">|</span><a href="/verify-xprv.py" style="color:#555">verify-xprv.py</a>`;
+  } else {
+    footer.innerHTML = '';
+  }
   modal.className = 'show';
-  if (DEV) localStorage.setItem('xprv_modal_open', '1');
 }
 
 function closeModal() {
   document.getElementById('modal').className = '';
-  if (DEV) localStorage.removeItem('xprv_modal_open');
 }
 document.getElementById('modal-close').onclick = closeModal;
 document.getElementById('modal').onclick = (e) => {
   if (e.target.id === 'modal') closeModal();
 };
-
-// ── Dev mode ──────────────────────────────────────────────────
-const DEV = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-if (DEV) {
-  const last = localStorage.getItem('xprv_last_hash');
-  if (last) {
-    tx.value = last;
-    tx.classList.add('valid');
-    prove(last).then(() => {
-      if (localStorage.getItem('xprv_modal_open')) showSteps();
-    });
-  }
-}
-// Save hash on successful prove
-const _origProve = prove;
-prove = async function(hash) {
-  if (DEV) localStorage.setItem('xprv_last_hash', hash);
-  return _origProve(hash);
-};
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeModal();
+});
 
 function finishProve(json, hash) {
   lastProvedHash = hash;
@@ -692,13 +697,15 @@ async function prove(hash) {
   statusEl.textContent = 'proving\u2026';
   details.className = '';
 
-  // Open step modal immediately with a "building..." state
+  // Open step modal immediately with skeleton placeholder
   const modal = document.getElementById('modal');
   const body = document.getElementById('modal-body');
-  body.innerHTML = '<h3>Building proof\u2026</h3>';
+  body.innerHTML = '<h3>Building proof\u2026</h3>' + skeletonStep(1);
   modal.className = 'show';
   linkNum = 0;
   const streamedSteps = [];
+  let stepStartTime = performance.now();
+  const stepTimes = [];  // elapsed ms per step
 
   return new Promise((resolve) => {
     const es = new EventSource(`/prove?tx=${hash}`);
@@ -707,6 +714,9 @@ async function prove(hash) {
       es.close(); activeSSE = null;
       statusEl.className = 'status error';
       statusEl.textContent = 'timed out';
+      const sk = document.getElementById('sk-next');
+      if (sk) sk.remove();
+      if (!streamedSteps.length) closeModal();
       resolve();
     }, 60000);
 
@@ -715,21 +725,43 @@ async function prove(hash) {
         const msg = JSON.parse(e.data);
 
         if (msg.type === 'step') {
+          const now = performance.now();
+          const elapsed = now - stepStartTime;
+          stepTimes.push(elapsed);
+          stepStartTime = now;
+
           streamedSteps.push(msg.step);
           statusEl.textContent = `proving\u2026 step ${msg.index + 1}`;
-          // Render step incrementally
+          // Remove skeleton placeholder
+          const sk = document.getElementById('sk-next');
+          if (sk) sk.remove();
+          // Render step with timing badge
           const html = await describeStep(msg.step, msg.index, streamedSteps);
-          if (body.querySelector('.step-block')) {
-            body.insertAdjacentHTML('beforeend', html);
-          } else {
-            body.innerHTML = `<h3>Building proof\u2026</h3>` + html;
+          const timeLabel = elapsed < 1000
+            ? `${Math.round(elapsed)}ms`
+            : `${(elapsed / 1000).toFixed(1)}s`;
+          const timed = html.replace(
+            '<div class="step-detail">',
+            `<span class="step-time">${timeLabel}</span><div class="step-detail">`);
+          body.insertAdjacentHTML('beforeend', timed);
+          // Add next skeleton (unless this was a tx map_proof = final step)
+          const isFinal = msg.step.type === 'map_proof' && msg.step.tree === 'tx';
+          if (!isFinal) {
+            body.insertAdjacentHTML('beforeend', skeletonStep(msg.index + 2));
           }
+          // Auto-scroll to bottom
+          body.parentElement.scrollTop = body.parentElement.scrollHeight;
         }
 
         if (msg.type === 'done') {
           clearTimeout(timeout);
+          if (skTimer) { clearInterval(skTimer); skTimer = null; }
           es.close(); activeSSE = null;
-          const json = msg.proof;
+          // Assemble proof from streamed steps
+          const json = {
+            network_id: msg.network_id || 0,
+            steps: streamedSteps
+          };
           finishProve(json, hash);
           // Re-render all steps with full context for correct links
           showSteps();
@@ -753,7 +785,10 @@ async function prove(hash) {
       clearTimeout(timeout);
       es.close(); activeSSE = null;
       statusEl.className = 'status error';
-      statusEl.textContent = 'connection lost';
+      statusEl.textContent = streamedSteps.length ? 'connection lost' : 'failed to connect';
+      const sk = document.getElementById('sk-next');
+      if (sk) sk.remove();
+      if (!streamedSteps.length) closeModal();
       resolve();
     };
   });

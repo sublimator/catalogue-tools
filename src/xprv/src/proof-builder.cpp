@@ -1280,6 +1280,60 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     // it would retune peer discovery away from other requests' targets.
     // wait_for_peer(seq) already searches by the specific seq needed.
 
+    // ── Helpers for streaming steps as they become available ──
+    ProofChain proof_chain;
+
+    auto emit_step =
+        [&](ChainStep step) -> boost::asio::awaitable<void> {
+        proof_chain.steps.push_back(std::move(step));
+        if (svc.on_step)
+            co_await svc.on_step(proof_chain.steps.back());
+    };
+
+    auto make_header = [](auto const& hdr_result) -> HeaderData {
+        auto h = hdr_result.header();
+        return {
+            .seq = hdr_result.seq(),
+            .drops = h.drops(),
+            .parent_hash = h.parent_hash(),
+            .tx_hash = h.tx_hash(),
+            .account_hash = h.account_hash(),
+            .parent_close_time = h.parent_close_time(),
+            .close_time = h.close_time(),
+            .close_time_resolution = h.close_time_resolution(),
+            .close_flags = h.close_flags(),
+        };
+    };
+
+    auto make_trie_data =
+        [ctx](auto& tree, bool is_tx, TrieData::TreeType tree_type) -> TrieData {
+        TrieData trie;
+        trie.tree = tree_type;
+        catl::shamap::TrieJsonOptions trie_opts;
+        trie_opts.on_leaf = make_proof_leaf_callback(ctx->protocol, is_tx);
+        trie.trie_json =
+            tree.get_root()->trie_json(trie_opts, tree.get_options());
+        trie.trie_binary = tree.trie_binary();
+        return trie;
+    };
+
+    // ── Emit anchor + anchor header immediately ──
+    {
+        AnchorData anchor;
+        anchor.ledger_hash = ctx->anchor_hash;
+        anchor.ledger_index = ctx->anchor_hdr.seq();
+        anchor.publisher_key_hex = vl_data.publisher_key_hex;
+        anchor.publisher_manifest = vl_data.publisher_manifest.raw;
+        anchor.blob = vl_data.blob_bytes;
+        anchor.blob_signature = vl_data.blob_signature;
+
+        for (auto const& v : anchor_validations)
+            anchor.validations[v.signing_key_hex] = v.raw;
+
+        co_await emit_step(std::move(anchor));
+    }
+    co_await emit_step(make_header(ctx->anchor_hdr));
+
     // ── Step 5: Determine hop path ──
     ctx->distance = ctx->anchor_hdr.seq() - tx_ledger_seq;
     PLOGI(log_, "Distance: ", ctx->distance, " ledgers");
@@ -1310,6 +1364,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
 
         auto sp = build_state_proof(
             wr, skip_key_val, ctx->anchor_account_hash);
+        co_await emit_step(
+            make_trie_data(sp.tree, false, TrieData::TreeType::state));
         ctx->state_proofs.emplace_back(skip_key_val, std::move(sp));
 
         ctx->target_hdr_result = co_await with_peer_failover(
@@ -1365,6 +1421,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         {
             auto sp = build_state_proof(
                 wr1, long_skip_key, ctx->anchor_account_hash);
+            co_await emit_step(
+                make_trie_data(sp.tree, false, TrieData::TreeType::state));
             ctx->state_proofs.emplace_back(long_skip_key, std::move(sp));
         }
 
@@ -1379,6 +1437,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             });
         auto flag_hash = ctx->flag_hdr_result->ledger_hash256();
         auto flag_header = ctx->flag_hdr_result->header();
+        co_await emit_step(make_header(*ctx->flag_hdr_result));
 
         Slice long_sle(wr1.leaf_data.data(), wr1.leaf_data.size());
         if (sle_hashes_contain(long_sle, flag_hash, ctx->protocol))
@@ -1412,6 +1471,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         {
             auto sp = build_state_proof(
                 wr2, short_skip_key, flag_header.account_hash());
+            co_await emit_step(
+                make_trie_data(sp.tree, false, TrieData::TreeType::state));
             ctx->state_proofs.emplace_back(short_skip_key, std::move(sp));
         }
 
@@ -1509,100 +1570,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     PLOGI(log_, "  Abbreviated tree: ", placed, " placeholders");
     PLOGI(log_, "  TX tree hash: ", verified ? "VERIFIED" : "MISMATCH");
 
-    // ── Step 9: Build proof chain ──
-    ProofChain proof_chain;
-
-    auto emit_step =
-        [&](ChainStep step) -> boost::asio::awaitable<void> {
-        proof_chain.steps.push_back(std::move(step));
-        if (svc.on_step)
-            co_await svc.on_step(proof_chain.steps.back());
-    };
-
-    auto make_header = [](auto const& hdr_result) -> HeaderData {
-        auto h = hdr_result.header();
-        return {
-            .seq = hdr_result.seq(),
-            .drops = h.drops(),
-            .parent_hash = h.parent_hash(),
-            .tx_hash = h.tx_hash(),
-            .account_hash = h.account_hash(),
-            .parent_close_time = h.parent_close_time(),
-            .close_time = h.close_time(),
-            .close_time_resolution = h.close_time_resolution(),
-            .close_flags = h.close_flags(),
-        };
-    };
-
-    auto make_trie_data =
-        [ctx](auto& tree, bool is_tx, TrieData::TreeType tree_type) -> TrieData {
-        TrieData trie;
-        trie.tree = tree_type;
-        catl::shamap::TrieJsonOptions trie_opts;
-        trie_opts.on_leaf = make_proof_leaf_callback(ctx->protocol, is_tx);
-        trie.trie_json =
-            tree.get_root()->trie_json(trie_opts, tree.get_options());
-        trie.trie_binary = tree.trie_binary();
-        return trie;
-    };
-
-    // Anchor
-    {
-        AnchorData anchor;
-        anchor.ledger_hash = ctx->anchor_hash;
-        anchor.ledger_index = ctx->anchor_hdr.seq();
-        anchor.publisher_key_hex = vl_data.publisher_key_hex;
-        anchor.publisher_manifest = vl_data.publisher_manifest.raw;
-        anchor.blob = vl_data.blob_bytes;
-        anchor.blob_signature = vl_data.blob_signature;
-
-        for (auto const& v : anchor_validations)
-            anchor.validations[v.signing_key_hex] = v.raw;
-
-        co_await emit_step(std::move(anchor));
-    }
-
-    co_await emit_step(make_header(ctx->anchor_hdr));
-
-    // State proofs
-    if (ctx->need_flag_hop && ctx->state_proofs.size() >= 2)
-    {
-        {
-            auto& [key, sp] = ctx->state_proofs[0];
-            co_await emit_step(
-                make_trie_data(sp.tree, false, TrieData::TreeType::state));
-        }
-        {
-            uint32_t flag_seq = flag_ledger_for(tx_ledger_seq);
-            if (!ctx->flag_hdr_result)
-            {
-                ctx->flag_hdr_result = co_await with_peer_failover(
-                    ctx->client,
-                    flag_seq,
-                    "re-fetch flag header",
-                    [ctx, flag_seq](std::shared_ptr<PeerClient> peer)
-                        -> boost::asio::awaitable<LedgerHeaderResult> {
-                        co_return co_await ctx->node_cache->get_header(
-                            flag_seq, ctx->peers, peer);
-                    });
-            }
-            co_await emit_step(make_header(*ctx->flag_hdr_result));
-        }
-        {
-            auto& [key, sp] = ctx->state_proofs[1];
-            co_await emit_step(
-                make_trie_data(sp.tree, false, TrieData::TreeType::state));
-        }
-    }
-    else if (!ctx->state_proofs.empty())
-    {
-        auto& [key, sp] = ctx->state_proofs[0];
-        co_await emit_step(
-            make_trie_data(sp.tree, false, TrieData::TreeType::state));
-    }
-
+    // ── Emit target header + TX tree ──
     co_await emit_step(make_header(target_hdr));
-
     co_await emit_step(make_trie_data(abbrev, true, TrieData::TreeType::tx));
 
     co_return BuildResult{
