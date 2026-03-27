@@ -118,6 +118,11 @@ public:
      * Convert to human-readable decimal string.
      * Similar to Java's value.toPlainString()
      */
+    /// Convert to string matching rippled's STAmount::getText().
+    ///
+    /// Uses scientific notation when offset < -25 or offset > -5,
+    /// otherwise decimal with trailing zeros stripped. This is an
+    /// exact port of rippled's logic.
     std::string
     to_string() const
     {
@@ -131,54 +136,75 @@ public:
             return "0";
         }
 
-        // Convert mantissa to string
-        std::stringstream ss;
-        ss << mantissa_bits();
-        std::string mantissa_str = ss.str();
+        std::string const raw_value = std::to_string(mantissa_bits());
+        int const offset = exponent();
+        std::string ret;
 
-        // Apply exponent
-        int effective_scale = -exponent();
+        if (!is_positive())
+            ret += '-';
 
-        if (effective_scale == 0)
+        // rippled: scientific when offset != 0 and (offset < -25 or offset > -5)
+        bool const scientific =
+            (offset != 0) && ((offset < -25) || (offset > -5));
+
+        if (scientific)
         {
-            // No decimal point needed
-            return (is_positive() ? "" : "-") + mantissa_str;
+            ret += raw_value;
+            ret += 'e';
+            ret += std::to_string(offset);
+            return ret;
         }
-        else if (effective_scale > 0)
-        {
-            // Need to add decimal point
-            int mantissa_len = mantissa_str.length();
 
-            if (effective_scale >= mantissa_len)
-            {
-                // Need to add leading zeros after decimal
-                std::string result = "0.";
-                for (int i = 0; i < effective_scale - mantissa_len; ++i)
-                {
-                    result += "0";
-                }
-                result += mantissa_str;
-                return (is_positive() ? "" : "-") + result;
-            }
-            else
-            {
-                // Insert decimal point within the number
-                std::string result =
-                    mantissa_str.substr(0, mantissa_len - effective_scale);
-                result += ".";
-                result += mantissa_str.substr(mantissa_len - effective_scale);
-                return (is_positive() ? "" : "-") + result;
-            }
-        }
+        // Decimal form with padding and crop — same as rippled.
+        // Pad raw_value with zeros on both sides, place decimal point
+        // at position (offset + 43), then crop leading/trailing zeros.
+        static constexpr size_t pad_prefix = 27;
+        static constexpr size_t pad_suffix = 23;
+
+        std::string val;
+        val.reserve(raw_value.size() + pad_prefix + pad_suffix);
+        val.append(pad_prefix, '0');
+        val.append(raw_value);
+        val.append(pad_suffix, '0');
+
+        size_t const split = static_cast<size_t>(offset + 43);
+
+        // Pre-decimal: crop leading zeros
+        auto pre_from = val.begin();
+        auto pre_to = val.begin() + split;
+
+        if (std::distance(pre_from, pre_to) > static_cast<ptrdiff_t>(pad_prefix))
+            pre_from += pad_prefix;
+
+        pre_from = std::find_if(
+            pre_from, pre_to, [](char c) { return c != '0'; });
+
+        // Post-decimal: crop trailing zeros
+        auto post_from = val.begin() + split;
+        auto post_to = val.end();
+
+        if (std::distance(post_from, post_to) > static_cast<ptrdiff_t>(pad_suffix))
+            post_to -= pad_suffix;
+
+        post_to = std::find_if(
+                      std::make_reverse_iterator(post_to),
+                      std::make_reverse_iterator(post_from),
+                      [](char c) { return c != '0'; })
+                      .base();
+
+        // Assemble
+        if (pre_from == pre_to)
+            ret += '0';
         else
+            ret.append(pre_from, pre_to);
+
+        if (post_to != post_from)
         {
-            // Negative scale — use mantissa + e notation to match rippled.
-            // e.g. mantissa=9999999999999999, exponent=79 → "9999999999999999e79"
-            // Expanding to trailing zeros creates values xrpl-py can't parse.
-            int exp = -effective_scale;
-            return (is_positive() ? "" : "-") + mantissa_str + "e" +
-                std::to_string(exp);
+            ret += '.';
+            ret.append(post_from, post_to);
         }
+
+        return ret;
     }
 };
 

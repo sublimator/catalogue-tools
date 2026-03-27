@@ -958,3 +958,181 @@ INSTANTIATE_TEST_SUITE_P(
         std::replace(name.begin(), name.end(), '-', '_');
         return name;
     });
+
+// ═══════════════════════════════════════════════════════════════════════
+// IOUValue::to_string — must match rippled's canonical output
+//
+// Fixtures generated via:
+//   xrpl-codec decode --codec-type amount <hex>
+// ═══════════════════════════════════════════════════════════════════════
+
+#include <catl/xdata/types/iou-value.h>
+
+namespace {
+
+struct IOUValueCase
+{
+    const char* name;
+    const char* raw_hex;  // first 8 bytes of IOU amount
+    const char* expected;  // rippled's canonical string
+};
+
+IOUValueCase iou_value_cases[] = {
+    {"zero", "8000000000000000", "0"},
+    {"one", "D4838D7EA4C68000", "1"},
+    {"negative_one", "94838D7EA4C68000", "-1"},
+    {"one_point_five", "D485543DF729C000", "1.5"},
+    {"thousandth", "D3C38D7EA4C68000", "0.001"},
+    {"max_positive", "EC2386F26FC0FFFF", "9999999999999999e79"},
+    {"max_negative", "AC2386F26FC0FFFF", "-9999999999999999e79"},
+    {"tiny_value", "D0838D7EA4C68000", "1000000000000000e-31"},
+    {"hundred", "D5038D7EA4C68000", "100"},
+    {"million", "D6038D7EA4C68000", "1000000"},
+    {"ten_billion", "D7038D7EA4C68000", "10000000000"},
+};
+
+uint8_t
+hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'A' && c <= 'F')
+        return 10 + c - 'A';
+    if (c >= 'a' && c <= 'f')
+        return 10 + c - 'a';
+    return 0;
+}
+
+void
+hex_to_bytes(const char* hex, uint8_t* out, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        out[i] = (hex_nibble(hex[i * 2]) << 4) | hex_nibble(hex[i * 2 + 1]);
+}
+
+class IOUValueTest : public ::testing::TestWithParam<IOUValueCase>
+{
+};
+
+TEST_P(IOUValueTest, MatchesRippled)
+{
+    auto const& tc = GetParam();
+    uint8_t bytes[8];
+    hex_to_bytes(tc.raw_hex, bytes, 8);
+    auto iou = catl::xdata::IOUValue::from_bytes(bytes);
+    EXPECT_EQ(iou.to_string(), tc.expected) << "Case: " << tc.name;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    IOUValues,
+    IOUValueTest,
+    ::testing::ValuesIn(iou_value_cases),
+    [](auto const& info) -> std::string { return info.param.name; });
+
+}  // namespace
+
+// ═══════════════════════════════════════════════════════════════════════
+// TransactionResult — UInt8 decoded as unsigned (not signed int8)
+//
+// On-chain result codes are 0-255 (tec range). Our decoder must not
+// sign-extend to negative values.
+// ═══════════════════════════════════════════════════════════════════════
+
+namespace {
+
+TEST(TransactionResult, TecCodesAreUnsigned)
+{
+    auto protocol = Protocol::load_embedded_xrpl_protocol();
+
+    // tecCLAIM = 100, tecKILLED = 150, tecCLAIM raw byte = 0x64
+    // These must decode to their string names, not negative numbers.
+    struct TC
+    {
+        uint8_t raw;
+        const char* expected_name;
+    };
+    TC cases[] = {
+        {0, "tesSUCCESS"},
+        {100, "tecCLAIM"},
+        {150, "tecKILLED"},
+    };
+
+    for (auto& tc : cases)
+    {
+        Slice data(&tc.raw, 1);
+        auto result = TransactionResultCodec::decode(data, protocol);
+        ASSERT_TRUE(result.is_string()) << "raw=" << (int)tc.raw;
+        EXPECT_EQ(std::string(result.as_string()), tc.expected_name)
+            << "raw=" << (int)tc.raw;
+    }
+}
+
+TEST(TransactionResult, HighBytesNotSignExtended)
+{
+    auto protocol = Protocol::load_embedded_xrpl_protocol();
+
+    // 0x80 = 128 = tecCLAIM + 28, should NOT become -128
+    uint8_t raw = 0x80;
+    Slice data(&raw, 1);
+    auto result = TransactionResultCodec::decode(data, protocol);
+
+    // Should be a positive integer (128) or a known tec string, NOT -128
+    if (result.is_int64())
+    {
+        EXPECT_GT(result.as_int64(), 0) << "must not sign-extend to negative";
+    }
+    // If it resolves to a string name, that's also fine
+}
+
+}  // namespace
+
+// ═══════════════════════════════════════════════════════════════════════
+// JsonVisitor::Options — ascii_hints control
+// ═══════════════════════════════════════════════════════════════════════
+
+namespace {
+
+TEST(JsonVisitorOptions, AsciiHintsDisabled)
+{
+    auto protocol = Protocol::load_embedded_xrpl_protocol();
+
+    // A Memo with printable ASCII MemoType
+    // When ascii_hints=false, there should be no memo_type_ascii field
+    boost::json::object memo_obj;
+    memo_obj["MemoType"] = "746578742F706C61696E";  // "text/plain" in hex
+    memo_obj["MemoData"] = "48656C6C6F";             // "Hello" in hex
+
+    auto serialized = serialize_object(memo_obj, protocol);
+
+    // Decode with ascii_hints=false
+    {
+        JsonVisitor visitor(protocol, {.ascii_hints = false});
+        Slice slice(serialized.data(), serialized.size());
+        ParserContext ctx(slice);
+        parse_with_visitor(ctx, protocol, visitor);
+        auto result = visitor.get_result();
+        ASSERT_TRUE(result.is_object());
+        auto& obj = result.as_object();
+        EXPECT_TRUE(obj.contains("MemoType"));
+        EXPECT_FALSE(obj.contains("memo_type_ascii"))
+            << "ascii hints should be suppressed";
+        EXPECT_FALSE(obj.contains("memo_data_ascii"))
+            << "ascii hints should be suppressed";
+    }
+
+    // Decode with ascii_hints=true (default)
+    {
+        JsonVisitor visitor(protocol);
+        Slice slice(serialized.data(), serialized.size());
+        ParserContext ctx(slice);
+        parse_with_visitor(ctx, protocol, visitor);
+        auto result = visitor.get_result();
+        ASSERT_TRUE(result.is_object());
+        auto& obj = result.as_object();
+        EXPECT_TRUE(obj.contains("MemoType"));
+        EXPECT_TRUE(obj.contains("memo_type_ascii"))
+            << "ascii hints should be present by default";
+    }
+}
+
+}  // namespace
