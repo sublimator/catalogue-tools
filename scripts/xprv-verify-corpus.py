@@ -88,21 +88,26 @@ def prove_and_verify(
     return label, fmt, ok, msg, elapsed_prove
 
 
-async def run_one(
-    sem: asyncio.Semaphore,
+async def worker(
+    queue: asyncio.Queue,
     host: str,
-    tx_hash: str,
-    label: str,
     verifier: Path,
-    fmt: str,
-    ledger_index: int = 0,
-) -> tuple[str, str, bool, str, float]:
-    async with sem:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
+    results: list,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Pull work items from queue until sentinel (None)."""
+    while True:
+        item = await queue.get()
+        if item is None:
+            queue.task_done()
+            break
+        tx_hash, label, fmt, ledger_index = item
+        result = await loop.run_in_executor(
             None, prove_and_verify, host, tx_hash, label, verifier, fmt,
             ledger_index
         )
+        results.append(result)
+        queue.task_done()
 
 
 async def main_async(
@@ -132,13 +137,23 @@ async def main_async(
     print(f"Verifier: {verifier}")
     print()
 
-    sem = asyncio.Semaphore(concurrency)
-    tasks = []
+    # Work queue — workers pull next item as soon as they finish one
+    queue: asyncio.Queue = asyncio.Queue()
     for tx_hash, label, ledger_index in txs:
         for fmt in ("json", "bin"):
-            tasks.append(run_one(sem, host, tx_hash, label, verifier, fmt, ledger_index))
+            queue.put_nowait((tx_hash, label, fmt, ledger_index))
 
-    results = await asyncio.gather(*tasks)
+    # Sentinel values to stop workers
+    for _ in range(concurrency):
+        queue.put_nowait(None)
+
+    loop = asyncio.get_event_loop()
+    results: list = []
+    workers = [
+        asyncio.create_task(worker(queue, host, verifier, results, loop))
+        for _ in range(concurrency)
+    ]
+    await asyncio.gather(*workers)
 
     # Print results
     passed = 0
