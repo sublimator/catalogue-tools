@@ -233,7 +233,7 @@ def serialize_leaf(leaf_json: dict[str, Any], *, is_tx: bool) -> bytes:
         meta_bytes = bytes.fromhex(encode(leaf_json["meta"]))
         return vl_encode(tx_bytes) + vl_encode(meta_bytes)
     else:
-        clean = {k: v for k, v in leaf_json.items() if k not in ("blob", "index")}
+        clean = {k: v for k, v in leaf_json.items() if k not in ("index",)}
         return bytes.fromhex(encode(clean))
 
 

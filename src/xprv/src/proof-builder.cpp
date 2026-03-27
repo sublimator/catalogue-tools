@@ -52,7 +52,6 @@ make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree)
                     full,
                     protocol,
                     {.includes_prefix = false,
-                     .include_blob = true,
                      .json_opts = {.ascii_hints = false}}));
             }
             else
@@ -61,7 +60,6 @@ make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree)
                     full,
                     protocol,
                     {.includes_prefix = false,
-                     .include_blob = true,
                      .json_opts = {.ascii_hints = false}}));
             }
         }
