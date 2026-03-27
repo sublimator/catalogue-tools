@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = []
+# dependencies = ["rich>=13.0"]
 # ///
 """
 Corpus verification test: prove each tx in the corpus via the local
@@ -25,6 +25,11 @@ import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+
+from rich.console import Console
+from rich.live import Live
+from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 
 
 def do_prove(
@@ -91,9 +96,11 @@ async def prove_worker(
     verify_queue: asyncio.Queue,
     host: str,
     results: list,
+    results_lock: asyncio.Lock,
     loop: asyncio.AbstractEventLoop,
+    progress: Progress,
+    prove_task_id: int,
 ) -> None:
-    """Pull prove tasks, send completed proofs to verify queue."""
     while True:
         item = await prove_queue.get()
         if item is None:
@@ -103,11 +110,14 @@ async def prove_worker(
         label, fmt, elapsed, data, error = await loop.run_in_executor(
             None, do_prove, host, tx_hash, label, fmt, ledger_index
         )
-        if data is None:
-            results.append((label, fmt, False, error, elapsed))
-        else:
-            results.append((label, fmt, True, "pending", elapsed))
-            await verify_queue.put((label, fmt, data, len(results) - 1))
+        async with results_lock:
+            idx = len(results)
+            if data is None:
+                results.append((label, fmt, False, error, elapsed))
+            else:
+                results.append((label, fmt, True, "pending", elapsed))
+                await verify_queue.put((label, fmt, data, idx))
+        progress.advance(prove_task_id)
         prove_queue.task_done()
 
 
@@ -115,9 +125,12 @@ async def verify_worker(
     verify_queue: asyncio.Queue,
     verifier: Path,
     results: list,
+    results_lock: asyncio.Lock,
     loop: asyncio.AbstractEventLoop,
+    progress: Progress,
+    verify_task_id: int,
+    counters: dict,
 ) -> None:
-    """Pull verify tasks, update results in place."""
     while True:
         item = await verify_queue.get()
         if item is None:
@@ -127,7 +140,13 @@ async def verify_worker(
         label, fmt, ok, msg = await loop.run_in_executor(
             None, do_verify, label, fmt, data, verifier
         )
-        results[result_idx] = (label, fmt, ok, msg, results[result_idx][4])
+        async with results_lock:
+            results[result_idx] = (label, fmt, ok, msg, results[result_idx][4])
+            if ok:
+                counters["passed"] += 1
+            else:
+                counters["failed"] += 1
+        progress.advance(verify_task_id)
         verify_queue.task_done()
 
 
@@ -153,12 +172,13 @@ async def main_async(
     if max_tx > 0:
         txs = txs[:max_tx]
 
-    print(f"Corpus: {len(txs)} transactions, concurrency={concurrency}")
-    print(f"Server: {host}")
-    print(f"Verifier: {verifier}")
-    print()
+    console = Console()
+    total_tasks = len(txs) * 2  # json + bin per tx
 
-    # Two queues: prove (HTTP) and verify (subprocess) run in parallel
+    console.print(f"[bold]Corpus:[/] {len(txs)} txs x 2 formats = {total_tasks} proofs, concurrency={concurrency}")
+    console.print(f"[bold]Server:[/] {host}")
+    console.print(f"[bold]Verifier:[/] {verifier}\n")
+
     prove_queue: asyncio.Queue = asyncio.Queue()
     verify_queue: asyncio.Queue = asyncio.Queue()
 
@@ -166,56 +186,67 @@ async def main_async(
         for fmt in ("json", "bin"):
             prove_queue.put_nowait((tx_hash, label, fmt, ledger_index))
 
-    # Sentinels for prove workers
     for _ in range(concurrency):
         prove_queue.put_nowait(None)
 
     loop = asyncio.get_event_loop()
     results: list = []
+    results_lock = asyncio.Lock()
+    counters = {"passed": 0, "failed": 0}
 
-    # Prove workers (N) — saturate the server
-    prove_workers = [
-        asyncio.create_task(
-            prove_worker(prove_queue, verify_queue, host, results, loop))
-        for _ in range(concurrency)
-    ]
-    # Verify workers (N) — run subprocesses in parallel
-    verify_workers = [
-        asyncio.create_task(
-            verify_worker(verify_queue, verifier, results, loop))
-        for _ in range(concurrency)
-    ]
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    )
 
-    # Wait for all proves to finish
-    await asyncio.gather(*prove_workers)
+    prove_tid = progress.add_task("[cyan]Proving", total=total_tasks)
+    verify_tid = progress.add_task("[green]Verifying", total=total_tasks)
 
-    # Signal verify workers to stop and wait
-    for _ in range(concurrency):
-        await verify_queue.put(None)
-    await asyncio.gather(*verify_workers)
+    with progress:
+        prove_workers = [
+            asyncio.create_task(
+                prove_worker(prove_queue, verify_queue, host, results,
+                             results_lock, loop, progress, prove_tid))
+            for _ in range(concurrency)
+        ]
+        verify_workers = [
+            asyncio.create_task(
+                verify_worker(verify_queue, verifier, results,
+                              results_lock, loop, progress, verify_tid,
+                              counters))
+            for _ in range(concurrency)
+        ]
 
-    # Print results
-    passed = 0
-    failed = 0
+        await asyncio.gather(*prove_workers)
+
+        for _ in range(concurrency):
+            await verify_queue.put(None)
+        await asyncio.gather(*verify_workers)
+
+    # Summary
+    console.print()
     errors: list[tuple[str, str, str]] = []
-
     for label, fmt, ok, msg, elapsed in results:
-        status = "PASS" if ok else "FAIL"
-        if ok:
-            passed += 1
-            print(f"  [{status}] {label} ({fmt}) {elapsed:.1f}s")
-        else:
-            failed += 1
+        if not ok:
             errors.append((label, fmt, msg))
-            print(f"  [{status}] {label} ({fmt}) {elapsed:.1f}s — {msg}")
 
-    print(f"\n{'=' * 60}")
-    print(f"  {passed} passed, {failed} failed, {len(results)} total")
-    if errors:
-        print(f"\n  Failures:")
+    passed = counters["passed"]
+    failed = counters["failed"]
+    # Count prove failures (never made it to verify)
+    prove_fails = sum(1 for _, _, ok, msg, _ in results if not ok and msg != "pending")
+    failed += prove_fails
+
+    if failed == 0:
+        console.print(f"[bold green]  {passed} passed, 0 failed[/]")
+    else:
+        console.print(f"[bold red]  {passed} passed, {failed} failed[/]")
         for label, fmt, msg in errors:
-            print(f"    {label} ({fmt}): {msg}")
-    print(f"{'=' * 60}")
+            console.print(f"    [red]{label} ({fmt}): {msg}[/]")
 
     return 0 if failed == 0 else 1
 
