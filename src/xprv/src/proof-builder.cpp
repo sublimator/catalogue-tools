@@ -1512,6 +1512,13 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     // ── Step 9: Build proof chain ──
     ProofChain proof_chain;
 
+    auto emit_step =
+        [&](ChainStep step) -> boost::asio::awaitable<void> {
+        proof_chain.steps.push_back(std::move(step));
+        if (svc.on_step)
+            co_await svc.on_step(proof_chain.steps.back());
+    };
+
     auto make_header = [](auto const& hdr_result) -> HeaderData {
         auto h = hdr_result.header();
         return {
@@ -1552,17 +1559,17 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         for (auto const& v : anchor_validations)
             anchor.validations[v.signing_key_hex] = v.raw;
 
-        proof_chain.steps.push_back(std::move(anchor));
+        co_await emit_step(std::move(anchor));
     }
 
-    proof_chain.steps.push_back(make_header(ctx->anchor_hdr));
+    co_await emit_step(make_header(ctx->anchor_hdr));
 
     // State proofs
     if (ctx->need_flag_hop && ctx->state_proofs.size() >= 2)
     {
         {
             auto& [key, sp] = ctx->state_proofs[0];
-            proof_chain.steps.push_back(
+            co_await emit_step(
                 make_trie_data(sp.tree, false, TrieData::TreeType::state));
         }
         {
@@ -1579,25 +1586,24 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                             flag_seq, ctx->peers, peer);
                     });
             }
-            proof_chain.steps.push_back(make_header(*ctx->flag_hdr_result));
+            co_await emit_step(make_header(*ctx->flag_hdr_result));
         }
         {
             auto& [key, sp] = ctx->state_proofs[1];
-            proof_chain.steps.push_back(
+            co_await emit_step(
                 make_trie_data(sp.tree, false, TrieData::TreeType::state));
         }
     }
     else if (!ctx->state_proofs.empty())
     {
         auto& [key, sp] = ctx->state_proofs[0];
-        proof_chain.steps.push_back(
+        co_await emit_step(
             make_trie_data(sp.tree, false, TrieData::TreeType::state));
     }
 
-    proof_chain.steps.push_back(make_header(target_hdr));
+    co_await emit_step(make_header(target_hdr));
 
-    proof_chain.steps.push_back(
-        make_trie_data(abbrev, true, TrieData::TreeType::tx));
+    co_await emit_step(make_trie_data(abbrev, true, TrieData::TreeType::tx));
 
     co_return BuildResult{
         std::move(proof_chain), vl_data.publisher_key_hex, tx_ledger_seq};

@@ -664,55 +664,99 @@ prove = async function(hash) {
   return _origProve(hash);
 };
 
+function finishProve(json, hash) {
+  lastProvedHash = hash;
+  showDetails(json, hash);
+  populateGlobe(lastProofPretty);
+
+  const anchor = (json.steps || []).find(s => s.type === 'anchor');
+  const seq = anchor ? anchor.ledger_index : 'unknown';
+  const filename = `proof-${seq}-${hash.substring(0, 12).toUpperCase()}.xprv.json`;
+
+  const blob = new Blob([lastProofPretty], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  lastDownloadUrl = url;
+  lastFilename = filename;
+
+  statusEl.className = 'status done';
+  const binFilename = filename.replace('.json', '.xprv.bin');
+  statusEl.innerHTML = `<a href="${url}" download="${filename}" style="color:#2a2;text-decoration:none" title="${filename}">json</a> <a href="/prove?tx=${hash}&format=bin" download="${binFilename}" style="color:#686;text-decoration:none;margin-left:.5rem" title="${binFilename}">bin</a> <span onclick="copyProof()" title="copy JSON" style="cursor:pointer;color:#696;font-size:1em;margin-left:.4rem">&#x1F4CB;</span>`;
+}
+
+let activeSSE = null;
+
 async function prove(hash) {
-  if (controller) controller.abort();
-  controller = new AbortController();
+  if (activeSSE) { activeSSE.close(); activeSSE = null; }
 
   statusEl.className = 'status working';
   statusEl.textContent = 'proving\u2026';
   details.className = '';
 
-  try {
-    const timeout = setTimeout(() => controller.abort(), 30000);
-    const res = await fetch(`/prove?tx=${hash}`, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `HTTP ${res.status}`);
-    }
-    const json = await res.json();
-    lastProvedHash = hash;
-    showDetails(json, hash);
+  // Open step modal immediately with a "building..." state
+  const modal = document.getElementById('modal');
+  const body = document.getElementById('modal-body');
+  body.innerHTML = '<h3>Building proof\u2026</h3>';
+  modal.className = 'show';
+  linkNum = 0;
+  const streamedSteps = [];
 
-    // Globe background
-    populateGlobe(lastProofPretty);
-
-    // Filename with ledger index
-    const anchor = (json.steps || []).find(s => s.type === 'anchor');
-    const seq = anchor ? anchor.ledger_index : 'unknown';
-    const filename = `proof-${seq}-${hash.substring(0, 12).toUpperCase()}.xprv.json`;
-
-    // Create download link
-    const blob = new Blob([lastProofPretty], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    lastDownloadUrl = url;
-    lastFilename = filename;
-
-    statusEl.className = 'status done';
-    const binFilename = filename.replace('.json', '.xprv.bin');
-    statusEl.innerHTML = `<a href="${url}" download="${filename}" style="color:#2a2;text-decoration:none" title="${filename}">json</a> <a href="/prove?tx=${hash}&format=bin" download="${binFilename}" style="color:#686;text-decoration:none;margin-left:.5rem" title="${binFilename}">bin</a> <span onclick="copyProof()" title="copy JSON" style="cursor:pointer;color:#696;font-size:1em;margin-left:.4rem">&#x1F4CB;</span>`;
-
-    // Auto-open the step inspector
-    showSteps();
-  } catch (e) {
-    if (e.name === 'AbortError') {
+  return new Promise((resolve) => {
+    const es = new EventSource(`/prove?tx=${hash}`);
+    activeSSE = es;
+    const timeout = setTimeout(() => {
+      es.close(); activeSSE = null;
       statusEl.className = 'status error';
       statusEl.textContent = 'timed out';
-      return;
-    }
-    statusEl.className = 'status error';
-    statusEl.textContent = e.message;
-  }
+      resolve();
+    }, 60000);
+
+    es.onmessage = async (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+
+        if (msg.type === 'step') {
+          streamedSteps.push(msg.step);
+          statusEl.textContent = `proving\u2026 step ${msg.index + 1}`;
+          // Render step incrementally
+          const html = await describeStep(msg.step, msg.index, streamedSteps);
+          if (body.querySelector('.step-block')) {
+            body.insertAdjacentHTML('beforeend', html);
+          } else {
+            body.innerHTML = `<h3>Building proof\u2026</h3>` + html;
+          }
+        }
+
+        if (msg.type === 'done') {
+          clearTimeout(timeout);
+          es.close(); activeSSE = null;
+          const json = msg.proof;
+          finishProve(json, hash);
+          // Re-render all steps with full context for correct links
+          showSteps();
+          resolve();
+        }
+
+        if (msg.type === 'error') {
+          clearTimeout(timeout);
+          es.close(); activeSSE = null;
+          statusEl.className = 'status error';
+          statusEl.textContent = msg.error;
+          closeModal();
+          resolve();
+        }
+      } catch(err) {
+        // JSON parse error — ignore malformed event
+      }
+    };
+
+    es.onerror = () => {
+      clearTimeout(timeout);
+      es.close(); activeSSE = null;
+      statusEl.className = 'status error';
+      statusEl.textContent = 'connection lost';
+      resolve();
+    };
+  });
 }
 </script>
 </body>

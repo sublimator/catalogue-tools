@@ -199,7 +199,8 @@ ProofEngine::stop()
 asio::awaitable<ProofEngine::ProveResult>
 ProofEngine::prove(
     std::string const& tx_hash,
-    std::shared_ptr<std::atomic<bool>> cancel_token)
+    std::shared_ptr<std::atomic<bool>> cancel_token,
+    StepCallback on_step)
 {
     // Enable cancellation so the || operator in the HTTP session can
     // abort this coroutine when the client disconnects.
@@ -212,6 +213,12 @@ ProofEngine::prove(
         if (auto cached = cache_get(tx_hash))
         {
             PLOGI(log_, "Cache hit for ", tx_hash.substr(0, 16), "...");
+            // Replay cached steps through the callback for SSE
+            if (on_step)
+            {
+                for (auto const& step : cached->chain.steps)
+                    co_await on_step(step);
+            }
             co_return *cached;
         }
     }
@@ -257,6 +264,7 @@ ProofEngine::prove(
         .anchor_hash = anchor.anchor_hash,
         .anchor_account_hash = anchor.account_hash,
         .cancel_token = cancel_token,
+        .on_step = std::move(on_step),
     };
 
     auto result = co_await build_proof(svc, tx_hash);

@@ -20,6 +20,7 @@
 #include <catl/xdata/protocol.h>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -56,6 +57,14 @@ struct BuildServices
     // Checked at cancellation boundaries (walk_to, with_peer_failover)
     // to stop work without disrupting shared NodeCache state.
     std::shared_ptr<std::atomic<bool>> cancel_token;
+
+    /// Optional SSE step callback — co_awaited with each step as it
+    /// becomes ready during the build. If null, steps are only returned
+    /// in the final BuildResult (batch mode). The callback receives the
+    /// step variant; caller is responsible for serialization and writing.
+    using StepCallback =
+        std::function<boost::asio::awaitable<void>(ChainStep const&)>;
+    StepCallback on_step;
 };
 
 /// Build using shared services (ProofEngine path).

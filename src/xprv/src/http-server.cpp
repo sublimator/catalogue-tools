@@ -385,11 +385,94 @@ HttpServer::handle_session(tcp::socket socket)
                 }
                 else
                 {
+                    // Check if client wants SSE
+                    auto accept = std::string(
+                        req[http::field::accept]);
+                    bool wants_sse =
+                        accept.find("text/event-stream") != std::string::npos;
+
                     // Cancel token: atomic flag checked at cancellation
                     // boundaries (walk_to, with_peer_failover) for fast
                     // exit without disrupting shared NodeCache state.
                     auto cancel_token =
                         std::make_shared<std::atomic<bool>>(false);
+
+                    if (wants_sse)
+                    {
+                        // ── SSE path ──
+                        // Send headers immediately, then stream steps
+                        // as they become ready via on_step callback.
+                        http::response<http::empty_body> sse_hdr{
+                            http::status::ok, version};
+                        sse_hdr.set(http::field::content_type, "text/event-stream");
+                        sse_hdr.set(http::field::cache_control, "no-cache");
+                        sse_hdr.set(http::field::server, "xprv");
+                        sse_hdr.keep_alive(false);  // SSE — no keep-alive
+                        sse_hdr.chunked(true);
+
+                        // Send headers
+                        http::response_serializer<http::empty_body> sr{sse_hdr};
+                        stream.expires_never();
+                        co_await http::async_write_header(
+                            stream, sr,
+                            asio::redirect_error(asio::use_awaitable, ec));
+                        if (ec) break;
+
+                        int step_index = 0;
+                        auto write_sse = [&](std::string const& data)
+                            -> asio::awaitable<void> {
+                            // Chunked frame: size\r\n data\r\n
+                            auto frame = "data: " + data + "\n\n";
+                            auto chunk = beast::http::make_chunk(
+                                asio::buffer(frame));
+                            co_await asio::async_write(
+                                stream,
+                                chunk,
+                                asio::redirect_error(asio::use_awaitable, ec));
+                        };
+
+                        auto on_step = [&](ChainStep const& step)
+                            -> asio::awaitable<void> {
+                            boost::json::object ev;
+                            ev["type"] = "step";
+                            ev["index"] = step_index++;
+                            ev["step"] = step_to_json(step);
+                            co_await write_sse(boost::json::serialize(ev));
+                        };
+
+                        std::string sse_error;
+                        try
+                        {
+                            auto result = co_await engine_->prove(
+                                tx_it->second, cancel_token,
+                                std::move(on_step));
+
+                            // Send final done event with full proof
+                            boost::json::object done;
+                            done["type"] = "done";
+                            done["proof"] = to_json(result.chain);
+                            co_await write_sse(boost::json::serialize(done));
+                        }
+                        catch (std::exception const& e)
+                        {
+                            boost::json::object err;
+                            err["type"] = "error";
+                            err["error"] = e.what();
+                            sse_error = boost::json::serialize(err);
+                        }
+
+                        if (!sse_error.empty())
+                            co_await write_sse(sse_error);
+
+                        // Send final chunk (zero-length = end of chunked)
+                        co_await asio::async_write(
+                            stream,
+                            beast::http::make_chunk_last(),
+                            asio::redirect_error(asio::use_awaitable, ec));
+                    }
+                    else
+                    {
+                    // ── Regular JSON/binary path ──
 
                     // Cancel timer: set to max, cancelled by socket
                     // watcher when the client disconnects.
@@ -510,6 +593,7 @@ HttpServer::handle_session(tcp::socket socket)
                             res,
                             asio::redirect_error(asio::use_awaitable, ec));
                     }
+                    } // regular path
                 }
             }
             else if (path == "/verify" && req.method() == http::verb::post)

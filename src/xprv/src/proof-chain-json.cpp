@@ -97,6 +97,22 @@ steps_to_json(ProofChain const& chain)
 }
 
 boost::json::object
+step_to_json(ChainStep const& step)
+{
+    return std::visit(
+        [](auto const& data) -> boost::json::object {
+            using T = std::decay_t<decltype(data)>;
+            if constexpr (std::is_same_v<T, AnchorData>)
+                return anchor_to_json(data);
+            else if constexpr (std::is_same_v<T, HeaderData>)
+                return header_to_json(data);
+            else
+                return trie_to_json(data);
+        },
+        step);
+}
+
+boost::json::object
 to_json(ProofChain const& chain)
 {
     boost::json::object obj;

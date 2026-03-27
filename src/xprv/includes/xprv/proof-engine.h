@@ -71,10 +71,16 @@ public:
     ///                      client disconnect. Checked at cancellation
     ///                      boundaries to stop work without disrupting
     ///                      shared NodeCache state.
+    /// @param on_step       Optional async callback co_awaited with each step
+    ///                      as it becomes ready during the build (for SSE).
+    using StepCallback =
+        std::function<boost::asio::awaitable<void>(ChainStep const&)>;
+
     boost::asio::awaitable<ProveResult>
     prove(
         std::string const& tx_hash,
-        std::shared_ptr<std::atomic<bool>> cancel_token = nullptr);
+        std::shared_ptr<std::atomic<bool>> cancel_token = nullptr,
+        StepCallback on_step = nullptr);
 
     /// Verify a proof chain. Sync pure function — no shared state.
     VerifyResult
