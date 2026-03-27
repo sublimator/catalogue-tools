@@ -201,6 +201,7 @@ ProofEngine::prove(
     std::string const& tx_hash,
     std::shared_ptr<std::atomic<bool>> cancel_token,
     uint32_t ledger_seq_hint,
+    uint32_t max_anchor_age_secs,
     StepCallback on_step)
 {
     // Enable cancellation so the || operator in the HTTP session can
@@ -230,7 +231,7 @@ ProofEngine::prove(
 
     // Step 2: Get anchor — reuse cached bundle if recent enough,
     // otherwise wait for the latest quorum.
-    auto anchor = co_await get_or_reuse_anchor(vl);
+    auto anchor = co_await get_or_reuse_anchor(vl, max_anchor_age_secs);
 
     // Step 4: Build proof using shared services
     // Check tx→ledger_seq cache (avoids RPC lookup on repeated requests)
@@ -439,18 +440,18 @@ ProofEngine::co_health()
 // ═══════════════════════════════════════════════════════════════════════
 
 asio::awaitable<ProofEngine::AnchorBundle>
-ProofEngine::get_or_reuse_anchor(catl::vl::ValidatorList const& vl)
+ProofEngine::get_or_reuse_anchor(
+    catl::vl::ValidatorList const& vl,
+    uint32_t max_age_secs)
 {
-    // Reuse the current anchor if it's less than 30s old.
-    // This avoids waiting for a new quorum on every request —
-    // concurrent and near-concurrent requests share the same anchor.
-    static constexpr auto kMaxAnchorAge = std::chrono::seconds(30);
-
+    // When max_age_secs > 0, reuse the current anchor if fresh enough.
+    // When 0 (default), always wait for the latest quorum.
+    if (max_age_secs > 0)
     {
         std::lock_guard lock(cache_mutex_);
         if (current_anchor_ &&
             (std::chrono::steady_clock::now() - current_anchor_->built_at) <
-                kMaxAnchorAge)
+                std::chrono::seconds(max_age_secs))
         {
             PLOGI(
                 log_,

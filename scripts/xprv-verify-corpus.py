@@ -38,7 +38,7 @@ def prove_and_verify(
     """Prove a tx, save to temp file, verify with subprocess.
     Returns (label, format, ok, message, elapsed_secs).
     """
-    url = f"http://{host}/prove?tx={tx_hash}"
+    url = f"http://{host}/prove?tx={tx_hash}&max_anchor_age=120"
     if ledger_index:
         url += f"&ledger_index={ledger_index}"
     if fmt == "bin":

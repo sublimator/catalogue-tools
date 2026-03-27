@@ -76,11 +76,14 @@ public:
     using StepCallback =
         std::function<boost::asio::awaitable<void>(ChainStep const&)>;
 
+    /// @param max_anchor_age_secs  Max age of cached anchor to reuse (0 = always
+    ///                             wait for latest quorum, the default).
     boost::asio::awaitable<ProveResult>
     prove(
         std::string const& tx_hash,
         std::shared_ptr<std::atomic<bool>> cancel_token = nullptr,
         uint32_t ledger_seq_hint = 0,
+        uint32_t max_anchor_age_secs = 0,
         StepCallback on_step = nullptr);
 
     /// Verify a proof chain. Sync pure function — no shared state.
@@ -275,8 +278,10 @@ private:
 
     /// Reuse the current anchor if recent enough, otherwise wait for
     /// a new quorum and build a fresh one.
+    /// @param max_age_secs  0 = always fresh (wait for latest quorum)
     boost::asio::awaitable<AnchorBundle>
-    get_or_reuse_anchor(catl::vl::ValidatorList const& vl);
+    get_or_reuse_anchor(catl::vl::ValidatorList const& vl,
+                        uint32_t max_age_secs);
 };
 
 }  // namespace xprv

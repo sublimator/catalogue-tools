@@ -395,7 +395,20 @@ HttpServer::handle_session(tcp::socket socket)
                     uint32_t ledger_seq_hint = 0;
                     auto li_it = params.find("ledger_index");
                     if (li_it != params.end() && !li_it->second.empty())
-                        ledger_seq_hint = std::stoul(li_it->second);
+                    {
+                        try { ledger_seq_hint = std::stoul(li_it->second); }
+                        catch (...) {}
+                    }
+
+                    // Optional max_anchor_age — reuse recent anchor (seconds).
+                    // 0 (default) = always wait for latest quorum.
+                    uint32_t max_anchor_age = 0;
+                    auto ma_it = params.find("max_anchor_age");
+                    if (ma_it != params.end() && !ma_it->second.empty())
+                    {
+                        try { max_anchor_age = std::stoul(ma_it->second); }
+                        catch (...) {}
+                    }
 
                     // Cancel token: atomic flag checked at cancellation
                     // boundaries (walk_to, with_peer_failover) for fast
@@ -458,7 +471,8 @@ HttpServer::handle_session(tcp::socket socket)
                         {
                             auto result = co_await engine_->prove(
                                 tx_it->second, cancel_token,
-                                ledger_seq_hint, std::move(on_step));
+                                ledger_seq_hint, max_anchor_age,
+                                std::move(on_step));
 
                             // Send done event — client stitches proof
                             // from streamed steps + network_id
@@ -527,7 +541,7 @@ HttpServer::handle_session(tcp::socket socket)
                                 ex,
                                 engine_->prove(
                                     tx_it->second, cancel_token,
-                                    ledger_seq_hint),
+                                    ledger_seq_hint, max_anchor_age),
                                 asio::deferred),
                             asio::co_spawn(
                                 ex,
