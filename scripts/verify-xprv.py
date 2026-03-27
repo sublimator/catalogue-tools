@@ -4,7 +4,7 @@
 # dependencies = ["xrpl-py>=4.0.0"]
 # ///
 """
-Standalone Python verifier for xprv JSON proofs.
+Standalone Python verifier for xprv proofs (JSON and binary).
 
 Verifies the full cryptographic chain:
   anchor (VL sig + validation sigs + quorum) →
@@ -12,8 +12,13 @@ Verifies the full cryptographic chain:
   [flag header → state tree → skip list →]
   target header → tx tree
 
+Supports both formats:
+  - JSON (.json, .xprv.json): {"network_id": N, "steps": [...]}
+  - Binary (.bin, .xprv.bin): XPRF header + TLV body (optionally zlib)
+
 Usage:
   ./scripts/verify-xprv.py proof.json
+  ./scripts/verify-xprv.py proof.xprv.bin
   ./scripts/verify-xprv.py proof.json --trusted-key ED2677AB...
 """
 
@@ -30,6 +35,8 @@ from binascii import hexlify, unhexlify
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TypedDict
+
+import zlib
 
 import xrpl.core.keypairs
 from xrpl.core.binarycodec import decode, encode, encode_for_signing
@@ -496,26 +503,35 @@ def verify(proof: dict[str, Any], trusted_key: str | None = None) -> VerifyResul
             tree: str = step["tree"]
             is_tx = tree == "tx"
             trie: TrieNode | None = step.get("trie")
+            binary_root_hex: str | None = step.get("__binary_root__")
 
             print(f"\n  Step {i}: {'TX' if is_tx else 'STATE'} TREE")
 
-            if trie is None:
+            if trie is None and not binary_root_hex:
                 print("    [SKIP] no trie")
                 continue
 
-            stats = count_nodes(trie)
-            print(
-                f"    {stats.inners} inners, {stats.placeholders} placeholders, "
-                f"{stats.leaves} leaves (depth {stats.max_depth})"
-            )
+            if trie:
+                stats = count_nodes(trie)
+                print(
+                    f"    {stats.inners} inners, {stats.placeholders} placeholders, "
+                    f"{stats.leaves} leaves (depth {stats.max_depth})"
+                )
+            else:
+                print(f"    Binary trie, root={binary_root_hex[:16]}...")
 
             expected = tx_hash if is_tx else ac_hash
             if expected is None:
                 print("    [SKIP] no expected hash")
                 continue
 
+            # Binary proofs have pre-computed root hash
+            binary_root = step.get("__binary_root__")
             try:
-                root = hash_trie(trie, is_tx=is_tx)
+                if binary_root:
+                    root = bytes.fromhex(binary_root)
+                else:
+                    root = hash_trie(trie, is_tx=is_tx)
                 if root == expected:
                     print(
                         f"    [PASS] root {root.hex().upper()[:16]}... "
@@ -535,22 +551,39 @@ def verify(proof: dict[str, Any], trusted_key: str | None = None) -> VerifyResul
 
             # Extract skip list from state tree leaf
             if not is_tx:
-                leaf = find_leaf(trie)
-                if leaf and len(leaf) >= 2 and isinstance(leaf[1], dict):
-                    hashes = leaf[1].get("Hashes")
-                    if hashes:
-                        skip_hashes = [h.upper() for h in hashes]
-                        print(f"    Skip list: {len(skip_hashes)} hashes")
+                if binary_root:
+                    leaf_data = find_binary_trie_leaf(step.get("__binary_payload__", b""), is_tx=False)
+                    if leaf_data:
+                        hashes = leaf_data.get("Hashes")
+                        if hashes:
+                            skip_hashes = [h.upper() for h in hashes]
+                            print(f"    Skip list: {len(skip_hashes)} hashes")
+                else:
+                    leaf = find_leaf(trie)
+                    if leaf and len(leaf) >= 2 and isinstance(leaf[1], dict):
+                        hashes = leaf[1].get("Hashes")
+                        if hashes:
+                            skip_hashes = [h.upper() for h in hashes]
+                            print(f"    Skip list: {len(skip_hashes)} hashes")
 
             # Extract tx info from tx tree leaf
             if is_tx:
-                leaf = find_leaf(trie)
-                if leaf and len(leaf) >= 2 and isinstance(leaf[1], dict):
-                    tx_data: dict[str, Any] = leaf[1].get("tx", {})
-                    print(
-                        f"    Leaf: {tx_data.get('TransactionType', '?')} "
-                        f"from {tx_data.get('Account', '?')}"
-                    )
+                if binary_root:
+                    leaf_data = find_binary_trie_leaf(step.get("__binary_payload__", b""), is_tx=True)
+                    if leaf_data and "tx" in leaf_data:
+                        tx_data = leaf_data["tx"]
+                        print(
+                            f"    Leaf: {tx_data.get('TransactionType', '?')} "
+                            f"from {tx_data.get('Account', '?')}"
+                        )
+                else:
+                    leaf = find_leaf(trie)
+                    if leaf and len(leaf) >= 2 and isinstance(leaf[1], dict):
+                        tx_data_j: dict[str, Any] = leaf[1].get("tx", {})
+                        print(
+                            f"    Leaf: {tx_data_j.get('TransactionType', '?')} "
+                            f"from {tx_data_j.get('Account', '?')}"
+                        )
 
     print(f"\n{'=' * 60}")
     print(f"  {'PASS — all checks verified' if result.ok else 'FAIL'}")
@@ -561,12 +594,371 @@ def verify(proof: dict[str, Any], trusted_key: str | None = None) -> VerifyResul
     return result
 
 
+# ─── Binary format (XPRF) ────────────────────────────────────────────
+#
+# File: XPRF(4) + version(1) + flags(1) [+ network_id(4 LE if v2)]
+# Body: TLV records (type(1) + length(LEB128) + payload)
+# TLV types: 0x01=anchor, 0x02=header, 0x03=tx_map, 0x04=state_map, 0x05=unl
+
+MAGIC = b"XPRF"
+FLAG_ZLIB = 0x01
+
+# TLV types
+TLV_ANCHOR = 0x01
+TLV_HEADER = 0x02
+TLV_MAP_TX = 0x03
+TLV_MAP_STATE = 0x04
+TLV_UNL = 0x05
+
+# Binary trie branch types (2 bits each in a uint32 LE header)
+BR_EMPTY = 0
+BR_LEAF = 1
+BR_INNER = 2
+BR_HASH = 3
+
+# Blob JSON key permutations (for exact byte reconstitution)
+BLOB_KEYS = ["sequence", "expiration", "validators"]
+VAL_KEYS = ["validation_public_key", "manifest"]
+PERMS_3 = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]
+PERMS_2 = [[0, 1], [1, 0]]
+
+
+def leb128_read(data: bytes, pos: int) -> tuple[int, int]:
+    """Read a LEB128 varint. Returns (value, new_pos)."""
+    value = 0
+    shift = 0
+    while pos < len(data):
+        b = data[pos]
+        pos += 1
+        value |= (b & 0x7F) << shift
+        if (b & 0x80) == 0:
+            return value, pos
+        shift += 7
+    raise ValueError("LEB128: unexpected end")
+
+
+def read_vl(data: bytes, pos: int) -> tuple[bytes, int]:
+    """Read a VL-prefixed blob (LEB128 length + bytes)."""
+    length, pos = leb128_read(data, pos)
+    return data[pos : pos + length], pos + length
+
+
+def is_binary_proof(data: bytes) -> bool:
+    """Check if data starts with XPRF magic."""
+    return len(data) >= 4 and data[:4] == MAGIC
+
+
+def parse_binary_header(data: bytes) -> tuple[int, int, int, int]:
+    """Parse XPRF file header. Returns (version, flags, network_id, body_offset)."""
+    if len(data) < 6:
+        raise ValueError("binary proof: too short")
+    if data[:4] != MAGIC:
+        raise ValueError("binary proof: bad magic")
+    version = data[4]
+    flags = data[5]
+    if version == 0x01:
+        return version, flags, 0, 6
+    if version == 0x02:
+        if len(data) < 10:
+            raise ValueError("binary proof: v2 header too short")
+        net = struct.unpack_from("<I", data, 6)[0]
+        return version, flags, net, 10
+    raise ValueError(f"binary proof: unsupported version {version}")
+
+
+def parse_tlv_records(body: bytes) -> list[tuple[int, bytes]]:
+    """Parse TLV body into list of (type, payload)."""
+    records: list[tuple[int, bytes]] = []
+    pos = 0
+    while pos < len(body):
+        tlv_type = body[pos]
+        pos += 1
+        length, pos = leb128_read(body, pos)
+        payload = body[pos : pos + length]
+        pos += length
+        records.append((tlv_type, payload))
+    return records
+
+
+def decode_bin_header(payload: bytes) -> dict[str, Any]:
+    """Decode a 118-byte ledger header TLV payload to dict."""
+    if len(payload) < 118:
+        raise ValueError(f"header payload too short: {len(payload)}")
+    seq = struct.unpack_from(">I", payload, 0)[0]
+    drops = struct.unpack_from(">Q", payload, 4)[0]
+    parent_hash = hexlify(payload[12:44]).decode().upper()
+    tx_hash = hexlify(payload[44:76]).decode().upper()
+    account_hash = hexlify(payload[76:108]).decode().upper()
+    parent_close_time = struct.unpack_from(">I", payload, 108)[0]
+    close_time = struct.unpack_from(">I", payload, 112)[0]
+    close_time_resolution = payload[116]
+    close_flags = payload[117]
+    return {
+        "seq": seq,
+        "drops": str(drops),
+        "parent_hash": parent_hash,
+        "tx_hash": tx_hash,
+        "account_hash": account_hash,
+        "parent_close_time": parent_close_time,
+        "close_time": close_time,
+        "close_time_resolution": close_time_resolution,
+        "close_flags": close_flags,
+    }
+
+
+def decode_anchor_core(payload: bytes) -> dict[str, Any]:
+    """Decode anchor core TLV: hash + publisher key + decomposed validations."""
+    pos = 0
+    ledger_hash = hexlify(payload[pos : pos + 32]).decode().upper()
+    pos += 32
+    publisher_key = hexlify(payload[pos : pos + 33]).decode().upper()
+    pos += 33
+    val_count, pos = leb128_read(payload, pos)
+
+    validations: dict[str, str] = {}
+    if val_count == 0:
+        return {
+            "type": "anchor",
+            "ledger_hash": ledger_hash,
+            "unl": {"public_key": publisher_key},
+            "validations": validations,
+        }
+
+    # Read common fields (XRPL binary → hex for decode())
+    common_bytes, pos = read_vl(payload, pos)
+    common_hex = hexlify(common_bytes).decode()
+    common_fields = decode(common_hex) if common_hex else {}
+
+    # Read unique field names
+    num_unique, pos = leb128_read(payload, pos)
+    unique_names: list[str] = []
+    for _ in range(num_unique):
+        name_len, pos = leb128_read(payload, pos)
+        unique_names.append(payload[pos : pos + name_len].decode("utf-8"))
+        pos += name_len
+
+    # Read each validator's key + unique fields, merge with common
+    for _ in range(val_count):
+        vkey = hexlify(payload[pos : pos + 33]).decode().upper()
+        pos += 33
+        unique_bytes, pos = read_vl(payload, pos)
+        unique_hex = hexlify(unique_bytes).decode()
+        unique_fields = decode(unique_hex) if unique_hex else {}
+
+        merged = dict(common_fields)
+        merged.update(unique_fields)
+        full_hex = encode(merged)
+        validations[vkey] = full_hex
+
+    return {
+        "type": "anchor",
+        "ledger_hash": ledger_hash,
+        "unl": {"public_key": publisher_key},
+        "validations": validations,
+    }
+
+
+def decode_anchor_unl(payload: bytes, anchor: dict[str, Any]) -> None:
+    """Decode anchor UNL TLV and merge into existing anchor dict."""
+    pos = 0
+    manifest_bytes, pos = read_vl(payload, pos)
+    sig_bytes, pos = read_vl(payload, pos)
+
+    anchor["unl"]["manifest"] = hexlify(manifest_bytes).decode().upper()
+    anchor["unl"]["signature"] = hexlify(sig_bytes).decode().upper()
+
+    if pos >= len(payload):
+        return
+
+    # Reconstruct blob JSON with exact key ordering
+    shape = payload[pos]
+    pos += 1
+    top_perm = PERMS_3[shape & 0x07]
+    val_perm = PERMS_2[(shape >> 3) & 0x01]
+
+    sequence = struct.unpack_from(">I", payload, pos)[0]
+    pos += 4
+    expiration = struct.unpack_from(">I", payload, pos)[0]
+    pos += 4
+    validator_count, pos = leb128_read(payload, pos)
+
+    validators: list[tuple[str, str]] = []
+    for _ in range(validator_count):
+        vpk = hexlify(payload[pos : pos + 33]).decode().upper()
+        pos += 33
+        m_bytes, pos = read_vl(payload, pos)
+        m_b64 = base64.b64encode(m_bytes).decode()
+        validators.append((vpk, m_b64))
+
+    # Build blob JSON string with exact key ordering for sig verification
+    values = {
+        0: str(sequence),
+        1: str(expiration),
+        2: None,  # validators array
+    }
+
+    parts: list[str] = []
+    for ki in top_perm:
+        key = BLOB_KEYS[ki]
+        if ki == 2:  # validators
+            val_parts: list[str] = []
+            for vpk, m_b64 in validators:
+                vobj_parts: list[str] = []
+                for vki in val_perm:
+                    vkey = VAL_KEYS[vki]
+                    vval = vpk if vki == 0 else m_b64
+                    vobj_parts.append(f'"{vkey}":"{vval}"')
+                val_parts.append("{" + ",".join(vobj_parts) + "}")
+            parts.append(f'"{key}":[' + ",".join(val_parts) + "]")
+        else:
+            parts.append(f'"{key}":{values[ki]}')
+
+    blob_str = "{" + ",".join(parts) + "}"
+    anchor["unl"]["blob"] = hexlify(blob_str.encode()).decode().upper()
+
+
+def hash_binary_trie(data: bytes, pos: int, *, is_tx: bool) -> tuple[Hash256, int]:
+    """Recursively hash a binary trie. Returns (hash, new_pos).
+
+    Binary trie format: uint32 LE header (16 branches × 2 bits),
+    then depth-first children. Branch types: 00=empty, 01=leaf,
+    10=inner (recurse), 11=hash (32-byte placeholder).
+    """
+    if pos + 4 > len(data):
+        raise ValueError("binary trie: unexpected end reading header")
+    header = struct.unpack_from("<I", data, pos)[0]
+    pos += 4
+
+    children: list[Hash256] = [ZERO_HASH] * 16
+    for branch in range(16):
+        btype = (header >> (branch * 2)) & 0x03
+        if btype == BR_EMPTY:
+            continue
+        elif btype == BR_LEAF:
+            key = data[pos : pos + 32]
+            pos += 32
+            data_len, pos = leb128_read(data, pos)
+            leaf_data = data[pos : pos + data_len]
+            pos += data_len
+            prefix = PREFIX_TX_LEAF if is_tx else PREFIX_STATE_LEAF
+            children[branch] = sha512half(prefix + leaf_data + key)
+        elif btype == BR_INNER:
+            children[branch], pos = hash_binary_trie(data, pos, is_tx=is_tx)
+        elif btype == BR_HASH:
+            children[branch] = data[pos : pos + 32]
+            pos += 32
+
+    return hash_inner(children), pos
+
+
+def find_binary_trie_leaf(data: bytes, *, is_tx: bool) -> dict[str, Any] | None:
+    """Find and decode the first leaf in a binary trie. Returns decoded JSON or None."""
+    try:
+        return _scan_binary_trie_leaf(data, 0, is_tx=is_tx)[0]
+    except Exception:
+        return None
+
+
+def _scan_binary_trie_leaf(
+    data: bytes, pos: int, *, is_tx: bool
+) -> tuple[dict[str, Any] | None, int]:
+    """Recursively scan a binary trie for the first leaf."""
+    header = struct.unpack_from("<I", data, pos)[0]
+    pos += 4
+    for branch in range(16):
+        btype = (header >> (branch * 2)) & 0x03
+        if btype == BR_EMPTY:
+            continue
+        elif btype == BR_LEAF:
+            _key = data[pos : pos + 32]
+            pos += 32
+            data_len, pos = leb128_read(data, pos)
+            leaf_bytes = data[pos : pos + data_len]
+            pos += data_len
+            # Decode the canonical binary leaf data
+            try:
+                if is_tx:
+                    # TX leaf: vl_encode(tx_bytes) + vl_encode(meta_bytes)
+                    lpos = 0
+                    tx_len, lpos = _vl_decode(leaf_bytes, lpos)
+                    tx_hex = hexlify(leaf_bytes[lpos : lpos + tx_len]).decode()
+                    lpos += tx_len
+                    meta_len, lpos = _vl_decode(leaf_bytes, lpos)
+                    meta_hex = hexlify(leaf_bytes[lpos : lpos + meta_len]).decode()
+                    return {"tx": decode(tx_hex), "meta": decode(meta_hex)}, pos
+                else:
+                    # State leaf: raw SLE binary
+                    sle_hex = hexlify(leaf_bytes).decode()
+                    return decode(sle_hex), pos
+            except Exception:
+                return None, pos
+        elif btype == BR_INNER:
+            found, pos = _scan_binary_trie_leaf(data, pos, is_tx=is_tx)
+            if found is not None:
+                return found, pos
+        elif btype == BR_HASH:
+            pos += 32
+    return None, pos
+
+
+def _vl_decode(data: bytes, pos: int) -> tuple[int, int]:
+    """Decode XRPL variable-length prefix. Returns (length, new_pos)."""
+    b0 = data[pos]
+    if b0 <= 192:
+        return b0, pos + 1
+    elif b0 <= 240:
+        b1 = data[pos + 1]
+        return 193 + ((b0 - 193) << 8) + b1, pos + 2
+    else:
+        b1, b2 = data[pos + 1], data[pos + 2]
+        return 12481 + ((b0 - 241) << 16) + (b1 << 8) + b2, pos + 3
+
+
+def binary_to_proof(data: bytes) -> dict[str, Any]:
+    """Parse a binary XPRF file into a proof dict compatible with verify()."""
+    version, flags, network_id, body_offset = parse_binary_header(data)
+
+    body = data[body_offset:]
+    if flags & FLAG_ZLIB:
+        body = zlib.decompress(body)
+
+    records = parse_tlv_records(body)
+
+    steps: list[dict[str, Any]] = []
+    anchor_idx = -1
+
+    for tlv_type, payload in records:
+        if tlv_type == TLV_ANCHOR:
+            anchor_idx = len(steps)
+            steps.append(decode_anchor_core(payload))
+        elif tlv_type == TLV_UNL:
+            if anchor_idx >= 0:
+                decode_anchor_unl(payload, steps[anchor_idx])
+        elif tlv_type == TLV_HEADER:
+            steps.append({"type": "ledger_header", "header": decode_bin_header(payload)})
+        elif tlv_type in (TLV_MAP_TX, TLV_MAP_STATE):
+            tree = "tx" if tlv_type == TLV_MAP_TX else "state"
+            is_tx = tree == "tx"
+            root_hash, _ = hash_binary_trie(payload, 0, is_tx=is_tx)
+            # Store the computed root hash and tree type.
+            # We can't convert binary trie to JSON trie easily, so we
+            # store __binary_root__ for the verifier to check directly.
+            steps.append({
+                "type": "map_proof",
+                "tree": tree,
+                "__binary_root__": root_hash.hex().upper(),
+                "__binary_payload__": payload,
+            })
+
+    return {"network_id": network_id, "steps": steps}
+
+
 # ─── CLI ─────────────────────────────────────────────────────────────
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Verify an xprv JSON proof")
-    ap.add_argument("proof", help="Path to proof JSON file")
+    ap = argparse.ArgumentParser(description="Verify an xprv proof (JSON or binary)")
+    ap.add_argument("proof", help="Path to proof file (.json or .bin)")
     ap.add_argument("--trusted-key", default=None, help="VL publisher key (hex)")
     args = ap.parse_args()
 
@@ -575,7 +967,14 @@ def main() -> None:
         print(f"Not found: {path}", file=sys.stderr)
         sys.exit(1)
 
-    proof = json.loads(path.read_text())
+    raw = path.read_bytes()
+    if is_binary_proof(raw):
+        print(f"Format: binary (XPRF)")
+        proof = binary_to_proof(raw)
+    else:
+        print(f"Format: JSON")
+        proof = json.loads(raw)
+
     r = verify(proof, args.trusted_key)
     sys.exit(0 if r.ok else 1)
 
