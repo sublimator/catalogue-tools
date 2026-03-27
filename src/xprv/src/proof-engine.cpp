@@ -228,25 +228,9 @@ ProofEngine::prove(
     // not per-request — set_unl clears the quorum cache)
     auto vl = co_await vl_cache_->co_get();
 
-    // Step 2: Wait for a quorum (may already have one)
-    auto quorum =
-        co_await val_buffer_->co_wait_quorum(std::chrono::seconds(30));
-
-    PLOGI(
-        log_,
-        "Anchor: seq=",
-        quorum.ledger_seq,
-        " hash=",
-        quorum.ledger_hash.hex().substr(0, 16),
-        "... (",
-        quorum.validations.size(),
-        "/",
-        vl.validators.size(),
-        " validators)");
-
-    // Step 3: Get anchor bundle (future-based — built once, shared)
-    auto anchor =
-        co_await get_anchor_bundle(quorum.ledger_seq, quorum.ledger_hash);
+    // Step 2: Get anchor — reuse cached bundle if recent enough,
+    // otherwise wait for the latest quorum.
+    auto anchor = co_await get_or_reuse_anchor(vl);
 
     // Step 4: Build proof using shared services
     // Check tx→ledger_seq cache (avoids RPC lookup on repeated requests)
@@ -256,7 +240,7 @@ ProofEngine::prove(
         .io = io_,
         .peers = peers_,
         .vl = vl,
-        .anchor_validations = quorum.validations,
+        .anchor_validations = anchor.validations,
         .protocol = protocol_,
         .node_cache = node_cache_,
         .rpc = rpc_,
@@ -455,7 +439,62 @@ ProofEngine::co_health()
 // ═══════════════════════════════════════════════════════════════════════
 
 asio::awaitable<ProofEngine::AnchorBundle>
-ProofEngine::get_anchor_bundle(uint32_t anchor_seq, Hash256 anchor_hash)
+ProofEngine::get_or_reuse_anchor(catl::vl::ValidatorList const& vl)
+{
+    // Reuse the current anchor if it's less than 30s old.
+    // This avoids waiting for a new quorum on every request —
+    // concurrent and near-concurrent requests share the same anchor.
+    static constexpr auto kMaxAnchorAge = std::chrono::seconds(30);
+
+    {
+        std::lock_guard lock(cache_mutex_);
+        if (current_anchor_ &&
+            (std::chrono::steady_clock::now() - current_anchor_->built_at) <
+                kMaxAnchorAge)
+        {
+            PLOGI(
+                log_,
+                "Anchor: reusing seq=",
+                current_anchor_->seq,
+                " hash=",
+                current_anchor_->anchor_hash.hex().substr(0, 16),
+                "... (age=",
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() -
+                    current_anchor_->built_at)
+                    .count(),
+                "s)");
+            co_return *current_anchor_;
+        }
+    }
+
+    // Need a fresh anchor — wait for latest quorum
+    auto quorum =
+        co_await val_buffer_->co_wait_quorum(std::chrono::seconds(30));
+
+    PLOGI(
+        log_,
+        "Anchor: seq=",
+        quorum.ledger_seq,
+        " hash=",
+        quorum.ledger_hash.hex().substr(0, 16),
+        "... (",
+        quorum.validations.size(),
+        "/",
+        vl.validators.size(),
+        " validators)");
+
+    auto anchor = co_await get_anchor_bundle(
+        quorum.ledger_seq, quorum.ledger_hash, quorum.validations);
+
+    co_return anchor;
+}
+
+asio::awaitable<ProofEngine::AnchorBundle>
+ProofEngine::get_anchor_bundle(
+    uint32_t anchor_seq,
+    Hash256 anchor_hash,
+    std::vector<ValidationCollector::Entry> validations)
 {
     enum class Action { hit, wait, fetch };
     Action action;
@@ -515,6 +554,8 @@ ProofEngine::get_anchor_bundle(uint32_t anchor_seq, Hash256 anchor_hash)
         bundle.anchor_hash = anchor_hash;
         bundle.account_hash = hdr.header().account_hash();
         bundle.seq = anchor_seq;
+        bundle.validations = std::move(validations);
+        bundle.built_at = std::chrono::steady_clock::now();
 
         // Populate cache and wake waiters
         std::shared_ptr<asio::steady_timer> sig;
@@ -525,6 +566,9 @@ ProofEngine::get_anchor_bundle(uint32_t anchor_seq, Hash256 anchor_hash)
             entry.bundle = bundle;
             entry.present = true;
             entry.signal = nullptr;
+
+            // Update current anchor for reuse
+            current_anchor_ = bundle;
         }
         if (sig)
             sig->cancel();

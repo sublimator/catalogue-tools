@@ -250,6 +250,8 @@ private:
         Hash256 anchor_hash;
         Hash256 account_hash;  // header.account_hash() for state walks
         uint32_t seq = 0;
+        std::vector<ValidationCollector::Entry> validations;
+        std::chrono::steady_clock::time_point built_at;
     };
 
     struct AnchorEntry
@@ -262,10 +264,19 @@ private:
     std::map<uint32_t, AnchorEntry> anchor_cache_;
     // Uses cache_mutex_ (same lock as proof cache)
 
+    // The most recently built anchor — reused when fresh enough.
+    std::optional<AnchorBundle> current_anchor_;
+
     /// Get or build anchor bundle for a given seq. First caller builds,
     /// others co_await the signal.
     boost::asio::awaitable<AnchorBundle>
-    get_anchor_bundle(uint32_t anchor_seq, Hash256 anchor_hash);
+    get_anchor_bundle(uint32_t anchor_seq, Hash256 anchor_hash,
+                      std::vector<ValidationCollector::Entry> validations);
+
+    /// Reuse the current anchor if recent enough, otherwise wait for
+    /// a new quorum and build a fresh one.
+    boost::asio::awaitable<AnchorBundle>
+    get_or_reuse_anchor(catl::vl::ValidatorList const& vl);
 };
 
 }  // namespace xprv
