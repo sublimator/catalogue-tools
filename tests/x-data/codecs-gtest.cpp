@@ -133,6 +133,39 @@ TEST_P(STObjectCodecTest, EncodeMatchesRippled)
         << "Fixture: " << entry.at("name").as_string();
 }
 
+TEST_P(STObjectCodecTest, DecodeAndReencode)
+{
+    auto const& data = FixtureData::instance();
+    auto const& entries = data.fixtures.as_object().at("stobject").as_array();
+    auto const& entry = entries[GetParam()].as_object();
+
+    auto hex_str = std::string(entry.at("hex").as_string());
+
+    std::vector<uint8_t> binary;
+    binary.reserve(hex_str.size() / 2);
+    for (size_t i = 0; i + 1 < hex_str.size(); i += 2)
+    {
+        unsigned int b;
+        std::sscanf(hex_str.c_str() + i, "%2x", &b);
+        binary.push_back(static_cast<uint8_t>(b));
+    }
+
+    Slice slice(binary.data(), binary.size());
+    JsonVisitor visitor(data.protocol, {.ascii_hints = false});
+    ParserContext ctx(slice);
+    parse_with_visitor(ctx, data.protocol, visitor);
+    auto decoded = visitor.get_result();
+
+    ASSERT_TRUE(decoded.is_object())
+        << "Fixture: " << entry.at("name").as_string();
+
+    auto reencoded = serialize_object(decoded.as_object(), data.protocol);
+    auto reencoded_hex = to_upper_hex(reencoded);
+
+    EXPECT_EQ(reencoded_hex, hex_str)
+        << "Fixture: " << entry.at("name").as_string();
+}
+
 INSTANTIATE_TEST_SUITE_P(
     Fixtures,
     STObjectCodecTest,
