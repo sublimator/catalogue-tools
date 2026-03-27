@@ -51,14 +51,18 @@ make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree)
                 arr.emplace_back(catl::xdata::parse_transaction(
                     full,
                     protocol,
-                    {.includes_prefix = false, .include_blob = true}));
+                    {.includes_prefix = false,
+                     .include_blob = true,
+                     .json_opts = {.ascii_hints = false}}));
             }
             else
             {
                 arr.emplace_back(catl::xdata::parse_leaf(
                     full,
                     protocol,
-                    {.includes_prefix = false, .include_blob = true}));
+                    {.includes_prefix = false,
+                     .include_blob = true,
+                     .json_opts = {.ascii_hints = false}}));
             }
         }
         catch (std::exception const&)

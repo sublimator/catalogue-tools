@@ -1,6 +1,7 @@
 #pragma once
 
 #include "catl/core/types.h"
+#include "catl/xdata/json-visitor.h"
 #include "catl/xdata/protocol.h"
 #include <boost/json.hpp>
 
@@ -14,6 +15,8 @@ struct ParseLeafOptions
     /// If true, add a "blob" field with hex-encoded raw item data
     /// (excluding prefix and key). Enables round-trip verification.
     bool include_blob = false;
+    /// JsonVisitor options (ascii hints, etc.)
+    JsonVisitor::Options json_opts;
 };
 
 /**

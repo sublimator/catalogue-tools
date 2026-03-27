@@ -23,7 +23,7 @@ parse_leaf(Slice const& data, Protocol const& protocol, ParseLeafOptions opts)
 
     Slice item_data(data.data() + prefix_size, data.size() - prefix_size - 32);
 
-    JsonVisitor visitor(protocol);
+    JsonVisitor visitor(protocol, opts.json_opts);
     ParserContext ctx(item_data);
     parse_with_visitor(ctx, protocol, visitor);
     auto result = visitor.get_result();

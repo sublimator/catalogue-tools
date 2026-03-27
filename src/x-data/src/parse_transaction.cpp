@@ -57,7 +57,7 @@ parse_transaction(
     Slice tx_data = ctx.cursor.read_slice(tx_vl_length);
 
     {
-        JsonVisitor tx_visitor(protocol);
+        JsonVisitor tx_visitor(protocol, opts.json_opts);
         ParserContext tx_ctx(tx_data);
         parse_with_visitor(tx_ctx, protocol, tx_visitor);
         root["tx"] = tx_visitor.get_result();
@@ -68,7 +68,7 @@ parse_transaction(
     Slice meta_data = ctx.cursor.read_slice(meta_vl_length);
 
     {
-        JsonVisitor meta_visitor(protocol);
+        JsonVisitor meta_visitor(protocol, opts.json_opts);
         ParserContext meta_ctx(meta_data);
         parse_with_visitor(meta_ctx, protocol, meta_visitor);
         root["meta"] = meta_visitor.get_result();

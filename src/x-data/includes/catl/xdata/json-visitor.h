@@ -22,7 +22,18 @@ namespace catl::xdata {
 class JsonVisitor
 {
 public:
-    explicit JsonVisitor(const Protocol& protocol) : protocol_(protocol)
+    struct Options
+    {
+        bool ascii_hints = true;  // add memo_type_ascii etc.
+    };
+
+    explicit JsonVisitor(const Protocol& protocol)
+        : protocol_(protocol)
+    {
+    }
+
+    JsonVisitor(const Protocol& protocol, Options opts)
+        : protocol_(protocol), options_(opts)
     {
     }
 
@@ -185,7 +196,8 @@ public:
             obj[field.name] = std::move(field_value);
 
             // Add lowercase _ascii hint for printable Blob fields
-            if ((field.meta.type == FieldTypes::Blob ||
+            if (options_.ascii_hints &&
+                (field.meta.type == FieldTypes::Blob ||
                  field.meta.is_vl_encoded) &&
                 is_printable_text(fs.data))
             {
@@ -245,6 +257,7 @@ public:
 
 private:
     const Protocol& protocol_;
+    Options options_;
     mutable std::stack<boost::json::value> stack_;
     boost::json::value result_;
 };

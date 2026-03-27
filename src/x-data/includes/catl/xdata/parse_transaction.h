@@ -1,6 +1,7 @@
 #pragma once
 
 #include "catl/core/types.h"
+#include "catl/xdata/json-visitor.h"
 #include "catl/xdata/protocol.h"
 #include <boost/json.hpp>
 
@@ -27,6 +28,8 @@ struct ParseTransactionOptions
     /// If true, add a "blob" field with hex-encoded raw item data
     /// (VL tx + VL meta, excluding prefix and key).
     bool include_blob = false;
+    /// JsonVisitor options (ascii hints, etc.)
+    JsonVisitor::Options json_opts;
 };
 
 boost::json::value
