@@ -56,6 +56,9 @@
 
 namespace xprv {
 
+/// Binary proof magic bytes.
+inline constexpr uint8_t XPRV_MAGIC[4] = {'X', 'P', 'R', 'V'};
+
 /// Options for binary serialization.
 struct BinaryOptions
 {

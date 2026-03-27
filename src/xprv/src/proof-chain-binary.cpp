@@ -27,7 +27,7 @@ using catl::shamap::leb128_encode;
 namespace xprv {
 
 // File header
-static constexpr uint8_t MAGIC[4] = {'X', 'P', 'R', 'V'};
+static constexpr auto const& MAGIC = XPRV_MAGIC;
 static constexpr uint8_t VERSION = 0x02;
 static constexpr uint8_t FLAG_ZLIB = 0x01;
 

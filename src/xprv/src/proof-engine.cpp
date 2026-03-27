@@ -6,6 +6,7 @@
 #include "xprv/proof-resolver.h"
 
 #include <catl/core/logger.h>
+#include <cstring>
 #include <catl/rpc-client/rpc-client-coro.h>
 
 #include <boost/asio/co_spawn.hpp>
@@ -349,8 +350,8 @@ ProofEngine::verify(
     {
         // Auto-detect format
         ProofChain chain;
-        if (data.size() >= 4 && data[0] == 'X' && data[1] == 'P' &&
-            data[2] == 'R' && data[3] == 'F')
+        if (data.size() >= 4 &&
+            std::memcmp(data.data(), XPRV_MAGIC, 4) == 0)
         {
             chain = from_binary(data);
         }

@@ -8,6 +8,7 @@
 #include <catl/core/logger.h>
 
 #include <boost/json.hpp>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 
@@ -32,8 +33,8 @@ cmd_verify(
 
     xprv::ProofChain proof;
 
-    bool is_binary = file_data.size() >= 4 && file_data[0] == 'X' &&
-        file_data[1] == 'P' && file_data[2] == 'R' && file_data[3] == 'F';
+    bool is_binary = file_data.size() >= 4 &&
+        std::memcmp(file_data.data(), xprv::XPRV_MAGIC, 4) == 0;
 
     if (!is_binary)
     {

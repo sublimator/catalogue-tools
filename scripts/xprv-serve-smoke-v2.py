@@ -311,8 +311,8 @@ def prove_path_for_case(case: TxCase) -> str:
 
 
 def cache_stats_from_health(body: dict[str, Any]) -> dict[str, int]:
-    cache = body.get("cache")
-    assert isinstance(cache, dict), f"/health missing cache object: {body}"
+    cache = body.get("proof_cache") or body.get("cache")
+    assert isinstance(cache, dict), f"/health missing proof_cache object: {body}"
     return {
         "entries": int(cache["entries"]),
         "max_entries": int(cache["max_entries"]),
@@ -986,6 +986,8 @@ def config(tmp_path_factory: pytest.TempPathFactory) -> TestConfig:
         soak_seconds=env_float("XPRV_SOAK_SECONDS", 0.0),
         server_threads=env_int("XPRV_THREADS") or 1,
         no_cache=env_bool("XPRV_NO_CACHE"),
+        server_scope=os.environ.get("XPRV_SERVER_SCOPE", "session"),
+        explicit_peer_cache_path=bool(peer_cache_env),
     )
     LOG.info(
         "artifact_dir=%s session_server_log=%s session_runner_log=%s index=%s",
