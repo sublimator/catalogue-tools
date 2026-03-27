@@ -172,13 +172,12 @@ public:
         }
         else
         {
-            // Negative scale - add trailing zeros
-            std::string result = mantissa_str;
-            for (int i = 0; i < -effective_scale; ++i)
-            {
-                result += "0";
-            }
-            return (is_positive() ? "" : "-") + result;
+            // Negative scale — use mantissa + e notation to match rippled.
+            // e.g. mantissa=9999999999999999, exponent=79 → "9999999999999999e79"
+            // Expanding to trailing zeros creates values xrpl-py can't parse.
+            int exp = -effective_scale;
+            return (is_positive() ? "" : "-") + mantissa_str + "e" +
+                std::to_string(exp);
         }
     }
 };
