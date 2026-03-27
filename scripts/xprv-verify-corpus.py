@@ -27,17 +27,14 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
 
-def prove_and_verify(
+def do_prove(
     host: str,
     tx_hash: str,
     label: str,
-    verifier: Path,
     fmt: str,
     ledger_index: int = 0,
-) -> tuple[str, str, bool, str, float]:
-    """Prove a tx, save to temp file, verify with subprocess.
-    Returns (label, format, ok, message, elapsed_secs).
-    """
+) -> tuple[str, str, float, bytes | None, str]:
+    """Prove a tx. Returns (label, fmt, elapsed, data_or_none, error)."""
     url = f"http://{host}/prove?tx={tx_hash}&max_anchor_age=120"
     if ledger_index:
         url += f"&ledger_index={ledger_index}"
@@ -49,16 +46,20 @@ def prove_and_verify(
         req = Request(url)
         with urlopen(req, timeout=120) as resp:
             data = resp.read()
+        return label, fmt, time.monotonic() - start, data, ""
     except HTTPError as e:
-        elapsed = time.monotonic() - start
-        return label, fmt, False, f"HTTP {e.code}: {e.read().decode()[:200]}", elapsed
+        return label, fmt, time.monotonic() - start, None, f"HTTP {e.code}: {e.read().decode()[:200]}"
     except (URLError, TimeoutError) as e:
-        elapsed = time.monotonic() - start
-        return label, fmt, False, f"request failed: {e}", elapsed
+        return label, fmt, time.monotonic() - start, None, f"request failed: {e}"
 
-    elapsed_prove = time.monotonic() - start
 
-    # Write to temp file and verify
+def do_verify(
+    label: str,
+    fmt: str,
+    data: bytes,
+    verifier: Path,
+) -> tuple[str, str, bool, str]:
+    """Verify proof data. Returns (label, fmt, ok, message)."""
     suffix = ".xprv.json" if fmt == "json" else ".xprv.bin"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
         f.write(data)
@@ -75,39 +76,59 @@ def prove_and_verify(
         if ok:
             msg = "PASS"
         else:
-            # Find the actual error lines (FAIL lines or last non-empty lines)
             lines = [l.strip() for l in (result.stdout + result.stderr).split("\n") if l.strip()]
             fail_lines = [l for l in lines if "FAIL" in l or "ERROR" in l or "error" in l.lower()]
             msg = fail_lines[0] if fail_lines else (lines[-1] if lines else "unknown error")
+        return label, fmt, ok, msg
     except subprocess.TimeoutExpired:
-        ok = False
-        msg = "verify timed out"
+        return label, fmt, False, "verify timed out"
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
-    return label, fmt, ok, msg, elapsed_prove
 
-
-async def worker(
-    queue: asyncio.Queue,
+async def prove_worker(
+    prove_queue: asyncio.Queue,
+    verify_queue: asyncio.Queue,
     host: str,
+    results: list,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Pull prove tasks, send completed proofs to verify queue."""
+    while True:
+        item = await prove_queue.get()
+        if item is None:
+            prove_queue.task_done()
+            break
+        tx_hash, label, fmt, ledger_index = item
+        label, fmt, elapsed, data, error = await loop.run_in_executor(
+            None, do_prove, host, tx_hash, label, fmt, ledger_index
+        )
+        if data is None:
+            results.append((label, fmt, False, error, elapsed))
+        else:
+            results.append((label, fmt, True, "pending", elapsed))
+            await verify_queue.put((label, fmt, data, len(results) - 1))
+        prove_queue.task_done()
+
+
+async def verify_worker(
+    verify_queue: asyncio.Queue,
     verifier: Path,
     results: list,
     loop: asyncio.AbstractEventLoop,
 ) -> None:
-    """Pull work items from queue until sentinel (None)."""
+    """Pull verify tasks, update results in place."""
     while True:
-        item = await queue.get()
+        item = await verify_queue.get()
         if item is None:
-            queue.task_done()
+            verify_queue.task_done()
             break
-        tx_hash, label, fmt, ledger_index = item
-        result = await loop.run_in_executor(
-            None, prove_and_verify, host, tx_hash, label, verifier, fmt,
-            ledger_index
+        label, fmt, data, result_idx = item
+        label, fmt, ok, msg = await loop.run_in_executor(
+            None, do_verify, label, fmt, data, verifier
         )
-        results.append(result)
-        queue.task_done()
+        results[result_idx] = (label, fmt, ok, msg, results[result_idx][4])
+        verify_queue.task_done()
 
 
 async def main_async(
@@ -137,23 +158,41 @@ async def main_async(
     print(f"Verifier: {verifier}")
     print()
 
-    # Work queue — workers pull next item as soon as they finish one
-    queue: asyncio.Queue = asyncio.Queue()
+    # Two queues: prove (HTTP) and verify (subprocess) run in parallel
+    prove_queue: asyncio.Queue = asyncio.Queue()
+    verify_queue: asyncio.Queue = asyncio.Queue()
+
     for tx_hash, label, ledger_index in txs:
         for fmt in ("json", "bin"):
-            queue.put_nowait((tx_hash, label, fmt, ledger_index))
+            prove_queue.put_nowait((tx_hash, label, fmt, ledger_index))
 
-    # Sentinel values to stop workers
+    # Sentinels for prove workers
     for _ in range(concurrency):
-        queue.put_nowait(None)
+        prove_queue.put_nowait(None)
 
     loop = asyncio.get_event_loop()
     results: list = []
-    workers = [
-        asyncio.create_task(worker(queue, host, verifier, results, loop))
+
+    # Prove workers (N) — saturate the server
+    prove_workers = [
+        asyncio.create_task(
+            prove_worker(prove_queue, verify_queue, host, results, loop))
         for _ in range(concurrency)
     ]
-    await asyncio.gather(*workers)
+    # Verify workers (N) — run subprocesses in parallel
+    verify_workers = [
+        asyncio.create_task(
+            verify_worker(verify_queue, verifier, results, loop))
+        for _ in range(concurrency)
+    ]
+
+    # Wait for all proves to finish
+    await asyncio.gather(*prove_workers)
+
+    # Signal verify workers to stop and wait
+    for _ in range(concurrency):
+        await verify_queue.put(None)
+    await asyncio.gather(*verify_workers)
 
     # Print results
     passed = 0
