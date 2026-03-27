@@ -5,7 +5,7 @@
 // Coroutine-based Beast sessions. Routes:
 //   GET  /health              → engine status JSON
 //   GET  /prove?tx=<hash>     → JSON proof chain
-//   GET  /prove?tx=...&format=bin → binary XPRF
+//   GET  /prove?tx=...&format=bin → binary XPRV
 //   POST /verify              → verify proof from request body
 
 #include "proof-engine.h"

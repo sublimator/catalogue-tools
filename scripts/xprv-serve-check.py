@@ -379,8 +379,8 @@ def case_prove_json(server: RunningServer) -> None:
 def case_prove_bin(server: RunningServer) -> None:
     result = server.request("GET", prove_path(server.config.tx_case.tx_hash) + "&format=bin")
     assert_octet_stream(result, context="GET /prove bin")
-    if not result.body.startswith(b"XPRF"):
-        raise CaseFailure("binary proof missing XPRF magic")
+    if not result.body.startswith(b"XPRV"):
+        raise CaseFailure("binary proof missing XPRV magic")
     if binary_network_id(result.body) != server.config.network:
         raise CaseFailure(
             f"binary proof network mismatch: expected {server.config.network}, "

@@ -686,7 +686,7 @@ def test_prove_binary_header_and_network(
     proof_bin_response: HttpResult,
     config: TestConfig,
 ) -> None:
-    assert proof_bin_response.body.startswith(b"XPRF"), "binary proof missing XPRF magic"
+    assert proof_bin_response.body.startswith(b"XPRV"), "binary proof missing XPRV magic"
     assert proof_bin_response.body[4] == 0x02, (
         f"expected v2 binary header, got version={proof_bin_response.body[4]}"
     )
@@ -819,7 +819,7 @@ def test_concurrent_prove_requests(
             return ("json", len(body["steps"]))
 
         assert_octet_stream_content_type(result)
-        assert result.body.startswith(b"XPRF"), "concurrent binary proof missing magic"
+        assert result.body.startswith(b"XPRV"), "concurrent binary proof missing magic"
         assert binary_network_id(result.body) == config.network
         return ("bin", len(result.body))
 
@@ -1007,7 +1007,7 @@ def test_verify_bad_binary_reports_failure(server: RunningServer) -> None:
     result = server.request(
         "POST",
         "/verify",
-        body=b"XPRF\x03\x00",
+        body=b"XPRV\x03\x00",
         headers={"Content-Type": "application/octet-stream"},
     )
     assert result.status == 200

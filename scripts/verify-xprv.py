@@ -14,7 +14,7 @@ Verifies the full cryptographic chain:
 
 Supports both formats:
   - JSON (.json, .xprv.json): {"network_id": N, "steps": [...]}
-  - Binary (.bin, .xprv.bin): XPRF header + TLV body (optionally zlib)
+  - Binary (.bin, .xprv.bin): XPRV header + TLV body (optionally zlib)
 
 Usage:
   ./scripts/verify-xprv.py proof.json
@@ -598,13 +598,13 @@ def verify(proof: dict[str, Any], trusted_key: str | None = None) -> VerifyResul
     return result
 
 
-# ─── Binary format (XPRF) ────────────────────────────────────────────
+# ─── Binary format (XPRV) ────────────────────────────────────────────
 #
-# File: XPRF(4) + version(1) + flags(1) [+ network_id(4 LE if v2)]
+# File: XPRV(4) + version(1) + flags(1) [+ network_id(4 LE if v2)]
 # Body: TLV records (type(1) + length(LEB128) + payload)
 # TLV types: 0x01=anchor, 0x02=header, 0x03=tx_map, 0x04=state_map, 0x05=unl
 
-MAGIC = b"XPRF"
+MAGIC = b"XPRV"
 FLAG_ZLIB = 0x01
 
 # TLV types
@@ -648,12 +648,12 @@ def read_vl(data: bytes, pos: int) -> tuple[bytes, int]:
 
 
 def is_binary_proof(data: bytes) -> bool:
-    """Check if data starts with XPRF magic."""
+    """Check if data starts with XPRV magic."""
     return len(data) >= 4 and data[:4] == MAGIC
 
 
 def parse_binary_header(data: bytes) -> tuple[int, int, int, int]:
-    """Parse XPRF file header. Returns (version, flags, network_id, body_offset)."""
+    """Parse XPRV file header. Returns (version, flags, network_id, body_offset)."""
     if len(data) < 6:
         raise ValueError("binary proof: too short")
     if data[:4] != MAGIC:
@@ -919,7 +919,7 @@ def _vl_decode(data: bytes, pos: int) -> tuple[int, int]:
 
 
 def binary_to_proof(data: bytes) -> dict[str, Any]:
-    """Parse a binary XPRF file into a proof dict compatible with verify()."""
+    """Parse a binary XPRV file into a proof dict compatible with verify()."""
     version, flags, network_id, body_offset = parse_binary_header(data)
 
     body = data[body_offset:]
@@ -977,7 +977,7 @@ def main() -> None:
 
     raw = path.read_bytes()
     if is_binary_proof(raw):
-        print("Format: binary (XPRF)")
+        print("Format: binary (XPRV)")
         proof = binary_to_proof(raw)
     else:
         print("Format: JSON")

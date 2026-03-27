@@ -27,7 +27,7 @@ using catl::shamap::leb128_encode;
 namespace xprv {
 
 // File header
-static constexpr uint8_t MAGIC[4] = {'X', 'P', 'R', 'F'};
+static constexpr uint8_t MAGIC[4] = {'X', 'P', 'R', 'V'};
 static constexpr uint8_t VERSION = 0x02;
 static constexpr uint8_t FLAG_ZLIB = 0x01;
 
@@ -831,7 +831,7 @@ from_binary(std::span<const uint8_t> data)
 
     // Check magic
     if (std::memcmp(data.data(), MAGIC, 4) != 0)
-        throw std::runtime_error("binary proof: bad magic (expected XPRF)");
+        throw std::runtime_error("binary proof: bad magic (expected XPRV)");
 
     uint8_t version = data[4];
     if (version != 0x01 && version != 0x02)

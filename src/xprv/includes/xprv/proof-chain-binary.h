@@ -1,9 +1,9 @@
 #pragma once
 
-// XPRF — Compact binary proof chain format.
+// XPRV — Compact binary proof chain format.
 //
 // File layout:
-//   [magic: 4 bytes "XPRF"]
+//   [magic: 4 bytes "XPRV"]
 //   [version: 1 byte, currently 0x02]
 //   [flags: 1 byte]
 //     bit 0: zlib compressed body

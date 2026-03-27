@@ -2,7 +2,7 @@
 
 // Binary trie encoding/decoding for SHAMap trees.
 //
-// Compact serialization of 16-way radix tries. Used by XPRF proof format
+// Compact serialization of 16-way radix tries. Used by XPRV proof format
 // for map proofs (tx and state trees). An abbreviated tree with 1 leaf
 // and ~20 placeholders typically encodes to ~500-700 bytes.
 //
