@@ -552,7 +552,9 @@ def verify(proof: dict[str, Any], trusted_key: str | None = None) -> VerifyResul
             # Extract skip list from state tree leaf
             if not is_tx:
                 if binary_root:
-                    leaf_data = find_binary_trie_leaf(step.get("__binary_payload__", b""), is_tx=False)
+                    leaf_data = find_binary_trie_leaf(
+                        step.get("__binary_payload__", b""), is_tx=False
+                    )
                     if leaf_data:
                         hashes = leaf_data.get("Hashes")
                         if hashes:
@@ -569,7 +571,9 @@ def verify(proof: dict[str, Any], trusted_key: str | None = None) -> VerifyResul
             # Extract tx info from tx tree leaf
             if is_tx:
                 if binary_root:
-                    leaf_data = find_binary_trie_leaf(step.get("__binary_payload__", b""), is_tx=True)
+                    leaf_data = find_binary_trie_leaf(
+                        step.get("__binary_payload__", b""), is_tx=True
+                    )
                     if leaf_data and "tx" in leaf_data:
                         tx_data = leaf_data["tx"]
                         print(
@@ -935,7 +939,9 @@ def binary_to_proof(data: bytes) -> dict[str, Any]:
             if anchor_idx >= 0:
                 decode_anchor_unl(payload, steps[anchor_idx])
         elif tlv_type == TLV_HEADER:
-            steps.append({"type": "ledger_header", "header": decode_bin_header(payload)})
+            steps.append(
+                {"type": "ledger_header", "header": decode_bin_header(payload)}
+            )
         elif tlv_type in (TLV_MAP_TX, TLV_MAP_STATE):
             tree = "tx" if tlv_type == TLV_MAP_TX else "state"
             is_tx = tree == "tx"
@@ -943,12 +949,14 @@ def binary_to_proof(data: bytes) -> dict[str, Any]:
             # Store the computed root hash and tree type.
             # We can't convert binary trie to JSON trie easily, so we
             # store __binary_root__ for the verifier to check directly.
-            steps.append({
-                "type": "map_proof",
-                "tree": tree,
-                "__binary_root__": root_hash.hex().upper(),
-                "__binary_payload__": payload,
-            })
+            steps.append(
+                {
+                    "type": "map_proof",
+                    "tree": tree,
+                    "__binary_root__": root_hash.hex().upper(),
+                    "__binary_payload__": payload,
+                }
+            )
 
     return {"network_id": network_id, "steps": steps}
 
@@ -969,10 +977,10 @@ def main() -> None:
 
     raw = path.read_bytes()
     if is_binary_proof(raw):
-        print(f"Format: binary (XPRF)")
+        print("Format: binary (XPRF)")
         proof = binary_to_proof(raw)
     else:
-        print(f"Format: JSON")
+        print("Format: JSON")
         proof = json.loads(raw)
 
     r = verify(proof, args.trusted_key)
