@@ -233,7 +233,36 @@ private:
         int decimals = 0;
         bool in_trailing_digits = false;
 
-        for (char c : sv)
+        // Split on 'e'/'E' for scientific notation (e.g. "9999999999999999e79")
+        auto e_pos = sv.find_first_of("eE");
+        std::string_view digits_part = (e_pos != std::string_view::npos)
+            ? sv.substr(0, e_pos)
+            : sv;
+        int e_exponent = 0;
+        if (e_pos != std::string_view::npos)
+        {
+            auto exp_str = sv.substr(e_pos + 1);
+            bool exp_neg = false;
+            if (!exp_str.empty() && exp_str.front() == '-')
+            {
+                exp_neg = true;
+                exp_str.remove_prefix(1);
+            }
+            else if (!exp_str.empty() && exp_str.front() == '+')
+            {
+                exp_str.remove_prefix(1);
+            }
+            for (char c : exp_str)
+            {
+                if (c < '0' || c > '9')
+                    break;
+                e_exponent = e_exponent * 10 + (c - '0');
+            }
+            if (exp_neg)
+                e_exponent = -e_exponent;
+        }
+
+        for (char c : digits_part)
         {
             if (c == '.')
             {
@@ -268,6 +297,7 @@ private:
                 ++decimals;
         }
         exponent -= decimals;
+        exponent += e_exponent;
 
         if (mantissa == 0)
         {

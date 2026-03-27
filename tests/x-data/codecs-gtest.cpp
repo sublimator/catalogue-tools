@@ -1023,6 +1023,41 @@ TEST_P(IOUValueTest, MatchesRippled)
     EXPECT_EQ(iou.to_string(), tc.expected) << "Case: " << tc.name;
 }
 
+TEST_P(IOUValueTest, RoundTrip)
+{
+    // Decode raw bytes → string → re-encode → first 8 bytes must match
+    auto const& tc = GetParam();
+    uint8_t bytes[8];
+    hex_to_bytes(tc.raw_hex, bytes, 8);
+
+    auto iou = catl::xdata::IOUValue::from_bytes(bytes);
+    auto str = iou.to_string();
+
+    // Re-encode via serialize_object with an Amount field
+    boost::json::object obj;
+    boost::json::object amount;
+    amount["value"] = str;
+    amount["currency"] = "USD";
+    amount["issuer"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+    obj["LowLimit"] = amount;
+
+    auto const& data = FixtureData::instance();
+    auto encoded = serialize_object(obj, data.protocol);
+
+    // LowLimit field header (1 byte) + 48 bytes IOU amount
+    // The first 8 bytes of the amount portion should match our raw_hex
+    ASSERT_GE(encoded.size(), 1u + 48u);
+    std::string got_hex;
+    for (int i = 1; i < 9; i++)
+    {
+        char buf[3];
+        std::snprintf(buf, sizeof(buf), "%02X", encoded[i]);
+        got_hex += buf;
+    }
+    EXPECT_EQ(got_hex, std::string(tc.raw_hex))
+        << "Roundtrip failed for " << tc.name << " value=\"" << str << "\"";
+}
+
 INSTANTIATE_TEST_SUITE_P(
     IOUValues,
     IOUValueTest,
