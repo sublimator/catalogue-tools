@@ -12,6 +12,7 @@
 #include "catl/xdata/types/issue.h"
 #include "catl/xdata/types/number.h"
 #include "catl/xdata/types/pathset.h"
+#include "catl/xdata/codecs/xchain_bridge.h"
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -103,6 +104,12 @@ skip_object(ParserContext& ctx, const Protocol& protocol)
             // Issue is special - 20 bytes for XRP, 40 bytes for non-XRP
             size_t issue_size = get_issue_size(ctx.cursor);
             ctx.cursor.advance(issue_size);
+        }
+        else if (field->meta.type == FieldTypes::XChainBridge)
+        {
+            size_t bridge_size =
+                codecs::XChainBridgeCodec::wire_size(ctx.cursor);
+            ctx.cursor.advance(bridge_size);
         }
         else
         {
@@ -368,6 +375,11 @@ parse_with_visitor_impl(
             {
                 // Issue is special - 20 bytes for XRP, 40 bytes for non-XRP
                 field_size = get_issue_size(ctx.cursor);
+            }
+            else if (field->meta.type == FieldTypes::XChainBridge)
+            {
+                field_size =
+                    codecs::XChainBridgeCodec::wire_size(ctx.cursor);
             }
             else if (field->meta.type == FieldTypes::PathSet)
             {

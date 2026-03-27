@@ -10,12 +10,16 @@ namespace catl::xdata {
 // XRP/XAH currency is represented as 20 zero bytes
 static constexpr uint8_t NATIVE_CURRENCY[20] = {0};
 
-// Get size for Amount type by peeking at first byte
+// Get size for Amount type by peeking at first byte.
+// Native (XRP/XAH): 8 bytes, IOU: 48 bytes, MPT: 33 bytes.
 inline size_t
 get_amount_size(uint8_t first_byte)
 {
-    bool is_iou = (first_byte & 0x80) != 0;
-    return is_iou ? 48 : 8;  // IOU: 8 + 20 + 20, NATIVE(XRP/XAH): just 8
+    if (first_byte & 0x80)
+        return 48;  // IOU: 8 value + 20 currency + 20 issuer
+    if (first_byte & 0x20)
+        return 33;  // MPT: 1 flag + 8 value + 24 MPTID
+    return 8;       // Native (XRP/XAH): 8 bytes
 }
 
 // Check if an amount is native (XRP/XAH) or IOU

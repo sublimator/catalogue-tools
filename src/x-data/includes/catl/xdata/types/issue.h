@@ -25,34 +25,57 @@ is_xrp_currency(const Slice& currency)
     return currency.size() == 20 && is_xrp_currency(currency.data());
 }
 
-// Get the size of an Issue field by peeking at the currency
-// Returns 20 for XRP (just currency), 40 for non-XRP (currency + issuer)
+// noAccount sentinel: 19 zero bytes + 0x01
+// Distinguishes MPT from IOU in the Issue wire format.
+inline bool
+is_no_account(const uint8_t* data)
+{
+    static constexpr uint8_t sentinel[20] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    return std::memcmp(data, sentinel, 20) == 0;
+}
+
+// Get the size of an Issue field by peeking at the data.
+// Returns 20 for XRP, 40 for IOU, 44 for MPT.
+//
+// Wire formats:
+//   XRP: currency(20 zeros)                           = 20 bytes
+//   IOU: currency(20) + account(20)                   = 40 bytes
+//   MPT: issuer(20) + noAccount(20 zeros) + seq(4)    = 44 bytes
 inline size_t
 get_issue_size(SliceCursor& cursor)
 {
-    // Ensure we have at least 20 bytes for currency
     if (cursor.remaining_size() < 20)
     {
-        throw SliceCursorError("Not enough data for Issue currency field");
+        throw SliceCursorError("Not enough data for Issue field");
     }
 
-    // Peek at the currency field without advancing
-    const uint8_t* currency_data = cursor.data.data() + cursor.pos;
+    const uint8_t* first20 = cursor.data.data() + cursor.pos;
 
-    // Check if it's XRP (all zeros)
-    if (is_xrp_currency(currency_data))
+    if (is_xrp_currency(first20))
     {
-        return 20;  // Just currency, no issuer
+        return 20;  // XRP — just the currency (all zeros)
     }
-    else
+
+    // Non-XRP: need at least 40 bytes to peek at second 20
+    if (cursor.remaining_size() < 40)
     {
-        // Ensure we have 40 bytes total for currency + issuer
-        if (cursor.remaining_size() < 40)
+        throw SliceCursorError("Not enough data for Issue with issuer");
+    }
+
+    const uint8_t* second20 = first20 + 20;
+
+    if (is_no_account(second20))
+    {
+        // MPT: issuer(20) + noAccount(20) + sequence(4)
+        if (cursor.remaining_size() < 44)
         {
-            throw SliceCursorError("Not enough data for Issue with issuer");
+            throw SliceCursorError("Not enough data for MPT Issue");
         }
-        return 40;  // Currency + issuer
+        return 44;
     }
+
+    return 40;  // IOU: currency(20) + account(20)
 }
 
 // Parse an Issue and return currency and issuer slices

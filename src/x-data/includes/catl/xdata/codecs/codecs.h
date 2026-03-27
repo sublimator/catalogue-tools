@@ -156,6 +156,8 @@ decode_field_value(
         return IssueCodec::decode(data);
     if (t == FieldTypes::Number)
         return NumberCodec::decode(data);
+    if (t == FieldTypes::XChainBridge)
+        return XChainBridgeCodec::decode(data);
     if (t == FieldTypes::Vector256)
         return Vector256Codec::decode(data);
     if (t == FieldTypes::PathSet)

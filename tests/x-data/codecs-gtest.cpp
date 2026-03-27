@@ -904,6 +904,90 @@ INSTANTIATE_TEST_SUITE_P(
         return "crs_" + let + "_" + std::to_string(info.param);
     });
 
+// ===========================================================================
+// True roundtrip: binary → decode(JSON) → re-encode(binary) → must match
+//
+// This catches any decode↔encode asymmetry (e.g. IOU e-notation,
+// TransactionResult sign, ascii hint fields).
+// ===========================================================================
+
+TEST_P(CodecRoundtripTxTest, DecodeAndReencode)
+{
+    static auto fixtures = load_json_fixture("codec-roundtrip-fixtures.json");
+    auto const& data = FixtureData::instance();
+    auto const& entries = fixtures.as_object().at("transactions").as_array();
+    auto const& entry = entries[GetParam()].as_object();
+
+    auto hex_str = std::string(entry.at("binary").as_string());
+
+    // Decode binary → JSON (no ascii hints, matching proof builder)
+    std::vector<uint8_t> binary;
+    binary.reserve(hex_str.size() / 2);
+    for (size_t i = 0; i + 1 < hex_str.size(); i += 2)
+    {
+        unsigned int b;
+        std::sscanf(hex_str.c_str() + i, "%2x", &b);
+        binary.push_back(static_cast<uint8_t>(b));
+    }
+
+    Slice slice(binary.data(), binary.size());
+    JsonVisitor visitor(data.protocol, {.ascii_hints = false});
+    ParserContext ctx(slice);
+    parse_with_visitor(ctx, data.protocol, visitor);
+    auto decoded_json = visitor.get_result();
+
+    ASSERT_TRUE(decoded_json.is_object())
+        << "TX[" << GetParam() << "] decode produced non-object";
+
+    // Re-encode JSON → binary
+    auto reencoded = serialize_object(decoded_json.as_object(), data.protocol);
+    auto reencoded_hex = to_upper_hex(reencoded);
+
+    EXPECT_EQ(reencoded_hex, hex_str)
+        << "TX[" << GetParam() << "] roundtrip mismatch: "
+        << entry.at("json").as_object().at("TransactionType").as_string();
+}
+
+TEST_P(CodecRoundtripSLETest, DecodeAndReencode)
+{
+    static auto fixtures = load_json_fixture("codec-roundtrip-fixtures.json");
+    auto const& data = FixtureData::instance();
+    auto const& entries = fixtures.as_object().at("accountState").as_array();
+    auto const& entry = entries[GetParam()].as_object();
+
+    auto hex_str = std::string(entry.at("binary").as_string());
+
+    // Decode binary → JSON
+    std::vector<uint8_t> binary;
+    binary.reserve(hex_str.size() / 2);
+    for (size_t i = 0; i + 1 < hex_str.size(); i += 2)
+    {
+        unsigned int b;
+        std::sscanf(hex_str.c_str() + i, "%2x", &b);
+        binary.push_back(static_cast<uint8_t>(b));
+    }
+
+    Slice slice(binary.data(), binary.size());
+    JsonVisitor visitor(data.protocol, {.ascii_hints = false});
+    ParserContext ctx(slice);
+    parse_with_visitor(ctx, data.protocol, visitor);
+    auto decoded_json = visitor.get_result();
+
+    ASSERT_TRUE(decoded_json.is_object())
+        << "SLE[" << GetParam() << "] decode produced non-object";
+
+    // Re-encode JSON → binary
+    // Remove "index" field (added by decoder, not part of binary)
+    auto obj = decoded_json.as_object();
+    obj.erase("index");
+    auto reencoded = serialize_object(obj, data.protocol);
+    auto reencoded_hex = to_upper_hex(reencoded);
+
+    EXPECT_EQ(reencoded_hex, hex_str)
+        << "SLE[" << GetParam() << "] roundtrip mismatch: "
+        << entry.at("json").as_object().at("LedgerEntryType").as_string();
+}
+
 TEST(LedgerSHAMap, Ledger38129)
 {
     auto const& data = FixtureData::instance();

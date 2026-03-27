@@ -3,6 +3,7 @@
 #include "catl/xdata/codecs/account_id.h"
 #include "catl/xdata/codecs/issue.h"
 #include "catl/xdata/serializer.h"
+#include "catl/xdata/types/issue.h"
 #include <boost/json.hpp>
 
 namespace catl::xdata::codecs {
@@ -54,25 +55,58 @@ struct XChainBridgeCodec
     decode(Slice const& data)
     {
         boost::json::object obj;
-        // LockingChainDoor: 20 bytes
+        size_t pos = 0;
+
+        // LockingChainDoor: STAccount = VL prefix + AccountID (20 bytes)
+        size_t lcd_vl = data.data()[pos];
+        pos += 1;
         obj["LockingChainDoor"] = AccountIDCodec::decode(
-            Slice(data.data(), 20));
-        size_t pos = 20;
-        // LockingChainIssue: 20 or 40 bytes
-        Slice lci_slice(data.data() + pos, data.size() - pos);
-        auto lci_parsed = parse_issue(lci_slice);
-        size_t lci_size = lci_parsed.is_native() ? 20 : 40;
+            Slice(data.data() + pos, lcd_vl));
+        pos += lcd_vl;
+
+        // LockingChainIssue: STIssue = 20 (XRP) or 40 (non-XRP) bytes
+        SliceCursor lci_cursor(Slice(data.data() + pos, data.size() - pos));
+        size_t lci_size = get_issue_size(lci_cursor);
         obj["LockingChainIssue"] = IssueCodec::decode(
             Slice(data.data() + pos, lci_size));
         pos += lci_size;
-        // IssuingChainDoor: 20 bytes
+
+        // IssuingChainDoor: STAccount = VL prefix + AccountID
+        size_t icd_vl = data.data()[pos];
+        pos += 1;
         obj["IssuingChainDoor"] = AccountIDCodec::decode(
-            Slice(data.data() + pos, 20));
-        pos += 20;
-        // IssuingChainIssue: rest
+            Slice(data.data() + pos, icd_vl));
+        pos += icd_vl;
+
+        // IssuingChainIssue: STIssue = rest
         obj["IssuingChainIssue"] = IssueCodec::decode(
             Slice(data.data() + pos, data.size() - pos));
         return obj;
+    }
+
+    /// Get the total wire size by peeking at the data.
+    static size_t
+    wire_size(SliceCursor& cursor)
+    {
+        size_t start = cursor.pos;
+
+        // LockingChainDoor: VL + account
+        size_t lcd_len = cursor.data.data()[cursor.pos];
+        cursor.pos += 1 + lcd_len;
+
+        // LockingChainIssue: 20 or 40
+        cursor.pos += get_issue_size(cursor);
+
+        // IssuingChainDoor: VL + account
+        size_t icd_len = cursor.data.data()[cursor.pos];
+        cursor.pos += 1 + icd_len;
+
+        // IssuingChainIssue: 20 or 40
+        cursor.pos += get_issue_size(cursor);
+
+        size_t total = cursor.pos - start;
+        cursor.pos = start;  // reset — caller will read
+        return total;
     }
 };
 
