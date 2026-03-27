@@ -595,6 +595,42 @@ TEST_P(DDWholeObjectTest, EncodeMatchesExpected)
         << tx_json.as_object().at("TransactionType").as_string();
 }
 
+TEST_P(DDWholeObjectTest, DecodeAndReencode)
+{
+    auto const& data = FixtureData::instance();
+    auto const& entries =
+        data.data_driven.as_object().at("whole_objects").as_array();
+    auto const& entry = entries[GetParam()].as_object();
+
+    auto hex_str =
+        std::string(entry.at("blob_with_no_signing").as_string());
+
+    std::vector<uint8_t> binary;
+    binary.reserve(hex_str.size() / 2);
+    for (size_t i = 0; i + 1 < hex_str.size(); i += 2)
+    {
+        unsigned int b;
+        std::sscanf(hex_str.c_str() + i, "%2x", &b);
+        binary.push_back(static_cast<uint8_t>(b));
+    }
+
+    Slice slice(binary.data(), binary.size());
+    JsonVisitor visitor(data.protocol, {.ascii_hints = false});
+    ParserContext ctx(slice);
+    parse_with_visitor(ctx, data.protocol, visitor);
+    auto decoded = visitor.get_result();
+
+    ASSERT_TRUE(decoded.is_object());
+
+    // Re-encode without signing fields (matching blob_with_no_signing)
+    auto reencoded = serialize_object(decoded.as_object(), data.protocol, false);
+    auto reencoded_hex = to_upper_hex(reencoded);
+
+    EXPECT_EQ(reencoded_hex, hex_str)
+        << "Object[" << GetParam() << "] "
+        << entry.at("tx_json").as_object().at("TransactionType").as_string();
+}
+
 INSTANTIATE_TEST_SUITE_P(
     DataDriven,
     DDWholeObjectTest,
