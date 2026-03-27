@@ -263,11 +263,15 @@ public:
     /// node_response_handler (if set) and then through normal dispatch.
     /// Thread-safe: async_send_packet posts to the connection's write
     /// queue which is strand-serialized internally.
+    /// Optional on_error callback fires if the async write fails (e.g.
+    /// broken pipe) — use this to cancel signal timers immediately
+    /// instead of waiting for the full fetch timeout.
     void
     send_get_nodes(
         Hash256 const& ledger_hash,
         int type,  // liTX_NODE or liAS_NODE
-        std::vector<SHAMapNodeID> const& node_ids);
+        std::vector<SHAMapNodeID> const& node_ids,
+        std::function<void(boost::system::error_code)> on_error = nullptr);
 
     void
     cancel_all();

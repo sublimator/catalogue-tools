@@ -508,7 +508,28 @@ NodeCache::send_fetch(
 
     // Send raw TMGetLedger — no pending_nodes registration.
     // send_get_nodes just queues an async write, safe outside lock.
-    peer->send_get_nodes(ledger_hash, tree_type, node_ids);
+    // On write failure (broken pipe etc), cancel the signal immediately
+    // so waiters don't sit around for the full timeout.
+    std::weak_ptr<NodeCache> weak_self = shared_from_this();
+    auto cancel_hash = expected_hash;
+    peer->send_get_nodes(
+        ledger_hash,
+        tree_type,
+        node_ids,
+        [weak_self, cancel_hash](boost::system::error_code) {
+            if (auto self = weak_self.lock())
+            {
+                std::shared_ptr<asio::steady_timer> sig;
+                {
+                    std::lock_guard lock(self->mutex_);
+                    auto it = self->store_.find(cancel_hash);
+                    if (it != self->store_.end() && !it->second.present)
+                        sig = it->second.signal;
+                }
+                if (sig)
+                    sig->cancel();
+            }
+        });
 
     // Record when this fetch was sent (for stale detection)
     {

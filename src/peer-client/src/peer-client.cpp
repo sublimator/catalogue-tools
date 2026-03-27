@@ -625,11 +625,14 @@ void
 PeerClient::send_get_nodes(
     Hash256 const& ledger_hash,
     int type,
-    std::vector<SHAMapNodeID> const& node_ids)
+    std::vector<SHAMapNodeID> const& node_ids,
+    std::function<void(boost::system::error_code)> on_error)
 {
     if (state_ != State::Ready)
     {
         PLOGD(log_, "send_get_nodes: not ready, dropping");
+        if (on_error)
+            on_error(boost::asio::error::connection_aborted);
         return;
     }
 
@@ -654,12 +657,18 @@ PeerClient::send_get_nodes(
         ledger_hash.hex().substr(0, 16));
 
     connection_->async_send_packet(
-        packet_type::get_ledger, data, [](boost::system::error_code ec) {
+        packet_type::get_ledger,
+        data,
+        [on_error = std::move(on_error)](boost::system::error_code ec) {
             if (ec)
+            {
                 PLOGE(
                     PeerClient::log_,
                     "send_get_nodes failed: ",
                     ec.message());
+                if (on_error)
+                    on_error(ec);
+            }
         });
 }
 
