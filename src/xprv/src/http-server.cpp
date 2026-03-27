@@ -390,7 +390,12 @@ HttpServer::handle_session(tcp::socket socket)
                         req[http::field::accept]);
                     bool wants_sse =
                         accept.find("text/event-stream") != std::string::npos;
-                    PLOGI(log_, "Accept: '", accept, "' wants_sse=", wants_sse);
+
+                    // Optional ledger_index hint — skips RPC lookup
+                    uint32_t ledger_seq_hint = 0;
+                    auto li_it = params.find("ledger_index");
+                    if (li_it != params.end() && !li_it->second.empty())
+                        ledger_seq_hint = std::stoul(li_it->second);
 
                     // Cancel token: atomic flag checked at cancellation
                     // boundaries (walk_to, with_peer_failover) for fast
@@ -453,7 +458,7 @@ HttpServer::handle_session(tcp::socket socket)
                         {
                             auto result = co_await engine_->prove(
                                 tx_it->second, cancel_token,
-                                std::move(on_step));
+                                ledger_seq_hint, std::move(on_step));
 
                             // Send done event — client stitches proof
                             // from streamed steps + network_id
@@ -521,7 +526,8 @@ HttpServer::handle_session(tcp::socket socket)
                             asio::co_spawn(
                                 ex,
                                 engine_->prove(
-                                    tx_it->second, cancel_token),
+                                    tx_it->second, cancel_token,
+                                    ledger_seq_hint),
                                 asio::deferred),
                             asio::co_spawn(
                                 ex,

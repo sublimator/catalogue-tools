@@ -80,6 +80,7 @@ public:
     prove(
         std::string const& tx_hash,
         std::shared_ptr<std::atomic<bool>> cancel_token = nullptr,
+        uint32_t ledger_seq_hint = 0,
         StepCallback on_step = nullptr);
 
     /// Verify a proof chain. Sync pure function — no shared state.

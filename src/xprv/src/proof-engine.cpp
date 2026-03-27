@@ -200,6 +200,7 @@ asio::awaitable<ProofEngine::ProveResult>
 ProofEngine::prove(
     std::string const& tx_hash,
     std::shared_ptr<std::atomic<bool>> cancel_token,
+    uint32_t ledger_seq_hint,
     StepCallback on_step)
 {
     // Enable cancellation so the || operator in the HTTP session can
@@ -259,7 +260,8 @@ ProofEngine::prove(
         .protocol = protocol_,
         .node_cache = node_cache_,
         .rpc = rpc_,
-        .tx_ledger_seq_hint = cached_seq.value_or(0),
+        .tx_ledger_seq_hint =
+            ledger_seq_hint ? ledger_seq_hint : cached_seq.value_or(0),
         .anchor_hdr = anchor.header_result,
         .anchor_hash = anchor.anchor_hash,
         .anchor_account_hash = anchor.account_hash,

@@ -33,11 +33,14 @@ def prove_and_verify(
     label: str,
     verifier: Path,
     fmt: str,
+    ledger_index: int = 0,
 ) -> tuple[str, str, bool, str, float]:
     """Prove a tx, save to temp file, verify with subprocess.
     Returns (label, format, ok, message, elapsed_secs).
     """
     url = f"http://{host}/prove?tx={tx_hash}"
+    if ledger_index:
+        url += f"&ledger_index={ledger_index}"
     if fmt == "bin":
         url += "&format=bin"
 
@@ -92,11 +95,13 @@ async def run_one(
     label: str,
     verifier: Path,
     fmt: str,
+    ledger_index: int = 0,
 ) -> tuple[str, str, bool, str, float]:
     async with sem:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            None, prove_and_verify, host, tx_hash, label, verifier, fmt
+            None, prove_and_verify, host, tx_hash, label, verifier, fmt,
+            ledger_index
         )
 
 
@@ -113,11 +118,11 @@ async def main_async(
         return 1
 
     # Collect all tx hashes (hot + cold sets)
-    txs: list[tuple[str, str]] = []
+    txs: list[tuple[str, str, int]] = []
     for entry in corpus.get("hot_set", []):
-        txs.append((entry["tx_hash"], entry["label"]))
+        txs.append((entry["tx_hash"], entry["label"], entry.get("ledger_index", 0)))
     for entry in corpus.get("cold_set", []):
-        txs.append((entry["tx_hash"], entry["label"]))
+        txs.append((entry["tx_hash"], entry["label"], entry.get("ledger_index", 0)))
 
     if max_tx > 0:
         txs = txs[:max_tx]
@@ -129,9 +134,9 @@ async def main_async(
 
     sem = asyncio.Semaphore(concurrency)
     tasks = []
-    for tx_hash, label in txs:
+    for tx_hash, label, ledger_index in txs:
         for fmt in ("json", "bin"):
-            tasks.append(run_one(sem, host, tx_hash, label, verifier, fmt))
+            tasks.append(run_one(sem, host, tx_hash, label, verifier, fmt, ledger_index))
 
     results = await asyncio.gather(*tasks)
 
