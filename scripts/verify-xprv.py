@@ -47,7 +47,9 @@ from xrpl.core.binarycodec import decode, encode, encode_for_signing
 import xrpl.core.binarycodec.types.amount as _amt
 from decimal import Decimal as _Decimal
 
-_amt._calculate_precision = lambda v: len(_Decimal(v).as_tuple().digits) if not _Decimal(v).is_zero() else 0
+_amt._calculate_precision = (
+    lambda v: len(_Decimal(v).as_tuple().digits) if not _Decimal(v).is_zero() else 0
+)
 
 # ─── JSON proof shape ────────────────────────────────────────────────
 #

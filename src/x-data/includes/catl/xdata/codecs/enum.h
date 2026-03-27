@@ -168,8 +168,7 @@ struct TransactionResultCodec
     decode(Slice const& data, Protocol const& protocol)
     {
         uint8_t raw = data.data()[0];
-        // TransactionResult codes are signed
-        int32_t code = static_cast<int8_t>(raw);
+        int32_t code = static_cast<int32_t>(raw);
         for (auto const& [name, c] : protocol.transactionResults())
         {
             if (c == code)
