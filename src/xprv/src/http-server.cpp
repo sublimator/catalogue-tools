@@ -6,7 +6,9 @@
 #include <filesystem>
 #include <fstream>
 
+#include <catl/core/context-executor.h>
 #include <catl/core/logger.h>
+#include <catl/core/request-context.h>
 #include <catl/peer-client/peer-client-coro.h>
 #include <catl/rpc-client/rpc-client.h>
 
@@ -22,6 +24,7 @@
 #include <boost/json.hpp>
 
 #include <map>
+#include <random>
 #include <string>
 #include <string_view>
 
@@ -33,6 +36,18 @@ namespace http = beast::http;
 using tcp = asio::ip::tcp;
 
 static LogPartition log_("http", LogLevel::INFO);
+
+static std::string
+generate_request_id()
+{
+    static constexpr char hex[] = "0123456789abcdef";
+    static thread_local std::mt19937 gen(std::random_device{}());
+    std::uniform_int_distribution<> dist(0, 15);
+    std::string id(8, '\0');
+    for (auto& c : id)
+        c = hex[dist(gen)];
+    return id;
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Helpers
@@ -169,10 +184,20 @@ HttpServer::accept_loop()
             break;
         }
 
+        // Per-connection request context for log prefixes.
+        // Covers handle_session and prove coroutine co_awaits;
+        // inner strand hops (peer/RPC) won't have it.
+        auto req_ctx = std::make_shared<catl::core::RequestContext>(
+            catl::core::RequestContext{
+                generate_request_id(),
+                {},  // tx_hash filled later
+                std::chrono::steady_clock::now()});
+        auto ctx_ex = catl::core::ContextExecutor(
+            io_.get_executor(), req_ctx);
         asio::co_spawn(
-            io_,
-            [self, s = std::move(socket)]() mutable {
-                return self->handle_session(std::move(s));
+            ctx_ex,
+            [self, s = std::move(socket), req_ctx]() mutable {
+                return self->handle_session(std::move(s), std::move(req_ctx));
             },
             asio::detached);
     }
@@ -183,7 +208,9 @@ HttpServer::accept_loop()
 // ═══════════════════════════════════════════════════════════════════════
 
 asio::awaitable<void>
-HttpServer::handle_session(tcp::socket socket)
+HttpServer::handle_session(
+    tcp::socket socket,
+    std::shared_ptr<catl::core::RequestContext> req_ctx)
 {
     beast::tcp_stream stream(std::move(socket));
     beast::flat_buffer buffer;
@@ -227,7 +254,33 @@ HttpServer::handle_session(tcp::socket socket)
         auto [path, query_string] = split_target(req.target());
         auto params = parse_query(query_string);
 
-        PLOGD(log_, req.method_string(), " ", req.target());
+        // Fresh request ID per HTTP request (not per connection).
+        // Priority: X-Request-Id header > xrid query param > generated.
+        req_ctx->request_id = generate_request_id();
+        auto hdr = req["X-Request-Id"];
+        if (hdr.empty())
+        {
+            if (auto it = params.find("xrid"); it != params.end())
+                hdr = it->second;
+        }
+        if (!hdr.empty())
+        {
+            // Sanitize: alphanumeric + dash/underscore, max 64 chars
+            std::string safe;
+            safe.reserve(std::min(hdr.size(), std::size_t(64)));
+            for (char c : hdr)
+            {
+                if (safe.size() >= 64)
+                    break;
+                if (std::isalnum(static_cast<unsigned char>(c)) ||
+                    c == '-' || c == '_')
+                    safe += c;
+            }
+            if (!safe.empty())
+                req_ctx->request_id = std::move(safe);
+        }
+
+        PLOGI(log_, req.method_string(), " ", path);
 
         // ── Route dispatch ────────────────────────────────────────
 
@@ -529,7 +582,9 @@ HttpServer::handle_session(tcp::socket socket)
                         },
                         asio::detached);
 
-                    auto ex = stream.get_executor();
+                    // ContextExecutor — prove's top-level co_awaits get
+                    // the request ID; inner strand hops don't.
+                    auto ex = co_await asio::this_coro::executor;
 
                     // Race prove against disconnect using parallel_group
                     // with wait_for_one(). Unlike ||/wait_for_one_success,

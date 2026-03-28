@@ -1,2 +1,2 @@
 #!/bin/bash
-cd build && ninja xprv 2>&1 | tail -5
+cd build && ninja xprv 2>&1 | tee /tmp/catalogue_tools_build.txt

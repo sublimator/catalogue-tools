@@ -68,6 +68,16 @@ class LogPartition;
 
 class Logger
 {
+public:
+    // Request context hook — returns a lightweight struct with just the
+    // request_id, or nullptr if no request is active. Set once at startup
+    // to avoid including request-context.h in this header.
+    struct RequestIdView
+    {
+        std::string_view request_id;
+    };
+    using RequestContextFn = RequestIdView const* (*)();
+
 private:
     static LogLevel current_level_;
     static std::mutex log_mutex_;
@@ -80,6 +90,8 @@ private:
     static bool include_run_id_;
     static std::string run_id_;
     static std::chrono::steady_clock::time_point start_time_;
+
+    static RequestContextFn request_context_ptr_;
 
     // Fast level check method
     static bool
@@ -137,6 +149,15 @@ private:
             oss << "[" << run_id_ << "]";
         }
 
+        // Include per-request ID if one is active (via ContextExecutor)
+        if (request_context_ptr_)
+        {
+            if (auto const* rctx = request_context_ptr_())
+            {
+                oss << "[" << rctx->request_id << "]";
+            }
+        }
+
         oss << " ";
         return oss.str();
     }
@@ -177,6 +198,14 @@ public:
     // Include a random run ID in log prefix (distinguishes container restarts)
     static void
     set_run_id(bool enabled);
+
+    // Set the request context hook for per-request log prefixes.
+    // Called once at startup; the function is thread-safe (reads thread_local).
+    static void
+    set_request_context_hook(RequestContextFn fn)
+    {
+        request_context_ptr_ = fn;
+    }
 
     // Partition registry helpers.
     static bool

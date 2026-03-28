@@ -2,6 +2,7 @@
 #include "config.h"
 
 #include <catl/core/logger.h>
+#include <catl/core/request-context.h>
 #include <catl/peer-client/endpoint-tracker.h>
 #include <catl/xdata/protocol.h>
 #include <xprv/network-config.h>
@@ -127,6 +128,16 @@ configure_logging(LoggingOptions const& opts, std::string& error)
     };
 
     Logger::set_run_id(true);
+
+    // Wire up per-request log prefix via thread_local set by ContextExecutor
+    Logger::set_request_context_hook([]() -> Logger::RequestIdView const* {
+        static thread_local Logger::RequestIdView view;
+        auto const* ctx = catl::core::g_current_request;
+        if (!ctx)
+            return nullptr;
+        view.request_id = ctx->request_id;
+        return &view;
+    });
 
     set_exact("xprv", LogLevel::INFO);
     set_exact("verify", LogLevel::INFO);

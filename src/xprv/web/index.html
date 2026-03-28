@@ -342,6 +342,7 @@ let lastProofPretty = '';
 let lastDownloadUrl = '';
 let lastFilename = '';
 let lastProvedHash = '';
+let lastRid = '';
 
 function showDetails(json, txHash) {
   lastProofJson = json;
@@ -648,7 +649,8 @@ async function showSteps() {
   for (let i = 0; i < steps.length; i++) {
     rendered.push(await describeStep(steps[i], i, steps));
   }
-  body.innerHTML = `<h3>Proof chain \u2014 ${steps.length} steps</h3>` + rendered.join('');
+  const ridTag = lastRid ? ` <span style="float:right;font-size:.65rem;color:#444;font-weight:normal;font-family:monospace;margin-top:.3rem">${lastRid}</span>` : '';
+  body.innerHTML = `<h3>Proof chain \u2014 ${steps.length} steps${ridTag}</h3>` + rendered.join('');
   if (lastDownloadUrl) {
     const binName = lastFilename.replace('.xprv.json', '.xprv.bin');
     footer.innerHTML = `<a href="${lastDownloadUrl}" download="${lastFilename}" title="${lastFilename}">json</a> <a href="/prove?tx=${tx.value}&format=bin" download="${binName}" style="color:#686;margin-left:.5rem" title="${binName}">bin</a> <span class="act" onclick="copyProof()" title="copy JSON" style="margin-left:.4rem">&#x1F4CB;</span><span class="msep">|</span><a href="/verify-xprv.py" style="color:#555">verify-xprv.py</a>`;
@@ -690,6 +692,11 @@ function finishProve(json, hash) {
 
 let activeSSE = null;
 
+function genRequestId() {
+  const a = crypto.getRandomValues(new Uint8Array(4));
+  return Array.from(a, b => b.toString(16).padStart(2,'0')).join('');
+}
+
 async function prove(hash) {
   if (activeSSE) { activeSSE.close(); activeSSE = null; }
 
@@ -697,10 +704,13 @@ async function prove(hash) {
   statusEl.textContent = 'proving\u2026';
   details.className = '';
 
+  const rid = genRequestId();
+  lastRid = rid;
+
   // Open step modal immediately with skeleton placeholder
   const modal = document.getElementById('modal');
   const body = document.getElementById('modal-body');
-  body.innerHTML = '<h3>Building proof\u2026</h3>' + skeletonStep(1);
+  body.innerHTML = `<h3>Building proof\u2026 <span style="float:right;font-size:.65rem;color:#444;font-weight:normal;font-family:monospace;margin-top:.3rem">${rid}</span></h3>` + skeletonStep(1);
   modal.className = 'show';
   linkNum = 0;
   const streamedSteps = [];
@@ -708,7 +718,7 @@ async function prove(hash) {
   const stepTimes = [];  // elapsed ms per step
 
   return new Promise((resolve) => {
-    const es = new EventSource(`/prove?tx=${hash}`);
+    const es = new EventSource(`/prove?tx=${hash}&xrid=${rid}`);
     activeSSE = es;
     const timeout = setTimeout(() => {
       es.close(); activeSSE = null;

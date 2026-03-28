@@ -16,6 +16,10 @@
 #include <memory>
 #include <string>
 
+namespace catl::core {
+struct RequestContext;
+}
+
 namespace xprv {
 
 struct HttpServerOptions
@@ -60,7 +64,9 @@ private:
     accept_loop();
 
     boost::asio::awaitable<void>
-    handle_session(boost::asio::ip::tcp::socket socket);
+    handle_session(
+        boost::asio::ip::tcp::socket socket,
+        std::shared_ptr<catl::core::RequestContext> req_ctx);
 
     boost::asio::io_context& io_;
     std::shared_ptr<ProofEngine> engine_;

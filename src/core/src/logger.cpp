@@ -26,6 +26,7 @@ bool Logger::include_run_id_ = false;
 std::string Logger::run_id_;
 std::chrono::steady_clock::time_point Logger::start_time_ =
     std::chrono::steady_clock::now();
+Logger::RequestContextFn Logger::request_context_ptr_ = nullptr;
 
 bool
 Logger::should_log(LogLevel level)
