@@ -177,7 +177,14 @@ NodeCache::walk_to(
             {
                 same_peer_retried = false;
                 if (peer)
+                {
                     failed_peers.insert(peer->endpoint());
+                    // Report to PeerSet so ALL callers skip this
+                    // peer for this ledger (shared knowledge).
+                    if (peers)
+                        peers->note_ledger_failure(
+                            peer->endpoint(), ledger_seq);
+                }
 
                 ++total_retries;
                 PLOGW(
@@ -878,6 +885,9 @@ NodeCache::get_header(
                 peer->endpoint(),
                 ": ",
                 e.what());
+            // Report to PeerSet so all callers skip this peer for this ledger
+            if (peers)
+                peers->note_ledger_failure(peer->endpoint(), ledger_seq);
             peer = nullptr;  // force new peer on next attempt
         }
     }

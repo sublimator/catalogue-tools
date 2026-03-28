@@ -272,6 +272,27 @@ PeerSet::note_connect_failure(std::string const& endpoint)
     sort_pending_connects();
 }
 
+void
+PeerSet::note_ledger_failure(std::string const& endpoint, uint32_t ledger_seq)
+{
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), endpoint, ledger_seq]() {
+            self->note_ledger_failure(endpoint, ledger_seq);
+        });
+        return;
+    }
+    auto key = canonical_endpoint(endpoint);
+    endpoint_stats_[key].failed_ledgers[ledger_seq] = {
+        std::chrono::steady_clock::now()};
+    PLOGD(
+        log_,
+        "Noted ledger failure: peer=",
+        key,
+        " ledger=",
+        ledger_seq);
+}
+
 std::shared_ptr<PeerClient>
 PeerSet::choose_any_peer(std::unordered_set<std::string> const& excluded)
 {
@@ -1444,20 +1465,36 @@ PeerSet::wait_for_peer(
     auto const timeout_ms = timeout_secs * 1000;
 
     // Helper: snapshot connected peers into PeerCandidate structs
-    // for the pure select_peer logic.
+    // for the pure select_peer logic. Checks failed_ledgers with
+    // a 60s TTL so peers get fresh chances.
+    static constexpr auto kFailedLedgerTtl = std::chrono::seconds(60);
+
     auto snapshot_peers = [&]() -> std::vector<PeerCandidate> {
+        auto const now = std::chrono::steady_clock::now();
         std::vector<PeerCandidate> candidates;
         candidates.reserve(connections_.size());
         for (auto const& [key, client] : connections_)
         {
             if (!client)
                 continue;
+            auto& stats = endpoint_stats_[key];
+            // Check if this peer has a recent failure for the target
+            bool failed = false;
+            auto it = stats.failed_ledgers.find(ledger_seq);
+            if (it != stats.failed_ledgers.end())
+            {
+                if (now - it->second.at < kFailedLedgerTtl)
+                    failed = true;
+                else
+                    stats.failed_ledgers.erase(it);  // expired, clean up
+            }
             candidates.push_back({
                 key,
                 client->peer_first_seq(),
                 client->peer_last_seq(),
-                endpoint_stats_[key].selection_count,
-                client->is_ready()});
+                stats.selection_count,
+                client->is_ready(),
+                failed});
         }
         return candidates;
     };

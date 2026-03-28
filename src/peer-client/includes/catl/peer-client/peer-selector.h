@@ -41,6 +41,7 @@ struct PeerCandidate
     uint32_t last_seq = 0;
     uint64_t selection_count = 0;
     bool is_ready = false;
+    bool failed_for_target = false;  // true if this peer failed for the target ledger
 };
 
 enum class PeerDecision

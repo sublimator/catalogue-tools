@@ -220,6 +220,12 @@ public:
     size_t
     connected_count() const;
 
+    /// Record that a peer failed to serve a specific ledger.
+    /// All peer selection methods will exclude this peer for this
+    /// ledger until the TTL expires (default 60s).
+    void
+    note_ledger_failure(std::string const& endpoint, uint32_t ledger_seq);
+
     /// Number of connected archival peers (range > archival_range_threshold).
     size_t
     archival_peer_count() const;
@@ -358,6 +364,15 @@ private:
         std::uint64_t failure_count = 0;
         std::uint64_t selection_count = 0;
         std::uint64_t last_selected_ticket = 0;
+
+        // Ledger seqs this peer has failed to serve. Entries expire
+        // after failed_ledger_ttl_secs (default 60s) so peers get
+        // fresh chances as they recover or cache data.
+        struct LedgerFailure
+        {
+            std::chrono::steady_clock::time_point at;
+        };
+        std::unordered_map<uint32_t, LedgerFailure> failed_ledgers;
     };
     std::unordered_map<std::string, EndpointStats> endpoint_stats_;
     std::uint64_t next_selection_ticket_ = 0;

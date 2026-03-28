@@ -28,6 +28,8 @@ select_peer(
                 continue;
             if (excluded.count(p.endpoint))
                 continue;
+            if (p.failed_for_target)
+                continue;
             if (p.first_seq == 0 || p.last_seq == 0)
                 continue;
             if (target_seq < p.first_seq || target_seq > p.last_seq)
@@ -59,6 +61,8 @@ select_peer(
             if (!p.is_ready)
                 continue;
             if (excluded.count(p.endpoint))
+                continue;
+            if (p.failed_for_target)
                 continue;
 
             uint64_t span = (p.last_seq > p.first_seq)
