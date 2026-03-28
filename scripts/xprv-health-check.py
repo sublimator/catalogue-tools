@@ -47,6 +47,8 @@ def check_sse(url, ctx, timeout):
                 step = ev.get("step", {}) if etype == "step" else {}
                 step_type = step.get("type", "")
                 events.append(etype)
+                if etype == "error":
+                    print(f"  sse ERROR: {ev.get('error', '?')}")
                 # Extract useful context per step type
                 detail = ""
                 if step_type == "anchor":
