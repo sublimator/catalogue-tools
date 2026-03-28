@@ -323,6 +323,13 @@ build_proof_DEAD(
         for (;;)
         {
             auto excluded = collect_excluded_peers();
+            // Merge in per-ledger failures from peer history
+            if (required_ledger)
+            {
+                auto ledger_excluded = ctx->excluded_for(*required_ledger);
+                excluded.insert(
+                    ledger_excluded.begin(), ledger_excluded.end());
+            }
 
             if (current && current->is_ready() &&
                 !excluded.count(current->endpoint()) &&
@@ -473,6 +480,13 @@ build_proof_DEAD(
                 failures = 0;
                 peer_cooldowns[endpoint] = std::chrono::steady_clock::now() +
                     peer_retry_policy.cooldown;
+
+                // Record this peer as failed for this ledger so it's
+                // excluded from future attempts at the same ledger
+                // across all retry loops in this prove.
+                if (required_ledger)
+                    ctx->note_peer_failure(endpoint, *required_ledger);
+
                 PLOGW(
                     log_,
                     purpose,
@@ -986,6 +1000,47 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         std::unordered_map<std::string, std::chrono::steady_clock::time_point>
             peer_cooldowns;
 
+        // Per-prove peer history — tracks what each peer has failed
+        // to serve so we don't hammer the same peer for the same
+        // ledger across retry loops. Keyed by endpoint (host:port).
+        // Grows during the prove, never resets.
+        struct PeerRecord
+        {
+            std::unordered_set<uint32_t> failed_ledgers;
+            // Room to grow: timeout_count, last_failure_at, etc.
+        };
+        std::unordered_map<std::string, PeerRecord> peer_history;
+
+        // Check if a peer has already failed for a specific ledger
+        bool
+        peer_failed_for(std::string const& ep, uint32_t seq) const
+        {
+            auto it = peer_history.find(ep);
+            if (it == peer_history.end())
+                return false;
+            return it->second.failed_ledgers.count(seq) > 0;
+        }
+
+        // Record that a peer failed for a specific ledger
+        void
+        note_peer_failure(std::string const& ep, uint32_t seq)
+        {
+            peer_history[ep].failed_ledgers.insert(seq);
+        }
+
+        // Build an exclusion set for a specific ledger from history
+        std::unordered_set<std::string>
+        excluded_for(uint32_t seq) const
+        {
+            std::unordered_set<std::string> result;
+            for (auto const& [ep, record] : peer_history)
+            {
+                if (record.failed_ledgers.count(seq))
+                    result.insert(ep);
+            }
+            return result;
+        }
+
         // Anchor state
         Hash256 anchor_hash;
         LedgerHeaderResult anchor_hdr;
@@ -1182,6 +1237,13 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         for (;;)
         {
             auto excluded = collect_excluded_peers();
+            // Merge in per-ledger failures from peer history
+            if (required_ledger)
+            {
+                auto ledger_excluded = ctx->excluded_for(*required_ledger);
+                excluded.insert(
+                    ledger_excluded.begin(), ledger_excluded.end());
+            }
             if (current && current->is_ready() &&
                 !excluded.count(current->endpoint()) &&
                 (!required_ledger ||
@@ -1287,6 +1349,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                 ctx->peer_cooldowns[endpoint] =
                     std::chrono::steady_clock::now() +
                     ctx->peer_retry_policy.cooldown;
+                if (required_ledger)
+                    ctx->note_peer_failure(endpoint, *required_ledger);
                 current.reset();
             }
         }
