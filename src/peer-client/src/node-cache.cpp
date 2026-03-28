@@ -3,6 +3,7 @@
 #include "ripple.pb.h"
 
 #include <catl/core/log-macros.h>
+#include <catl/core/request-context.h>
 #include <catl/crypto/sha512-half-hasher.h>
 
 #include <boost/asio/redirect_error.hpp>
@@ -96,6 +97,7 @@ NodeCache::walk_to(
         if (!peer || !peer->is_ready())
         {
             PLOGW(log_, "walk_to: no peer available for ledger ", ledger_seq);
+            catl::core::emit_status("no peer available for ledger " + std::to_string(ledger_seq));
             co_return result;
         }
     }
@@ -170,6 +172,11 @@ NodeCache::walk_to(
                     "/",
                     max_retries,
                     ")");
+                catl::core::emit_status(
+                    "timeout depth=" + std::to_string(depth) +
+                    " — retrying same peer " + peer->endpoint() +
+                    " (" + std::to_string(total_retries) + "/" +
+                    std::to_string(max_retries) + ")");
                 --depth;  // retry this depth
                 continue;
             }
@@ -200,10 +207,17 @@ NodeCache::walk_to(
                     max_retries,
                     "), excluded=",
                     failed_peers.size());
+                catl::core::emit_status(
+                    "timeout depth=" + std::to_string(depth) +
+                    " — switching peer (" +
+                    std::to_string(total_retries) + "/" +
+                    std::to_string(max_retries) + ")");
                 auto new_peer =
                     co_await peers->wait_for_peer(ledger_seq, 10, failed_peers);
                 if (new_peer && new_peer->is_ready())
                 {
+                    catl::core::emit_status(
+                        "acquired peer " + new_peer->endpoint());
                     peer = new_peer;
                     --depth;  // retry this depth
                     continue;
@@ -216,6 +230,9 @@ NodeCache::walk_to(
                 " MISS hash=",
                 cursor.hex().substr(0, 16),
                 " — giving up");
+            catl::core::emit_status(
+                "giving up at depth=" + std::to_string(depth) +
+                " after " + std::to_string(total_retries) + " retries");
             co_return result;  // found=false, caller retries
         }
 

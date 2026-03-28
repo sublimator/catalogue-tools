@@ -187,8 +187,8 @@ HttpServer::accept_loop()
         // Per-connection request context for log prefixes.
         // Covers handle_session and prove coroutine co_awaits;
         // inner strand hops (peer/RPC) won't have it.
-        auto req_ctx = std::make_shared<catl::core::RequestContext>(
-            catl::core::RequestContext{
+        auto req_ctx = std::shared_ptr<catl::core::RequestContext>(
+            new catl::core::RequestContext{
                 generate_request_id(),
                 {},  // tx_hash filled later
                 std::chrono::steady_clock::now()});
@@ -526,6 +526,42 @@ HttpServer::handle_session(
                             co_await write_sse(boost::json::serialize(ev));
                         };
 
+                        // Status drain loop — runs concurrently with prove,
+                        // flushing status events every 500ms. Single-threaded
+                        // io_context means writes interleave at co_await
+                        // points, never concurrently.
+                        auto drain_done = std::make_shared<bool>(false);
+                        auto drain_timer = std::make_shared<asio::steady_timer>(
+                            stream.get_executor());
+                        auto drain_ctx = req_ctx;
+                        asio::co_spawn(
+                            co_await asio::this_coro::executor,
+                            [&stream, &ec, drain_done, drain_timer,
+                             drain_ctx, &write_sse]()
+                                -> asio::awaitable<void> {
+                                while (!*drain_done)
+                                {
+                                    drain_timer->expires_after(
+                                        std::chrono::milliseconds(300));
+                                    boost::system::error_code tec;
+                                    co_await drain_timer->async_wait(
+                                        asio::redirect_error(
+                                            asio::use_awaitable, tec));
+                                    if (*drain_done)
+                                        break;
+                                    auto msgs = drain_ctx->drain();
+                                    for (auto& msg : msgs)
+                                    {
+                                        boost::json::object ev;
+                                        ev["type"] = "log";
+                                        ev["msg"] = std::move(msg);
+                                        co_await write_sse(
+                                            boost::json::serialize(ev));
+                                    }
+                                }
+                            },
+                            asio::detached);
+
                         std::string sse_error;
                         try
                         {
@@ -533,6 +569,19 @@ HttpServer::handle_session(
                                 tx_it->second, cancel_token,
                                 ledger_seq_hint, max_anchor_age,
                                 std::move(on_step));
+
+                            // Stop drain loop and flush remaining
+                            *drain_done = true;
+                            drain_timer->cancel();
+                            auto msgs = req_ctx->drain();
+                            for (auto& msg : msgs)
+                            {
+                                boost::json::object ev;
+                                ev["type"] = "log";
+                                ev["msg"] = std::move(msg);
+                                co_await write_sse(
+                                    boost::json::serialize(ev));
+                            }
 
                             // Send done event — client stitches proof
                             // from streamed steps + network_id
@@ -543,6 +592,8 @@ HttpServer::handle_session(
                         }
                         catch (std::exception const& e)
                         {
+                            *drain_done = true;
+                            drain_timer->cancel();
                             boost::json::object err;
                             err["type"] = "error";
                             err["error"] = e.what();

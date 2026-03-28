@@ -766,6 +766,27 @@ async function prove(hash) {
       try {
         const msg = JSON.parse(e.data);
 
+        if (msg.type === 'log') {
+          // Rolling log console — max 5 lines, newest at bottom
+          let logBox = document.getElementById('log-console');
+          if (!logBox) {
+            logBox = document.createElement('div');
+            logBox.id = 'log-console';
+            logBox.style.cssText = 'font-size:.6rem;color:#555;font-family:monospace;margin:.3rem 0;padding:.3rem .6rem;border-left:1px solid #2a2a2a;max-height:5.5em;overflow:hidden';
+            const sk = document.getElementById('sk-next');
+            if (sk) sk.parentElement.insertBefore(logBox, sk);
+            else body.appendChild(logBox);
+          }
+          const line = document.createElement('div');
+          line.style.cssText = 'padding:.05rem 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+          line.textContent = '\u203a ' + msg.msg;
+          logBox.appendChild(line);
+          // Cap at 5 lines
+          while (logBox.children.length > 5)
+            logBox.removeChild(logBox.firstChild);
+          body.parentElement.scrollTop = body.parentElement.scrollHeight;
+        }
+
         if (msg.type === 'step') {
           const now = performance.now();
           const elapsed = now - stepStartTime;
@@ -774,7 +795,9 @@ async function prove(hash) {
 
           streamedSteps.push(msg.step);
           statusEl.textContent = `proving\u2026 step ${msg.index + 1}`;
-          // Remove skeleton placeholder
+          // Remove log console + skeleton for this step
+          const lc = document.getElementById('log-console');
+          if (lc) lc.remove();
           const sk = document.getElementById('sk-next');
           if (sk) sk.remove();
           // Render step with timing badge

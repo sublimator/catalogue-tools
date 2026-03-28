@@ -4,6 +4,7 @@
 #include "xprv/validation-collector.h"
 
 #include <catl/core/logger.h>
+#include <catl/core/request-context.h>
 #include <catl/peer-client/peer-client-coro.h>
 #include <catl/peer-client/peer-set.h>
 #include <catl/rpc-client/rpc-client-coro.h>
@@ -1155,6 +1156,9 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             " (",
             wr.placeholders.size(),
             " placeholders)");
+        catl::core::emit_status(
+            std::string("state tree: ") + (ok ? "verified" : "MISMATCH") +
+            " (" + std::to_string(wr.placeholders.size()) + " placeholders)");
         return {ok, std::move(abbrev)};
     };
 
@@ -1273,6 +1277,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                     ctx->peer_retry_counts[current->endpoint()] = 0;
                 PLOGI(
                     log_, "Using peer ", current->endpoint(), " for ", purpose);
+                catl::core::emit_status(
+                    "peer " + current->endpoint() + " → " + purpose);
                 co_return current;
             }
 
@@ -1283,6 +1289,9 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                 " (",
                 excluded.size(),
                 " cooled down)");
+            catl::core::emit_status(
+                "waiting for peer for " + purpose +
+                " (" + std::to_string(excluded.size()) + " excluded)");
         }
     };
 
@@ -1426,12 +1435,15 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     }
     ctx->distance = ctx->anchor_hdr.seq() - tx_ledger_seq;
     PLOGI(log_, "Distance: ", ctx->distance, " ledgers");
+    catl::core::emit_status(
+        "distance: " + std::to_string(ctx->distance) + " ledgers");
 
     ctx->need_flag_hop = (ctx->distance > 256);
 
     if (!ctx->need_flag_hop)
     {
         PLOGI(log_, "Short skip list (within 256)");
+        catl::core::emit_status("short skip list (within 256)");
         auto skip_key_val = skip_list_key();
 
         auto wr = co_await with_peer_failover(
@@ -1481,6 +1493,9 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     else
     {
         PLOGI(log_, "Long skip list (2-hop, distance=", ctx->distance, ")");
+        catl::core::emit_status(
+            "long skip list (2-hop, distance=" +
+            std::to_string(ctx->distance) + ")");
 
         // Flag ledger: the nearest multiple of 256 AT OR ABOVE the target.
         // When the target IS a flag ledger (target % 256 == 0), the flag's
@@ -1607,6 +1622,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     // ── Step 7: Walk TX tree ──
     auto ledger_hash = target_hdr.ledger_hash256();
     PLOGI(log_, "Walking TX tree for ", tx_hash_str.substr(0, 16), "...");
+    catl::core::emit_status("walking TX tree");
 
     auto tx_walk = co_await with_peer_failover(
         ctx->client,
@@ -1658,6 +1674,9 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     bool verified = (abbrev_hash == expected_tx_hash);
     PLOGI(log_, "  Abbreviated tree: ", placed, " placeholders");
     PLOGI(log_, "  TX tree hash: ", verified ? "VERIFIED" : "MISMATCH");
+    catl::core::emit_status(
+        std::string("TX tree: ") + (verified ? "verified" : "MISMATCH") +
+        " (" + std::to_string(placed) + " placeholders)");
 
     // ── Emit target header + TX tree ──
     co_await emit_step(make_header(target_hdr));
