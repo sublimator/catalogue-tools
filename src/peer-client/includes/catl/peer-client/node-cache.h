@@ -211,7 +211,9 @@ private:
         SHAMapNodeID position,
         Hash256 const& target_key,
         int speculative_depth,
-        std::shared_ptr<PeerClient> peer);
+        std::shared_ptr<PeerClient> peer,
+        std::shared_ptr<PeerSet> peers = nullptr,
+        uint32_t ledger_seq = 0);
 
     /// Send a TMGetLedger request for a node (+ speculative deeper nodes).
     /// Non-coroutine: just builds and sends the request, no waiting.

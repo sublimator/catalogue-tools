@@ -272,6 +272,85 @@ PeerSet::note_connect_failure(std::string const& endpoint)
     sort_pending_connects();
 }
 
+std::vector<std::shared_ptr<PeerClient>>
+PeerSet::select_peers_for(
+    uint32_t ledger_seq,
+    int max_count,
+    std::unordered_set<std::string> const& excluded)
+{
+    ASSERT_ON_STRAND();
+
+    // Budget: never use more than 1/3 of ready peers, cap at 4
+    int ready = 0;
+    for (auto const& [_, c] : connections_)
+        if (c && c->is_ready())
+            ++ready;
+    int budget = std::min({max_count, std::max(1, ready / 3), 4});
+
+    // Build candidates sorted by range width descending
+    struct Candidate
+    {
+        std::string key;
+        uint64_t span;
+        std::shared_ptr<PeerClient> client;
+    };
+    std::vector<Candidate> candidates;
+    auto const now = std::chrono::steady_clock::now();
+
+    for (auto const& [key, client] : connections_)
+    {
+        if (!client || !client->is_ready())
+            continue;
+        if (excluded.count(key))
+            continue;
+        // Check failed_ledgers
+        auto& stats = endpoint_stats_[key];
+        auto it = stats.failed_ledgers.find(ledger_seq);
+        if (it != stats.failed_ledgers.end() &&
+            now - it->second.at < std::chrono::seconds(60))
+            continue;
+
+        uint64_t span = 0;
+        auto f = client->peer_first_seq();
+        auto l = client->peer_last_seq();
+        if (l > f)
+            span = static_cast<uint64_t>(l - f);
+        candidates.push_back({key, span, client});
+    }
+
+    // Sort: range-matched first, then by span descending
+    std::sort(candidates.begin(), candidates.end(),
+        [ledger_seq](auto const& a, auto const& b) {
+            bool a_covers = a.client->peer_first_seq() <= ledger_seq &&
+                            ledger_seq <= a.client->peer_last_seq();
+            bool b_covers = b.client->peer_first_seq() <= ledger_seq &&
+                            ledger_seq <= b.client->peer_last_seq();
+            if (a_covers != b_covers)
+                return a_covers > b_covers;  // range-matched first
+            return a.span > b.span;  // wider range preferred
+        });
+
+    std::vector<std::shared_ptr<PeerClient>> result;
+    for (auto const& c : candidates)
+    {
+        if (static_cast<int>(result.size()) >= budget)
+            break;
+        note_peer_selected(c.key);
+        result.push_back(c.client);
+    }
+    return result;
+}
+
+boost::asio::awaitable<std::vector<std::shared_ptr<PeerClient>>>
+PeerSet::co_select_peers_for(
+    uint32_t ledger_seq,
+    int max_count,
+    std::unordered_set<std::string> excluded)
+{
+    co_await asio::post(strand_, asio::use_awaitable);
+    co_return select_peers_for(ledger_seq, max_count, excluded);
+}
+
 void
 PeerSet::note_ledger_failure(std::string const& endpoint, uint32_t ledger_seq)
 {

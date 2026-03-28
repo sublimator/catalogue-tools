@@ -130,7 +130,8 @@ NodeCache::walk_to(
         }
 
         auto wire = co_await ensure_present(
-            cursor, ledger_hash, tree_type, pos, target_key, spec_depth, peer);
+            cursor, ledger_hash, tree_type, pos, target_key, spec_depth,
+            peer, peers, ledger_seq);
 
         // Halve speculation after each fetch round
         if (spec_depth > 1)
@@ -309,7 +310,9 @@ NodeCache::ensure_present(
     SHAMapNodeID position,
     Hash256 const& target_key,
     int speculative_depth,
-    std::shared_ptr<PeerClient> peer)
+    std::shared_ptr<PeerClient> peer,
+    std::shared_ptr<PeerSet> peers,
+    uint32_t ledger_seq)
 {
     enum class Action { hit, wait, send_and_wait };
     Action action;
@@ -413,6 +416,38 @@ NodeCache::ensure_present(
             target_key,
             speculative_depth,
             peer);
+
+        // Fan-out: also send to additional peers from PeerSet.
+        // First response wins via insert_and_notify (content-addressed).
+        // Duplicate responses are harmless (already-present early return).
+        if (peers && ledger_seq > 0)
+        {
+            std::unordered_set<std::string> exclude_set;
+            exclude_set.insert(peer->endpoint());
+            auto extras = co_await peers->co_select_peers_for(
+                ledger_seq, 2, std::move(exclude_set));
+
+            for (auto const& extra : extras)
+            {
+                if (extra && extra->is_ready())
+                {
+                    PLOGD(
+                        log_,
+                        "  ensure: fan-out to ",
+                        extra->endpoint(),
+                        " for hash=",
+                        expected_hash.hex().substr(0, 16));
+                    send_fetch(
+                        expected_hash,
+                        ledger_hash,
+                        tree_type,
+                        position,
+                        target_key,
+                        speculative_depth,
+                        extra);
+                }
+            }
+        }
     }
 
     // Wait on the shared signal. Two outcomes:

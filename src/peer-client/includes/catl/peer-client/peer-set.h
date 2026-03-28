@@ -220,6 +220,21 @@ public:
     size_t
     connected_count() const;
 
+    /// Get up to N peers for a ledger, for fan-out requests.
+    /// Synchronous version — must be called on strand.
+    std::vector<std::shared_ptr<PeerClient>>
+    select_peers_for(
+        uint32_t ledger_seq,
+        int max_count,
+        std::unordered_set<std::string> const& excluded);
+
+    /// Awaitable version — hops to strand internally.
+    boost::asio::awaitable<std::vector<std::shared_ptr<PeerClient>>>
+    co_select_peers_for(
+        uint32_t ledger_seq,
+        int max_count,
+        std::unordered_set<std::string> excluded);
+
     /// Record that a peer failed to serve a specific ledger.
     /// All peer selection methods will exclude this peer for this
     /// ledger until the TTL expires (default 60s).
