@@ -396,12 +396,26 @@ build_proof_DEAD(
         }
     };
 
+    // Global deadline for any single with_peer_failover operation.
+    // Prevents infinite retry loops when all peers can't serve the data.
+    static constexpr auto kFailoverDeadline = std::chrono::seconds(60);
+
     auto with_peer_failover = [&](std::shared_ptr<PeerClient>& current,
                                   std::optional<uint32_t> required_ledger,
                                   std::string const& purpose,
                                   auto op) -> decltype(op(current)) {
+        auto const deadline =
+            std::chrono::steady_clock::now() + kFailoverDeadline;
+
         for (;;)
         {
+            if (std::chrono::steady_clock::now() > deadline)
+            {
+                throw PeerClientException(
+                    Error::Timeout,
+                    "with_peer_failover deadline exceeded for: " + purpose);
+            }
+
             current = co_await acquire_peer(current, required_ledger, purpose);
 
             try
