@@ -62,6 +62,11 @@ struct PeerSetOptions
     /// this threshold. Default 1M ledgers (~40 days of history).
     uint32_t archival_range_threshold = 1'000'000;
 
+    /// After this many ms without finding a peer whose advertised range
+    /// covers the target ledger, fall back to any ready peer. Many
+    /// full-history nodes report narrow ranges but can still serve old
+    /// data. 0 = disable fallback. Default 5000ms.
+    int peer_fallback_ms = 1000;
 };
 
 class PeerSet : public std::enable_shared_from_this<PeerSet>

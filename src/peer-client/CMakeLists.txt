@@ -20,6 +20,7 @@ add_library(
   src/crypto-utils.cpp
   src/endpoint-tracker.cpp
   src/peer-endpoint-cache.cpp
+  src/peer-selector.cpp
   src/peer-set.cpp
   src/tree-walk-state.cpp
   src/node-cache.cpp

@@ -1,4 +1,5 @@
 #include <catl/peer-client/peer-client-coro.h>
+#include <catl/peer-client/peer-selector.h>
 #include <catl/peer-client/peer-set.h>
 
 #include <catl/core/logger.h>
@@ -1436,14 +1437,55 @@ PeerSet::wait_for_peer(
     // and evict_for can prioritize candidates that cover it.
     wanted_ledgers_.insert(ledger_seq);
 
-    if (auto p = choose_peer_for(ledger_seq, excluded))
-    {
-        wanted_ledgers_.erase(ledger_seq);
-        co_return p;
-    }
-
     // Immediately try any undiscovered endpoints
     try_candidates_for(ledger_seq);
+
+    auto const fallback_ms = options_.peer_fallback_ms;
+    auto const timeout_ms = timeout_secs * 1000;
+
+    // Helper: snapshot connected peers into PeerCandidate structs
+    // for the pure select_peer logic.
+    auto snapshot_peers = [&]() -> std::vector<PeerCandidate> {
+        std::vector<PeerCandidate> candidates;
+        candidates.reserve(connections_.size());
+        for (auto const& [key, client] : connections_)
+        {
+            if (!client)
+                continue;
+            candidates.push_back({
+                key,
+                client->peer_first_seq(),
+                client->peer_last_seq(),
+                endpoint_stats_[key].selection_count,
+                client->is_ready()});
+        }
+        return candidates;
+    };
+
+    // Initial check before entering the poll loop
+    {
+        auto sel = select_peer(
+            ledger_seq, snapshot_peers(), excluded, 0, fallback_ms, timeout_ms);
+        if (sel.decision == PeerDecision::use_range_match ||
+            sel.decision == PeerDecision::use_fallback)
+        {
+            auto it = connections_.find(sel.endpoint);
+            if (it != connections_.end() && it->second)
+            {
+                PLOGI(
+                    log_,
+                    sel.decision == PeerDecision::use_range_match
+                        ? "Range match: "
+                        : "Fallback: ",
+                    sel.endpoint,
+                    " for ledger ",
+                    ledger_seq);
+                note_peer_selected(sel.endpoint);
+                wanted_ledgers_.erase(ledger_seq);
+                co_return it->second;
+            }
+        }
+    }
 
     PLOGI(
         log_,
@@ -1455,28 +1497,64 @@ PeerSet::wait_for_peer(
         in_flight_.size(),
         " in-flight, ",
         tracker_->size(),
-        " known, Ctrl-C to cancel)");
+        " known)");
 
-    for (int elapsed_ms = 0; elapsed_ms < timeout_secs * 1000;
+    for (int elapsed_ms = 0; elapsed_ms < timeout_ms;
          elapsed_ms += 200)
     {
         co_await strand_sleep(strand_, std::chrono::milliseconds(200));
 
-        if (auto p = choose_peer_for(ledger_seq, excluded))
+        auto sel = select_peer(
+            ledger_seq, snapshot_peers(), excluded,
+            elapsed_ms + 200, fallback_ms, timeout_ms);
+
+        switch (sel.decision)
         {
-            PLOGI(log_, "Found peer for ledger ", ledger_seq);
-            wanted_ledgers_.erase(ledger_seq);
-            co_return p;
+            case PeerDecision::use_range_match:
+            case PeerDecision::use_fallback:
+            {
+                auto it = connections_.find(sel.endpoint);
+                if (it != connections_.end() && it->second)
+                {
+                    PLOGI(
+                        log_,
+                        sel.decision == PeerDecision::use_range_match
+                            ? "Found peer: "
+                            : "Fallback peer: ",
+                        sel.endpoint,
+                        " for ledger ",
+                        ledger_seq,
+                        " (range ",
+                        it->second->peer_first_seq(),
+                        "-",
+                        it->second->peer_last_seq(),
+                        ")");
+                    note_peer_selected(sel.endpoint);
+                    wanted_ledgers_.erase(ledger_seq);
+                    co_return it->second;
+                }
+                break;  // selected peer vanished, keep polling
+            }
+            case PeerDecision::give_up:
+                wanted_ledgers_.erase(ledger_seq);
+                PLOGW(
+                    log_,
+                    "No peer found with ledger ",
+                    ledger_seq,
+                    " after ",
+                    timeout_secs,
+                    "s");
+                co_return nullptr;
+
+            case PeerDecision::wait:
+                break;
         }
 
+        // Periodic discovery actions
         if (((elapsed_ms + 200) % 1000) == 0)
         {
-            // If we're capped and nobody has this ledger, evict to
-            // make room for a better candidate
             if (at_connection_cap())
-            {
                 evict_for(ledger_seq);
-            }
             try_candidates_for(ledger_seq);
         }
 
