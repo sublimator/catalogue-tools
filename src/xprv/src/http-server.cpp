@@ -353,6 +353,10 @@ HttpServer::handle_session(
                 cache["misses"] = cs.misses;
                 body["proof_cache"] = cache;
 
+                body["run_id"] = Logger::get_run_id();
+                if (!opts_.build_id.empty())
+                    body["build_id"] = opts_.build_id;
+
                 auto ncs = engine_->node_cache_stats();
                 boost::json::object nc;
                 nc["entries"] = ncs.entries;
@@ -490,6 +494,9 @@ HttpServer::handle_session(
                             "Cache-Control: no-cache\r\n"
                             "Connection: close\r\n"
                             "Server: xprv\r\n"
+                            "X-Run-Id: " + Logger::get_run_id() + "\r\n" +
+                            (opts_.build_id.empty() ? "" :
+                                "X-Build-Id: " + opts_.build_id + "\r\n") +
                             "\r\n";
                         co_await asio::async_write(
                             stream,

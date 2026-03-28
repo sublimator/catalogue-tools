@@ -57,6 +57,9 @@ cmd_serve()
     xprv::HttpServerOptions http_opts;
     http_opts.bind_address = config.bind_address;
     http_opts.port = config.port;
+#ifdef XPRV_BUILD_ID
+    http_opts.build_id = XPRV_BUILD_ID;
+#endif
 
     auto server = xprv::HttpServer::create(io, engine, http_opts);
     server->start();

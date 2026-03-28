@@ -199,6 +199,13 @@ public:
     static void
     set_run_id(bool enabled);
 
+    // Access the run ID (empty if not enabled)
+    static std::string const&
+    get_run_id()
+    {
+        return run_id_;
+    }
+
     // Set the request context hook for per-request log prefixes.
     // Called once at startup; the function is thread-safe (reads thread_local).
     static void

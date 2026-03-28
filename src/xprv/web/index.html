@@ -343,6 +343,27 @@ let lastDownloadUrl = '';
 let lastFilename = '';
 let lastProvedHash = '';
 let lastRid = '';
+let serverInfo = {};  // {run_id, build_id} from /health
+
+// Fetch server identity once (lazy, on first prove)
+async function fetchServerInfo() {
+  if (serverInfo.run_id) return;
+  try {
+    const r = await fetch('/health');
+    const j = await r.json();
+    if (j.run_id) serverInfo.run_id = j.run_id;
+    if (j.build_id) serverInfo.build_id = j.build_id;
+  } catch(e) {}
+}
+
+function idBadges(rid) {
+  const parts = [];
+  if (serverInfo.build_id) parts.push(serverInfo.build_id);
+  if (serverInfo.run_id) parts.push(serverInfo.run_id);
+  if (rid) parts.push(rid);
+  if (!parts.length) return '';
+  return `<span style="float:right;font-size:.6rem;color:#383838;font-weight:normal;font-family:monospace;margin-top:.35rem">${parts.join(' \u00b7 ')}</span>`;
+}
 
 function showDetails(json, txHash) {
   lastProofJson = json;
@@ -649,8 +670,7 @@ async function showSteps() {
   for (let i = 0; i < steps.length; i++) {
     rendered.push(await describeStep(steps[i], i, steps));
   }
-  const ridTag = lastRid ? ` <span style="float:right;font-size:.65rem;color:#444;font-weight:normal;font-family:monospace;margin-top:.3rem">${lastRid}</span>` : '';
-  body.innerHTML = `<h3>Proof chain \u2014 ${steps.length} steps${ridTag}</h3>` + rendered.join('');
+  body.innerHTML = `<h3>Proof chain \u2014 ${steps.length} steps${idBadges(lastRid)}</h3>` + rendered.join('');
   if (lastDownloadUrl) {
     const binName = lastFilename.replace('.xprv.json', '.xprv.bin');
     footer.innerHTML = `<a href="${lastDownloadUrl}" download="${lastFilename}" title="${lastFilename}">json</a> <a href="/prove?tx=${tx.value}&format=bin" download="${binName}" style="color:#686;margin-left:.5rem" title="${binName}">bin</a> <span class="act" onclick="copyProof()" title="copy JSON" style="margin-left:.4rem">&#x1F4CB;</span><span class="msep">|</span><a href="/verify-xprv.py" style="color:#555">verify-xprv.py</a>`;
@@ -692,6 +712,19 @@ function finishProve(json, hash) {
 
 let activeSSE = null;
 
+function showModalError(msg, hash) {
+  const body = document.getElementById('modal-body');
+  if (!body) return;
+  const sk = document.getElementById('sk-next');
+  if (sk) sk.remove();
+  const div = document.createElement('div');
+  div.style.cssText = 'margin-top:1rem;padding:.6rem;border-left:2px solid #e44;color:#e44;font-size:.8rem;display:flex;align-items:center;gap:.8rem';
+  div.innerHTML = `<span style="flex:1">${msg}</span><button style="background:none;border:1px solid #666;color:#ccc;padding:.3rem .8rem;border-radius:4px;cursor:pointer;font-size:.75rem;font-family:monospace;white-space:nowrap" onmouseover="this.style.borderColor='#aaa'" onmouseout="this.style.borderColor='#666'">retry</button>`;
+  div.querySelector('button').onclick = () => prove(hash);
+  body.appendChild(div);
+  body.parentElement.scrollTop = body.parentElement.scrollHeight;
+}
+
 function genRequestId() {
   const a = crypto.getRandomValues(new Uint8Array(4));
   return Array.from(a, b => b.toString(16).padStart(2,'0')).join('');
@@ -706,11 +739,12 @@ async function prove(hash) {
 
   const rid = genRequestId();
   lastRid = rid;
+  fetchServerInfo();
 
   // Open step modal immediately with skeleton placeholder
   const modal = document.getElementById('modal');
   const body = document.getElementById('modal-body');
-  body.innerHTML = `<h3>Building proof\u2026 <span style="float:right;font-size:.65rem;color:#444;font-weight:normal;font-family:monospace;margin-top:.3rem">${rid}</span></h3>` + skeletonStep(1);
+  body.innerHTML = `<h3>Building proof\u2026 ${idBadges(rid)}</h3>` + skeletonStep(1);
   modal.className = 'show';
   linkNum = 0;
   const streamedSteps = [];
@@ -724,9 +758,7 @@ async function prove(hash) {
       es.close(); activeSSE = null;
       statusEl.className = 'status error';
       statusEl.textContent = 'timed out';
-      const sk = document.getElementById('sk-next');
-      if (sk) sk.remove();
-      if (!streamedSteps.length) closeModal();
+      showModalError('timed out', hash);
       resolve();
     }, 60000);
 
@@ -783,14 +815,7 @@ async function prove(hash) {
           es.close(); activeSSE = null;
           statusEl.className = 'status error';
           statusEl.textContent = msg.error;
-          // Show error in the modal too (don't close it — user can see partial progress)
-          const body = document.getElementById('modal-body');
-          if (body) {
-            const errDiv = document.createElement('div');
-            errDiv.style.cssText = 'margin-top:1rem;padding:.6rem;border-left:2px solid #e44;color:#e44;font-size:.8rem';
-            errDiv.textContent = msg.error;
-            body.appendChild(errDiv);
-          }
+          showModalError(msg.error, hash);
           resolve();
         }
       } catch(err) {
@@ -804,19 +829,7 @@ async function prove(hash) {
       const errMsg = streamedSteps.length ? 'connection lost' : 'failed to connect';
       statusEl.className = 'status error';
       statusEl.textContent = errMsg;
-      const sk = document.getElementById('sk-next');
-      if (sk) sk.remove();
-      if (streamedSteps.length) {
-        const body = document.getElementById('modal-body');
-        if (body) {
-          const errDiv = document.createElement('div');
-          errDiv.style.cssText = 'margin-top:1rem;padding:.6rem;border-left:2px solid #e44;color:#e44;font-size:.8rem';
-          errDiv.textContent = errMsg;
-          body.appendChild(errDiv);
-        }
-      } else {
-        closeModal();
-      }
+      showModalError(errMsg, hash);
       resolve();
     };
   });

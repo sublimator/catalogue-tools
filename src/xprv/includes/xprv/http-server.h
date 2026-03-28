@@ -29,6 +29,7 @@ struct HttpServerOptions
     size_t max_request_body = 512 * 1024;  // 512KB
     std::chrono::seconds read_timeout{30};
     std::chrono::seconds write_timeout{30};
+    std::string build_id;  // git short hash, set from XPRV_BUILD_ID env
 };
 
 class HttpServer : public std::enable_shared_from_this<HttpServer>

@@ -54,6 +54,18 @@ add_dependencies(xprv xprv_web_assets)
 target_include_directories(xprv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/includes
                                         ${CMAKE_CURRENT_BINARY_DIR})
 
+# Bake git short hash into the binary at compile time
+execute_process(
+  COMMAND git rev-parse --short HEAD
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  OUTPUT_VARIABLE XPRV_BUILD_ID
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET)
+if(NOT XPRV_BUILD_ID)
+  set(XPRV_BUILD_ID "unknown")
+endif()
+target_compile_definitions(xprv PRIVATE XPRV_BUILD_ID="${XPRV_BUILD_ID}")
+
 target_link_libraries(
   xprv
   PRIVATE catl::peer-client
