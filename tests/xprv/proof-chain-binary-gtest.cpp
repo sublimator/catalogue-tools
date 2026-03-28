@@ -86,7 +86,7 @@ TEST(ProofChainBinary, HeaderRoundTrip)
     EXPECT_EQ(binary[0], 'X');
     EXPECT_EQ(binary[1], 'P');
     EXPECT_EQ(binary[2], 'R');
-    EXPECT_EQ(binary[3], 'F');
+    EXPECT_EQ(binary[3], 'V');
     EXPECT_EQ(binary[4], 0x02);  // version
     EXPECT_EQ(binary[5], 0x00);  // flags (uncompressed)
     // bytes 6-9: network_id LE (0)
