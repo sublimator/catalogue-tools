@@ -773,7 +773,14 @@ async function prove(hash) {
           es.close(); activeSSE = null;
           statusEl.className = 'status error';
           statusEl.textContent = msg.error;
-          closeModal();
+          // Show error in the modal too (don't close it — user can see partial progress)
+          const body = document.getElementById('modal-body');
+          if (body) {
+            const errDiv = document.createElement('div');
+            errDiv.style.cssText = 'margin-top:1rem;padding:.6rem;border-left:2px solid #e44;color:#e44;font-size:.8rem';
+            errDiv.textContent = msg.error;
+            body.appendChild(errDiv);
+          }
           resolve();
         }
       } catch(err) {
@@ -784,11 +791,22 @@ async function prove(hash) {
     es.onerror = () => {
       clearTimeout(timeout);
       es.close(); activeSSE = null;
+      const errMsg = streamedSteps.length ? 'connection lost' : 'failed to connect';
       statusEl.className = 'status error';
-      statusEl.textContent = streamedSteps.length ? 'connection lost' : 'failed to connect';
+      statusEl.textContent = errMsg;
       const sk = document.getElementById('sk-next');
       if (sk) sk.remove();
-      if (!streamedSteps.length) closeModal();
+      if (streamedSteps.length) {
+        const body = document.getElementById('modal-body');
+        if (body) {
+          const errDiv = document.createElement('div');
+          errDiv.style.cssText = 'margin-top:1rem;padding:.6rem;border-left:2px solid #e44;color:#e44;font-size:.8rem';
+          errDiv.textContent = errMsg;
+          body.appendChild(errDiv);
+        }
+      } else {
+        closeModal();
+      }
       resolve();
     };
   });
