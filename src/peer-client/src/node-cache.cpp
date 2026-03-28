@@ -801,20 +801,89 @@ NodeCache::get_header(
     }
 
     // action == Action::fetch
+    //
+    // Retry loop: try up to 3 peers. The first attempt uses the
+    // provided peer (if any), subsequent attempts get a new peer
+    // from the PeerSet. This handles the common case where the
+    // first peer times out but another can serve the header.
+    static constexpr int kMaxHeaderRetries = 3;
+    std::unordered_set<std::string> tried_peers;
 
-    // Use the provided peer if available. Otherwise find one via
-    // wait_for_peer (awaitable — hops to PeerSet strand internally,
-    // safe to call from any executor).
-    if (!peer || !peer->is_ready())
+    for (int attempt = 0; attempt < kMaxHeaderRetries; ++attempt)
     {
-        if (peers)
-            peer = co_await peers->wait_for_peer(ledger_seq, 10);
+        // Get a peer for this attempt
+        if (!peer || !peer->is_ready())
+        {
+            if (peers)
+                peer = co_await peers->wait_for_peer(
+                    ledger_seq, 10, tried_peers);
+        }
+
+        if (!peer || !peer->is_ready())
+        {
+            PLOGW(
+                log_,
+                "  get_header: no peer for seq=",
+                ledger_seq,
+                " (attempt ",
+                attempt + 1,
+                "/",
+                kMaxHeaderRetries,
+                ")");
+            continue;
+        }
+
+        tried_peers.insert(peer->endpoint());
+
+        try
+        {
+            auto result =
+                co_await co_get_ledger_header(peer, ledger_seq);
+
+            // Populate cache and wake waiters
+            std::shared_ptr<asio::steady_timer> sig;
+            {
+                std::lock_guard lock(mutex_);
+                auto& entry = header_cache_[ledger_seq];
+                sig = entry.signal;
+                entry.result = result;
+                entry.present = true;
+                entry.signal = nullptr;
+            }
+            if (sig)
+                sig->cancel();
+
+            PLOGD(
+                log_,
+                "  get_header: fetched seq=",
+                ledger_seq,
+                " hash=",
+                result.ledger_hash256().hex().substr(0, 16),
+                " (attempt ",
+                attempt + 1,
+                ")");
+            co_return result;
+        }
+        catch (std::exception const& e)
+        {
+            PLOGW(
+                log_,
+                "  get_header: attempt ",
+                attempt + 1,
+                "/",
+                kMaxHeaderRetries,
+                " failed for seq=",
+                ledger_seq,
+                " peer=",
+                peer->endpoint(),
+                ": ",
+                e.what());
+            peer = nullptr;  // force new peer on next attempt
+        }
     }
 
-    if (!peer || !peer->is_ready())
+    // All retries exhausted — clean up and throw
     {
-        PLOGW(log_, "  get_header: no peer for seq=", ledger_seq);
-        // Don't erase — clear signal so next caller retries.
         std::shared_ptr<asio::steady_timer> sig;
         {
             std::lock_guard lock(mutex_);
@@ -827,52 +896,8 @@ NodeCache::get_header(
         }
         if (sig)
             sig->cancel();
-        throw PeerClientException(Error::Timeout);
     }
-
-    try
-    {
-        auto result = co_await co_get_ledger_header(peer, ledger_seq);
-
-        // Populate cache and wake waiters
-        std::shared_ptr<asio::steady_timer> signal;
-        {
-            std::lock_guard lock(mutex_);
-            auto& entry = header_cache_[ledger_seq];
-            signal = entry.signal;
-            entry.result = result;
-            entry.present = true;
-            entry.signal = nullptr;
-        }
-
-        if (signal)
-            signal->cancel();
-
-        PLOGD(
-            log_,
-            "  get_header: fetched seq=",
-            ledger_seq,
-            " hash=",
-            result.ledger_hash256().hex().substr(0, 16));
-        co_return result;
-    }
-    catch (...)
-    {
-        // Don't erase — clear signal so next caller retries the fetch.
-        std::shared_ptr<asio::steady_timer> signal;
-        {
-            std::lock_guard lock(mutex_);
-            auto it = header_cache_.find(ledger_seq);
-            if (it != header_cache_.end())
-            {
-                signal = it->second.signal;
-                it->second.signal = nullptr;
-            }
-        }
-        if (signal)
-            signal->cancel();
-        throw;
-    }
+    throw PeerClientException(Error::Timeout);
 }
 
 bool
