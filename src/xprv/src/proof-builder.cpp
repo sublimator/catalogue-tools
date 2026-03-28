@@ -1337,6 +1337,15 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     co_await emit_step(make_header(ctx->anchor_hdr));
 
     // ── Step 5: Determine hop path ──
+    // Guard against unsigned underflow: anchor must be at or after the tx.
+    // A stale anchor (via max_anchor_age) can be behind the tx ledger.
+    if (ctx->anchor_hdr.seq() < tx_ledger_seq)
+    {
+        throw std::runtime_error(
+            "Anchor seq " + std::to_string(ctx->anchor_hdr.seq()) +
+            " is behind tx seq " + std::to_string(tx_ledger_seq) +
+            " — cannot build proof (stale anchor?)");
+    }
     ctx->distance = ctx->anchor_hdr.seq() - tx_ledger_seq;
     PLOGI(log_, "Distance: ", ctx->distance, " ledgers");
 

@@ -230,13 +230,28 @@ ProofEngine::prove(
     // not per-request — set_unl clears the quorum cache)
     auto vl = co_await vl_cache_->co_get();
 
+    // Check tx→ledger_seq cache (avoids RPC lookup on repeated requests)
+    auto cached_seq = tx_ledger_get(tx_hash);
+
     // Step 2: Get anchor — reuse cached bundle if recent enough,
     // otherwise wait for the latest quorum.
     auto anchor = co_await get_or_reuse_anchor(vl, max_anchor_age_secs);
 
-    // Step 4: Build proof using shared services
-    // Check tx→ledger_seq cache (avoids RPC lookup on repeated requests)
-    auto cached_seq = tx_ledger_get(tx_hash);
+    // If we know the tx ledger seq (from hint or cache), verify
+    // the anchor is ahead of it. If not, discard and get a fresh one.
+    uint32_t known_tx_seq =
+        ledger_seq_hint ? ledger_seq_hint : cached_seq.value_or(0);
+    if (known_tx_seq > 0 && anchor.seq < known_tx_seq)
+    {
+        PLOGW(
+            log_,
+            "Anchor seq=",
+            anchor.seq,
+            " is behind tx seq=",
+            known_tx_seq,
+            " — fetching fresh anchor");
+        anchor = co_await get_or_reuse_anchor(vl, 0);  // force fresh
+    }
 
     BuildServices svc{
         .io = io_,
