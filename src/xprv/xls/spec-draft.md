@@ -25,21 +25,45 @@ Two representations of the same proof, no mixing:
 
 Both forms verify identically. JSON→binary conversion is lossy in one respect: the anchor's `ledger_index` (sequence number) is present in JSON but not encoded in binary. It is informational — the verifier does not need it. All other fields round-trip losslessly.
 
-## 1. Proof Chain Model
+## 1. Proof Graph Model
 
-A proof chain is an ordered sequence of steps. Three step types:
+XPRV is logically a directed acyclic graph (DAG) of authenticated objects.
+JSON and binary forms serialize that DAG as a parent-first ordered list of
+steps.
+
+Three step types:
 
 | Type | Consumes | Produces |
 |------|----------|----------|
 | `anchor` | nothing | trusted ledger hash |
-| `ledger_header` | trusted hash (or skip list entry) | trusted `tx_hash` + `account_hash` |
-| `map_proof` | trusted tree root | trusted leaf data (may contain hashes for further steps) |
+| `ledger_header` | trusted ledger hash (from an anchor, a parent header, or a skip list leaf) | trusted header plus its `tx_hash` and `account_hash` roots |
+| `map_proof` | trusted tree root | one or more trusted leaves from that tree |
 
-A chain MUST start with an `anchor`. Subsequent steps MUST be `ledger_header` or `map_proof` in any valid order per the verification rules in section 5.
+Validity rules:
+
+- A proof MUST contain exactly one `anchor`, and it MUST be the first
+  serialized step.
+- Every non-anchor step MUST be supported by an earlier authenticated ancestor.
+- A `ledger_header` is supported when its computed hash is authenticated by the
+  anchor, by a prior header's `parent_hash`, or by a hash contained in an
+  authenticated skip list leaf.
+- A `map_proof` is supported when its recomputed root matches the `tx_hash` or
+  `account_hash` of an earlier authenticated `ledger_header`.
+- A `map_proof` MAY contain one or more leaves. All included leaves are
+  authenticated outputs of that step.
+- Multiple later steps MAY share the same supporting ancestor, so the logical
+  proof is a tree/DAG even though the serialized form is a list.
+
+> **Reference status:** The current reference verifiers implement the
+> single-path subset of this model. The format itself permits fan-out, provided
+> the serialized order follows the canonical parent-before-child rules in
+> section 3.3.
 
 ## 2. JSON Form
 
-The proof chain is a JSON object with a top-level `network_id` and an array of step objects.
+The proof chain is a JSON object with a top-level `network_id` and an array of
+step objects. The `steps` array is the canonical parent-first linearization of
+the logical proof DAG.
 
 ```json
 {
@@ -142,9 +166,21 @@ The trie is a nested JSON structure. Three JSON types discriminate three node ty
 | **Object** (keys `"0"`-`"F"`) | Inner node |
 | **Array** `[key, data]` | Leaf node |
 
-Leaf `data` is a JSON object — the decoded XRPL ledger entry, transaction, or transaction+metadata. The verifier re-serializes to canonical binary for hashing.
+Leaf `data` is a JSON object — the decoded XRPL ledger entry, transaction, or
+transaction+metadata. The verifier re-serializes to canonical binary for
+hashing.
 
-At each inner node, ALL non-empty branches MUST be present so the verifier can recompute the parent hash. Branches on the proof path are objects (recurse); branches off the path are hash strings (pruned).
+At each inner node, ALL non-empty branches MUST be present so the verifier can
+recompute the parent hash. Branches on the proof path are objects (recurse);
+branches off the path are hash strings (pruned).
+
+A `map_proof` MAY contain one or more leaves from the same authenticated root.
+Canonical form uses a single `map_proof` step per authenticated tree root and
+includes all required leaves in that trie rather than emitting repeated sibling
+proofs against the same root.
+
+Leaves that do not contribute to a declared claim or to any descendant step are
+non-canonical.
 
 ## 3. Binary Form
 
@@ -155,7 +191,7 @@ Every binary proof begins with a **10-byte file header**:
 ```
 Offset  Size  Field
   0       4   magic       "XPRV" (0x58 0x50 0x52 0x56)
-  4       1   version     0x02
+  4       1   version     0x03
   5       1   flags       bit 0: zlib compressed body
   6       4   network_id  little-endian uint32 (0 = XRPL, 21337 = Xahau)
 ```
@@ -204,10 +240,31 @@ The anchor is split into two TLV records (`0x01` core + `0x05` UNL) so the ~4KB 
 
 > **Note:** Progressive verification with a cached UNL is not yet implemented in the reference verifiers — both currently require the full anchor (core + UNL) before verification can begin. The TLV split is designed to enable future progressive verification for animated QR codes, BLE/NFC scanning, and streaming use cases.
 
+Canonical serialized order:
+
+1. All non-UNL steps MUST be serialized parent-before-child.
+2. The canonical traversal is depth-first pre-order over the logical proof DAG.
+3. Children of a `ledger_header` are canonically ordered as: state-tree subtree
+   first, then tx-tree subtree.
+4. A given authenticated tree root MUST appear at most once in canonical form.
+   If multiple leaves are required from that root, they MUST be merged into one
+   multi-leaf `map_proof`.
+5. If one authenticated skip list leaf supports multiple child
+   `ledger_header` steps, those child headers MUST be ordered by descending
+   `seq`.
+6. Within a `map_proof`, trie branch order (`0`-`F` at every inner node)
+   defines the canonical leaf ordering.
+7. `0x05` anchor UNL remains last.
+
+Other parent-before-child orders may still be verifiable, but they are
+non-canonical and SHOULD NOT be emitted when a stable proof hash, signature, or
+cache key is required.
+
 ### 3.4 Anchor Core Payload (0x01)
 
 ```
 [ledger_hash: 32 bytes]
+[ledger_index: 4 bytes, big-endian uint32]
 [publisher_key: 33 bytes, Ed25519 compressed]
 [validation_count: LEB128]
 [common_fields_len: LEB128][common_fields: serialized STObject]
@@ -310,7 +367,11 @@ decode(bytes):
 
 ## 5. Verification Algorithm
 
-The verification algorithm is identical for both forms.
+The step-local cryptographic checks are identical for both forms. The
+generalized proof model in section 1 permits fan-out and multi-leaf map proofs.
+The pseudocode below illustrates the current single-path verification profile
+used by the reference implementations; a generalized verifier applies the same
+checks while keeping a stack or set of authenticated parent capabilities.
 
 ```
 function verify(chain, trusted_publisher_keys):
@@ -426,13 +487,34 @@ The **flag ledger** is the nearest multiple of 256 at or above the target ledger
 anchor → ledger_header → map_proof(state, account_key)
 ```
 
-### 6.4 Multiple Proofs from Same Ledger (Future)
+### 6.4 Bundled Headers From One Skip List
 
-> **Note:** Not yet implemented in reference verifiers. The trusted tree roots are currently cleared after each map_proof, so a second map_proof from the same header would be unverified. This composition pattern requires the verifier to retain trusted roots across consecutive map_proof steps from the same header.
+A single skip list state proof may justify multiple child ledger headers.
+Canonical form emits the supporting `map_proof(state)` once, then the child
+`ledger_header` subtrees in descending `seq`.
 
 ```
-anchor → ledger_header → map_proof(tx, tx1) → map_proof(tx, tx2)
+anchor → ledger_header →
+map_proof(state, long_skip_list_key) →
+ledger_header(flag_3) → ...
+ledger_header(flag_2) → ...
+ledger_header(flag_1) → ...
 ```
+
+### 6.5 Multi-Leaf Proofs From Same Root
+
+A single `map_proof` may include multiple leaves from the same authenticated
+tree root. Canonical form merges them into one trie rather than emitting
+repeated sibling proofs against the same root.
+
+```
+anchor → ledger_header → map_proof(state)   // multiple state leaves
+anchor → ledger_header → map_proof(tx)      // multiple tx leaves
+```
+
+> **Reference status:** Not yet fully implemented in the reference verifiers.
+> Today they assume a single active path and do not keep sibling
+> header/map-proof contexts alive across a fan-out.
 
 ## 7. Security Considerations
 
@@ -442,6 +524,8 @@ anchor → ledger_header → map_proof(tx, tx1) → map_proof(tx, tx2)
 - All hashes use SHA512-Half as specified by the XRPL protocol.
 - The verifier MUST reject chains where any step fails.
 - Binary and JSON forms of the same proof MUST verify identically.
+- Producers SHOULD emit canonical serialized order (section 3.3) whenever
+  proofs are hashed, signed, cached, or deduplicated.
 
 ## 8. MIME Types and File Extensions
 

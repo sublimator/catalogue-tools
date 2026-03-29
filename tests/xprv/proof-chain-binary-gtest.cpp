@@ -87,7 +87,7 @@ TEST(ProofChainBinary, HeaderRoundTrip)
     EXPECT_EQ(binary[1], 'P');
     EXPECT_EQ(binary[2], 'R');
     EXPECT_EQ(binary[3], 'V');
-    EXPECT_EQ(binary[4], 0x02);  // version
+    EXPECT_EQ(binary[4], XPRV_FORMAT_VERSION);  // version
     EXPECT_EQ(binary[5], 0x00);  // flags (uncompressed)
     // bytes 6-9: network_id LE (0)
     EXPECT_EQ(binary[6], 0x00);
@@ -417,6 +417,7 @@ TEST(ProofChainBinary, RealProofRoundTrip)
     auto& orig_anchor = std::get<AnchorData>(chain.steps[0]);
     auto& dec_anchor = std::get<AnchorData>(decoded.steps[0]);
     EXPECT_EQ(dec_anchor.ledger_hash, orig_anchor.ledger_hash);
+    EXPECT_EQ(dec_anchor.ledger_index, orig_anchor.ledger_index);
     EXPECT_EQ(dec_anchor.publisher_key_hex, orig_anchor.publisher_key_hex);
     EXPECT_EQ(dec_anchor.blob.size(), orig_anchor.blob.size());
     EXPECT_EQ(dec_anchor.validations.size(), orig_anchor.validations.size());
@@ -444,16 +445,6 @@ TEST(ProofChainBinary, RealProofRoundTrip)
     auto compressed = to_binary(chain, {.compress = true});
     auto decoded_compressed = from_binary(compressed);
     ASSERT_EQ(decoded_compressed.steps.size(), 7u);
-
-    // Write proof.bin for CLI testing
-    {
-        std::string bin_path =
-            std::string(PROJECT_ROOT) + "tests/xprv/fixture/proof.bin";
-        std::ofstream out(bin_path, std::ios::binary);
-        out.write(
-            reinterpret_cast<const char*>(compressed.data()),
-            static_cast<std::streamsize>(compressed.size()));
-    }
 
     // Size comparison
     auto json_str = boost::json::serialize(to_json(chain));

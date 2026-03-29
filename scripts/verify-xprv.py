@@ -32,6 +32,7 @@ import math
 import struct
 import sys
 from binascii import hexlify, unhexlify
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -162,6 +163,7 @@ class VerifyResult:
     ok: bool = True
     steps_checked: int = 0
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 # ─── Constants ───────────────────────────────────────────────────────
@@ -295,6 +297,120 @@ def count_nodes(node: TrieNode, depth: int = 0) -> TrieStats:
             s.max_depth = max(s.max_depth, c.max_depth)
         return s
     return TrieStats()
+
+
+def add_capability(store: dict[str, list[str]], key_hex: str, source: str) -> None:
+    """Record that a hash/root is authenticated by some earlier step."""
+    if source not in store[key_hex]:
+        store[key_hex].append(source)
+
+
+def first_source(store: dict[str, list[str]], key_hex: str) -> str | None:
+    """Return the first supporting source for an authenticated value."""
+    sources = store.get(key_hex)
+    return sources[0] if sources else None
+
+
+def collect_json_leaves(node: Any) -> list[tuple[str, dict[str, Any]]]:
+    """Collect all leaves from a JSON trie."""
+    leaves: list[tuple[str, dict[str, Any]]] = []
+
+    def walk(cur: Any) -> None:
+        if isinstance(cur, list) and len(cur) >= 2:
+            key_hex = cur[0]
+            leaf_data = cur[1]
+            if isinstance(key_hex, str) and isinstance(leaf_data, dict):
+                leaves.append((key_hex, leaf_data))
+            return
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if k == "__depth__":
+                    continue
+                if len(k) == 1 and k in HEX_BRANCH:
+                    walk(v)
+
+    walk(node)
+    return leaves
+
+
+def decode_binary_leaf(leaf_bytes: bytes, *, is_tx: bool) -> dict[str, Any] | None:
+    """Decode a binary trie leaf back to JSON form."""
+    try:
+        if is_tx:
+            pos = 0
+            tx_len, pos = _vl_decode(leaf_bytes, pos)
+            tx_hex = leaf_bytes[pos : pos + tx_len].hex()
+            pos += tx_len
+            meta_len, pos = _vl_decode(leaf_bytes, pos)
+            meta_hex = leaf_bytes[pos : pos + meta_len].hex()
+            return {"tx": decode(tx_hex), "meta": decode(meta_hex)}
+        return decode(leaf_bytes.hex())
+    except Exception:
+        return None
+
+
+def collect_binary_leaves(
+    data: bytes, *, is_tx: bool
+) -> list[tuple[str, dict[str, Any]]]:
+    """Collect all decodable leaves from a binary trie."""
+    leaves: list[tuple[str, dict[str, Any]]] = []
+
+    def walk(pos: int) -> int:
+        header = struct.unpack_from("<I", data, pos)[0]
+        pos += 4
+
+        for branch in range(16):
+            branch_type = (header >> (branch * 2)) & 0x03
+            if branch_type == BR_EMPTY:
+                continue
+            if branch_type == BR_LEAF:
+                key_bytes = data[pos : pos + 32]
+                pos += 32
+                data_len, pos = leb128_read(data, pos)
+                leaf_bytes = data[pos : pos + data_len]
+                pos += data_len
+                leaf_data = decode_binary_leaf(leaf_bytes, is_tx=is_tx)
+                if leaf_data is not None:
+                    leaves.append((key_bytes.hex().upper(), leaf_data))
+                continue
+            if branch_type == BR_INNER:
+                pos = walk(pos)
+                continue
+            if branch_type == BR_HASH:
+                pos += 32
+
+        return pos
+
+    walk(0)
+    return leaves
+
+
+def extract_state_child_hashes(
+    leaves: list[tuple[str, dict[str, Any]]],
+) -> list[str]:
+    """Extract ledger hashes from authenticated state leaves (skip lists)."""
+    hashes: list[str] = []
+    for _key_hex, leaf_data in leaves:
+        raw_hashes = leaf_data.get("Hashes")
+        if not isinstance(raw_hashes, list):
+            continue
+        for item in raw_hashes:
+            if isinstance(item, str):
+                hashes.append(item.upper())
+    return hashes
+
+
+def describe_tx_leaves(leaves: list[tuple[str, dict[str, Any]]]) -> str:
+    """Produce a short human-readable summary of tx leaves."""
+    if not leaves:
+        return "0 tx leaves"
+    first = leaves[0][1]
+    tx = first.get("tx", {}) if isinstance(first, dict) else {}
+    tx_type = tx.get("TransactionType", "?")
+    account = tx.get("Account", "?")
+    if len(leaves) == 1:
+        return f"1 tx leaf ({tx_type} from {account})"
+    return f"{len(leaves)} tx leaves (first: {tx_type} from {account})"
 
 
 # ─── STValidation parsing ───────────────────────────────────────────
@@ -441,18 +557,36 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
 # ─── Main verifier ──────────────────────────────────────────────────
 
 
-def verify(proof: dict[str, Any], trusted_key: str | None = None) -> VerifyResult:
-    """Verify all steps in a proof chain. Returns structured result."""
-    steps: list[dict[str, Any]] = proof["steps"]
+def verify(
+    proof: dict[str, Any] | list[Any], trusted_key: str | None = None
+) -> VerifyResult:
+    """Verify a proof DAG serialized as a parent-first step list."""
+    if isinstance(proof, list):
+        steps: list[dict[str, Any]] = proof
+    else:
+        steps = proof.get("steps", [])
     result = VerifyResult()
 
-    trusted_hash: Hash256 | None = None
-    tx_hash: Hash256 | None = None
-    ac_hash: Hash256 | None = None
-    skip_hashes: list[str] | None = None
+    if not steps:
+        result.ok = False
+        result.errors.append("proof has no steps")
+        return result
 
     if not trusted_key:
         trusted_key = XRPL_VL_KEY
+
+    anchor_count = sum(1 for step in steps if step.get("type") == "anchor")
+    if anchor_count != 1:
+        result.ok = False
+        result.errors.append(f"proof must contain exactly one anchor, found {anchor_count}")
+
+    trusted_ledger_hashes: dict[str, list[str]] = defaultdict(list)
+    trusted_tx_roots: dict[str, list[str]] = defaultdict(list)
+    trusted_state_roots: dict[str, list[str]] = defaultdict(list)
+    seen_header_hashes: set[str] = set()
+    seen_map_roots: set[tuple[str, str]] = set()
+    skip_source_last_seq: dict[str, int] = {}
+    anchor_seen = False
 
     print(f"\n{'=' * 60}")
     print(f"  PROOF VERIFICATION ({len(steps)} steps)")
@@ -460,150 +594,189 @@ def verify(proof: dict[str, Any], trusted_key: str | None = None) -> VerifyResul
 
     for i, step in enumerate(steps, 1):
         result.steps_checked += 1
-        t: str = step["type"]
+        step_type = step.get("type")
 
-        if t == "anchor":
-            trusted_hash = bytes.fromhex(step["ledger_hash"])
+        if step_type == "anchor":
+            if i != 1:
+                msg = "anchor must be the first serialized step"
+                print(f"\n  Step {i}: ANCHOR\n    [FAIL] {msg}")
+                result.ok = False
+                result.errors.append(f"step {i}: {msg}")
+                continue
+            if anchor_seen:
+                msg = "duplicate anchor"
+                print(f"\n  Step {i}: ANCHOR\n    [FAIL] {msg}")
+                result.ok = False
+                result.errors.append(f"step {i}: {msg}")
+                continue
+
+            anchor_seen = True
             n_val = len(step.get("validations", {}))
             print(
                 f"\n  Step {i}: ANCHOR seq={step.get('ledger_index', '?')} "
-                f"hash={step['ledger_hash'][:16]}... ({n_val} validations)"
+                f"hash={step.get('ledger_hash', '')[:16]}... ({n_val} validations)"
             )
 
             ar = verify_anchor(step, trusted_key)
             if ar.ok:
+                ledger_hash = step["ledger_hash"].upper()
+                add_capability(trusted_ledger_hashes, ledger_hash, "anchor")
                 print(f"    [PASS] anchor verified ({ar.message})")
             else:
                 print(f"    [FAIL] {ar.message}")
                 result.ok = False
                 result.errors.append(f"step {i}: anchor: {ar.message}")
 
-        elif t == "ledger_header":
-            hdr: dict[str, Any] = step["header"]
+        elif step_type == "ledger_header":
+            hdr: dict[str, Any] = step.get("header", {})
             computed = hash_header(hdr)
-            h = computed.hex().upper()
+            computed_hex = computed.hex().upper()
 
             print(f"\n  Step {i}: HEADER seq={hdr['seq']}")
             print(
-                f"    Hash={h[:16]}... tx={hdr['tx_hash'][:16]}... "
+                f"    Hash={computed_hex[:16]}... tx={hdr['tx_hash'][:16]}... "
                 f"ac={hdr['account_hash'][:16]}..."
             )
 
-            if trusted_hash is not None:
-                if computed == trusted_hash:
-                    print("    [PASS] matches anchor hash")
-                else:
-                    print(f"    [FAIL] expected {trusted_hash.hex().upper()[:16]}...")
-                    result.ok = False
-                    result.errors.append(f"step {i}: header hash mismatch")
-                trusted_hash = None
-            elif skip_hashes is not None:
-                if h in skip_hashes:
-                    print(f"    [PASS] found in skip list ({len(skip_hashes)} entries)")
-                else:
-                    print("    [FAIL] not in skip list!")
-                    result.ok = False
-                    result.errors.append(f"step {i}: not in skip list")
-                skip_hashes = None
+            source = first_source(trusted_ledger_hashes, computed_hex)
+            if source is None:
+                msg = "header hash is not supported by any earlier authenticated ancestor"
+                print(f"    [FAIL] {msg}")
+                result.ok = False
+                result.errors.append(f"step {i}: {msg}")
+                continue
 
-            tx_hash = bytes.fromhex(hdr["tx_hash"])
-            ac_hash = bytes.fromhex(hdr["account_hash"])
+            if source == "anchor":
+                print("    [PASS] matches anchor hash")
+            elif source.startswith("skip list from step "):
+                print(f"    [PASS] found in {source}")
+            else:
+                print(f"    [PASS] supported by {source}")
 
-        elif t == "map_proof":
+            if computed_hex in seen_header_hashes:
+                warn = f"step {i}: duplicate ledger_header {computed_hex[:16]}... is non-canonical"
+                print(f"    [WARN] {warn}")
+                result.warnings.append(warn)
+            seen_header_hashes.add(computed_hex)
+
+            if source.startswith("skip list from step "):
+                prev_seq = skip_source_last_seq.get(source)
+                seq = int(hdr["seq"])
+                if prev_seq is not None and seq > prev_seq:
+                    warn = (
+                        f"step {i}: headers from {source} are not in descending seq order "
+                        f"({seq} after {prev_seq})"
+                    )
+                    print(f"    [WARN] {warn}")
+                    result.warnings.append(warn)
+                skip_source_last_seq[source] = seq
+
+            parent_hash = hdr["parent_hash"].upper()
+            tx_root = hdr["tx_hash"].upper()
+            state_root = hdr["account_hash"].upper()
+
+            add_capability(
+                trusted_ledger_hashes,
+                parent_hash,
+                f"parent hash of header seq={hdr['seq']}",
+            )
+            add_capability(trusted_tx_roots, tx_root, f"header seq={hdr['seq']}")
+            add_capability(
+                trusted_state_roots, state_root, f"header seq={hdr['seq']}"
+            )
+
+        elif step_type == "map_proof":
             tree: str = step["tree"]
             is_tx = tree == "tx"
             trie: TrieNode | None = step.get("trie")
             binary_root_hex: str | None = step.get("__binary_root__")
+            binary_payload: bytes = step.get("__binary_payload__", b"")
 
             print(f"\n  Step {i}: {'TX' if is_tx else 'STATE'} TREE")
 
-            if trie is None and not binary_root_hex:
-                print("    [SKIP] no trie")
-                continue
-
-            if trie:
-                stats = count_nodes(trie)
-                print(
-                    f"    {stats.inners} inners, {stats.placeholders} placeholders, "
-                    f"{stats.leaves} leaves (depth {stats.max_depth})"
-                )
-            else:
-                print(f"    Binary trie, root={binary_root_hex[:16]}...")
-
-            expected = tx_hash if is_tx else ac_hash
-            if expected is None:
-                print("    [SKIP] no expected hash")
-                continue
-
-            # Binary proofs have pre-computed root hash
-            binary_root = step.get("__binary_root__")
             try:
-                if binary_root:
-                    root = bytes.fromhex(binary_root)
+                if binary_root_hex:
+                    root_hex = binary_root_hex.upper()
+                    leaves = collect_binary_leaves(binary_payload, is_tx=is_tx)
+                    print(f"    Binary trie, root={root_hex[:16]}...")
                 else:
-                    root = hash_trie(trie, is_tx=is_tx)
-                if root == expected:
+                    if trie is None:
+                        raise ValueError("no trie payload")
+                    stats = count_nodes(trie)
                     print(
-                        f"    [PASS] root {root.hex().upper()[:16]}... "
-                        f"matches {'tx' if is_tx else 'account'}_hash"
+                        f"    {stats.inners} inners, {stats.placeholders} placeholders, "
+                        f"{stats.leaves} leaves (depth {stats.max_depth})"
                     )
-                else:
-                    print(
-                        f"    [FAIL] root {root.hex().upper()[:16]}... "
-                        f"!= {expected.hex().upper()[:16]}..."
-                    )
-                    result.ok = False
-                    result.errors.append(f"step {i}: {tree} tree root mismatch")
-            except Exception as e:
-                print(f"    [ERROR] {e}")
+                    root_hex = hash_trie(trie, is_tx=is_tx).hex().upper()
+                    leaves = collect_json_leaves(trie)
+            except Exception as exc:
+                print(f"    [ERROR] {exc}")
                 result.ok = False
-                result.errors.append(f"step {i}: {tree} tree error: {e}")
+                result.errors.append(f"step {i}: {tree} tree error: {exc}")
+                continue
 
-            # Extract skip list from state tree leaf
-            if not is_tx:
-                if binary_root:
-                    leaf_data = find_binary_trie_leaf(
-                        step.get("__binary_payload__", b""), is_tx=False
-                    )
-                    if leaf_data:
-                        hashes = leaf_data.get("Hashes")
-                        if hashes:
-                            skip_hashes = [h.upper() for h in hashes]
-                            print(f"    Skip list: {len(skip_hashes)} hashes")
-                else:
-                    leaf = find_leaf(trie)
-                    if leaf and len(leaf) >= 2 and isinstance(leaf[1], dict):
-                        hashes = leaf[1].get("Hashes")
-                        if hashes:
-                            skip_hashes = [h.upper() for h in hashes]
-                            print(f"    Skip list: {len(skip_hashes)} hashes")
+            capability_store = trusted_tx_roots if is_tx else trusted_state_roots
+            root_source = first_source(capability_store, root_hex)
+            if root_source is None:
+                msg = f"{tree} root {root_hex[:16]}... is not supported by any earlier header"
+                print(f"    [FAIL] {msg}")
+                result.ok = False
+                result.errors.append(f"step {i}: {msg}")
+                continue
 
-            # Extract tx info from tx tree leaf
+            if not leaves:
+                msg = f"{tree} map proof contains no decodable leaves"
+                print(f"    [FAIL] {msg}")
+                result.ok = False
+                result.errors.append(f"step {i}: {msg}")
+                continue
+
+            print(f"    [PASS] root {root_hex[:16]}... supported by {root_source}")
+            print(f"    leaves: {len(leaves)}")
+
+            root_key = (tree, root_hex)
+            if root_key in seen_map_roots:
+                warn = (
+                    f"step {i}: repeated {tree} map_proof for root {root_hex[:16]}... "
+                    "is non-canonical; merge leaves into one proof"
+                )
+                print(f"    [WARN] {warn}")
+                result.warnings.append(warn)
+            seen_map_roots.add(root_key)
+
             if is_tx:
-                if binary_root:
-                    leaf_data = find_binary_trie_leaf(
-                        step.get("__binary_payload__", b""), is_tx=True
+                print(f"    {describe_tx_leaves(leaves)}")
+            else:
+                child_hashes = extract_state_child_hashes(leaves)
+                if child_hashes:
+                    for child_hash in child_hashes:
+                        add_capability(
+                            trusted_ledger_hashes,
+                            child_hash,
+                            f"skip list from step {i}",
+                        )
+                    print(
+                        f"    capability: {len(child_hashes)} child ledger hashes "
+                        f"from authenticated state leaf/leaves"
                     )
-                    if leaf_data and "tx" in leaf_data:
-                        tx_data = leaf_data["tx"]
-                        print(
-                            f"    Leaf: {tx_data.get('TransactionType', '?')} "
-                            f"from {tx_data.get('Account', '?')}"
-                        )
                 else:
-                    leaf = find_leaf(trie)
-                    if leaf and len(leaf) >= 2 and isinstance(leaf[1], dict):
-                        tx_data_j: dict[str, Any] = leaf[1].get("tx", {})
-                        print(
-                            f"    Leaf: {tx_data_j.get('TransactionType', '?')} "
-                            f"from {tx_data_j.get('Account', '?')}"
-                        )
+                    print("    state proof contains no Hashes arrays")
+
+        else:
+            msg = f"unknown step type: {step_type!r}"
+            print(f"\n  Step {i}: UNKNOWN\n    [FAIL] {msg}")
+            result.ok = False
+            result.errors.append(f"step {i}: {msg}")
 
     print(f"\n{'=' * 60}")
     print(f"  {'PASS — all checks verified' if result.ok else 'FAIL'}")
     if result.errors:
         for err in result.errors:
             print(f"    - {err}")
+    if result.warnings:
+        print("  WARNINGS")
+        for warn in result.warnings:
+            print(f"    - {warn}")
     print(f"{'=' * 60}\n")
     return result
 
@@ -615,6 +788,7 @@ def verify(proof: dict[str, Any], trusted_key: str | None = None) -> VerifyResul
 # TLV types: 0x01=anchor, 0x02=header, 0x03=tx_map, 0x04=state_map, 0x05=unl
 
 MAGIC = b"XPRV"
+FORMAT_VERSION = int((Path(__file__).parent.parent / "src/xprv/VERSION").read_text().strip())
 FLAG_ZLIB = 0x01
 
 # TLV types
@@ -670,14 +844,13 @@ def parse_binary_header(data: bytes) -> tuple[int, int, int, int]:
         raise ValueError("binary proof: bad magic")
     version = data[4]
     flags = data[5]
-    if version == 0x01:
-        return version, flags, 0, 6
-    if version == 0x02:
-        if len(data) < 10:
-            raise ValueError("binary proof: v2 header too short")
-        net = struct.unpack_from("<I", data, 6)[0]
-        return version, flags, net, 10
-    raise ValueError(f"binary proof: unsupported version {version}")
+    if version != FORMAT_VERSION:
+        raise ValueError(
+            f"binary proof: version {version} != expected {FORMAT_VERSION}")
+    if len(data) < 10:
+        raise ValueError("binary proof: header too short")
+    net = struct.unpack_from("<I", data, 6)[0]
+    return version, flags, net, 10
 
 
 def parse_tlv_records(body: bytes) -> list[tuple[int, bytes]]:
@@ -721,12 +894,16 @@ def decode_bin_header(payload: bytes) -> dict[str, Any]:
 
 
 def decode_anchor_core(payload: bytes) -> dict[str, Any]:
-    """Decode anchor core TLV: hash + publisher key + decomposed validations."""
-    pos = 0
-    ledger_hash = hexlify(payload[pos : pos + 32]).decode().upper()
-    pos += 32
-    publisher_key = hexlify(payload[pos : pos + 33]).decode().upper()
-    pos += 33
+    """Decode anchor core TLV: hash + ledger_index + publisher key + validations."""
+    if len(payload) < 69:
+        raise ValueError(f"anchor core payload too short: {len(payload)}")
+
+    # Must match xprv::encode_anchor_core():
+    #   ledger_hash[32] + ledger_index[4] + publisher_key[33] + ...
+    ledger_hash = hexlify(payload[0:32]).decode().upper()
+    ledger_index = struct.unpack_from(">I", payload, 32)[0]
+    publisher_key = hexlify(payload[36:69]).decode().upper()
+    pos = 69
     val_count, pos = leb128_read(payload, pos)
 
     validations: dict[str, str] = {}
@@ -734,6 +911,7 @@ def decode_anchor_core(payload: bytes) -> dict[str, Any]:
         return {
             "type": "anchor",
             "ledger_hash": ledger_hash,
+            "ledger_index": ledger_index,
             "unl": {"public_key": publisher_key},
             "validations": validations,
         }
@@ -767,6 +945,7 @@ def decode_anchor_core(payload: bytes) -> dict[str, Any]:
     return {
         "type": "anchor",
         "ledger_hash": ledger_hash,
+        "ledger_index": ledger_index,
         "unl": {"public_key": publisher_key},
         "validations": validations,
     }

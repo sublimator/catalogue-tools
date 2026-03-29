@@ -64,7 +64,14 @@ execute_process(
 if(NOT XPRV_BUILD_ID)
   set(XPRV_BUILD_ID "unknown")
 endif()
-target_compile_definitions(xprv PRIVATE XPRV_BUILD_ID="${XPRV_BUILD_ID}")
+
+# Read proof format version from VERSION file
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/VERSION XPRV_FORMAT_VERSION)
+string(STRIP "${XPRV_FORMAT_VERSION}" XPRV_FORMAT_VERSION)
+
+target_compile_definitions(xprv PRIVATE
+  XPRV_BUILD_ID="${XPRV_BUILD_ID}"
+  XPRV_FORMAT_VERSION=${XPRV_FORMAT_VERSION})
 
 target_link_libraries(
   xprv

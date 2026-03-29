@@ -79,20 +79,26 @@ verify_ed25519(
 }
 
 bool
-verify(
+verify_message(
     std::span<const uint8_t> public_key_33,
     std::span<const uint8_t> signature,
-    std::span<const uint8_t> data)
+    std::span<const uint8_t> message)
 {
     auto type = detect_key_type(public_key_33);
     switch (type)
     {
         case KeyType::secp256k1:
-            return verify_secp256k1(public_key_33, signature, data);
+        {
+            // secp256k1 verifies against SHA512-Half of the message
+            unsigned char full_hash[64];
+            crypto_hash_sha512(full_hash, message.data(), message.size());
+            return verify_secp256k1(
+                public_key_33, signature,
+                std::span<const uint8_t>(full_hash, 32));
+        }
         case KeyType::ed25519:
-            // Strip the 0xED prefix to get the raw 32-byte key
             return verify_ed25519(
-                public_key_33.subspan(1, 32), signature, data);
+                public_key_33.subspan(1, 32), signature, message);
         default:
             return false;
     }

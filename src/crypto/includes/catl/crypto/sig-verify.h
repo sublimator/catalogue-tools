@@ -32,14 +32,14 @@ verify_ed25519(
     std::span<const uint8_t> signature,
     std::span<const uint8_t> message);
 
-/// Convenience: verify a signature given a 33-byte XRPL public key
-/// (auto-detects Ed25519 vs secp256k1).
-/// For secp256k1: `data` must be a 32-byte hash.
-/// For Ed25519:   `data` is the raw message (will NOT be pre-hashed).
+/// Verify a signature over a raw message, auto-detecting key type.
+/// For Ed25519: message is passed directly (Ed25519 hashes internally).
+/// For secp256k1: message is SHA512-Half'd first, then verified.
+/// This is the preferred API — callers never need to pre-hash.
 bool
-verify(
+verify_message(
     std::span<const uint8_t> public_key_33,
     std::span<const uint8_t> signature,
-    std::span<const uint8_t> data);
+    std::span<const uint8_t> message);
 
 }  // namespace catl::crypto

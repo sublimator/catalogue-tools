@@ -60,6 +60,11 @@ private:
     static ParsedValidation
     parse_validation(std::vector<uint8_t> const& raw);
 
+    /// Build manifest signing data: MAN\0 + raw bytes with both
+    /// sfSignature and sfMasterSignature fields stripped.
+    static std::vector<uint8_t>
+    manifest_signing_data(std::vector<uint8_t> const& raw);
+
     /// Decode hex string to bytes.
     static std::vector<uint8_t>
     from_hex(std::string_view hex);

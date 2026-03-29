@@ -21,5 +21,10 @@ target_sources(
   xprv_gtest PRIVATE ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-binary.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-json.cpp)
 
+# Share format version with the xprv target
+file(READ ${CMAKE_SOURCE_DIR}/src/xprv/VERSION XPRV_FORMAT_VERSION)
+string(STRIP "${XPRV_FORMAT_VERSION}" XPRV_FORMAT_VERSION)
+target_compile_definitions(xprv_gtest PRIVATE XPRV_FORMAT_VERSION=${XPRV_FORMAT_VERSION})
+
 include(GoogleTest)
 gtest_discover_tests(xprv_gtest DISCOVERY_TIMEOUT 30)

@@ -18,6 +18,7 @@
 #include <boost/json.hpp>
 
 #include <cstring>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 
@@ -28,7 +29,7 @@ namespace xprv {
 
 // File header
 static constexpr auto const& MAGIC = XPRV_MAGIC;
-static constexpr uint8_t VERSION = 0x02;
+static constexpr uint8_t VERSION = XPRV_FORMAT_VERSION;
 static constexpr uint8_t FLAG_ZLIB = 0x01;
 
 // TLV type bytes
@@ -272,6 +273,7 @@ encode_anchor_core(AnchorData const& a)
     std::vector<uint8_t> payload;
 
     write_bytes(payload, a.ledger_hash.data(), 32);
+    write_u32_be(payload, a.ledger_index);
 
     auto pubkey = hex_decode(a.publisher_key_hex);
     if (pubkey.size() < 33)
@@ -298,46 +300,56 @@ encode_anchor_core(AnchorData const& a)
         parsed.emplace_back(key_hex, result.as_object());
     }
 
+    // Collect ALL field names across all validations
+    std::set<std::string> all_keys;
+    for (auto const& [_, fields] : parsed)
+    {
+        for (auto const& [key, val] : fields)
+        {
+            if (!key.empty() && !std::islower(key[0]))
+                all_keys.insert(std::string(key));
+        }
+    }
+
+    // A field is common if it appears in ALL validations with the
+    // same value. Everything else is unique (per-validator).
     auto const& first = parsed[0].second;
     boost::json::object common;
-    boost::json::object first_unique;
+    std::set<std::string> unique_key_set;
 
-    for (auto const& [key, val] : first)
+    for (auto const& key : all_keys)
     {
-        if (!key.empty() && std::islower(key[0]))
+        auto it0 = first.find(key);
+        if (it0 == first.end())
+        {
+            unique_key_set.insert(key);
             continue;
-
+        }
+        auto const& ref_val = it0->value();
         bool is_common = true;
         for (size_t i = 1; i < parsed.size(); i++)
         {
             auto it = parsed[i].second.find(key);
             if (it == parsed[i].second.end() ||
                 boost::json::serialize(it->value()) !=
-                    boost::json::serialize(val))
+                    boost::json::serialize(ref_val))
             {
                 is_common = false;
                 break;
             }
         }
         if (is_common)
-        {
-            common[key] = val;
-        }
+            common[key] = ref_val;
         else
-        {
-            first_unique[key] = val;
-        }
+            unique_key_set.insert(key);
     }
 
     auto common_bytes =
         catl::xdata::codecs::serialize_object(common, protocol);
     write_vl(payload, common_bytes);
 
-    std::vector<std::string> unique_keys;
-    for (auto const& [key, val] : first_unique)
-    {
-        unique_keys.push_back(std::string(key));
-    }
+    std::vector<std::string> unique_keys(
+        unique_key_set.begin(), unique_key_set.end());
     leb128_encode(payload, unique_keys.size());
     for (auto const& uk : unique_keys)
     {
@@ -577,6 +589,7 @@ decode_anchor_core(std::span<const uint8_t> payload)
     size_t pos = 0;
 
     read_bytes(payload, pos, a.ledger_hash.data(), 32);
+    a.ledger_index = read_u32_be(payload, pos);
 
     uint8_t pubkey[33];
     read_bytes(payload, pos, pubkey, 33);
@@ -834,7 +847,7 @@ from_binary(std::span<const uint8_t> data)
         throw std::runtime_error("binary proof: bad magic (expected XPRV)");
 
     uint8_t version = data[4];
-    if (version != 0x01 && version != 0x02)
+    if (version != VERSION)
         throw std::runtime_error(
             "binary proof: unsupported version " + std::to_string(version));
 
