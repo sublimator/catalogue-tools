@@ -177,6 +177,7 @@ PREFIX_INNER = b"MIN\x00"  # SHAMap inner node
 PREFIX_TX_LEAF = b"SND\x00"  # transaction + metadata leaf
 PREFIX_STATE_LEAF = b"MLN\x00"  # account state (SLE) leaf
 PREFIX_VALIDATION = b"VAL\x00"  # STValidation signing data
+PREFIX_MANIFEST = b"MAN\x00"  # manifest signing data
 PREFIX_TX_SIGNING = b"STX\x00"  # STObject signing (swapped to VAL for validations)
 
 # Default XRPL mainnet VL publisher key
@@ -442,11 +443,60 @@ def parse_validation(val_hex: str) -> ParsedValidation | None:
     )
 
 
+def parse_manifest(manifest_bytes: bytes) -> dict[str, Any]:
+    """Parse a raw validator/publisher manifest STObject."""
+    return decode(hexlify(manifest_bytes).decode())
+
+
+def manifest_signing_data(manifest_dict: dict[str, Any]) -> bytes:
+    """Build MAN\\0 + manifest fields with both signature fields stripped."""
+    signing_hex = encode_for_signing(manifest_dict)
+    signing_bytes = unhexlify(signing_hex)
+    return PREFIX_MANIFEST + signing_bytes[4:]
+
+
+def verify_manifest(manifest_bytes: bytes) -> tuple[bool, str, dict[str, Any]]:
+    """Verify a manifest's signing-key and master-key signatures."""
+    parsed = parse_manifest(manifest_bytes)
+
+    master_key = parsed.get("PublicKey", "").upper()
+    signing_key = parsed.get("SigningPubKey", "").upper()
+    signature_hex = parsed.get("Signature", "")
+    master_sig_hex = parsed.get("MasterSignature", "")
+    sequence = parsed.get("Sequence")
+
+    if not master_key:
+        return False, "manifest missing PublicKey", parsed
+    if not master_sig_hex:
+        return False, "manifest missing MasterSignature", parsed
+
+    is_revocation = sequence == 0xFFFFFFFF
+    if not is_revocation and not signing_key:
+        return False, "manifest missing SigningPubKey", parsed
+
+    signing_data = manifest_signing_data(parsed)
+
+    if signature_hex:
+        sig_bytes = unhexlify(signature_hex)
+        if not signing_key:
+            return False, "manifest has Signature but no SigningPubKey", parsed
+        if not xrpl.core.keypairs.is_valid_message(signing_data, sig_bytes, signing_key):
+            return False, "signing key signature invalid", parsed
+
+    master_sig_bytes = unhexlify(master_sig_hex)
+    if not xrpl.core.keypairs.is_valid_message(
+        signing_data, master_sig_bytes, master_key
+    ):
+        return False, "master key signature invalid", parsed
+
+    return True, "ok", parsed
+
+
 # ─── Anchor verification ────────────────────────────────────────────
 
 
 def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
-    """Verify anchor: VL signature + validation signatures + quorum."""
+    """Verify anchor: manifest chain + VL blob + validations + quorum."""
     unl = anchor.get("unl")
     if not unl:
         return AnchorResult(ok=False, message="no UNL data")
@@ -460,15 +510,18 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
         )
     print(f"    A1: Publisher key {proof_key[:16]}... matches trusted key")
 
-    # Step 2: parse publisher manifest → get signing key
+    # Step 2: verify publisher manifest → get signing key
     manifest_hex: str = unl.get("manifest", "")
     if not manifest_hex:
         return AnchorResult(ok=False, message="no manifest")
-    manifest = decode(hexlify(unhexlify(manifest_hex)).decode())
-    signing_key: str = manifest.get("SigningPubKey", "")
+    manifest_bytes = unhexlify(manifest_hex)
+    ok, err, manifest = verify_manifest(manifest_bytes)
+    if not ok:
+        return AnchorResult(ok=False, message=f"publisher manifest: {err}")
+    signing_key: str = manifest.get("SigningPubKey", "").upper()
     if not signing_key:
         return AnchorResult(ok=False, message="manifest has no SigningPubKey")
-    print(f"    A2: Publisher manifest → signing key {signing_key[:16]}...")
+    print(f"    A2: Publisher manifest VERIFIED, signing key {signing_key[:16]}...")
 
     # Step 3: verify blob signature (raw bytes, signed by publisher signing key)
     blob_hex: str = unl.get("blob", "")
@@ -482,24 +535,33 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
         return AnchorResult(ok=False, message="blob signature FAILED")
     print(f"    A3: Blob signature VERIFIED ({len(blob_bytes)} bytes)")
 
-    # Step 4: parse validator manifests from blob → build signing→master key map
+    # Step 4: verify validator manifests from blob → build signing→master key map
     blob_json = json.loads(blob_bytes)
     validators: list[dict[str, Any]] = blob_json.get("validators", [])
     signing_to_master: dict[str, str] = {}
+    manifest_warnings = 0
 
     for v in validators:
         m_b64: str = v.get("manifest", "")
         if not m_b64:
             continue
         m_bytes = base64.b64decode(m_b64)
-        m = decode(hexlify(m_bytes).decode())
+        ok, err, m = verify_manifest(m_bytes)
+        if not ok:
+            manifest_warnings += 1
+            continue
         sk = m.get("SigningPubKey", "").upper()
         mk = m.get("PublicKey", "").upper()
         if sk:
             signing_to_master[sk] = mk
 
     unl_size = len(signing_to_master)
-    print(f"    A4: {unl_size} validator manifests parsed from UNL blob")
+    if manifest_warnings:
+        print(
+            f"    A4: {unl_size} validator manifests verified, {manifest_warnings} ignored"
+        )
+    else:
+        print(f"    A4: {unl_size} validator manifests verified from UNL blob")
 
     # Step 5: verify each STValidation
     validations: dict[str, str] = anchor.get("validations", {})

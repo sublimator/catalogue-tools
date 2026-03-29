@@ -11,6 +11,10 @@
 #include <catl/xdata/parse_transaction.h>
 #include <catl/xdata/serialize.h>
 
+#include <algorithm>
+#include <map>
+#include <set>
+
 namespace xprv {
 
 static LogPartition verify_log("verify", LogLevel::INFO);
@@ -98,9 +102,11 @@ count_trie_nodes(boost::json::value const& node, int depth, TrieStats& stats)
     }
 }
 
-/// Extract the Hashes array from a state tree leaf.
-static boost::json::array const*
-extract_leaf_hashes(boost::json::value const& trie)
+/// Collect all Hashes entries from all state tree leaves.
+static void
+collect_leaf_hashes(
+    boost::json::value const& trie,
+    std::vector<std::string>& out)
 {
     if (trie.is_array())
     {
@@ -108,10 +114,16 @@ extract_leaf_hashes(boost::json::value const& trie)
         if (arr.size() >= 2 && arr[1].is_object())
         {
             auto const& sle = arr[1].as_object();
-            if (sle.contains("Hashes"))
-                return &sle.at("Hashes").as_array();
+            if (sle.contains("Hashes") && sle.at("Hashes").is_array())
+            {
+                for (auto const& h : sle.at("Hashes").as_array())
+                {
+                    if (h.is_string())
+                        out.push_back(std::string(h.as_string()));
+                }
+            }
         }
-        return nullptr;
+        return;
     }
     if (trie.is_object())
     {
@@ -119,12 +131,9 @@ extract_leaf_hashes(boost::json::value const& trie)
         {
             if (kv.key() == "__depth__")
                 continue;
-            auto result = extract_leaf_hashes(kv.value());
-            if (result)
-                return result;
+            collect_leaf_hashes(kv.value(), out);
         }
     }
-    return nullptr;
 }
 
 /// Find the first leaf (array node) in a JSON trie.
@@ -145,6 +154,36 @@ extract_trie_leaf(boost::json::value const& trie)
         }
     }
     return nullptr;
+}
+
+static void
+add_capability(
+    std::map<std::string, std::vector<std::string>>& store,
+    std::string const& key,
+    std::string source)
+{
+    auto& sources = store[key];
+    if (std::find(sources.begin(), sources.end(), source) == sources.end())
+        sources.push_back(std::move(source));
+}
+
+static std::string const*
+first_source(
+    std::map<std::string, std::vector<std::string>> const& store,
+    std::string const& key)
+{
+    auto const it = store.find(key);
+    if (it == store.end() || it->second.empty())
+        return nullptr;
+    return &it->second.front();
+}
+
+static std::string
+upper_copy(std::string s)
+{
+    for (auto& c : s)
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return s;
 }
 
 //------------------------------------------------------------------------------
@@ -170,20 +209,18 @@ resolve_proof_chain(
         verify_log,
         "═══════════════════════════════════════════════════════════════");
 
-    Hash256 trusted_hash;
-    bool have_trusted_hash = false;
-    Hash256 trusted_tx_hash;
-    Hash256 trusted_ac_hash;
-    bool have_tree_hashes = false;
-    boost::json::array const* pending_hashes = nullptr;
-    int pending_hashes_count = 0;
     int step_num = 0;
     bool all_ok = true;
 
-    int header_count = 0;
-    int state_proof_count = 0;
+    std::map<std::string, std::vector<std::string>> trusted_ledger_hashes;
+    std::map<std::string, std::vector<std::string>> trusted_tx_roots;
+    std::map<std::string, std::vector<std::string>> trusted_state_roots;
+    std::map<std::string, uint32_t> skip_source_last_seq;
+    std::map<std::string, int> skip_source_sizes;
+    std::set<std::string> seen_header_hashes;
+    std::set<std::pair<std::string, std::string>> seen_map_roots;
+    bool anchor_seen = false;
     uint32_t anchor_seq = 0;
-    uint32_t target_seq = 0;
 
     std::vector<ProofStep> proof_steps;
 
@@ -198,23 +235,35 @@ resolve_proof_chain(
                 // ── Anchor ──────────────────────────────────────
                 if constexpr (std::is_same_v<T, AnchorData>)
                 {
-                    trusted_hash = data.ledger_hash;
-                    have_trusted_hash = true;
+                    auto ledger_hash_hex = upper_hex(data.ledger_hash);
+
+                    if (step_num != 1)
+                    {
+                        PLOGE(verify_log, "  Anchor: must be the first step");
+                        all_ok = false;
+                    }
+                    if (anchor_seen)
+                    {
+                        PLOGE(verify_log, "  Anchor: duplicate anchor step");
+                        all_ok = false;
+                    }
+                    anchor_seen = true;
                     anchor_seq = data.ledger_index;
+                    add_capability(
+                        trusted_ledger_hashes, ledger_hash_hex, "anchor");
 
                     PLOGI(verify_log, "");
                     PLOGI(verify_log, "Step ", step_num, ": ANCHOR");
                     PLOGI(
                         verify_log,
                         "  Trusted hash: ",
-                        upper_hex(data.ledger_hash).substr(0, 16),
+                        ledger_hash_hex.substr(0, 16),
                         "...");
                     PLOGI(verify_log, "  Ledger index: ", data.ledger_index);
 
                     AnchorStep anchor_step;
                     anchor_step.ledger_index = data.ledger_index;
-                    anchor_step.ledger_hash =
-                        upper_hex(data.ledger_hash).substr(0, 16);
+                    anchor_step.ledger_hash = ledger_hash_hex.substr(0, 16);
 
                     if (!trusted_publisher_key.empty())
                     {
@@ -226,6 +275,7 @@ resolve_proof_chain(
                         auto av_result = AnchorVerifier::verify(
                             steps[0].as_object(),
                             trusted_publisher_key,
+                            protocol,
                             av_narrative);
 
                         anchor_step.sub_steps = std::move(av_narrative);
@@ -268,40 +318,8 @@ resolve_proof_chain(
                 // ── Ledger Header ───────────────────────────────
                 else if constexpr (std::is_same_v<T, HeaderData>)
                 {
-                    header_count++;
-                    target_seq = data.seq;
-
-                    std::string role;
-                    if (header_count == 1)
-                    {
-                        role = "anchor";
-                        anchor_seq = data.seq;
-                    }
-                    else if (pending_hashes && state_proof_count >= 2)
-                    {
-                        role = "target";
-                    }
-                    else if (pending_hashes && state_proof_count == 1)
-                    {
-                        role = (data.seq % 256 == 0 && data.seq != anchor_seq)
-                            ? "flag"
-                            : "target";
-                    }
-                    else
-                    {
-                        role = "target";
-                    }
-
                     PLOGI(verify_log, "");
-                    PLOGI(
-                        verify_log,
-                        "Step ",
-                        step_num,
-                        ": LEDGER HEADER (seq=",
-                        data.seq,
-                        ", ",
-                        role,
-                        ")");
+                    PLOGI(verify_log, "Step ", step_num, ": LEDGER HEADER (seq=", data.seq, ")");
 
                     auto computed = hash_header(data);
                     auto computed_hex = upper_hex(computed);
@@ -314,81 +332,110 @@ resolve_proof_chain(
                     HeaderStep hdr_step;
                     hdr_step.seq = data.seq;
                     hdr_step.computed_hash = computed_hex.substr(0, 16);
-                    hdr_step.role = (role == "anchor")
-                        ? HeaderRole::anchor
-                        : (role == "flag" ? HeaderRole::flag
-                                          : HeaderRole::target);
+                    hdr_step.role = HeaderRole::target;
 
-                    if (have_trusted_hash)
+                    auto const* source =
+                        first_source(trusted_ledger_hashes, computed_hex);
+                    if (!source)
                     {
-                        hdr_step.method = HeaderVerifyMethod::anchor_hash;
-                        if (computed == trusted_hash)
-                        {
-                            PLOGI(verify_log, "  Hash check:   PASS");
-                            hdr_step.hash_check = Check::pass;
-                        }
-                        else
-                        {
-                            PLOGE(verify_log, "  Hash check:   FAIL!");
-                            all_ok = false;
-                            hdr_step.hash_check = Check::fail;
-                        }
+                        PLOGE(
+                            verify_log,
+                            "  Hash check:   FAIL (unsupported by prior anchor/header/skip list)");
+                        all_ok = false;
+                        hdr_step.hash_check = Check::fail;
                     }
-                    else if (pending_hashes)
+                    else
                     {
-                        hdr_step.method = HeaderVerifyMethod::skip_list;
-                        hdr_step.skip_type = (role == "flag")
-                            ? SkipListType::flag
-                            : SkipListType::recent;
-                        hdr_step.skip_list_size =
-                            static_cast<int>(pending_hashes->size());
-
-                        bool found = false;
-                        for (auto const& h : *pending_hashes)
+                        hdr_step.hash_check = Check::pass;
+                        if (*source == "anchor")
                         {
-                            if (std::string(h.as_string()) == computed_hex)
-                            {
-                                found = true;
-                                break;
-                            }
+                            hdr_step.method = HeaderVerifyMethod::anchor_hash;
+                            hdr_step.role = HeaderRole::anchor;
+                            anchor_seq = data.seq;
+                            PLOGI(verify_log, "  Hash check:   PASS");
                         }
-                        if (found)
+                        else if (source->rfind("skip list from step ", 0) == 0)
                         {
+                            hdr_step.method = HeaderVerifyMethod::skip_list;
+                            hdr_step.role =
+                                (data.seq % 256 == 0 && data.seq != anchor_seq)
+                                ? HeaderRole::flag
+                                : HeaderRole::target;
+                            hdr_step.skip_list_size =
+                                skip_source_sizes[*source];
+                            hdr_step.skip_type = (data.seq % 256 == 0 &&
+                                                  data.seq != anchor_seq)
+                                ? SkipListType::flag
+                                : SkipListType::recent;
                             PLOGI(
                                 verify_log,
-                                "  Skip list:    PASS (",
-                                pending_hashes->size(),
-                                " entries)");
-                            hdr_step.hash_check = Check::pass;
+                                "  Skip list:    PASS (source ",
+                                *source,
+                                ")");
+
+                            auto [it_last, inserted] = skip_source_last_seq.emplace(
+                                *source, data.seq);
+                            if (!inserted && data.seq > it_last->second)
+                            {
+                                PLOGW(
+                                    verify_log,
+                                    "  Non-canonical: sibling header seq ",
+                                    data.seq,
+                                    " appears after ",
+                                    it_last->second,
+                                    " from ",
+                                    *source);
+                            }
+                            it_last->second = data.seq;
                         }
                         else
                         {
-                            PLOGE(verify_log, "  Skip list:    FAIL");
-                            all_ok = false;
-                            hdr_step.hash_check = Check::fail;
+                            hdr_step.method = HeaderVerifyMethod::parent_hash;
+                            hdr_step.role = HeaderRole::target;
+                            PLOGI(
+                                verify_log,
+                                "  Parent hash:  PASS (source ",
+                                *source,
+                                ")");
                         }
-                        pending_hashes = nullptr;
                     }
 
-                    trusted_tx_hash = data.tx_hash;
-                    trusted_ac_hash = data.account_hash;
-                    have_tree_hashes = true;
-                    have_trusted_hash = false;
+                    if (!seen_header_hashes.insert(computed_hex).second)
+                    {
+                        PLOGW(
+                            verify_log,
+                            "  Non-canonical: duplicate header ",
+                            computed_hex.substr(0, 16),
+                            "...");
+                    }
+
+                    add_capability(
+                        trusted_ledger_hashes,
+                        upper_hex(data.parent_hash),
+                        "parent hash of header seq=" + std::to_string(data.seq));
+                    add_capability(
+                        trusted_tx_roots,
+                        upper_hex(data.tx_hash),
+                        "header seq=" + std::to_string(data.seq));
+                    add_capability(
+                        trusted_state_roots,
+                        upper_hex(data.account_hash),
+                        "header seq=" + std::to_string(data.seq));
 
                     PLOGI(
                         verify_log,
                         "  tx_hash:      ",
-                        upper_hex(trusted_tx_hash).substr(0, 16),
+                        upper_hex(data.tx_hash).substr(0, 16),
                         "...");
                     PLOGI(
                         verify_log,
                         "  account_hash: ",
-                        upper_hex(trusted_ac_hash).substr(0, 16),
+                        upper_hex(data.account_hash).substr(0, 16),
                         "...");
 
-                    hdr_step.tx_hash = upper_hex(trusted_tx_hash).substr(0, 16);
+                    hdr_step.tx_hash = upper_hex(data.tx_hash).substr(0, 16);
                     hdr_step.account_hash =
-                        upper_hex(trusted_ac_hash).substr(0, 16);
+                        upper_hex(data.account_hash).substr(0, 16);
 
                     proof_steps.push_back(
                         {StepType::ledger_header,
@@ -399,8 +446,6 @@ resolve_proof_chain(
                 else if constexpr (std::is_same_v<T, TrieData>)
                 {
                     bool is_state = (data.tree == TrieData::TreeType::state);
-                    if (is_state)
-                        state_proof_count++;
 
                     PLOGI(verify_log, "");
                     PLOGI(
@@ -411,24 +456,8 @@ resolve_proof_chain(
                         (is_state ? "state" : "tx"),
                         " tree)");
 
-                    Hash256 expected;
-                    if (have_tree_hashes)
-                    {
-                        expected = is_state ? trusted_ac_hash : trusted_tx_hash;
-                        PLOGI(
-                            verify_log,
-                            "  Expected root: ",
-                            upper_hex(expected).substr(0, 16),
-                            "...");
-                    }
-
                     MapProofStep map_step;
                     map_step.is_state = is_state;
-                    if (have_tree_hashes)
-                    {
-                        map_step.expected_root =
-                            upper_hex(expected).substr(0, 16);
-                    }
 
                     // Reconstruct the abbreviated SHAMap from
                     // whichever representation is available.
@@ -439,6 +468,7 @@ resolve_proof_chain(
                         catl::shamap::AbbreviatedTreeTraits>;
 
                     std::optional<AbbrevMap> reconstructed;
+                    std::vector<std::string> state_hashes;
 
                     // --- JSON trie path ---
                     if (!data.trie_json.is_null())
@@ -498,27 +528,16 @@ resolve_proof_chain(
                         // Extract narrative info from JSON trie
                         if (is_state)
                         {
-                            auto const* hashes =
-                                extract_leaf_hashes(data.trie_json);
-                            if (hashes)
+                            collect_leaf_hashes(data.trie_json, state_hashes);
+                            if (!state_hashes.empty())
                             {
-                                pending_hashes_count =
-                                    static_cast<int>(hashes->size());
-                                pending_hashes = hashes;
-                                map_step.hashes_count = pending_hashes_count;
-
+                                map_step.hashes_count =
+                                    static_cast<int>(state_hashes.size());
                                 bool is_flag_skip =
-                                    (state_proof_count == 1 &&
-                                     hashes->size() < 256);
+                                    state_hashes.size() < 256;
                                 map_step.skip_type = is_flag_skip
                                     ? SkipListType::flag
                                     : SkipListType::recent;
-
-                                PLOGI(
-                                    verify_log,
-                                    "  Skip list:    ",
-                                    hashes->size(),
-                                    " hashes");
                             }
                         }
                         else
@@ -613,47 +632,18 @@ resolve_proof_chain(
                                                 parsed.as_object().contains(
                                                     "Hashes"))
                                             {
-                                                // Store decoded hashes for
-                                                // skip list verification.
-                                                // We stash it in trie_json
-                                                // so the existing
-                                                // extract_leaf_hashes works.
-                                                // (Bit of a hack but avoids
-                                                // duplicating the logic.)
-                                                auto& mut_data =
-                                                    const_cast<TrieData&>(data);
-                                                boost::json::array leaf_arr;
-                                                leaf_arr.emplace_back(
-                                                    item->key().hex());
-                                                leaf_arr.emplace_back(parsed);
-                                                mut_data.trie_json = leaf_arr;
-
-                                                auto const* hashes =
-                                                    extract_leaf_hashes(
-                                                        mut_data.trie_json);
-                                                if (hashes)
+                                                for (auto const& h :
+                                                     parsed.as_object()
+                                                         .at("Hashes")
+                                                         .as_array())
                                                 {
-                                                    pending_hashes_count =
-                                                        static_cast<int>(
-                                                            hashes->size());
-                                                    pending_hashes = hashes;
-                                                    map_step.hashes_count =
-                                                        pending_hashes_count;
-
-                                                    bool is_flag_skip =
-                                                        (state_proof_count ==
-                                                             1 &&
-                                                         hashes->size() < 256);
-                                                    map_step.skip_type =
-                                                        is_flag_skip
-                                                        ? SkipListType::flag
-                                                        : SkipListType::recent;
-
-                                                    PLOGI(
-                                                        verify_log,
-                                                        "  Skip list:    ",
-                                                        hashes->size(),
-                                                        " hashes");
+                                                    if (h.is_string())
+                                                    {
+                                                        state_hashes.push_back(
+                                                            upper_copy(
+                                                                std::string(
+                                                                    h.as_string())));
+                                                    }
                                                 }
                                             }
                                         }
@@ -715,29 +705,88 @@ resolve_proof_chain(
                     }
 
                     // --- Verify root hash (shared for both paths) ---
-                    if (reconstructed && have_tree_hashes)
+                    if (!reconstructed)
+                    {
+                        PLOGE(
+                            verify_log,
+                            "  Trie proof:   FAIL (could not reconstruct abbreviated tree)");
+                        map_step.root_hash_check = Check::fail;
+                        all_ok = false;
+                    }
+                    else
                     {
                         try
                         {
                             auto computed_root = reconstructed->get_hash();
-                            auto expected_root =
-                                is_state ? trusted_ac_hash : trusted_tx_hash;
+                            auto computed_root_hex = upper_hex(computed_root);
+                            auto const* root_source = first_source(
+                                is_state ? trusted_state_roots
+                                         : trusted_tx_roots,
+                                computed_root_hex);
 
                             map_step.computed_root =
-                                upper_hex(computed_root).substr(0, 16);
+                                computed_root_hex.substr(0, 16);
 
-                            if (computed_root == expected_root)
+                            if (root_source)
                             {
                                 PLOGI(
                                     verify_log,
                                     "  Trie root:    PASS (",
-                                    upper_hex(computed_root).substr(0, 16),
+                                    computed_root_hex.substr(0, 16),
                                     "...)");
                                 map_step.root_hash_check = Check::pass;
+                                map_step.expected_root =
+                                    computed_root_hex.substr(0, 16);
+
+                                auto root_key = std::make_pair(
+                                    std::string(is_state ? "state" : "tx"),
+                                    computed_root_hex);
+                                if (!seen_map_roots.insert(root_key).second)
+                                {
+                                    PLOGW(
+                                        verify_log,
+                                        "  Non-canonical: repeated ",
+                                        (is_state ? "state" : "tx"),
+                                        " root ",
+                                        computed_root_hex.substr(0, 16),
+                                        "...");
+                                }
+
+                                if (is_state)
+                                {
+                                    map_step.hashes_count =
+                                        static_cast<int>(state_hashes.size());
+                                    map_step.skip_type =
+                                        state_hashes.size() < 256
+                                        ? SkipListType::flag
+                                        : SkipListType::recent;
+                                    if (!state_hashes.empty())
+                                    {
+                                        PLOGI(
+                                            verify_log,
+                                            "  Skip list:    ",
+                                            state_hashes.size(),
+                                            " hashes");
+                                    }
+                                    for (auto const& h : state_hashes)
+                                    {
+                                        auto h_upper = upper_copy(h);
+                                        skip_source_sizes["skip list from step " +
+                                                          std::to_string(step_num)] =
+                                            static_cast<int>(state_hashes.size());
+                                        add_capability(
+                                            trusted_ledger_hashes,
+                                            h_upper,
+                                            "skip list from step " +
+                                                std::to_string(step_num));
+                                    }
+                                }
                             }
                             else
                             {
-                                PLOGE(verify_log, "  Trie root:    FAIL!");
+                                PLOGE(
+                                    verify_log,
+                                    "  Trie root:    FAIL (unsupported by prior header)");
                                 map_step.root_hash_check = Check::fail;
                                 all_ok = false;
                             }
@@ -755,8 +804,6 @@ resolve_proof_chain(
                         {is_state ? StepType::state_proof : StepType::tx_proof,
                          step_num,
                          std::move(map_step)});
-
-                    have_tree_hashes = false;
                 }
             },
             step);

@@ -110,6 +110,15 @@ render_narrative(std::vector<ProofStep> const& steps)
                     skip_list_name(h->skip_type) + " (" +
                     std::to_string(h->skip_list_size) + " entries)");
             }
+            else if (h->method == HeaderVerifyMethod::parent_hash)
+            {
+                lines.push_back(
+                    "    Hash " + h->computed_hash +
+                    "... = SHA512Half(LWR\\0 || fields)");
+                lines.push_back(
+                    "    [" + check_mark(h->hash_check) +
+                    "] matched a trusted parent-hash capability");
+            }
 
             lines.push_back(
                 "    => tx_hash=" + h->tx_hash +

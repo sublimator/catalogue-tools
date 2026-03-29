@@ -31,6 +31,18 @@ struct RequestContext
     mutable std::mutex status_mutex;
     mutable std::vector<std::string> status_events;
 
+    RequestContext() = default;
+
+    RequestContext(
+        std::string request_id_,
+        std::string tx_hash_,
+        std::chrono::steady_clock::time_point started_at_)
+        : request_id(std::move(request_id_))
+        , tx_hash(std::move(tx_hash_))
+        , started_at(started_at_)
+    {
+    }
+
     void
     emit(std::string msg) const
     {

@@ -44,6 +44,7 @@ public:
     verify(
         boost::json::object const& anchor,
         std::string const& trusted_key,
+        catl::xdata::Protocol const& protocol,
         std::vector<std::string>& narrative);
 
 private:
@@ -63,7 +64,9 @@ private:
     /// Build manifest signing data: MAN\0 + raw bytes with both
     /// sfSignature and sfMasterSignature fields stripped.
     static std::vector<uint8_t>
-    manifest_signing_data(std::vector<uint8_t> const& raw);
+    manifest_signing_data(
+        std::vector<uint8_t> const& raw,
+        catl::xdata::Protocol const& protocol);
 
     /// Decode hex string to bytes.
     static std::vector<uint8_t>

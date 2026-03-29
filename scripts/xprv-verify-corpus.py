@@ -155,9 +155,12 @@ async def main_async(
     host: str,
     max_tx: int,
     concurrency: int,
+    verifier_arg: str,
 ) -> int:
     corpus = json.loads(Path(corpus_path).read_text())
-    verifier = Path(__file__).parent / "verify-xprv.py"
+    verifier = Path(verifier_arg)
+    if not verifier.is_absolute():
+        verifier = (Path(__file__).parent / verifier).resolve()
     if not verifier.exists():
         print(f"Verifier not found: {verifier}", file=sys.stderr)
         return 1
@@ -262,9 +265,24 @@ def main() -> None:
     ap.add_argument("--host", default="localhost:8080", help="xprv server host:port")
     ap.add_argument("--max", type=int, default=0, help="Max transactions to test (0=all)")
     ap.add_argument("--concurrency", type=int, default=8, help="Max concurrent requests")
+    ap.add_argument(
+        "--verifier",
+        default="verify-xprv.py",
+        help="Verifier script path. Relative paths resolve under scripts/.",
+    )
     args = ap.parse_args()
 
-    sys.exit(asyncio.run(main_async(args.corpus, args.host, args.max, args.concurrency)))
+    sys.exit(
+        asyncio.run(
+            main_async(
+                args.corpus,
+                args.host,
+                args.max,
+                args.concurrency,
+                args.verifier,
+            )
+        )
+    )
 
 
 if __name__ == "__main__":

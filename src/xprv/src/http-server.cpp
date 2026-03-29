@@ -188,10 +188,10 @@ HttpServer::accept_loop()
         // Covers handle_session and prove coroutine co_awaits;
         // inner strand hops (peer/RPC) won't have it.
         auto req_ctx = std::shared_ptr<catl::core::RequestContext>(
-            new catl::core::RequestContext{
+            new catl::core::RequestContext(
                 generate_request_id(),
                 {},  // tx_hash filled later
-                std::chrono::steady_clock::now()});
+                std::chrono::steady_clock::now()));
         auto ctx_ex = catl::core::ContextExecutor(
             io_.get_executor(), req_ctx);
         asio::co_spawn(
@@ -536,8 +536,7 @@ HttpServer::handle_session(
                         auto drain_ctx = req_ctx;
                         asio::co_spawn(
                             co_await asio::this_coro::executor,
-                            [&stream, &ec, drain_done, drain_timer,
-                             drain_ctx, &write_sse]()
+                            [drain_done, drain_timer, drain_ctx, &write_sse]()
                                 -> asio::awaitable<void> {
                                 while (!*drain_done)
                                 {

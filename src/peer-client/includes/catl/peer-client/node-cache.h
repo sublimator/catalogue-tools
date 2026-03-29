@@ -24,13 +24,17 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <list>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace catl::peer_client {
@@ -174,6 +178,87 @@ public:
 private:
     NodeCache(asio::io_context& io, Options opts);
 
+    static constexpr std::size_t kProgressCapacity = 16;
+    static constexpr uint16_t kNoDepth = 0xFFFF;
+
+    enum class ProgressKind : uint8_t {
+        retry_same_peer,
+        switch_peer,
+        acquired_peer,
+        give_up,
+        no_peer_available,
+    };
+
+    struct ProgressEvent
+    {
+        uint64_t seq = 0;
+        ProgressKind kind = ProgressKind::retry_same_peer;
+        uint32_t ledger_seq = 0;
+        uint16_t depth = kNoDepth;
+        uint8_t attempt = 0;
+        uint8_t max_attempts = 0;
+        std::array<char, 64> peer{};
+    };
+
+    struct ProgressCursor
+    {
+        uint64_t next_seq = 1;
+    };
+
+    template <std::size_t Capacity>
+    struct ProgressJournal
+    {
+        uint64_t next_seq = 1;
+        std::array<ProgressEvent, Capacity> slots{};
+
+        ProgressCursor
+        subscribe() const noexcept
+        {
+            return ProgressCursor{next_seq};
+        }
+
+        void
+        publish(ProgressEvent event) noexcept
+        {
+            event.seq = next_seq;
+            slots[(next_seq - 1) % Capacity] = event;
+            ++next_seq;
+        }
+
+        std::vector<ProgressEvent>
+        replay(ProgressCursor& cursor) const
+        {
+            auto oldest = next_seq > Capacity ? next_seq - Capacity : 1;
+            if (cursor.next_seq < oldest)
+                cursor.next_seq = oldest;
+
+            std::vector<ProgressEvent> out;
+            auto end = next_seq;
+            out.reserve(static_cast<std::size_t>(end - cursor.next_seq));
+            for (auto seq = cursor.next_seq; seq < end; ++seq)
+            {
+                auto const& event = slots[(seq - 1) % Capacity];
+                if (event.seq == seq)
+                    out.push_back(event);
+            }
+            cursor.next_seq = end;
+            return out;
+        }
+    };
+
+    struct ProgressState
+    {
+        ProgressJournal<kProgressCapacity> journal;
+        std::shared_ptr<asio::steady_timer> signal;
+    };
+
+    struct WaitRegistration
+    {
+        std::shared_ptr<asio::steady_timer> done_signal;
+        std::shared_ptr<asio::steady_timer> progress_signal;
+        ProgressCursor cursor;
+    };
+
     // ── Cache entry ─────────────────────────────────────────────
     //
     // Single shared signal per entry. When data arrives via
@@ -191,6 +276,7 @@ private:
     {
         std::shared_ptr<std::vector<uint8_t>> wire_data;
         std::shared_ptr<asio::steady_timer> signal;  // non-null while in-flight
+        ProgressState progress;
         bool present = false;
 
         // When the most recent TMGetLedger was sent for this hash.
@@ -198,6 +284,15 @@ private:
         // fetch_timeout * stale_multiplier, a new caller will
         // re-send the request (original sender likely timed out).
         std::chrono::steady_clock::time_point last_fetch_at{};
+    };
+
+    // Ledger header cache: keyed by seq
+    struct HeaderEntry
+    {
+        LedgerHeaderResult result;
+        std::shared_ptr<asio::steady_timer> signal;  // non-null while in-flight
+        ProgressState progress;
+        bool present = false;
     };
 
     /// Ensure a node is in the cache. Fetches from peer on miss.
@@ -251,6 +346,62 @@ private:
     void
     evict_if_needed();
 
+    std::shared_ptr<asio::steady_timer>
+    make_progress_signal();
+
+    static std::string
+    format_progress(ProgressEvent const& event);
+
+    WaitRegistration
+    attach_waiter_locked(Entry& entry);
+
+    WaitRegistration
+    attach_waiter_locked(HeaderEntry& entry);
+
+    void
+    refresh_waiter_locked(Entry& entry, WaitRegistration& wait);
+
+    void
+    refresh_waiter_locked(HeaderEntry& entry, WaitRegistration& wait);
+
+    std::shared_ptr<asio::steady_timer>
+    publish_progress_locked(
+        Entry& entry,
+        ProgressKind kind,
+        uint32_t ledger_seq,
+        uint16_t depth,
+        uint8_t attempt,
+        uint8_t max_attempts,
+        std::string_view peer = {});
+
+    std::shared_ptr<asio::steady_timer>
+    publish_progress_locked(
+        HeaderEntry& entry,
+        ProgressKind kind,
+        uint32_t ledger_seq,
+        uint16_t depth,
+        uint8_t attempt,
+        uint8_t max_attempts,
+        std::string_view peer = {});
+
+    void
+    publish_node_progress(
+        Hash256 const& hash,
+        ProgressKind kind,
+        uint32_t ledger_seq,
+        uint16_t depth,
+        uint8_t attempt,
+        uint8_t max_attempts,
+        std::string_view peer = {});
+
+    void
+    publish_header_progress(
+        uint32_t ledger_seq,
+        ProgressKind kind,
+        uint8_t attempt,
+        uint8_t max_attempts,
+        std::string_view peer = {});
+
     asio::io_context& io_;
     size_t max_entries_;
     int fetch_timeout_secs_;
@@ -259,14 +410,6 @@ private:
 
     mutable std::mutex mutex_;
     std::map<Hash256, Entry> store_;
-
-    // Ledger header cache: keyed by seq
-    struct HeaderEntry
-    {
-        LedgerHeaderResult result;
-        std::shared_ptr<asio::steady_timer> signal;  // non-null while in-flight
-        bool present = false;
-    };
     std::map<uint32_t, HeaderEntry> header_cache_;
 
     // LRU tracking: front = most recently accessed (mutable for const get())

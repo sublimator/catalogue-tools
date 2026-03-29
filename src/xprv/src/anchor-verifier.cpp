@@ -4,6 +4,11 @@
 #include <catl/core/logger.h>
 #include <catl/crypto/sig-verify.h>
 #include <catl/vl-client/vl-client.h>
+#include <catl/xdata/codecs/codecs.h>
+#include <catl/xdata/json-visitor.h>
+#include <catl/xdata/parser-context.h>
+#include <catl/xdata/parser.h>
+#include <catl/xdata/protocol.h>
 
 #include <cstring>
 #include <iomanip>
@@ -199,107 +204,34 @@ done:
 }
 
 //------------------------------------------------------------------------------
-// Manifest signing data — strip both signature fields
+// Manifest signing data — parse → re-serialize signing fields only
 //------------------------------------------------------------------------------
 
 std::vector<uint8_t>
-AnchorVerifier::manifest_signing_data(std::vector<uint8_t> const& raw)
+AnchorVerifier::manifest_signing_data(
+    std::vector<uint8_t> const& raw,
+    catl::xdata::Protocol const& protocol)
 {
-    // Walk the serialized STObject, collecting field positions.
-    // Strip sfSignature (type=7, field=6 → 0x76) and
-    // sfMasterSignature (type=7, field=16 → 0x70 0x10).
-    // Return MAN\0 + remaining bytes.
 
-    struct FieldSpan
-    {
-        size_t start;
-        size_t end;
-        bool is_signature;
-    };
-    std::vector<FieldSpan> fields;
+    // Parse raw manifest bytes → JSON object
+    Slice slice(raw.data(), raw.size());
+    catl::xdata::JsonVisitor visitor(protocol);
+    catl::xdata::ParserContext ctx(slice);
+    catl::xdata::parse_with_visitor(ctx, protocol, visitor);
+    auto json = visitor.get_result().as_object();
 
-    size_t pos = 0;
-    while (pos < raw.size())
-    {
-        size_t field_start = pos;
-        uint8_t byte1 = raw[pos];
-        uint32_t type_code = byte1 >> 4;
-        uint32_t field_code = byte1 & 0x0F;
-        pos++;
+    // Re-serialize with only_signing=true (strips Signature, MasterSignature)
+    auto signing_bytes =
+        catl::xdata::codecs::serialize_object(json, protocol, true);
 
-        if (type_code == 0 && pos < raw.size())
-            type_code = raw[pos++];
-        if (field_code == 0 && pos < raw.size())
-            field_code = raw[pos++];
-
-        size_t field_size = 0;
-        switch (type_code)
-        {
-            case 1:
-                field_size = 2;
-                break;  // UInt16
-            case 2:
-                field_size = 4;
-                break;  // UInt32
-            case 5:
-                field_size = 32;
-                break;  // Hash256
-            case 7:  // Blob (VL-encoded)
-            {
-                if (pos >= raw.size())
-                    goto done;
-                uint8_t vl = raw[pos++];
-                if (vl <= 192)
-                {
-                    field_size = vl;
-                }
-                else if (vl <= 240 && pos < raw.size())
-                {
-                    uint8_t b2 = raw[pos++];
-                    field_size = 193 + ((vl - 193) * 256) + b2;
-                }
-                else if (pos + 1 < raw.size())
-                {
-                    uint8_t b2 = raw[pos++];
-                    uint8_t b3 = raw[pos++];
-                    field_size = 12481 + ((vl - 241) * 65536) + (b2 * 256) + b3;
-                }
-                break;
-            }
-            default:
-                goto done;
-        }
-
-        if (pos + field_size > raw.size())
-            goto done;
-
-        pos += field_size;
-
-        // sfSignature: type=7, field=6
-        // sfMasterSignature: type=7, field=16
-        bool is_sig =
-            (type_code == 7 && (field_code == 6 || field_code == 16));
-        fields.push_back({field_start, pos, is_sig});
-    }
-
-done:
-    // Build MAN\0 + raw bytes without signature fields
+    // Prepend MAN\0 prefix
     std::vector<uint8_t> result;
-    result.reserve(4 + raw.size());
+    result.reserve(4 + signing_bytes.size());
     result.push_back('M');
     result.push_back('A');
     result.push_back('N');
     result.push_back(0x00);
-
-    for (auto const& f : fields)
-    {
-        if (!f.is_signature)
-        {
-            result.insert(
-                result.end(), raw.begin() + f.start, raw.begin() + f.end);
-        }
-    }
-
+    result.insert(result.end(), signing_bytes.begin(), signing_bytes.end());
     return result;
 }
 
@@ -311,6 +243,7 @@ AnchorVerifyResult
 AnchorVerifier::verify(
     boost::json::object const& anchor,
     std::string const& trusted_key,
+    catl::xdata::Protocol const& protocol,
     std::vector<std::string>& narrative)
 {
     AnchorVerifyResult result;
@@ -383,7 +316,7 @@ AnchorVerifier::verify(
 
     // Verify publisher manifest signatures: MAN\0 + serialized fields
     // (without Signature and MasterSignature), signed by both keys.
-    auto signing_data = manifest_signing_data(manifest_bytes);
+    auto signing_data = manifest_signing_data(manifest_bytes, protocol);
 
     // Verify master signature (proves master key authorized this binding)
     if (publisher_manifest.master_signature.empty())
@@ -504,7 +437,7 @@ AnchorVerifier::verify(
         // Verify validator manifest master signature
         if (!manifest.master_signature.empty())
         {
-            auto val_signing_data = manifest_signing_data(m_bytes);
+            auto val_signing_data = manifest_signing_data(m_bytes, protocol);
             if (!catl::crypto::verify_message(
                     manifest.master_public_key,
                     manifest.master_signature,

@@ -1277,8 +1277,9 @@ def test_prove_binary_header_and_network(
     config: TestConfig,
 ) -> None:
     assert proof_bin_response.body.startswith(b"XPRV"), "binary proof missing XPRV magic"
-    assert proof_bin_response.body[4] == 0x02, (
-        f"expected v2 binary header, got version={proof_bin_response.body[4]}"
+    expected_version = int((Path(__file__).parent.parent / "src/xprv/VERSION").read_text().strip())
+    assert proof_bin_response.body[4] == expected_version, (
+        f"expected v{expected_version} binary header, got version={proof_bin_response.body[4]}"
     )
     assert proof_bin_response.body[5] & 0x01 == 0x01, "expected zlib-compressed body"
     assert binary_network_id(proof_bin_response.body) == config.network
@@ -1688,7 +1689,7 @@ def test_verify_bad_binary_reports_failure(server: RunningServer) -> None:
     result = server.request(
         "POST",
         "/verify",
-        body=b"XPRV\x03\x00",
+        body=b"XPRV\xff\x00",  # invalid version
         headers={"Content-Type": "application/octet-stream"},
     )
     assert result.status == 200
