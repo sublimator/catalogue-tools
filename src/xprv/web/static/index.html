@@ -846,7 +846,8 @@ function copyProof() {
 
 // ── Ledger header hashing (SHA512-Half) ───────────────────────
 async function hashHeader(hdr) {
-  // prefix "LWR\0" + seq(4) + drops(8) + 3×hash(32) + parent_close(4) + close(4) + res(1) + flags(1)
+  // prefix "LWR\0" + ledger_index(4) + total_coins(8) + 3×hash(32)
+  //        + parent_close_time(4) + close_time(4) + resolution(1) + flags(1)
   const prefix = new Uint8Array([0x4C, 0x57, 0x52, 0x00]);
   const full = new Uint8Array(4 + 4 + 8 + 32 + 32 + 32 + 4 + 4 + 1 + 1);
   full.set(prefix, 0);
@@ -854,10 +855,10 @@ async function hashHeader(hdr) {
   const dv = new DataView(full.buffer);
   let off = 4;
   dv.setUint32(off, hdr.ledger_index); off += 4;
-  // drops as uint64 (BigInt)
+  // total_coins as uint64
   dv.setBigUint64(off, BigInt(hdr.total_coins)); off += 8;
   // 32-byte hashes
-  for (const field of ['parent_hash', 'tx_hash', 'account_hash']) {
+  for (const field of ['parent_hash', 'transaction_hash', 'account_hash']) {
     const bytes = hexToBytes(hdr[field]);
     full.set(bytes, off); off += 32;
   }
