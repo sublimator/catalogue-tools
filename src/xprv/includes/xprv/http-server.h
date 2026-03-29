@@ -69,11 +69,20 @@ private:
         boost::asio::ip::tcp::socket socket,
         std::shared_ptr<catl::core::RequestContext> req_ctx);
 
+    /// Add X-XPRV metadata header to any response.
+    template <typename Body>
+    void
+    stamp(boost::beast::http::response<Body>& res) const
+    {
+        res.set("X-XPRV", xprv_header_);
+    }
+
     boost::asio::io_context& io_;
     std::shared_ptr<ProofEngine> engine_;
     HttpServerOptions opts_;
     boost::asio::ip::tcp::acceptor acceptor_;
     bool accepting_ = false;
+    std::string xprv_header_;  // pre-built X-XPRV header value
 };
 
 }  // namespace xprv

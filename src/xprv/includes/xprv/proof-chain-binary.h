@@ -4,7 +4,7 @@
 //
 // File layout:
 //   [magic: 4 bytes "XPRV"]
-//   [version: 1 byte, currently 0x03]
+//   [version: 1 byte, currently 0x04]
 //   [flags: 1 byte]
 //     bit 0: zlib compressed body
 //   [network_id: 4 bytes LE]  (added in v2)

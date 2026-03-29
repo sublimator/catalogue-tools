@@ -46,10 +46,10 @@ header_to_json(HeaderData const& h)
     boost::json::object obj;
     obj["type"] = "ledger_header";
     boost::json::object hdr;
-    hdr["seq"] = h.seq;
-    hdr["drops"] = std::to_string(h.drops);
+    hdr["ledger_index"] = h.seq;
+    hdr["total_coins"] = std::to_string(h.drops);
     hdr["parent_hash"] = upper_hex(h.parent_hash);
-    hdr["tx_hash"] = upper_hex(h.tx_hash);
+    hdr["transaction_hash"] = upper_hex(h.tx_hash);
     hdr["account_hash"] = upper_hex(h.account_hash);
     hdr["parent_close_time"] = h.parent_close_time;
     hdr["close_time"] = h.close_time;
@@ -116,6 +116,7 @@ boost::json::object
 to_json(ProofChain const& chain)
 {
     boost::json::object obj;
+    obj["format_version"] = XPRV_FORMAT_VERSION;
     obj["network_id"] = chain.network_id;
     obj["steps"] = steps_to_json(chain);
     return obj;
@@ -180,11 +181,11 @@ header_from_json(boost::json::object const& obj)
 {
     HeaderData h;
     auto const& hdr = obj.at("header").as_object();
-    h.seq = hdr.at("seq").to_number<uint32_t>();
-    h.drops = std::stoull(std::string(hdr.at("drops").as_string()));
+    h.seq = hdr.at("ledger_index").to_number<uint32_t>();
+    h.drops = std::stoull(std::string(hdr.at("total_coins").as_string()));
     h.parent_hash =
         hash_from_hex(std::string(hdr.at("parent_hash").as_string()));
-    h.tx_hash = hash_from_hex(std::string(hdr.at("tx_hash").as_string()));
+    h.tx_hash = hash_from_hex(std::string(hdr.at("transaction_hash").as_string()));
     h.account_hash =
         hash_from_hex(std::string(hdr.at("account_hash").as_string()));
     h.parent_close_time =
@@ -244,10 +245,20 @@ parse_steps_array(boost::json::array const& arr)
 ProofChain
 from_json(boost::json::value const& json)
 {
-    // New format: {"network_id": N, "steps": [...]}
+    // New format: {"format_version": N, "network_id": N, "steps": [...]}
     if (json.is_object())
     {
         auto const& obj = json.as_object();
+
+        if (obj.contains("format_version"))
+        {
+            auto v = obj.at("format_version").to_number<uint32_t>();
+            if (v != XPRV_FORMAT_VERSION)
+                throw std::runtime_error(
+                    "proof JSON: format_version " + std::to_string(v) +
+                    " != expected " + std::to_string(XPRV_FORMAT_VERSION));
+        }
+
         auto chain = parse_steps_array(obj.at("steps").as_array());
         if (obj.contains("network_id"))
         {

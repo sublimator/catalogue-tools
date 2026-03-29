@@ -6,56 +6,281 @@
 <title>xprv.it</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{min-height:100vh;height:100%;overflow:hidden;background:#000;color:#fff;
+:root{
+  --bg:#000;
+  --panel:rgba(10,10,10,.62);
+  --panel-strong:rgba(16,16,16,.82);
+  --line:rgba(255,255,255,.12);
+  --line-strong:rgba(196,255,230,.28);
+  --text:#f2f4f2;
+  --muted:#8a928c;
+  --soft:#5e6761;
+  --accent:#9af0cb;
+  --accent-2:#5ed18c;
+  --danger:#d85d5d;
+  --title-font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  --title-size:clamp(2.9rem,7vw,4.8rem);
+  --title-weight:280;
+  --title-spacing:.18em;
+  --title-indent:.18em;
+  --input-font:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace;
+}
+html,body{min-height:100vh;height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 
 canvas#globe{position:fixed;inset:0;z-index:0;pointer-events:none}
 
 body{display:flex;flex-direction:column;align-items:center;justify-content:center;
-gap:2rem;position:relative;z-index:1}
-h1{font-size:4rem;font-weight:300;letter-spacing:.15em;text-shadow:0 0 40px rgba(255,255,255,0.1)}
-.search{width:min(600px,90vw);position:relative}
+gap:2rem;position:relative;z-index:1;padding:2rem 1rem}
+.hero{
+  width:min(760px,92vw);
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:.8rem;
+  position:relative;
+  z-index:2;
+  animation:hero-in .7s ease-out both;
+}
+.hero > .title-wrap{order:1}
+.hero > .search-shell{order:2}
+.hero > #details{order:3}
+.hero > .status{order:4}
+.title-wrap{
+  width:100%;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+h1{
+  font-family:var(--title-font);
+  font-size:var(--title-size);
+  font-weight:var(--title-weight);
+  letter-spacing:var(--title-spacing);
+  text-indent:var(--title-indent);
+  text-shadow:0 0 40px rgba(255,255,255,0.08);
+}
+.search-shell{
+  width:100%;
+  max-width:660px;
+  padding:.82rem;
+  border:1px solid rgba(255,255,255,.11);
+  border-radius:26px;
+  background:linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01)), var(--panel);
+  backdrop-filter:blur(10px);
+  box-shadow:0 28px 90px rgba(0,0,0,.48), inset 0 1px 0 rgba(255,255,255,.04);
+  transition:border-color .25s, box-shadow .25s, transform .25s;
+}
+.search-shell:focus-within{
+  border-color:var(--line-strong);
+  box-shadow:0 28px 96px rgba(0,0,0,.56), 0 0 0 1px rgba(154,240,203,.1), 0 0 36px rgba(94,209,140,.08);
+  transform:translateY(-1px);
+}
+.search{width:100%;position:relative}
 .clear,.paste{position:absolute;right:0;top:0;bottom:0;
-color:#666;cursor:pointer;background:none;border:none;border-left:1px solid #333;display:none}
+color:#869089;cursor:pointer;background:none;border:none;border-left:1px solid rgba(255,255,255,.08);display:none}
 .clear{width:2.5rem;font-size:1.4rem}
-.paste{width:3.5rem;font-size:.75rem;font-family:monospace;letter-spacing:.05em}
-.clear:hover,.paste:hover{color:#fff;background:rgba(255,255,255,0.05)}
+.paste{
+  width:4.1rem;
+  font-size:.72rem;
+  font-family:monospace;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:#b5c9bb;
+  background:linear-gradient(180deg, rgba(154,240,203,.08), rgba(94,209,140,.02));
+}
+.clear:hover,.paste:hover{color:#fff;background:rgba(255,255,255,0.06)}
 input:not(:placeholder-shown) ~ .clear{display:block}
 input:placeholder-shown ~ .paste{display:block}
-input{width:100%;padding:.8rem 2.5rem .8rem 1rem;font-size:1rem;font-family:monospace;
-background:rgba(17,17,17,0.85);border:1px solid #333;color:#fff;border-radius:6px;
-outline:none;transition:border-color .2s;backdrop-filter:blur(4px)}
-input:focus{border-color:#555}
-input.valid{border-color:#2a2}
-input.invalid{border-color:#a22}
-.status{font-size:.85rem;color:#666;min-height:1.2em;text-align:center;
-padding:.3rem .8rem;border-radius:4px}
-.status:not(:empty){background:rgba(0,0,0,0.6);backdrop-filter:blur(4px)}
-footer{position:fixed;bottom:1rem;font-size:.75rem;color:#444;text-align:center;z-index:1}
-footer a{color:#555;text-decoration:none}
-footer a:hover{color:#7d7;text-decoration:underline}
-.status.error{color:#e44}
-.status.working{color:#fa0}
-.status.done{color:#2a2}
+input{
+  width:100%;
+  padding:1rem 4.2rem 1rem 1rem;
+  font-size:1rem;
+  font-family:var(--input-font);
+  background:var(--panel-strong);
+  border:1px solid rgba(255,255,255,.1);
+  color:var(--text);
+  border-radius:10px;
+  outline:none;
+  transition:border-color .2s, box-shadow .2s, background .2s;
+  backdrop-filter:blur(4px);
+}
+input::placeholder{color:#58615c}
+input:focus{
+  border-color:rgba(154,240,203,.38);
+  box-shadow:0 0 0 1px rgba(154,240,203,.12), 0 0 28px rgba(154,240,203,.08);
+  background:rgba(20,20,20,.92);
+}
+input.valid{border-color:rgba(94,209,140,.62);box-shadow:0 0 0 1px rgba(94,209,140,.15)}
+input.invalid{border-color:rgba(216,93,93,.65);box-shadow:0 0 0 1px rgba(216,93,93,.12)}
+.status{
+  font-size:.84rem;
+  color:#6d756f;
+  min-height:1.35em;
+  text-align:center;
+  padding:.35rem .95rem;
+  border-radius:999px;
+  max-width:min(680px,92vw);
+}
+.status:not(:empty){
+  background:rgba(0,0,0,.55);
+  border:1px solid rgba(255,255,255,.06);
+  backdrop-filter:blur(4px);
+}
+footer{
+  position:fixed;
+  bottom:1.05rem;
+  font-size:.74rem;
+  color:#4e5550;
+  text-align:center;
+  z-index:2;
+  animation:hero-in .9s ease-out both;
+}
+footer a{color:#838d86;text-decoration:none}
+footer a:hover{color:#b9efcf;text-decoration:none}
+.status.error{color:#f07b7b}
+.status.working{color:#e3bb62}
+.status.done{color:#8fe0ac}
 
-#details{margin-top:.5rem;opacity:0;transition:opacity .4s;
-font-size:.8rem;color:#999;font-family:monospace;
+body.variant-stack{}
+body.variant-below{
+  --title-font:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace;
+  --title-size:clamp(2rem,4.8vw,3.1rem);
+  --title-weight:400;
+  --title-spacing:.22em;
+  --title-indent:.22em;
+}
+body.variant-below .hero{gap:.55rem}
+body.variant-below .title-wrap{order:2}
+body.variant-below .search-shell{order:1}
+body.variant-below h1{opacity:.9}
+
+body.variant-mono{
+  --title-font:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace;
+  --title-size:clamp(2.65rem,6.1vw,4.15rem);
+  --title-weight:400;
+  --title-spacing:.14em;
+  --title-indent:.14em;
+}
+body.variant-mono .hero{gap:.65rem}
+body.variant-mono .search-shell{max-width:700px}
+body.variant-mono input::placeholder{letter-spacing:.04em}
+
+body.variant-side{
+  --title-font:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+  --title-size:clamp(2.7rem,5.8vw,4.6rem);
+  --title-weight:400;
+  --title-spacing:.06em;
+  --title-indent:.06em;
+}
+body.variant-side .hero{
+  width:min(980px,94vw);
+  flex-direction:row;
+  flex-wrap:wrap;
+  justify-content:center;
+  align-items:flex-end;
+  gap:1.25rem 1.5rem;
+}
+body.variant-side .title-wrap{
+  width:auto;
+  flex:0 0 auto;
+  justify-content:flex-end;
+}
+body.variant-side .search-shell{
+  flex:1 1 520px;
+  max-width:none;
+}
+body.variant-side #details,
+body.variant-side .status{
+  width:100%;
+}
+
+#details{margin-top:.1rem;opacity:0;transform:translateY(4px);transition:opacity .35s,transform .35s;
+font-size:.8rem;color:#9ca39d;font-family:monospace;
 display:flex;align-items:center;gap:0;flex-wrap:wrap;justify-content:center;
-background:rgba(0,0,0,0.7);border-radius:6px;padding:.4rem .8rem;
-backdrop-filter:blur(6px);max-width:min(600px,90vw)}
-#details.show{opacity:1}
-#details .sep{color:#333;margin:0 .6rem}
+background:rgba(0,0,0,0.56);border:1px solid rgba(255,255,255,.06);border-radius:999px;padding:.45rem .9rem;
+backdrop-filter:blur(6px);max-width:min(680px,92vw)}
+#details.show{opacity:1;transform:translateY(0)}
+#details .sep{color:#38413c;margin:0 .6rem}
 @media(max-width:500px){
   #details{flex-direction:column;gap:.2rem;padding:.5rem .8rem}
   #details .sep{display:none}
-  h1{font-size:2.5rem}
+  .hero{gap:.7rem}
+  .search-shell{padding:.62rem;border-radius:20px}
+  input{padding:.95rem 4.1rem .95rem .95rem;font-size:.96rem}
+  #variant-dock{
+    right:.75rem;
+    bottom:.8rem;
+    padding:.3rem;
+    gap:.28rem;
+  }
+  #variant-dock button{
+    padding:.42rem .6rem;
+    font-size:.6rem;
+  }
 }
-#details a{color:#5b5;text-decoration:none;cursor:pointer}
-#details a:hover{text-decoration:underline;color:#7d7}
-#details .steps{cursor:pointer;color:#8b8}
-#details .steps:hover{color:#afa}
+@media(max-width:900px){
+  body.variant-side .hero{
+    width:min(760px,92vw);
+    flex-direction:column;
+    align-items:center;
+    gap:.8rem;
+  }
+  body.variant-side .title-wrap,
+  body.variant-side .search-shell{
+    width:100%;
+    flex:auto;
+  }
+}
+#details a{color:#8fd6a9;text-decoration:none;cursor:pointer}
+#details a:hover{text-decoration:none;color:#c2f4d2}
+#details .steps{cursor:pointer;color:#a8e2bd}
+#details .steps:hover{color:#d0f8dc}
 #details .icon{cursor:pointer;opacity:.5;margin-left:.3rem;font-size:.9em}
 #details .icon:hover{opacity:1}
+
+#variant-dock{
+  position:fixed;
+  right:1rem;
+  bottom:1rem;
+  z-index:7;
+  display:none;
+  gap:.35rem;
+  padding:.35rem;
+  border:1px solid rgba(255,255,255,.09);
+  border-radius:999px;
+  background:rgba(0,0,0,.62);
+  backdrop-filter:blur(10px);
+  box-shadow:0 18px 50px rgba(0,0,0,.4);
+}
+#variant-dock button{
+  appearance:none;
+  border:1px solid rgba(255,255,255,.08);
+  background:rgba(255,255,255,.02);
+  color:#7f8982;
+  font:600 .64rem/1 ui-monospace,SFMono-Regular,Menlo,Monaco,monospace;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  border-radius:999px;
+  padding:.48rem .7rem;
+  cursor:pointer;
+  transition:background .2s,color .2s,border-color .2s,transform .2s;
+}
+#variant-dock button:hover{
+  color:#dce5de;
+  border-color:rgba(255,255,255,.18);
+  background:rgba(255,255,255,.06);
+  transform:translateY(-1px);
+}
+#variant-dock button.active{
+  color:#d9f2e3;
+  border-color:rgba(154,240,203,.22);
+  background:rgba(154,240,203,.1);
+}
+#variant-dock button.font-cycle{
+  min-width:8rem;
+  text-align:center;
+}
 
 #modal{display:none;position:fixed;inset:0;z-index:10;
 background:rgba(0,0,0,0.85);backdrop-filter:blur(8px);
@@ -107,6 +332,10 @@ animation:sk-pulse 1.5s ease-in-out infinite}
 .step-skeleton .sk-bar:nth-child(2){width:70%}
 .step-skeleton .sk-bar:nth-child(3){width:50%}
 @keyframes sk-pulse{0%,100%{opacity:.3}50%{opacity:1}}
+@keyframes hero-in{
+  from{opacity:0;transform:translateY(14px)}
+  to{opacity:1;transform:translateY(0)}
+}
 
 .step-block{position:relative}
 .step-time{position:absolute;top:.4rem;right:.4rem;font-size:.65rem;color:#555;font-family:monospace}
@@ -115,42 +344,214 @@ animation:sk-pulse 1.5s ease-in-out infinite}
 <body>
 <svg id="corner-lines" style="position:fixed;inset:0;width:100%;height:100%;z-index:1;pointer-events:none">
 <defs>
-<linearGradient id="tl" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#aaa" stop-opacity=".4"/><stop offset="100%" stop-color="#aaa" stop-opacity="0"/></linearGradient>
-<linearGradient id="tr" x1="1" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#aaa" stop-opacity=".4"/><stop offset="100%" stop-color="#aaa" stop-opacity="0"/></linearGradient>
-<linearGradient id="bl" x1="0" y1="1" x2="1" y2="0"><stop offset="0%" stop-color="#aaa" stop-opacity=".4"/><stop offset="100%" stop-color="#aaa" stop-opacity="0"/></linearGradient>
-<linearGradient id="br" x1="1" y1="1" x2="0" y2="0"><stop offset="0%" stop-color="#aaa" stop-opacity=".4"/><stop offset="100%" stop-color="#aaa" stop-opacity="0"/></linearGradient>
+<linearGradient id="tl" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#c8ffe7" stop-opacity=".7"/><stop offset="100%" stop-color="#c8ffe7" stop-opacity="0"/></linearGradient>
+<linearGradient id="tr" x1="1" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#c8ffe7" stop-opacity=".52"/><stop offset="100%" stop-color="#c8ffe7" stop-opacity="0"/></linearGradient>
+<linearGradient id="bl" x1="0" y1="1" x2="1" y2="0"><stop offset="0%" stop-color="#c8ffe7" stop-opacity=".52"/><stop offset="100%" stop-color="#c8ffe7" stop-opacity="0"/></linearGradient>
+<linearGradient id="br" x1="1" y1="1" x2="0" y2="0"><stop offset="0%" stop-color="#c8ffe7" stop-opacity=".7"/><stop offset="100%" stop-color="#c8ffe7" stop-opacity="0"/></linearGradient>
 <filter id="glo"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
 </defs>
-<line x1="0" y1="0" x2="12%" y2="12%" stroke="url(#tl)" stroke-width="2.5" filter="url(#glo)"/>
-<line x1="100%" y1="0" x2="91%" y2="9%" stroke="url(#tr)" stroke-width="2.5" filter="url(#glo)" display="none"/>
-<line x1="0" y1="100%" x2="12%" y2="88%" stroke="url(#bl)" stroke-width="2.5" filter="url(#glo)"/>
-<line x1="100%" y1="100%" x2="88%" y2="88%" stroke="url(#br)" stroke-width="2.5" filter="url(#glo)"/>
+<line x1="0" y1="0" x2="14%" y2="14%" stroke="url(#tl)" stroke-width="2.5" filter="url(#glo)"/>
+<line x1="100%" y1="0" x2="89%" y2="11%" stroke="url(#tr)" stroke-width="2.5" filter="url(#glo)" display="none"/>
+<line x1="0" y1="100%" x2="11%" y2="89%" stroke="url(#bl)" stroke-width="2.5" filter="url(#glo)"/>
+<line x1="100%" y1="100%" x2="86%" y2="86%" stroke="url(#br)" stroke-width="2.5" filter="url(#glo)"/>
 </svg>
-<a href="https://github.com/sublimator/catalogue-tools/blob/main/src/xprv/xls/spec-draft.md" target="_blank" rel="noopener" style="position:fixed;top:1rem;right:1rem;z-index:5;opacity:.25;transition:opacity .2s" onmouseover="this.style.opacity='.6'" onmouseout="this.style.opacity='.25'"><svg width="28" height="28" viewBox="0 0 16 16" fill="#fff"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
+<a href="https://github.com/sublimator/catalogue-tools/blob/main/src/xprv/xls/spec-draft.md" target="_blank" rel="noopener" style="position:fixed;top:1rem;right:1rem;z-index:5;opacity:.28;transition:opacity .2s,transform .2s" onmouseover="this.style.opacity='.72';this.style.transform='translateY(-1px)'" onmouseout="this.style.opacity='.28';this.style.transform='translateY(0)'"><svg width="28" height="28" viewBox="0 0 16 16" fill="#fff"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
 <canvas id="globe"></canvas>
-<h1>xprv.it</h1>
-<div class="search">
-  <input type="text" id="tx" placeholder="transaction hash" spellcheck="false" autocomplete="off">
-  <button class="clear" id="clear" onclick="tx.value='';tx.dispatchEvent(new Event('input'));tx.focus()">&times;</button>
-  <button class="paste" id="paste" onclick="doPaste()">paste</button>
-</div>
-<div id="details"></div>
-<div class="status" id="status"></div>
+<main class="hero">
+  <div class="title-wrap"><h1>xprv.it</h1></div>
+  <div class="search-shell">
+    <div class="search">
+      <input type="text" id="tx" placeholder="enter an XRPL transaction hash" spellcheck="false" autocomplete="off">
+      <button class="clear" id="clear" onclick="tx.value='';tx.dispatchEvent(new Event('input'));tx.focus()">&times;</button>
+      <button class="paste" id="paste" onclick="doPaste()">paste</button>
+    </div>
+  </div>
+  <div id="details"></div>
+  <div class="status" id="status"></div>
+</main>
 <div id="modal"><div id="modal-inner"><button id="modal-close">&times;</button><div id="modal-header"></div><div id="modal-body"></div><div id="modal-footer"></div></div></div>
-<footer id="footer"><a href="/verify-xprv.py">verify-xprv.py</a> — standalone proof verifier</footer>
+<footer id="footer"><a href="/verify-xprv.py">verify-xprv.py</a> · standalone verifier script</footer>
+<div id="variant-dock" aria-label="layout variants">
+  <button type="button" data-variant="stack">stack</button>
+  <button type="button" data-variant="below">below</button>
+  <button type="button" data-variant="mono">mono</button>
+  <button type="button" data-variant="side">side</button>
+  <button type="button" id="font-cycle" class="font-cycle">font:sans</button>
+</div>
 <script>
 const tx = document.getElementById('tx');
 const statusEl = document.getElementById('status');
 const details = document.getElementById('details');
 const canvas = document.getElementById('globe');
 const ctx = canvas.getContext('2d');
+const variantDock = document.getElementById('variant-dock');
+const fontCycleBtn = document.getElementById('font-cycle');
 const HEX64 = /^[0-9a-fA-F]{64}$/;
+const HEX_ONLY = /^[0-9a-fA-F]*$/;
 let controller = null;
 let mouseX = 0.5, mouseY = 0.5;
 
 // ── Globe JSON background ─────────────────────────────────────
 let rotation = 0;
 let charGrid = []; // [{ch, isKey}] per line
+
+const FONT_PRESETS = [
+  {
+    id: 'sans',
+    label: 'sans',
+    titleFont: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',
+    titleSize: 'clamp(2.9rem,7vw,4.8rem)',
+    titleWeight: '280',
+    titleSpacing: '.18em',
+    titleIndent: '.18em',
+    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
+  },
+  {
+    id: 'grotesk',
+    label: 'grotesk',
+    titleFont: '"Avenir Next","Helvetica Neue",Helvetica,Arial,sans-serif',
+    titleSize: 'clamp(2.8rem,6.8vw,4.6rem)',
+    titleWeight: '300',
+    titleSpacing: '.12em',
+    titleIndent: '.12em',
+    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
+  },
+  {
+    id: 'round',
+    label: 'round',
+    titleFont: '"SF Pro Rounded","Avenir Next Rounded","Arial Rounded MT Bold","Trebuchet MS",sans-serif',
+    titleSize: 'clamp(2.85rem,6.9vw,4.75rem)',
+    titleWeight: '400',
+    titleSpacing: '.08em',
+    titleIndent: '.08em',
+    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
+  },
+  {
+    id: 'human',
+    label: 'human',
+    titleFont: 'Optima,"Segoe UI",Candara,sans-serif',
+    titleSize: 'clamp(2.95rem,6.9vw,4.9rem)',
+    titleWeight: '400',
+    titleSpacing: '.11em',
+    titleIndent: '.11em',
+    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
+  },
+  {
+    id: 'mono',
+    label: 'mono',
+    titleFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace',
+    titleSize: 'clamp(2.6rem,6vw,4.1rem)',
+    titleWeight: '400',
+    titleSpacing: '.14em',
+    titleIndent: '.14em',
+    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
+  },
+  {
+    id: 'term',
+    label: 'term',
+    titleFont: '"Andale Mono","Lucida Console","Courier New",monospace',
+    titleSize: 'clamp(2.5rem,5.8vw,3.95rem)',
+    titleWeight: '400',
+    titleSpacing: '.1em',
+    titleIndent: '.1em',
+    inputFont: '"Andale Mono","Lucida Console","Courier New",monospace'
+  },
+  {
+    id: 'serif',
+    label: 'serif',
+    titleFont: '"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif',
+    titleSize: 'clamp(3rem,6.7vw,5rem)',
+    titleWeight: '400',
+    titleSpacing: '.05em',
+    titleIndent: '.05em',
+    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
+  },
+  {
+    id: 'book',
+    label: 'book',
+    titleFont: '"Baskerville","Times New Roman",serif',
+    titleSize: 'clamp(3.05rem,7vw,5.05rem)',
+    titleWeight: '400',
+    titleSpacing: '.07em',
+    titleIndent: '.07em',
+    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
+  },
+  {
+    id: 'didot',
+    label: 'didot',
+    titleFont: 'Didot,"Bodoni 72","Times New Roman",serif',
+    titleSize: 'clamp(3.2rem,7.4vw,5.4rem)',
+    titleWeight: '400',
+    titleSpacing: '.03em',
+    titleIndent: '.03em',
+    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
+  },
+  {
+    id: 'narrow',
+    label: 'narrow',
+    titleFont: '"Arial Narrow","Aptos Narrow","Helvetica Neue",Arial,sans-serif',
+    titleSize: 'clamp(3.05rem,7vw,5.05rem)',
+    titleWeight: '300',
+    titleSpacing: '.14em',
+    titleIndent: '.14em',
+    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
+  },
+  {
+    id: 'wide',
+    label: 'wide',
+    titleFont: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',
+    titleSize: 'clamp(2.85rem,6.9vw,4.7rem)',
+    titleWeight: '260',
+    titleSpacing: '.28em',
+    titleIndent: '.28em',
+    inputFont: 'ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono",monospace'
+  }
+];
+let fontPresetIndex = 0;
+
+function applyFontPreset(id) {
+  const index = FONT_PRESETS.findIndex(p => p.id === id);
+  const preset = FONT_PRESETS[index >= 0 ? index : 0];
+  fontPresetIndex = index >= 0 ? index : 0;
+  document.body.style.setProperty('--title-font', preset.titleFont);
+  document.body.style.setProperty('--title-size', preset.titleSize);
+  document.body.style.setProperty('--title-weight', preset.titleWeight);
+  document.body.style.setProperty('--title-spacing', preset.titleSpacing);
+  document.body.style.setProperty('--title-indent', preset.titleIndent);
+  document.body.style.setProperty('--input-font', preset.inputFont);
+  fontCycleBtn.textContent = `font:${preset.label}`;
+  try { localStorage.setItem('xprv-font-preset', preset.id); } catch (e) {}
+}
+
+function applyVariant(name) {
+  const variants = ['stack', 'below', 'mono', 'side'];
+  const chosen = variants.includes(name) ? name : 'stack';
+  document.body.classList.remove(
+    'variant-stack',
+    'variant-below',
+    'variant-mono',
+    'variant-side'
+  );
+  document.body.classList.add(`variant-${chosen}`);
+  variantDock.querySelectorAll('button').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.variant === chosen);
+  });
+  try { localStorage.setItem('xprv-landing-variant', chosen); } catch (e) {}
+}
+
+variantDock.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-variant]');
+  if (!btn) return;
+  applyVariant(btn.dataset.variant);
+});
+
+fontCycleBtn.addEventListener('click', () => {
+  const next = FONT_PRESETS[(fontPresetIndex + 1) % FONT_PRESETS.length];
+  applyFontPreset(next.id);
+});
+
+applyVariant('stack');
+applyFontPreset('mono');
 
 function resize() {
   canvas.width = window.innerWidth;
@@ -315,15 +716,30 @@ drawGlobe();
 
 // ── Proof logic ───────────────────────────────────────────────
 
+function normalizeTxCandidate(raw, { extract = false } = {}) {
+  const compact = raw.trim().replace(/\s+/g, '').replace(/^0x/i, '');
+  if (!extract) return compact;
+  const match = compact.match(/[0-9a-fA-F]{64}/);
+  return match ? match[0] : compact;
+}
+
 async function doPaste() {
   try {
-    const clip = (await navigator.clipboard.readText()).trim();
+    const clip = await navigator.clipboard.readText();
     if (clip) {
-      tx.value = clip;
+      tx.value = normalizeTxCandidate(clip, { extract: true });
       tx.dispatchEvent(new Event('input'));
     }
   } catch(e) {}
 }
+
+tx.addEventListener('paste', (e) => {
+  const clip = e.clipboardData?.getData('text');
+  if (!clip) return;
+  e.preventDefault();
+  tx.value = normalizeTxCandidate(clip, { extract: true });
+  tx.dispatchEvent(new Event('input'));
+});
 
 tx.addEventListener('input', () => {
   const v = tx.value.trim();
@@ -337,15 +753,23 @@ tx.addEventListener('input', () => {
     closeModal();
     return;
   }
-  if (!HEX64.test(v)) {
-    if (v.length >= 1) {
-      tx.classList.add('invalid');
-      statusEl.textContent = v.length < 64
-        ? `${v.length}/64 characters`
-        : 'must be 64 hex characters';
-    }
+  if (!HEX_ONLY.test(v)) {
+    tx.classList.add('invalid');
+    statusEl.classList.add('error');
+    statusEl.textContent = 'hex only: 0-9, a-f';
     return;
   }
+  if (v.length < 64) {
+    statusEl.textContent = `${v.length}/64 characters`;
+    return;
+  }
+  if (v.length > 64) {
+    tx.classList.add('invalid');
+    statusEl.classList.add('error');
+    statusEl.textContent = 'too long for transaction hash';
+    return;
+  }
+  if (!HEX64.test(v)) return;
 
   tx.classList.add('valid');
   prove(v);
@@ -365,11 +789,20 @@ async function fetchServerInfo() {
   if (serverInfo.run_id) return;
   try {
     const r = await fetch('/health');
-    const j = await r.json();
-    if (j.run_id) serverInfo.run_id = j.run_id;
-    if (j.build_id) serverInfo.build_id = j.build_id;
+    const xprv = new URLSearchParams(r.headers.get('X-XPRV') || '');
+    serverInfo.format_version = xprv.get('format_version') || '';
+    serverInfo.build_id = xprv.get('build_id') || '';
+    serverInfo.run_id = xprv.get('run_id') || '';
+    // Update footer verify link with version
+    if (serverInfo.format_version) {
+      document.querySelectorAll('a[href="/verify-xprv.py"]').forEach(a => {
+        a.href = '/verify-xprv.py?v=' + serverInfo.format_version;
+      });
+    }
   } catch(e) {}
 }
+// Fetch server info on page load (for footer link versioning)
+fetchServerInfo();
 
 function idBadges(rid) {
   const items = [];

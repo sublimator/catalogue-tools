@@ -37,6 +37,9 @@ using tcp = asio::ip::tcp;
 
 static LogPartition log_("http", LogLevel::INFO);
 
+// Process-wide X-XPRV header value, set once by HttpServer constructor.
+static std::string g_xprv_header;
+
 static std::string
 generate_request_id()
 {
@@ -95,10 +98,103 @@ json_response(
         static_cast<http::status>(status), version};
     res.set(http::field::content_type, "application/json");
     res.set(http::field::server, "xprv");
+    if (!g_xprv_header.empty())
+        res.set("X-XPRV", g_xprv_header);
     res.keep_alive(keep_alive);
     res.body() = boost::json::serialize(body);
     res.prepare_payload();
     return res;
+}
+
+static std::string_view
+mime_for_extension(std::string_view ext)
+{
+    if (ext == ".html") return "text/html; charset=utf-8";
+    if (ext == ".js")   return "application/javascript; charset=utf-8";
+    if (ext == ".css")  return "text/css; charset=utf-8";
+    if (ext == ".svg")  return "image/svg+xml";
+    if (ext == ".json") return "application/json";
+    if (ext == ".png")  return "image/png";
+    if (ext == ".ico")  return "image/x-icon";
+    if (ext == ".py")   return "text/x-python; charset=utf-8";
+    return "application/octet-stream";
+}
+
+/// Map a URL path to an embedded web asset name.
+/// "/" → "index", "/foo.js" → "foo", "/verify-xprv.py" → "verify_xprv"
+static std::string
+asset_name_for_path(std::string_view path)
+{
+    // Strip leading /
+    if (!path.empty() && path[0] == '/')
+        path = path.substr(1);
+    if (path.empty())
+        return "index";
+
+    // Extract stem: "foo.js" → "foo", "verify-xprv.py" → "verify-xprv"
+    auto dot = path.rfind('.');
+    auto stem = (dot != std::string_view::npos) ? path.substr(0, dot) : path;
+
+    // Normalize: replace - and . with _
+    std::string name(stem);
+    for (auto& c : name)
+    {
+        if (c == '-' || c == '.')
+            c = '_';
+    }
+    return name;
+}
+
+/// Try to serve a static file: dev mode (disk) first, then embedded.
+/// Returns true if served, false if not found.
+static bool
+try_serve_static(
+    std::string_view path,
+    std::string& out_body,
+    std::string& out_content_type)
+{
+    // Sanitize: reject paths with ".." or starting with "/"
+    if (path.find("..") != std::string_view::npos)
+        return false;
+
+    // Strip leading /
+    auto relative = path;
+    if (!relative.empty() && relative[0] == '/')
+        relative = relative.substr(1);
+    if (relative.empty())
+        relative = "index.html";
+
+    // Dev mode: try disk first
+    auto dev_path = std::filesystem::path("src/xprv/web/static") / relative;
+    if (std::filesystem::exists(dev_path))
+    {
+        std::ifstream f(dev_path);
+        out_body.assign(
+            std::istreambuf_iterator<char>(f),
+            std::istreambuf_iterator<char>());
+        auto ext = dev_path.extension().string();
+        out_content_type = std::string(mime_for_extension(ext));
+        return true;
+    }
+
+    // Embedded: look up by normalized name
+    auto name = asset_name_for_path(path);
+
+    // Check known embedded assets
+    if (name == "index")
+    {
+        out_body = std::string(web::index);
+        out_content_type = "text/html; charset=utf-8";
+        return true;
+    }
+    if (name == "verify_xprv")
+    {
+        out_body = std::string(web::verify_xprv);
+        out_content_type = "text/x-python; charset=utf-8";
+        return true;
+    }
+
+    return false;
 }
 
 static http::response<http::string_body>
@@ -121,6 +217,11 @@ HttpServer::HttpServer(
     HttpServerOptions opts)
     : io_(io), engine_(std::move(engine)), opts_(std::move(opts)), acceptor_(io)
 {
+    // Build X-XPRV header value once (stable for this process lifetime)
+    xprv_header_ = "format_version=" + std::to_string(XPRV_FORMAT_VERSION) +
+        "&build_id=" + (opts_.build_id.empty() ? "dev" : opts_.build_id) +
+        "&run_id=" + Logger::get_run_id();
+    g_xprv_header = xprv_header_;
 }
 
 std::shared_ptr<HttpServer>
@@ -287,55 +388,7 @@ HttpServer::handle_session(
         std::optional<http::response<http::string_body>> caught_error;
         try
         {
-            if (path == "/" && req.method() == http::verb::get)
-            {
-                // Dev mode: serve from disk if available (live reload)
-                std::string html;
-                const auto dev_path =
-                    std::filesystem::path("src/xprv/web/index.html");
-                if (std::filesystem::exists(dev_path))
-                {
-                    std::ifstream f(dev_path);
-                    html.assign(
-                        std::istreambuf_iterator<char>(f),
-                        std::istreambuf_iterator<char>());
-                }
-                else
-                {
-                    html = std::string(web::index);
-                }
-
-                http::response<http::string_body> res{
-                    http::status::ok, version};
-                res.set(http::field::content_type, "text/html; charset=utf-8");
-                res.set(http::field::server, "xprv");
-                res.keep_alive(keep_alive);
-                res.body() = std::move(html);
-                res.prepare_payload();
-                stream.expires_after(opts_.write_timeout);
-                co_await http::async_write(
-                    stream,
-                    res,
-                    asio::redirect_error(asio::use_awaitable, ec));
-            }
-            else if (path == "/verify-xprv.py" && req.method() == http::verb::get)
-            {
-                http::response<http::string_body> res{
-                    http::status::ok, version};
-                res.set(http::field::content_type, "text/x-python; charset=utf-8");
-                res.set(http::field::content_disposition,
-                    "attachment; filename=\"verify-xprv.py\"");
-                res.set(http::field::server, "xprv");
-                res.keep_alive(keep_alive);
-                res.body() = std::string(web::verify_xprv);
-                res.prepare_payload();
-                stream.expires_after(opts_.write_timeout);
-                co_await http::async_write(
-                    stream,
-                    res,
-                    asio::redirect_error(asio::use_awaitable, ec));
-            }
-            else if (path == "/health" && req.method() == http::verb::get)
+            if (path == "/health" && req.method() == http::verb::get)
             {
                 auto status = co_await engine_->co_health();
                 auto cs = engine_->cache_stats();
@@ -494,9 +547,7 @@ HttpServer::handle_session(
                             "Cache-Control: no-cache\r\n"
                             "Connection: close\r\n"
                             "Server: xprv\r\n"
-                            "X-Run-Id: " + Logger::get_run_id() + "\r\n" +
-                            (opts_.build_id.empty() ? "" :
-                                "X-Build-Id: " + opts_.build_id + "\r\n") +
+                            "X-XPRV: " + g_xprv_header + "\r\n"
                             "\r\n";
                         co_await asio::async_write(
                             stream,
@@ -767,11 +818,37 @@ HttpServer::handle_session(
             }
             else
             {
-                stream.expires_after(opts_.write_timeout);
-                co_await http::async_write(
-                    stream,
-                    error_response(404, "not found", version, keep_alive),
-                    asio::redirect_error(asio::use_awaitable, ec));
+                // Try static file (dev disk → embedded)
+                std::string static_body, content_type;
+                if (req.method() == http::verb::get &&
+                    try_serve_static(path, static_body, content_type))
+                {
+                    http::response<http::string_body> res{
+                        http::status::ok, version};
+                    res.set(http::field::content_type, content_type);
+                    res.set(http::field::server, "xprv");
+                    if (!g_xprv_header.empty())
+                        res.set("X-XPRV", g_xprv_header);
+                    if (path == "/verify-xprv.py")
+                        res.set(http::field::content_disposition,
+                            "attachment; filename=\"verify-xprv.py\"");
+                    res.keep_alive(keep_alive);
+                    res.body() = std::move(static_body);
+                    res.prepare_payload();
+                    stream.expires_after(opts_.write_timeout);
+                    co_await http::async_write(
+                        stream,
+                        res,
+                        asio::redirect_error(asio::use_awaitable, ec));
+                }
+                else
+                {
+                    stream.expires_after(opts_.write_timeout);
+                    co_await http::async_write(
+                        stream,
+                        error_response(404, "not found", version, keep_alive),
+                        asio::redirect_error(asio::use_awaitable, ec));
+                }
             }
         }
         catch (catl::rpc::RpcTxNotFound const& e)

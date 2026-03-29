@@ -13,7 +13,7 @@ Verifies the full cryptographic chain:
   target header → tx tree
 
 Supports both formats:
-  - JSON (.json, .xprv.json): {"network_id": N, "steps": [...]}
+  - JSON (.json, .xprv.json): {"format_version": N, "network_id": N, "steps": [...]}
   - Binary (.bin, .xprv.bin): XPRV header + TLV body (optionally zlib)
 
 Usage:
@@ -55,7 +55,11 @@ _amt._calculate_precision = (
 # ─── JSON proof shape ────────────────────────────────────────────────
 #
 # A proof JSON has the structure:
-#   { "network_id": 0, "steps": [AnchorStep, HeaderStep, MapProofStep, ...] }
+#   {
+#     "format_version": 3,
+#     "network_id": 0,
+#     "steps": [AnchorStep, HeaderStep, MapProofStep, ...]
+#   }
 #
 # Steps are discriminated by "type" field.
 
@@ -92,10 +96,10 @@ class AnchorStep(TypedDict, total=False):
 class LedgerHeader(TypedDict):
     """Ledger header fields (nested under HeaderStep.header)."""
 
-    seq: int
-    drops: str  # string representation of uint64
+    ledger_index: int
+    total_coins: str  # string representation of uint64
     parent_hash: str  # 64-char hex
-    tx_hash: str  # 64-char hex
+    transaction_hash: str  # 64-char hex
     account_hash: str  # 64-char hex
     parent_close_time: int
     close_time: int
@@ -198,10 +202,10 @@ def sha512half(data: bytes) -> Hash256:
 def hash_header(hdr: dict[str, Any]) -> Hash256:
     """Hash a ledger header: SHA512Half(LWR\\0 + canonical fields)."""
     buf = PREFIX_HEADER
-    buf += struct.pack(">I", hdr["seq"])
-    buf += struct.pack(">Q", int(hdr["drops"]))
+    buf += struct.pack(">I", hdr["ledger_index"])
+    buf += struct.pack(">Q", int(hdr["total_coins"]))
     buf += bytes.fromhex(hdr["parent_hash"])
-    buf += bytes.fromhex(hdr["tx_hash"])
+    buf += bytes.fromhex(hdr["transaction_hash"])
     buf += bytes.fromhex(hdr["account_hash"])
     buf += struct.pack(">I", hdr["parent_close_time"])
     buf += struct.pack(">I", hdr["close_time"])
@@ -694,9 +698,9 @@ def verify(
             computed = hash_header(hdr)
             computed_hex = computed.hex().upper()
 
-            print(f"\n  Step {i}: HEADER seq={hdr['seq']}")
+            print(f"\n  Step {i}: HEADER seq={hdr['ledger_index']}")
             print(
-                f"    Hash={computed_hex[:16]}... tx={hdr['tx_hash'][:16]}... "
+                f"    Hash={computed_hex[:16]}... tx={hdr['transaction_hash'][:16]}... "
                 f"ac={hdr['account_hash'][:16]}..."
             )
 
@@ -723,7 +727,7 @@ def verify(
 
             if source.startswith("skip list from step "):
                 prev_seq = skip_source_last_seq.get(source)
-                seq = int(hdr["seq"])
+                seq = int(hdr["ledger_index"])
                 if prev_seq is not None and seq > prev_seq:
                     warn = (
                         f"step {i}: headers from {source} are not in descending seq order "
@@ -734,17 +738,17 @@ def verify(
                 skip_source_last_seq[source] = seq
 
             parent_hash = hdr["parent_hash"].upper()
-            tx_root = hdr["tx_hash"].upper()
+            tx_root = hdr["transaction_hash"].upper()
             state_root = hdr["account_hash"].upper()
 
             add_capability(
                 trusted_ledger_hashes,
                 parent_hash,
-                f"parent hash of header seq={hdr['seq']}",
+                f"parent hash of header ledger_index={hdr['ledger_index']}",
             )
-            add_capability(trusted_tx_roots, tx_root, f"header seq={hdr['seq']}")
+            add_capability(trusted_tx_roots, tx_root, f"header ledger_index={hdr['ledger_index']}")
             add_capability(
-                trusted_state_roots, state_root, f"header seq={hdr['seq']}"
+                trusted_state_roots, state_root, f"header seq={hdr['ledger_index']}"
             )
 
         elif step_type == "map_proof":
@@ -943,10 +947,10 @@ def decode_bin_header(payload: bytes) -> dict[str, Any]:
     close_time_resolution = payload[116]
     close_flags = payload[117]
     return {
-        "seq": seq,
-        "drops": str(drops),
+        "ledger_index": seq,
+        "total_coins": str(drops),
         "parent_hash": parent_hash,
-        "tx_hash": tx_hash,
+        "transaction_hash": tx_hash,
         "account_hash": account_hash,
         "parent_close_time": parent_close_time,
         "close_time": close_time,

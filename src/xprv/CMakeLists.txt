@@ -16,7 +16,14 @@ target_link_libraries(
 # ── Embed web assets into C++ header ──────────────────────────────
 set(WEB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/web)
 set(WEB_HEADER ${CMAKE_CURRENT_BINARY_DIR}/web_assets.h)
-set(WEB_FILES ${WEB_DIR}/index.html ${CMAKE_SOURCE_DIR}/scripts/verify-xprv.py)
+
+# Auto-discover all static web assets
+file(GLOB WEB_ASSETS
+  ${WEB_DIR}/static/*.html
+  ${WEB_DIR}/static/*.js
+  ${WEB_DIR}/static/*.css
+  ${WEB_DIR}/static/*.svg)
+set(WEB_FILES ${WEB_ASSETS} ${CMAKE_SOURCE_DIR}/scripts/verify-xprv.py)
 
 add_custom_command(
   OUTPUT ${WEB_HEADER}

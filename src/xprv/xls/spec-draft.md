@@ -23,9 +23,8 @@ Two representations of the same proof, no mixing:
 - **JSON form** — human-readable, for debugging and review
 - **Binary form** — compact TLV-encoded, for on-ledger storage, wire protocol, QR codes
 
-Both forms verify identically. JSON and binary carry the same proof data and
-round-trip losslessly for all currently defined fields, including the anchor's
-`ledger_index`.
+Both forms verify identically and encode the same proof data. JSON is the
+human-readable form; binary is the compact transport and storage form.
 
 ## 1. Proof Graph Model
 
@@ -38,7 +37,7 @@ Three step types:
 | Type | Consumes | Produces |
 |------|----------|----------|
 | `anchor` | nothing | trusted ledger hash |
-| `ledger_header` | trusted ledger hash (from an anchor, a parent header, or a skip list leaf) | trusted header plus its `tx_hash` and `account_hash` roots |
+| `ledger_header` | trusted ledger hash (from an anchor, a parent header, or a skip list leaf) | trusted header plus its `transaction_hash` and `account_hash` roots |
 | `map_proof` | trusted tree root | one or more trusted leaves from that tree |
 
 Validity rules:
@@ -49,7 +48,7 @@ Validity rules:
 - A `ledger_header` is supported when its computed hash is authenticated by the
   anchor, by a prior header's `parent_hash`, or by a hash contained in an
   authenticated skip list leaf.
-- A `map_proof` is supported when its recomputed root matches the `tx_hash` or
+- A `map_proof` is supported when its recomputed root matches the `transaction_hash` or
   `account_hash` of an earlier authenticated `ledger_header`.
 - A `map_proof` MAY contain one or more leaves. All included leaves are
   authenticated outputs of that step.
@@ -64,12 +63,13 @@ Validity rules:
 
 ## 2. JSON Form
 
-The proof chain is a JSON object with a top-level `network_id` and an array of
-step objects. The `steps` array is the canonical parent-first linearization of
-the logical proof DAG.
+The proof chain is a JSON object with top-level `format_version`,
+`network_id`, and an array of step objects. The `steps` array is the canonical
+parent-first linearization of the logical proof DAG.
 
 ```json
 {
+    "format_version": 3,
     "network_id": 0,
     "steps": [
         { "type": "anchor", ... },
@@ -81,6 +81,7 @@ the logical proof DAG.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `format_version` | uint32 | JSON proof format version |
 | `network_id` | uint32 | `0` = XRPL mainnet, `21337` = Xahau mainnet |
 | `steps` | array | Ordered sequence of step objects |
 
@@ -122,10 +123,10 @@ All hashes and binary data are hex-encoded strings. Leaf data is JSON objects (d
 {
     "type": "ledger_header",
     "header": {
-        "seq": 103188348,
-        "drops": "99999999999000000",
+        "ledger_index": 103188348,
+        "total_coins": "99999999999000000",
         "parent_hash": "<64 hex>",
-        "tx_hash": "<64 hex>",
+        "transaction_hash": "<64 hex>",
         "account_hash": "<64 hex>",
         "parent_close_time": 751234560,
         "close_time": 751234567,
@@ -135,14 +136,21 @@ All hashes and binary data are hex-encoded strings. Leaf data is JSON objects (d
 }
 ```
 
+> **Alignment note:** The canonical XPRV ledger-header JSON subset intentionally
+> aligns with rippled's ledger JSON naming for the hashing-relevant fields:
+> `ledger_index`, `total_coins`, `parent_hash`, `transaction_hash`,
+> `account_hash`, `parent_close_time`, `close_time`,
+> `close_time_resolution`, and `close_flags`. Extra convenience fields such as
+> `ledger_hash` are intentionally excluded from this canonical subset.
+
 All fields REQUIRED:
 
 | Field | Type | Binary size |
 |-------|------|-------------|
-| `seq` | uint32 | 4 bytes |
-| `drops` | decimal string | uint64, 8 bytes |
+| `ledger_index` | uint32 | 4 bytes |
+| `total_coins` | decimal string | uint64, 8 bytes |
 | `parent_hash` | hex string | 32 bytes |
-| `tx_hash` | hex string | 32 bytes |
+| `transaction_hash` | hex string | 32 bytes |
 | `account_hash` | hex string | 32 bytes |
 | `parent_close_time` | uint32 | 4 bytes |
 | `close_time` | uint32 | 4 bytes |
@@ -182,7 +190,9 @@ Canonical form uses a single `map_proof` step per authenticated tree root and
 includes all required leaves in that trie rather than emitting repeated sibling
 proofs against the same root.
 
-Leaves that do not contribute to a declared claim or to any descendant step are
+Leaves are canonical only when they participate in the proof graph: either they
+provide data consumed by a descendant step, or they are retained as terminal
+authenticated outputs of the proof. Extra authenticated leaves beyond that are
 non-canonical.
 
 ## 3. Binary Form
@@ -194,7 +204,7 @@ Every binary proof begins with a **10-byte file header**:
 ```
 Offset  Size  Field
   0       4   magic       "XPRV" (0x58 0x50 0x52 0x56)
-  4       1   version     0x03
+  4       1   version     0x04
   5       1   flags       bit 0: zlib compressed body
   6       4   network_id  little-endian uint32 (0 = XRPL, 21337 = Xahau)
 ```
@@ -254,7 +264,7 @@ Canonical serialized order:
    multi-leaf `map_proof`.
 5. If one authenticated skip list leaf supports multiple child
    `ledger_header` steps, those child headers MUST be ordered by descending
-   `seq`.
+   `ledger_index`.
 6. Within a `map_proof`, trie branch order (`0`-`F` at every inner node)
    defines the canonical leaf ordering.
 7. `0x05` anchor UNL remains last.
@@ -321,10 +331,10 @@ The **shape byte** preserves JSON key ordering of the original VL blob for exact
 Fixed 118-byte canonical serialization:
 
 ```
-[seq: 4 bytes, big-endian uint32]
-[drops: 8 bytes, big-endian uint64]
+[ledger_index: 4 bytes, big-endian uint32]
+[total_coins: 8 bytes, big-endian uint64]
 [parent_hash: 32 bytes]
-[tx_hash: 32 bytes]
+[transaction_hash: 32 bytes]
 [account_hash: 32 bytes]
 [parent_close_time: 4 bytes, big-endian uint32]
 [close_time: 4 bytes, big-endian uint32]
@@ -407,10 +417,10 @@ function verify(chain, trusted_publisher_keys):
         elif step is ledger_header:
             computed_hash = SHA512-Half(
                 0x4C575200 ||                    // "LWR\0"
-                uint32_be(seq) ||
-                uint64_be(drops) ||
+                uint32_be(ledger_index) ||
+                uint64_be(total_coins) ||
                 parent_hash ||
-                tx_hash ||
+                transaction_hash ||
                 account_hash ||
                 uint32_be(parent_close_time) ||
                 uint32_be(close_time) ||
@@ -421,7 +431,7 @@ function verify(chain, trusted_publisher_keys):
             assert computed_hash in trusted_ledger_hashes
 
             trusted_ledger_hashes.add(step.header.parent_hash)
-            trusted_tx_roots.add(step.header.tx_hash)
+            trusted_tx_roots.add(step.header.transaction_hash)
             trusted_ac_roots.add(step.header.account_hash)
 
         elif step is map_proof:
@@ -462,7 +472,7 @@ function verify(chain, trusted_publisher_keys):
 anchor → ledger_header →
 map_proof(state, skip_list_key) →
 ledger_header →
-map_proof(tx, tx_hash)
+map_proof(tx, transaction_hash)
 ```
 
 ### 6.2 Historical Transaction (2-hop skip list, > 256 ledgers)
@@ -473,7 +483,7 @@ map_proof(state, long_skip_list_key) →
 ledger_header(flag) →
 map_proof(state, short_skip_list_key) →
 ledger_header(target) →
-map_proof(tx, tx_hash)
+map_proof(tx, transaction_hash)
 ```
 
 The **flag ledger** is the nearest multiple of 256 at or above the target ledger. The anchor's state tree long skip list contains hashes of flag ledgers. The flag ledger's short skip list contains hashes of the 256 ledgers before it.
@@ -488,7 +498,7 @@ anchor → ledger_header → map_proof(state, account_key)
 
 A single skip list state proof may justify multiple child ledger headers.
 Canonical form emits the supporting `map_proof(state)` once, then the child
-`ledger_header` subtrees in descending `seq`.
+`ledger_header` subtrees in descending `ledger_index`.
 
 ```
 anchor → ledger_header →

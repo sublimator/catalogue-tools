@@ -7,7 +7,7 @@
 namespace xprv {
 
 /// Serialize a ProofChain to JSON.
-/// Returns {"network_id": N, "steps": [...]}.
+/// Returns {"format_version": N, "network_id": N, "steps": [...]}.
 boost::json::object
 to_json(ProofChain const& chain);
 
@@ -16,7 +16,8 @@ boost::json::object
 step_to_json(ChainStep const& step);
 
 /// Deserialize JSON into a ProofChain.
-/// Accepts both the new object format {"network_id":..., "steps":[...]}
+/// Accepts both the new object format
+/// {"format_version":..., "network_id":..., "steps":[...]}
 /// and the legacy bare array format.
 ProofChain
 from_json(boost::json::value const& json);
