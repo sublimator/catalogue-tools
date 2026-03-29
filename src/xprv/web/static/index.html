@@ -853,9 +853,9 @@ async function hashHeader(hdr) {
 
   const dv = new DataView(full.buffer);
   let off = 4;
-  dv.setUint32(off, hdr.seq); off += 4;
+  dv.setUint32(off, hdr.ledger_index); off += 4;
   // drops as uint64 (BigInt)
-  dv.setBigUint64(off, BigInt(hdr.drops)); off += 8;
+  dv.setBigUint64(off, BigInt(hdr.total_coins)); off += 8;
   // 32-byte hashes
   for (const field of ['parent_hash', 'tx_hash', 'account_hash']) {
     const bytes = hexToBytes(hdr[field]);
@@ -962,7 +962,7 @@ async function describeStep(step, i, allSteps) {
     for (let j = i - 1; j >= 0; j--) {
       if (allSteps[j].type === 'ledger_header') {
         const prevH = allSteps[j].header;
-        const skippedLedgers = prevH.seq - h.seq;
+        const skippedLedgers = prevH.ledger_index - h.ledger_index;
         if (skippedLedgers > 0) {
           const skippedSecs = prevH.close_time - h.close_time;
           let timeStr;
@@ -975,7 +975,7 @@ async function describeStep(step, i, allSteps) {
         break;
       }
     }
-    lines.push(kv('ledger', `#${num(h.seq)}${skipInfo} ${sep()}${ts} ${sep()}${lnk('link-anchor', computed.substring(0,24)+'\u2026')}`));
+    lines.push(kv('ledger', `#${num(h.ledger_index)}${skipInfo} ${sep()}${ts} ${sep()}${lnk('link-anchor', computed.substring(0,24)+'\u2026')}`));
     // Find what comes next to label the links
     let nextIsState = false, nextIsTx = false;
     for (let j = i + 1; j < allSteps.length; j++) {
@@ -986,7 +986,7 @@ async function describeStep(step, i, allSteps) {
       }
     }
     if (nextIsTx) {
-      lines.push(kv('tx_hash', lnk('link-tx', (h.tx_hash||'').substring(0,24)+'\u2026', 'tx tree')));
+      lines.push(kv('tx_hash', lnk('link-tx', (h.transaction_hash||'').substring(0,24)+'\u2026', 'tx tree')));
     }
     if (nextIsState) {
       lines.push(kv('account_hash', lnk('link-state', (h.account_hash||'').substring(0,24)+'\u2026', 'state tree')));
@@ -1001,7 +1001,7 @@ async function describeStep(step, i, allSteps) {
     for (let j = i - 1; j >= 0; j--) {
       if (allSteps[j].type === 'ledger_header') {
         const hdr = allSteps[j].header;
-        rootHash = isTx ? hdr.tx_hash : hdr.account_hash;
+        rootHash = isTx ? hdr.transaction_hash : hdr.account_hash;
         break;
       }
     }
@@ -1020,7 +1020,7 @@ async function describeStep(step, i, allSteps) {
           // Determine range from preceding header
           let prevSeq = 0;
           for (let j = i - 1; j >= 0; j--) {
-            if (allSteps[j].type === 'ledger_header') { prevSeq = allSteps[j].header.seq; break; }
+            if (allSteps[j].type === 'ledger_header') { prevSeq = allSteps[j].header.ledger_index; break; }
           }
           // Short vs long: compare leaf index to known short skip list key
           const leafIndex = leaf[0] || '';
