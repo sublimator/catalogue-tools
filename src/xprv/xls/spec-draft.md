@@ -6,6 +6,14 @@
 **Discussion:** [XRPLF/XRPL-Standards#107](https://github.com/XRPLF/XRPL-Standards/discussions/107)
 **Reference:** [XLS-41d XPOP](https://github.com/XRPLF/XRPL-Standards/discussions/107) (Richard Holland)
 
+## Acknowledgements
+
+This work builds on the XPOP (XLS-41d) standard by Richard Holland ([@RichardAH](https://github.com/RichardAH)), which defined the original proof-of-payment format for XRPL transactions.
+
+The key insight enabling historical proofs — using LedgerHashes (skip lists) as the cryptographic bridge between a current validated ledger and any historical ledger — emerged from a discussion with [@wojake](https://github.com/wojake) about the ephemeral nature of validator signatures. After exploring and rejecting approaches that would require validators to re-sign historical ledgers (contentious, poor incentives), [@mDuo13](https://github.com/mDuo13) suggested the use of LedgerHashes, which are already maintained by the protocol and provide a compact, permanent navigational structure through the ledger history.
+
+See [XRPLF/XRPL-Standards#107 comment](https://github.com/XRPLF/XRPL-Standards/discussions/107#discussioncomment-7344712) for the original discussion.
+
 ## Abstract
 
 XPRV is a compact, offline-verifiable proof that data exists (or existed) in an XRPL or Xahau ledger. It extends the XPOP concept (XLS-41d) with composable proof steps that can reach any historical ledger via skip list navigation, and adds a compact binary representation designed for progressive verification.
@@ -15,7 +23,7 @@ Two representations of the same proof, no mixing:
 - **JSON form** — human-readable, for debugging and review
 - **Binary form** — compact TLV-encoded, for on-ledger storage, wire protocol, QR codes
 
-Both forms are losslessly interconvertible and verify identically.
+Both forms verify identically. JSON→binary conversion is lossy in one respect: the anchor's `ledger_index` (sequence number) is present in JSON but not encoded in binary. It is informational — the verifier does not need it. All other fields round-trip losslessly.
 
 ## 1. Proof Chain Model
 
@@ -192,7 +200,9 @@ TLV ordering is significant for **progressive verification**:
 [0x05 anchor UNL]        ← LAST: only needed if verifier has no cached UNL
 ```
 
-The anchor is split into two TLV records (`0x01` core + `0x05` UNL) so the ~4KB of validation signatures arrive before the ~15KB VL blob. A verifier with a cached UNL can confirm a payment before the UNL blob is fully received. This enables animated QR codes, BLE/NFC progressive scanning, and SSE streaming.
+The anchor is split into two TLV records (`0x01` core + `0x05` UNL) so the ~4KB of validation signatures arrive before the ~15KB VL blob.
+
+> **Note:** Progressive verification with a cached UNL is not yet implemented in the reference verifiers — both currently require the full anchor (core + UNL) before verification can begin. The TLV split is designed to enable future progressive verification for animated QR codes, BLE/NFC scanning, and streaming use cases.
 
 ### 3.4 Anchor Core Payload (0x01)
 
@@ -212,10 +222,12 @@ The anchor is split into two TLV records (`0x01` core + `0x05` UNL) so the ~4KB 
 **Validation decomposition**: STValidation objects across validators typically share many fields (LedgerSequence, SigningTime, Cookie, ServerVersion, etc.). The encoder:
 
 1. Parses all STValidation objects into field maps
-2. Identifies fields with identical values across all validators (**common fields**)
+2. Uses the **first validation** as the reference — fields present in the first that have identical values across all validators are **common fields**
 3. Encodes common fields once as a single serialized STObject
-4. Identifies the remaining **unique field names** (typically just the signature)
+4. Fields in the first validation that differ across validators become the **unique field names** list (typically just the signature)
 5. Encodes unique fields per validator as individual STObjects
+
+> **Limitation:** Unique field names are derived only from the first validation. If a later validation contains an extra field not present in the first, that field is silently dropped in binary form. In practice this is harmless — validators running the same software version produce identical field sets.
 
 This reduces per-validator overhead from ~200 bytes to ~80 bytes.
 
@@ -310,13 +322,18 @@ function verify(chain, trusted_publisher_keys):
     for each step in chain.steps:
 
         if step is anchor:
-            // 1. Verify UNL manifest chain
-            //    manifest is signed by unl.public_key (master)
-            //    extract signing key from manifest
+            // 1. Verify UNL publisher chain
+            //    parse manifest to extract signing key
             //    verify unl.signature over unl.blob using signing key
             //    assert unl.public_key is in trusted_publisher_keys
+            //    NOTE: publisher manifest signature verification is
+            //    not yet implemented in reference verifiers — the
+            //    manifest is parsed and trusted. Full manifest chain
+            //    verification is a TODO.
             // 2. Decode unl.blob → list of validator entries
-            //    each entry has a manifest mapping master → signing key
+            //    each entry has a manifest; the signing key is
+            //    extracted and trusted (manifest signatures not yet
+            //    verified in reference implementations)
             // 3. For each validation:
             //    deserialize STValidation
             //    verify LedgerHash == anchor.ledger_hash
@@ -409,7 +426,9 @@ The **flag ledger** is the nearest multiple of 256 at or above the target ledger
 anchor → ledger_header → map_proof(state, account_key)
 ```
 
-### 6.4 Multiple Proofs from Same Ledger
+### 6.4 Multiple Proofs from Same Ledger (Future)
+
+> **Note:** Not yet implemented in reference verifiers. The trusted tree roots are currently cleared after each map_proof, so a second map_proof from the same header would be unverified. This composition pattern requires the verifier to retain trusted roots across consecutive map_proof steps from the same header.
 
 ```
 anchor → ledger_header → map_proof(tx, tx1) → map_proof(tx, tx2)
