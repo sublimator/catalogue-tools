@@ -333,8 +333,8 @@ function verify(chain, trusted_publisher_keys):
                 parent_hash ||
                 tx_hash ||
                 account_hash ||
-                uint32_be(close_time) ||
                 uint32_be(parent_close_time) ||
+                uint32_be(close_time) ||
                 uint8(close_time_resolution) ||
                 uint8(close_flags)
             )
