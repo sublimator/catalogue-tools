@@ -23,7 +23,9 @@ Two representations of the same proof, no mixing:
 - **JSON form** — human-readable, for debugging and review
 - **Binary form** — compact TLV-encoded, for on-ledger storage, wire protocol, QR codes
 
-Both forms verify identically. JSON→binary conversion is lossy in one respect: the anchor's `ledger_index` (sequence number) is present in JSON but not encoded in binary. It is informational — the verifier does not need it. All other fields round-trip losslessly.
+Both forms verify identically. JSON and binary carry the same proof data and
+round-trip losslessly for all currently defined fields, including the anchor's
+`ledger_index`.
 
 ## 1. Proof Graph Model
 
@@ -54,10 +56,11 @@ Validity rules:
 - Multiple later steps MAY share the same supporting ancestor, so the logical
   proof is a tree/DAG even though the serialized form is a list.
 
-> **Reference status:** The current reference verifiers implement the
-> single-path subset of this model. The format itself permits fan-out, provided
-> the serialized order follows the canonical parent-before-child rules in
-> section 3.3.
+> **Reference status:** The current C++ and Python reference verifiers implement
+> capability-based verification of this parent-before-child DAG model. They
+> keep authenticated ledger hashes and tree roots alive across sibling fan-out,
+> and may emit warnings for non-canonical duplication or ordering while still
+> accepting a valid proof.
 
 ## 2. JSON Form
 
@@ -276,17 +279,21 @@ cache key is required.
     [unique_fields_len: LEB128][unique_fields: serialized STObject]
 ```
 
-**Validation decomposition**: STValidation objects across validators typically share many fields (LedgerSequence, SigningTime, Cookie, ServerVersion, etc.). The encoder:
+**Validation decomposition**: STValidation objects across validators typically
+share many fields (LedgerSequence, SigningTime, Cookie, ServerVersion, etc.).
+The encoder:
 
 1. Parses all STValidation objects into field maps
-2. Uses the **first validation** as the reference — fields present in the first that have identical values across all validators are **common fields**
-3. Encodes common fields once as a single serialized STObject
-4. Fields in the first validation that differ across validators become the **unique field names** list (typically just the signature)
-5. Encodes unique fields per validator as individual STObjects
+2. Collects the union of all field names across all validations
+3. Marks a field as **common** only if it appears in every validation with an
+   identical value
+4. Encodes those common fields once as a single serialized STObject
+5. Encodes all remaining fields as the **unique field names** list, then emits
+   per-validator STObjects containing whatever subset of those unique fields
+   that validator actually carries
 
-> **Limitation:** Unique field names are derived only from the first validation. If a later validation contains an extra field not present in the first, that field is silently dropped in binary form. In practice this is harmless — validators running the same software version produce identical field sets.
-
-This reduces per-validator overhead from ~200 bytes to ~80 bytes.
+This preserves fields that appear only in some validations while still reducing
+per-validator overhead from ~200 bytes to ~80 bytes.
 
 ### 3.5 Anchor UNL Payload (0x05)
 
@@ -367,41 +374,35 @@ decode(bytes):
 
 ## 5. Verification Algorithm
 
-The step-local cryptographic checks are identical for both forms. The
-generalized proof model in section 1 permits fan-out and multi-leaf map proofs.
-The pseudocode below illustrates the current single-path verification profile
-used by the reference implementations; a generalized verifier applies the same
-checks while keeping a stack or set of authenticated parent capabilities.
+The step-local cryptographic checks are identical for both forms. Verification
+maintains capability sets of authenticated ledger hashes, tx roots, and state
+roots. Parent-before-child serialized order ensures each step can only consume
+capabilities produced by earlier authenticated steps.
 
 ```
 function verify(chain, trusted_publisher_keys):
-    trusted_ledger_hash = null
-    trusted_tx_hash = null
-    trusted_ac_hash = null
-    prev_header = null
+    trusted_ledger_hashes = set()
+    trusted_tx_roots = set()
+    trusted_ac_roots = set()
 
     for each step in chain.steps:
 
         if step is anchor:
-            // 1. Verify UNL publisher chain
-            //    parse manifest to extract signing key
-            //    verify unl.signature over unl.blob using signing key
-            //    assert unl.public_key is in trusted_publisher_keys
-            //    NOTE: publisher manifest signature verification is
-            //    not yet implemented in reference verifiers — the
-            //    manifest is parsed and trusted. Full manifest chain
-            //    verification is a TODO.
-            // 2. Decode unl.blob → list of validator entries
-            //    each entry has a manifest; the signing key is
-            //    extracted and trusted (manifest signatures not yet
-            //    verified in reference implementations)
-            // 3. For each validation:
-            //    deserialize STValidation
-            //    verify LedgerHash == anchor.ledger_hash
-            //    verify signature using SigningPubKey
-            //    verify SigningPubKey maps to a UNL validator
-            // 4. Quorum: >= 80% of UNL validators must validate
-            trusted_ledger_hash = step.ledger_hash
+            // 1. Assert unl.public_key is in trusted_publisher_keys
+            // 2. Verify publisher manifest signatures:
+            //      MAN\0 + manifest fields without Signature/MasterSignature
+            // 3. Use the manifest's SigningPubKey to verify unl.signature
+            //    over unl.blob
+            // 4. Decode unl.blob → validator entries
+            // 5. Verify each validator manifest the same way and build the
+            //    signing_key → master_key map
+            // 6. For each validation:
+            //      deserialize STValidation
+            //      verify LedgerHash == anchor.ledger_hash
+            //      verify VAL\0 signing data signature using SigningPubKey
+            //      verify SigningPubKey maps to a verified UNL validator
+            // 7. Quorum: >= 80% of UNL validators must validate
+            trusted_ledger_hashes.add(step.ledger_hash)
 
         elif step is ledger_header:
             computed_hash = SHA512-Half(
@@ -417,29 +418,25 @@ function verify(chain, trusted_publisher_keys):
                 uint8(close_flags)
             )
 
-            if trusted_ledger_hash != null:
-                assert computed_hash == trusted_ledger_hash
-            elif prev_header != null:
-                assert computed_hash == prev_header.parent_hash
-            else:
-                FAIL
+            assert computed_hash in trusted_ledger_hashes
 
-            trusted_tx_hash = step.header.tx_hash
-            trusted_ac_hash = step.header.account_hash
-            trusted_ledger_hash = null
-            prev_header = step.header
+            trusted_ledger_hashes.add(step.header.parent_hash)
+            trusted_tx_roots.add(step.header.tx_hash)
+            trusted_ac_roots.add(step.header.account_hash)
 
         elif step is map_proof:
             if step.tree == tx:
-                expected_root = trusted_tx_hash
+                expected_roots = trusted_tx_roots
             else:
-                expected_root = trusted_ac_hash
-            assert expected_root != null
+                expected_roots = trusted_ac_roots
 
             root_hash = compute_trie_root(step.trie)
-            assert root_hash == expected_root
+            assert root_hash in expected_roots
 
-            prev_header = null
+            if step.tree == state:
+                for each ledger_hash in all Hashes leaves authenticated by this
+                proof:
+                    trusted_ledger_hashes.add(ledger_hash)
 
     return true
 ```
@@ -512,9 +509,10 @@ anchor → ledger_header → map_proof(state)   // multiple state leaves
 anchor → ledger_header → map_proof(tx)      // multiple tx leaves
 ```
 
-> **Reference status:** Not yet fully implemented in the reference verifiers.
-> Today they assume a single active path and do not keep sibling
-> header/map-proof contexts alive across a fan-out.
+> **Reference status:** Implemented in the current C++ and Python reference
+> verifiers for parent-before-child proofs. They accept sibling fan-out and
+> multi-leaf proofs, and warn when repeated sibling roots or header orderings
+> are non-canonical.
 
 ## 7. Security Considerations
 
