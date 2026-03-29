@@ -1,10 +1,12 @@
 # XPRV: XRPL Proof Verification Format
 
-**Status:** Draft
-**Date:** 2026-03-29
-**Authors:** Nicholas Dudfield (@sublimator)
-**Discussion:** [XRPLF/XRPL-Standards#107](https://github.com/XRPLF/XRPL-Standards/discussions/107)
-**Reference:** [XLS-41d XPOP](https://github.com/XRPLF/XRPL-Standards/discussions/107) (Richard Holland)
+| | |
+|---|---|
+| **Status** | Draft |
+| **Date** | 2026-03-29 |
+| **Authors** | Nicholas Dudfield ([@sublimator](https://github.com/sublimator)) |
+| **Discussion** | [XRPLF/XRPL-Standards#107](https://github.com/XRPLF/XRPL-Standards/discussions/107) |
+| **Reference** | [XLS-41d XPOP](https://github.com/XRPLF/XRPL-Standards/discussions/107) (Richard Holland) |
 
 ## Acknowledgements
 
