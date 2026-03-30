@@ -987,6 +987,8 @@ async function describeStep(step, i, allSteps) {
       }
     }
     if (nextIsTx) {
+      // TODO: align visible UI labels with canonical proof JSON names
+      // (`transaction_hash`, `total_coins`, etc.) after a quick browser pass.
       lines.push(kv('tx_hash', lnk('link-tx', (h.transaction_hash||'').substring(0,24)+'\u2026', 'tx tree')));
     }
     if (nextIsState) {
@@ -1036,7 +1038,7 @@ async function describeStep(step, i, allSteps) {
           } else {
             desc = `${num(h)} entries`;
           }
-          sub.push(kv('LedgerHashes', desc));
+          sub.push(kv('LedgerEntryType: LedgerHashes', desc));
         } else if (data.LedgerEntryType) {
           sub.push(kv('LedgerEntryType', `<span class="v">${data.LedgerEntryType}</span>`));
         }
