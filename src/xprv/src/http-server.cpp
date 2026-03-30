@@ -3,8 +3,10 @@
 #include "xprv/proof-chain-json.h"
 #include "web_assets.h"
 
+#include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 
 #include <catl/core/context-executor.h>
 #include <catl/core/logger.h>
@@ -85,6 +87,89 @@ parse_query(std::string_view qs)
         qs = qs.substr(amp + 1);
     }
     return params;
+}
+
+static std::string
+to_lower_copy(std::string_view s)
+{
+    std::string out(s);
+    for (auto& c : out)
+        c = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
+
+static bool
+is_hex_64(std::string_view s)
+{
+    if (s.size() != 64)
+        return false;
+    for (unsigned char c : s)
+    {
+        if (!std::isxdigit(c))
+            return false;
+    }
+    return true;
+}
+
+static std::string
+network_slug_for_id(uint32_t network_id)
+{
+    switch (network_id)
+    {
+        case 0:
+            return "xrpl-mainnet";
+        case 21337:
+            return "xahau-mainnet";
+        default:
+            return std::to_string(network_id);
+    }
+}
+
+struct NetworkTxRoute
+{
+    std::string network;
+    std::string tx_hash;
+};
+
+static std::optional<NetworkTxRoute>
+parse_network_tx_route(std::string_view path)
+{
+    static constexpr std::string_view prefix = "/network/";
+    static constexpr std::string_view tx_prefix = "tx/";
+
+    if (!path.starts_with(prefix))
+        return std::nullopt;
+
+    auto rest = path.substr(prefix.size());
+    auto slash = rest.find('/');
+    if (slash == std::string_view::npos)
+        return std::nullopt;
+
+    auto network = rest.substr(0, slash);
+    rest = rest.substr(slash + 1);
+    if (!rest.starts_with(tx_prefix))
+        return std::nullopt;
+
+    auto tx_hash = rest.substr(tx_prefix.size());
+    if (!tx_hash.empty() && tx_hash.back() == '/')
+        tx_hash.remove_suffix(1);
+
+    if (network.empty() || !is_hex_64(tx_hash))
+        return std::nullopt;
+
+    return NetworkTxRoute{
+        to_lower_copy(network),
+        std::string(tx_hash)};
+}
+
+static bool
+route_matches_network(std::string_view route_network, uint32_t network_id)
+{
+    auto const configured_slug = network_slug_for_id(network_id);
+    auto const numeric_id = std::to_string(network_id);
+    auto const token = to_lower_copy(route_network);
+    return token == configured_slug || token == numeric_id;
 }
 
 static http::response<http::string_body>
@@ -820,8 +905,18 @@ HttpServer::handle_session(
             {
                 // Try static file (dev disk → embedded)
                 std::string static_body, content_type;
-                if (req.method() == http::verb::get &&
-                    try_serve_static(path, static_body, content_type))
+                auto route = req.method() == http::verb::get
+                    ? parse_network_tx_route(path)
+                    : std::nullopt;
+                bool deep_link =
+                    route &&
+                    route_matches_network(
+                        route->network, engine_->config().network_id) &&
+                    try_serve_static("/", static_body, content_type);
+
+                if (deep_link ||
+                    (req.method() == http::verb::get &&
+                     try_serve_static(path, static_body, content_type)))
                 {
                     http::response<http::string_body> res{
                         http::status::ok, version};

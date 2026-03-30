@@ -293,6 +293,18 @@ position:relative}
 #modal-header{padding:1rem 2rem;border-bottom:1px solid #333;flex-shrink:0}
 #modal-header h3{color:#fff;font-size:1rem;margin:0;font-family:sans-serif}
 #modal-body{flex:1;overflow-y:auto;padding:1rem 2rem}
+#step-scene{position:relative;min-height:100%}
+#step-content{position:relative;z-index:1}
+#step-links{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;overflow:visible}
+#step-links-debug{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2;overflow:visible}
+#step-links .link-path{fill:none;stroke:rgba(224,232,239,.16);stroke-width:1.15;
+stroke-dasharray:1.5 6.5;stroke-linecap:round;opacity:.92}
+#step-links .link-path.even{stroke:rgba(245,250,255,.22)}
+#step-links .link-path.animate-in{opacity:0;animation:link-path-in .7s cubic-bezier(.22,.7,.2,1) forwards}
+#step-links-debug .link-debug-box{fill:none;stroke:rgba(255,0,200,.8);stroke-width:1;
+stroke-dasharray:3 2}
+#step-links-debug .link-debug-dot{fill:#00e5ff;stroke:rgba(0,0,0,.65);stroke-width:.8}
+#step-links-debug .link-debug-edge{fill:#111;stroke:#ff5bd8;stroke-width:.9}
 #modal-footer{padding:.6rem 2rem;border-top:1px solid #333;font-size:.75rem;color:#666;text-align:center;flex-shrink:0}
 #modal-footer a{color:#5b5;text-decoration:none}
 #modal-footer a:hover{color:#7d7;text-decoration:underline}
@@ -318,11 +330,16 @@ font-size:1.2rem;background:none;border:none;z-index:1}
 .step-detail .link-badge{display:inline-flex;align-items:center;justify-content:center;
 width:1.6em;height:1.6em;font-size:.8em;font-weight:900;color:#000;background:#fff;
 border-radius:50%;margin-right:.3rem;vertical-align:middle}
+.step-detail .link-badge.is-inverted{color:#fff;background:#333;border:1px solid #555}
+.debug-step-links .step-detail .link-badge{box-shadow:0 0 0 1px rgba(255,0,200,.82),0 0 0 4px rgba(255,0,200,.08)}
+.debug-step-links #step-scene{box-shadow:inset 0 0 0 1px rgba(255,0,200,.12)}
+.debug-step-links #step-content{box-shadow:inset 0 0 0 1px rgba(0,229,255,.1)}
 .step-detail .link-anchor{color:#f80;font-weight:bold}
 .step-detail .link-tx{color:#e66}
 .step-detail .link-state{color:#6af}
 .step-detail .leaf-data{margin-top:.4rem;padding:.4rem .6rem;
 border-left:1px solid #333;margin-left:.2rem;background:rgba(255,255,255,0.02);border-radius:0 4px 4px 0}
+.step-detail .leaf-ellipsis{display:block;color:#4f5651;font-size:.66rem;letter-spacing:.18em}
 
 .step-skeleton{margin-bottom:1rem;padding:.6rem .8rem;border-left:2px solid #333;
 animation:sk-pulse 1.5s ease-in-out infinite}
@@ -332,6 +349,10 @@ animation:sk-pulse 1.5s ease-in-out infinite}
 .step-skeleton .sk-bar:nth-child(2){width:70%}
 .step-skeleton .sk-bar:nth-child(3){width:50%}
 @keyframes sk-pulse{0%,100%{opacity:.3}50%{opacity:1}}
+@keyframes link-path-in{
+  from{opacity:0;stroke-dashoffset:14}
+  to{opacity:.92;stroke-dashoffset:0}
+}
 @keyframes hero-in{
   from{opacity:0;transform:translateY(14px)}
   to{opacity:1;transform:translateY(0)}
@@ -723,6 +744,50 @@ function normalizeTxCandidate(raw, { extract = false } = {}) {
   return match ? match[0] : compact;
 }
 
+function networkSlugForId(networkId) {
+  const n = Number(networkId);
+  if (!Number.isFinite(n)) return null;
+  if (n === 0) return 'xrpl-mainnet';
+  if (n === 21337) return 'xahau-mainnet';
+  return String(n);
+}
+
+function networkLabel(networkId) {
+  const n = Number(networkId);
+  if (n === 0) return 'XRPL mainnet';
+  if (n === 21337) return 'Xahau mainnet';
+  return `network ${n}`;
+}
+
+function parseProofPath(pathname = location.pathname) {
+  const match = pathname.match(/^\/network\/([^/]+)\/tx\/([0-9a-fA-F]{64})\/?$/);
+  if (!match) return null;
+  return {
+    network: decodeURIComponent(match[1]).toLowerCase(),
+    txHash: match[2].toUpperCase()
+  };
+}
+
+function proofPathFor(hash, networkId) {
+  const slug = networkSlugForId(networkId);
+  return slug ? `/network/${slug}/tx/${hash.toUpperCase()}` : null;
+}
+
+function syncProofPath(hash, networkId, mode = 'push') {
+  const path = proofPathFor(hash, networkId);
+  if (!path || location.pathname === path) return;
+  history[mode === 'replace' ? 'replaceState' : 'pushState'](
+    { txHash: hash.toUpperCase(), networkId },
+    '',
+    path
+  );
+}
+
+function clearProofPath(mode = 'replace') {
+  if (location.pathname === '/') return;
+  history[mode === 'replace' ? 'replaceState' : 'pushState']({}, '', '/');
+}
+
 async function doPaste() {
   try {
     const clip = await navigator.clipboard.readText();
@@ -741,39 +806,68 @@ tx.addEventListener('paste', (e) => {
   tx.dispatchEvent(new Event('input'));
 });
 
-tx.addEventListener('input', () => {
-  const v = tx.value.trim();
+function resetProofUi() {
   tx.classList.remove('valid', 'invalid');
   statusEl.className = 'status';
   statusEl.textContent = '';
   details.className = '';
   details.innerHTML = '';
+}
 
+function handleTxInput({ history = 'push' } = {}) {
+  const raw = tx.value.trim();
+  const v = normalizeTxCandidate(raw);
+  if (v !== raw) tx.value = v;
+
+  resetProofUi();
   if (!v) {
+    cancelActiveProof();
+    clearStepScene();
     closeModal();
+    if (history !== 'none')
+      clearProofPath('replace');
     return;
   }
   if (!HEX_ONLY.test(v)) {
+    cancelActiveProof();
+    clearStepScene();
+    closeModal();
     tx.classList.add('invalid');
     statusEl.classList.add('error');
     statusEl.textContent = 'hex only: 0-9, a-f';
+    if (history !== 'none')
+      clearProofPath('replace');
     return;
   }
   if (v.length < 64) {
+    cancelActiveProof();
+    clearStepScene();
+    closeModal();
     statusEl.textContent = `${v.length}/64 characters`;
+    if (history !== 'none' && parseProofPath())
+      clearProofPath('replace');
     return;
   }
   if (v.length > 64) {
+    cancelActiveProof();
+    clearStepScene();
+    closeModal();
     tx.classList.add('invalid');
     statusEl.classList.add('error');
     statusEl.textContent = 'too long for transaction hash';
+    if (history !== 'none')
+      clearProofPath('replace');
     return;
   }
   if (!HEX64.test(v)) return;
 
+  const hash = v.toUpperCase();
+  if (hash !== v) tx.value = hash;
   tx.classList.add('valid');
-  prove(v);
-});
+  prove(hash, {history});
+}
+
+tx.addEventListener('input', () => handleTxInput());
 
 const S = '<span class="sep">|</span>';
 let lastProofJson = null;
@@ -824,7 +918,7 @@ function showDetails(json, txHash) {
   const steps = json.steps || [];
   const anchor = steps.find(s => s.type === 'anchor');
 
-  const net = json.network_id === 0 ? 'XRPL mainnet' : `network ${json.network_id}`;
+  const net = networkLabel(json.network_id);
   const seq = anchor ? `<a href="https://xrpscan.com/ledger/${anchor.ledger_index}" target="_blank" rel="noopener">#${anchor.ledger_index}</a>` : '';
   const tx = `<a href="https://xrpscan.com/tx/${txHash}" target="_blank" rel="noopener">${txHash.substring(0,16)}\u2026</a>`;
   const stepsLink = `<span class="steps" onclick="showSteps()">${steps.length} steps</span>`;
@@ -928,13 +1022,196 @@ function countTrieNodes(node) {
 }
 
 let linkNum = 0;
+const DEBUG_STEP_LINKS = false;
+let stepLinksEnabled = false;
 const lnk = (cls, hash, label) => {
   const n = Math.floor(linkNum / 2) + 1;
   linkNum++;
-  const badge = `<span class="link-badge">${n}</span>`;
+  const inverted = n % 2 === 0;
+  const badge = `<span class="link-badge${inverted ? ' is-inverted' : ''}" data-link-group="${n}">${n}</span>`;
   const tag = label ? ` \u2192 ${label}` : '';
   return `${badge}<span class="${cls}">${hash}</span>${tag}`;
 };
+
+function ensureStepScene() {
+  const body = document.getElementById('modal-body');
+  let scene = document.getElementById('step-scene');
+  let content = document.getElementById('step-content');
+  let svg = document.getElementById('step-links');
+  let debug = document.getElementById('step-links-debug');
+  if (!scene || !content || !svg || !debug || !body.contains(scene)) {
+    body.innerHTML = '<div id="step-scene"><svg id="step-links" aria-hidden="true"></svg><svg id="step-links-debug" aria-hidden="true"></svg><div id="step-content"></div></div>';
+    scene = document.getElementById('step-scene');
+    content = document.getElementById('step-content');
+    svg = document.getElementById('step-links');
+    debug = document.getElementById('step-links-debug');
+  }
+  document.documentElement.classList.toggle('debug-step-links', DEBUG_STEP_LINKS);
+  debug.style.display = DEBUG_STEP_LINKS ? 'block' : 'none';
+  return {body, scene, content, svg, debug};
+}
+
+function linkGeometryBetween(fromRect, toRect, overlayRect, pairNum) {
+  const ax = fromRect.left - overlayRect.left + (fromRect.width / 2);
+  const ay = fromRect.top - overlayRect.top + (fromRect.height / 2);
+  const bx = toRect.left - overlayRect.left + (toRect.width / 2);
+  const by = toRect.top - overlayRect.top + (toRect.height / 2);
+  const dx = bx - ax;
+  const dy = by - ay;
+  const dist = Math.hypot(dx, dy) || 1;
+  const ux = dx / dist;
+  const uy = dy / dist;
+  const fromRadius = Math.max(4, Math.min(fromRect.width, fromRect.height) / 2 - 1);
+  const toRadius = Math.max(4, Math.min(toRect.width, toRect.height) / 2 - 1);
+  const sx = ax + ux * fromRadius;
+  const sy = ay + uy * fromRadius;
+  const ex = bx - ux * toRadius;
+  const ey = by - uy * toRadius;
+  const px = -uy;
+  const py = ux;
+  const bend = Math.min(20, Math.max(8, dist * 0.14)) * (pairNum % 2 === 0 ? 1 : -1);
+  const c1x = sx + dx * 0.28 + px * bend;
+  const c1y = sy + dy * 0.22 + py * bend;
+  const c2x = ex - dx * 0.28 + px * bend;
+  const c2y = ey - dy * 0.22 + py * bend;
+  return {
+    centerA: {x: ax, y: ay},
+    centerB: {x: bx, y: by},
+    start: {x: sx, y: sy},
+    end: {x: ex, y: ey},
+    path: `M ${sx.toFixed(1)} ${sy.toFixed(1)} C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${ex.toFixed(1)} ${ey.toFixed(1)}`
+  };
+}
+
+function redrawStepLinks({animate = false} = {}) {
+  const scene = document.getElementById('step-scene');
+  const content = document.getElementById('step-content');
+  const svg = document.getElementById('step-links');
+  const debug = document.getElementById('step-links-debug');
+  if (!scene || !content || !svg || !debug) return;
+
+  const badges = Array.from(content.querySelectorAll('.link-badge[data-link-group]'));
+  const width = Math.ceil(scene.clientWidth || content.clientWidth || 1);
+  const height = Math.ceil(content.offsetHeight || 1);
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  debug.setAttribute('viewBox', `0 0 ${width} ${height}`);
+
+  if (!stepLinksEnabled || !badges.length) {
+    svg.innerHTML = '';
+    debug.innerHTML = '';
+    return;
+  }
+
+  const overlayRect = svg.getBoundingClientRect();
+  const groups = new Map();
+  for (const badge of badges) {
+    const group = badge.dataset.linkGroup;
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(badge);
+  }
+
+  const paths = [];
+  const debugShapes = DEBUG_STEP_LINKS
+    ? [`<rect class="link-debug-box" x="0.5" y="0.5" width="${Math.max(1, width - 1)}" height="${Math.max(1, height - 1)}"/>`]
+    : [];
+  for (const [group, nodes] of groups.entries()) {
+    if (nodes.length < 2) continue;
+    nodes.sort((a, b) => {
+      const top = a.offsetTop - b.offsetTop;
+      return top || (a.offsetLeft - b.offsetLeft);
+    });
+    for (let i = 0; i + 1 < nodes.length; i += 2) {
+      const pairNum = Number(group) || 0;
+      const fromRect = nodes[i].getBoundingClientRect();
+      const toRect = nodes[i + 1].getBoundingClientRect();
+      const geom = linkGeometryBetween(fromRect, toRect, overlayRect, pairNum);
+      const classes = `link-path${pairNum % 2 === 0 ? ' even' : ''}${animate ? ' animate-in' : ''}`;
+      const delay = animate ? ` style="animation-delay:${Math.min((pairNum - 1) * 55, 330)}ms"` : '';
+      paths.push(`<path class="${classes}" d="${geom.path}"${delay}/>`);
+      if (DEBUG_STEP_LINKS) {
+        const boxes = [fromRect, toRect].map((rect) => {
+          const x = rect.left - overlayRect.left;
+          const y = rect.top - overlayRect.top;
+          return `<rect class="link-debug-box" x="${(x - 2).toFixed(1)}" y="${(y - 2).toFixed(1)}" width="${(rect.width + 4).toFixed(1)}" height="${(rect.height + 4).toFixed(1)}" rx="3"/>`;
+        });
+        debugShapes.push(...boxes);
+        debugShapes.push(`<circle class="link-debug-dot" cx="${geom.centerA.x.toFixed(1)}" cy="${geom.centerA.y.toFixed(1)}" r="2.9"/>`);
+        debugShapes.push(`<circle class="link-debug-dot" cx="${geom.centerB.x.toFixed(1)}" cy="${geom.centerB.y.toFixed(1)}" r="2.9"/>`);
+        debugShapes.push(`<circle class="link-debug-edge" cx="${geom.start.x.toFixed(1)}" cy="${geom.start.y.toFixed(1)}" r="2.2"/>`);
+        debugShapes.push(`<circle class="link-debug-edge" cx="${geom.end.x.toFixed(1)}" cy="${geom.end.y.toFixed(1)}" r="2.2"/>`);
+      }
+    }
+  }
+
+  svg.innerHTML = paths.join('');
+  debug.innerHTML = DEBUG_STEP_LINKS ? debugShapes.join('') : '';
+}
+
+let stepLinkDrawToken = 0;
+
+function nextAnimationFrame() {
+  return new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
+function stepLinkLayoutSignature() {
+  const content = document.getElementById('step-content');
+  if (!content) return '';
+  const badges = Array.from(content.querySelectorAll('.link-badge[data-link-group]'));
+  return [
+    Math.round(content.offsetHeight * 2) / 2,
+    ...badges.map((badge) => {
+      const rect = badge.getBoundingClientRect();
+      return [
+        badge.dataset.linkGroup || '',
+        Math.round(rect.left * 2) / 2,
+        Math.round(rect.top * 2) / 2,
+        Math.round(rect.width * 2) / 2,
+        Math.round(rect.height * 2) / 2
+      ].join(':');
+    })
+  ].join('|');
+}
+
+async function queueStepLinkRedraw({animate = false} = {}) {
+  const token = ++stepLinkDrawToken;
+  const svg = document.getElementById('step-links');
+  const debug = document.getElementById('step-links-debug');
+  if (svg) svg.innerHTML = '';
+  if (debug) debug.innerHTML = '';
+
+  if (!stepLinksEnabled) return;
+
+  let stableFrames = 0;
+  let lastSignature = '';
+
+  for (let i = 0; i < 24; i++) {
+    await nextAnimationFrame();
+    if (token !== stepLinkDrawToken) return;
+    const signature = stepLinkLayoutSignature();
+    if (signature && signature === lastSignature) {
+      stableFrames++;
+      if (stableFrames >= 2) break;
+    } else {
+      stableFrames = 0;
+      lastSignature = signature;
+    }
+  }
+
+  await nextAnimationFrame();
+  if (token !== stepLinkDrawToken) return;
+  redrawStepLinks({animate});
+}
+
+function clearStepScene() {
+  stepLinksEnabled = false;
+  stepLinkDrawToken++;
+  const content = document.getElementById('step-content');
+  const svg = document.getElementById('step-links');
+  const debug = document.getElementById('step-links-debug');
+  if (content) content.innerHTML = '';
+  if (svg) svg.innerHTML = '';
+  if (debug) debug.innerHTML = '';
+}
 
 async function describeStep(step, i, allSteps) {
   const type = step.type || 'unknown';
@@ -1036,7 +1313,7 @@ async function describeStep(step, i, allSteps) {
           } else {
             desc = `${num(h)} entries`;
           }
-          sub.push(kv('LedgerEntryType: LedgerHashes', desc));
+          sub.push(`<span class="k">LedgerEntryType:</span> <span class="v">LedgerHashes</span> <span class="h"># ${desc}</span>`);
         } else if (data.LedgerEntryType) {
           sub.push(kv('LedgerEntryType', `<span class="v">${data.LedgerEntryType}</span>`));
         }
@@ -1066,6 +1343,8 @@ async function describeStep(step, i, allSteps) {
         }
         if (data.tx) {
           const tx = data.tx;
+          const txHash = tx.hash || leaf[0] || '';
+          if (txHash) sub.push(kv('hash', hx(txHash, 24)));
           if (tx.TransactionType) sub.push(kv('TransactionType', `<span class="v">${tx.TransactionType}</span>`));
           if (tx.Account) sub.push(kv('Account', `<span class="v">${tx.Account}</span>`));
           if (tx.Destination) sub.push(kv('Destination', `<span class="v">${tx.Destination}</span>`));
@@ -1089,7 +1368,7 @@ async function describeStep(step, i, allSteps) {
           sub.push(kv('result', `<span class="v">${data.meta.TransactionResult}</span>`));
         }
         if (sub.length) {
-          lines.push(`<div class="leaf-data">${sub.join('<br>')}</div>`);
+          lines.push(`<div class="leaf-data"><span class="leaf-ellipsis">\u2026</span>${sub.join('<br>')}<span class="leaf-ellipsis">\u2026</span></div>`);
         }
       }
     }
@@ -1116,7 +1395,7 @@ function skeletonStep(n) {
 async function showSteps() {
   if (!lastProofJson) return;
   const modal = document.getElementById('modal');
-  const body = document.getElementById('modal-body');
+  const {content} = ensureStepScene();
   const footer = document.getElementById('modal-footer');
   const steps = lastProofJson.steps || [];
   linkNum = 0;
@@ -1125,7 +1404,9 @@ async function showSteps() {
     rendered.push(await describeStep(steps[i], i, steps));
   }
   document.getElementById('modal-header').innerHTML = `<h3>Proof chain \u2014 ${steps.length} steps${idBadges(lastRid)}</h3>`;
-  body.innerHTML = rendered.join('');
+  content.innerHTML = rendered.join('');
+  stepLinksEnabled = true;
+  queueStepLinkRedraw({animate:true});
   if (lastDownloadUrl) {
     const binName = lastFilename.replace('.xprv.json', '.xprv.bin');
     footer.innerHTML = `<a href="${lastDownloadUrl}" download="${lastFilename}" title="${lastFilename}">json</a> <a href="/prove?tx=${tx.value}&format=bin" download="${binName}" style="color:#686;margin-left:.5rem" title="${binName}">bin</a> <span class="act" onclick="copyProof()" title="copy JSON" style="margin-left:.4rem">&#x1F4CB;</span><span class="msep">|</span><a href="/verify-xprv.py" style="color:#555">verify-xprv.py</a>`;
@@ -1136,6 +1417,7 @@ async function showSteps() {
 }
 
 function closeModal() {
+  stepLinksEnabled = false;
   document.getElementById('modal').className = '';
 }
 document.getElementById('modal-close').onclick = closeModal;
@@ -1166,18 +1448,33 @@ function finishProve(json, hash) {
 }
 
 let activeSSE = null;
+let activeProveToken = 0;
+let activeProveTimeout = null;
+
+function cancelActiveProof() {
+  activeProveToken++;
+  if (activeSSE) {
+    activeSSE.close();
+    activeSSE = null;
+  }
+  if (activeProveTimeout) {
+    clearTimeout(activeProveTimeout);
+    activeProveTimeout = null;
+  }
+}
 
 function showModalError(msg, hash) {
-  const body = document.getElementById('modal-body');
-  if (!body) return;
+  const {body, content} = ensureStepScene();
   const sk = document.getElementById('sk-next');
   if (sk) sk.remove();
+  stepLinksEnabled = false;
   const div = document.createElement('div');
   div.style.cssText = 'margin-top:1rem;padding:.6rem;border-left:2px solid #e44;color:#e44;font-size:.8rem;display:flex;align-items:center;gap:.8rem';
   div.innerHTML = `<span style="flex:1">${msg}</span><button style="background:none;border:1px solid #666;color:#ccc;padding:.3rem .8rem;border-radius:4px;cursor:pointer;font-size:.75rem;font-family:monospace;white-space:nowrap" onmouseover="this.style.borderColor='#aaa'" onmouseout="this.style.borderColor='#666'">retry</button>`;
-  div.querySelector('button').onclick = () => prove(hash);
-  body.appendChild(div);
-  body.parentElement.scrollTop = body.parentElement.scrollHeight;
+  div.querySelector('button').onclick = () => prove(hash, {history:'none'});
+  content.appendChild(div);
+  queueStepLinkRedraw();
+  body.scrollTop = body.scrollHeight;
 }
 
 function genRequestId() {
@@ -1185,8 +1482,10 @@ function genRequestId() {
   return Array.from(a, b => b.toString(16).padStart(2,'0')).join('');
 }
 
-async function prove(hash) {
-  if (activeSSE) { activeSSE.close(); activeSSE = null; }
+async function prove(hash, {history = 'push'} = {}) {
+  cancelActiveProof();
+  const proveToken = activeProveToken;
+  stepLinksEnabled = false;
 
   statusEl.className = 'status working';
   statusEl.textContent = 'proving\u2026';
@@ -1198,9 +1497,10 @@ async function prove(hash) {
 
   // Open step modal immediately with skeleton placeholder
   const modal = document.getElementById('modal');
-  const body = document.getElementById('modal-body');
+  const {body, content} = ensureStepScene();
+  clearStepScene();
   document.getElementById('modal-header').innerHTML = `<h3>Building proof\u2026 ${idBadges(rid)}</h3>`;
-  body.innerHTML = skeletonStep(1);
+  content.innerHTML = skeletonStep(1);
   modal.className = 'show';
   linkNum = 0;
   const streamedSteps = [];
@@ -1210,8 +1510,10 @@ async function prove(hash) {
   return new Promise((resolve) => {
     const es = new EventSource(`/prove?tx=${hash}&xrid=${rid}`);
     activeSSE = es;
-    const timeout = setTimeout(() => {
+    activeProveTimeout = setTimeout(() => {
+      if (proveToken !== activeProveToken) return;
       es.close(); activeSSE = null;
+      activeProveTimeout = null;
       statusEl.className = 'status error';
       statusEl.textContent = 'timed out';
       showModalError('timed out', hash);
@@ -1220,6 +1522,7 @@ async function prove(hash) {
 
     es.onmessage = async (e) => {
       try {
+        if (proveToken !== activeProveToken) return;
         const msg = JSON.parse(e.data);
 
         if (msg.type === 'log') {
@@ -1231,7 +1534,7 @@ async function prove(hash) {
             logBox.style.cssText = 'font-size:.6rem;color:#555;font-family:monospace;margin:.3rem 0;padding:.3rem .6rem;border-left:1px solid #2a2a2a;max-height:5.5em;overflow:hidden';
             const sk = document.getElementById('sk-next');
             if (sk) sk.parentElement.insertBefore(logBox, sk);
-            else body.appendChild(logBox);
+            else content.appendChild(logBox);
           }
           const line = document.createElement('div');
           line.style.cssText = 'padding:.05rem 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
@@ -1240,7 +1543,7 @@ async function prove(hash) {
           // Cap at 5 lines
           while (logBox.children.length > 5)
             logBox.removeChild(logBox.firstChild);
-          body.parentElement.scrollTop = body.parentElement.scrollHeight;
+          body.scrollTop = body.scrollHeight;
         }
 
         if (msg.type === 'step') {
@@ -1258,24 +1561,28 @@ async function prove(hash) {
           if (sk) sk.remove();
           // Render step with timing badge
           const html = await describeStep(msg.step, msg.index, streamedSteps);
+          if (proveToken !== activeProveToken) return;
           const timeLabel = elapsed < 1000
             ? `${Math.round(elapsed)}ms`
             : `${(elapsed / 1000).toFixed(1)}s`;
           const timed = html.replace(
             '<div class="step-detail">',
             `<span class="step-time">${timeLabel}</span><div class="step-detail">`);
-          body.insertAdjacentHTML('beforeend', timed);
+          content.insertAdjacentHTML('beforeend', timed);
           // Add next skeleton (unless this was a tx map_proof = final step)
           const isFinal = msg.step.type === 'map_proof' && msg.step.tree === 'tx';
           if (!isFinal) {
-            body.insertAdjacentHTML('beforeend', skeletonStep(msg.index + 2));
+            content.insertAdjacentHTML('beforeend', skeletonStep(msg.index + 2));
           }
           // Auto-scroll to bottom
-          body.parentElement.scrollTop = body.parentElement.scrollHeight;
+          body.scrollTop = body.scrollHeight;
         }
 
         if (msg.type === 'done') {
-          clearTimeout(timeout);
+          if (activeProveTimeout) {
+            clearTimeout(activeProveTimeout);
+            activeProveTimeout = null;
+          }
           if (skTimer) { clearInterval(skTimer); skTimer = null; }
           es.close(); activeSSE = null;
           // Assemble proof from streamed steps
@@ -1284,13 +1591,18 @@ async function prove(hash) {
             steps: streamedSteps
           };
           finishProve(json, hash);
+          if (history !== 'none')
+            syncProofPath(hash, json.network_id, history);
           // Re-render all steps with full context for correct links
           showSteps();
           resolve();
         }
 
         if (msg.type === 'error') {
-          clearTimeout(timeout);
+          if (activeProveTimeout) {
+            clearTimeout(activeProveTimeout);
+            activeProveTimeout = null;
+          }
           es.close(); activeSSE = null;
           statusEl.className = 'status error';
           statusEl.textContent = msg.error;
@@ -1303,7 +1615,11 @@ async function prove(hash) {
     };
 
     es.onerror = () => {
-      clearTimeout(timeout);
+      if (proveToken !== activeProveToken) return;
+      if (activeProveTimeout) {
+        clearTimeout(activeProveTimeout);
+        activeProveTimeout = null;
+      }
       es.close(); activeSSE = null;
       const errMsg = streamedSteps.length ? 'connection lost' : 'failed to connect';
       statusEl.className = 'status error';
@@ -1313,6 +1629,24 @@ async function prove(hash) {
     };
   });
 }
+
+function applyRouteFromLocation() {
+  const route = parseProofPath();
+  if (!route) {
+    if (tx.value) {
+      tx.value = '';
+      handleTxInput({history:'none'});
+    }
+    return;
+  }
+  if (tx.value !== route.txHash)
+    tx.value = route.txHash;
+  handleTxInput({history:'none'});
+}
+
+window.addEventListener('popstate', applyRouteFromLocation);
+window.addEventListener('resize', () => queueStepLinkRedraw());
+applyRouteFromLocation();
 </script>
 </body>
 </html>
