@@ -987,9 +987,7 @@ async function describeStep(step, i, allSteps) {
       }
     }
     if (nextIsTx) {
-      // TODO: align visible UI labels with canonical proof JSON names
-      // (`transaction_hash`, `total_coins`, etc.) after a quick browser pass.
-      lines.push(kv('tx_hash', lnk('link-tx', (h.transaction_hash||'').substring(0,24)+'\u2026', 'tx tree')));
+      lines.push(kv('transaction_hash', lnk('link-tx', (h.transaction_hash||'').substring(0,24)+'\u2026', 'tx tree')));
     }
     if (nextIsState) {
       lines.push(kv('account_hash', lnk('link-state', (h.account_hash||'').substring(0,24)+'\u2026', 'state tree')));
