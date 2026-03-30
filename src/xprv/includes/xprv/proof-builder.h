@@ -40,7 +40,6 @@ struct BuildServices
     boost::asio::io_context& io;
     std::shared_ptr<catl::peer_client::PeerSet> peers;
     catl::vl::ValidatorList const& vl;
-    std::vector<ValidationCollector::Entry> const& anchor_validations;
     catl::xdata::Protocol const& protocol;
     std::shared_ptr<catl::peer_client::NodeCache> node_cache;
     std::shared_ptr<catl::rpc::RpcClient> rpc;
@@ -48,10 +47,19 @@ struct BuildServices
     // Cached tx → ledger_seq (0 = not cached, must do RPC lookup)
     uint32_t tx_ledger_seq_hint = 0;
 
-    // Pre-built anchor bundle — shared across concurrent proves
-    catl::peer_client::LedgerHeaderResult anchor_hdr;
-    Hash256 anchor_hash;
-    Hash256 anchor_account_hash;  // for state walks
+    // Lazy anchor provider — fetches (or reuses) an anchor using
+    // min_seq as a floor when possible. Caching/quorum logic lives
+    // in the engine.
+    struct AnchorData
+    {
+        catl::peer_client::LedgerHeaderResult hdr;
+        Hash256 hash;
+        Hash256 account_hash;
+        std::vector<ValidationCollector::Entry> validations;
+    };
+    using GetAnchorFn =
+        std::function<boost::asio::awaitable<AnchorData>(uint32_t min_seq)>;
+    GetAnchorFn get_anchor;
 
     // Cancel token — set by HTTP session on client disconnect.
     // Checked at cancellation boundaries (walk_to, with_peer_failover)

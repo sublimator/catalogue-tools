@@ -759,6 +759,23 @@ function networkLabel(networkId) {
   return `network ${n}`;
 }
 
+function explorerUrlsForNetwork(networkId) {
+  const n = Number(networkId);
+  if (n === 0) {
+    return {
+      ledger: 'https://xrpscan.com/ledger/',
+      tx: 'https://xrpscan.com/tx/'
+    };
+  }
+  if (n === 21337) {
+    return {
+      ledger: '',
+      tx: 'https://xahscan.com/tx/'
+    };
+  }
+  return null;
+}
+
 function parseProofPath(pathname = location.pathname) {
   const match = pathname.match(/^\/network\/([^/]+)\/tx\/([0-9a-fA-F]{64})\/?$/);
   if (!match) return null;
@@ -864,6 +881,9 @@ function handleTxInput({ history = 'push' } = {}) {
   const hash = v.toUpperCase();
   if (hash !== v) tx.value = hash;
   tx.classList.add('valid');
+  const currentRoute = history !== 'none' ? parseProofPath() : null;
+  if (currentRoute && currentRoute.txHash !== hash)
+    clearProofPath('replace');
   prove(hash, {history});
 }
 
@@ -919,8 +939,19 @@ function showDetails(json, txHash) {
   const anchor = steps.find(s => s.type === 'anchor');
 
   const net = networkLabel(json.network_id);
-  const seq = anchor ? `<a href="https://xrpscan.com/ledger/${anchor.ledger_index}" target="_blank" rel="noopener">#${anchor.ledger_index}</a>` : '';
-  const tx = `<a href="https://xrpscan.com/tx/${txHash}" target="_blank" rel="noopener">${txHash.substring(0,16)}\u2026</a>`;
+  const explorer = explorerUrlsForNetwork(json.network_id);
+  const seq = anchor
+    ? (explorer
+      ? (explorer.ledger
+        ? `<a href="${explorer.ledger}${anchor.ledger_index}" target="_blank" rel="noopener">#${anchor.ledger_index}</a>`
+        : `#${anchor.ledger_index}`)
+      : `#${anchor.ledger_index}`)
+    : '';
+  const tx = explorer
+    ? (explorer.tx
+      ? `<a href="${explorer.tx}${txHash}" target="_blank" rel="noopener">${txHash.substring(0,16)}\u2026</a>`
+      : `${txHash.substring(0,16)}\u2026`)
+    : `${txHash.substring(0,16)}\u2026`;
   const stepsLink = `<span class="steps" onclick="showSteps()">${steps.length} steps</span>`;
 
   details.innerHTML = `${net}${S}${seq}${S}${tx}${S}${stepsLink}`;

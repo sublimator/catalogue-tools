@@ -1066,16 +1066,10 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     ctx->peers = svc.peers;
     ctx->node_cache = svc.node_cache;
     ctx->protocol = svc.protocol;
-    ctx->anchor_hdr = svc.anchor_hdr;
-    ctx->anchor_account_hash = ctx->anchor_hdr.header().account_hash();
-    ctx->anchor_hash = svc.anchor_hash;
     ctx->cancel_token = svc.cancel_token;
 
-    // Convenience references for non-lambda, non-suspending code in this frame.
-    // These are safe to use between co_awaits only when accessed directly
-    // (not captured into lambdas that outlive the suspension point).
+    // Convenience reference — safe between co_awaits in this frame
     auto const& vl_data = svc.vl;
-    auto const& anchor_validations = svc.anchor_validations;
 
     // walk_state uses NodeCache::walk_to — content-addressed, cross-ledger
     // sharing, concurrent dedup. Needs the tree root hash (account_hash)
@@ -1193,11 +1187,17 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             " (cached)");
     }
 
-    // ── Step 2: Anchor from provided validations ──
-    if (anchor_validations.empty())
-        throw std::runtime_error("No anchor validations provided");
+    // ── Step 2: Fetch anchor (lazy — knows tx_ledger_seq) ──
+    if (!svc.get_anchor)
+        throw std::runtime_error("No anchor provider");
 
-    uint32_t anchor_seq = anchor_validations.front().ledger_seq;
+    auto anchor = co_await svc.get_anchor(tx_ledger_seq);
+    ctx->anchor_hdr = anchor.hdr;
+    ctx->anchor_hash = anchor.hash;
+    ctx->anchor_account_hash = anchor.account_hash;
+
+    auto const& anchor_validations = anchor.validations;
+    uint32_t anchor_seq = ctx->anchor_hdr.seq();
     PLOGI(
         log_,
         "Using validated anchor: seq=",
@@ -1424,8 +1424,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     co_await emit_step(make_header(ctx->anchor_hdr));
 
     // ── Step 5: Determine hop path ──
-    // Guard against unsigned underflow: anchor must be at or after the tx.
-    // A stale anchor (via max_anchor_age) can be behind the tx ledger.
+    // Anchor must be at or ahead of the tx ledger. A stale anchor can
+    // still happen if the latest quorum has not yet reached tx_ledger_seq.
     if (ctx->anchor_hdr.seq() < tx_ledger_seq)
     {
         throw std::runtime_error(

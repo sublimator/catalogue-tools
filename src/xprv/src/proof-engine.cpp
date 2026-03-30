@@ -233,39 +233,43 @@ ProofEngine::prove(
     // Check tx→ledger_seq cache (avoids RPC lookup on repeated requests)
     auto cached_seq = tx_ledger_get(tx_hash);
 
-    // Step 2: Get anchor — reuse cached bundle if recent enough,
-    // otherwise wait for the latest quorum.
-    auto anchor = co_await get_or_reuse_anchor(vl, max_anchor_age_secs);
-
-    // If we know the tx ledger seq (from hint or cache), verify
-    // the anchor is ahead of it. If not, discard and get a fresh one.
-    uint32_t known_tx_seq =
-        ledger_seq_hint ? ledger_seq_hint : cached_seq.value_or(0);
-    if (known_tx_seq > 0 && anchor.seq < known_tx_seq)
-    {
-        PLOGW(
-            log_,
-            "Anchor seq=",
-            anchor.seq,
-            " is behind tx seq=",
-            known_tx_seq,
-            " — fetching fresh anchor");
-        anchor = co_await get_or_reuse_anchor(vl, 0);  // force fresh
-    }
+    // Capture self + vl + age for the lazy anchor provider
+    auto self = shared_from_this();
+    auto anchor_age = max_anchor_age_secs;
 
     BuildServices svc{
         .io = io_,
         .peers = peers_,
         .vl = vl,
-        .anchor_validations = anchor.validations,
         .protocol = protocol_,
         .node_cache = node_cache_,
         .rpc = rpc_,
         .tx_ledger_seq_hint =
             ledger_seq_hint ? ledger_seq_hint : cached_seq.value_or(0),
-        .anchor_hdr = anchor.header_result,
-        .anchor_hash = anchor.anchor_hash,
-        .anchor_account_hash = anchor.account_hash,
+        .get_anchor =
+            [self, &vl, anchor_age](uint32_t min_seq)
+                -> boost::asio::awaitable<BuildServices::AnchorData> {
+                auto bundle =
+                    co_await self->get_or_reuse_anchor(vl, anchor_age);
+                // If anchor is behind min_seq, force a fresh one once.
+                if (min_seq > 0 && bundle.seq < min_seq)
+                {
+                    PLOGW(
+                        log_,
+                        "Anchor seq=",
+                        bundle.seq,
+                        " behind min_seq=",
+                        min_seq,
+                        " — fetching fresh");
+                    bundle = co_await self->get_or_reuse_anchor(vl, 0);
+                }
+                co_return BuildServices::AnchorData{
+                    .hdr = bundle.header_result,
+                    .hash = bundle.anchor_hash,
+                    .account_hash = bundle.account_hash,
+                    .validations = bundle.validations,
+                };
+            },
         .cancel_token = cancel_token,
         .on_step = std::move(on_step),
     };
