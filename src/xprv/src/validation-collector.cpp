@@ -1,5 +1,6 @@
 #include "xprv/validation-collector.h"
 #include "xprv/hex-utils.h"
+#include "xprv/network-config.h"
 
 #include <catl/xdata/parser-context.h>
 #include <catl/xdata/parser.h>
@@ -34,8 +35,11 @@ lower_hex(std::span<const uint8_t> data)
 
 }  // namespace
 
-ValidationCollector::ValidationCollector(catl::xdata::Protocol const& protocol)
+ValidationCollector::ValidationCollector(
+    catl::xdata::Protocol const& protocol,
+    uint32_t network_id)
     : protocol_(protocol)
+    , net_label_(network_label(network_id))
 {
 }
 
@@ -55,7 +59,7 @@ ValidationCollector::set_unl(std::vector<catl::vl::Manifest> const& validators)
     }
     PLOGI(
         log_,
-        "  UNL loaded: ",
+        "[", net_label_, "] UNL loaded: ",
         unl_signing_keys.size(),
         " signing keys from ",
         unl_size,
@@ -189,8 +193,9 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     auto count = by_ledger[hash].size();
     PLOGD(
         log_,
-        unl_signing_keys.empty() ? "  Buffered validation for seq="
-                                 : "  UNL validation for seq=",
+        "[", net_label_, "] ",
+        unl_signing_keys.empty() ? "Buffered validation for seq="
+                                 : "UNL validation for seq=",
         seq,
         " hash=",
         hash.hex().substr(0, 16),
@@ -314,7 +319,7 @@ ValidationCollector::recompute_quorum_state(int percent)
         auto const seq = it->second.front().ledger_seq;
         PLOGI(
             log_,
-            "  QUORUM reached for seq=",
+            "[", net_label_, "] QUORUM reached for seq=",
             seq,
             " hash=",
             quorum_hash.hex().substr(0, 16),

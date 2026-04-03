@@ -367,6 +367,7 @@ private:
     mutable boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     PeerSetOptions options_;
     uint32_t network_id_;
+    std::string net_label_;
     std::shared_ptr<EndpointTracker> tracker_;
     std::shared_ptr<PeerEndpointCache> endpoint_cache_;
     struct EndpointStats

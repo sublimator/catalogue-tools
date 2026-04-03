@@ -9,12 +9,40 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <iostream>
+#include <map>
 #include <pthread.h>
 #include <sys/resource.h>
 #include <thread>
 #include <vector>
 
 static LogPartition log_("xprv", LogLevel::INFO);
+
+/// Create and configure a ProofEngine for a specific network, using
+/// the shared (non-network) settings from config.
+static std::shared_ptr<xprv::ProofEngine>
+make_engine(
+    boost::asio::io_context& io,
+    xprv::Config const& config,
+    uint32_t network_id)
+{
+    auto net_config = xprv::NetworkConfig::for_network(network_id);
+
+    // If this is the primary network, use any user-overridden endpoints
+    if (network_id == config.network_id)
+    {
+        net_config = xprv::to_network_config(config);
+    }
+
+    auto engine = xprv::ProofEngine::create(io, std::move(net_config));
+    if (config.no_cache)
+        engine->set_cache_enabled(false);
+    engine->set_node_cache_size(config.node_cache_size);
+    engine->set_fetch_timeout(config.fetch_timeout);
+    engine->set_max_walk_peer_retries(config.max_walk_peer_retries);
+    engine->set_fetch_stale_multiplier(config.fetch_stale_multiplier);
+    engine->set_rpc_max_concurrent(config.rpc_max_concurrent);
+    return engine;
+}
 
 int
 cmd_serve()
@@ -41,18 +69,27 @@ cmd_serve()
         }
     }
 
-    auto net_config = xprv::to_network_config(config);
     boost::asio::io_context io;
 
-    auto engine = xprv::ProofEngine::create(io, std::move(net_config));
-    if (config.no_cache)
-        engine->set_cache_enabled(false);
-    engine->set_node_cache_size(config.node_cache_size);
-    engine->set_fetch_timeout(config.fetch_timeout);
-    engine->set_max_walk_peer_retries(config.max_walk_peer_retries);
-    engine->set_fetch_stale_multiplier(config.fetch_stale_multiplier);
-    engine->set_rpc_max_concurrent(config.rpc_max_concurrent);
-    engine->start();
+    // Create engines for all enabled networks
+    std::map<uint32_t, std::shared_ptr<xprv::ProofEngine>> engines;
+    for (auto network_id : config.enabled_networks)
+    {
+        PLOGI(
+            log_,
+            "Creating engine for network ",
+            network_id,
+            " (",
+            xprv::NetworkConfig::for_network(network_id).peer_host,
+            ")");
+        engines[network_id] = make_engine(io, config, network_id);
+    }
+
+    // Start all engines
+    for (auto& [net_id, engine] : engines)
+    {
+        engine->start();
+    }
 
     xprv::HttpServerOptions http_opts;
     http_opts.bind_address = config.bind_address;
@@ -61,15 +98,22 @@ cmd_serve()
     http_opts.build_id = XPRV_BUILD_ID;
 #endif
 
-    auto server = xprv::HttpServer::create(io, engine, http_opts);
+    auto server = (engines.size() == 1)
+        ? xprv::HttpServer::create(
+              io, engines.begin()->second, http_opts)
+        : xprv::HttpServer::create(
+              io, engines, config.network_id, http_opts);
     server->start();
 
-    // SIGINT/SIGTERM → stop server, stop engine, stop io
+    // SIGINT/SIGTERM → stop server, stop engines, stop io
     boost::asio::signal_set signals(io, SIGINT, SIGTERM);
     signals.async_wait([&](boost::system::error_code, int sig) {
         PLOGI(log_, "Signal ", sig, " received, shutting down...");
         server->stop();
-        engine->stop();
+        for (auto& [net_id, engine] : engines)
+        {
+            engine->stop();
+        }
         io.stop();
     });
 

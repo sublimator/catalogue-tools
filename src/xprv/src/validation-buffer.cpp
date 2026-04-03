@@ -1,4 +1,5 @@
 #include "xprv/validation-buffer.h"
+#include "xprv/network-config.h"
 
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
@@ -12,9 +13,11 @@ LogPartition ValidationBuffer::log_("val-buffer", LogLevel::INHERIT);
 
 ValidationBuffer::ValidationBuffer(
     asio::io_context& io,
-    catl::xdata::Protocol const& protocol)
+    catl::xdata::Protocol const& protocol,
+    uint32_t network_id)
     : strand_(asio::make_strand(io))
-    , collector_(protocol)
+    , net_label_(network_label(network_id))
+    , collector_(protocol, network_id)
 {
     collector_.continuous = true;
 }
@@ -53,7 +56,7 @@ ValidationBuffer::set_unl(std::vector<catl::vl::Manifest> const& validators)
         {
             PLOGI(
                 ValidationBuffer::log_,
-                "UNL changed: ",
+                "[", self->net_label_, "] UNL changed: ",
                 self->collector_.unl_size,
                 " validators (was ",
                 old_keys.size(),
@@ -68,7 +71,7 @@ ValidationBuffer::set_unl(std::vector<catl::vl::Manifest> const& validators)
         {
             PLOGD(
                 ValidationBuffer::log_,
-                "UNL refreshed, unchanged (",
+                "[", self->net_label_, "] UNL refreshed, unchanged (",
                 self->collector_.unl_size,
                 " validators)");
         }
@@ -103,7 +106,7 @@ ValidationBuffer::check_for_new_quorum()
 
     PLOGI(
         log_,
-        "New quorum: seq=",
+        "[", net_label_, "] New quorum: seq=",
         entry.ledger_seq,
         " hash=",
         entry.ledger_hash.hex().substr(0, 16),

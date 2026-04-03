@@ -33,7 +33,9 @@ public:
         bool sig_verified = false;
     };
 
-    explicit ValidationCollector(catl::xdata::Protocol const& protocol);
+    explicit ValidationCollector(
+        catl::xdata::Protocol const& protocol,
+        uint32_t network_id = 0);
 
     /// Set the UNL signing keys for quorum checking.
     void
@@ -68,6 +70,7 @@ public:
 
 private:
     catl::xdata::Protocol const& protocol_;
+    std::string net_label_;
 
     void
     filter_buffer_to_unl();

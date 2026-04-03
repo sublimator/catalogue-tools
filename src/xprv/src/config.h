@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace xprv {
 
@@ -113,6 +114,12 @@ struct Config
     /// Trusted VL publisher master key (hex). Used to verify the UNL
     /// blob signature. Network-specific default from NetworkConfig.
     std::string publisher_key;
+
+    /// Enabled networks for multi-network mode. When empty or
+    /// single-element, behaves exactly like the old single-network mode.
+    /// Populated from XPRV_NETWORKS env var (comma-separated, e.g. "0,21337")
+    /// or [server].networks TOML array. Defaults to {network_id}.
+    std::vector<uint32_t> enabled_networks;
 };
 
 /// Find config file: $XDG_CONFIG_HOME/xprv/config.toml or

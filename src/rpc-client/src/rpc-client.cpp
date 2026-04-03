@@ -102,6 +102,10 @@ RpcClient::call(
                 co_await tcp_stream.async_connect(
                     endpoints, asio::use_awaitable);
 
+                // Set SNI hostname (required by Cloudflare and most modern TLS servers)
+                SSL_set_tlsext_host_name(
+                    stream.native_handle(), host.c_str());
+
                 // SSL handshake
                 tcp_stream.expires_after(std::chrono::seconds(10));
                 co_await stream.async_handshake(

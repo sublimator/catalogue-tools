@@ -172,6 +172,27 @@ route_matches_network(std::string_view route_network, uint32_t network_id)
     return token == configured_slug || token == numeric_id;
 }
 
+/// Parse /network/{slug}/... routes. Returns {slug, rest_of_path} or nullopt.
+static std::optional<std::pair<std::string, std::string>>
+parse_network_prefix(std::string_view path)
+{
+    static constexpr std::string_view prefix = "/network/";
+    if (!path.starts_with(prefix))
+        return std::nullopt;
+
+    auto rest = path.substr(prefix.size());
+    auto slash = rest.find('/');
+    if (slash == std::string_view::npos)
+    {
+        // /network/{slug} with no trailing path — treat rest as the route
+        return std::pair{std::string(rest), std::string("/")};
+    }
+
+    auto slug = rest.substr(0, slash);
+    auto sub_path = rest.substr(slash);  // includes leading /
+    return std::pair{std::string(slug), std::string(sub_path)};
+}
+
 static http::response<http::string_body>
 json_response(
     unsigned status,
@@ -298,9 +319,14 @@ error_response(
 
 HttpServer::HttpServer(
     asio::io_context& io,
-    std::shared_ptr<ProofEngine> engine,
+    std::map<uint32_t, std::shared_ptr<ProofEngine>> engines,
+    uint32_t default_network_id,
     HttpServerOptions opts)
-    : io_(io), engine_(std::move(engine)), opts_(std::move(opts)), acceptor_(io)
+    : io_(io)
+    , engines_(std::move(engines))
+    , default_network_id_(default_network_id)
+    , opts_(std::move(opts))
+    , acceptor_(io)
 {
     // Build X-XPRV header value once (stable for this process lifetime)
     xprv_header_ = "format_version=" + std::to_string(XPRV_FORMAT_VERSION) +
@@ -315,8 +341,23 @@ HttpServer::create(
     std::shared_ptr<ProofEngine> engine,
     HttpServerOptions opts)
 {
+    auto network_id = engine->config().network_id;
+    std::map<uint32_t, std::shared_ptr<ProofEngine>> engines;
+    engines[network_id] = std::move(engine);
     return std::shared_ptr<HttpServer>(
-        new HttpServer(io, std::move(engine), std::move(opts)));
+        new HttpServer(io, std::move(engines), network_id, std::move(opts)));
+}
+
+std::shared_ptr<HttpServer>
+HttpServer::create(
+    asio::io_context& io,
+    std::map<uint32_t, std::shared_ptr<ProofEngine>> engines,
+    uint32_t default_network_id,
+    HttpServerOptions opts)
+{
+    return std::shared_ptr<HttpServer>(
+        new HttpServer(
+            io, std::move(engines), default_network_id, std::move(opts)));
 }
 
 void
@@ -331,7 +372,17 @@ HttpServer::start()
     acceptor_.listen(asio::socket_base::max_listen_connections);
     accepting_ = true;
 
-    PLOGI(log_, "Listening on ", opts_.bind_address, ":", opts_.port);
+    PLOGI(
+        log_,
+        "Listening on ",
+        opts_.bind_address,
+        ":",
+        opts_.port,
+        " (",
+        engines_.size(),
+        " network",
+        (engines_.size() != 1 ? "s" : ""),
+        ")");
 
     auto self = shared_from_this();
     asio::co_spawn(
@@ -345,6 +396,81 @@ HttpServer::stop()
     boost::system::error_code ec;
     acceptor_.close(ec);
     PLOGI(log_, "Stopped accepting connections");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Engine lookup helpers
+// ═══════════════════════════════════════════════════════════════════════
+
+ProofEngine*
+HttpServer::engine_for(uint32_t network_id) const
+{
+    auto it = engines_.find(network_id);
+    return it != engines_.end() ? it->second.get() : nullptr;
+}
+
+std::pair<uint32_t, ProofEngine*>
+HttpServer::engine_for_slug(std::string_view slug) const
+{
+    for (auto const& [id, engine] : engines_)
+    {
+        if (route_matches_network(slug, id))
+            return {id, engine.get()};
+    }
+    return {0, nullptr};
+}
+
+asio::awaitable<std::pair<uint32_t, uint32_t>>
+HttpServer::lookup_tx_all(std::string const& tx_hash)
+{
+    // Single engine — skip the parallel dispatch overhead
+    if (engines_.size() == 1)
+    {
+        auto& [net_id, engine] = *engines_.begin();
+        auto seq = co_await engine->lookup_tx(tx_hash);
+        co_return std::pair{seq ? net_id : 0u, seq};
+    }
+
+    // Multi-engine: fire lookup_tx on all engines in parallel.
+    // We use co_spawn + a shared result to collect the first hit.
+    auto result_net = std::make_shared<std::atomic<uint32_t>>(0);
+    auto result_seq = std::make_shared<std::atomic<uint32_t>>(0);
+    auto remaining = std::make_shared<std::atomic<size_t>>(engines_.size());
+    auto signal = std::make_shared<asio::steady_timer>(
+        io_, asio::steady_timer::time_point::max());
+
+    auto ex = co_await asio::this_coro::executor;
+
+    for (auto const& [net_id, engine] : engines_)
+    {
+        asio::co_spawn(
+            ex,
+            [engine, tx_hash, net_id, result_net, result_seq, remaining,
+             signal]() -> asio::awaitable<void> {
+                auto seq = co_await engine->lookup_tx(tx_hash);
+                if (seq != 0)
+                {
+                    // First writer wins (CAS from 0)
+                    uint32_t expected = 0;
+                    if (result_net->compare_exchange_strong(expected, net_id))
+                    {
+                        result_seq->store(seq);
+                        signal->cancel();
+                    }
+                }
+                if (remaining->fetch_sub(1) == 1)
+                {
+                    // All done, nobody found it — wake up
+                    signal->cancel();
+                }
+            },
+            asio::detached);
+    }
+
+    boost::system::error_code ec;
+    co_await signal->async_wait(asio::redirect_error(asio::use_awaitable, ec));
+
+    co_return std::pair{result_net->load(), result_seq->load()};
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -400,6 +526,11 @@ HttpServer::handle_session(
 {
     beast::tcp_stream stream(std::move(socket));
     beast::flat_buffer buffer;
+
+    // Helper: get the default engine (for single-network backwards compat)
+    auto default_engine = [this]() -> ProofEngine* {
+        return engine_for(default_network_id_);
+    };
 
     for (;;)
     {
@@ -468,56 +599,228 @@ HttpServer::handle_session(
 
         PLOGI(log_, req.method_string(), " ", path);
 
+        // ── Check for /network/{slug}/... prefix routing ──────────
+        ProofEngine* routed_engine = nullptr;
+        uint32_t routed_network_id = 0;
+        std::string effective_path = path;
+
+        auto net_prefix = parse_network_prefix(path);
+        if (net_prefix)
+        {
+            auto [slug, sub_path] = *net_prefix;
+            auto [net_id, eng] = engine_for_slug(slug);
+            if (!eng)
+            {
+                // Unknown network slug — but might be a deep link for the web UI
+                // Check if this is a /network/{slug}/tx/{hash} route
+                auto route = parse_network_tx_route(path);
+                if (route && req.method() == http::verb::get)
+                {
+                    // Deep link — serve index.html for any known network
+                    bool any_match = false;
+                    for (auto const& [id, _] : engines_)
+                    {
+                        if (route_matches_network(route->network, id))
+                        {
+                            any_match = true;
+                            break;
+                        }
+                    }
+                    if (any_match)
+                    {
+                        std::string static_body, content_type;
+                        if (try_serve_static("/", static_body, content_type))
+                        {
+                            http::response<http::string_body> res{
+                                http::status::ok, version};
+                            res.set(http::field::content_type, content_type);
+                            res.set(http::field::server, "xprv");
+                            if (!g_xprv_header.empty())
+                                res.set("X-XPRV", g_xprv_header);
+                            res.keep_alive(keep_alive);
+                            res.body() = std::move(static_body);
+                            res.prepare_payload();
+                            stream.expires_after(opts_.write_timeout);
+                            co_await http::async_write(
+                                stream,
+                                res,
+                                asio::redirect_error(asio::use_awaitable, ec));
+                            if (ec || !keep_alive)
+                                break;
+                            continue;
+                        }
+                    }
+                }
+
+                stream.expires_after(opts_.write_timeout);
+                co_await http::async_write(
+                    stream,
+                    error_response(
+                        404,
+                        "unknown network: " + slug,
+                        version,
+                        keep_alive),
+                    asio::redirect_error(asio::use_awaitable, ec));
+                if (ec || !keep_alive)
+                    break;
+                continue;
+            }
+            routed_engine = eng;
+            routed_network_id = net_id;
+            effective_path = sub_path;
+        }
+
         // ── Route dispatch ────────────────────────────────────────
 
         std::optional<http::response<http::string_body>> caught_error;
         try
         {
-            if (path == "/health" && req.method() == http::verb::get)
+            if (effective_path == "/health" &&
+                req.method() == http::verb::get)
             {
-                auto status = co_await engine_->co_health();
-                auto cs = engine_->cache_stats();
-                boost::json::object body;
-                body["peer_count"] = status.peer_count;
-                body["vl_loaded"] = status.vl_loaded;
-                if (status.latest_quorum_seq)
+                if (routed_engine)
                 {
-                    body["latest_quorum_seq"] = *status.latest_quorum_seq;
+                    // Single network health
+                    auto status = co_await routed_engine->co_health();
+                    auto cs = routed_engine->cache_stats();
+                    boost::json::object body;
+                    body["network_id"] = routed_network_id;
+                    body["network"] =
+                        network_slug_for_id(routed_network_id);
+                    body["peer_count"] = status.peer_count;
+                    body["vl_loaded"] = status.vl_loaded;
+                    if (status.latest_quorum_seq)
+                        body["latest_quorum_seq"] = *status.latest_quorum_seq;
+
+                    boost::json::object cache;
+                    cache["entries"] = cs.entries;
+                    cache["max_entries"] = cs.max_entries;
+                    cache["hits"] = cs.hits;
+                    cache["misses"] = cs.misses;
+                    body["proof_cache"] = cache;
+
+                    auto ncs = routed_engine->node_cache_stats();
+                    boost::json::object nc;
+                    nc["entries"] = ncs.entries;
+                    nc["max_entries"] = ncs.max_entries;
+                    nc["hits"] = ncs.hits;
+                    nc["misses"] = ncs.misses;
+                    nc["fetches"] = ncs.fetches;
+                    nc["fetch_errors"] = ncs.fetch_errors;
+                    nc["hash_mismatches"] = ncs.hash_mismatches;
+                    nc["waiter_wakeups"] = ncs.waiter_wakeups;
+                    body["node_cache"] = nc;
+
+                    stream.expires_after(opts_.write_timeout);
+                    co_await http::async_write(
+                        stream,
+                        json_response(200, body, version, keep_alive),
+                        asio::redirect_error(asio::use_awaitable, ec));
                 }
-                boost::json::object cache;
-                cache["entries"] = cs.entries;
-                cache["max_entries"] = cs.max_entries;
-                cache["hits"] = cs.hits;
-                cache["misses"] = cs.misses;
-                body["proof_cache"] = cache;
+                else
+                {
+                    // Aggregate health across all engines
+                    boost::json::object body;
+                    boost::json::object networks;
 
-                body["run_id"] = Logger::get_run_id();
-                if (!opts_.build_id.empty())
-                    body["build_id"] = opts_.build_id;
+                    for (auto const& [net_id, engine] : engines_)
+                    {
+                        auto status = co_await engine->co_health();
+                        auto cs = engine->cache_stats();
+                        boost::json::object net_body;
+                        net_body["network_id"] = net_id;
+                        net_body["peer_count"] = status.peer_count;
+                        net_body["vl_loaded"] = status.vl_loaded;
+                        if (status.latest_quorum_seq)
+                            net_body["latest_quorum_seq"] =
+                                *status.latest_quorum_seq;
 
-                auto ncs = engine_->node_cache_stats();
-                boost::json::object nc;
-                nc["entries"] = ncs.entries;
-                nc["max_entries"] = ncs.max_entries;
-                nc["hits"] = ncs.hits;
-                nc["misses"] = ncs.misses;
-                nc["fetches"] = ncs.fetches;
-                nc["fetch_errors"] = ncs.fetch_errors;
-                nc["hash_mismatches"] = ncs.hash_mismatches;
-                nc["waiter_wakeups"] = ncs.waiter_wakeups;
-                body["node_cache"] = nc;
+                        boost::json::object cache;
+                        cache["entries"] = cs.entries;
+                        cache["max_entries"] = cs.max_entries;
+                        cache["hits"] = cs.hits;
+                        cache["misses"] = cs.misses;
+                        net_body["proof_cache"] = cache;
 
-                stream.expires_after(opts_.write_timeout);
-                co_await http::async_write(
-                    stream,
-                    json_response(200, body, version, keep_alive),
-                    asio::redirect_error(asio::use_awaitable, ec));
+                        auto ncs = engine->node_cache_stats();
+                        boost::json::object nc;
+                        nc["entries"] = ncs.entries;
+                        nc["max_entries"] = ncs.max_entries;
+                        nc["hits"] = ncs.hits;
+                        nc["misses"] = ncs.misses;
+                        nc["fetches"] = ncs.fetches;
+                        nc["fetch_errors"] = ncs.fetch_errors;
+                        nc["hash_mismatches"] = ncs.hash_mismatches;
+                        nc["waiter_wakeups"] = ncs.waiter_wakeups;
+                        net_body["node_cache"] = nc;
+
+                        networks[network_slug_for_id(net_id)] =
+                            std::move(net_body);
+                    }
+
+                    body["networks"] = std::move(networks);
+                    body["run_id"] = Logger::get_run_id();
+                    if (!opts_.build_id.empty())
+                        body["build_id"] = opts_.build_id;
+
+                    // For backwards compat with single-engine mode,
+                    // also include top-level fields from the default engine
+                    if (engines_.size() == 1)
+                    {
+                        auto& engine = engines_.begin()->second;
+                        auto status = co_await engine->co_health();
+                        auto cs = engine->cache_stats();
+                        body["peer_count"] = status.peer_count;
+                        body["vl_loaded"] = status.vl_loaded;
+                        if (status.latest_quorum_seq)
+                            body["latest_quorum_seq"] =
+                                *status.latest_quorum_seq;
+
+                        boost::json::object cache;
+                        cache["entries"] = cs.entries;
+                        cache["max_entries"] = cs.max_entries;
+                        cache["hits"] = cs.hits;
+                        cache["misses"] = cs.misses;
+                        body["proof_cache"] = cache;
+
+                        auto ncs = engine->node_cache_stats();
+                        boost::json::object nc;
+                        nc["entries"] = ncs.entries;
+                        nc["max_entries"] = ncs.max_entries;
+                        nc["hits"] = ncs.hits;
+                        nc["misses"] = ncs.misses;
+                        nc["fetches"] = ncs.fetches;
+                        nc["fetch_errors"] = ncs.fetch_errors;
+                        nc["hash_mismatches"] = ncs.hash_mismatches;
+                        nc["waiter_wakeups"] = ncs.waiter_wakeups;
+                        body["node_cache"] = nc;
+                    }
+
+                    stream.expires_after(opts_.write_timeout);
+                    co_await http::async_write(
+                        stream,
+                        json_response(200, body, version, keep_alive),
+                        asio::redirect_error(asio::use_awaitable, ec));
+                }
             }
-            else if (path == "/peers" && req.method() == http::verb::get)
+            else if (
+                effective_path == "/peers" &&
+                req.method() == http::verb::get)
             {
-                auto snapshot = co_await engine_->peers()->co_snapshot();
+                // Determine which engine to query
+                auto* engine = routed_engine
+                    ? routed_engine
+                    : default_engine();
+
+                auto snapshot = co_await engine->peers()->co_snapshot();
 
                 boost::json::object body;
+                if (routed_engine)
+                {
+                    body["network_id"] = routed_network_id;
+                    body["network"] =
+                        network_slug_for_id(routed_network_id);
+                }
                 body["known_endpoints"] = snapshot.known_endpoints;
                 body["tracked_endpoints"] = snapshot.tracked_endpoints;
                 body["connected_peers"] = snapshot.connected_peers;
@@ -566,7 +869,9 @@ HttpServer::handle_session(
                     json_response(200, body, version, keep_alive),
                     asio::redirect_error(asio::use_awaitable, ec));
             }
-            else if (path == "/prove" && req.method() == http::verb::get)
+            else if (
+                effective_path == "/prove" &&
+                req.method() == http::verb::get)
             {
                 auto tx_it = params.find("tx");
                 if (tx_it == params.end() || tx_it->second.empty())
@@ -580,20 +885,49 @@ HttpServer::handle_session(
                 }
                 else
                 {
-                    // Check if client wants SSE
-                    auto accept = std::string(
-                        req[http::field::accept]);
-                    bool wants_sse =
-                        accept.find("text/event-stream") != std::string::npos;
-
-                    // Optional ledger_index hint — skips RPC lookup
+                    // Determine which engine handles this tx
+                    ProofEngine* prove_engine = nullptr;
                     uint32_t ledger_seq_hint = 0;
+
+                    // Optional ledger_index hint from query
                     auto li_it = params.find("ledger_index");
                     if (li_it != params.end() && !li_it->second.empty())
                     {
                         try { ledger_seq_hint = std::stoul(li_it->second); }
                         catch (...) {}
                     }
+
+                    if (routed_engine)
+                    {
+                        // Network-specific route — use that engine directly
+                        prove_engine = routed_engine;
+                    }
+                    else if (engines_.size() == 1)
+                    {
+                        // Single engine — no lookup needed
+                        prove_engine = engines_.begin()->second.get();
+                    }
+                    else
+                    {
+                        // Multi-engine: look up tx on all networks
+                        auto [found_net, found_seq] =
+                            co_await lookup_tx_all(tx_it->second);
+                        if (found_net == 0)
+                        {
+                            throw catl::rpc::RpcTxNotFound(
+                                "tx " + tx_it->second.substr(0, 16) +
+                                "...: not found on any configured network");
+                        }
+                        prove_engine = engine_for(found_net);
+                        if (ledger_seq_hint == 0)
+                            ledger_seq_hint = found_seq;
+                    }
+
+                    // Check if client wants SSE
+                    auto accept = std::string(
+                        req[http::field::accept]);
+                    bool wants_sse =
+                        accept.find("text/event-stream") != std::string::npos;
 
                     // Optional max_anchor_age — reuse recent anchor (seconds).
                     // 0 (default) = always wait for latest quorum.
@@ -610,6 +944,10 @@ HttpServer::handle_session(
                     // exit without disrupting shared NodeCache state.
                     auto cancel_token =
                         std::make_shared<std::atomic<bool>>(false);
+
+                    // Capture engine as shared_ptr for coroutine safety
+                    auto engine_sp =
+                        engines_.at(prove_engine->config().network_id);
 
                     if (wants_sse)
                     {
@@ -700,7 +1038,7 @@ HttpServer::handle_session(
                         std::string sse_error;
                         try
                         {
-                            auto result = co_await engine_->prove(
+                            auto result = co_await engine_sp->prove(
                                 tx_it->second, cancel_token,
                                 ledger_seq_hint, max_anchor_age,
                                 std::move(on_step));
@@ -787,7 +1125,7 @@ HttpServer::handle_session(
                         co_await asio::experimental::make_parallel_group(
                             asio::co_spawn(
                                 ex,
-                                engine_->prove(
+                                engine_sp->prove(
                                     tx_it->second, cancel_token,
                                     ledger_seq_hint, max_anchor_age),
                                 asio::deferred),
@@ -870,7 +1208,9 @@ HttpServer::handle_session(
                     } // regular path
                 }
             }
-            else if (path == "/verify" && req.method() == http::verb::post)
+            else if (
+                effective_path == "/verify" &&
+                req.method() == http::verb::post)
             {
                 auto const& body = req.body();
                 if (body.empty())
@@ -884,7 +1224,9 @@ HttpServer::handle_session(
                 }
                 else
                 {
-                    auto vr = engine_->verify(
+                    // Use default engine for verify (it's a static
+                    // function that auto-detects network from the proof)
+                    auto vr = default_engine()->verify(
                         std::span<const uint8_t>(body.data(), body.size()));
 
                     boost::json::object result;
@@ -905,14 +1247,24 @@ HttpServer::handle_session(
             {
                 // Try static file (dev disk → embedded)
                 std::string static_body, content_type;
+
+                // Deep link: /network/{slug}/tx/{hash} → serve index.html
                 auto route = req.method() == http::verb::get
                     ? parse_network_tx_route(path)
                     : std::nullopt;
-                bool deep_link =
-                    route &&
-                    route_matches_network(
-                        route->network, engine_->config().network_id) &&
-                    try_serve_static("/", static_body, content_type);
+                bool deep_link = false;
+                if (route)
+                {
+                    for (auto const& [id, _] : engines_)
+                    {
+                        if (route_matches_network(route->network, id))
+                        {
+                            deep_link =
+                                try_serve_static("/", static_body, content_type);
+                            break;
+                        }
+                    }
+                }
 
                 if (deep_link ||
                     (req.method() == http::verb::get &&

@@ -11,4 +11,4 @@ images:
   - us-central1-docker.pkg.dev/xprv-server/xprv/xprv:latest
 timeout: 600s
 options:
-  machineType: E2_HIGHCPU_8
+  machineType: E2_HIGHCPU_16

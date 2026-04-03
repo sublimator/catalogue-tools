@@ -1,5 +1,6 @@
 #include "xprv/proof-builder.h"
 #include "xprv/hex-utils.h"
+#include "xprv/network-config.h"
 #include "xprv/skip-list.h"
 #include "xprv/validation-collector.h"
 
@@ -967,6 +968,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     co_await boost::asio::this_coro::reset_cancellation_state(
         boost::asio::enable_total_cancellation());
 
+    auto const net_label = network_label(svc.network_id);
     auto tx_hash = hash_from_hex(tx_hash_str);
 
     using AbbrevMap =
@@ -1170,7 +1172,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                 "... not found or no ledger_index");
         PLOGI(
             log_,
-            "TX ",
+            "[", net_label, "] TX ",
             tx_hash_str.substr(0, 16),
             "... is in ledger ",
             tx_ledger_seq,
@@ -1180,7 +1182,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     {
         PLOGI(
             log_,
-            "TX ",
+            "[", net_label, "] TX ",
             tx_hash_str.substr(0, 16),
             "... is in ledger ",
             tx_ledger_seq,
@@ -1200,7 +1202,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     uint32_t anchor_seq = ctx->anchor_hdr.seq();
     PLOGI(
         log_,
-        "Using validated anchor: seq=",
+        "[", net_label, "] Using validated anchor: seq=",
         anchor_seq,
         " (",
         anchor_validations.size(),
@@ -1223,7 +1225,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         return excluded;
     };
 
-    auto acquire_peer = [ctx, collect_excluded_peers](
+    auto acquire_peer = [ctx, collect_excluded_peers, net_label](
                             std::shared_ptr<PeerClient>& current,
                             std::optional<uint32_t> required_ledger,
                             std::string const& purpose)
@@ -1276,7 +1278,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                 if (!current->endpoint().empty())
                     ctx->peer_retry_counts[current->endpoint()] = 0;
                 PLOGI(
-                    log_, "Using peer ", current->endpoint(), " for ", purpose);
+                    log_, "[", net_label, "] Using peer ", current->endpoint(), " for ", purpose);
                 catl::core::emit_status(
                     "peer " + current->endpoint() + " → " + purpose);
                 co_return current;
@@ -1284,7 +1286,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
 
             PLOGI(
                 log_,
-                "Still waiting for peer for ",
+                "[", net_label, "] Still waiting for peer for ",
                 purpose,
                 " (",
                 excluded.size(),
@@ -1434,7 +1436,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             " — cannot build proof (stale anchor?)");
     }
     ctx->distance = ctx->anchor_hdr.seq() - tx_ledger_seq;
-    PLOGI(log_, "Distance: ", ctx->distance, " ledgers");
+    PLOGI(log_, "[", net_label, "] Distance: ", ctx->distance, " ledgers");
     catl::core::emit_status(
         "distance: " + std::to_string(ctx->distance) + " ledgers");
 
@@ -1442,7 +1444,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
 
     if (!ctx->need_flag_hop)
     {
-        PLOGI(log_, "Short skip list (within 256)");
+        PLOGI(log_, "[", net_label, "] Short skip list (within 256)");
         catl::core::emit_status("short skip list (within 256)");
         auto skip_key_val = skip_list_key();
 
@@ -1492,7 +1494,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     }
     else
     {
-        PLOGI(log_, "Long skip list (2-hop, distance=", ctx->distance, ")");
+        PLOGI(log_, "[", net_label, "] Long skip list (2-hop, distance=", ctx->distance, ")");
         catl::core::emit_status(
             "long skip list (2-hop, distance=" +
             std::to_string(ctx->distance) + ")");
@@ -1621,7 +1623,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
 
     // ── Step 7: Walk TX tree ──
     auto ledger_hash = target_hdr.ledger_hash256();
-    PLOGI(log_, "Walking TX tree for ", tx_hash_str.substr(0, 16), "...");
+    PLOGI(log_, "[", net_label, "] Walking TX tree for ", tx_hash_str.substr(0, 16), "...");
     catl::core::emit_status("walking TX tree");
 
     auto tx_walk = co_await with_peer_failover(

@@ -166,6 +166,20 @@ load_config_file(std::string const& path, uint32_t network_id_hint)
                 config.fd_limit = static_cast<unsigned int>(*v);
         }
 
+        // Multi-network: [server].networks = [0, 21337]
+        if (auto s = tbl["server"].as_table())
+        {
+            if (auto arr = (*s)["networks"].as_array())
+            {
+                for (auto const& v : *arr)
+                {
+                    if (auto n = v.value<int64_t>())
+                        config.enabled_networks.push_back(
+                            static_cast<uint32_t>(*n));
+                }
+            }
+        }
+
         // Per-network section
         auto net_key = std::to_string(config.network_id);
         if (auto n = tbl["network"][net_key].as_table())
@@ -241,6 +255,22 @@ apply_env_overrides(Config& config)
         config.peer_cache_path = *v;
     if (auto v = env_u32("XPRV_FD_LIMIT"))
         config.fd_limit = *v;
+
+    // XPRV_NETWORKS="0,21337" — comma-separated list of network IDs
+    if (auto v = env_str("XPRV_NETWORKS"))
+    {
+        config.enabled_networks.clear();
+        std::istringstream ss(*v);
+        std::string token;
+        while (std::getline(ss, token, ','))
+        {
+            if (!token.empty())
+            {
+                config.enabled_networks.push_back(
+                    static_cast<uint32_t>(std::stoul(token)));
+            }
+        }
+    }
 }
 
 // ─── Public API ──────────────────────────────────────────────────────
@@ -281,6 +311,10 @@ load_config(uint32_t network_id_hint)
         config.vl_port = net.vl_port;
     if (config.publisher_key.empty())
         config.publisher_key = net.publisher_key;
+
+    // Default enabled_networks to just the primary network_id
+    if (config.enabled_networks.empty())
+        config.enabled_networks.push_back(config.network_id);
 
     return config;
 }
@@ -324,7 +358,19 @@ dump_config(Config const& config, std::ostream& os)
     os << "bind = \"" << config.bind_address << "\"\n";
     os << "port = " << config.port << "\n";
     os << "threads = " << config.threads << "\n";
-    os << "fd_limit = " << config.fd_limit << "\n\n";
+    os << "fd_limit = " << config.fd_limit << "\n";
+    if (config.enabled_networks.size() > 1)
+    {
+        os << "networks = [";
+        for (size_t i = 0; i < config.enabled_networks.size(); ++i)
+        {
+            if (i > 0)
+                os << ", ";
+            os << config.enabled_networks[i];
+        }
+        os << "]\n";
+    }
+    os << "\n";
 
     os << "[cache]\n";
     os << "enabled = " << (config.no_cache ? "false" : "true") << "\n";

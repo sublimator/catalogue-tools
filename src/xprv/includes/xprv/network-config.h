@@ -58,4 +58,20 @@ struct NetworkConfig
     for_network(uint32_t network_id);
 };
 
+/// Human-readable short label for a network ID.
+/// "xrpl" for 0, "xahau" for 21337, "net-{id}" for unknown.
+inline std::string
+network_label(uint32_t network_id)
+{
+    switch (network_id)
+    {
+        case 0:
+            return "xrpl";
+        case 21337:
+            return "xahau";
+        default:
+            return "net-" + std::to_string(network_id);
+    }
+}
+
 }  // namespace xprv

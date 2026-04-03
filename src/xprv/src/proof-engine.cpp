@@ -26,7 +26,10 @@ static LogPartition log_("engine", LogLevel::INFO);
 // ═══════════════════════════════════════════════════════════════════════
 
 ProofEngine::ProofEngine(asio::io_context& io, NetworkConfig config)
-    : io_(io), config_(std::move(config)), protocol_(config_.load_protocol())
+    : io_(io)
+    , config_(std::move(config))
+    , net_label_(network_label(config_.network_id))
+    , protocol_(config_.load_protocol())
 {
     config_.apply_defaults();
 }
@@ -45,7 +48,7 @@ ProofEngine::start()
     vl_cache_->start();
 
     // Validation buffer
-    val_buffer_ = ValidationBuffer::create(io_, protocol_);
+    val_buffer_ = ValidationBuffer::create(io_, protocol_, config_.network_id);
 
     // Wire VL → validation buffer: when VL loads, push UNL keys
     // We do this via a one-shot fetch, then the refresh will re-push.
@@ -75,7 +78,7 @@ ProofEngine::start()
     peer_opts.archival_range_threshold = config_.archival_range_threshold;
     PLOGI(
         log_,
-        "Peer pool (",
+        "[", net_label_, "] Peer pool (",
         single_shot_ ? "cli" : "server",
         "): hubs=",
         pool.max_hub_peers,
@@ -118,7 +121,7 @@ ProofEngine::start()
             {
                 PLOGI(
                     log_,
-                    "Initial peer connected: ",
+                    "[", self->net_label_, "] Initial peer connected: ",
                     client->endpoint(),
                     " (ledger ",
                     client->peer_ledger_seq(),
@@ -128,7 +131,7 @@ ProofEngine::start()
             {
                 PLOGW(
                     log_,
-                    "Initial peer ",
+                    "[", self->net_label_, "] Initial peer ",
                     self->config_.peer_host,
                     ":",
                     self->config_.peer_port,
@@ -150,7 +153,7 @@ ProofEngine::start()
                 results.begin()->endpoint().address().to_string();
             PLOGI(
                 log_,
-                "Resolved RPC host ",
+                "[", net_label_, "] Resolved RPC host ",
                 config_.rpc_host,
                 " → ",
                 resolved_ip);
@@ -159,13 +162,13 @@ ProofEngine::start()
     }
     catch (std::exception const& e)
     {
-        PLOGW(log_, "Failed to pre-resolve RPC host: ", e.what());
+        PLOGW(log_, "[", net_label_, "] Failed to pre-resolve RPC host: ", e.what());
         // Continue with hostname — individual requests will resolve
     }
 
     PLOGI(
         log_,
-        "Engine started (network=",
+        "[", net_label_, "] Engine started (network=",
         config_.network_id,
         ", vl=",
         config_.vl_host,
@@ -183,7 +186,7 @@ ProofEngine::start()
 void
 ProofEngine::stop()
 {
-    PLOGI(log_, "Engine stopping...");
+    PLOGI(log_, "[", net_label_, "] Engine stopping...");
     if (vl_cache_)
     {
         vl_cache_->stop();
@@ -215,7 +218,7 @@ ProofEngine::prove(
     {
         if (auto cached = cache_get(tx_hash))
         {
-            PLOGI(log_, "Cache hit for ", tx_hash.substr(0, 16), "...");
+            PLOGI(log_, "[", net_label_, "] Cache hit for ", tx_hash.substr(0, 16), "...");
             // Replay cached steps through the callback for SSE
             if (on_step)
             {
@@ -244,6 +247,7 @@ ProofEngine::prove(
         .protocol = protocol_,
         .node_cache = node_cache_,
         .rpc = rpc_,
+        .network_id = config_.network_id,
         .tx_ledger_seq_hint =
             ledger_seq_hint ? ledger_seq_hint : cached_seq.value_or(0),
         .get_anchor =
@@ -256,7 +260,7 @@ ProofEngine::prove(
                 {
                     PLOGW(
                         log_,
-                        "Anchor seq=",
+                        "[", self->net_label_, "] Anchor seq=",
                         bundle.seq,
                         " behind min_seq=",
                         min_seq,
@@ -293,6 +297,46 @@ ProofEngine::prove(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// lookup_tx() — check tx_ledger cache then RPC, return ledger_seq or 0
+// ═══════════════════════════════════════════════════════════════════════
+
+asio::awaitable<uint32_t>
+ProofEngine::lookup_tx(std::string const& tx_hash)
+{
+    // Check tx→ledger cache first
+    if (auto cached = tx_ledger_get(tx_hash))
+        co_return *cached;
+
+    try
+    {
+        auto result = co_await catl::rpc::co_tx(*rpc_, tx_hash);
+        auto const& obj = result.as_object();
+        // v2 API: ledger_index is in the result object
+        if (auto it = obj.find("ledger_index"); it != obj.end())
+        {
+            auto seq = static_cast<uint32_t>(it->value().as_int64());
+            tx_ledger_put(tx_hash, seq);
+            co_return seq;
+        }
+        co_return 0u;
+    }
+    catch (catl::rpc::RpcTxNotFound const&)
+    {
+        co_return 0u;
+    }
+    catch (std::exception const& e)
+    {
+        PLOGD(
+            log_,
+            "lookup_tx(",
+            tx_hash.substr(0, 16),
+            "...): ",
+            e.what());
+        co_return 0u;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Proof cache
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -319,7 +363,7 @@ ProofEngine::cache_put(std::string const& tx_hash, ProveResult const& result)
     cache_map_[tx_hash] = cache_lru_.begin();
     PLOGD(
         log_,
-        "Cached proof for ",
+        "[", net_label_, "] Cached proof for ",
         tx_hash.substr(0, 16),
         "... (",
         cache_lru_.size(),
@@ -475,7 +519,7 @@ ProofEngine::get_or_reuse_anchor(
         {
             PLOGI(
                 log_,
-                "Anchor: reusing seq=",
+                "[", net_label_, "] Anchor: reusing seq=",
                 current_anchor_->seq,
                 " hash=",
                 current_anchor_->anchor_hash.hex().substr(0, 16),
@@ -495,7 +539,7 @@ ProofEngine::get_or_reuse_anchor(
 
     PLOGI(
         log_,
-        "Anchor: seq=",
+        "[", net_label_, "] Anchor: seq=",
         quorum.ledger_seq,
         " hash=",
         quorum.ledger_hash.hex().substr(0, 16),
@@ -530,13 +574,13 @@ ProofEngine::get_anchor_bundle(
         {
             action = Action::hit;
             hit_bundle = it->second.bundle;
-            PLOGD(log_, "anchor_bundle: HIT seq=", anchor_seq);
+            PLOGD(log_, "[", net_label_, "] anchor_bundle: HIT seq=", anchor_seq);
         }
         else if (!inserted && it->second.signal)
         {
             action = Action::wait;
             signal = it->second.signal;
-            PLOGD(log_, "anchor_bundle: IN-FLIGHT seq=", anchor_seq);
+            PLOGD(log_, "[", net_label_, "] anchor_bundle: IN-FLIGHT seq=", anchor_seq);
         }
         else
         {
@@ -544,7 +588,7 @@ ProofEngine::get_anchor_bundle(
                 io_, std::chrono::seconds(30));
             it->second.present = false;
             action = Action::fetch;
-            PLOGD(log_, "anchor_bundle: MISS seq=", anchor_seq, " — building");
+            PLOGD(log_, "[", net_label_, "] anchor_bundle: MISS seq=", anchor_seq, " — building");
         }
     }
 
@@ -596,7 +640,7 @@ ProofEngine::get_anchor_bundle(
 
         PLOGI(
             log_,
-            "anchor_bundle: built seq=",
+            "[", net_label_, "] anchor_bundle: built seq=",
             anchor_seq,
             " hash=",
             anchor_hash.hex().substr(0, 16));

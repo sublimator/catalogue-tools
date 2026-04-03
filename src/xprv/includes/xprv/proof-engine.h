@@ -91,6 +91,12 @@ public:
     VerifyResult
     verify(std::span<const uint8_t> data, std::string const& trusted_key = "");
 
+    /// Look up which ledger a transaction is in (RPC only, no proof
+    /// building). Returns the ledger sequence, or 0 if not found on
+    /// this network.
+    boost::asio::awaitable<uint32_t>
+    lookup_tx(std::string const& tx_hash);
+
     /// Engine status for health checks. Awaitable — hops to each
     /// service strand to collect a snapshot.
     struct Status
@@ -198,6 +204,7 @@ private:
 
     boost::asio::io_context& io_;
     NetworkConfig config_;
+    std::string net_label_;
     catl::xdata::Protocol protocol_;
 
     std::shared_ptr<catl::peer_client::PeerSet> peers_;

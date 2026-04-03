@@ -41,10 +41,13 @@ class ValidationBuffer : public std::enable_shared_from_this<ValidationBuffer>
 {
 public:
     static std::shared_ptr<ValidationBuffer>
-    create(boost::asio::io_context& io, catl::xdata::Protocol const& protocol)
+    create(
+        boost::asio::io_context& io,
+        catl::xdata::Protocol const& protocol,
+        uint32_t network_id = 0)
     {
         return std::shared_ptr<ValidationBuffer>(
-            new ValidationBuffer(io, protocol));
+            new ValidationBuffer(io, protocol, network_id));
     }
 
     /// Feed from unsolicited handler. Safe to call from any thread/strand —
@@ -70,7 +73,8 @@ public:
 private:
     ValidationBuffer(
         boost::asio::io_context& io,
-        catl::xdata::Protocol const& protocol);
+        catl::xdata::Protocol const& protocol,
+        uint32_t network_id);
 
     static constexpr int kQuorumPercent = 90;
 
@@ -86,6 +90,7 @@ private:
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
 
     // Strand-owned state:
+    std::string net_label_;
     ValidationCollector collector_;
     std::deque<QuorumEntry> recent_quorums_;  // newest at back
     Hash256 last_quorum_hash_;                // dedup: don't re-add same quorum

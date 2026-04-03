@@ -2,17 +2,25 @@
 
 // HTTP server for xprv — thin wrapper over ProofEngine.
 //
-// Coroutine-based Beast sessions. Routes:
-//   GET  /health              → engine status JSON
-//   GET  /prove?tx=<hash>     → JSON proof chain
-//   GET  /prove?tx=...&format=bin → binary XPRV
-//   POST /verify              → verify proof from request body
+// Supports single-network mode (backwards compat) and multi-network
+// mode where multiple ProofEngines are registered.
+//
+// Routes:
+//   GET  /health                          → aggregate or single-network status
+//   GET  /network/{slug}/health           → single network health
+//   GET  /prove?tx=<hash>                 → auto-detect network, JSON proof
+//   GET  /prove?tx=...&format=bin         → auto-detect network, binary XPRV
+//   GET  /network/{slug}/prove?tx=<hash>  → network-specific prove
+//   GET  /peers                           → aggregate peers
+//   GET  /network/{slug}/peers            → single network peers
+//   POST /verify                          → verify proof from request body
 
 #include "proof-engine.h"
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <chrono>
+#include <map>
 #include <memory>
 #include <string>
 
@@ -35,10 +43,19 @@ struct HttpServerOptions
 class HttpServer : public std::enable_shared_from_this<HttpServer>
 {
 public:
+    /// Single-engine constructor (backwards compat).
     static std::shared_ptr<HttpServer>
     create(
         boost::asio::io_context& io,
         std::shared_ptr<ProofEngine> engine,
+        HttpServerOptions opts = {});
+
+    /// Multi-engine constructor.
+    static std::shared_ptr<HttpServer>
+    create(
+        boost::asio::io_context& io,
+        std::map<uint32_t, std::shared_ptr<ProofEngine>> engines,
+        uint32_t default_network_id,
         HttpServerOptions opts = {});
 
     /// Start accepting connections.
@@ -58,7 +75,8 @@ public:
 private:
     HttpServer(
         boost::asio::io_context& io,
-        std::shared_ptr<ProofEngine> engine,
+        std::map<uint32_t, std::shared_ptr<ProofEngine>> engines,
+        uint32_t default_network_id,
         HttpServerOptions opts);
 
     boost::asio::awaitable<void>
@@ -77,8 +95,24 @@ private:
         res.set("X-XPRV", xprv_header_);
     }
 
+    /// Find engine for a network ID. Returns nullptr if not found.
+    ProofEngine*
+    engine_for(uint32_t network_id) const;
+
+    /// Find engine matching a network slug (name or numeric ID).
+    /// Returns {network_id, engine*} or {0, nullptr} if not found.
+    std::pair<uint32_t, ProofEngine*>
+    engine_for_slug(std::string_view slug) const;
+
+    /// Look up a tx hash across all engines in parallel.
+    /// Returns {network_id, ledger_seq} of the first engine to find it,
+    /// or {0, 0} if not found on any network.
+    boost::asio::awaitable<std::pair<uint32_t, uint32_t>>
+    lookup_tx_all(std::string const& tx_hash);
+
     boost::asio::io_context& io_;
-    std::shared_ptr<ProofEngine> engine_;
+    std::map<uint32_t, std::shared_ptr<ProofEngine>> engines_;
+    uint32_t default_network_id_ = 0;
     HttpServerOptions opts_;
     boost::asio::ip::tcp::acceptor acceptor_;
     bool accepting_ = false;

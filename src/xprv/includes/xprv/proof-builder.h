@@ -43,6 +43,7 @@ struct BuildServices
     catl::xdata::Protocol const& protocol;
     std::shared_ptr<catl::peer_client::NodeCache> node_cache;
     std::shared_ptr<catl::rpc::RpcClient> rpc;
+    uint32_t network_id = 0;
 
     // Cached tx → ledger_seq (0 = not cached, must do RPC lookup)
     uint32_t tx_ledger_seq_hint = 0;

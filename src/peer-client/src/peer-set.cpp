@@ -111,11 +111,26 @@ get_bootstrap_peers(uint32_t network_id)
 
 // ── PeerSet ─────────────────────────────────────────────────────
 
+static std::string
+peer_net_label(uint32_t network_id)
+{
+    switch (network_id)
+    {
+        case 0:
+            return "xrpl";
+        case 21337:
+            return "xahau";
+        default:
+            return "net-" + std::to_string(network_id);
+    }
+}
+
 PeerSet::PeerSet(boost::asio::io_context& io, PeerSetOptions const& options)
     : io_(io)
     , strand_(asio::make_strand(io))
     , options_(options)
     , network_id_(options.network_id)
+    , net_label_(peer_net_label(options.network_id))
     , tracker_(std::make_shared<EndpointTracker>())
 {
     if (!options_.endpoint_cache_path.empty())
@@ -978,7 +993,7 @@ PeerSet::load_cached_endpoints()
         network_id_, options_.cached_endpoint_limit);
     PLOGI(
         log_,
-        "Peer cache has ",
+        "[", net_label_, "] Peer cache has ",
         total_cached,
         " endpoints for network ",
         network_id_,
@@ -1000,7 +1015,7 @@ PeerSet::load_cached_endpoints()
     }
     if (!cached.empty())
     {
-        PLOGI(log_, "Peer cache path: ", endpoint_cache_->path());
+        PLOGI(log_, "[", net_label_, "] Peer cache path: ", endpoint_cache_->path());
     }
 }
 
@@ -1117,7 +1132,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
         {
             PLOGI(
                 log_,
-                "Connection cap reached (",
+                "[", net_label_, "] Connection cap reached (",
                 incoming_archival ? "archival" : "hub",
                 " pool), skipping ",
                 key);
@@ -1127,7 +1142,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 
     PLOGI(
         log_,
-        "Connecting to ",
+        "[", net_label_, "] Connecting to ",
         key,
         incoming_archival ? " (archival)" : "",
         " [hubs=",
@@ -1196,7 +1211,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
         }
         PLOGI(
             log_,
-            "Connected to ",
+            "[", net_label_, "] Connected to ",
             key,
             " (range: ",
             client->peer_first_seq(),
@@ -1233,7 +1248,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
             auto const& ips = client->raw_connection().redirect_ips();
             if (!ips.empty())
             {
-                PLOGI(log_, "Got ", ips.size(), " redirect peers from ", key);
+                PLOGI(log_, "[", net_label_, "] Got ", ips.size(), " redirect peers from ", key);
                 for (auto const& ip : ips)
                 {
                     tracker_->add_discovered(ip);
@@ -1256,13 +1271,13 @@ PeerSet::bootstrap()
 
     if (boot_peers.empty() && tracked_endpoints.empty())
     {
-        PLOGW(log_, "No bootstrap peers for network ", network_id_);
+        PLOGW(log_, "[", net_label_, "] No bootstrap peers for network ", network_id_);
         return;
     }
 
     PLOGI(
         log_,
-        "Bootstrapping: ",
+        "[", net_label_, "] Bootstrapping: ",
         boot_peers.size(),
         " built-in seeds, ",
         tracked_endpoints.size(),
@@ -1338,7 +1353,7 @@ PeerSet::try_undiscovered()
     {
         PLOGI(
             log_,
-            "Queued ",
+            "[", net_label_, "] Queued ",
             crawls,
             " crawl jobs and ",
             connects,
@@ -1475,7 +1490,7 @@ PeerSet::wait_for_any_peer(
 
     PLOGI(
         log_,
-        "Waiting for any ready peer (",
+        "[", net_label_, "] Waiting for any ready peer (",
         connections_.size(),
         " connected, ",
         in_flight_.size(),
@@ -1503,7 +1518,7 @@ PeerSet::wait_for_any_peer(
         {
             PLOGI(
                 log_,
-                "Still waiting for any peer (",
+                "[", net_label_, "] Still waiting for any peer (",
                 connections_.size(),
                 " connected, ",
                 in_flight_.size(),
@@ -1513,7 +1528,7 @@ PeerSet::wait_for_any_peer(
         }
     }
 
-    PLOGW(log_, "No ready peer found after ", timeout_secs, "s");
+    PLOGW(log_, "[", net_label_, "] No ready peer found after ", timeout_secs, "s");
     co_return nullptr;
 }
 
@@ -1590,6 +1605,7 @@ PeerSet::wait_for_peer(
             {
                 PLOGI(
                     log_,
+                    "[", net_label_, "] ",
                     sel.decision == PeerDecision::use_range_match
                         ? "Range match: "
                         : "Fallback: ",
@@ -1605,7 +1621,7 @@ PeerSet::wait_for_peer(
 
     PLOGI(
         log_,
-        "Waiting for a peer with ledger ",
+        "[", net_label_, "] Waiting for a peer with ledger ",
         ledger_seq,
         " (",
         connections_.size(),
@@ -1634,6 +1650,7 @@ PeerSet::wait_for_peer(
                 {
                     PLOGI(
                         log_,
+                        "[", net_label_, "] ",
                         sel.decision == PeerDecision::use_range_match
                             ? "Found peer: "
                             : "Fallback peer: ",
@@ -1655,7 +1672,7 @@ PeerSet::wait_for_peer(
                 wanted_ledgers_.erase(ledger_seq);
                 PLOGW(
                     log_,
-                    "No peer found with ledger ",
+                    "[", net_label_, "] No peer found with ledger ",
                     ledger_seq,
                     " after ",
                     timeout_secs,
@@ -1678,7 +1695,7 @@ PeerSet::wait_for_peer(
         {
             PLOGI(
                 log_,
-                "Still waiting for ledger ",
+                "[", net_label_, "] Still waiting for ledger ",
                 ledger_seq,
                 " (",
                 connections_.size(),
@@ -1693,7 +1710,7 @@ PeerSet::wait_for_peer(
     wanted_ledgers_.erase(ledger_seq);
     PLOGW(
         log_,
-        "No peer found with ledger ",
+        "[", net_label_, "] No peer found with ledger ",
         ledger_seq,
         " after ",
         timeout_secs,
@@ -1942,7 +1959,7 @@ PeerSet::evict_for(uint32_t target_ledger_seq)
 
     PLOGI(
         log_,
-        "Evicting idle peer ",
+        "[", net_label_, "] Evicting idle peer ",
         worst_key,
         " (range span ",
         worst_range_span,
@@ -1967,7 +1984,7 @@ PeerSet::remove_peer(std::string const& key)
     auto it = connections_.find(key);
     if (it != connections_.end())
     {
-        PLOGI(log_, "Removing dead peer: ", key);
+        PLOGI(log_, "[", net_label_, "] Removing dead peer: ", key);
         connections_.erase(it);
         tracker_->remove(key);
     }
