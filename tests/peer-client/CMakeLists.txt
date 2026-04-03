@@ -10,7 +10,12 @@ add_executable(peer-selector-gtest peer-selector-gtest.cpp)
 target_link_libraries(peer-selector-gtest
                       PRIVATE catl::peer-client GTest::gtest_main)
 
+add_executable(node-cache-signal-gtest node-cache-signal-gtest.cpp)
+target_link_libraries(node-cache-signal-gtest
+                      PRIVATE catl::peer-client GTest::gtest_main)
+
 include(GoogleTest)
 gtest_discover_tests(peer-client-gtest DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(tree-walk-state-gtest DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(peer-selector-gtest DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(node-cache-signal-gtest DISCOVERY_TIMEOUT 30)

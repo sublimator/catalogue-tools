@@ -673,20 +673,39 @@ NodeCache::ensure_present(
             // the peer probably dropped the request. Re-send with a
             // fresh signal.
             auto now = std::chrono::steady_clock::now();
+            bool signal_expired = it->second.signal &&
+                it->second.signal->expiry() <= now;
             auto stale_threshold = std::chrono::seconds(
                 fetch_timeout_secs_ * fetch_stale_multiplier_);
-            if (now - it->second.last_fetch_at > stale_threshold &&
-                peer && peer->is_ready())
+            bool is_stale =
+                now - it->second.last_fetch_at > stale_threshold;
+
+            if ((signal_expired || is_stale) && peer && peer->is_ready())
             {
-                // Replace with fresh signal
+                // Signal expired or entry is stale — refresh and re-send
                 it->second.signal = std::make_shared<asio::steady_timer>(
                     io_, std::chrono::seconds(fetch_timeout_secs_));
                 action = Action::send_and_wait;
                 PLOGD(
                     log_,
-                    "  ensure: STALE in-flight hash=",
+                    "  ensure: ",
+                    signal_expired ? "EXPIRED" : "STALE",
+                    " in-flight hash=",
                     expected_hash.hex().substr(0, 16),
                     " — re-sending");
+            }
+            else if (signal_expired)
+            {
+                // Signal expired but no peer to re-send — create
+                // fresh signal anyway so waiters don't instantly timeout
+                it->second.signal = std::make_shared<asio::steady_timer>(
+                    io_, std::chrono::seconds(fetch_timeout_secs_));
+                action = Action::wait;
+                PLOGD(
+                    log_,
+                    "  ensure: EXPIRED (no peer) hash=",
+                    expected_hash.hex().substr(0, 16),
+                    " — fresh signal, waiting");
             }
             else
             {

@@ -37,6 +37,8 @@
 #include <string_view>
 #include <vector>
 
+class NodeCacheTestAccess;  // forward decl for test friend
+
 namespace catl::peer_client {
 
 namespace asio = boost::asio;
@@ -84,6 +86,7 @@ struct WalkResult
 
 class NodeCache : public std::enable_shared_from_this<NodeCache>
 {
+    friend class ::NodeCacheTestAccess;
 public:
     struct Options
     {
