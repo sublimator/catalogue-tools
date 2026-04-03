@@ -9,6 +9,7 @@
 
 #include <xprv/network-config.h>
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -42,12 +43,12 @@ struct Config
     /// entries ≈ 32-64MB depending on tree shape.
     size_t node_cache_size = 65536;
 
-    /// Per-caller timeout in seconds for each node fetch. Each waiter
-    /// has their own deadline — timing out returns nullptr but does NOT
-    /// erase the cache entry, so late-arriving responses still get cached.
-    /// The walk_to caller retries with a different peer on timeout.
+    /// Per-caller timeout for each node fetch. Each waiter has their own
+    /// deadline — timing out returns nullptr but does NOT erase the cache
+    /// entry, so late-arriving responses still get cached. The walk_to
+    /// caller retries with a different peer on timeout.
     /// Lower = faster failover, higher = more tolerant of slow peers.
-    int fetch_timeout_secs = 5;
+    std::chrono::milliseconds fetch_timeout{1500};
 
     /// Max concurrent RPC connections. Limits fd usage and avoids
     /// overwhelming the RPC endpoint under high load.
@@ -84,9 +85,9 @@ struct Config
     /// Shared between server and CLI modes.
     uint32_t archival_range_threshold = 1'000'000;
 
-    /// After this many ms without finding a range-matching peer,
-    /// fall back to any ready peer. 0 = disable. Default 5000ms.
-    int peer_fallback_ms = 1000;
+    /// After this duration without finding a range-matching peer,
+    /// fall back to any ready peer. 0ms = disable. Default 1000ms.
+    std::chrono::milliseconds peer_fallback{1000};
 
     /// File descriptor soft limit for serve mode. 0 = don't touch.
     unsigned int fd_limit = 8192;

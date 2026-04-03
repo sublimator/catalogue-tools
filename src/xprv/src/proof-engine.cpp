@@ -55,7 +55,7 @@ ProofEngine::start()
     node_cache_ = NodeCache::create(
         io_,
         {.max_entries = node_cache_size_,
-         .fetch_timeout_secs = fetch_timeout_secs_,
+         .fetch_timeout = fetch_timeout_,
          .max_walk_peer_retries = max_walk_peer_retries_,
          .fetch_stale_multiplier = fetch_stale_multiplier_});
 

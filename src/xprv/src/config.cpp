@@ -121,8 +121,8 @@ load_config_file(std::string const& path, uint32_t network_id_hint)
                 config.no_cache = !*v;
             if (auto v = (*s)["node_cache_size"].value<int64_t>())
                 config.node_cache_size = static_cast<size_t>(*v);
-            if (auto v = (*s)["fetch_timeout"].value<int64_t>())
-                config.fetch_timeout_secs = static_cast<int>(*v);
+            if (auto v = (*s)["fetch_timeout_ms"].value<int64_t>())
+                config.fetch_timeout = std::chrono::milliseconds(*v);
             if (auto v = (*s)["rpc_max_concurrent"].value<int64_t>())
                 config.rpc_max_concurrent = static_cast<int>(*v);
             if (auto v = (*s)["max_walk_peer_retries"].value<int64_t>())
@@ -139,7 +139,7 @@ load_config_file(std::string const& path, uint32_t network_id_hint)
             if (auto v = (*s)["archival_range_threshold"].value<int64_t>())
                 config.archival_range_threshold = static_cast<uint32_t>(*v);
             if (auto v = (*s)["peer_fallback_ms"].value<int64_t>())
-                config.peer_fallback_ms = static_cast<int>(*v);
+                config.peer_fallback = std::chrono::milliseconds(*v);
 
             // Helper to load a PeerPool from a TOML sub-table
             auto load_pool = [](toml::table const& t, Config::PeerPool& pool) {
@@ -229,8 +229,8 @@ apply_env_overrides(Config& config)
         config.no_cache = *v;
     if (auto v = env_size("XPRV_NODE_CACHE_SIZE"))
         config.node_cache_size = *v;
-    if (auto v = env_u32("XPRV_FETCH_TIMEOUT"))
-        config.fetch_timeout_secs = static_cast<int>(*v);
+    if (auto v = env_u32("XPRV_FETCH_TIMEOUT_MS"))
+        config.fetch_timeout = std::chrono::milliseconds(*v);
     if (auto v = env_u32("XPRV_RPC_MAX_CONCURRENT"))
         config.rpc_max_concurrent = static_cast<int>(*v);
     if (auto v = env_u32("XPRV_MAX_WALK_PEER_RETRIES"))
@@ -329,7 +329,7 @@ dump_config(Config const& config, std::ostream& os)
     os << "[cache]\n";
     os << "enabled = " << (config.no_cache ? "false" : "true") << "\n";
     os << "node_cache_size = " << config.node_cache_size << "\n";
-    os << "fetch_timeout = " << config.fetch_timeout_secs << "\n";
+    os << "fetch_timeout_ms = " << config.fetch_timeout.count() << "\n";
     os << "rpc_max_concurrent = " << config.rpc_max_concurrent << "\n";
     os << "max_walk_peer_retries = " << config.max_walk_peer_retries << "\n";
     os << "fetch_stale_multiplier = " << config.fetch_stale_multiplier << "\n";

@@ -48,7 +48,7 @@ cmd_serve()
     if (config.no_cache)
         engine->set_cache_enabled(false);
     engine->set_node_cache_size(config.node_cache_size);
-    engine->set_fetch_timeout(config.fetch_timeout_secs);
+    engine->set_fetch_timeout(config.fetch_timeout);
     engine->set_max_walk_peer_retries(config.max_walk_peer_retries);
     engine->set_fetch_stale_multiplier(config.fetch_stale_multiplier);
     engine->set_rpc_max_concurrent(config.rpc_max_concurrent);

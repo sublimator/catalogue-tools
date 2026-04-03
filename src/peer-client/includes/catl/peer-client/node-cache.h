@@ -91,7 +91,7 @@ public:
     struct Options
     {
         size_t max_entries = 65536;
-        int fetch_timeout_secs = 5;
+        std::chrono::milliseconds fetch_timeout{1500};
         int max_walk_peer_retries = 3;
         int fetch_stale_multiplier = 2;
     };
@@ -407,7 +407,7 @@ private:
 
     asio::io_context& io_;
     size_t max_entries_;
-    int fetch_timeout_secs_;
+    std::chrono::milliseconds fetch_timeout_;
     int max_walk_peer_retries_;
     int fetch_stale_multiplier_;
 

@@ -1540,7 +1540,7 @@ PeerSet::wait_for_peer(
     // Immediately try any undiscovered endpoints
     try_candidates_for(ledger_seq);
 
-    auto const fallback_ms = options_.peer_fallback_ms;
+    auto const fallback_ms = static_cast<int>(options_.peer_fallback.count());
     auto const timeout_ms = timeout_secs * 1000;
 
     // Helper: snapshot connected peers into PeerCandidate structs

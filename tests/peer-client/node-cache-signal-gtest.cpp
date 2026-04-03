@@ -54,14 +54,14 @@ public:
     create_in_flight(
         NodeCache& cache,
         Hash256 const& hash,
-        int timeout_secs)
+        std::chrono::milliseconds timeout)
     {
         std::lock_guard lock(cache.mutex_);
         auto [it, inserted] = cache.store_.try_emplace(hash);
         if (inserted || !it->second.present)
         {
             it->second.signal = std::make_shared<asio::steady_timer>(
-                cache.io_, std::chrono::seconds(timeout_secs));
+                cache.io_, timeout);
             it->second.present = false;
             it->second.last_fetch_at = std::chrono::steady_clock::now();
         }
@@ -117,14 +117,14 @@ TEST(NodeCacheIntegration, InsertNotifyWakesEnsurePresent)
     asio::io_context io;
     auto cache = NodeCache::create(io, {
         .max_entries = 1024,
-        .fetch_timeout_secs = 5,
+        .fetch_timeout = std::chrono::milliseconds(5000),
     });
 
     auto hash = make_hash(0xAA);
     auto data = make_data(100);
 
     // Create in-flight entry
-    NodeCacheTestAccess::create_in_flight(*cache, hash, 5);
+    NodeCacheTestAccess::create_in_flight(*cache, hash, std::chrono::milliseconds(5000));
 
     // Start waiter
     std::shared_ptr<std::vector<uint8_t>> result;
@@ -158,13 +158,13 @@ TEST(NodeCacheIntegration, TwoWaitersBothGetData)
     asio::io_context io;
     auto cache = NodeCache::create(io, {
         .max_entries = 1024,
-        .fetch_timeout_secs = 5,
+        .fetch_timeout = std::chrono::milliseconds(5000),
     });
 
     auto hash = make_hash(0xBB);
     auto data = make_data(200, 0x77);
 
-    NodeCacheTestAccess::create_in_flight(*cache, hash, 5);
+    NodeCacheTestAccess::create_in_flight(*cache, hash, std::chrono::milliseconds(5000));
 
     std::shared_ptr<std::vector<uint8_t>> r1, r2;
     int done_count = 0;
@@ -200,11 +200,11 @@ TEST(NodeCacheIntegration, TimeoutReturnsNullptr)
     asio::io_context io;
     auto cache = NodeCache::create(io, {
         .max_entries = 1024,
-        .fetch_timeout_secs = 1,  // short timeout
+        .fetch_timeout = std::chrono::milliseconds(1000),  // short timeout
     });
 
     auto hash = make_hash(0xCC);
-    NodeCacheTestAccess::create_in_flight(*cache, hash, 1);
+    NodeCacheTestAccess::create_in_flight(*cache, hash, std::chrono::milliseconds(1000));
 
     std::shared_ptr<std::vector<uint8_t>> result;
     bool done = false;
@@ -229,14 +229,14 @@ TEST(NodeCacheIntegration, SecondWaiterAfterTimeoutGetsFreshSignal)
     asio::io_context io;
     auto cache = NodeCache::create(io, {
         .max_entries = 1024,
-        .fetch_timeout_secs = 1,  // 1s timeout
+        .fetch_timeout = std::chrono::milliseconds(1000),  // 1s timeout
         .fetch_stale_multiplier = 10,  // stale at 10s (won't trigger)
     });
 
     auto hash = make_hash(0xDD);
     auto data = make_data(50);
 
-    NodeCacheTestAccess::create_in_flight(*cache, hash, 1);
+    NodeCacheTestAccess::create_in_flight(*cache, hash, std::chrono::milliseconds(1000));
 
     // First waiter — will timeout after 1s
     bool first_done = false;
@@ -289,13 +289,13 @@ TEST(NodeCacheIntegration, ProgressEventRelayedThenContinuesWaiting)
     asio::io_context io;
     auto cache = NodeCache::create(io, {
         .max_entries = 1024,
-        .fetch_timeout_secs = 5,
+        .fetch_timeout = std::chrono::milliseconds(5000),
     });
 
     auto hash = make_hash(0xEE);
     auto data = make_data(75);
 
-    NodeCacheTestAccess::create_in_flight(*cache, hash, 5);
+    NodeCacheTestAccess::create_in_flight(*cache, hash, std::chrono::milliseconds(5000));
 
     std::shared_ptr<std::vector<uint8_t>> result;
     bool done = false;
@@ -332,13 +332,13 @@ TEST(NodeCacheIntegration, DataArrivesDuringProgressProcessing)
     asio::io_context io;
     auto cache = NodeCache::create(io, {
         .max_entries = 1024,
-        .fetch_timeout_secs = 5,
+        .fetch_timeout = std::chrono::milliseconds(5000),
     });
 
     auto hash = make_hash(0xFF);
     auto data = make_data(120);
 
-    NodeCacheTestAccess::create_in_flight(*cache, hash, 5);
+    NodeCacheTestAccess::create_in_flight(*cache, hash, std::chrono::milliseconds(5000));
 
     std::shared_ptr<std::vector<uint8_t>> result;
     bool done = false;
@@ -370,7 +370,7 @@ TEST(NodeCacheIntegration, CacheHitOnSecondCall)
     asio::io_context io;
     auto cache = NodeCache::create(io, {
         .max_entries = 1024,
-        .fetch_timeout_secs = 5,
+        .fetch_timeout = std::chrono::milliseconds(5000),
     });
 
     auto hash = make_hash(0x11);

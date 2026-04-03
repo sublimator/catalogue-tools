@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <boost/asio/awaitable.hpp>
+#include <chrono>
 #include <boost/asio/io_context.hpp>
 #include <list>
 #include <memory>
@@ -161,9 +162,9 @@ public:
     }
 
     void
-    set_fetch_timeout(int secs)
+    set_fetch_timeout(std::chrono::milliseconds timeout)
     {
-        fetch_timeout_secs_ = secs;
+        fetch_timeout_ = timeout;
     }
 
     void
@@ -215,7 +216,7 @@ private:
     std::unordered_map<std::string, CacheList::iterator> cache_map_;
     std::atomic<bool> cache_enabled_{true};
     size_t node_cache_size_ = 65536;
-    int fetch_timeout_secs_ = 5;
+    std::chrono::milliseconds fetch_timeout_{1500};
     int max_walk_peer_retries_ = 3;
     int fetch_stale_multiplier_ = 2;
     int rpc_max_concurrent_ = 8;

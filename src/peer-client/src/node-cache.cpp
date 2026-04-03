@@ -68,7 +68,7 @@ wait_for_signal_or_progress(
 NodeCache::NodeCache(asio::io_context& io, Options opts)
     : io_(io)
     , max_entries_(opts.max_entries)
-    , fetch_timeout_secs_(opts.fetch_timeout_secs)
+    , fetch_timeout_(opts.fetch_timeout)
     , max_walk_peer_retries_(opts.max_walk_peer_retries)
     , fetch_stale_multiplier_(opts.fetch_stale_multiplier)
 {
@@ -675,8 +675,8 @@ NodeCache::ensure_present(
             auto now = std::chrono::steady_clock::now();
             bool signal_expired = it->second.signal &&
                 it->second.signal->expiry() <= now;
-            auto stale_threshold = std::chrono::seconds(
-                fetch_timeout_secs_ * fetch_stale_multiplier_);
+            auto stale_threshold =
+                fetch_timeout_ * fetch_stale_multiplier_;
             bool is_stale =
                 now - it->second.last_fetch_at > stale_threshold;
 
@@ -684,7 +684,7 @@ NodeCache::ensure_present(
             {
                 // Signal expired or entry is stale — refresh and re-send
                 it->second.signal = std::make_shared<asio::steady_timer>(
-                    io_, std::chrono::seconds(fetch_timeout_secs_));
+                    io_, fetch_timeout_);
                 action = Action::send_and_wait;
                 PLOGD(
                     log_,
@@ -699,7 +699,7 @@ NodeCache::ensure_present(
                 // Signal expired but no peer to re-send — create
                 // fresh signal anyway so waiters don't instantly timeout
                 it->second.signal = std::make_shared<asio::steady_timer>(
-                    io_, std::chrono::seconds(fetch_timeout_secs_));
+                    io_, fetch_timeout_);
                 action = Action::wait;
                 PLOGD(
                     log_,
@@ -722,7 +722,7 @@ NodeCache::ensure_present(
             // MISS — new entry, create signal and fetch
             misses_++;
             it->second.signal = std::make_shared<asio::steady_timer>(
-                io_, std::chrono::seconds(fetch_timeout_secs_));
+                io_, fetch_timeout_);
             action = Action::send_and_wait;
             PLOGD(
                 log_,
@@ -1189,7 +1189,7 @@ NodeCache::get_header(
         else
         {
             it->second.signal = std::make_shared<asio::steady_timer>(
-                io_, std::chrono::seconds(fetch_timeout_secs_));
+                io_, fetch_timeout_);
             it->second.present = false;
             action = Action::fetch;
             PLOGD(log_, "  get_header: MISS seq=", ledger_seq, " — fetching");
