@@ -18,8 +18,12 @@ ValidationBuffer::ValidationBuffer(
     : strand_(asio::make_strand(io))
     , net_label_(network_label(network_id))
     , collector_(protocol, network_id)
+    , heartbeat_timer_(io)
+    , last_quorum_at_(std::chrono::steady_clock::now())
 {
     collector_.continuous = true;
+    // Note: start_heartbeat() must be called AFTER construction,
+    // once the object is owned by a shared_ptr (shared_from_this).
 }
 
 void
@@ -32,6 +36,11 @@ ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     auto self = shared_from_this();
 
     asio::post(strand_, [self, owned]() {
+        if (!self->heartbeat_started_)
+        {
+            self->heartbeat_started_ = true;
+            self->start_heartbeat();
+        }
         self->collector_.on_packet(41, *owned);
         self->check_for_new_quorum();
         self->prune_old_entries();
@@ -116,6 +125,7 @@ ValidationBuffer::check_for_new_quorum()
         collector_.unl_size,
         " validators)");
 
+    last_quorum_at_ = std::chrono::steady_clock::now();
     recent_quorums_.push_back(std::move(entry));
     prune_old_entries();
     wake_waiters();
@@ -264,6 +274,48 @@ ValidationBuffer::co_latest_quorum()
     }
 
     co_return recent_quorums_.back();
+}
+
+void
+ValidationBuffer::start_heartbeat()
+{
+    auto self = shared_from_this();
+    heartbeat_timer_.expires_after(kHeartbeatInterval);
+    heartbeat_timer_.async_wait([self](boost::system::error_code ec) {
+        if (ec)
+            return;  // cancelled (shutdown)
+
+        asio::post(self->strand_, [self]() {
+            auto now = std::chrono::steady_clock::now();
+            auto since_quorum =
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    now - self->last_quorum_at_)
+                    .count();
+
+            if (self->recent_quorums_.empty() ||
+                since_quorum >= kHeartbeatInterval.count())
+            {
+                // No recent quorum — report what we have
+                auto total_validations = 0u;
+                auto ledger_count = self->collector_.by_ledger.size();
+                for (auto const& [hash, entries] :
+                     self->collector_.by_ledger)
+                {
+                    total_validations += entries.size();
+                }
+
+                PLOGI(
+                    ValidationBuffer::log_,
+                    "[", self->net_label_, "] no quorum for ",
+                    since_quorum, "s — ",
+                    total_validations, " validations across ",
+                    ledger_count, " ledgers, ",
+                    self->collector_.unl_size, " UNL keys");
+            }
+
+            self->start_heartbeat();
+        });
+    });
 }
 
 }  // namespace xprv

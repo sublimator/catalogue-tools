@@ -58,7 +58,7 @@ NetworkConfig::apply_defaults()
             if (rpc_port == 0)
                 rpc_port = 443;
             if (peer_host.empty())
-                peer_host = "bacab.alloy.ee";
+                peer_host = "hubs.xahau.as16089.net";
             if (peer_port == 0)
                 peer_port = 21337;
             break;

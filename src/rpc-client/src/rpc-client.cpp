@@ -136,7 +136,7 @@ RpcClient::call(
                     " ",
                     res.body().size(),
                     " bytes");
-                PLOGT(RpcClient::log_, "  body: ", res.body().substr(0, 500));
+                PLOGD(RpcClient::log_, "  body: ", res.body());
 
                 // Parse JSON
                 auto jv = boost::json::parse(res.body());

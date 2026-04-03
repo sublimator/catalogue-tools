@@ -103,6 +103,27 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     if (val_bytes.empty())
         return;
 
+    // Diagnostic: log full hex of first validation per network
+    {
+        static std::set<std::string> logged_networks;
+        if (logged_networks.find(net_label_) == logged_networks.end())
+        {
+            logged_networks.insert(net_label_);
+            std::string hex;
+            hex.reserve(val_bytes.size() * 2);
+            for (auto b : val_bytes)
+            {
+                char buf[3];
+                std::snprintf(buf, sizeof(buf), "%02X", b);
+                hex += buf;
+            }
+            PLOGI(
+                log_,
+                "[", net_label_, "] FIRST validation hex (",
+                val_bytes.size(), "B): ", hex);
+        }
+    }
+
     Entry entry;
     entry.raw = std::move(val_bytes);
 
@@ -193,9 +214,7 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     auto count = by_ledger[hash].size();
     PLOGD(
         log_,
-        "[", net_label_, "] ",
-        unl_signing_keys.empty() ? "Buffered validation for seq="
-                                 : "UNL validation for seq=",
+        "[", net_label_, "] validation seq=",
         seq,
         " hash=",
         hash.hex().substr(0, 16),

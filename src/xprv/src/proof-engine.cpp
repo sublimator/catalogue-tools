@@ -311,13 +311,14 @@ ProofEngine::lookup_tx(std::string const& tx_hash)
     {
         auto result = co_await catl::rpc::co_tx(*rpc_, tx_hash);
         auto const& obj = result.as_object();
-        // v2 API: ledger_index is in the result object
         if (auto it = obj.find("ledger_index"); it != obj.end())
         {
             auto seq = static_cast<uint32_t>(it->value().as_int64());
+            PLOGI(log_, "[", net_label_, "] lookup_tx found seq=", seq);
             tx_ledger_put(tx_hash, seq);
             co_return seq;
         }
+        PLOGW(log_, "[", net_label_, "] lookup_tx: no ledger_index in response");
         co_return 0u;
     }
     catch (catl::rpc::RpcTxNotFound const&)
@@ -326,11 +327,13 @@ ProofEngine::lookup_tx(std::string const& tx_hash)
     }
     catch (std::exception const& e)
     {
-        PLOGD(
+        PLOGW(
             log_,
-            "lookup_tx(",
+            "[", net_label_, "] lookup_tx(",
             tx_hash.substr(0, 16),
-            "...): ",
+            "...) rpc=",
+            config_.rpc_host, ":", config_.rpc_port,
+            " error: ",
             e.what());
         co_return 0u;
     }

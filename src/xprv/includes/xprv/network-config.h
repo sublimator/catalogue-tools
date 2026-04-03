@@ -20,14 +20,14 @@ struct NetworkConfig
     uint32_t network_id = 0;  // 0=XRPL mainnet, 21337=Xahau mainnet
 
     std::string vl_host;
-    uint16_t vl_port = 443;
+    uint16_t vl_port = 0;
     std::string publisher_key;  // hex, trusted VL publisher master key
 
     std::string rpc_host;
-    uint16_t rpc_port = 443;
+    uint16_t rpc_port = 0;
 
     std::string peer_host;
-    uint16_t peer_port = 51235;
+    uint16_t peer_port = 0;
 
     std::string peer_cache_path;  // empty = platform default
     std::vector<catl::peer_client::BootstrapPeer> extra_bootstrap;

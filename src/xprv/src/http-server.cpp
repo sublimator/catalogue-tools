@@ -470,7 +470,11 @@ HttpServer::lookup_tx_all(std::string const& tx_hash)
     boost::system::error_code ec;
     co_await signal->async_wait(asio::redirect_error(asio::use_awaitable, ec));
 
-    co_return std::pair{result_net->load(), result_seq->load()};
+    auto net = result_net->load();
+    auto seq = result_seq->load();
+    PLOGI(log_, "lookup_tx_all: net=", net, " seq=", seq,
+        " remaining=", remaining->load());
+    co_return std::pair{net, seq};
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -912,7 +916,7 @@ HttpServer::handle_session(
                         // Multi-engine: look up tx on all networks
                         auto [found_net, found_seq] =
                             co_await lookup_tx_all(tx_it->second);
-                        if (found_net == 0)
+                        if (found_seq == 0)
                         {
                             throw catl::rpc::RpcTxNotFound(
                                 "tx " + tx_it->second.substr(0, 16) +

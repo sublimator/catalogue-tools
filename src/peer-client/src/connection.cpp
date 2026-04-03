@@ -239,7 +239,7 @@ peer_connection::send_http_request(const connection_handler& handler)
     auto req = std::make_shared<http::request<http::string_body>>(
         http::verb::get, "/", 11);
     req->set(http::field::user_agent, "xahaud-2025.11.4-HEAD+2427");
-    req->set(http::field::upgrade, "XRPL/2.1, XRPL/2.2");
+    req->set(http::field::upgrade, "XRPL/2.2");
     req->set(http::field::connection, "Upgrade");
     req->set("Connect-As", "Peer");
     req->set("Crawl", "private");

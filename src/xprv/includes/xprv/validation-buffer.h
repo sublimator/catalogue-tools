@@ -99,9 +99,17 @@ private:
     // wake_waiters() cancels all of them when a new quorum arrives.
     std::vector<std::shared_ptr<boost::asio::steady_timer>> waiters_;
 
+    void
+    start_heartbeat();
+
+    boost::asio::steady_timer heartbeat_timer_;
+    std::chrono::steady_clock::time_point last_quorum_at_;
+    bool heartbeat_started_ = false;
+
     static constexpr size_t kMaxQuorumEntries = 30;
     static constexpr size_t kMaxCollectorLedgers = 64;
     static constexpr auto kMaxQuorumAge = std::chrono::seconds(120);
+    static constexpr auto kHeartbeatInterval = std::chrono::seconds(10);
 
     static LogPartition log_;
 };

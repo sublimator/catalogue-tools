@@ -129,9 +129,12 @@ Protocol::load_from_json_value(
         // Add to protocol
         protocol.fieldNameIndex_[def.name] = protocol.fields_.size();
 
-        // Set the field code
+        // Set the field code.
+        // First writer wins — later duplicates with the same wire code
+        // (e.g. "hash" nth=1 vs "LedgerHash" nth=1) must not overwrite.
         def.code = make_field_code(def.meta.type.code, def.meta.nth);
-        protocol.fieldCodeIndex_[def.code] = protocol.fields_.size();
+        protocol.fieldCodeIndex_.try_emplace(
+            def.code, protocol.fields_.size());
 
         protocol.fields_.push_back(std::move(def));
     }
@@ -400,7 +403,14 @@ Protocol::build_fast_lookup()
 
         if (type_code < 256 && field_id < 256)
         {
-            fast_lookup_[type_code][field_id] = &field;
+            // First writer wins — don't let duplicates (e.g. "hash"
+            // nth=1) overwrite real fields (e.g. "LedgerHash" nth=1).
+            // TODO: detect duplicate field codes at load time and
+            // either warn loudly or reject the definitions outright.
+            // The root cause is broken definitions JSON with duplicate
+            // "hash" entries at different indices.
+            if (!fast_lookup_[type_code][field_id])
+                fast_lookup_[type_code][field_id] = &field;
         }
     }
 }

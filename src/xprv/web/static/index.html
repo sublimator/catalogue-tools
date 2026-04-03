@@ -769,7 +769,7 @@ function explorerUrlsForNetwork(networkId) {
   }
   if (n === 21337) {
     return {
-      ledger: '',
+      ledger: 'https://xahscan.com/ledger/',
       tx: 'https://xahscan.com/tx/'
     };
   }
@@ -918,16 +918,17 @@ async function fetchServerInfo() {
 // Fetch server info on page load (for footer link versioning)
 fetchServerInfo();
 
-function idBadges(rid) {
+function idBadges(rid, networkId) {
   const items = [];
   if (serverInfo.build_id) items.push({label:'build', id:serverInfo.build_id});
   if (serverInfo.run_id) items.push({label:'run', id:serverInfo.run_id});
   if (rid) items.push({label:'req', id:rid});
+  if (networkId !== undefined) items.push({label:'network', id:networkLabel(networkId), bright:true});
   if (!items.length) return '';
   const pill = items.map(i =>
     `<span style="display:inline-flex;flex-direction:column;align-items:center;gap:0">` +
-    `<span style="font-size:.6rem;color:#444;line-height:1.2">${i.id}</span>` +
-    `<span style="font-size:.45rem;color:#3a3a3a;line-height:1;letter-spacing:.05em">${i.label}</span></span>`
+    `<span style="font-size:.6rem;color:${i.bright ? '#8fe0ac' : '#444'};line-height:1.2">${i.id}</span>` +
+    `<span style="font-size:.45rem;color:${i.bright ? '#5a8a66' : '#3a3a3a'};line-height:1;letter-spacing:.05em">${i.label}</span></span>`
   ).join('<span style="color:#2a2a2a;margin:0 .4rem;font-size:.5rem">\u00b7</span>');
   return `<span style="float:right;font-family:monospace;font-weight:normal;margin-top:.15rem;background:#1a1a1a;border:1px solid #252525;border-radius:4px;padding:.25rem .5rem;display:inline-flex;align-items:center">${pill}</span>`;
 }
@@ -1375,7 +1376,7 @@ async function describeStep(step, i, allSteps) {
         if (data.tx) {
           const tx = data.tx;
           const txHash = tx.hash || leaf[0] || '';
-          if (txHash) sub.push(kv('hash', hx(txHash, 24)));
+          if (txHash) sub.push(kv('hash', `<span style="color:#5b5;font-size:.8em;margin-right:.3rem">\u2713</span>${hx(txHash, 24)}`));
           if (tx.TransactionType) sub.push(kv('TransactionType', `<span class="v">${tx.TransactionType}</span>`));
           if (tx.Account) sub.push(kv('Account', `<span class="v">${tx.Account}</span>`));
           if (tx.Destination) sub.push(kv('Destination', `<span class="v">${tx.Destination}</span>`));
@@ -1434,7 +1435,7 @@ async function showSteps() {
   for (let i = 0; i < steps.length; i++) {
     rendered.push(await describeStep(steps[i], i, steps));
   }
-  document.getElementById('modal-header').innerHTML = `<h3>Proof chain \u2014 ${steps.length} steps${idBadges(lastRid)}</h3>`;
+  document.getElementById('modal-header').innerHTML = `<h3>Proof chain \u2014 ${steps.length} steps${idBadges(lastRid, lastProofJson.network_id)}</h3>`;
   content.innerHTML = rendered.join('');
   stepLinksEnabled = true;
   queueStepLinkRedraw({animate:true});
@@ -1466,7 +1467,8 @@ function finishProve(json, hash) {
 
   const anchor = (json.steps || []).find(s => s.type === 'anchor');
   const seq = anchor ? anchor.ledger_index : 'unknown';
-  const filename = `proof-${seq}-${hash.substring(0, 12).toUpperCase()}.xprv.json`;
+  const netSlug = networkSlugForId(json.network_id) || 'unknown';
+  const filename = `proof-${netSlug}-${seq}-${hash.substring(0, 12).toUpperCase()}.xprv.json`;
 
   const blob = new Blob([lastProofPretty], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
