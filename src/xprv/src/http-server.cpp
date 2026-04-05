@@ -706,6 +706,8 @@ HttpServer::handle_session(
                     auto ncs = routed_engine->node_cache_stats();
                     boost::json::object nc;
                     nc["entries"] = ncs.entries;
+                    nc["resident_entries"] = ncs.resident_entries;
+                    nc["header_entries"] = ncs.header_entries;
                     nc["max_entries"] = ncs.max_entries;
                     nc["hits"] = ncs.hits;
                     nc["misses"] = ncs.misses;
@@ -749,6 +751,8 @@ HttpServer::handle_session(
                         auto ncs = engine->node_cache_stats();
                         boost::json::object nc;
                         nc["entries"] = ncs.entries;
+                        nc["resident_entries"] = ncs.resident_entries;
+                        nc["header_entries"] = ncs.header_entries;
                         nc["max_entries"] = ncs.max_entries;
                         nc["hits"] = ncs.hits;
                         nc["misses"] = ncs.misses;
@@ -790,6 +794,8 @@ HttpServer::handle_session(
                         auto ncs = engine->node_cache_stats();
                         boost::json::object nc;
                         nc["entries"] = ncs.entries;
+                        nc["resident_entries"] = ncs.resident_entries;
+                        nc["header_entries"] = ncs.header_entries;
                         nc["max_entries"] = ncs.max_entries;
                         nc["hits"] = ncs.hits;
                         nc["misses"] = ncs.misses;

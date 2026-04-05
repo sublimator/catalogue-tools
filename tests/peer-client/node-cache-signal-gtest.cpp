@@ -108,6 +108,50 @@ public:
             NodeCache::ProgressKind::retry_same_peer,
             100000, 0, 1, 3, "test-peer:51235");
     }
+
+    static void
+    create_placeholder(NodeCache& cache, Hash256 const& hash)
+    {
+        std::lock_guard lock(cache.mutex_);
+        auto [it, inserted] = cache.store_.try_emplace(hash);
+        it->second.present = false;
+        it->second.signal = nullptr;
+        it->second.last_fetch_at = std::chrono::steady_clock::now();
+        cache.touch_lru(hash);
+        cache.evict_if_needed();
+    }
+
+    static bool
+    has_entry(NodeCache& cache, Hash256 const& hash)
+    {
+        std::lock_guard lock(cache.mutex_);
+        return cache.store_.count(hash) > 0;
+    }
+
+    static void
+    create_cached_header(NodeCache& cache, uint32_t ledger_seq)
+    {
+        std::lock_guard lock(cache.mutex_);
+        auto& entry = cache.header_cache_[ledger_seq];
+        entry.present = true;
+        entry.signal = nullptr;
+        cache.touch_header_lru(ledger_seq);
+        cache.evict_headers_if_needed();
+    }
+
+    static bool
+    has_header(NodeCache& cache, uint32_t ledger_seq)
+    {
+        std::lock_guard lock(cache.mutex_);
+        return cache.header_cache_.count(ledger_seq) > 0;
+    }
+
+    static size_t
+    max_header_entries(NodeCache& cache)
+    {
+        std::lock_guard lock(cache.mutex_);
+        return cache.max_header_entries_;
+    }
 };
 
 // ─── insert_and_notify wakes a waiter in ensure_present ─────────
@@ -394,4 +438,51 @@ TEST(NodeCacheIntegration, CacheHitOnSecondCall)
     EXPECT_TRUE(done);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->size(), 60u);
+}
+
+TEST(NodeCacheIntegration, PlaceholderEntriesAreEvictable)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(io, {
+        .max_entries = 2,
+        .fetch_timeout = std::chrono::milliseconds(5000),
+    });
+
+    auto h1 = make_hash(0x21);
+    auto h2 = make_hash(0x22);
+    auto h3 = make_hash(0x23);
+
+    NodeCacheTestAccess::create_placeholder(*cache, h1);
+    NodeCacheTestAccess::create_placeholder(*cache, h2);
+    NodeCacheTestAccess::create_placeholder(*cache, h3);
+
+    EXPECT_FALSE(NodeCacheTestAccess::has_entry(*cache, h1));
+    EXPECT_TRUE(NodeCacheTestAccess::has_entry(*cache, h2));
+    EXPECT_TRUE(NodeCacheTestAccess::has_entry(*cache, h3));
+
+    auto stats = cache->stats();
+    EXPECT_EQ(stats.entries, 2u);
+    EXPECT_EQ(stats.resident_entries, 0u);
+}
+
+TEST(NodeCacheIntegration, HeaderCacheIsBounded)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(io, {
+        .max_entries = 1024,
+        .fetch_timeout = std::chrono::milliseconds(5000),
+    });
+
+    auto max_headers = NodeCacheTestAccess::max_header_entries(*cache);
+    ASSERT_GT(max_headers, 0u);
+
+    for (size_t seq = 1; seq <= max_headers + 1; ++seq)
+        NodeCacheTestAccess::create_cached_header(*cache, static_cast<uint32_t>(seq));
+
+    EXPECT_FALSE(NodeCacheTestAccess::has_header(*cache, 1));
+    EXPECT_TRUE(
+        NodeCacheTestAccess::has_header(*cache, static_cast<uint32_t>(max_headers + 1)));
+
+    auto stats = cache->stats();
+    EXPECT_EQ(stats.header_entries, max_headers);
 }

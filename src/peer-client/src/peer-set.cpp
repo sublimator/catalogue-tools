@@ -80,6 +80,11 @@ canonical_endpoint(std::string const& endpoint)
 
 }  // namespace
 
+static constexpr size_t kMaxTrackedEndpoints = 4096;
+static constexpr size_t kMaxCrawlHistory = 4096;
+static constexpr auto kCrawlRetention = std::chrono::minutes(30);
+static constexpr auto kFailedEndpointRetention = std::chrono::minutes(30);
+
 // ── Bootstrap peers by network ──────────────────────────────────
 
 static const std::vector<BootstrapPeer> XRPL_BOOTSTRAP = {
@@ -237,6 +242,7 @@ PeerSet::note_discovered(std::string const& endpoint)
     }
     sort_pending_connects();
     sort_pending_crawls();
+    prune_discovery_state();
     pump_crawls();
     pump_connects();
 }
@@ -256,6 +262,7 @@ PeerSet::note_status(std::string const& endpoint, PeerStatus const& status)
     }
     sort_pending_connects();
     sort_pending_crawls();
+    prune_discovery_state();
     pump_crawls();
     pump_connects();
 }
@@ -642,6 +649,7 @@ PeerSet::should_connect_endpoint(std::string const& endpoint) const
 {
     ASSERT_ON_STRAND();
     auto key = canonical_endpoint(endpoint);
+    auto const now = std::chrono::steady_clock::now();
 
     if (connections_.count(key) || in_flight_.count(key) || queued_.count(key))
         return false;
@@ -671,8 +679,12 @@ PeerSet::should_connect_endpoint(std::string const& endpoint) const
     // If crawl already had a chance and still did not give us range data,
     // fall back to a real peer handshake rather than starving on crawl-only
     // nodes.
-    if (crawled_.count(key) && !endpoint_has_range(key))
+    if (auto crawled = crawled_.find(key);
+        crawled != crawled_.end() && now - crawled->second < kCrawlRetention &&
+        !endpoint_has_range(key))
+    {
         return true;
+    }
 
     // We still need at least one ready peer for validations and anchor work,
     // so allow known-good cached peers to race in even before they have been
@@ -830,8 +842,13 @@ PeerSet::queue_crawl(std::string const& endpoint)
         return;
 
     auto key = canonical_endpoint(endpoint);
-    if (key.empty() || crawl_in_flight_.count(key) || crawl_queued_.count(key) ||
-        crawled_.count(key))
+    auto const now = std::chrono::steady_clock::now();
+    if (key.empty() || crawl_in_flight_.count(key) || crawl_queued_.count(key))
+    {
+        return;
+    }
+    if (auto crawled = crawled_.find(key);
+        crawled != crawled_.end() && now - crawled->second < kCrawlRetention)
     {
         return;
     }
@@ -901,8 +918,13 @@ PeerSet::pump_crawls()
         if (!EndpointTracker::parse_endpoint(key, host, port))
             continue;
 
-        if (crawl_in_flight_.count(key) || crawled_.count(key))
+        auto const now = std::chrono::steady_clock::now();
+        if (auto crawled = crawled_.find(key);
+            crawl_in_flight_.count(key) ||
+            (crawled != crawled_.end() && now - crawled->second < kCrawlRetention))
+        {
             continue;
+        }
 
         crawl_in_flight_.insert(key);
 
@@ -924,7 +946,8 @@ PeerSet::pump_crawls()
                         if (self->endpoint_cache_)
                         {
                             try { self->endpoint_cache_->remember_seen_crawl(
-                                self->network_id_, peer.endpoint); }
+                                self->network_id_,
+                                canonical_endpoint(peer.endpoint)); }
                             catch (...) {}
                         }
 
@@ -932,11 +955,13 @@ PeerSet::pump_crawls()
                                 self->choose_crawl_status(peer.complete_ledgers))
                         {
                             ++ranged;
-                            self->tracker_->update(peer.endpoint, *status);
+                            self->tracker_->update(
+                                canonical_endpoint(peer.endpoint), *status);
                         }
                         else
                         {
-                            self->tracker_->add_discovered(peer.endpoint);
+                            self->tracker_->add_discovered(
+                                canonical_endpoint(peer.endpoint));
                         }
                     }
 
@@ -958,13 +983,14 @@ PeerSet::pump_crawls()
                 }
 
                 self->crawl_in_flight_.erase(key);
-                self->crawled_.insert(key);
+                self->crawled_[key] = std::chrono::steady_clock::now();
 
                 if (self->should_connect_endpoint(key))
                 {
                     self->queue_connect(key);
                 }
 
+                self->prune_discovery_state();
                 self->pump_crawls();
                 self->pump_connects();
             },
@@ -1004,13 +1030,14 @@ PeerSet::load_cached_endpoints()
     for (auto const& entry : cached)
     {
         update_endpoint_stats(entry);
+        auto key = canonical_endpoint(entry.endpoint);
         if (entry.status.first_seq != 0 && entry.status.last_seq != 0)
         {
-            tracker_->update(entry.endpoint, entry.status);
+            tracker_->update(key, entry.status);
         }
         else
         {
-            tracker_->add_discovered(entry.endpoint);
+            tracker_->add_discovered(key);
         }
     }
     if (!cached.empty())
@@ -1169,12 +1196,15 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
             connect_opts.unsolicited_handler = unsolicited_handler_;
         }
         {
-            auto self2 = shared_from_this();
+            auto self_weak = weak_from_this();
             auto owned_key2 = key;
-            connect_opts.on_disconnect = [self2, owned_key2]() {
-                asio::post(self2->strand_, [self2, owned_key2]() {
-                    self2->remove_peer(owned_key2);
-                });
+            connect_opts.on_disconnect = [self_weak, owned_key2]() {
+                if (auto self2 = self_weak.lock())
+                {
+                    asio::post(self2->strand_, [self2, owned_key2]() {
+                        self2->remove_peer(owned_key2);
+                    });
+                }
             };
         }
 
@@ -1251,7 +1281,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
                 PLOGI(log_, "[", net_label_, "] Got ", ips.size(), " redirect peers from ", key);
                 for (auto const& ip : ips)
                 {
-                    tracker_->add_discovered(ip);
+                    tracker_->add_discovered(canonical_endpoint(ip));
                 }
                 // Immediately try the redirect peers
                 try_undiscovered();
@@ -1364,6 +1394,8 @@ PeerSet::try_undiscovered()
             " in flight)");
     }
 
+    prune_endpoint_stats();
+    prune_discovery_state();
     pump_crawls();
     pump_connects();
 }
@@ -1850,7 +1882,8 @@ PeerSet::snapshot_unsafe() const
     endpoints.insert(queued_.begin(), queued_.end());
     endpoints.insert(crawl_in_flight_.begin(), crawl_in_flight_.end());
     endpoints.insert(crawl_queued_.begin(), crawl_queued_.end());
-    endpoints.insert(crawled_.begin(), crawled_.end());
+    for (auto const& [key, _] : crawled_)
+        endpoints.insert(key);
 
     for (auto const& key : endpoints)
     {
@@ -1987,6 +2020,286 @@ PeerSet::remove_peer(std::string const& key)
         PLOGI(log_, "[", net_label_, "] Removing dead peer: ", key);
         connections_.erase(it);
         tracker_->remove(key);
+    }
+}
+
+void
+PeerSet::prune_endpoint_stats()
+{
+    ASSERT_ON_STRAND();
+
+    // Prune expired failed_ledgers from all entries
+    auto const now = std::chrono::steady_clock::now();
+    static constexpr auto kFailedLedgerTtl = std::chrono::seconds(60);
+    for (auto& [key, stats] : endpoint_stats_)
+    {
+        for (auto it = stats.failed_ledgers.begin();
+             it != stats.failed_ledgers.end();)
+        {
+            if (now - it->second.at >= kFailedLedgerTtl)
+                it = stats.failed_ledgers.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    // Cap total endpoint_stats_ entries — keep connected/active, evict stale
+    static constexpr size_t kMaxEndpointStats = 2000;
+    if (endpoint_stats_.size() <= kMaxEndpointStats)
+        return;
+
+    // Build set of endpoints we must keep (connected, in-flight, queued)
+    std::unordered_set<std::string> keep;
+    for (auto const& [key, _] : connections_)
+        keep.insert(key);
+    keep.insert(in_flight_.begin(), in_flight_.end());
+    keep.insert(queued_.begin(), queued_.end());
+    keep.insert(crawl_in_flight_.begin(), crawl_in_flight_.end());
+    keep.insert(crawl_queued_.begin(), crawl_queued_.end());
+
+    // Collect eviction candidates (not in keep set)
+    struct Candidate
+    {
+        std::string key;
+        std::int64_t last_seen_at;
+    };
+    std::vector<Candidate> candidates;
+    for (auto const& [key, stats] : endpoint_stats_)
+    {
+        if (!keep.count(key))
+            candidates.push_back({key, stats.last_seen_at});
+    }
+
+    // Sort by last_seen_at ascending (oldest first)
+    std::sort(candidates.begin(), candidates.end(),
+        [](auto const& a, auto const& b) {
+            return a.last_seen_at < b.last_seen_at;
+        });
+
+    // Evict oldest until under cap
+    size_t to_evict = endpoint_stats_.size() - kMaxEndpointStats;
+    size_t evicted = 0;
+    for (auto const& c : candidates)
+    {
+        if (evicted >= to_evict)
+            break;
+        endpoint_stats_.erase(c.key);
+        ++evicted;
+    }
+
+    if (evicted > 0)
+    {
+        PLOGI(
+            log_,
+            "[", net_label_, "] Pruned ",
+            evicted,
+            " stale endpoint stats (",
+            endpoint_stats_.size(),
+            " remaining)");
+    }
+}
+
+void
+PeerSet::prune_discovery_state()
+{
+    ASSERT_ON_STRAND();
+
+    auto const now = std::chrono::steady_clock::now();
+    size_t tracker_removed = 0;
+    size_t crawled_removed = 0;
+    size_t failed_removed = 0;
+
+    for (auto it = crawled_.begin(); it != crawled_.end();)
+    {
+        if (now - it->second >= kCrawlRetention)
+        {
+            it = crawled_.erase(it);
+            ++crawled_removed;
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    for (auto it = failed_at_.begin(); it != failed_at_.end();)
+    {
+        if (now - it->second >= kFailedEndpointRetention)
+        {
+            it = failed_at_.erase(it);
+            ++failed_removed;
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    std::unordered_set<std::string> active;
+    for (auto const& [key, _] : connections_)
+        active.insert(key);
+    active.insert(in_flight_.begin(), in_flight_.end());
+    active.insert(queued_.begin(), queued_.end());
+    active.insert(crawl_in_flight_.begin(), crawl_in_flight_.end());
+    active.insert(crawl_queued_.begin(), crawl_queued_.end());
+
+    if (tracker_->size() > kMaxTrackedEndpoints)
+    {
+        auto tracked = tracker_->all_endpoints();
+        std::sort(
+            tracked.begin(),
+            tracked.end(),
+            [this](std::string const& lhs, std::string const& rhs) {
+                return candidate_better(lhs, rhs);
+            });
+
+        std::unordered_set<std::string> retained_keys;
+        size_t retained_non_active = 0;
+        for (auto const& raw_endpoint : tracked)
+        {
+            auto key = canonical_endpoint(raw_endpoint);
+            if (active.count(key))
+            {
+                if (!retained_keys.insert(key).second)
+                {
+                    tracker_->remove(raw_endpoint);
+                    ++tracker_removed;
+                }
+                continue;
+            }
+
+            if (!retained_keys.insert(key).second)
+            {
+                tracker_->remove(raw_endpoint);
+                ++tracker_removed;
+                continue;
+            }
+
+            if (retained_non_active < kMaxTrackedEndpoints)
+            {
+                ++retained_non_active;
+                continue;
+            }
+
+            retained_keys.erase(key);
+            tracker_->remove(raw_endpoint);
+            ++tracker_removed;
+        }
+    }
+
+    std::unordered_set<std::string> tracked_keys;
+    for (auto const& endpoint : tracker_->all_endpoints())
+        tracked_keys.insert(canonical_endpoint(endpoint));
+
+    for (auto it = crawled_.begin(); it != crawled_.end();)
+    {
+        if (!active.count(it->first) && !tracked_keys.count(it->first))
+        {
+            it = crawled_.erase(it);
+            ++crawled_removed;
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    if (crawled_.size() > kMaxCrawlHistory)
+    {
+        struct Candidate
+        {
+            std::string key;
+            std::chrono::steady_clock::time_point at;
+        };
+        std::vector<Candidate> candidates;
+        candidates.reserve(crawled_.size());
+        for (auto const& [key, at] : crawled_)
+        {
+            if (!active.count(key))
+                candidates.push_back({key, at});
+        }
+        std::sort(
+            candidates.begin(),
+            candidates.end(),
+            [](Candidate const& lhs, Candidate const& rhs) {
+                return lhs.at < rhs.at;
+            });
+        auto to_remove = crawled_.size() - kMaxCrawlHistory;
+        for (auto const& candidate : candidates)
+        {
+            if (to_remove == 0)
+                break;
+            if (crawled_.erase(candidate.key) > 0)
+            {
+                --to_remove;
+                ++crawled_removed;
+            }
+        }
+    }
+
+    for (auto it = failed_at_.begin(); it != failed_at_.end();)
+    {
+        if (!active.count(it->first) && !tracked_keys.count(it->first))
+        {
+            it = failed_at_.erase(it);
+            ++failed_removed;
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    if (failed_at_.size() > kMaxTrackedEndpoints)
+    {
+        struct Candidate
+        {
+            std::string key;
+            std::chrono::steady_clock::time_point at;
+        };
+        std::vector<Candidate> candidates;
+        candidates.reserve(failed_at_.size());
+        for (auto const& [key, at] : failed_at_)
+        {
+            if (!active.count(key))
+                candidates.push_back({key, at});
+        }
+        std::sort(
+            candidates.begin(),
+            candidates.end(),
+            [](Candidate const& lhs, Candidate const& rhs) {
+                return lhs.at < rhs.at;
+            });
+        auto to_remove = failed_at_.size() - kMaxTrackedEndpoints;
+        for (auto const& candidate : candidates)
+        {
+            if (to_remove == 0)
+                break;
+            if (failed_at_.erase(candidate.key) > 0)
+            {
+                --to_remove;
+                ++failed_removed;
+            }
+        }
+    }
+
+    if (tracker_removed > 0 || crawled_removed > 0 || failed_removed > 0)
+    {
+        PLOGI(
+            log_,
+            "[", net_label_, "] Pruned discovery state: tracker=",
+            tracker_removed,
+            " crawled=",
+            crawled_removed,
+            " failed=",
+            failed_removed,
+            " (known=",
+            tracker_->size(),
+            " crawled=",
+            crawled_.size(),
+            " failed=",
+            failed_at_.size(),
+            ")");
     }
 }
 

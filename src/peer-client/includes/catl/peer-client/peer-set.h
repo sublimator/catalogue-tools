@@ -31,6 +31,8 @@
 #include <unordered_set>
 #include <vector>
 
+class PeerSetTestAccess;  // forward decl for test friend
+
 namespace catl::peer_client {
 
 /// Well-known bootstrap peers by network ID.
@@ -71,6 +73,7 @@ struct PeerSetOptions
 
 class PeerSet : public std::enable_shared_from_this<PeerSet>
 {
+    friend class ::PeerSetTestAccess;
 public:
     static std::shared_ptr<PeerSet>
     create(boost::asio::io_context& io, PeerSetOptions const& options = {})
@@ -309,6 +312,16 @@ private:
     void
     try_candidates_for(uint32_t ledger_seq);
 
+    /// Remove stale endpoint_stats_ entries to bound memory.
+    /// Keeps entries that are connected, in-flight, queued, or recently seen.
+    /// Also prunes expired failed_ledgers sub-entries.
+    void
+    prune_endpoint_stats();
+
+    /// Bound long-lived discovery state (tracker, crawl history, backoff map).
+    void
+    prune_discovery_state();
+
     void
     update_endpoint_stats(PeerEndpointCache::Entry const& entry);
 
@@ -399,7 +412,7 @@ private:
     std::vector<std::string> pending_connects_;
     std::set<std::string> crawl_in_flight_;
     std::set<std::string> crawl_queued_;
-    std::set<std::string> crawled_;
+    std::map<std::string, std::chrono::steady_clock::time_point> crawled_;
     std::vector<std::string> pending_crawls_;
     // Active target ledgers from in-flight wait_for_peer calls.
     // Used by should_connect_endpoint and evict_for to prioritize

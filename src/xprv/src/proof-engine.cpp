@@ -637,6 +637,18 @@ ProofEngine::get_anchor_bundle(
 
             // Update current anchor for reuse
             current_anchor_ = bundle;
+
+            // Prune old anchors — keep at most 10
+            static constexpr size_t kMaxAnchorCache = 10;
+            while (anchor_cache_.size() > kMaxAnchorCache)
+            {
+                // std::map is ordered by seq — erase smallest (oldest)
+                auto oldest = anchor_cache_.begin();
+                // Don't evict entries with in-flight waiters
+                if (oldest->second.signal)
+                    break;
+                anchor_cache_.erase(oldest);
+            }
         }
         if (sig)
             sig->cancel();

@@ -81,6 +81,9 @@ private:
     void
     schedule_refresh();
 
+    void
+    schedule_retry(std::chrono::seconds delay);
+
     boost::asio::io_context& io_;
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     std::string vl_host_;
@@ -91,6 +94,8 @@ private:
     boost::asio::steady_timer signal_;            // wake waiters on first fetch
     boost::asio::steady_timer refresh_;           // periodic refresh
     std::chrono::seconds refresh_interval_{900};  // 15 minutes
+    std::chrono::seconds initial_retry_{2};       // first retry delay
+    std::chrono::seconds initial_retry_cap_{60};  // max retry delay before first success
     bool fetch_in_progress_ = false;
     RefreshCallback on_refresh_;
 

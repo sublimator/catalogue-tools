@@ -32,7 +32,6 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -147,6 +146,8 @@ public:
     struct Stats
     {
         size_t entries = 0;
+        size_t resident_entries = 0;
+        size_t header_entries = 0;
         size_t max_entries = 0;
         size_t hits = 0;
         size_t misses = 0;
@@ -333,7 +334,8 @@ private:
     static Hash256
     compute_inner_hash(std::span<const uint8_t> wire_data);
 
-    /// Install our response handler on a peer (idempotent per peer).
+    /// Install our response handler on a peer.
+    /// Safe to call repeatedly; PeerClient just overwrites the handler.
     void
     ensure_response_handler(std::shared_ptr<PeerClient> peer);
 
@@ -342,12 +344,12 @@ private:
     void
     on_node_response(std::shared_ptr<protocol::TMLedgerData> const& msg);
 
-    /// Track which peers have our handler installed.
-    std::set<std::string> handler_installed_peers_;
-
     /// Evict LRU entries when over capacity.
     void
     evict_if_needed();
+
+    void
+    evict_headers_if_needed();
 
     std::shared_ptr<asio::steady_timer>
     make_progress_signal();
@@ -416,12 +418,22 @@ private:
     std::map<uint32_t, HeaderEntry> header_cache_;
 
     // LRU tracking: front = most recently accessed (mutable for const get())
+    // Includes present nodes and non-present placeholders so failed fetches
+    // cannot grow store_ without bound.
     using LruList = std::list<Hash256>;
     mutable LruList lru_;
     mutable std::map<Hash256, LruList::iterator> lru_map_;
 
     void
     touch_lru(Hash256 const& hash) const;
+
+    using HeaderLruList = std::list<uint32_t>;
+    mutable HeaderLruList header_lru_;
+    mutable std::map<uint32_t, HeaderLruList::iterator> header_lru_map_;
+    size_t max_header_entries_ = 0;
+
+    void
+    touch_header_lru(uint32_t ledger_seq) const;
 
     // Stats — atomic for lock-free concurrent access
     mutable std::atomic<size_t> hits_{0};

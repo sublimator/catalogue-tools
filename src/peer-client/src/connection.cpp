@@ -727,6 +727,17 @@ peer_connection::async_send_packet(
 
     packet.insert(packet.end(), data.begin(), data.end());
 
+    // Cap write queue to prevent unbounded growth on slow/dead peers
+    static constexpr size_t kMaxWriteQueue = 256;
+    if (write_queue_.size() >= kMaxWriteQueue)
+    {
+        PLOGW(log_, remote_endpoint(), " write queue full (", kMaxWriteQueue, "), closing");
+        if (handler)
+            handler(boost::asio::error::no_buffer_space);
+        fail_and_close(boost::asio::error::no_buffer_space);
+        return;
+    }
+
     // Enqueue and pump — only one async_write in flight at a time
     write_queue_.push_back({std::move(packet), std::move(handler)});
     if (!write_in_progress_)

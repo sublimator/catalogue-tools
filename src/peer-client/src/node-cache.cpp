@@ -71,6 +71,11 @@ NodeCache::NodeCache(asio::io_context& io, Options opts)
     , fetch_timeout_(opts.fetch_timeout)
     , max_walk_peer_retries_(opts.max_walk_peer_retries)
     , fetch_stale_multiplier_(opts.fetch_stale_multiplier)
+    , max_header_entries_(
+          std::max<std::size_t>(
+              128,
+              std::min<std::size_t>(
+                  4096, std::max<std::size_t>(1, max_entries_ / 16))))
 {
 }
 
@@ -642,13 +647,14 @@ NodeCache::ensure_present(
     std::shared_ptr<PeerSet> peers,
     uint32_t ledger_seq)
 {
-    enum class Action { hit, wait, send_and_wait };
+    enum class Action { hit, return_null, wait, send_and_wait };
     Action action;
     std::shared_ptr<std::vector<uint8_t>> hit_data;
 
     {
         std::lock_guard lock(mutex_);
         auto [it, inserted] = store_.try_emplace(expected_hash);
+        touch_lru(expected_hash);
 
         if (!inserted && it->second.present)
         {
@@ -673,39 +679,58 @@ NodeCache::ensure_present(
             // the peer probably dropped the request. Re-send with a
             // fresh signal.
             auto now = std::chrono::steady_clock::now();
+            bool signal_missing = !it->second.signal;
             bool signal_expired = it->second.signal &&
                 it->second.signal->expiry() <= now;
+            bool has_prior_fetch =
+                it->second.last_fetch_at != std::chrono::steady_clock::time_point{};
             auto stale_threshold =
                 fetch_timeout_ * fetch_stale_multiplier_;
             bool is_stale =
                 now - it->second.last_fetch_at > stale_threshold;
 
-            if ((signal_expired || is_stale) && peer && peer->is_ready())
+            if ((signal_missing || signal_expired || is_stale) && peer &&
+                peer->is_ready())
             {
-                // Signal expired or entry is stale — refresh and re-send
+                // There is no active shared signal or the fetch is stale, so
+                // refresh the wait handle and re-send with the current peer.
                 it->second.signal = std::make_shared<asio::steady_timer>(
                     io_, fetch_timeout_);
                 action = Action::send_and_wait;
                 PLOGD(
                     log_,
                     "  ensure: ",
-                    signal_expired ? "EXPIRED" : "STALE",
+                    signal_missing ? "RESET" : (signal_expired ? "EXPIRED" : "STALE"),
                     " in-flight hash=",
                     expected_hash.hex().substr(0, 16),
                     " — re-sending");
             }
-            else if (signal_expired)
+            else if ((signal_missing || signal_expired) && has_prior_fetch)
             {
-                // Signal expired but no peer to re-send — create
-                // fresh signal anyway so waiters don't instantly timeout
+                // A prior fetch was sent, but there is no active timer left to
+                // wait on. Create a fresh shared signal so another caller can
+                // still benefit from a late response.
                 it->second.signal = std::make_shared<asio::steady_timer>(
                     io_, fetch_timeout_);
                 action = Action::wait;
                 PLOGD(
                     log_,
-                    "  ensure: EXPIRED (no peer) hash=",
+                    "  ensure: ",
+                    signal_missing ? "RESET" : "EXPIRED",
+                    " (no peer) hash=",
                     expected_hash.hex().substr(0, 16),
                     " — fresh signal, waiting");
+            }
+            else if (signal_missing)
+            {
+                // No active timer and no evidence a fetch was ever sent.
+                // There is nothing to wait for until a caller supplies a peer.
+                action = Action::return_null;
+                PLOGD(
+                    log_,
+                    "  ensure: RESET (no prior fetch) hash=",
+                    expected_hash.hex().substr(0, 16),
+                    " — no peer, returning miss");
             }
             else
             {
@@ -724,6 +749,7 @@ NodeCache::ensure_present(
             it->second.signal = std::make_shared<asio::steady_timer>(
                 io_, fetch_timeout_);
             action = Action::send_and_wait;
+            evict_if_needed();
             PLOGD(
                 log_,
                 "  ensure: MISS hash=",
@@ -736,6 +762,8 @@ NodeCache::ensure_present(
 
     if (action == Action::hit)
         co_return hit_data;
+    if (action == Action::return_null)
+        co_return nullptr;
 
     if (action == Action::wait)
     {
@@ -754,7 +782,12 @@ NodeCache::ensure_present(
                 "  ensure: peer not ready for hash=",
                 expected_hash.hex().substr(0, 16));
             fetch_errors_++;
-            // Don't erase the entry — leave it for next caller to retry.
+            {
+                std::lock_guard lock(mutex_);
+                auto it = store_.find(expected_hash);
+                if (it != store_.end() && !it->second.present)
+                    it->second.signal = nullptr;
+            }
             co_return nullptr;
         }
 
@@ -850,6 +883,15 @@ NodeCache::ensure_present(
         // Timed out (or write failed) and data still isn't present.
         // The entry stays alive so a late peer response can still
         // populate the cache for future callers.
+        {
+            std::lock_guard lock(mutex_);
+            auto it = store_.find(expected_hash);
+            if (it != store_.end() && !it->second.present &&
+                it->second.signal == wait.done_signal)
+            {
+                it->second.signal = nullptr;
+            }
+        }
         if (ec != asio::error::operation_aborted)
         {
             PLOGD(
@@ -962,21 +1004,13 @@ NodeCache::send_fetch(
 void
 NodeCache::ensure_response_handler(std::shared_ptr<PeerClient> peer)
 {
-    auto ep = peer->endpoint();
-    {
-        std::lock_guard lock(mutex_);
-        if (handler_installed_peers_.count(ep))
-            return;  // already installed
-        handler_installed_peers_.insert(ep);
-    }
-
     auto self = shared_from_this();
     peer->set_node_response_handler(
         [self](std::shared_ptr<protocol::TMLedgerData> const& msg) {
             self->on_node_response(msg);
         });
 
-    PLOGD(log_, "  installed response handler on peer ", ep);
+    PLOGD(log_, "  installed response handler on peer ", peer->endpoint());
 }
 
 void
@@ -1174,6 +1208,7 @@ NodeCache::get_header(
     {
         std::lock_guard lock(mutex_);
         auto [it, inserted] = header_cache_.try_emplace(ledger_seq);
+        touch_header_lru(ledger_seq);
 
         if (!inserted && it->second.present)
         {
@@ -1192,6 +1227,7 @@ NodeCache::get_header(
                 io_, fetch_timeout_);
             it->second.present = false;
             action = Action::fetch;
+            evict_headers_if_needed();
             PLOGD(log_, "  get_header: MISS seq=", ledger_seq, " — fetching");
         }
     }  // mutex released
@@ -1319,6 +1355,8 @@ NodeCache::get_header(
                 entry.present = true;
                 entry.signal = nullptr;
                 entry.progress.signal = nullptr;
+                touch_header_lru(ledger_seq);
+                evict_headers_if_needed();
             }
             if (sig)
                 sig->cancel();
@@ -1382,8 +1420,13 @@ NodeCache::get_header(
             if (it != header_cache_.end())
             {
                 sig = it->second.signal;
-                it->second.signal = nullptr;
-                it->second.progress.signal = nullptr;
+                header_cache_.erase(it);
+                if (auto lru_it = header_lru_map_.find(ledger_seq);
+                    lru_it != header_lru_map_.end())
+                {
+                    header_lru_.erase(lru_it->second);
+                    header_lru_map_.erase(lru_it);
+                }
             }
         }
         if (sig)
@@ -1446,22 +1489,27 @@ NodeCache::clear()
 {
     std::lock_guard lock(mutex_);
     store_.clear();
+    header_cache_.clear();
     lru_.clear();
     lru_map_.clear();
+    header_lru_.clear();
+    header_lru_map_.clear();
 }
 
 NodeCache::Stats
 NodeCache::stats() const
 {
     std::lock_guard lock(mutex_);
-    size_t entries = 0;
+    size_t resident_entries = 0;
     for (auto const& [_, e] : store_)
     {
         if (e.present)
-            entries++;
+            resident_entries++;
     }
     return {
-        .entries = entries,
+        .entries = store_.size(),
+        .resident_entries = resident_entries,
+        .header_entries = header_cache_.size(),
         .max_entries = max_entries_,
         .hits = hits_,
         .misses = misses_,
@@ -1489,6 +1537,22 @@ NodeCache::touch_lru(Hash256 const& hash) const
     {
         lru_.push_front(hash);
         lru_map_[hash] = lru_.begin();
+    }
+}
+
+void
+NodeCache::touch_header_lru(uint32_t ledger_seq) const
+{
+    // Must be called under lock
+    auto it = header_lru_map_.find(ledger_seq);
+    if (it != header_lru_map_.end())
+    {
+        header_lru_.splice(header_lru_.begin(), header_lru_, it->second);
+    }
+    else
+    {
+        header_lru_.push_front(ledger_seq);
+        header_lru_map_[ledger_seq] = header_lru_.begin();
     }
 }
 
@@ -1521,6 +1585,36 @@ NodeCache::evict_if_needed()
         }
         lru_map_.erase(victim);
         lru_.pop_back();
+    }
+}
+
+void
+NodeCache::evict_headers_if_needed()
+{
+    // Must be called under lock
+    size_t attempts = 0;
+    while (header_lru_.size() > max_header_entries_ && !header_lru_.empty())
+    {
+        if (++attempts > header_lru_.size())
+            break;
+
+        auto victim = header_lru_.back();
+        auto it = header_cache_.find(victim);
+        if (it != header_cache_.end())
+        {
+            if (!it->second.present && it->second.signal)
+            {
+                header_lru_.splice(
+                    header_lru_.begin(),
+                    header_lru_,
+                    std::prev(header_lru_.end()));
+                continue;
+            }
+            PLOGD(log_, "  evict header: seq=", victim);
+            header_cache_.erase(it);
+        }
+        header_lru_map_.erase(victim);
+        header_lru_.pop_back();
     }
 }
 

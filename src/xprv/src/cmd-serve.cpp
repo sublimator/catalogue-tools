@@ -8,6 +8,8 @@
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <pthread.h>
@@ -15,7 +17,54 @@
 #include <thread>
 #include <vector>
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
+
 static LogPartition log_("xprv", LogLevel::INFO);
+
+/// Get current process RSS in bytes. Returns 0 on failure.
+static size_t
+get_rss_bytes()
+{
+#ifdef __APPLE__
+    mach_task_basic_info_data_t info{};
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(
+            mach_task_self(), MACH_TASK_BASIC_INFO,
+            reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS)
+    {
+        return info.resident_size;
+    }
+    return 0;
+#else
+    // Linux: read /proc/self/status → VmRSS
+    std::ifstream f("/proc/self/status");
+    std::string line;
+    while (std::getline(f, line))
+    {
+        if (line.compare(0, 6, "VmRSS:") == 0)
+        {
+            // "VmRSS:    12345 kB"
+            size_t kb = 0;
+            std::sscanf(line.c_str(), "VmRSS: %zu", &kb);
+            return kb * 1024;
+        }
+    }
+    return 0;
+#endif
+}
+
+static void
+log_memory(char const* label)
+{
+    auto rss = get_rss_bytes();
+    if (rss == 0)
+        return;
+
+    auto mb = static_cast<double>(rss) / (1024.0 * 1024.0);
+    PLOGI(log_, label, ": RSS=", static_cast<int>(mb), "MB");
+}
 
 /// Create and configure a ProofEngine for a specific network, using
 /// the shared (non-network) settings from config.
@@ -54,17 +103,21 @@ cmd_serve()
     // Dump resolved config
     xprv::dump_config(config, std::cerr);
 
-    // Raise fd limit for server mode
+    // Raise fd limit for server mode (only increase, never lower)
     if (config.fd_limit > 0)
     {
         struct rlimit rl;
         if (getrlimit(RLIMIT_NOFILE, &rl) == 0)
         {
             auto old_soft = rl.rlim_cur;
-            rl.rlim_cur = std::min<rlim_t>(rl.rlim_max, config.fd_limit);
-            if (setrlimit(RLIMIT_NOFILE, &rl) == 0 && old_soft != rl.rlim_cur)
+            auto target = std::min<rlim_t>(rl.rlim_max, config.fd_limit);
+            if (target > old_soft)
             {
-                PLOGI(log_, "fd limit: ", old_soft, " → ", rl.rlim_cur);
+                rl.rlim_cur = target;
+                if (setrlimit(RLIMIT_NOFILE, &rl) == 0)
+                {
+                    PLOGI(log_, "fd limit: ", old_soft, " → ", rl.rlim_cur);
+                }
             }
         }
     }
@@ -105,10 +158,29 @@ cmd_serve()
               io, engines, config.network_id, http_opts);
     server->start();
 
+    log_memory("startup");
+
+    // Periodic memory reporter — every 60s
+    auto mem_timer = std::make_shared<boost::asio::steady_timer>(io);
+    std::function<void()> schedule_mem_report;
+    schedule_mem_report = [&io, mem_timer, &schedule_mem_report]() {
+        mem_timer->expires_after(std::chrono::seconds(60));
+        mem_timer->async_wait([mem_timer, &schedule_mem_report](
+                                  boost::system::error_code ec) {
+            if (ec)
+                return;
+            log_memory("periodic");
+            schedule_mem_report();
+        });
+    };
+    schedule_mem_report();
+
     // SIGINT/SIGTERM → stop server, stop engines, stop io
     boost::asio::signal_set signals(io, SIGINT, SIGTERM);
     signals.async_wait([&](boost::system::error_code, int sig) {
+        log_memory("shutdown");
         PLOGI(log_, "Signal ", sig, " received, shutting down...");
+        mem_timer->cancel();
         server->stop();
         for (auto& [net_id, engine] : engines)
         {

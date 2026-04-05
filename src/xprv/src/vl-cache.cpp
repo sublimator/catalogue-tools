@@ -51,6 +51,7 @@ VlCache::do_fetch()
             {
                 bool first_load = !self->vl_.has_value();
                 self->vl_ = std::move(result.vl);
+                self->initial_retry_ = std::chrono::seconds(2);  // reset for next cold start
                 PLOGI(
                     VlCache::log_,
                     "VL loaded: ",
@@ -70,13 +71,33 @@ VlCache::do_fetch()
                 {
                     self->on_refresh_(*self->vl_);
                 }
+
+                self->schedule_refresh();
             }
             else
             {
                 PLOGE(VlCache::log_, "VL fetch failed: ", result.error);
-            }
 
-            self->schedule_refresh();
+                if (!self->vl_.has_value())
+                {
+                    // Never loaded — retry aggressively
+                    auto delay = self->initial_retry_;
+                    PLOGW(
+                        VlCache::log_,
+                        "VL not yet loaded, retrying in ",
+                        delay.count(), "s");
+                    self->schedule_retry(delay);
+                    // Exponential backoff: 2s, 4s, 8s, 16s, 32s, 60s cap
+                    self->initial_retry_ = std::min(
+                        self->initial_retry_ * 2,
+                        self->initial_retry_cap_);
+                }
+                else
+                {
+                    // Already loaded — stale data is fine, normal refresh
+                    self->schedule_refresh();
+                }
+            }
         });
     });
 }
@@ -93,6 +114,19 @@ VlCache::schedule_refresh()
 {
     auto self = shared_from_this();
     refresh_.expires_after(refresh_interval_);
+    refresh_.async_wait([self](boost::system::error_code ec) {
+        if (!ec)
+        {
+            self->do_fetch();
+        }
+    });
+}
+
+void
+VlCache::schedule_retry(std::chrono::seconds delay)
+{
+    auto self = shared_from_this();
+    refresh_.expires_after(delay);
     refresh_.async_wait([self](boost::system::error_code ec) {
         if (!ec)
         {
