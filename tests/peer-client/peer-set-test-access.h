@@ -173,6 +173,52 @@ public:
     }
 
     static void
+    note_connect_success(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        catl::peer_client::PeerStatus status)
+    {
+        run_on_strand(
+            io,
+            peers,
+            [endpoint = std::move(endpoint), status](auto& set) {
+                set.note_connect_success(endpoint, status);
+            });
+    }
+
+    static void
+    note_connect_failure(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        run_on_strand(
+            io,
+            peers,
+            [endpoint = std::move(endpoint)](auto& set) {
+                set.note_connect_failure(endpoint);
+            });
+    }
+
+    static bool
+    candidate_better(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string lhs,
+        std::string rhs)
+    {
+        bool better = false;
+        run_on_strand(
+            io,
+            peers,
+            [&better, lhs = std::move(lhs), rhs = std::move(rhs)](auto& set) {
+                better = set.candidate_better(lhs, rhs);
+            });
+        return better;
+    }
+
+    static void
     insert_connected_peer(
         boost::asio::io_context& io,
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,

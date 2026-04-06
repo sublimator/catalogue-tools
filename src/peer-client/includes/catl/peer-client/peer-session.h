@@ -6,6 +6,7 @@
 #include <boost/asio/strand.hpp>
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -40,6 +41,12 @@ public:
 
     virtual uint32_t
     peer_last_seq() const = 0;
+
+    virtual std::map<std::string, std::string>
+    peer_headers() const
+    {
+        return {};
+    }
 
     virtual size_t
     pending_count() const = 0;

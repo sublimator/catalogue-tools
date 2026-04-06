@@ -11,7 +11,8 @@
 //   GET  /prove?tx=<hash>                 → auto-detect network, JSON proof
 //   GET  /prove?tx=...&format=bin         → auto-detect network, binary XPRV
 //   GET  /network/{slug}/prove?tx=<hash>  → network-specific prove
-//   GET  /peers                           → aggregate peers
+//   GET  /peers                           → peers for default network, or
+//                                           per-network list in multi-network
 //   GET  /network/{slug}/peers            → single network peers
 //   POST /verify                          → verify proof from request body
 

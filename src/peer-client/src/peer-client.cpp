@@ -7,6 +7,24 @@ namespace catl::peer_client {
 
 LogPartition PeerClient::log_("peer-client", LogLevel::INHERIT);
 
+namespace {
+
+std::string
+peer_net_label(uint32_t network_id)
+{
+    switch (network_id)
+    {
+        case 0:
+            return "xrpl";
+        case 21337:
+            return "xahau";
+        default:
+            return "net-" + std::to_string(network_id);
+    }
+}
+
+}  // namespace
+
 // ═══════════════════════════════════════════════════════════════════════
 // Canonical key computation
 // ═══════════════════════════════════════════════════════════════════════
@@ -162,8 +180,7 @@ PeerClient::register_callback(
         " callback_valid=",
         static_cast<bool>(callback));
     PendingEntry<T> entry;
-    auto timer =
-        std::make_unique<asio::steady_timer>(strand_, opts.timeout);
+    auto timer = std::make_unique<asio::steady_timer>(strand_, opts.timeout);
     auto* tp = timer.get();
     entry.callbacks.push_back({std::move(callback), std::move(timer)});
     PLOGT(
@@ -670,9 +687,7 @@ PeerClient::send_get_nodes(
             if (ec)
             {
                 PLOGE(
-                    PeerClient::log_,
-                    "send_get_nodes failed: ",
-                    ec.message());
+                    PeerClient::log_, "send_get_nodes failed: ", ec.message());
                 if (on_error)
                     on_error(ec);
             }
@@ -688,6 +703,7 @@ PeerClient::do_connect(
     ConnectCompletionCallback on_complete)
 {
     state_ = State::Connecting;
+    net_label_ = peer_net_label(network_id);
     endpoint_str_ = host + ":" + std::to_string(port);
     connect_completion_callback_ = std::move(on_complete);
 
@@ -707,7 +723,7 @@ PeerClient::do_connect(
     connection_ =
         std::make_shared<peer_connection>(strand_, *ssl_context_, config);
 
-    PLOGI(log_, "Connecting to ", host, ":", port, "...");
+    PLOGI(log_, "[", net_label_, "] Connecting to ", host, ":", port, "...");
 
     auto self = shared_from_this();
     // Disconnect handler fires on the strand (socket is strand-aware).
@@ -731,6 +747,8 @@ PeerClient::do_connect(
             PLOGD(
                 PeerClient::log_,
                 "[",
+                self->net_label_,
+                "] [",
                 self->endpoint_str_,
                 "] Connection lost before ready: ",
                 ec.message());
@@ -740,6 +758,8 @@ PeerClient::do_connect(
             PLOGE(
                 PeerClient::log_,
                 "[",
+                self->net_label_,
+                "] [",
                 self->endpoint_str_,
                 "] Connection lost before ready: ",
                 ec.message());
@@ -758,6 +778,8 @@ PeerClient::do_connect(
             PLOGD(
                 PeerClient::log_,
                 "[",
+                self->net_label_,
+                "] [",
                 self->endpoint_str_,
                 "] Connection failed: ",
                 ec.message());
@@ -785,7 +807,12 @@ void
 PeerClient::on_connected(ReadyCallback on_ready)
 {
     state_ = State::Connected;
-    PLOGI(log_, "Connected to ", connection_->remote_endpoint());
+    PLOGI(
+        log_,
+        "[",
+        net_label_,
+        "] Connected to ",
+        connection_->remote_endpoint());
 
     auto self = shared_from_this();
     ready_callback_ = std::move(on_ready);
@@ -814,7 +841,8 @@ PeerClient::send_monitoring_status()
 
     connection_->async_send_packet(
         packet_type::status_change, data, [](boost::system::error_code) {});
-    PLOGI(log_, "Sent monitoring status, waiting for peer...");
+    PLOGI(
+        log_, "[", net_label_, "] Sent monitoring status, waiting for peer...");
 }
 
 void
@@ -823,7 +851,7 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
     protocol::TMStatusChange status;
     if (!status.ParseFromArray(payload.data(), payload.size()))
     {
-        PLOGE(log_, "handle_status_change: parse failed");
+        PLOGE(log_, "[", net_label_, "] handle_status_change: parse failed");
         return;
     }
 
@@ -854,6 +882,8 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
                 PLOGI(
                     log_,
                     "[",
+                    net_label_,
+                    "] [",
                     endpoint_str_,
                     "] range: ",
                     peer_first_seq_,
@@ -865,6 +895,8 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
                 PLOGD(
                     log_,
                     "[",
+                    net_label_,
+                    "] [",
                     endpoint_str_,
                     "] range: ",
                     peer_first_seq_,
@@ -913,50 +945,53 @@ PeerClient::handle_endpoints(std::vector<uint8_t> const& payload)
     protocol::TMEndpoints msg;
     if (!msg.ParseFromArray(payload.data(), payload.size()))
     {
-        PLOGD(log_, "handle_endpoints: parse failed");
+        PLOGD(log_, "[", net_label_, "] handle_endpoints: parse failed");
         return;
     }
 
     int added = 0;
+    int filtered = 0;
     for (auto const& ep : msg.endpoints_v2())
     {
         if (ep.hops() > 1)
             continue;
 
-        auto const& addr = ep.endpoint();
-
-        // Skip useless wildcard bind addresses
-        if (addr.find("[::]:") == 0 || addr.find("0.0.0.0:") == 0)
+        auto normalized =
+            EndpointTracker::normalize_discovered_endpoint(ep.endpoint());
+        if (!normalized)
+        {
+            ++filtered;
             continue;
+        }
 
-        // Must be parseable
-        std::string host;
-        uint16_t port = 0;
-        if (!EndpointTracker::parse_endpoint(addr, host, port))
-            continue;
-
-        tracker->add_discovered(addr);
+        tracker->add_discovered(*normalized, DiscoverySource::Endpoints);
         PLOGD(
             log_,
             "[",
+            net_label_,
+            "] [",
             endpoint_str_,
             "] TMEndpoints: ",
-            addr,
+            *normalized,
             " (hops=",
             ep.hops(),
             ")");
         added++;
     }
 
-    if (added > 0)
+    if (added > 0 || filtered > 0)
     {
         PLOGI(
             log_,
             "[",
+            net_label_,
+            "] [",
             endpoint_str_,
             "] discovered ",
             added,
-            " peer endpoints");
+            " peer endpoints and filtered ",
+            filtered,
+            " non-public endpoints");
     }
 }
 
@@ -964,7 +999,13 @@ void
 PeerClient::become_ready()
 {
     state_ = State::Ready;
-    PLOGI(log_, "Ready (peer ledger: ", peer_ledger_seq_.load(), ")");
+    PLOGI(
+        log_,
+        "[",
+        net_label_,
+        "] Ready (peer ledger: ",
+        peer_ledger_seq_.load(),
+        ")");
 
     flush_queue();
 
@@ -1183,8 +1224,8 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
     // (queryDepth=0 still follows bc==1 chains → extra descendants).
     //
     // Fallback to match_key scan for error responses (no nodes).
-    auto is_descendant_or_equal =
-        [](SHAMapNodeID const& child, SHAMapNodeID const& ancestor) -> bool {
+    auto is_descendant_or_equal = [](SHAMapNodeID const& child,
+                                     SHAMapNodeID const& ancestor) -> bool {
         if (child.depth < ancestor.depth)
             return false;
         if (child.depth == ancestor.depth)

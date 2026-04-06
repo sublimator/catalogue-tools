@@ -22,6 +22,7 @@ target_link_libraries(
 # xprv source files we need (not the main)
 target_sources(
   xprv_gtest PRIVATE ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-binary.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/peer-json.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-json.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-buffer.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-collector.cpp)

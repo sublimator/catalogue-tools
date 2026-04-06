@@ -30,10 +30,18 @@ struct PeerStatus
     std::chrono::steady_clock::time_point last_seen;
 };
 
+enum class DiscoverySource {
+    Unknown,
+    Endpoints,
+    Crawl,
+    Redirect,
+};
+
 class EndpointTracker
 {
 public:
-    using DiscoveredObserver = std::function<void(std::string const& endpoint)>;
+    using DiscoveredObserver = std::function<
+        void(std::string const& endpoint, DiscoverySource source)>;
     using StatusObserver = std::function<
         void(std::string const& endpoint, PeerStatus const& status)>;
 
@@ -69,7 +77,9 @@ public:
     /// Add a discovered endpoint (from TMEndpoints gossip).
     /// Only records the address — range unknown until we connect.
     void
-    add_discovered(std::string const& endpoint);
+    add_discovered(
+        std::string const& endpoint,
+        DiscoverySource source = DiscoverySource::Unknown);
 
     /// Get all discovered endpoints that we haven't connected to yet
     /// (have no range info).
@@ -93,6 +103,22 @@ public:
         std::string const& endpoint,
         std::string& host,
         uint16_t& port);
+
+    /// Canonicalize an endpoint string for storage/comparison.
+    /// IPv4-mapped IPv6 literals are collapsed to plain IPv4.
+    /// IPv6 literals are returned in bracket notation.
+    static std::string
+    canonical_endpoint(std::string const& endpoint);
+
+    /// Canonicalize a discovered endpoint and reject non-public literals.
+    /// Hostnames are accepted after canonicalization.
+    static std::optional<std::string>
+    normalize_discovered_endpoint(std::string const& endpoint);
+
+    /// Canonicalize a discovered host using the supplied port and reject
+    /// non-public IP literals. Hostnames are accepted after canonicalization.
+    static std::optional<std::string>
+    normalize_discovered_host(std::string const& host, uint16_t port);
 
     void
     set_discovered_observer(DiscoveredObserver observer);

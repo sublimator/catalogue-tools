@@ -30,6 +30,9 @@ struct CrawlResponse
 std::vector<CrawlLedgerRange>
 parse_complete_ledgers(std::string_view value);
 
+std::string
+summarize_crawl_error(std::string_view error);
+
 boost::asio::awaitable<CrawlResponse>
 co_fetch_peer_crawl(std::string host, uint16_t port);
 

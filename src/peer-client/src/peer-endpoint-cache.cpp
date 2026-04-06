@@ -121,6 +121,7 @@ PeerEndpointCache::initialize_schema()
         "  failure_count INTEGER NOT NULL DEFAULT 0,"
         "  seen_crawl INTEGER NOT NULL DEFAULT 0,"
         "  seen_endpoints INTEGER NOT NULL DEFAULT 0,"
+        "  seen_redirect INTEGER NOT NULL DEFAULT 0,"
         "  connected_ok INTEGER NOT NULL DEFAULT 0,"
         "  PRIMARY KEY(network_id, endpoint)"
         ");");
@@ -134,11 +135,17 @@ PeerEndpointCache::initialize_schema()
             sqlite3_free(err);
     };
     try_add_column(
-        "ALTER TABLE peer_endpoints ADD COLUMN seen_crawl INTEGER NOT NULL DEFAULT 0");
+        "ALTER TABLE peer_endpoints ADD COLUMN seen_crawl INTEGER NOT NULL "
+        "DEFAULT 0");
     try_add_column(
-        "ALTER TABLE peer_endpoints ADD COLUMN seen_endpoints INTEGER NOT NULL DEFAULT 0");
+        "ALTER TABLE peer_endpoints ADD COLUMN seen_endpoints INTEGER NOT NULL "
+        "DEFAULT 0");
     try_add_column(
-        "ALTER TABLE peer_endpoints ADD COLUMN connected_ok INTEGER NOT NULL DEFAULT 0");
+        "ALTER TABLE peer_endpoints ADD COLUMN seen_redirect INTEGER NOT NULL "
+        "DEFAULT 0");
+    try_add_column(
+        "ALTER TABLE peer_endpoints ADD COLUMN connected_ok INTEGER NOT NULL "
+        "DEFAULT 0");
 
     exec_sql(
         db_,
@@ -188,17 +195,26 @@ PeerEndpointCache::load_bootstrap_candidates(
             db_,
             "SELECT endpoint, first_seq, last_seq, current_seq, last_seen_at, "
             "       last_success_at, last_failure_at, success_count, "
-            "       failure_count, seen_crawl, seen_endpoints, connected_ok "
+            "       failure_count, seen_crawl, seen_endpoints, "
+            "       seen_redirect, connected_ok "
             "FROM peer_endpoints "
             "WHERE network_id = ? "
             "ORDER BY "
+            "  CASE "
+            "    WHEN last_failure_at > 0 AND "
+            "         (last_success_at = 0 OR last_failure_at > "
+            "last_success_at) "
+            "    THEN 1 ELSE 0 "
+            "  END ASC, "
             "  connected_ok DESC, "
+            "  CASE WHEN first_seq > 0 AND last_seq > 0 THEN 1 ELSE 0 END "
+            "DESC, "
             "  CASE WHEN last_success_at > 0 THEN 1 ELSE 0 END DESC, "
-            "  (seen_crawl + seen_endpoints) DESC, "
+            "  (seen_crawl + seen_endpoints + seen_redirect) DESC, "
             "  last_success_at DESC, "
+            "  failure_count ASC, "
             "  last_seen_at DESC, "
             "  success_count DESC, "
-            "  failure_count ASC, "
             "  endpoint ASC "
             "LIMIT ?");
 
@@ -232,7 +248,8 @@ PeerEndpointCache::load_bootstrap_candidates(
                 static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 8));
             entry.seen_crawl = sqlite3_column_int(stmt.get(), 9) != 0;
             entry.seen_endpoints = sqlite3_column_int(stmt.get(), 10) != 0;
-            entry.connected_ok = sqlite3_column_int(stmt.get(), 11) != 0;
+            entry.seen_redirect = sqlite3_column_int(stmt.get(), 11) != 0;
+            entry.connected_ok = sqlite3_column_int(stmt.get(), 12) != 0;
             result.push_back(std::move(entry));
         }
 
@@ -422,16 +439,20 @@ PeerEndpointCache::remember_connect_failure(
         Statement stmt(
             db_,
             "INSERT INTO peer_endpoints("
-            "  network_id, endpoint, last_failure_at, failure_count"
-            ") VALUES(?, ?, ?, 1) "
+            "  network_id, endpoint, last_seen_at, last_failure_at, "
+            "  failure_count, connected_ok"
+            ") VALUES(?, ?, ?, ?, 1, 0) "
             "ON CONFLICT(network_id, endpoint) DO UPDATE SET "
+            "  last_seen_at = excluded.last_seen_at, "
             "  last_failure_at = excluded.last_failure_at, "
-            "  failure_count = peer_endpoints.failure_count + 1;");
+            "  failure_count = peer_endpoints.failure_count + 1, "
+            "  connected_ok = 0;");
 
         sqlite3_bind_int(stmt.get(), 1, static_cast<int>(network_id));
         sqlite3_bind_text(
             stmt.get(), 2, endpoint.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt.get(), 3, now);
+        sqlite3_bind_int64(stmt.get(), 4, now);
 
         if (sqlite3_step(stmt.get()) != SQLITE_DONE)
         {
@@ -501,6 +522,43 @@ PeerEndpointCache::remember_seen_endpoints(
             "ON CONFLICT(network_id, endpoint) DO UPDATE SET "
             "  last_seen_at = excluded.last_seen_at, "
             "  seen_endpoints = 1;");
+
+        sqlite3_bind_int(stmt.get(), 1, static_cast<int>(network_id));
+        sqlite3_bind_text(
+            stmt.get(), 2, endpoint.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt.get(), 3, now_unix());
+
+        if (sqlite3_step(stmt.get()) != SQLITE_DONE)
+        {
+            throw std::runtime_error(sqlite3_errmsg(db_));
+        }
+    }
+    catch (...)
+    {
+        disable();
+        throw;
+    }
+}
+
+void
+PeerEndpointCache::remember_seen_redirect(
+    uint32_t network_id,
+    std::string const& endpoint)
+{
+    std::lock_guard lock(mutex_);
+    if (is_disabled())
+        return;
+
+    try
+    {
+        Statement stmt(
+            db_,
+            "INSERT INTO peer_endpoints("
+            "  network_id, endpoint, last_seen_at, seen_redirect"
+            ") VALUES(?, ?, ?, 1) "
+            "ON CONFLICT(network_id, endpoint) DO UPDATE SET "
+            "  last_seen_at = excluded.last_seen_at, "
+            "  seen_redirect = 1;");
 
         sqlite3_bind_int(stmt.get(), 1, static_cast<int>(network_id));
         sqlite3_bind_text(

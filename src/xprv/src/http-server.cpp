@@ -1,7 +1,8 @@
 #include "xprv/http-server.h"
+#include "web_assets.h"
+#include "xprv/peer-json.h"
 #include "xprv/proof-chain-binary.h"
 #include "xprv/proof-chain-json.h"
-#include "web_assets.h"
 
 #include <cctype>
 #include <filesystem>
@@ -94,8 +95,7 @@ to_lower_copy(std::string_view s)
 {
     std::string out(s);
     for (auto& c : out)
-        c = static_cast<char>(
-            std::tolower(static_cast<unsigned char>(c)));
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return out;
 }
 
@@ -158,9 +158,7 @@ parse_network_tx_route(std::string_view path)
     if (network.empty() || !is_hex_64(tx_hash))
         return std::nullopt;
 
-    return NetworkTxRoute{
-        to_lower_copy(network),
-        std::string(tx_hash)};
+    return NetworkTxRoute{to_lower_copy(network), std::string(tx_hash)};
 }
 
 static bool
@@ -215,14 +213,22 @@ json_response(
 static std::string_view
 mime_for_extension(std::string_view ext)
 {
-    if (ext == ".html") return "text/html; charset=utf-8";
-    if (ext == ".js")   return "application/javascript; charset=utf-8";
-    if (ext == ".css")  return "text/css; charset=utf-8";
-    if (ext == ".svg")  return "image/svg+xml";
-    if (ext == ".json") return "application/json";
-    if (ext == ".png")  return "image/png";
-    if (ext == ".ico")  return "image/x-icon";
-    if (ext == ".py")   return "text/x-python; charset=utf-8";
+    if (ext == ".html")
+        return "text/html; charset=utf-8";
+    if (ext == ".js")
+        return "application/javascript; charset=utf-8";
+    if (ext == ".css")
+        return "text/css; charset=utf-8";
+    if (ext == ".svg")
+        return "image/svg+xml";
+    if (ext == ".json")
+        return "application/json";
+    if (ext == ".png")
+        return "image/png";
+    if (ext == ".ico")
+        return "image/x-icon";
+    if (ext == ".py")
+        return "text/x-python; charset=utf-8";
     return "application/octet-stream";
 }
 
@@ -355,9 +361,8 @@ HttpServer::create(
     uint32_t default_network_id,
     HttpServerOptions opts)
 {
-    return std::shared_ptr<HttpServer>(
-        new HttpServer(
-            io, std::move(engines), default_network_id, std::move(opts)));
+    return std::shared_ptr<HttpServer>(new HttpServer(
+        io, std::move(engines), default_network_id, std::move(opts)));
 }
 
 void
@@ -445,7 +450,12 @@ HttpServer::lookup_tx_all(std::string const& tx_hash)
     {
         asio::co_spawn(
             ex,
-            [engine, tx_hash, net_id, result_net, result_seq, remaining,
+            [engine,
+             tx_hash,
+             net_id,
+             result_net,
+             result_seq,
+             remaining,
              signal]() -> asio::awaitable<void> {
                 auto seq = co_await engine->lookup_tx(tx_hash);
                 if (seq != 0)
@@ -472,8 +482,14 @@ HttpServer::lookup_tx_all(std::string const& tx_hash)
 
     auto net = result_net->load();
     auto seq = result_seq->load();
-    PLOGD(log_, "lookup_tx_all: net=", net, " seq=", seq,
-        " remaining=", remaining->load());
+    PLOGD(
+        log_,
+        "lookup_tx_all: net=",
+        net,
+        " seq=",
+        seq,
+        " remaining=",
+        remaining->load());
     co_return std::pair{net, seq};
 }
 
@@ -508,8 +524,7 @@ HttpServer::accept_loop()
                 generate_request_id(),
                 {},  // tx_hash filled later
                 std::chrono::steady_clock::now()));
-        auto ctx_ex = catl::core::ContextExecutor(
-            io_.get_executor(), req_ctx);
+        auto ctx_ex = catl::core::ContextExecutor(io_.get_executor(), req_ctx);
         asio::co_spawn(
             ctx_ex,
             [self, s = std::move(socket), req_ctx]() mutable {
@@ -593,8 +608,8 @@ HttpServer::handle_session(
             {
                 if (safe.size() >= 64)
                     break;
-                if (std::isalnum(static_cast<unsigned char>(c)) ||
-                    c == '-' || c == '_')
+                if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' ||
+                    c == '_')
                     safe += c;
             }
             if (!safe.empty())
@@ -615,8 +630,8 @@ HttpServer::handle_session(
             auto [net_id, eng] = engine_for_slug(slug);
             if (!eng)
             {
-                // Unknown network slug — but might be a deep link for the web UI
-                // Check if this is a /network/{slug}/tx/{hash} route
+                // Unknown network slug — but might be a deep link for the web
+                // UI Check if this is a /network/{slug}/tx/{hash} route
                 auto route = parse_network_tx_route(path);
                 if (route && req.method() == http::verb::get)
                 {
@@ -660,10 +675,7 @@ HttpServer::handle_session(
                 co_await http::async_write(
                     stream,
                     error_response(
-                        404,
-                        "unknown network: " + slug,
-                        version,
-                        keep_alive),
+                        404, "unknown network: " + slug, version, keep_alive),
                     asio::redirect_error(asio::use_awaitable, ec));
                 if (ec || !keep_alive)
                     break;
@@ -679,8 +691,7 @@ HttpServer::handle_session(
         std::optional<http::response<http::string_body>> caught_error;
         try
         {
-            if (effective_path == "/health" &&
-                req.method() == http::verb::get)
+            if (effective_path == "/health" && req.method() == http::verb::get)
             {
                 if (routed_engine)
                 {
@@ -689,8 +700,7 @@ HttpServer::handle_session(
                     auto cs = routed_engine->cache_stats();
                     boost::json::object body;
                     body["network_id"] = routed_network_id;
-                    body["network"] =
-                        network_slug_for_id(routed_network_id);
+                    body["network"] = network_slug_for_id(routed_network_id);
                     body["peer_count"] = status.peer_count;
                     body["vl_loaded"] = status.vl_loaded;
                     if (status.latest_quorum_seq)
@@ -841,64 +851,46 @@ HttpServer::handle_session(
                 }
             }
             else if (
-                effective_path == "/peers" &&
-                req.method() == http::verb::get)
+                effective_path == "/peers" && req.method() == http::verb::get)
             {
-                // Determine which engine to query
-                auto* engine = routed_engine
-                    ? routed_engine
-                    : default_engine();
-
-                auto snapshot = co_await engine->peers()->co_snapshot();
+                auto const filters = parse_peer_snapshot_filters(params);
 
                 boost::json::object body;
-                if (routed_engine)
+                if (routed_engine || engines_.size() == 1)
                 {
-                    body["network_id"] = routed_network_id;
-                    body["network"] =
-                        network_slug_for_id(routed_network_id);
+                    auto* engine =
+                        routed_engine ? routed_engine : default_engine();
+                    auto snapshot = co_await engine->peers()->co_snapshot();
+                    body = peer_snapshot_to_json(
+                        snapshot,
+                        routed_engine
+                            ? std::optional<uint32_t>(routed_network_id)
+                            : std::optional<uint32_t>(),
+                        filters,
+                        true);
                 }
-                body["known_endpoints"] = snapshot.known_endpoints;
-                body["tracked_endpoints"] = snapshot.tracked_endpoints;
-                body["connected_peers"] = snapshot.connected_peers;
-                body["ready_peers"] = snapshot.ready_peers;
-                body["in_flight_connects"] = snapshot.in_flight_connects;
-                body["queued_connects"] = snapshot.queued_connects;
-                body["crawl_in_flight"] = snapshot.crawl_in_flight;
-                body["queued_crawls"] = snapshot.queued_crawls;
+                else
+                {
+                    if (!filters.empty())
+                    {
+                        boost::json::object filter_body;
+                        if (filters.connected.has_value())
+                            filter_body["connected"] = *filters.connected;
+                        body["filters"] = std::move(filter_body);
+                    }
 
-                boost::json::array wanted_ledgers;
-                for (auto ledger_seq : snapshot.wanted_ledgers)
-                {
-                    wanted_ledgers.push_back(ledger_seq);
+                    boost::json::array networks;
+                    for (auto const& [network_id, engine] : engines_)
+                    {
+                        auto snapshot = co_await engine->peers()->co_snapshot();
+                        networks.push_back(peer_snapshot_to_json(
+                            snapshot, network_id, filters, false));
+                    }
+                    body["networks"] = std::move(networks);
+                    body["run_id"] = Logger::get_run_id();
+                    if (!opts_.build_id.empty())
+                        body["build_id"] = opts_.build_id;
                 }
-                body["wanted_ledgers"] = std::move(wanted_ledgers);
-
-                boost::json::array peers;
-                for (auto const& peer : snapshot.peers)
-                {
-                    boost::json::object item;
-                    item["endpoint"] = peer.endpoint;
-                    item["connected"] = peer.connected;
-                    item["ready"] = peer.ready;
-                    item["in_flight"] = peer.in_flight;
-                    item["queued_connect"] = peer.queued_connect;
-                    item["crawl_in_flight"] = peer.crawl_in_flight;
-                    item["queued_crawl"] = peer.queued_crawl;
-                    item["crawled"] = peer.crawled;
-                    item["first_seq"] = peer.first_seq;
-                    item["last_seq"] = peer.last_seq;
-                    item["current_seq"] = peer.current_seq;
-                    item["last_seen_at"] = peer.last_seen_at;
-                    item["last_success_at"] = peer.last_success_at;
-                    item["last_failure_at"] = peer.last_failure_at;
-                    item["success_count"] = peer.success_count;
-                    item["failure_count"] = peer.failure_count;
-                    item["selection_count"] = peer.selection_count;
-                    item["last_selected_ticket"] = peer.last_selected_ticket;
-                    peers.push_back(std::move(item));
-                }
-                body["peers"] = std::move(peers);
 
                 stream.expires_after(opts_.write_timeout);
                 co_await http::async_write(
@@ -907,8 +899,7 @@ HttpServer::handle_session(
                     asio::redirect_error(asio::use_awaitable, ec));
             }
             else if (
-                effective_path == "/prove" &&
-                req.method() == http::verb::get)
+                effective_path == "/prove" && req.method() == http::verb::get)
             {
                 auto tx_it = params.find("tx");
                 if (tx_it == params.end() || tx_it->second.empty())
@@ -930,8 +921,13 @@ HttpServer::handle_session(
                     auto li_it = params.find("ledger_index");
                     if (li_it != params.end() && !li_it->second.empty())
                     {
-                        try { ledger_seq_hint = std::stoul(li_it->second); }
-                        catch (...) {}
+                        try
+                        {
+                            ledger_seq_hint = std::stoul(li_it->second);
+                        }
+                        catch (...)
+                        {
+                        }
                     }
 
                     if (routed_engine)
@@ -961,8 +957,7 @@ HttpServer::handle_session(
                     }
 
                     // Check if client wants SSE
-                    auto accept = std::string(
-                        req[http::field::accept]);
+                    auto accept = std::string(req[http::field::accept]);
                     bool wants_sse =
                         accept.find("text/event-stream") != std::string::npos;
 
@@ -972,8 +967,13 @@ HttpServer::handle_session(
                     auto ma_it = params.find("max_anchor_age");
                     if (ma_it != params.end() && !ma_it->second.empty())
                     {
-                        try { max_anchor_age = std::stoul(ma_it->second); }
-                        catch (...) {}
+                        try
+                        {
+                            max_anchor_age = std::stoul(ma_it->second);
+                        }
+                        catch (...)
+                        {
+                        }
                     }
 
                     // Cancel token: atomic flag checked at cancellation
@@ -996,10 +996,8 @@ HttpServer::handle_session(
                         stream.expires_never();
 
                         // Disable Nagle so each write flushes immediately
-                        beast::get_lowest_layer(stream)
-                            .socket()
-                            .set_option(
-                                asio::ip::tcp::no_delay(true));
+                        beast::get_lowest_layer(stream).socket().set_option(
+                            asio::ip::tcp::no_delay(true));
 
                         std::string hdr_str =
                             "HTTP/1.1 200 OK\r\n"
@@ -1007,20 +1005,28 @@ HttpServer::handle_session(
                             "Cache-Control: no-cache\r\n"
                             "Connection: close\r\n"
                             "Server: xprv\r\n"
-                            "X-XPRV: " + g_xprv_header + "\r\n"
+                            "X-XPRV: " +
+                            g_xprv_header +
+                            "\r\n"
                             "\r\n";
                         co_await asio::async_write(
                             stream,
                             asio::buffer(hdr_str),
                             asio::redirect_error(asio::use_awaitable, ec));
                         PLOGI(log_, "SSE headers sent, ec=", ec.message());
-                        if (ec) break;
+                        if (ec)
+                            break;
 
                         int step_index = 0;
-                        auto write_sse = [&](std::string data)
-                            -> asio::awaitable<void> {
+                        auto write_sse =
+                            [&](std::string data) -> asio::awaitable<void> {
                             auto frame = "data: " + data + "\n\n";
-                            PLOGI(log_, "SSE write: ", frame.size(), "B type=", data.substr(0, 40));
+                            PLOGI(
+                                log_,
+                                "SSE write: ",
+                                frame.size(),
+                                "B type=",
+                                data.substr(0, 40));
                             co_await asio::async_write(
                                 stream,
                                 asio::buffer(frame),
@@ -1076,8 +1082,10 @@ HttpServer::handle_session(
                         try
                         {
                             auto result = co_await engine_sp->prove(
-                                tx_it->second, cancel_token,
-                                ledger_seq_hint, max_anchor_age,
+                                tx_it->second,
+                                cancel_token,
+                                ledger_seq_hint,
+                                max_anchor_age,
                                 std::move(on_step));
 
                             // Stop drain loop and flush remaining
@@ -1089,8 +1097,7 @@ HttpServer::handle_session(
                                 boost::json::object ev;
                                 ev["type"] = "log";
                                 ev["msg"] = std::move(msg);
-                                co_await write_sse(
-                                    boost::json::serialize(ev));
+                                co_await write_sse(boost::json::serialize(ev));
                             }
 
                             // Send done event — client stitches proof
@@ -1118,136 +1125,138 @@ HttpServer::handle_session(
                     }
                     else
                     {
-                    // ── Regular JSON/binary path ──
+                        // ── Regular JSON/binary path ──
 
-                    // Cancel timer: set to max, cancelled by socket
-                    // watcher when the client disconnects.
-                    auto cancel = std::make_shared<asio::steady_timer>(
-                        stream.get_executor(),
-                        asio::steady_timer::time_point::max());
+                        // Cancel timer: set to max, cancelled by socket
+                        // watcher when the client disconnects.
+                        auto cancel = std::make_shared<asio::steady_timer>(
+                            stream.get_executor(),
+                            asio::steady_timer::time_point::max());
 
-                    // Socket watcher: monitors client disconnect.
-                    // Safe: stream lives in handle_session which is
-                    // blocked on the parallel_group below.
-                    auto watcher_done =
-                        std::make_shared<std::atomic<bool>>(false);
-                    co_spawn(
-                        stream.get_executor(),
-                        [&stream, cancel, cancel_token, watcher_done]()
-                            -> asio::awaitable<void> {
-                            boost::system::error_code wec;
-                            co_await beast::get_lowest_layer(stream)
-                                .socket()
-                                .async_wait(
-                                    asio::ip::tcp::socket::wait_read,
-                                    asio::redirect_error(
-                                        asio::use_awaitable, wec));
-                            if (!watcher_done->load())
-                            {
-                                cancel_token->store(true);
-                                cancel->cancel();
-                            }
-                        },
-                        asio::detached);
-
-                    // ContextExecutor — prove's top-level co_awaits get
-                    // the request ID; inner strand hops don't.
-                    auto ex = co_await asio::this_coro::executor;
-
-                    // Race prove against disconnect using parallel_group
-                    // with wait_for_one(). Unlike ||/wait_for_one_success,
-                    // this cancels the other branch when EITHER completes
-                    // — including when prove throws an exception.
-                    auto [order, ex0, r0, ex1] =
-                        co_await asio::experimental::make_parallel_group(
-                            asio::co_spawn(
-                                ex,
-                                engine_sp->prove(
-                                    tx_it->second, cancel_token,
-                                    ledger_seq_hint, max_anchor_age),
-                                asio::deferred),
-                            asio::co_spawn(
-                                ex,
-                                [cancel]()
-                                    -> asio::awaitable<void> {
-                                    co_await asio::this_coro::
-                                        reset_cancellation_state(
-                                            asio::
-                                                enable_total_cancellation());
-                                    boost::system::error_code ec;
-                                    co_await cancel->async_wait(
+                        // Socket watcher: monitors client disconnect.
+                        // Safe: stream lives in handle_session which is
+                        // blocked on the parallel_group below.
+                        auto watcher_done =
+                            std::make_shared<std::atomic<bool>>(false);
+                        co_spawn(
+                            stream.get_executor(),
+                            [&stream, cancel, cancel_token, watcher_done]()
+                                -> asio::awaitable<void> {
+                                boost::system::error_code wec;
+                                co_await beast::get_lowest_layer(stream)
+                                    .socket()
+                                    .async_wait(
+                                        asio::ip::tcp::socket::wait_read,
                                         asio::redirect_error(
-                                            asio::use_awaitable, ec));
-                                },
-                                asio::deferred))
-                            .async_wait(
-                                asio::experimental::wait_for_one(),
-                                asio::use_awaitable);
+                                            asio::use_awaitable, wec));
+                                if (!watcher_done->load())
+                                {
+                                    cancel_token->store(true);
+                                    cancel->cancel();
+                                }
+                            },
+                            asio::detached);
 
-                    // Cancel the socket watcher before touching stream
-                    watcher_done->store(true);
-                    beast::get_lowest_layer(stream).socket().cancel();
+                        // ContextExecutor — prove's top-level co_awaits get
+                        // the request ID; inner strand hops don't.
+                        auto ex = co_await asio::this_coro::executor;
 
-                    // Check which branch completed first
-                    if (order[0] == 0)
-                    {
-                        // Prove finished first (success or error)
-                        if (ex0)
-                            std::rethrow_exception(ex0); // → caught below
-                    }
-                    else
-                    {
-                        // Cancel branch fired = client disconnected
-                        PLOGD(log_, "Client disconnected during prove");
-                        break;
-                    }
+                        // Race prove against disconnect using parallel_group
+                        // with wait_for_one(). Unlike ||/wait_for_one_success,
+                        // this cancels the other branch when EITHER completes
+                        // — including when prove throws an exception.
+                        auto [order, ex0, r0, ex1] =
+                            co_await asio::experimental::make_parallel_group(
+                                asio::co_spawn(
+                                    ex,
+                                    engine_sp->prove(
+                                        tx_it->second,
+                                        cancel_token,
+                                        ledger_seq_hint,
+                                        max_anchor_age),
+                                    asio::deferred),
+                                asio::co_spawn(
+                                    ex,
+                                    [cancel]() -> asio::awaitable<void> {
+                                        co_await asio::this_coro::
+                                            reset_cancellation_state(
+                                                asio::
+                                                    enable_total_cancellation());
+                                        boost::system::error_code ec;
+                                        co_await cancel->async_wait(
+                                            asio::redirect_error(
+                                                asio::use_awaitable, ec));
+                                    },
+                                    asio::deferred))
+                                .async_wait(
+                                    asio::experimental::wait_for_one(),
+                                    asio::use_awaitable);
 
-                    auto result = std::move(r0);
-                    auto format_it = params.find("format");
-                    bool binary =
-                        format_it != params.end() && format_it->second == "bin";
+                        // Cancel the socket watcher before touching stream
+                        watcher_done->store(true);
+                        beast::get_lowest_layer(stream).socket().cancel();
 
-                    stream.expires_after(opts_.write_timeout);
+                        // Check which branch completed first
+                        if (order[0] == 0)
+                        {
+                            // Prove finished first (success or error)
+                            if (ex0)
+                                std::rethrow_exception(ex0);  // → caught below
+                        }
+                        else
+                        {
+                            // Cancel branch fired = client disconnected
+                            PLOGD(log_, "Client disconnected during prove");
+                            break;
+                        }
 
-                    if (binary)
-                    {
-                        auto data = to_binary(result.chain, {.compress = true});
-                        http::response<http::vector_body<uint8_t>> res{
-                            http::status::ok, version};
-                        res.set(
-                            http::field::content_type,
-                            "application/octet-stream");
-                        res.set(http::field::server, "xprv");
-                        res.keep_alive(keep_alive);
-                        res.body() = std::move(data);
-                        res.prepare_payload();
-                        co_await http::async_write(
-                            stream,
-                            res,
-                            asio::redirect_error(asio::use_awaitable, ec));
-                    }
-                    else
-                    {
-                        auto chain_json = to_json(result.chain);
-                        auto body_str = boost::json::serialize(chain_json);
-                        http::response<http::string_body> res{
-                            http::status::ok, version};
-                        res.set(http::field::content_type, "application/json");
-                        res.set(http::field::server, "xprv");
-                        res.keep_alive(keep_alive);
-                        res.body() = std::move(body_str);
-                        res.prepare_payload();
-                        co_await http::async_write(
-                            stream,
-                            res,
-                            asio::redirect_error(asio::use_awaitable, ec));
-                    }
-                    } // regular path
+                        auto result = std::move(r0);
+                        auto format_it = params.find("format");
+                        bool binary = format_it != params.end() &&
+                            format_it->second == "bin";
+
+                        stream.expires_after(opts_.write_timeout);
+
+                        if (binary)
+                        {
+                            auto data =
+                                to_binary(result.chain, {.compress = true});
+                            http::response<http::vector_body<uint8_t>> res{
+                                http::status::ok, version};
+                            res.set(
+                                http::field::content_type,
+                                "application/octet-stream");
+                            res.set(http::field::server, "xprv");
+                            res.keep_alive(keep_alive);
+                            res.body() = std::move(data);
+                            res.prepare_payload();
+                            co_await http::async_write(
+                                stream,
+                                res,
+                                asio::redirect_error(asio::use_awaitable, ec));
+                        }
+                        else
+                        {
+                            auto chain_json = to_json(result.chain);
+                            auto body_str = boost::json::serialize(chain_json);
+                            http::response<http::string_body> res{
+                                http::status::ok, version};
+                            res.set(
+                                http::field::content_type, "application/json");
+                            res.set(http::field::server, "xprv");
+                            res.keep_alive(keep_alive);
+                            res.body() = std::move(body_str);
+                            res.prepare_payload();
+                            co_await http::async_write(
+                                stream,
+                                res,
+                                asio::redirect_error(asio::use_awaitable, ec));
+                        }
+                    }  // regular path
                 }
             }
             else if (
-                effective_path == "/verify" &&
-                req.method() == http::verb::post)
+                effective_path == "/verify" && req.method() == http::verb::post)
             {
                 auto const& body = req.body();
                 if (body.empty())
@@ -1296,8 +1305,8 @@ HttpServer::handle_session(
                     {
                         if (route_matches_network(route->network, id))
                         {
-                            deep_link =
-                                try_serve_static("/", static_body, content_type);
+                            deep_link = try_serve_static(
+                                "/", static_body, content_type);
                             break;
                         }
                     }
@@ -1314,7 +1323,8 @@ HttpServer::handle_session(
                     if (!g_xprv_header.empty())
                         res.set("X-XPRV", g_xprv_header);
                     if (path == "/verify-xprv.py")
-                        res.set(http::field::content_disposition,
+                        res.set(
+                            http::field::content_disposition,
                             "attachment; filename=\"verify-xprv.py\"");
                     res.keep_alive(keep_alive);
                     res.body() = std::move(static_body);

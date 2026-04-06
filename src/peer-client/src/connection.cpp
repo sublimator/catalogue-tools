@@ -8,6 +8,7 @@
 #include <boost/json.hpp>
 #include <chrono>
 #include <openssl/ssl.h>
+#include <sstream>
 #include <utility>
 
 namespace catl::peer_client {
@@ -16,6 +17,18 @@ static LogPartition log_("peer-conn", LogLevel::INHERIT);
 
 namespace beast = boost::beast;
 namespace http = beast::http;
+
+namespace {
+
+std::string
+truncate_for_log(std::string const& text, std::size_t limit = 160)
+{
+    if (text.size() <= limit)
+        return text;
+    return text.substr(0, limit) + "...";
+}
+
+}  // namespace
 
 peer_connection::peer_connection(
     strand_type strand,
@@ -31,7 +44,8 @@ peer_connection::~peer_connection()
 {
     if (socket_ && socket_->lowest_layer().is_open())
     {
-        PLOGW(log_, "Socket still open in destructor — was close() not called?");
+        PLOGW(
+            log_, "Socket still open in destructor — was close() not called?");
         boost::system::error_code ec;
         socket_->lowest_layer().close(ec);
     }
@@ -40,6 +54,8 @@ peer_connection::~peer_connection()
 void
 peer_connection::async_connect(const connection_handler& handler)
 {
+    set_connect_failure_detail({});
+
     if (config_.listen_mode)
     {
         PLOGE(log_, "Cannot call async_connect in listen mode");
@@ -57,6 +73,7 @@ peer_connection::async_connect(const connection_handler& handler)
             tcp::resolver::results_type endpoints) {
             if (ec)
             {
+                self->note_connect_failure("resolve", ec);
                 handler(ec);
                 return;
             }
@@ -74,6 +91,7 @@ peer_connection::async_connect(const connection_handler& handler)
                     }
                     else
                     {
+                        self->note_connect_failure("tcp connect", ec);
                         handler(ec);
                     }
                 });
@@ -115,6 +133,7 @@ peer_connection::handle_connect(
 {
     if (ec)
     {
+        note_connect_failure("tcp connect", ec);
         handler(ec);
         return;
     }
@@ -134,6 +153,7 @@ peer_connection::handle_handshake(
 {
     if (ec)
     {
+        note_connect_failure("tls handshake", ec);
         handler(ec);
         return;
     }
@@ -147,6 +167,7 @@ peer_connection::handle_handshake(
         SSL_get_finished(ssl, finished.data(), finished.size());
     if (finished_len < 12)
     {
+        set_connect_failure_detail("tls handshake: finished message too short");
         handler(boost::asio::error::invalid_argument);
         return;
     }
@@ -157,6 +178,8 @@ peer_connection::handle_handshake(
         SSL_get_peer_finished(ssl, peer_finished.data(), peer_finished.size());
     if (peer_finished_len < 12)
     {
+        set_connect_failure_detail(
+            "tls handshake: peer finished message too short");
         handler(boost::asio::error::invalid_argument);
         return;
     }
@@ -262,9 +285,6 @@ peer_connection::send_http_request(const connection_handler& handler)
     req->set("Session-Signature", session_signature_);
     req->set("Public-Key", node_public_key_b58_);
 
-    // Request ledger replay feature (lowercase as per rippled source)
-    req->set("X-Protocol-Ctl", "ledgerreplay=1;");
-
     http::async_write(
         *socket_,
         *req,
@@ -292,6 +312,7 @@ peer_connection::send_http_request(const connection_handler& handler)
             }
             else
             {
+                self->note_connect_failure("http upgrade write", ec);
                 handler(ec);
             }
         });
@@ -300,6 +321,11 @@ peer_connection::send_http_request(const connection_handler& handler)
 void
 peer_connection::handle_http_request(const connection_handler& handler)
 {
+    upgrade_headers_.clear();
+    for (auto const& field : http_request_)
+        upgrade_headers_[std::string(field.name_string())] =
+            std::string(field.value());
+
     // Send upgrade response
     auto res = std::make_shared<http::response<http::string_body>>(
         http::status::switching_protocols, 11);
@@ -331,6 +357,7 @@ peer_connection::handle_http_request(const connection_handler& handler)
             }
             else
             {
+                self->note_connect_failure("http upgrade read", ec);
                 handler(ec);
             }
         });
@@ -369,6 +396,11 @@ peer_connection::handle_http_response(const connection_handler& handler)
                 "] HTTP upgrade failed with status: ",
                 status_code);
         }
+
+        std::ostringstream detail;
+        detail << "http upgrade status=" << status_code;
+        if (!http_response_.reason().empty())
+            detail << " reason=\"" << http_response_.reason() << '"';
 
         // Log response headers — may contain redirect or error info
         for (auto const& field : http_response_)
@@ -432,13 +464,19 @@ peer_connection::handle_http_response(const connection_handler& handler)
                         "] 503 redirect: ",
                         redirect_ips_.size(),
                         " peer-ips");
+                    detail << " redirect_peers=" << redirect_ips_.size();
                 }
             }
             catch (...)
             {
                 // Not JSON or no peer-ips — that's fine
             }
+
+            detail << " body=\"" << truncate_for_log(http_response_.body())
+                   << '"';
         }
+
+        set_connect_failure_detail(detail.str());
 
         handler(boost::asio::error::invalid_argument);
         return;
@@ -446,6 +484,11 @@ peer_connection::handle_http_response(const connection_handler& handler)
 
     // Log important response headers
     PLOGD(log_, "HTTP upgrade successful - examining response headers:");
+
+    upgrade_headers_.clear();
+    for (auto const& field : http_response_)
+        upgrade_headers_[std::string(field.name_string())] =
+            std::string(field.value());
 
     // Check protocol version
     if (auto it = http_response_.find("Upgrade"); it != http_response_.end())
@@ -514,6 +557,7 @@ peer_connection::handle_http_response(const connection_handler& handler)
 
     http_upgraded_ = true;
     connected_ = true;
+    set_connect_failure_detail({});
 
     // Now that upgrade is complete, we can start reading packets
     handler({});
@@ -745,7 +789,12 @@ peer_connection::async_send_packet(
     static constexpr size_t kMaxWriteQueue = 256;
     if (write_queue_.size() >= kMaxWriteQueue)
     {
-        PLOGW(log_, remote_endpoint(), " write queue full (", kMaxWriteQueue, "), closing");
+        PLOGW(
+            log_,
+            remote_endpoint(),
+            " write queue full (",
+            kMaxWriteQueue,
+            "), closing");
         if (handler)
             handler(boost::asio::error::no_buffer_space);
         fail_and_close(boost::asio::error::no_buffer_space);
@@ -774,8 +823,7 @@ peer_connection::do_write()
     asio::async_write(
         *socket_,
         asio::buffer(front.packet),
-        [self = shared_from_this()](
-            boost::system::error_code ec, std::size_t) {
+        [self = shared_from_this()](boost::system::error_code ec, std::size_t) {
             // If closing_ is set, fail_and_close already drained the
             // queue. The front entry we were writing is gone.
             if (self->closing_)
@@ -849,6 +897,34 @@ peer_connection::remote_endpoint() const
             std::to_string(remote_endpoint_.port());
     }
     return "not connected";
+}
+
+std::string
+peer_connection::connect_failure_detail() const
+{
+    std::lock_guard lock(connect_failure_mutex_);
+    return connect_failure_detail_;
+}
+
+void
+peer_connection::set_connect_failure_detail(std::string detail)
+{
+    std::lock_guard lock(connect_failure_mutex_);
+    connect_failure_detail_ = std::move(detail);
+}
+
+void
+peer_connection::note_connect_failure(
+    char const* stage,
+    boost::system::error_code ec)
+{
+    std::string detail = stage;
+    if (ec)
+    {
+        detail += ": ";
+        detail += ec.message();
+    }
+    set_connect_failure_detail(std::move(detail));
 }
 
 std::string

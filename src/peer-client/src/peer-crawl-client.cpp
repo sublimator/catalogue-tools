@@ -48,7 +48,8 @@ trim_copy(std::string_view input)
 std::string
 format_endpoint(std::string const& host, uint16_t port)
 {
-    if (host.find(':') != std::string::npos && host.find(']') == std::string::npos)
+    if (host.find(':') != std::string::npos &&
+        host.find(']') == std::string::npos)
     {
         return "[" + host + "]:" + std::to_string(port);
     }
@@ -179,7 +180,8 @@ fetch_crawl_https(std::string const& host, uint16_t port)
     co_await stream.async_handshake(
         ssl::stream_base::client, boost::asio::use_awaitable);
 
-    auto response = co_await read_crawl_response(stream, tcp_stream, host, true);
+    auto response =
+        co_await read_crawl_response(stream, tcp_stream, host, true);
 
     boost::system::error_code ec;
     tcp_stream.expires_after(std::chrono::seconds(2));
@@ -227,8 +229,10 @@ parse_complete_ledgers(std::string_view value)
             continue;
 
         auto dash = token.find('-');
-        auto first_text = dash == std::string::npos ? token : token.substr(0, dash);
-        auto last_text = dash == std::string::npos ? token : token.substr(dash + 1);
+        auto first_text =
+            dash == std::string::npos ? token : token.substr(0, dash);
+        auto last_text =
+            dash == std::string::npos ? token : token.substr(dash + 1);
 
         try
         {
@@ -245,6 +249,16 @@ parse_complete_ledgers(std::string_view value)
     }
 
     return ranges;
+}
+
+std::string
+summarize_crawl_error(std::string_view error)
+{
+    auto summary = trim_copy(error);
+    auto const diagnostic = summary.find(" [");
+    if (diagnostic != std::string::npos)
+        summary.erase(diagnostic);
+    return summary;
 }
 
 boost::asio::awaitable<CrawlResponse>

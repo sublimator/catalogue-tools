@@ -223,7 +223,6 @@ public:
     void
     set_tracker(std::shared_ptr<EndpointTracker> tracker);
 
-
     /// Peer's advertised ledger range (from TMStatusChange).
     uint32_t
     peer_first_seq() const override
@@ -235,6 +234,14 @@ public:
     peer_last_seq() const override
     {
         return peer_last_seq_;
+    }
+
+    std::map<std::string, std::string>
+    peer_headers() const override
+    {
+        if (!connection_)
+            return {};
+        return connection_->upgrade_headers();
     }
 
     /// Set a handler that receives every node-type TMLedgerData response
@@ -255,8 +262,8 @@ public:
         Hash256 const& ledger_hash,
         int type,  // liTX_NODE or liAS_NODE
         std::vector<SHAMapNodeID> const& node_ids,
-        std::function<void(boost::system::error_code)> on_error = nullptr)
-        override;
+        std::function<void(boost::system::error_code)> on_error =
+            nullptr) override;
 
     void
     disconnect() override;
@@ -470,6 +477,7 @@ private:
     std::atomic<uint32_t> peer_ledger_seq_{0};
     std::atomic<uint32_t> peer_first_seq_{0};
     std::atomic<uint32_t> peer_last_seq_{0};
+    std::string net_label_;
     std::string endpoint_str_;  // "host:port" for tracker
 
     /// Optional shared tracker — fed from TMStatusChange.

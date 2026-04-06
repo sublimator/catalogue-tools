@@ -1,9 +1,123 @@
 #include <catl/peer-client/endpoint-tracker.h>
 
+#include <boost/asio/ip/address.hpp>
+
 #include <algorithm>
 #include <cctype>
 
 namespace catl::peer_client {
+
+namespace {
+
+std::string
+strip_ipv4_mapped(std::string const& host)
+{
+    static constexpr auto prefix = std::string_view("::ffff:");
+    if (host.size() >= prefix.size())
+    {
+        bool match = true;
+        for (std::size_t i = 0; i < prefix.size(); ++i)
+        {
+            if (std::tolower(static_cast<unsigned char>(host[i])) != prefix[i])
+            {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+            return host.substr(prefix.size());
+    }
+    return host;
+}
+
+std::string
+format_endpoint(std::string const& host, uint16_t port)
+{
+    if (host.find(':') != std::string::npos &&
+        host.find('.') == std::string::npos)
+    {
+        return "[" + host + "]:" + std::to_string(port);
+    }
+    return host + ":" + std::to_string(port);
+}
+
+bool
+is_non_public_ipv4(boost::asio::ip::address_v4 const& addr)
+{
+    if (addr.is_unspecified() || addr.is_loopback() || addr.is_multicast())
+        return true;
+
+    auto const bytes = addr.to_bytes();
+    auto const a = bytes[0];
+    auto const b = bytes[1];
+    auto const c = bytes[2];
+
+    if (a == 0 || a == 10 || a == 127)
+        return true;
+    if (a == 169 && b == 254)
+        return true;
+    if (a == 172 && b >= 16 && b <= 31)
+        return true;
+    if (a == 192 && b == 168)
+        return true;
+    if (a == 100 && b >= 64 && b <= 127)
+        return true;
+    if (a == 198 && (b == 18 || b == 19))
+        return true;
+    if (a == 192 && b == 0 && c == 2)
+        return true;
+    if (a == 198 && b == 51 && c == 100)
+        return true;
+    if (a == 203 && b == 0 && c == 113)
+        return true;
+    if (a >= 224)
+        return true;
+
+    return false;
+}
+
+bool
+is_non_public_ipv6(boost::asio::ip::address_v6 const& addr)
+{
+    if (addr.is_unspecified() || addr.is_loopback() || addr.is_link_local() ||
+        addr.is_multicast())
+        return true;
+
+    auto const bytes = addr.to_bytes();
+
+    if ((bytes[0] & 0xfe) == 0xfc)
+        return true;
+
+    if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d &&
+        bytes[3] == 0xb8)
+        return true;
+
+    return false;
+}
+
+std::optional<std::string>
+normalize_discovered_host_impl(std::string host, uint16_t port)
+{
+    if (port == 0)
+        return std::nullopt;
+
+    host = strip_ipv4_mapped(host);
+
+    boost::system::error_code ec;
+    auto const addr = boost::asio::ip::make_address(host, ec);
+    if (!ec)
+    {
+        if ((addr.is_v4() && is_non_public_ipv4(addr.to_v4())) ||
+            (addr.is_v6() && is_non_public_ipv6(addr.to_v6())))
+        {
+            return std::nullopt;
+        }
+    }
+
+    return format_endpoint(host, port);
+}
+
+}  // namespace
 
 void
 EndpointTracker::update(std::string const& endpoint, PeerStatus status)
@@ -114,7 +228,9 @@ EndpointTracker::size() const
 }
 
 void
-EndpointTracker::add_discovered(std::string const& endpoint)
+EndpointTracker::add_discovered(
+    std::string const& endpoint,
+    DiscoverySource source)
 {
     DiscoveredObserver observer;
     {
@@ -126,7 +242,7 @@ EndpointTracker::add_discovered(std::string const& endpoint)
 
     if (observer)
     {
-        observer(endpoint);
+        observer(endpoint, source);
     }
 }
 
@@ -267,6 +383,42 @@ EndpointTracker::parse_endpoint(
     {
         return false;
     }
+}
+
+std::string
+EndpointTracker::canonical_endpoint(std::string const& endpoint)
+{
+    std::string host;
+    uint16_t port = 0;
+    if (!parse_endpoint(endpoint, host, port))
+        return endpoint;
+
+    host = strip_ipv4_mapped(host);
+    return format_endpoint(host, port);
+}
+
+std::optional<std::string>
+EndpointTracker::normalize_discovered_endpoint(std::string const& endpoint)
+{
+    std::string host;
+    uint16_t port = 0;
+    if (!parse_endpoint(endpoint, host, port) || port == 0)
+        return std::nullopt;
+
+    return normalize_discovered_host(host, port);
+}
+
+std::optional<std::string>
+EndpointTracker::normalize_discovered_host(
+    std::string const& host,
+    uint16_t port)
+{
+    std::string parsed_host;
+    uint16_t parsed_port = 0;
+    if (parse_endpoint(host, parsed_host, parsed_port))
+        return normalize_discovered_host_impl(parsed_host, parsed_port);
+
+    return normalize_discovered_host_impl(host, port);
 }
 
 }  // namespace catl::peer_client

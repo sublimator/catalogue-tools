@@ -15,24 +15,38 @@
 // Assert that we're running on the PeerSet strand.
 // Fires in debug/TSAN builds, zero cost in release.
 // Log + assert strand affinity. In release builds, logs but doesn't crash.
-#define ASSERT_ON_STRAND() \
-    do { \
-        if (!strand_.running_in_this_thread()) { \
-            PLOGE(log_, "OFF-STRAND: ", __func__, " at ", __FILE__, ":", __LINE__); \
-            if (std::getenv("XPRV_STRAND_FAIL_FAST")) { \
-                std::abort(); \
-            } \
-        } \
+#define ASSERT_ON_STRAND()                            \
+    do                                                \
+    {                                                 \
+        if (!strand_.running_in_this_thread())        \
+        {                                             \
+            PLOGE(                                    \
+                log_,                                 \
+                "OFF-STRAND: ",                       \
+                __func__,                             \
+                " at ",                               \
+                __FILE__,                             \
+                ":",                                  \
+                __LINE__);                            \
+            if (std::getenv("XPRV_STRAND_FAIL_FAST")) \
+            {                                         \
+                std::abort();                         \
+            }                                         \
+        }                                             \
     } while (0)
 
 // Auto-repost onto strand if called from off-strand. Use for public methods.
 // The method must be callable via shared_from_this().
-#define ENSURE_ON_STRAND(method_call) \
-    do { \
-        if (!strand_.running_in_this_thread()) { \
-            asio::post(strand_, [self = shared_from_this()]() { self->method_call; }); \
-            return; \
-        } \
+#define ENSURE_ON_STRAND(method_call)                           \
+    do                                                          \
+    {                                                           \
+        if (!strand_.running_in_this_thread())                  \
+        {                                                       \
+            asio::post(strand_, [self = shared_from_this()]() { \
+                self->method_call;                              \
+            });                                                 \
+            return;                                             \
+        }                                                       \
     } while (0)
 
 namespace catl::peer_client {
@@ -76,7 +90,8 @@ wait_for_signal_or_timeout(
                     asio::deferred),
                 asio::co_spawn(
                     strand,
-                    [strand, slice]() -> asio::awaitable<boost::system::error_code> {
+                    [strand,
+                     slice]() -> asio::awaitable<boost::system::error_code> {
                         asio::steady_timer timer(strand, slice);
                         boost::system::error_code ec;
                         co_await timer.async_wait(
@@ -103,28 +118,41 @@ wait_for_signal_or_timeout(
 namespace {
 
 std::string
-strip_ipv4_mapped(std::string const& host)
+canonical_endpoint(std::string const& endpoint)
 {
-    // ::ffff:1.2.3.4 → 1.2.3.4
-    static constexpr auto prefix = std::string_view("::ffff:");
-    if (host.size() > prefix.size() &&
-        host.compare(0, prefix.size(), prefix) == 0)
-    {
-        return host.substr(prefix.size());
-    }
-    return host;
+    return EndpointTracker::canonical_endpoint(endpoint);
 }
 
 std::string
-canonical_endpoint(std::string const& endpoint)
+trim_connect_failure_detail(std::string detail)
 {
-    std::string host;
-    uint16_t port = 0;
-    if (EndpointTracker::parse_endpoint(endpoint, host, port))
-    {
-        return strip_ipv4_mapped(host) + ":" + std::to_string(port);
-    }
-    return endpoint;
+    auto const body = detail.find(" body=\"");
+    if (body != std::string::npos)
+        detail.erase(body);
+    return detail;
+}
+
+void
+append_source_label(std::string& out, char const* label)
+{
+    if (!out.empty())
+        out += "+";
+    out += label;
+}
+
+std::string
+discovery_source_label(bool seen_crawl, bool seen_endpoints, bool seen_redirect)
+{
+    std::string label;
+    if (seen_crawl)
+        append_source_label(label, "crawl");
+    if (seen_endpoints)
+        append_source_label(label, "tmendpoints");
+    if (seen_redirect)
+        append_source_label(label, "redirect");
+    if (label.empty())
+        label = "unknown";
+    return label;
 }
 
 }  // namespace
@@ -199,6 +227,9 @@ PeerSet::PeerSet(boost::asio::io_context& io, PeerSetOptions const& options)
         {
             PLOGW(
                 log_,
+                "[",
+                net_label_,
+                "] ",
                 "Peer cache disabled (",
                 options_.endpoint_cache_path,
                 "): ",
@@ -222,6 +253,9 @@ PeerSet::start()
         {
             PLOGW(
                 log_,
+                "[",
+                net_label_,
+                "] ",
                 "Peer cache load failed: ",
                 e.what());
         }
@@ -267,7 +301,13 @@ PeerSet::now_unix()
 void
 PeerSet::update_endpoint_stats(PeerEndpointCache::Entry const& entry)
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), entry]() { self->update_endpoint_stats(entry); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), entry]() {
+            self->update_endpoint_stats(entry);
+        });
+        return;
+    }
     auto key = canonical_endpoint(entry.endpoint);
     auto& stats = endpoint_stats_[key];
     stats.status = entry.status;
@@ -276,15 +316,39 @@ PeerSet::update_endpoint_stats(PeerEndpointCache::Entry const& entry)
     stats.last_failure_at = entry.last_failure_at;
     stats.success_count = entry.success_count;
     stats.failure_count = entry.failure_count;
+    stats.seen_crawl = entry.seen_crawl;
+    stats.seen_endpoints = entry.seen_endpoints;
+    stats.seen_redirect = entry.seen_redirect;
+    stats.connected_ok = entry.connected_ok;
 }
 
 void
-PeerSet::note_discovered(std::string const& endpoint)
+PeerSet::note_discovered(std::string const& endpoint, DiscoverySource source)
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint]() { self->note_discovered(endpoint); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), endpoint, source]() {
+            self->note_discovered(endpoint, source);
+        });
+        return;
+    }
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     stats.last_seen_at = now_unix();
+    switch (source)
+    {
+        case DiscoverySource::Crawl:
+            stats.seen_crawl = true;
+            break;
+        case DiscoverySource::Endpoints:
+            stats.seen_endpoints = true;
+            break;
+        case DiscoverySource::Redirect:
+            stats.seen_redirect = true;
+            break;
+        case DiscoverySource::Unknown:
+            break;
+    }
     queue_crawl(key);
     if (should_connect_endpoint(key))
     {
@@ -301,7 +365,13 @@ PeerSet::note_discovered(std::string const& endpoint)
 void
 PeerSet::note_status(std::string const& endpoint, PeerStatus const& status)
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint, status]() { self->note_status(endpoint, status); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), endpoint, status]() {
+            self->note_status(endpoint, status);
+        });
+        return;
+    }
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     stats.status = status;
@@ -324,7 +394,13 @@ PeerSet::note_connect_success(
     std::string const& endpoint,
     PeerStatus const& status)
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint, status]() { self->note_connect_success(endpoint, status); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), endpoint, status]() {
+            self->note_connect_success(endpoint, status);
+        });
+        return;
+    }
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     auto const now = now_unix();
@@ -332,6 +408,7 @@ PeerSet::note_connect_success(
     stats.last_seen_at = now;
     stats.last_success_at = now;
     stats.success_count++;
+    stats.connected_ok = true;
     sort_pending_connects();
     notify_waiters();
 }
@@ -339,11 +416,19 @@ PeerSet::note_connect_success(
 void
 PeerSet::note_connect_failure(std::string const& endpoint)
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint]() { self->note_connect_failure(endpoint); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), endpoint]() {
+            self->note_connect_failure(endpoint);
+        });
+        return;
+    }
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     stats.last_failure_at = now_unix();
+    stats.last_seen_at = stats.last_failure_at;
     stats.failure_count++;
+    stats.connected_ok = false;
     sort_pending_connects();
     notify_waiters();
 }
@@ -418,15 +503,17 @@ PeerSet::select_peers_for(
     }
 
     // Sort: range-matched first, then by span descending
-    std::sort(candidates.begin(), candidates.end(),
+    std::sort(
+        candidates.begin(),
+        candidates.end(),
         [ledger_seq](auto const& a, auto const& b) {
             bool a_covers = a.client->peer_first_seq() <= ledger_seq &&
-                            ledger_seq <= a.client->peer_last_seq();
+                ledger_seq <= a.client->peer_last_seq();
             bool b_covers = b.client->peer_first_seq() <= ledger_seq &&
-                            ledger_seq <= b.client->peer_last_seq();
+                ledger_seq <= b.client->peer_last_seq();
             if (a_covers != b_covers)
                 return a_covers > b_covers;  // range-matched first
-            return a.span > b.span;  // wider range preferred
+            return a.span > b.span;          // wider range preferred
         });
 
     std::vector<PeerSessionPtr> result;
@@ -455,20 +542,16 @@ PeerSet::note_ledger_failure(std::string const& endpoint, uint32_t ledger_seq)
 {
     if (!strand_.running_in_this_thread())
     {
-        asio::post(strand_, [self = shared_from_this(), endpoint, ledger_seq]() {
-            self->note_ledger_failure(endpoint, ledger_seq);
-        });
+        asio::post(
+            strand_, [self = shared_from_this(), endpoint, ledger_seq]() {
+                self->note_ledger_failure(endpoint, ledger_seq);
+            });
         return;
     }
     auto key = canonical_endpoint(endpoint);
     endpoint_stats_[key].failed_ledgers[ledger_seq] = {
         std::chrono::steady_clock::now()};
-    PLOGD(
-        log_,
-        "Noted ledger failure: peer=",
-        key,
-        " ledger=",
-        ledger_seq);
+    PLOGD(log_, "Noted ledger failure: peer=", key, " ledger=", ledger_seq);
 }
 
 PeerSessionPtr
@@ -756,9 +839,8 @@ PeerSet::should_connect_endpoint(std::string const& endpoint) const
     // If crawl already had a chance and still did not give us range data,
     // fall back to a real peer handshake rather than starving on crawl-only
     // nodes.
-    if (auto crawled = crawled_.find(key);
-        crawled != crawled_.end() && now - crawled->second < kCrawlRetention &&
-        !endpoint_has_range(key))
+    if (auto crawled = crawled_.find(key); crawled != crawled_.end() &&
+        now - crawled->second < kCrawlRetention && !endpoint_has_range(key))
     {
         return true;
     }
@@ -806,6 +888,18 @@ PeerSet::candidate_better(std::string const& lhs, std::string const& rhs) const
 
     if (lhs_covers != rhs_covers)
         return lhs_covers;
+
+    auto const lhs_penalized = lhs_stats.last_failure_at > 0 &&
+        (lhs_stats.last_success_at == 0 ||
+         lhs_stats.last_failure_at > lhs_stats.last_success_at);
+    auto const rhs_penalized = rhs_stats.last_failure_at > 0 &&
+        (rhs_stats.last_success_at == 0 ||
+         rhs_stats.last_failure_at > rhs_stats.last_success_at);
+    if (lhs_penalized != rhs_penalized)
+        return !lhs_penalized;
+
+    if (lhs_stats.connected_ok != rhs_stats.connected_ok)
+        return lhs_stats.connected_ok;
 
     auto const lhs_success = lhs_stats.last_success_at > 0;
     auto const rhs_success = rhs_stats.last_success_at > 0;
@@ -857,7 +951,13 @@ PeerSet::candidate_better(std::string const& lhs, std::string const& rhs) const
 void
 PeerSet::sort_pending_connects()
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->sort_pending_connects(); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this()]() {
+            self->sort_pending_connects();
+        });
+        return;
+    }
     std::sort(
         pending_connects_.begin(),
         pending_connects_.end(),
@@ -869,7 +969,13 @@ PeerSet::sort_pending_connects()
 void
 PeerSet::sort_pending_crawls()
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->sort_pending_crawls(); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this()]() {
+            self->sort_pending_crawls();
+        });
+        return;
+    }
     std::sort(
         pending_crawls_.begin(),
         pending_crawls_.end(),
@@ -881,7 +987,13 @@ PeerSet::sort_pending_crawls()
 void
 PeerSet::queue_connect(std::string const& endpoint)
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint]() { self->queue_connect(endpoint); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), endpoint]() {
+            self->queue_connect(endpoint);
+        });
+        return;
+    }
     auto key = canonical_endpoint(endpoint);
     auto const now = std::chrono::steady_clock::now();
 
@@ -914,7 +1026,13 @@ PeerSet::queue_connect(std::string const& endpoint)
 void
 PeerSet::queue_crawl(std::string const& endpoint)
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint]() { self->queue_crawl(endpoint); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), endpoint]() {
+            self->queue_crawl(endpoint);
+        });
+        return;
+    }
     if (options_.max_in_flight_crawls == 0)
         return;
 
@@ -938,7 +1056,12 @@ PeerSet::queue_crawl(std::string const& endpoint)
 void
 PeerSet::pump_connects()
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->pump_connects(); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(
+            strand_, [self = shared_from_this()]() { self->pump_connects(); });
+        return;
+    }
     while (in_flight_.size() < options_.max_in_flight_connects &&
            !pending_connects_.empty())
     {
@@ -982,7 +1105,12 @@ PeerSet::pump_connects()
 void
 PeerSet::pump_crawls()
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->pump_crawls(); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(
+            strand_, [self = shared_from_this()]() { self->pump_crawls(); });
+        return;
+    }
     while (crawl_in_flight_.size() < options_.max_in_flight_crawls &&
            !pending_crawls_.empty())
     {
@@ -996,9 +1124,9 @@ PeerSet::pump_crawls()
             continue;
 
         auto const now = std::chrono::steady_clock::now();
-        if (auto crawled = crawled_.find(key);
-            crawl_in_flight_.count(key) ||
-            (crawled != crawled_.end() && now - crawled->second < kCrawlRetention))
+        if (auto crawled = crawled_.find(key); crawl_in_flight_.count(key) ||
+            (crawled != crawled_.end() &&
+             now - crawled->second < kCrawlRetention))
         {
             continue;
         }
@@ -1013,50 +1141,80 @@ PeerSet::pump_crawls()
                 {
                     auto response = co_await co_fetch_peer_crawl(host, port);
 
+                    std::size_t accepted = 0;
                     std::size_t ranged = 0;
+                    std::size_t filtered = 0;
                     for (auto const& peer : response.peers)
                     {
                         if (peer.endpoint.empty())
                             continue;
 
+                        auto normalized =
+                            EndpointTracker::normalize_discovered_endpoint(
+                                peer.endpoint);
+                        if (!normalized)
+                        {
+                            ++filtered;
+                            continue;
+                        }
+
+                        ++accepted;
+
                         // Mark as seen in crawl
                         if (self->endpoint_cache_)
                         {
-                            try { self->endpoint_cache_->remember_seen_crawl(
-                                self->network_id_,
-                                canonical_endpoint(peer.endpoint)); }
-                            catch (...) {}
+                            try
+                            {
+                                self->endpoint_cache_->remember_seen_crawl(
+                                    self->network_id_, *normalized);
+                            }
+                            catch (...)
+                            {
+                            }
                         }
 
-                        if (auto status =
-                                self->choose_crawl_status(peer.complete_ledgers))
+                        if (auto status = self->choose_crawl_status(
+                                peer.complete_ledgers))
                         {
                             ++ranged;
-                            self->tracker_->update(
-                                canonical_endpoint(peer.endpoint), *status);
+                            self->tracker_->update(*normalized, *status);
                         }
                         else
                         {
                             self->tracker_->add_discovered(
-                                canonical_endpoint(peer.endpoint));
+                                *normalized, DiscoverySource::Crawl);
                         }
                     }
 
                     PLOGI(
                         log_,
+                        "[",
+                        self->net_label_,
+                        "] ",
                         "Crawled ",
                         key,
                         " via ",
                         response.used_tls ? "HTTPS" : "HTTP",
                         ": ",
                         response.peers.size(),
-                        " public peers, ",
+                        " raw peers, ",
+                        accepted,
+                        " accepted public peers, ",
                         ranged,
-                        " with ledger ranges");
+                        " with ledger ranges, ",
+                        filtered,
+                        " filtered");
                 }
                 catch (std::exception const& e)
                 {
-                    PLOGW(log_, "Crawl failed for ", key, ": ", e.what());
+                    PLOGW(
+                        log_,
+                        "[",
+                        self->net_label_,
+                        "] Crawl failed for ",
+                        key,
+                        ": ",
+                        summarize_crawl_error(e.what()));
                 }
 
                 self->crawl_in_flight_.erase(key);
@@ -1088,7 +1246,7 @@ PeerSet::load_cached_endpoints()
     }
     catch (std::exception const& e)
     {
-        PLOGW(log_, "Peer cache count failed: ", e.what());
+        PLOGW(log_, "[", net_label_, "] Peer cache count failed: ", e.what());
         return;
     }
 
@@ -1096,7 +1254,9 @@ PeerSet::load_cached_endpoints()
         network_id_, options_.cached_endpoint_limit);
     PLOGI(
         log_,
-        "[", net_label_, "] Peer cache has ",
+        "[",
+        net_label_,
+        "] Peer cache has ",
         total_cached,
         " endpoints for network ",
         network_id_,
@@ -1104,22 +1264,121 @@ PeerSet::load_cached_endpoints()
         cached.size(),
         " into bootstrap");
 
+    std::size_t filtered = 0;
+    std::size_t loaded = 0;
+    std::size_t loaded_with_range = 0;
+    std::size_t loaded_with_success = 0;
+    std::size_t loaded_connected_ok = 0;
+    std::size_t loaded_seen_crawl = 0;
+    std::size_t loaded_seen_endpoints = 0;
+    std::size_t loaded_seen_redirect = 0;
     for (auto const& entry : cached)
     {
-        update_endpoint_stats(entry);
-        auto key = canonical_endpoint(entry.endpoint);
+        auto normalized =
+            EndpointTracker::normalize_discovered_endpoint(entry.endpoint);
+        if (!normalized)
+        {
+            ++filtered;
+            continue;
+        }
+
+        auto normalized_entry = entry;
+        normalized_entry.endpoint = *normalized;
+        update_endpoint_stats(normalized_entry);
+        auto const& key = *normalized;
         if (entry.status.first_seq != 0 && entry.status.last_seq != 0)
         {
             tracker_->update(key, entry.status);
+            ++loaded_with_range;
         }
         else
         {
             tracker_->add_discovered(key);
         }
+        if (entry.last_success_at > 0)
+            ++loaded_with_success;
+        if (entry.connected_ok)
+            ++loaded_connected_ok;
+        if (entry.seen_crawl)
+            ++loaded_seen_crawl;
+        if (entry.seen_endpoints)
+            ++loaded_seen_endpoints;
+        if (entry.seen_redirect)
+            ++loaded_seen_redirect;
+        ++loaded;
     }
     if (!cached.empty())
     {
-        PLOGI(log_, "[", net_label_, "] Peer cache path: ", endpoint_cache_->path());
+        PLOGI(
+            log_,
+            "[",
+            net_label_,
+            "] Peer cache path: ",
+            endpoint_cache_->path());
+        PLOGI(
+            log_,
+            "[",
+            net_label_,
+            "] Cached bootstrap summary: loaded=",
+            loaded,
+            " ranged=",
+            loaded_with_range,
+            " success=",
+            loaded_with_success,
+            " connected_ok=",
+            loaded_connected_ok,
+            " seen_crawl=",
+            loaded_seen_crawl,
+            " seen_endpoints=",
+            loaded_seen_endpoints,
+            " seen_redirect=",
+            loaded_seen_redirect);
+
+        auto const detail_count = std::min<std::size_t>(cached.size(), 5);
+        for (std::size_t i = 0; i < detail_count; ++i)
+        {
+            auto const& entry = cached[i];
+            auto normalized =
+                EndpointTracker::normalize_discovered_endpoint(entry.endpoint);
+            if (!normalized)
+                continue;
+
+            PLOGI(
+                log_,
+                "[",
+                net_label_,
+                "] Cached candidate #",
+                i + 1,
+                ": ",
+                *normalized,
+                " connected_ok=",
+                entry.connected_ok ? 1 : 0,
+                " success=",
+                entry.success_count,
+                " fail=",
+                entry.failure_count,
+                " source=",
+                discovery_source_label(
+                    entry.seen_crawl,
+                    entry.seen_endpoints,
+                    entry.seen_redirect),
+                " range=",
+                entry.status.first_seq,
+                "-",
+                entry.status.last_seq);
+        }
+    }
+    if (filtered > 0)
+    {
+        PLOGI(
+            log_,
+            "[",
+            net_label_,
+            "] Ignored ",
+            filtered,
+            " non-public cached endpoints while loading ",
+            loaded,
+            " bootstrap candidates");
     }
 }
 
@@ -1133,21 +1392,34 @@ PeerSet::configure_tracker_persistence()
     // Observers fire from PeerClient strands (TMStatusChange/TMEndpoints).
     // Repost onto our strand so note_discovered/note_status touch PeerSet
     // state safely.
-    tracker_->set_discovered_observer(
-        [self, cache, network_id](std::string const& endpoint) {
-            asio::post(self->strand_, [self, cache, network_id, endpoint]() {
-                self->note_discovered(endpoint);
+    tracker_->set_discovered_observer([self, cache, network_id](
+                                          std::string const& endpoint,
+                                          DiscoverySource source) {
+        asio::post(
+            self->strand_, [self, cache, network_id, endpoint, source]() {
+                self->note_discovered(endpoint, source);
                 if (cache)
                 {
                     try
                     {
                         cache->remember_discovered(network_id, endpoint);
-                        cache->remember_seen_endpoints(network_id, endpoint);
+                        if (source == DiscoverySource::Endpoints)
+                        {
+                            cache->remember_seen_endpoints(
+                                network_id, endpoint);
+                        }
+                        else if (source == DiscoverySource::Redirect)
+                        {
+                            cache->remember_seen_redirect(network_id, endpoint);
+                        }
                     }
                     catch (std::exception const& e)
                     {
                         PLOGW(
                             log_,
+                            "[",
+                            self->net_label_,
+                            "] ",
                             "Peer cache write failed for ",
                             endpoint,
                             ": ",
@@ -1155,40 +1427,47 @@ PeerSet::configure_tracker_persistence()
                     }
                 }
             });
-        });
+    });
 
-    tracker_->set_status_observer(
-        [self, cache, network_id](
-            std::string const& endpoint, PeerStatus const& status) {
-            asio::post(
-                self->strand_,
-                [self, cache, network_id, endpoint, status]() {
-                    self->note_status(endpoint, status);
-                    if (cache)
+    tracker_->set_status_observer([self, cache, network_id](
+                                      std::string const& endpoint,
+                                      PeerStatus const& status) {
+        asio::post(
+            self->strand_, [self, cache, network_id, endpoint, status]() {
+                self->note_status(endpoint, status);
+                if (cache)
+                {
+                    try
                     {
-                        try
-                        {
-                            cache->remember_status(
-                                network_id, endpoint, status);
-                        }
-                        catch (std::exception const& e)
-                        {
-                            PLOGW(
-                                log_,
-                                "Peer cache write failed for ",
-                                endpoint,
-                                ": ",
-                                e.what());
-                        }
+                        cache->remember_status(network_id, endpoint, status);
                     }
-                });
-        });
+                    catch (std::exception const& e)
+                    {
+                        PLOGW(
+                            log_,
+                            "[",
+                            self->net_label_,
+                            "] ",
+                            "Peer cache write failed for ",
+                            endpoint,
+                            ": ",
+                            e.what());
+                    }
+                }
+            });
+    });
 }
 
 void
 PeerSet::start_connect(std::string const& endpoint)
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), endpoint]() { self->start_connect(endpoint); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), endpoint]() {
+            self->start_connect(endpoint);
+        });
+        return;
+    }
     queue_connect(endpoint);
     pump_connects();
 }
@@ -1196,7 +1475,13 @@ PeerSet::start_connect(std::string const& endpoint)
 void
 PeerSet::start_connect(std::string const& host, uint16_t port)
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), host, port]() { self->start_connect(host, port); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), host, port]() {
+            self->start_connect(host, port);
+        });
+        return;
+    }
     queue_connect(make_key(host, port));
     pump_connects();
 }
@@ -1225,18 +1510,24 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
     if (at_cap)
     {
         // Try to evict for any wanted ledger (pick the first)
-        auto evict_target = wanted_ledgers_.empty()
-            ? 0u
-            : *wanted_ledgers_.begin();
+        auto evict_target =
+            wanted_ledgers_.empty() ? 0u : *wanted_ledgers_.begin();
         if (evict_target != 0 && evict_for(evict_target))
         {
-            PLOGD(log_, "Evicted idle peer, connecting to ", key);
+            PLOGD(
+                log_,
+                "[",
+                net_label_,
+                "] Evicted idle peer, connecting to ",
+                key);
         }
         else
         {
             PLOGI(
                 log_,
-                "[", net_label_, "] Connection cap reached (",
+                "[",
+                net_label_,
+                "] Connection cap reached (",
                 incoming_archival ? "archival" : "hub",
                 " pool), skipping ",
                 key);
@@ -1246,7 +1537,9 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 
     PLOGI(
         log_,
-        "[", net_label_, "] Connecting to ",
+        "[",
+        net_label_,
+        "] Connecting to ",
         key,
         incoming_archival ? " (archival)" : "",
         " [hubs=",
@@ -1285,8 +1578,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
             };
         }
 
-        co_await co_connect(
-            io_, host, port, std::move(connect_opts), client);
+        co_await co_connect(io_, host, port, std::move(connect_opts), client);
 
         // Re-hop to strand — co_connect resumes on whatever executor
         // the signal timer uses, which may not be our strand.
@@ -1313,12 +1605,20 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
             catch (std::exception const& e)
             {
                 PLOGW(
-                    log_, "Peer cache write failed for ", key, ": ", e.what());
+                    log_,
+                    "[",
+                    net_label_,
+                    "] Peer cache write failed for ",
+                    key,
+                    ": ",
+                    e.what());
             }
         }
         PLOGI(
             log_,
-            "[", net_label_, "] Connected to ",
+            "[",
+            net_label_,
+            "] Connected to ",
             key,
             " (range: ",
             client->peer_first_seq(),
@@ -1327,9 +1627,70 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
             ")");
         co_return client;
     }
-    catch (std::exception const& e)
+    catch (PeerClientException const& e)
     {
-        PLOGW(log_, "Failed to connect to ", key, ": ", e.what());
+        auto redirected = false;
+        std::size_t redirect_count = 0;
+        std::size_t filtered = 0;
+
+        // Harvest 503 redirect IPs
+        if (client)
+        {
+            auto const& ips = client->raw_connection().redirect_ips();
+            redirect_count = ips.size();
+            redirected = redirect_count > 0;
+            for (auto const& ip : ips)
+            {
+                auto normalized =
+                    EndpointTracker::normalize_discovered_host(ip, port);
+                if (!normalized)
+                {
+                    ++filtered;
+                    continue;
+                }
+                tracker_->add_discovered(
+                    *normalized, DiscoverySource::Redirect);
+            }
+            if (redirected)
+            {
+                auto detail = trim_connect_failure_detail(e.detail);
+                PLOGI(
+                    log_,
+                    "[",
+                    net_label_,
+                    "] Connect redirected by ",
+                    key,
+                    ": ",
+                    detail.empty() ? std::string("redirect_peers=") +
+                            std::to_string(redirect_count)
+                                   : detail);
+                if (filtered > 0)
+                {
+                    PLOGI(
+                        log_,
+                        "[",
+                        net_label_,
+                        "] Ignored ",
+                        filtered,
+                        " non-public redirect peers from ",
+                        key);
+                }
+                // Immediately try the redirect peers
+                try_undiscovered();
+            }
+        }
+
+        if (!redirected)
+        {
+            PLOGW(
+                log_,
+                "[",
+                net_label_,
+                "] Failed to connect to ",
+                key,
+                ": ",
+                e.what());
+        }
         failed_at_[key] = std::chrono::steady_clock::now();
         note_connect_failure(key);
         if (endpoint_cache_)
@@ -1342,6 +1703,9 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
             {
                 PLOGW(
                     log_,
+                    "[",
+                    net_label_,
+                    "] ",
                     "Peer cache write failed for ",
                     key,
                     ": ",
@@ -1349,22 +1713,39 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
             }
         }
 
-        // Harvest 503 redirect IPs
-        if (client)
+        co_return nullptr;
+    }
+    catch (std::exception const& e)
+    {
+        PLOGW(
+            log_,
+            "[",
+            net_label_,
+            "] Failed to connect to ",
+            key,
+            ": ",
+            e.what());
+        failed_at_[key] = std::chrono::steady_clock::now();
+        note_connect_failure(key);
+        if (endpoint_cache_)
         {
-            auto const& ips = client->raw_connection().redirect_ips();
-            if (!ips.empty())
+            try
             {
-                PLOGI(log_, "[", net_label_, "] Got ", ips.size(), " redirect peers from ", key);
-                for (auto const& ip : ips)
-                {
-                    tracker_->add_discovered(canonical_endpoint(ip));
-                }
-                // Immediately try the redirect peers
-                try_undiscovered();
+                endpoint_cache_->remember_connect_failure(network_id_, key);
+            }
+            catch (std::exception const& cache_error)
+            {
+                PLOGW(
+                    log_,
+                    "[",
+                    net_label_,
+                    "] ",
+                    "Peer cache write failed for ",
+                    key,
+                    ": ",
+                    cache_error.what());
             }
         }
-
         co_return nullptr;
     }
 }
@@ -1372,19 +1753,31 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 void
 PeerSet::bootstrap()
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->bootstrap(); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(
+            strand_, [self = shared_from_this()]() { self->bootstrap(); });
+        return;
+    }
     auto const& boot_peers = get_bootstrap_peers(network_id_);
     auto tracked_endpoints = tracker_->all_endpoints();
 
     if (boot_peers.empty() && tracked_endpoints.empty())
     {
-        PLOGW(log_, "[", net_label_, "] No bootstrap peers for network ", network_id_);
+        PLOGW(
+            log_,
+            "[",
+            net_label_,
+            "] No bootstrap peers for network ",
+            network_id_);
         return;
     }
 
     PLOGI(
         log_,
-        "[", net_label_, "] Bootstrapping: ",
+        "[",
+        net_label_,
+        "] Bootstrapping: ",
         boot_peers.size(),
         " built-in seeds, ",
         tracked_endpoints.size(),
@@ -1412,7 +1805,13 @@ PeerSet::bootstrap()
 void
 PeerSet::start_tracked_endpoints()
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->start_tracked_endpoints(); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this()]() {
+            self->start_tracked_endpoints();
+        });
+        return;
+    }
     auto endpoints = tracker_->all_endpoints();
     for (auto const& endpoint : endpoints)
     {
@@ -1429,7 +1828,13 @@ PeerSet::start_tracked_endpoints()
 void
 PeerSet::try_undiscovered()
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this()]() { self->try_undiscovered(); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this()]() {
+            self->try_undiscovered();
+        });
+        return;
+    }
     auto candidates = tracker_->undiscovered();
     if (candidates.empty())
         return;
@@ -1460,7 +1865,9 @@ PeerSet::try_undiscovered()
     {
         PLOGI(
             log_,
-            "[", net_label_, "] Queued ",
+            "[",
+            net_label_,
+            "] Queued ",
             crawls,
             " crawl jobs and ",
             connects,
@@ -1480,7 +1887,13 @@ PeerSet::try_undiscovered()
 void
 PeerSet::prioritize_ledger(uint32_t ledger_seq)
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), ledger_seq]() { self->prioritize_ledger(ledger_seq); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), ledger_seq]() {
+            self->prioritize_ledger(ledger_seq);
+        });
+        return;
+    }
     wanted_ledgers_.insert(ledger_seq);
     // Cap at 10 entries — evict oldest if needed
     while (wanted_ledgers_.size() > 10)
@@ -1496,7 +1909,13 @@ PeerSet::prioritize_ledger(uint32_t ledger_seq)
 void
 PeerSet::try_candidates_for(uint32_t ledger_seq)
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), ledger_seq]() { self->try_candidates_for(ledger_seq); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), ledger_seq]() {
+            self->try_candidates_for(ledger_seq);
+        });
+        return;
+    }
     // Don't call prioritize_ledger() — with concurrent prove() calls,
     // overwriting the shared preference would retune discovery for all.
     // Just queue/pump without reranking.
@@ -1599,7 +2018,9 @@ PeerSet::wait_for_any_peer(
 
     PLOGI(
         log_,
-        "[", net_label_, "] Waiting for any ready peer (",
+        "[",
+        net_label_,
+        "] Waiting for any ready peer (",
         connections_.size(),
         " connected, ",
         in_flight_.size(),
@@ -1638,7 +2059,9 @@ PeerSet::wait_for_any_peer(
         {
             PLOGI(
                 log_,
-                "[", net_label_, "] Still waiting for any peer (",
+                "[",
+                net_label_,
+                "] Still waiting for any peer (",
                 connections_.size(),
                 " connected, ",
                 in_flight_.size(),
@@ -1651,13 +2074,19 @@ PeerSet::wait_for_any_peer(
 
         auto wait_until = std::min({deadline, next_maintenance, next_log});
         auto wait_signal = attach_wait_signal();
-        auto const wait_for = std::chrono::duration_cast<std::chrono::milliseconds>(
-            wait_until - std::chrono::steady_clock::now());
-        co_await wait_for_signal_or_timeout(
-            strand_, wait_signal, wait_for);
+        auto const wait_for =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                wait_until - std::chrono::steady_clock::now());
+        co_await wait_for_signal_or_timeout(strand_, wait_signal, wait_for);
     }
 
-    PLOGW(log_, "[", net_label_, "] No ready peer found after ", timeout_secs, "s");
+    PLOGW(
+        log_,
+        "[",
+        net_label_,
+        "] No ready peer found after ",
+        timeout_secs,
+        "s");
     co_return nullptr;
 }
 
@@ -1710,7 +2139,8 @@ PeerSet::wait_for_peer(
             {
                 asio::post(
                     strand,
-                    [self = std::move(self), ledger_seq = ledger_seq]() mutable {
+                    [self = std::move(self),
+                     ledger_seq = ledger_seq]() mutable {
                         if (auto locked = self.lock())
                             locked->wanted_ledgers_.erase(ledger_seq);
                     });
@@ -1755,13 +2185,13 @@ PeerSet::wait_for_peer(
                 else
                     stats.failed_ledgers.erase(it);  // expired, clean up
             }
-            candidates.push_back({
-                key,
-                client->peer_first_seq(),
-                client->peer_last_seq(),
-                stats.selection_count,
-                client->is_ready(),
-                failed});
+            candidates.push_back(
+                {key,
+                 client->peer_first_seq(),
+                 client->peer_last_seq(),
+                 stats.selection_count,
+                 client->is_ready(),
+                 failed});
         }
         return candidates;
     };
@@ -1778,7 +2208,9 @@ PeerSet::wait_for_peer(
             {
                 PLOGI(
                     log_,
-                    "[", net_label_, "] ",
+                    "[",
+                    net_label_,
+                    "] ",
                     sel.decision == PeerDecision::use_range_match
                         ? "Range match: "
                         : "Fallback: ",
@@ -1794,7 +2226,9 @@ PeerSet::wait_for_peer(
 
     PLOGI(
         log_,
-        "[", net_label_, "] Waiting for a peer with ledger ",
+        "[",
+        net_label_,
+        "] Waiting for a peer with ledger ",
         ledger_seq,
         " (",
         connections_.size(),
@@ -1816,15 +2250,16 @@ PeerSet::wait_for_peer(
             cleanup.clean_now();
             PLOGD(
                 log_,
-                "[", net_label_, "] wait_for_peer canceled for ledger ",
+                "[",
+                net_label_,
+                "] wait_for_peer canceled for ledger ",
                 ledger_seq);
             co_return nullptr;
         }
 
         auto const now = std::chrono::steady_clock::now();
         auto const elapsed_ms = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - start)
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - start)
                 .count());
 
         if (now >= next_maintenance)
@@ -1841,26 +2276,33 @@ PeerSet::wait_for_peer(
             cleanup.clean_now();
             PLOGD(
                 log_,
-                "[", net_label_, "] wait_for_peer canceled for ledger ",
+                "[",
+                net_label_,
+                "] wait_for_peer canceled for ledger ",
                 ledger_seq);
             co_return nullptr;
         }
 
         auto sel = select_peer(
-            ledger_seq, snapshot_peers(), excluded,
-            elapsed_ms, fallback_ms, timeout_ms);
+            ledger_seq,
+            snapshot_peers(),
+            excluded,
+            elapsed_ms,
+            fallback_ms,
+            timeout_ms);
 
         switch (sel.decision)
         {
             case PeerDecision::use_range_match:
-            case PeerDecision::use_fallback:
-            {
+            case PeerDecision::use_fallback: {
                 auto it = connections_.find(sel.endpoint);
                 if (it != connections_.end() && it->second)
                 {
                     PLOGI(
                         log_,
-                        "[", net_label_, "] ",
+                        "[",
+                        net_label_,
+                        "] ",
                         sel.decision == PeerDecision::use_range_match
                             ? "Found peer: "
                             : "Fallback peer: ",
@@ -1882,7 +2324,9 @@ PeerSet::wait_for_peer(
                 cleanup.clean_now();
                 PLOGW(
                     log_,
-                    "[", net_label_, "] No peer found with ledger ",
+                    "[",
+                    net_label_,
+                    "] No peer found with ledger ",
                     ledger_seq,
                     " after ",
                     timeout_secs,
@@ -1902,7 +2346,9 @@ PeerSet::wait_for_peer(
         {
             PLOGI(
                 log_,
-                "[", net_label_, "] Still waiting for ledger ",
+                "[",
+                net_label_,
+                "] Still waiting for ledger ",
                 ledger_seq,
                 " (",
                 connections_.size(),
@@ -1917,8 +2363,9 @@ PeerSet::wait_for_peer(
 
         auto wait_until = std::min({deadline, next_maintenance, next_log});
         auto wait_signal = attach_wait_signal();
-        auto const wait_for = std::chrono::duration_cast<std::chrono::milliseconds>(
-            wait_until - std::chrono::steady_clock::now());
+        auto const wait_for =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                wait_until - std::chrono::steady_clock::now());
         auto outcome = co_await wait_for_signal_or_timeout(
             strand_, wait_signal, wait_for, cancel);
         if (outcome == WaitOutcome::canceled)
@@ -1926,7 +2373,9 @@ PeerSet::wait_for_peer(
             cleanup.clean_now();
             PLOGD(
                 log_,
-                "[", net_label_, "] wait_for_peer canceled for ledger ",
+                "[",
+                net_label_,
+                "] wait_for_peer canceled for ledger ",
                 ledger_seq);
             co_return nullptr;
         }
@@ -1935,7 +2384,9 @@ PeerSet::wait_for_peer(
     cleanup.clean_now();
     PLOGW(
         log_,
-        "[", net_label_, "] No peer found with ledger ",
+        "[",
+        net_label_,
+        "] No peer found with ledger ",
         ledger_seq,
         " after ",
         timeout_secs,
@@ -2088,7 +2539,8 @@ PeerSet::snapshot_unsafe() const
         entry.queued_crawl = crawl_queued_.count(key) > 0;
         entry.crawled = crawled_.count(key) > 0;
 
-        if (auto stats_it = endpoint_stats_.find(key); stats_it != endpoint_stats_.end())
+        if (auto stats_it = endpoint_stats_.find(key);
+            stats_it != endpoint_stats_.end())
         {
             auto const& stats = stats_it->second;
             entry.first_seq = stats.status.first_seq;
@@ -2103,9 +2555,14 @@ PeerSet::snapshot_unsafe() const
             entry.last_selected_ticket = stats.last_selected_ticket;
         }
 
-        if (auto conn_it = connections_.find(key); conn_it != connections_.end())
+        if (auto conn_it = connections_.find(key);
+            conn_it != connections_.end())
         {
             entry.connected = true;
+            if (conn_it->second)
+            {
+                entry.peer_headers = conn_it->second->peer_headers();
+            }
             if (conn_it->second && conn_it->second->is_ready())
             {
                 entry.ready = true;
@@ -2135,7 +2592,13 @@ PeerSet::snapshot_unsafe() const
 bool
 PeerSet::evict_for(uint32_t target_ledger_seq)
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), target_ledger_seq]() { self->evict_for(target_ledger_seq); }); return {}; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), target_ledger_seq]() {
+            self->evict_for(target_ledger_seq);
+        });
+        return {};
+    }
 
     // Find the least useful idle peer that doesn't cover the target.
     std::string worst_key;
@@ -2185,7 +2648,9 @@ PeerSet::evict_for(uint32_t target_ledger_seq)
 
     PLOGI(
         log_,
-        "[", net_label_, "] Evicting idle peer ",
+        "[",
+        net_label_,
+        "] Evicting idle peer ",
         worst_key,
         " (range span ",
         worst_range_span,
@@ -2206,7 +2671,13 @@ PeerSet::evict_for(uint32_t target_ledger_seq)
 void
 PeerSet::remove_peer(std::string const& key)
 {
-    if (!strand_.running_in_this_thread()) { asio::post(strand_, [self = shared_from_this(), key]() { self->remove_peer(key); }); return; }
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(strand_, [self = shared_from_this(), key]() {
+            self->remove_peer(key);
+        });
+        return;
+    }
     auto it = connections_.find(key);
     if (it != connections_.end())
     {
@@ -2265,8 +2736,8 @@ PeerSet::prune_endpoint_stats()
     }
 
     // Sort by last_seen_at ascending (oldest first)
-    std::sort(candidates.begin(), candidates.end(),
-        [](auto const& a, auto const& b) {
+    std::sort(
+        candidates.begin(), candidates.end(), [](auto const& a, auto const& b) {
             return a.last_seen_at < b.last_seen_at;
         });
 
@@ -2285,7 +2756,9 @@ PeerSet::prune_endpoint_stats()
     {
         PLOGI(
             log_,
-            "[", net_label_, "] Pruned ",
+            "[",
+            net_label_,
+            "] Pruned ",
             evicted,
             " stale endpoint stats (",
             endpoint_stats_.size(),
@@ -2481,7 +2954,9 @@ PeerSet::prune_discovery_state()
     {
         PLOGI(
             log_,
-            "[", net_label_, "] Pruned discovery state: tracker=",
+            "[",
+            net_label_,
+            "] Pruned discovery state: tracker=",
             tracker_removed,
             " crawled=",
             crawled_removed,

@@ -256,6 +256,43 @@ TEST(PeerSetPruning, CapsTrackerAndDeduplicatesCanonicalEndpoints)
         contains_endpoint(endpoints, "::ffff:1.2.3.4:51235"));
 }
 
+TEST(PeerSetPruning, CandidateRankingPrefersHealthyConnectedPeers)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{
+        .network_id = 0,
+        .max_in_flight_connects = 0,
+        .max_in_flight_crawls = 0,
+    });
+
+    auto const status = PeerStatus{
+        .first_seq = 100,
+        .last_seq = 200,
+        .current_seq = 150,
+    };
+
+    PeerSetTestAccess::add_discovered(io, peers, "healthy.example.com:51235");
+    PeerSetTestAccess::note_connect_success(
+        io, peers, "healthy.example.com:51235", status);
+
+    PeerSetTestAccess::add_discovered(io, peers, "stale.example.com:51235");
+    PeerSetTestAccess::note_connect_success(
+        io, peers, "stale.example.com:51235", status);
+    PeerSetTestAccess::note_connect_failure(
+        io, peers, "stale.example.com:51235");
+
+    EXPECT_TRUE(PeerSetTestAccess::candidate_better(
+        io,
+        peers,
+        "healthy.example.com:51235",
+        "stale.example.com:51235"));
+    EXPECT_FALSE(PeerSetTestAccess::candidate_better(
+        io,
+        peers,
+        "stale.example.com:51235",
+        "healthy.example.com:51235"));
+}
+
 TEST(PeerSetPruning, TimedOutWaitForPeerClearsWantedLedger)
 {
     asio::io_context io;

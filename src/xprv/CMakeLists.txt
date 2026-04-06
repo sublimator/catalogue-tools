@@ -18,7 +18,9 @@ set(WEB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/web)
 set(WEB_HEADER ${CMAKE_CURRENT_BINARY_DIR}/web_assets.h)
 
 # Auto-discover all static web assets
-file(GLOB WEB_ASSETS
+file(
+  GLOB
+  WEB_ASSETS
   ${WEB_DIR}/static/*.html
   ${WEB_DIR}/static/*.js
   ${WEB_DIR}/static/*.css
@@ -45,6 +47,7 @@ add_executable(
   src/cmd-dev.cpp
   src/cmd-serve.cpp
   src/http-server.cpp
+  src/peer-json.cpp
   src/anchor-verifier.cpp
   src/network-config.cpp
   src/proof-builder.cpp
@@ -66,8 +69,7 @@ execute_process(
   COMMAND git rev-parse --short HEAD
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   OUTPUT_VARIABLE XPRV_BUILD_ID
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  ERROR_QUIET)
+  OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 if(NOT XPRV_BUILD_ID)
   set(XPRV_BUILD_ID "unknown")
 endif()
@@ -76,9 +78,9 @@ endif()
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/VERSION XPRV_FORMAT_VERSION)
 string(STRIP "${XPRV_FORMAT_VERSION}" XPRV_FORMAT_VERSION)
 
-target_compile_definitions(xprv PRIVATE
-  XPRV_BUILD_ID="${XPRV_BUILD_ID}"
-  XPRV_FORMAT_VERSION=${XPRV_FORMAT_VERSION})
+target_compile_definitions(
+  xprv PRIVATE XPRV_BUILD_ID="${XPRV_BUILD_ID}"
+               XPRV_FORMAT_VERSION=${XPRV_FORMAT_VERSION})
 
 target_link_libraries(
   xprv

@@ -14,12 +14,12 @@
 #include "peer-endpoint-cache.h"
 #include "peer-session.h"
 
+#include <atomic>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <map>
@@ -75,6 +75,7 @@ struct PeerSetOptions
 class PeerSet : public std::enable_shared_from_this<PeerSet>
 {
     friend class ::PeerSetTestAccess;
+
 public:
     static std::shared_ptr<PeerSet>
     create(boost::asio::io_context& io, PeerSetOptions const& options = {})
@@ -197,6 +198,7 @@ public:
         std::uint64_t failure_count = 0;
         std::uint64_t selection_count = 0;
         std::uint64_t last_selected_ticket = 0;
+        std::map<std::string, std::string> peer_headers;
     };
 
     struct Snapshot
@@ -331,7 +333,9 @@ private:
     update_endpoint_stats(PeerEndpointCache::Entry const& entry);
 
     void
-    note_discovered(std::string const& endpoint);
+    note_discovered(
+        std::string const& endpoint,
+        DiscoverySource source = DiscoverySource::Unknown);
 
     void
     note_status(std::string const& endpoint, PeerStatus const& status);
@@ -404,6 +408,10 @@ private:
         std::uint64_t failure_count = 0;
         std::uint64_t selection_count = 0;
         std::uint64_t last_selected_ticket = 0;
+        bool seen_crawl = false;
+        bool seen_endpoints = false;
+        bool seen_redirect = false;
+        bool connected_ok = false;
 
         // Ledger seqs this peer has failed to serve. Entries expire
         // after failed_ledger_ttl_secs (default 60s) so peers get

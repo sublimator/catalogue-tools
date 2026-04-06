@@ -82,6 +82,12 @@ public:
         return network_id_;
     }
 
+    std::map<std::string, std::string> const&
+    upgrade_headers() const
+    {
+        return upgrade_headers_;
+    }
+
     // Send transaction query
     void
     send_transaction_query(
@@ -110,7 +116,6 @@ public:
     void
     set_disconnect_handler(disconnect_handler handler);
 
-
     // Get socket for accept operations
     ssl_socket&
     socket()
@@ -124,6 +129,10 @@ public:
     {
         return redirect_ips_;
     }
+
+    /// Human-readable summary of the most recent connect/upgrade failure.
+    std::string
+    connect_failure_detail() const;
 
 private:
     void
@@ -149,6 +158,12 @@ private:
     void
     perform_http_upgrade(const connection_handler& handler);
 
+    void
+    set_connect_failure_detail(std::string detail);
+
+    void
+    note_connect_failure(char const* stage, boost::system::error_code ec);
+
     // Generate node keys
     void
     generate_node_keys();
@@ -166,6 +181,8 @@ private:
 
     // HTTP upgrade state
     bool http_upgraded_ = false;
+    mutable std::mutex connect_failure_mutex_;
+    std::string connect_failure_detail_;
 
     // Node identity
     std::array<std::uint8_t, 32> secret_key_;
@@ -180,6 +197,7 @@ private:
     std::string server_version_;
     std::string protocol_version_;
     std::string network_id_;
+    std::map<std::string, std::string> upgrade_headers_;
 
     // HTTP upgrade
     std::string session_signature_;
