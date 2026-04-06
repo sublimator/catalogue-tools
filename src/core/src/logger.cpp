@@ -300,3 +300,31 @@ Logger::partition_names()
     names.erase(std::unique(names.begin(), names.end()), names.end());
     return names;
 }
+
+std::vector<Logger::PartitionInfo>
+Logger::partition_info()
+{
+    auto& registry = partition_registry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+
+    // Deduplicate by name (same partition may be registered multiple times)
+    std::unordered_map<std::string, PartitionInfo> seen;
+    for (auto* partition : registry.partitions)
+    {
+        if (!partition)
+            continue;
+        auto const& name = partition->name();
+        if (seen.count(name))
+            continue;
+        seen[name] = PartitionInfo{
+            name, partition->configured_level(), partition->level()};
+    }
+
+    std::vector<PartitionInfo> result;
+    result.reserve(seen.size());
+    for (auto& [_, info] : seen)
+        result.push_back(std::move(info));
+    std::sort(result.begin(), result.end(),
+        [](auto const& a, auto const& b) { return a.name < b.name; });
+    return result;
+}

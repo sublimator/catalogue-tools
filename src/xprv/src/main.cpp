@@ -9,6 +9,7 @@
 
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -140,14 +141,19 @@ configure_logging(LoggingOptions const& opts, std::string& error)
     });
 
     set_exact("xprv", LogLevel::INFO);
+    set_exact("val-buffer", LogLevel::INFO);
     set_exact("verify", LogLevel::INFO);
     set_exact("anchor-verify", LogLevel::INFO);
 
+    set_exact("node-cache", LogLevel::WARNING);
+    set_exact("peer-cache", LogLevel::WARNING);
     set_exact("peer-client", LogLevel::WARNING);
     set_exact("peer-conn", LogLevel::WARNING);
+    set_exact("peer-crawl", LogLevel::WARNING);
     set_exact("peer-set", LogLevel::WARNING);
     set_exact("tree-walk", LogLevel::WARNING);
     set_exact("rpc-client", LogLevel::WARNING);
+    set_exact("vl-cache", LogLevel::WARNING);
     set_exact("vl-client", LogLevel::WARNING);
 
     if (opts.debug_xprv)
@@ -165,6 +171,37 @@ configure_logging(LoggingOptions const& opts, std::string& error)
         set_exact("tree-walk", LogLevel::DEBUG);
         set_exact("rpc-client", LogLevel::DEBUG);
         set_exact("vl-client", LogLevel::DEBUG);
+    }
+
+    // Log effective levels for all partitions at startup.
+    // Catches silent INHERIT→ERROR bugs where a new partition
+    // was added but not registered in configure_logging().
+    // Uses log_internal directly since global level is still ERROR
+    // at this point and LOGI would be suppressed.
+    {
+        auto partitions = Logger::partition_info();
+        std::ostringstream oss;
+        oss << "Log partitions:";
+        for (auto const& p : partitions)
+        {
+            auto level_str = [](LogLevel l) -> char const* {
+                switch (l)
+                {
+                    case LogLevel::ERROR: return "ERROR";
+                    case LogLevel::WARNING: return "WARN";
+                    case LogLevel::INFO: return "INFO";
+                    case LogLevel::DEBUG: return "DEBUG";
+                    case LogLevel::TRACE: return "TRACE";
+                    case LogLevel::NONE: return "NONE";
+                    case LogLevel::INHERIT: return "INHERIT";
+                    default: return "?";
+                }
+            };
+            oss << " " << p.name << "=" << level_str(p.effective);
+            if (p.configured == LogLevel::INHERIT)
+                oss << "(inherit)";
+        }
+        Logger::log_internal(LogLevel::INFO, oss.str());
     }
 
     for (auto const& override_spec : opts.overrides)

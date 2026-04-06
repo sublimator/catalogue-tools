@@ -230,6 +230,16 @@ public:
     static std::vector<std::string>
     partition_names();
 
+    struct PartitionInfo
+    {
+        std::string name;
+        LogLevel configured;  // as set (may be INHERIT)
+        LogLevel effective;   // resolved (never INHERIT)
+    };
+
+    static std::vector<PartitionInfo>
+    partition_info();
+
     // Log with efficient formatting using variadic templates
     template <typename... Args>
     static void
@@ -432,12 +442,20 @@ public:
         return name_;
     }
 
+    /// Effective level: resolves INHERIT to the global level.
     LogLevel
     level() const
     {
         auto configured = level_.load(std::memory_order_relaxed);
         return (configured == LogLevel::INHERIT) ? Logger::get_level()
                                                  : configured;
+    }
+
+    /// Raw configured level (may be INHERIT).
+    LogLevel
+    configured_level() const
+    {
+        return level_.load(std::memory_order_relaxed);
     }
 
     void
