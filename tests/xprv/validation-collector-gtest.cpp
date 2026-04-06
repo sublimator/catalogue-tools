@@ -161,3 +161,52 @@ TEST(ValidationCollector, PeerManifestsCanExplainLiveQuorumWithoutProofQuorum)
     EXPECT_FALSE(
         collector.has_quorum(90, xprv::ValidationCollector::QuorumMode::proof));
 }
+
+TEST(ValidationCollector, QuorumReturnsAllAvailableValidationsForLedger)
+{
+    auto const xrpl_protocol = test_protocol();
+    auto const anchor = load_anchor_fixture();
+
+    std::string blob_json(anchor.blob.begin(), anchor.blob.end());
+    auto const blob = boost::json::parse(blob_json).as_object();
+    auto const& validators_json = blob.at("validators").as_array();
+
+    std::vector<catl::vl::Manifest> manifests;
+    for (auto const& entry : validators_json)
+    {
+        auto const& obj = entry.as_object();
+        auto manifest_bytes = catl::base64_decode(
+            std::string(obj.at("manifest").as_string()));
+        auto manifest = catl::vl::parse_manifest(manifest_bytes);
+        if (!manifest.signing_public_key.empty())
+            manifests.push_back(std::move(manifest));
+    }
+
+    ASSERT_FALSE(manifests.empty());
+
+    xprv::ValidationCollector collector(xrpl_protocol, 0);
+    collector.set_unl(manifests);
+
+    auto const threshold =
+        (static_cast<int>(manifests.size()) * 90 + 99) / 100;
+    auto const selected_count =
+        std::min<int>(static_cast<int>(manifests.size()), threshold + 2);
+
+    ASSERT_GT(selected_count, threshold)
+        << "fixture needs more validators than the 90% threshold";
+
+    auto& entries = collector.by_ledger[anchor.ledger_hash];
+    for (int i = 0; i < selected_count; ++i)
+    {
+        xprv::ValidationCollector::Entry entry;
+        entry.ledger_hash = anchor.ledger_hash;
+        entry.ledger_seq = anchor.ledger_index;
+        entry.signing_key_hex = lower_ascii(manifests[i].signing_key_hex());
+        entries.push_back(std::move(entry));
+    }
+
+    auto const quorum = collector.get_quorum(
+        90, xprv::ValidationCollector::QuorumMode::proof);
+
+    EXPECT_EQ(quorum.size(), static_cast<size_t>(selected_count));
+}

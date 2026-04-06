@@ -37,6 +37,14 @@ struct QuorumEntry
     std::chrono::steady_clock::time_point when;
 };
 
+enum class QuorumCollectStopReason { full, next_ledger, timeout };
+
+struct QuorumCollectResult
+{
+    QuorumEntry quorum;
+    QuorumCollectStopReason stop_reason = QuorumCollectStopReason::timeout;
+};
+
 class ValidationBuffer : public std::enable_shared_from_this<ValidationBuffer>
 {
 public:
@@ -72,6 +80,17 @@ public:
     /// Awaitable: snapshot of latest quorum for health checks.
     boost::asio::awaitable<std::optional<QuorumEntry>>
     co_latest_quorum();
+
+    /// After quorum has been reached for a ledger, keep collecting additional
+    /// validations for that same ledger until either a newer ledger appears or
+    /// the linger timeout expires.
+    boost::asio::awaitable<QuorumCollectResult>
+    co_collect_quorum_validations(
+        Hash256 const& ledger_hash,
+        uint32_t ledger_seq,
+        std::chrono::milliseconds linger_timeout,
+        ValidationCollector::QuorumMode mode =
+            ValidationCollector::QuorumMode::proof);
 
     /// Awaitable: true when live peer manifests can explain a quorum but the
     /// current VL cannot. This is the signal to force a VL refresh rather than
@@ -110,6 +129,9 @@ private:
     std::optional<QuorumEntry>
     latest_quorum_locked(ValidationCollector::QuorumMode mode) const;
 
+    bool
+    has_newer_ledger_locked(uint32_t ledger_seq) const;
+
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
 
     // Strand-owned state:
@@ -118,7 +140,7 @@ private:
     std::deque<QuorumEntry> recent_quorums_;  // newest at back
     Hash256 last_quorum_hash_;                // dedup: don't re-add same quorum
     Hash256 last_proof_quorum_hash_;          // wake proof waiters on VL refresh
-
+    std::optional<QuorumEntry> active_live_quorum_log_;
     // Per-waiter signals — each co_wait_quorum() call gets its own timer.
     // wake_waiters() cancels all of them when a new quorum arrives.
     std::vector<std::shared_ptr<boost::asio::steady_timer>> waiters_;

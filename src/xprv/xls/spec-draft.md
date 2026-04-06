@@ -119,6 +119,23 @@ All hashes and binary data are hex-encoded strings. Leaf data is JSON objects (d
 | `unl.signature` | hex string | Signature over blob by manifest's signing key |
 | `validations` | object | Map of signing_key_hex → raw STValidation bytes |
 
+> **TBD: verifier modes and signature set policy.**
+>
+> The current format embeds the VL snapshot used when the proof was built, so
+> an offline verifier can validate the anchor strictly against that embedded
+> trust snapshot. A future online verifier mode may additionally refresh the
+> latest VL and re-check the included anchor validations against the updated
+> manifest/signing-key view.
+>
+> To support that future mode, producers SHOULD include as many distinct anchor
+> validations for the selected anchor ledger as are available, not merely the
+> minimum threshold needed to establish quorum at proof-build time.
+>
+> A proof built against a now-stale embedded VL snapshot is still valid if that
+> embedded snapshot yields proof quorum for the included anchor validations. A
+> refresh-and-retry path is only required when live peer manifests show quorum
+> for a ledger but the embedded VL snapshot does not.
+
 ### 2.2 Ledger Header Step
 
 ```json
@@ -536,6 +553,9 @@ anchor → ledger_header → map_proof(tx)      // multiple tx leaves
 - Binary and JSON forms of the same proof MUST verify identically.
 - Producers SHOULD emit canonical serialized order (section 3.3) whenever
   proofs are hashed, signed, cached, or deduplicated.
+- **TBD:** reference verifiers should support both an offline mode that trusts
+  only the embedded VL snapshot and an online mode that can refresh the latest
+  VL before assessing the included anchor validations.
 
 ## 8. MIME Types and File Extensions
 

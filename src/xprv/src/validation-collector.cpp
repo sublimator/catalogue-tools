@@ -264,16 +264,22 @@ ValidationCollector::get_quorum(int percent, QuorumMode mode) const
         return {};
     }
 
-    auto it = by_ledger.find(*hash);
+    return get_ledger_validations(*hash, mode);
+}
+
+std::vector<ValidationCollector::Entry>
+ValidationCollector::get_ledger_validations(
+    Hash256 const& ledger_hash,
+    QuorumMode mode) const
+{
+    auto it = by_ledger.find(ledger_hash);
     if (it == by_ledger.end())
     {
         return {};
     }
 
     std::vector<Entry> result;
-    auto const threshold = threshold_for(percent);
-    result.reserve(
-        std::min<int>(threshold, static_cast<int>(it->second.size())));
+    result.reserve(it->second.size());
 
     std::unordered_set<std::string> seen;
     for (auto const& entry : it->second)
@@ -282,10 +288,6 @@ ValidationCollector::get_quorum(int percent, QuorumMode mode) const
         if (key_hex.empty() || !seen.insert(key_hex).second)
             continue;
         result.push_back(entry);
-        if (static_cast<int>(result.size()) >= threshold)
-        {
-            break;
-        }
     }
 
     return result;
@@ -341,6 +343,7 @@ ValidationCollector::recompute_quorum_state(int percent)
 {
     auto const previous_reached = quorum_reached;
     auto const previous_hash = quorum_hash;
+    auto const previous_count = quorum_count;
 
     quorum_reached = false;
     quorum_hash = Hash256();
@@ -365,9 +368,9 @@ ValidationCollector::recompute_quorum_state(int percent)
     if (!previous_reached || previous_hash != quorum_hash)
     {
         auto const seq = it->second.front().ledger_seq;
-        PLOGI(
+        PLOGD(
             log_,
-            "[", net_label_, "] QUORUM reached for seq=",
+            "[", net_label_, "] QUORUM threshold reached for seq=",
             seq,
             " hash=",
             quorum_hash.hex().substr(0, 16),
@@ -375,7 +378,24 @@ ValidationCollector::recompute_quorum_state(int percent)
             quorum_count,
             "/",
             unl_size,
-            " UNL validators available)");
+            " UNL validators currently available)");
+    }
+    else if (quorum_count > previous_count)
+    {
+        auto const seq = it->second.front().ledger_seq;
+        PLOGD(
+            log_,
+            "[", net_label_, "] QUORUM grew for seq=",
+            seq,
+            " hash=",
+            quorum_hash.hex().substr(0, 16),
+            "... (",
+            previous_count,
+            " -> ",
+            quorum_count,
+            "/",
+            unl_size,
+            " UNL validators currently available)");
     }
 }
 

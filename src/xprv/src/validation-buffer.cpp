@@ -75,6 +75,7 @@ ValidationBuffer::set_unl(std::vector<catl::vl::Manifest> const& validators)
             // validators no longer in the UNL. Invalidate cache.
             self->last_quorum_hash_ = Hash256();
             self->last_proof_quorum_hash_ = Hash256();
+            self->active_live_quorum_log_.reset();
             self->recent_quorums_.clear();
         }
         else
@@ -99,29 +100,85 @@ ValidationBuffer::check_for_new_quorum()
         return;
 
     bool wake = false;
+    auto const now = std::chrono::steady_clock::now();
+
+    auto log_finalized_live_quorum =
+        [this](QuorumEntry const& entry, char const* reason) {
+            PLOGI(
+                log_,
+                "[", net_label_, "] Quorum: seq=",
+                entry.ledger_seq,
+                " hash=",
+                entry.ledger_hash.hex().substr(0, 16),
+                "... (",
+                entry.validations.size(),
+                "/",
+                collector_.unl_size,
+                " validators, ",
+                reason,
+                ")");
+        };
+
+    if (active_live_quorum_log_)
+    {
+        auto updated = collector_.get_ledger_validations(
+            active_live_quorum_log_->ledger_hash,
+            ValidationCollector::QuorumMode::live);
+
+        if (updated.empty())
+        {
+            active_live_quorum_log_.reset();
+        }
+        else
+        {
+            active_live_quorum_log_->validations = std::move(updated);
+
+            if (collector_.unl_size > 0 &&
+                static_cast<int>(active_live_quorum_log_->validations.size()) >=
+                    collector_.unl_size)
+            {
+                log_finalized_live_quorum(*active_live_quorum_log_, "full");
+                active_live_quorum_log_.reset();
+            }
+            else if (has_newer_ledger_locked(active_live_quorum_log_->ledger_seq))
+            {
+                log_finalized_live_quorum(
+                    *active_live_quorum_log_, "next-ledger");
+                active_live_quorum_log_.reset();
+            }
+        }
+    }
 
     if (auto live = latest_quorum_locked(ValidationCollector::QuorumMode::live))
     {
         if (live->ledger_hash != last_quorum_hash_)
         {
             last_quorum_hash_ = live->ledger_hash;
-
-            PLOGI(
-                log_,
-                "[", net_label_, "] New quorum: seq=",
-                live->ledger_seq,
-                " hash=",
-                live->ledger_hash.hex().substr(0, 16),
-                "... (",
-                live->validations.size(),
-                "/",
-                collector_.unl_size,
-                " validators)");
-
-            last_quorum_at_ = std::chrono::steady_clock::now();
-            recent_quorums_.push_back(std::move(*live));
+            last_quorum_at_ = now;
+            recent_quorums_.push_back(*live);
             prune_old_entries();
             wake = true;
+            active_live_quorum_log_ = *live;
+
+            if (collector_.unl_size > 0 &&
+                static_cast<int>(live->validations.size()) >=
+                    collector_.unl_size)
+            {
+                log_finalized_live_quorum(*live, "full");
+                active_live_quorum_log_.reset();
+            }
+        }
+        else if (
+            !recent_quorums_.empty() &&
+            recent_quorums_.back().ledger_hash == live->ledger_hash &&
+            live->validations.size() > recent_quorums_.back().validations.size())
+        {
+            recent_quorums_.back().validations = live->validations;
+            if (active_live_quorum_log_ &&
+                active_live_quorum_log_->ledger_hash == live->ledger_hash)
+            {
+                active_live_quorum_log_->validations = live->validations;
+            }
         }
     }
 
@@ -322,16 +379,87 @@ ValidationBuffer::co_latest_quorum()
     co_return latest_quorum_locked(ValidationCollector::QuorumMode::live);
 }
 
+asio::awaitable<QuorumCollectResult>
+ValidationBuffer::co_collect_quorum_validations(
+    Hash256 const& ledger_hash,
+    uint32_t ledger_seq,
+    std::chrono::milliseconds linger_timeout,
+    ValidationCollector::QuorumMode mode)
+{
+    co_await asio::post(strand_, asio::use_awaitable);
+
+    auto validations = collector_.get_ledger_validations(ledger_hash, mode);
+    if (validations.empty())
+    {
+        throw std::runtime_error("Selected quorum ledger is no longer available");
+    }
+
+    QuorumCollectResult result{
+        .quorum =
+            QuorumEntry{
+                .ledger_hash = ledger_hash,
+                .ledger_seq = ledger_seq,
+                .validations = std::move(validations),
+                .when = std::chrono::steady_clock::now()},
+        .stop_reason = QuorumCollectStopReason::timeout};
+
+    if (collector_.unl_size > 0 &&
+        static_cast<int>(result.quorum.validations.size()) >=
+            collector_.unl_size)
+    {
+        result.stop_reason = QuorumCollectStopReason::full;
+        co_return result;
+    }
+
+    auto const deadline = std::chrono::steady_clock::now() + linger_timeout;
+    static constexpr auto kPollInterval = std::chrono::milliseconds(100);
+
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (has_newer_ledger_locked(ledger_seq))
+        {
+            result.stop_reason = QuorumCollectStopReason::next_ledger;
+            break;
+        }
+
+        auto const remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        auto const slice = std::min(kPollInterval, remaining);
+        if (slice <= std::chrono::milliseconds::zero())
+            break;
+
+        asio::steady_timer timer(strand_, slice);
+        boost::system::error_code ec;
+        co_await timer.async_wait(
+            asio::redirect_error(asio::use_awaitable, ec));
+
+        auto const cancel_state =
+            co_await asio::this_coro::cancellation_state;
+        if (cancel_state.cancelled() != asio::cancellation_type::none)
+            throw boost::system::system_error(asio::error::operation_aborted);
+
+        auto updated = collector_.get_ledger_validations(ledger_hash, mode);
+        if (updated.size() > result.quorum.validations.size())
+        {
+            result.quorum.validations = std::move(updated);
+            result.quorum.when = std::chrono::steady_clock::now();
+            if (collector_.unl_size > 0 &&
+                static_cast<int>(result.quorum.validations.size()) >=
+                    collector_.unl_size)
+            {
+                result.stop_reason = QuorumCollectStopReason::full;
+                co_return result;
+            }
+        }
+    }
+
+    co_return result;
+}
+
 std::optional<QuorumEntry>
 ValidationBuffer::latest_quorum_locked(
     ValidationCollector::QuorumMode mode) const
 {
-    if (mode == ValidationCollector::QuorumMode::live &&
-        !recent_quorums_.empty())
-    {
-        return recent_quorums_.back();
-    }
-
     auto validations = collector_.get_quorum(kQuorumPercent, mode);
     if (validations.empty())
         return std::nullopt;
@@ -355,6 +483,17 @@ ValidationBuffer::latest_quorum_locked(
     }
 
     return entry;
+}
+
+bool
+ValidationBuffer::has_newer_ledger_locked(uint32_t ledger_seq) const
+{
+    for (auto const& [_, entries] : collector_.by_ledger)
+    {
+        if (!entries.empty() && entries.front().ledger_seq > ledger_seq)
+            return true;
+    }
+    return false;
 }
 
 asio::awaitable<bool>

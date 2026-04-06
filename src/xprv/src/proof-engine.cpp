@@ -23,6 +23,27 @@ using namespace catl::peer_client;
 
 static LogPartition log_("engine", LogLevel::INFO);
 
+namespace {
+
+constexpr auto kAnchorValidationLinger = std::chrono::milliseconds(2000);
+
+char const*
+to_string(QuorumCollectStopReason reason)
+{
+    switch (reason)
+    {
+        case QuorumCollectStopReason::full:
+            return "full";
+        case QuorumCollectStopReason::next_ledger:
+            return "next-ledger";
+        case QuorumCollectStopReason::timeout:
+            return "timed-out";
+    }
+    return "unknown";
+}
+
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Lifecycle
 // ═══════════════════════════════════════════════════════════════════════
@@ -540,8 +561,16 @@ ProofEngine::get_or_reuse_anchor(
         }
     }
 
-    // Need a fresh anchor — wait for latest quorum
+    // Need a fresh anchor — wait for latest proof-safe quorum, then linger
+    // briefly on that chosen ledger to collect additional validations without
+    // ever waiting for 100% indefinitely.
     auto quorum = co_await co_wait_for_proof_quorum(vl);
+    auto collected = co_await val_buffer_->co_collect_quorum_validations(
+        quorum.ledger_hash,
+        quorum.ledger_seq,
+        kAnchorValidationLinger,
+        ValidationCollector::QuorumMode::proof);
+    quorum = std::move(collected.quorum);
 
     PLOGI(
         log_,
@@ -553,7 +582,9 @@ ProofEngine::get_or_reuse_anchor(
         quorum.validations.size(),
         "/",
         (vl ? vl->validators.size() : 0),
-        " validators)");
+        " validators, ",
+        to_string(collected.stop_reason),
+        ")");
 
     auto anchor = co_await get_anchor_bundle(
         quorum.ledger_seq, quorum.ledger_hash, quorum.validations);
@@ -593,6 +624,9 @@ ProofEngine::co_wait_for_proof_quorum(
         {
         }
 
+        // A stale VL snapshot is acceptable if it still yields proof quorum.
+        // Only force a VL refresh when we have live quorum via newer peer
+        // manifests but no proof-safe quorum under the embedded VL snapshot.
         auto const live_only = co_await val_buffer_->co_has_live_only_quorum();
         if (!live_only)
             continue;

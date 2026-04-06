@@ -47,10 +47,18 @@ public:
     void
     on_packet(uint16_t type, std::vector<uint8_t> const& data);
 
-    /// Get the validations for the quorum ledger.
+    /// Get all distinct validations currently available for the selected
+    /// quorum ledger under the requested mode.
     std::vector<Entry>
     get_quorum(
         int percent = 90,
+        QuorumMode mode = QuorumMode::live) const;
+
+    /// Get all distinct validations currently available for a specific ledger
+    /// hash under the requested mode.
+    std::vector<Entry>
+    get_ledger_validations(
+        Hash256 const& ledger_hash,
         QuorumMode mode = QuorumMode::live) const;
 
     bool
