@@ -370,34 +370,36 @@ summarize_crawl_error(std::string_view error)
 boost::asio::awaitable<CrawlResponse>
 co_fetch_peer_crawl(std::string host, uint16_t port)
 {
-    std::string https_summary;
-    try
-    {
-        co_return co_await fetch_crawl_https(host, port);
-    }
-    catch (std::exception const& https_error)
-    {
-        https_summary = strip_diagnostic(https_error.what());
-        PLOGD(
-            log_,
-            "HTTPS crawl failed for ",
-            host,
-            ":",
-            port,
-            ": ",
-            https_summary,
-            " — falling back to HTTP");
-    }
-
+    // Try HTTP first — XRPL/Xahau peer crawl endpoints serve plain HTTP
+    // on the peer port. HTTPS wastes time on TLS handshake timeout.
+    std::string http_summary;
     try
     {
         co_return co_await fetch_crawl_http(host, port);
     }
     catch (std::exception const& http_error)
     {
+        http_summary = strip_diagnostic(http_error.what());
+        PLOGD(
+            log_,
+            "HTTP crawl failed for ",
+            host,
+            ":",
+            port,
+            ": ",
+            http_summary,
+            " — falling back to HTTPS");
+    }
+
+    try
+    {
+        co_return co_await fetch_crawl_https(host, port);
+    }
+    catch (std::exception const& https_error)
+    {
         throw std::runtime_error(
-            "crawl fallback failed: https=" + https_summary +
-            "; http=" + strip_diagnostic(http_error.what()));
+            "crawl fallback failed: http=" + http_summary +
+            "; https=" + strip_diagnostic(https_error.what()));
     }
 }
 

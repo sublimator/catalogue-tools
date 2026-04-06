@@ -92,6 +92,13 @@ private:
     catl::xdata::Protocol const& protocol_;
     std::string net_label_;
     std::set<std::string> unl_master_keys_;
+    // TODO: these manifest maps are populated but mostly unused since
+    // entry_key_hex was changed to always use live_signing_to_master_.
+    // vl_signing_to_master_, vl_manifest_sequence_by_master_, and
+    // stale_vl_masters_ are dead weight. peer_manifests_by_master_ and
+    // manifest_sequence_by_master_ feed live_signing_to_master_ via
+    // apply_manifest. Clean up: remove dead maps, or re-enable proof
+    // mode properly with manifest processing off the validation strand.
     std::map<std::string, catl::vl::Manifest> peer_manifests_by_master_;
     std::map<std::string, std::string> vl_signing_to_master_;
     std::map<std::string, std::string> live_signing_to_master_;

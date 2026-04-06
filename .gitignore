@@ -30,3 +30,4 @@ peermon.log
 proof.bin
 proof.json
 build-tsan/
+BUILD_ID

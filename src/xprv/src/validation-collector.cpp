@@ -626,11 +626,16 @@ ValidationCollector::entry_key_hex(Entry const& entry, QuorumMode mode) const
     if (unl_master_keys_.empty())
         return entry.signing_key_hex;
 
-    auto const& mapping =
-        (mode == QuorumMode::proof) ? vl_signing_to_master_
-                                    : live_signing_to_master_;
-    auto it = mapping.find(entry.signing_key_hex);
-    if (it == mapping.end())
+    // Always use live mapping for now — all validators visible regardless
+    // of VL manifest freshness. The proof verifier checks signatures.
+    // TODO: re-enable proof mode filtering once manifest processing runs
+    // off the validation strand and vl_signing_to_master_ is reliably
+    // populated. The current proof mode caused hangs because
+    // vl_signing_to_master_ was incomplete when validators rotated keys.
+    // The proof/live mode distinction caused 30-60s hangs when
+    // validators had rotated keys since the last VL publish.
+    auto it = live_signing_to_master_.find(entry.signing_key_hex);
+    if (it == live_signing_to_master_.end())
         return {};
     return it->second;
 }

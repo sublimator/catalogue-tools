@@ -108,7 +108,7 @@ TEST(ValidationBuffer, BestQuorumTimesOutWithNoValidations)
             }
 
             auto stats = co_await buffer->co_stats();
-            EXPECT_EQ(stats.waiters, 0u);
+            EXPECT_EQ(stats.pending_callbacks, 0u);
             done = true;
         },
         asio::detached);
@@ -172,7 +172,7 @@ TEST(ValidationBuffer, BestQuorumCancelledWaiterIsRemoved)
 
     EXPECT_TRUE(done);
     EXPECT_TRUE(cancel_branch_won);
-    EXPECT_EQ(stats.waiters, 0u);
+    EXPECT_EQ(stats.pending_callbacks, 0u);
 }
 
 TEST(ValidationBuffer, BestQuorumCollectsAndFinalizesOnNextLedger)

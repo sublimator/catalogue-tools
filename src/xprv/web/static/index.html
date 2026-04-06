@@ -1541,6 +1541,10 @@ async function prove(hash, {history = 'push'} = {}) {
   const stepTimes = [];  // elapsed ms per step
 
   return new Promise((resolve) => {
+    // TODO: deep links include network (e.g. /network/xahau-mainnet/tx/...)
+    // but we ignore it here — always hit /prove which does lookup_tx_all.
+    // Should use /network/{slug}/prove?tx=... when network is known from
+    // the URL, so we don't accidentally prove on the wrong network.
     const es = new EventSource(`/prove?tx=${hash}&xrid=${rid}`);
     activeSSE = es;
     activeProveTimeout = setTimeout(() => {

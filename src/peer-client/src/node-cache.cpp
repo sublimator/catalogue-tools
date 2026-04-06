@@ -1427,6 +1427,11 @@ NodeCache::get_header(
         }
     } cleanup{abandon_header_fetch, owned_signal};
 
+    // TODO: header fetch is sequential — try one peer, wait for timeout,
+    // try next. Should fan-out to 2-3 peers simultaneously and take the
+    // first response, like the tree walk node fetch does. This would cut
+    // header acquisition from 3×(fallback+timeout) to ~1×timeout.
+    // Also check other sequential fetch paths for the same pattern.
     static constexpr int kMaxHeaderRetries = 3;
     std::unordered_set<std::string> tried_peers;
 

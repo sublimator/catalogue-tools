@@ -6,6 +6,7 @@
 #include "xprv/proof-resolver.h"
 
 #include <catl/core/logger.h>
+#include <catl/core/request-context.h>
 #include <cstring>
 #include <catl/rpc-client/rpc-client-coro.h>
 
@@ -534,6 +535,19 @@ ProofEngine::get_or_reuse_anchor(
     std::shared_ptr<catl::vl::ValidatorList> const& vl,
     uint32_t max_age_secs)
 {
+    PLOGI(log_, "[", net_label_, "] get_or_reuse_anchor: ENTER max_age=", max_age_secs);
+    // TODO: why wait for a NEW quorum at all? recent_quorums_ already has
+    // the last 30 finalized quorums. The one at .back() is at most ~4s old
+    // and already has 34-35/35 validations. Just use it:
+    //   auto latest = co_await val_buffer_->co_latest_quorum();
+    //   if (latest) → use it, skip co_wait_best_quorum entirely
+    //   else → cold start, wait for first quorum
+    // Pick the most recent entry with the highest validation count.
+    // Don't wait for a ledger that's still "open" — use the prior one
+    // that's already finalized with full or near-full validations.
+    // Also: max_anchor_age defaults to 0 (always fresh) but the web UI
+    // never passes it. Should default to 30s so repeated requests reuse.
+    //
     // When max_age_secs > 0, reuse the current anchor if fresh enough.
     // When 0 (default), always wait for the latest quorum.
     if (max_age_secs > 0)
@@ -543,28 +557,50 @@ ProofEngine::get_or_reuse_anchor(
             (std::chrono::steady_clock::now() - current_anchor_->built_at) <
                 std::chrono::seconds(max_age_secs))
         {
+            auto age_s = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() -
+                    current_anchor_->built_at)
+                    .count();
             PLOGI(
                 log_,
                 "[", net_label_, "] Anchor: reusing seq=",
                 current_anchor_->seq,
                 " hash=",
                 current_anchor_->anchor_hash.hex().substr(0, 16),
-                "... (age=",
-                std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::steady_clock::now() -
-                    current_anchor_->built_at)
-                    .count(),
-                "s)");
+                "... (age=", age_s, "s)");
+            catl::core::emit_status(
+                "anchor: reusing seq=" +
+                std::to_string(current_anchor_->seq) +
+                " (age=" + std::to_string(age_s) + "s)");
             co_return *current_anchor_;
         }
     }
 
-    // Wait for best quorum: threshold → then event-driven until full or
-    // next-ledger-seen. No polling loops.
-    auto collected = co_await val_buffer_->co_wait_best_quorum(
-        ValidationCollector::QuorumMode::proof,
-        std::chrono::seconds(30));
-    auto quorum = std::move(collected.quorum);
+    // Use the last full quorum if available — no waiting needed.
+    // Fall back to co_wait_best_quorum only on cold start.
+    auto full = co_await val_buffer_->co_last_full_quorum(
+        std::chrono::seconds(max_age_secs > 0 ? max_age_secs : 10));
+    if (full)
+    {
+        PLOGI(log_, "[", net_label_,
+            "] get_or_reuse_anchor: using last full quorum seq=",
+            full->ledger_seq, " (",
+            full->validations.size(), "/",
+            (vl ? vl->validators.size() : 0), ")");
+        catl::core::emit_status(
+            "using recent full quorum seq=" +
+            std::to_string(full->ledger_seq));
+    }
+    else
+    {
+        catl::core::emit_status("waiting for first quorum (cold start)...");
+        PLOGI(log_, "[", net_label_,
+            "] get_or_reuse_anchor: no full quorum yet, waiting...");
+        auto collected = co_await val_buffer_->co_wait_best_quorum(
+            std::chrono::seconds(30));
+        full = std::move(collected.quorum);
+    }
+    auto quorum = std::move(*full);
 
     PLOGI(
         log_,
@@ -576,9 +612,12 @@ ProofEngine::get_or_reuse_anchor(
         quorum.validations.size(),
         "/",
         (vl ? vl->validators.size() : 0),
-        " validators, ",
-        to_string(collected.stop_reason),
-        ")");
+        " validators)");
+    catl::core::emit_status(
+        "quorum: seq=" + std::to_string(quorum.ledger_seq) +
+        " (" + std::to_string(quorum.validations.size()) + "/" +
+        std::to_string(vl ? vl->validators.size() : 0) +
+        " validators)");
 
     auto anchor = co_await get_anchor_bundle(
         quorum.ledger_seq, quorum.ledger_hash, quorum.validations);
@@ -625,13 +664,14 @@ ProofEngine::get_anchor_bundle(
         {
             action = Action::hit;
             hit_bundle = it->second.bundle;
-            PLOGD(log_, "[", net_label_, "] anchor_bundle: HIT seq=", anchor_seq);
+            PLOGI(log_, "[", net_label_, "] anchor_bundle: HIT seq=", anchor_seq);
         }
         else if (!inserted && it->second.signal)
         {
             action = Action::wait;
             signal = it->second.signal;
-            PLOGD(log_, "[", net_label_, "] anchor_bundle: IN-FLIGHT seq=", anchor_seq);
+            PLOGI(log_, "[", net_label_, "] anchor_bundle: WAIT seq=", anchor_seq,
+                " — another request is building it");
         }
         else
         {
@@ -639,15 +679,23 @@ ProofEngine::get_anchor_bundle(
                 io_, std::chrono::seconds(30));
             it->second.present = false;
             action = Action::fetch;
-            PLOGD(log_, "[", net_label_, "] anchor_bundle: MISS seq=", anchor_seq, " — building");
+            PLOGI(log_, "[", net_label_, "] anchor_bundle: FETCH seq=", anchor_seq, " — building");
         }
     }
 
     if (action == Action::hit)
+    {
+        catl::core::emit_status(
+            "anchor header: cached seq=" + std::to_string(anchor_seq));
         co_return hit_bundle;
+    }
 
     if (action == Action::wait)
     {
+        catl::core::emit_status(
+            "anchor header: waiting for in-flight build seq=" +
+            std::to_string(anchor_seq));
+
         boost::system::error_code ec;
         co_await signal->async_wait(
             asio::redirect_error(asio::use_awaitable, ec));
@@ -655,7 +703,12 @@ ProofEngine::get_anchor_bundle(
         std::lock_guard lock(cache_mutex_);
         auto it = anchor_cache_.find(anchor_seq);
         if (it != anchor_cache_.end() && it->second.present)
+        {
+            catl::core::emit_status(
+                "anchor header: in-flight build completed seq=" +
+                std::to_string(anchor_seq));
             co_return it->second.bundle;
+        }
 
         throw std::runtime_error("anchor bundle fetch failed");
     }
@@ -663,6 +716,12 @@ ProofEngine::get_anchor_bundle(
     // Build: fetch the anchor header
     try
     {
+        catl::core::emit_status(
+            "anchor header: fetching from peer seq=" +
+            std::to_string(anchor_seq));
+        // TODO: get_header has its own timeout/retry path that may not
+        // use fetch_timeout_. Verify it uses the configured 1500ms, not
+        // some hardcoded 5s default. Each peer switch adds a full timeout.
         auto hdr = co_await node_cache_->get_header(anchor_seq, peers_);
 
         AnchorBundle bundle;

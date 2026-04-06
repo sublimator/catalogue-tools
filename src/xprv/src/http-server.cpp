@@ -962,8 +962,8 @@ HttpServer::handle_session(
                         accept.find("text/event-stream") != std::string::npos;
 
                     // Optional max_anchor_age — reuse recent anchor (seconds).
-                    // 0 (default) = always wait for latest quorum.
-                    uint32_t max_anchor_age = 0;
+                    // Default 10s — reuse the cached anchor for repeated requests.
+                    uint32_t max_anchor_age = 10;
                     auto ma_it = params.find("max_anchor_age");
                     if (ma_it != params.end() && !ma_it->second.empty())
                     {

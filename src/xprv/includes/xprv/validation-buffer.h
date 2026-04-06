@@ -69,6 +69,12 @@ public:
     boost::asio::awaitable<std::optional<QuorumEntry>>
     co_latest_quorum();
 
+    /// Last quorum that reached full UNL coverage. Updated event-driven
+    /// by check_for_new_quorum when "full" is detected. Returns nullopt
+    /// if no full quorum exists or it's older than max_age.
+    boost::asio::awaitable<std::optional<QuorumEntry>>
+    co_last_full_quorum(std::chrono::seconds max_age);
+
     /// Wait for best quorum for a proof anchor. Returns when:
     ///   - full UNL coverage achieved, OR
     ///   - next ledger's first validation seen (our ledger is finalized), OR
@@ -77,8 +83,6 @@ public:
     /// pending callbacks directly on the strand on every validation.
     boost::asio::awaitable<QuorumCollectResult>
     co_wait_best_quorum(
-        ValidationCollector::QuorumMode mode =
-            ValidationCollector::QuorumMode::proof,
         std::chrono::seconds timeout = std::chrono::seconds(30));
 
     /// True when live peer manifests can explain a quorum but VL cannot.
@@ -129,11 +133,11 @@ private:
     Hash256 last_quorum_hash_;
     Hash256 last_proof_quorum_hash_;
     std::optional<QuorumEntry> active_live_quorum_log_;
+    std::optional<QuorumEntry> last_full_quorum_;
 
     // Pending proof callbacks — resolved by check_for_new_quorum on strand.
     struct PendingQuorum
     {
-        ValidationCollector::QuorumMode mode;
         uint32_t ledger_seq = 0;       // 0 = waiting for ANY quorum
         Hash256 ledger_hash;            // set after initial quorum
         std::chrono::steady_clock::time_point deadline;
