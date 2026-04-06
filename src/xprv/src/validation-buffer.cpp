@@ -25,8 +25,6 @@ ValidationBuffer::ValidationBuffer(
     , last_quorum_at_(std::chrono::steady_clock::now())
 {
     collector_.continuous = true;
-    // Note: start_heartbeat() must be called AFTER construction,
-    // once the object is owned by a shared_ptr (shared_from_this).
 }
 
 void
@@ -54,11 +52,8 @@ ValidationBuffer::set_unl(std::vector<catl::vl::Manifest> const& validators)
     auto self = shared_from_this();
 
     asio::post(strand_, [self, owned]() {
-        // Snapshot the old key set before updating
         auto old_keys = self->collector_.unl_signing_keys;
-
         self->collector_.set_unl(*owned);
-
         bool keys_changed = (self->collector_.unl_signing_keys != old_keys);
 
         if (keys_changed)
@@ -70,9 +65,6 @@ ValidationBuffer::set_unl(std::vector<catl::vl::Manifest> const& validators)
                 " validators (was ",
                 old_keys.size(),
                 ")");
-
-            // UNL actually changed — old quorum entries may contain
-            // validators no longer in the UNL. Invalidate cache.
             self->last_quorum_hash_ = Hash256();
             self->last_proof_quorum_hash_ = Hash256();
             self->active_live_quorum_log_.reset();
@@ -99,10 +91,10 @@ ValidationBuffer::check_for_new_quorum()
     if (collector_.unl_signing_keys.empty())
         return;
 
-    bool wake = false;
     auto const now = std::chrono::steady_clock::now();
 
-    auto log_finalized_live_quorum =
+    // ── Background logging: one INFO per finalized ledger ──────────
+    auto log_finalized =
         [this](QuorumEntry const& entry, char const* reason) {
             PLOGI(
                 log_,
@@ -137,18 +129,18 @@ ValidationBuffer::check_for_new_quorum()
                 static_cast<int>(active_live_quorum_log_->validations.size()) >=
                     collector_.unl_size)
             {
-                log_finalized_live_quorum(*active_live_quorum_log_, "full");
+                log_finalized(*active_live_quorum_log_, "full");
                 active_live_quorum_log_.reset();
             }
             else if (has_newer_ledger_locked(active_live_quorum_log_->ledger_seq))
             {
-                log_finalized_live_quorum(
-                    *active_live_quorum_log_, "next-ledger");
+                log_finalized(*active_live_quorum_log_, "next-ledger");
                 active_live_quorum_log_.reset();
             }
         }
     }
 
+    // ── Track live quorum for ring buffer ──────────────────────────
     if (auto live = latest_quorum_locked(ValidationCollector::QuorumMode::live))
     {
         if (live->ledger_hash != last_quorum_hash_)
@@ -157,14 +149,13 @@ ValidationBuffer::check_for_new_quorum()
             last_quorum_at_ = now;
             recent_quorums_.push_back(*live);
             prune_old_entries();
-            wake = true;
             active_live_quorum_log_ = *live;
 
             if (collector_.unl_size > 0 &&
                 static_cast<int>(live->validations.size()) >=
                     collector_.unl_size)
             {
-                log_finalized_live_quorum(*live, "full");
+                log_finalized(*live, "full");
                 active_live_quorum_log_.reset();
             }
         }
@@ -179,21 +170,133 @@ ValidationBuffer::check_for_new_quorum()
             {
                 active_live_quorum_log_->validations = live->validations;
             }
-            wake = true;
         }
     }
 
-    auto proof = latest_quorum_locked(ValidationCollector::QuorumMode::proof);
-    auto const proof_hash = proof ? proof->ledger_hash : Hash256();
-    if (proof_hash != last_proof_quorum_hash_)
-    {
-        last_proof_quorum_hash_ = proof_hash;
-        if (proof)
-            wake = true;
-    }
+    // ── Resolve pending proof callbacks ────────────────────────────
+    resolve_pending();
+}
 
-    if (wake)
-        wake_waiters();
+void
+ValidationBuffer::resolve_pending()
+{
+    // Called on strand from check_for_new_quorum — every validation.
+    auto const now = std::chrono::steady_clock::now();
+
+    for (auto it = pending_.begin(); it != pending_.end(); )
+    {
+        auto& p = *it;
+
+        // Stage 1: waiting for initial quorum (ledger_seq == 0)
+        if (p.ledger_seq == 0)
+        {
+            auto live = latest_quorum_locked(ValidationCollector::QuorumMode::live);
+            if (live)
+            {
+                // Got initial quorum — lock in this ledger
+                p.ledger_seq = live->ledger_seq;
+                p.ledger_hash = live->ledger_hash;
+                PLOGI(log_, "[", net_label_,
+                    "] co_wait_best_quorum: got live quorum seq=",
+                    p.ledger_seq, " (",
+                    live->validations.size(), "/", collector_.unl_size, ")");
+
+                // Maybe already full?
+                auto validations = collector_.get_ledger_validations(
+                    p.ledger_hash, p.mode);
+                if (!validations.empty() && collector_.unl_size > 0 &&
+                    static_cast<int>(validations.size()) >= collector_.unl_size)
+                {
+                    QuorumEntry q{p.ledger_hash, p.ledger_seq,
+                        std::move(validations), now};
+                    auto cb = std::move(p.callback);
+                    it = pending_.erase(it);
+                    cb({std::move(q), QuorumCollectStopReason::full});
+                    continue;
+                }
+
+                // Maybe next ledger already exists?
+                if (has_newer_ledger_locked(p.ledger_seq))
+                {
+                    if (validations.empty())
+                        validations = std::move(live->validations);
+                    QuorumEntry q{p.ledger_hash, p.ledger_seq,
+                        std::move(validations), now};
+                    auto cb = std::move(p.callback);
+                    it = pending_.erase(it);
+                    cb({std::move(q), QuorumCollectStopReason::next_ledger});
+                    continue;
+                }
+            }
+
+            // Check timeout
+            if (now >= p.deadline)
+            {
+                auto cb = std::move(p.callback);
+                it = pending_.erase(it);
+                cb({QuorumEntry{}, QuorumCollectStopReason::timeout});
+                continue;
+            }
+
+            ++it;
+            continue;
+        }
+
+        // Stage 2: have a ledger, waiting for full or next-ledger
+        auto validations = collector_.get_ledger_validations(
+            p.ledger_hash, p.mode);
+
+        // Full?
+        if (!validations.empty() && collector_.unl_size > 0 &&
+            static_cast<int>(validations.size()) >= collector_.unl_size)
+        {
+            QuorumEntry q{p.ledger_hash, p.ledger_seq,
+                std::move(validations), now};
+            auto cb = std::move(p.callback);
+            it = pending_.erase(it);
+            cb({std::move(q), QuorumCollectStopReason::full});
+            continue;
+        }
+
+        // Next ledger?
+        if (has_newer_ledger_locked(p.ledger_seq))
+        {
+            if (validations.empty())
+            {
+                // Fall back to live validations
+                auto live = collector_.get_ledger_validations(
+                    p.ledger_hash, ValidationCollector::QuorumMode::live);
+                if (!live.empty())
+                    validations = std::move(live);
+            }
+            QuorumEntry q{p.ledger_hash, p.ledger_seq,
+                std::move(validations), now};
+            auto cb = std::move(p.callback);
+            it = pending_.erase(it);
+            cb({std::move(q), QuorumCollectStopReason::next_ledger});
+            continue;
+        }
+
+        // Timeout?
+        if (now >= p.deadline)
+        {
+            if (validations.empty())
+            {
+                auto live = collector_.get_ledger_validations(
+                    p.ledger_hash, ValidationCollector::QuorumMode::live);
+                if (!live.empty())
+                    validations = std::move(live);
+            }
+            QuorumEntry q{p.ledger_hash, p.ledger_seq,
+                std::move(validations), now};
+            auto cb = std::move(p.callback);
+            it = pending_.erase(it);
+            cb({std::move(q), QuorumCollectStopReason::timeout});
+            continue;
+        }
+
+        ++it;
+    }
 }
 
 void
@@ -201,7 +304,6 @@ ValidationBuffer::prune_old_entries()
 {
     auto const now = std::chrono::steady_clock::now();
 
-    // Prune old quorum entries from the ring buffer
     while (!recent_quorums_.empty())
     {
         if (recent_quorums_.size() <= kMaxQuorumEntries &&
@@ -212,12 +314,8 @@ ValidationBuffer::prune_old_entries()
         recent_quorums_.pop_front();
     }
 
-    // Prune the collector's by_ledger map to prevent unbounded growth.
-    // This fires both with and without quorums — a long-lived server with
-    // no quorum (startup, UNL refresh, outage) must still cap memory.
     if (!recent_quorums_.empty())
     {
-        // Have quorums: keep only ledgers at or newer than oldest quorum
         auto oldest_seq = recent_quorums_.front().ledger_seq;
         for (auto it = collector_.by_ledger.begin();
              it != collector_.by_ledger.end();)
@@ -235,10 +333,6 @@ ValidationBuffer::prune_old_entries()
     }
     else
     {
-        // No quorums yet: cap the collector at kMaxCollectorLedgers to
-        // bound memory during startup or prolonged no-quorum periods.
-        // by_ledger is keyed by Hash256 (not ordered by seq), so find
-        // the oldest entry by scanning ledger_seq.
         while (collector_.by_ledger.size() > kMaxCollectorLedgers)
         {
             auto oldest = collector_.by_ledger.begin();
@@ -258,121 +352,6 @@ ValidationBuffer::prune_old_entries()
     }
 }
 
-void
-ValidationBuffer::wake_waiters()
-{
-    auto waiters = std::move(waiters_);
-    waiters_.clear();
-    for (auto& timer : waiters)
-    {
-        timer->cancel();
-    }
-}
-
-asio::awaitable<QuorumEntry>
-ValidationBuffer::co_wait_quorum(
-    std::chrono::seconds timeout,
-    ValidationCollector::QuorumMode mode)
-{
-    auto self = shared_from_this();
-
-    // Hop to strand
-    co_await asio::post(strand_, asio::use_awaitable);
-
-    // Already have one?
-    if (auto latest = latest_quorum_locked(mode))
-    {
-        co_return *latest;
-    }
-
-    // Create a per-waiter signal — not shared with other callers
-    auto signal = std::make_shared<asio::steady_timer>(
-        strand_, asio::steady_timer::time_point::max());
-    waiters_.push_back(signal);
-
-    struct WaiterCleanup
-    {
-        ValidationBuffer* owner = nullptr;
-        asio::strand<asio::io_context::executor_type> strand;
-        std::weak_ptr<ValidationBuffer> self;
-        std::shared_ptr<asio::steady_timer> signal;
-
-        void
-        clean_now()
-        {
-            if (!signal)
-                return;
-            std::erase(owner->waiters_, signal);
-            signal.reset();
-        }
-
-        ~WaiterCleanup()
-        {
-            if (!signal)
-                return;
-            try
-            {
-                asio::post(
-                    strand,
-                    [self = std::move(self), signal = std::move(signal)]() mutable {
-                        if (auto locked = self.lock())
-                            std::erase(locked->waiters_, signal);
-                    });
-            }
-            catch (...)
-            {
-            }
-        }
-    } cleanup{this, strand_, self, signal};
-
-    // Deadline
-    asio::steady_timer deadline(strand_, timeout);
-    deadline.async_wait([signal](boost::system::error_code ec) {
-        if (!ec)
-        {
-            signal->cancel();  // timeout wakes this waiter
-        }
-    });
-
-    while (true)
-    {
-        signal->expires_at(asio::steady_timer::time_point::max());
-
-        boost::system::error_code ec;
-        co_await signal->async_wait(
-            asio::redirect_error(asio::use_awaitable, ec));
-
-        auto const cancel_state =
-            co_await asio::this_coro::cancellation_state;
-        if (cancel_state.cancelled() != asio::cancellation_type::none)
-            throw boost::system::system_error(asio::error::operation_aborted);
-
-        // co_await resumes on birth executor, not strand.
-        // Re-hop to strand before touching shared state.
-        co_await asio::post(strand_, asio::use_awaitable);
-
-        if (auto latest = latest_quorum_locked(mode))
-        {
-            deadline.cancel();
-            cleanup.clean_now();
-            co_return *latest;
-        }
-
-        if (deadline.expiry() <= std::chrono::steady_clock::now())
-        {
-            // Remove our signal before throwing
-            cleanup.clean_now();
-            throw std::runtime_error(
-                "Timed out waiting for validation quorum (" +
-                std::to_string(timeout.count()) + "s)");
-        }
-    }
-
-    deadline.cancel();
-    cleanup.clean_now();
-    throw std::runtime_error("validation quorum waiter exited unexpectedly");
-}
-
 asio::awaitable<std::optional<QuorumEntry>>
 ValidationBuffer::co_latest_quorum()
 {
@@ -385,101 +364,93 @@ ValidationBuffer::co_wait_best_quorum(
     ValidationCollector::QuorumMode mode,
     std::chrono::seconds timeout)
 {
-    // Step 1: Wait for initial quorum at threshold (event-driven)
-    auto quorum = co_await co_wait_quorum(timeout, mode);
-
-    // Step 2: Already full? Return immediately.
-    if (collector_.unl_size > 0 &&
-        static_cast<int>(quorum.validations.size()) >= collector_.unl_size)
-    {
-        co_return QuorumCollectResult{
-            std::move(quorum), QuorumCollectStopReason::full};
-    }
-
-    // Step 3: Wait event-driven for full or next-ledger.
-    // Reuse the waiter mechanism — wake on each new validation.
     auto self = shared_from_this();
     co_await asio::post(strand_, asio::use_awaitable);
 
-    auto const ledger_hash = quorum.ledger_hash;
-    auto const ledger_seq = quorum.ledger_seq;
-
-    auto signal = std::make_shared<asio::steady_timer>(
-        strand_, asio::steady_timer::time_point::max());
-    waiters_.push_back(signal);
-
-    struct WaiterCleanup
+    // Check if we can resolve immediately (quorum already exists)
+    if (auto live = latest_quorum_locked(ValidationCollector::QuorumMode::live))
     {
-        ValidationBuffer* owner;
-        std::shared_ptr<asio::steady_timer> signal;
-        void clean_now()
-        {
-            if (!signal) return;
-            std::erase(owner->waiters_, signal);
-            signal.reset();
-        }
-        ~WaiterCleanup() { clean_now(); }
-    } cleanup{this, signal};
-
-    // Short deadline — we already have quorum, just collecting extras
-    asio::steady_timer deadline(strand_, std::chrono::seconds(5));
-    deadline.async_wait([signal](boost::system::error_code ec) {
-        if (!ec) signal->cancel();
-    });
-
-    while (true)
-    {
-        signal->expires_at(asio::steady_timer::time_point::max());
-
-        boost::system::error_code ec;
-        co_await signal->async_wait(
-            asio::redirect_error(asio::use_awaitable, ec));
-
-        auto const cancel_state =
-            co_await asio::this_coro::cancellation_state;
-        if (cancel_state.cancelled() != asio::cancellation_type::none)
-        {
-            cleanup.clean_now();
-            throw boost::system::system_error(asio::error::operation_aborted);
-        }
-
-        co_await asio::post(strand_, asio::use_awaitable);
-
-        // Refresh validations for this ledger
-        auto updated = collector_.get_ledger_validations(ledger_hash, mode);
-        if (updated.size() > quorum.validations.size())
-        {
-            quorum.validations = std::move(updated);
-            quorum.when = std::chrono::steady_clock::now();
-        }
+        auto validations = collector_.get_ledger_validations(
+            live->ledger_hash, mode);
 
         // Full?
-        if (collector_.unl_size > 0 &&
-            static_cast<int>(quorum.validations.size()) >= collector_.unl_size)
+        if (!validations.empty() && collector_.unl_size > 0 &&
+            static_cast<int>(validations.size()) >= collector_.unl_size)
         {
-            deadline.cancel();
-            cleanup.clean_now();
+            PLOGI(log_, "[", net_label_,
+                "] co_wait_best_quorum: immediate full seq=",
+                live->ledger_seq, " (",
+                validations.size(), "/", collector_.unl_size, ")");
             co_return QuorumCollectResult{
-                std::move(quorum), QuorumCollectStopReason::full};
+                QuorumEntry{live->ledger_hash, live->ledger_seq,
+                    std::move(validations), live->when},
+                QuorumCollectStopReason::full};
         }
 
-        // Next ledger seen?
-        if (has_newer_ledger_locked(ledger_seq))
+        // Next ledger already?
+        if (has_newer_ledger_locked(live->ledger_seq))
         {
-            deadline.cancel();
-            cleanup.clean_now();
+            if (validations.empty())
+                validations = std::move(live->validations);
+            PLOGI(log_, "[", net_label_,
+                "] co_wait_best_quorum: immediate next-ledger seq=",
+                live->ledger_seq, " (",
+                validations.size(), "/", collector_.unl_size, ")");
             co_return QuorumCollectResult{
-                std::move(quorum), QuorumCollectStopReason::next_ledger};
-        }
-
-        // Deadline hit?
-        if (deadline.expiry() <= std::chrono::steady_clock::now())
-        {
-            cleanup.clean_now();
-            co_return QuorumCollectResult{
-                std::move(quorum), QuorumCollectStopReason::timeout};
+                QuorumEntry{live->ledger_hash, live->ledger_seq,
+                    std::move(validations), live->when},
+                QuorumCollectStopReason::next_ledger};
         }
     }
+
+    // Register a pending callback — resolved by check_for_new_quorum
+    // directly on the strand. No timers, no signals, no races.
+    auto signal = std::make_shared<asio::steady_timer>(
+        strand_, asio::steady_timer::time_point::max());
+
+    auto result = std::make_shared<std::optional<QuorumCollectResult>>();
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+
+    // If we already have a quorum, seed the pending with the ledger info
+    uint32_t seed_seq = 0;
+    Hash256 seed_hash;
+    if (auto live = latest_quorum_locked(ValidationCollector::QuorumMode::live))
+    {
+        seed_seq = live->ledger_seq;
+        seed_hash = live->ledger_hash;
+        PLOGI(log_, "[", net_label_,
+            "] co_wait_best_quorum: waiting for finalization of seq=",
+            seed_seq);
+    }
+    else
+    {
+        PLOGI(log_, "[", net_label_,
+            "] co_wait_best_quorum: waiting for initial quorum...");
+    }
+
+    pending_.push_back(PendingQuorum{
+        .mode = mode,
+        .ledger_seq = seed_seq,
+        .ledger_hash = seed_hash,
+        .deadline = deadline,
+        .callback = [signal, result](QuorumCollectResult r) {
+            *result = std::move(r);
+            signal->cancel();  // wake the coroutine
+        },
+    });
+
+    // One single co_await — woken by the callback cancelling the timer
+    boost::system::error_code ec;
+    co_await signal->async_wait(
+        asio::redirect_error(asio::use_awaitable, ec));
+
+    if (result->has_value())
+    {
+        co_return std::move(**result);
+    }
+
+    // Shouldn't get here, but safety
+    co_return QuorumCollectResult{QuorumEntry{}, QuorumCollectStopReason::timeout};
 }
 
 std::optional<QuorumEntry>
@@ -546,7 +517,7 @@ ValidationBuffer::co_stats()
         .recent_quorums = recent_quorums_.size(),
         .collector_ledgers = collector_.by_ledger.size(),
         .collector_validations = collector_validations,
-        .waiters = waiters_.size(),
+        .pending_callbacks = pending_.size(),
     };
 }
 
@@ -557,7 +528,7 @@ ValidationBuffer::start_heartbeat()
     heartbeat_timer_.expires_after(kHeartbeatInterval);
     heartbeat_timer_.async_wait([self](boost::system::error_code ec) {
         if (ec)
-            return;  // cancelled (shutdown)
+            return;
 
         asio::post(self->strand_, [self]() {
             auto now = std::chrono::steady_clock::now();
@@ -569,7 +540,6 @@ ValidationBuffer::start_heartbeat()
             if (self->recent_quorums_.empty() ||
                 since_quorum >= kHeartbeatInterval.count())
             {
-                // No recent quorum — report what we have
                 auto total_validations = 0u;
                 auto ledger_count = self->collector_.by_ledger.size();
                 for (auto const& [hash, entries] :

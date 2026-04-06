@@ -712,7 +712,7 @@ HttpServer::handle_session(
                         status.validation_buffer.collector_ledgers;
                     vb["collector_validations"] =
                         status.validation_buffer.collector_validations;
-                    vb["waiters"] = status.validation_buffer.waiters;
+                    vb["waiters"] = status.validation_buffer.pending_callbacks;
                     body["validation_buffer"] = std::move(vb);
 
                     boost::json::object cache;
@@ -766,7 +766,7 @@ HttpServer::handle_session(
                             status.validation_buffer.collector_ledgers;
                         vb["collector_validations"] =
                             status.validation_buffer.collector_validations;
-                        vb["waiters"] = status.validation_buffer.waiters;
+                        vb["waiters"] = status.validation_buffer.pending_callbacks;
                         net_body["validation_buffer"] = std::move(vb);
 
                         boost::json::object cache;
@@ -818,7 +818,7 @@ HttpServer::handle_session(
                             status.validation_buffer.collector_ledgers;
                         vb["collector_validations"] =
                             status.validation_buffer.collector_validations;
-                        vb["waiters"] = status.validation_buffer.waiters;
+                        vb["waiters"] = status.validation_buffer.pending_callbacks;
                         body["validation_buffer"] = std::move(vb);
 
                         boost::json::object cache;

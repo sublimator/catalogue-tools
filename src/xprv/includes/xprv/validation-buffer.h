@@ -3,14 +3,11 @@
 // ValidationBuffer — strand-protected continuous validation collection.
 //
 // Collects STValidation messages from the peer network, maintains a ring
-// buffer of recent quorum entries, and lets proof requests wait for or
-// sample the latest quorum.
+// buffer of recent quorum entries, and services proof requests.
 //
-// Key differences from ValidationCollector (which this wraps):
-//   - Never goes deaf — keeps collecting after quorum is reached
-//   - Ring buffer of recent quorums — concurrent requests can sample
-//   - co_wait_quorum() takes no hash — caller doesn't know anchor upfront
-//   - All reads go through the strand — no sync const accessors
+// All mutation happens on the strand. Coroutine callers suspend via a
+// completion callback invoked directly from check_for_new_quorum() —
+// no timer signals, no async races.
 
 #include "validation-collector.h"
 
@@ -24,8 +21,10 @@
 #include <boost/asio/strand.hpp>
 #include <chrono>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace xprv {
 
@@ -58,13 +57,11 @@ public:
             new ValidationBuffer(io, protocol, network_id));
     }
 
-    /// Feed from unsolicited handler. Safe to call from any thread/strand —
-    /// dispatches onto our strand internally.
+    /// Feed from unsolicited handler. Safe to call from any thread/strand.
     void
     on_packet(uint16_t type, std::vector<uint8_t> const& data);
 
     /// Update UNL keys (called when VlCache refreshes).
-    /// Dispatches onto strand.
     void
     set_unl(std::vector<catl::vl::Manifest> const& validators);
 
@@ -72,18 +69,19 @@ public:
     boost::asio::awaitable<std::optional<QuorumEntry>>
     co_latest_quorum();
 
-    /// Wait for the best quorum: gets initial quorum at threshold, then
-    /// waits event-driven until full (all UNL) or next-ledger-seen.
-    /// No polling — wakes on each validation via wake_waiters().
+    /// Wait for best quorum for a proof anchor. Returns when:
+    ///   - full UNL coverage achieved, OR
+    ///   - next ledger's first validation seen (our ledger is finalized), OR
+    ///   - timeout
+    /// Pure callback — no timer signals. check_for_new_quorum() invokes
+    /// pending callbacks directly on the strand on every validation.
     boost::asio::awaitable<QuorumCollectResult>
     co_wait_best_quorum(
         ValidationCollector::QuorumMode mode =
             ValidationCollector::QuorumMode::proof,
         std::chrono::seconds timeout = std::chrono::seconds(30));
 
-    /// Awaitable: true when live peer manifests can explain a quorum but the
-    /// current VL cannot. This is the signal to force a VL refresh rather than
-    /// broadening the proof format.
+    /// True when live peer manifests can explain a quorum but VL cannot.
     boost::asio::awaitable<bool>
     co_has_live_only_quorum();
 
@@ -92,7 +90,7 @@ public:
         size_t recent_quorums = 0;
         size_t collector_ledgers = 0;
         size_t collector_validations = 0;
-        size_t waiters = 0;
+        size_t pending_callbacks = 0;
     };
 
     boost::asio::awaitable<Stats>
@@ -106,20 +104,15 @@ private:
 
     static constexpr int kQuorumPercent = 90;
 
-    /// Internal: wait for initial quorum at threshold. Used by co_wait_best_quorum.
-    boost::asio::awaitable<QuorumEntry>
-    co_wait_quorum(
-        std::chrono::seconds timeout,
-        ValidationCollector::QuorumMode mode);
-
     void
     check_for_new_quorum();
 
     void
     prune_old_entries();
 
+    /// Try to resolve pending proof callbacks. Called from check_for_new_quorum.
     void
-    wake_waiters();
+    resolve_pending();
 
     std::optional<QuorumEntry>
     latest_quorum_locked(ValidationCollector::QuorumMode mode) const;
@@ -132,13 +125,21 @@ private:
     // Strand-owned state:
     std::string net_label_;
     ValidationCollector collector_;
-    std::deque<QuorumEntry> recent_quorums_;  // newest at back
-    Hash256 last_quorum_hash_;                // dedup: don't re-add same quorum
-    Hash256 last_proof_quorum_hash_;          // wake proof waiters on VL refresh
+    std::deque<QuorumEntry> recent_quorums_;
+    Hash256 last_quorum_hash_;
+    Hash256 last_proof_quorum_hash_;
     std::optional<QuorumEntry> active_live_quorum_log_;
-    // Per-waiter signals — each co_wait_quorum() call gets its own timer.
-    // wake_waiters() cancels all of them when a new quorum arrives.
-    std::vector<std::shared_ptr<boost::asio::steady_timer>> waiters_;
+
+    // Pending proof callbacks — resolved by check_for_new_quorum on strand.
+    struct PendingQuorum
+    {
+        ValidationCollector::QuorumMode mode;
+        uint32_t ledger_seq = 0;       // 0 = waiting for ANY quorum
+        Hash256 ledger_hash;            // set after initial quorum
+        std::chrono::steady_clock::time_point deadline;
+        std::function<void(QuorumCollectResult)> callback;
+    };
+    std::vector<PendingQuorum> pending_;
 
     void
     start_heartbeat();

@@ -509,7 +509,7 @@ cmd_serve()
                                                     .value_or(0);
                                             status.validation_waiters =
                                                 health.validation_buffer
-                                                    .waiters;
+                                                    .pending_callbacks;
                                             status.recent_quorums =
                                                 health.validation_buffer
                                                     .recent_quorums;
