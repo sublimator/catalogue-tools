@@ -19,6 +19,7 @@
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/beast/http.hpp>
 #include <chrono>
 #include <map>
 #include <memory>

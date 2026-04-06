@@ -385,7 +385,7 @@ NodeCache::walk_to(
     uint32_t ledger_seq,
     int tree_type,
     std::shared_ptr<PeerSet> peers,
-    std::shared_ptr<PeerClient> peer,
+    PeerSessionPtr peer,
     std::shared_ptr<std::atomic<bool>> cancel)
 {
     // ── CANCELLATION BOUNDARY ──
@@ -409,7 +409,7 @@ NodeCache::walk_to(
     // This eliminates per-depth strand contention that was causing laggards
     // with 300+ concurrent proves. On failure mid-walk, we retry with a
     // different peer (max retries per walk).
-    auto peer_covers = [](std::shared_ptr<PeerClient> const& p, uint32_t seq) {
+    auto peer_covers = [](PeerSessionPtr const& p, uint32_t seq) {
         if (!p || !p->is_ready())
             return false;
         auto first = p->peer_first_seq();
@@ -702,7 +702,7 @@ NodeCache::ensure_present(
     SHAMapNodeID position,
     Hash256 const& target_key,
     int speculative_depth,
-    std::shared_ptr<PeerClient> peer,
+    PeerSessionPtr peer,
     std::shared_ptr<PeerSet> peers,
     uint32_t ledger_seq,
     std::shared_ptr<std::atomic<bool>> cancel)
@@ -1004,7 +1004,7 @@ NodeCache::send_fetch(
     SHAMapNodeID position,
     Hash256 const& target_key,
     int speculative_depth,
-    std::shared_ptr<PeerClient> peer)
+    PeerSessionPtr peer)
 {
     fetches_++;
 
@@ -1085,7 +1085,7 @@ NodeCache::send_fetch(
 // ═══════════════════════════════════════════════════════════════════════
 
 void
-NodeCache::ensure_response_handler(std::shared_ptr<PeerClient> peer)
+NodeCache::ensure_response_handler(PeerSessionPtr peer)
 {
     auto self = shared_from_this();
     peer->set_node_response_handler(
@@ -1281,7 +1281,7 @@ asio::awaitable<LedgerHeaderResult>
 NodeCache::get_header(
     uint32_t ledger_seq,
     std::shared_ptr<PeerSet> peers,
-    std::shared_ptr<PeerClient> peer)
+    PeerSessionPtr peer)
 {
     // Single lock: check present → check in-flight → create in-flight.
     enum class Action { hit, wait, fetch };

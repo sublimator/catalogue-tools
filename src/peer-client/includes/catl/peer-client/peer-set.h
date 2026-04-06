@@ -11,8 +11,8 @@
 
 #include "endpoint-tracker.h"
 #include "peer-crawl-client.h"
-#include "peer-client.h"
 #include "peer-endpoint-cache.h"
+#include "peer-session.h"
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
@@ -103,7 +103,7 @@ public:
     }
 
     /// Connect to a peer and add it to the set (awaitable).
-    boost::asio::awaitable<std::shared_ptr<PeerClient>>
+    boost::asio::awaitable<PeerSessionPtr>
     add(std::string const& host, uint16_t port);
 
     /// Start connecting to all bootstrap peers in parallel.
@@ -123,33 +123,33 @@ public:
 
     /// Synchronous check: any connected peer with this ledger?
     /// Returns nullptr if none found.
-    std::shared_ptr<PeerClient>
+    PeerSessionPtr
     peer_for(uint32_t ledger_seq) const;
 
-    std::shared_ptr<PeerClient>
+    PeerSessionPtr
     peer_for(
         uint32_t ledger_seq,
         std::unordered_set<std::string> const& excluded) const;
 
     /// Wait until any ready peer is available.
     /// Returns nullptr on timeout.
-    boost::asio::awaitable<std::shared_ptr<PeerClient>>
+    boost::asio::awaitable<PeerSessionPtr>
     wait_for_any_peer(int timeout_secs = 15);
 
-    boost::asio::awaitable<std::shared_ptr<PeerClient>>
+    boost::asio::awaitable<PeerSessionPtr>
     wait_for_any_peer(
         int timeout_secs,
         std::unordered_set<std::string> const& excluded);
 
     /// Wait until a peer with the given ledger is available.
     /// Returns nullptr on timeout.
-    boost::asio::awaitable<std::shared_ptr<PeerClient>>
+    boost::asio::awaitable<PeerSessionPtr>
     wait_for_peer(
         uint32_t ledger_seq,
         int timeout_secs = 300,
         std::shared_ptr<std::atomic<bool>> cancel = nullptr);
 
-    boost::asio::awaitable<std::shared_ptr<PeerClient>>
+    boost::asio::awaitable<PeerSessionPtr>
     wait_for_peer(
         uint32_t ledger_seq,
         int timeout_secs,
@@ -157,10 +157,10 @@ public:
         std::shared_ptr<std::atomic<bool>> cancel = nullptr);
 
     /// Get any ready peer.
-    std::shared_ptr<PeerClient>
+    PeerSessionPtr
     any_peer() const;
 
-    std::shared_ptr<PeerClient>
+    PeerSessionPtr
     any_peer(std::unordered_set<std::string> const& excluded) const;
 
     size_t
@@ -221,7 +221,7 @@ public:
 
     /// Try to connect to an endpoint. Returns nullptr on failure.
     /// Redirect IPs from 503 are fed into the tracker + tried immediately.
-    boost::asio::awaitable<std::shared_ptr<PeerClient>>
+    boost::asio::awaitable<PeerSessionPtr>
     try_connect(std::string const& host, uint16_t port);
 
     /// Number of live (ready) peer connections (all types).
@@ -230,14 +230,14 @@ public:
 
     /// Get up to N peers for a ledger, for fan-out requests.
     /// Synchronous version — must be called on strand.
-    std::vector<std::shared_ptr<PeerClient>>
+    std::vector<PeerSessionPtr>
     select_peers_for(
         uint32_t ledger_seq,
         int max_count,
         std::unordered_set<std::string> const& excluded);
 
     /// Awaitable version — hops to strand internally.
-    boost::asio::awaitable<std::vector<std::shared_ptr<PeerClient>>>
+    boost::asio::awaitable<std::vector<PeerSessionPtr>>
     co_select_peers_for(
         uint32_t ledger_seq,
         int max_count,
@@ -348,10 +348,10 @@ private:
     void
     notify_waiters();
 
-    std::shared_ptr<PeerClient>
+    PeerSessionPtr
     choose_any_peer(std::unordered_set<std::string> const& excluded);
 
-    std::shared_ptr<PeerClient>
+    PeerSessionPtr
     choose_peer_for(
         uint32_t ledger_seq,
         std::unordered_set<std::string> const& excluded);
@@ -416,7 +416,7 @@ private:
     };
     std::unordered_map<std::string, EndpointStats> endpoint_stats_;
     std::uint64_t next_selection_ticket_ = 0;
-    std::map<std::string, std::shared_ptr<PeerClient>> connections_;
+    std::map<std::string, PeerSessionPtr> connections_;
     std::map<std::string, std::chrono::steady_clock::time_point> failed_at_;
     std::set<std::string> in_flight_;  // currently connecting
     std::set<std::string> queued_;

@@ -198,11 +198,56 @@ def assert_octet_stream_content_type(result: "HttpResult") -> None:
     )
 
 
+def assert_sse_content_type(result: "HttpResult") -> None:
+    ctype = result.headers.get("content-type", "")
+    assert "text/event-stream" in ctype, (
+        f"expected text/event-stream content-type, got {ctype!r}"
+    )
+
+
 def decode_json_bytes(data: bytes, *, context: str) -> Any:
     try:
         return json.loads(data)
     except json.JSONDecodeError as exc:
         pytest.fail(f"{context}: invalid JSON body: {exc}\nraw={data[:500]!r}")
+
+
+def decode_sse_events(data: bytes, *, context: str) -> list[dict[str, Any]]:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        pytest.fail(f"{context}: invalid UTF-8 SSE body: {exc}\nraw={data[:500]!r}")
+
+    events: list[dict[str, Any]] = []
+    for raw_block in text.split("\n\n"):
+        block = raw_block.strip()
+        if not block:
+            continue
+
+        data_lines: list[str] = []
+        for line in block.splitlines():
+            if line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+
+        if not data_lines:
+            continue
+
+        payload = "\n".join(data_lines)
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            pytest.fail(
+                f"{context}: invalid SSE event JSON: {exc}\n"
+                f"payload={payload[:500]!r}\nraw={text[:2000]!r}"
+            )
+
+        assert isinstance(event, dict), f"{context}: SSE event was not an object: {event!r}"
+        events.append(event)
+
+    assert events, f"{context}: SSE body contained no events\nraw={text[:2000]!r}"
+    return events
 
 
 def binary_network_id(data: bytes) -> int:
@@ -1167,6 +1212,30 @@ def proof_bin_response(
     return result
 
 
+@pytest.fixture(scope="session")
+def proof_sse_response(
+    server: RunningServer,
+    config: TestConfig,
+    prove_path: str,
+) -> HttpResult:
+    result = server.request(
+        "GET",
+        prove_path,
+        headers={"Accept": "text/event-stream"},
+        timeout=config.request_timeout,
+    )
+    assert result.status == 200, (
+        f"/prove SSE expected 200, got {result.status}, body={result.body[:500]!r}"
+    )
+    assert_sse_content_type(result)
+    return result
+
+
+@pytest.fixture(scope="session")
+def proof_sse_events(proof_sse_response: HttpResult) -> list[dict[str, Any]]:
+    return decode_sse_events(proof_sse_response.body, context="/prove SSE")
+
+
 def test_health_shape(health: dict[str, Any]) -> None:
     assert "peer_count" in health, f"/health missing peer_count: {health}"
     assert "vl_loaded" in health, f"/health missing vl_loaded: {health}"
@@ -1253,6 +1322,50 @@ def test_prove_json_shape_and_network(
         hot_case.label,
         hot_case.ledger_index,
         hot_case.tx_hash,
+    )
+
+
+def test_prove_sse_shape_and_done(
+    proof_sse_events: list[dict[str, Any]],
+    config: TestConfig,
+    hot_case: TxCase,
+) -> None:
+    step_events = [event for event in proof_sse_events if event.get("type") == "step"]
+    log_events = [event for event in proof_sse_events if event.get("type") == "log"]
+    done_events = [event for event in proof_sse_events if event.get("type") == "done"]
+    error_events = [event for event in proof_sse_events if event.get("type") == "error"]
+
+    assert step_events, f"/prove SSE returned no step events: {proof_sse_events!r}"
+    assert not error_events, f"/prove SSE returned error events: {error_events!r}"
+    assert len(done_events) == 1, f"/prove SSE expected one done event: {done_events!r}"
+    assert proof_sse_events[-1].get("type") == "done", (
+        f"/prove SSE final event was not done: {proof_sse_events[-1]!r}"
+    )
+    assert done_events[0]["network_id"] == config.network
+
+    step_indexes = [event.get("index") for event in step_events]
+    assert step_indexes == list(range(len(step_events))), (
+        f"/prove SSE step indexes were not contiguous: {step_indexes!r}"
+    )
+
+    first_step = step_events[0]
+    assert isinstance(first_step.get("step"), dict), (
+        f"/prove SSE step payload was not an object: {first_step!r}"
+    )
+    assert "type" in first_step["step"], f"/prove SSE step missing type: {first_step!r}"
+
+    if log_events:
+        assert all(isinstance(event.get("msg"), str) for event in log_events), (
+            f"/prove SSE log events must contain string msgs: {log_events!r}"
+        )
+
+    LOG.info(
+        "hot SSE proof case label=%s ledger_index=%s tx_hash=%s step_count=%s log_count=%s",
+        hot_case.label,
+        hot_case.ledger_index,
+        hot_case.tx_hash,
+        len(step_events),
+        len(log_events),
     )
 
 

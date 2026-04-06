@@ -1,6 +1,6 @@
 #pragma once
 
-// TreeWalker — coroutine wrapper that drives TreeWalkState via PeerClient.
+// TreeWalker — coroutine wrapper that drives TreeWalkState via PeerSession.
 //
 // Connects the pure state machine (TreeWalkState) to the network.
 // Fetches nodes as requested by the state machine, feeds responses back.
@@ -25,7 +25,7 @@ class TreeWalker
 {
 public:
     TreeWalker(
-        std::shared_ptr<PeerClient> client,
+        PeerSessionPtr client,
         Hash256 const& ledger_hash,
         TreeWalkState::TreeType type)
         : client_(std::move(client))
@@ -205,7 +205,7 @@ public:
     }
 
 private:
-    std::shared_ptr<PeerClient> client_;
+    PeerSessionPtr client_;
     Hash256 ledger_hash_;
     TreeWalkState state_;
     TreeWalkState::TreeType type_;

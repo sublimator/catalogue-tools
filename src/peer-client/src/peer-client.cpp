@@ -622,6 +622,13 @@ PeerClient::set_node_response_handler(NodeResponseHandler handler)
 }
 
 void
+PeerClient::disconnect()
+{
+    if (connection_)
+        connection_->close();
+}
+
+void
 PeerClient::send_get_nodes(
     Hash256 const& ledger_hash,
     int type,

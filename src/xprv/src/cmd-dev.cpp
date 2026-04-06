@@ -3,8 +3,7 @@
 #include "xprv/hex-utils.h"
 
 #include <catl/core/logger.h>
-#include <catl/peer-client/peer-client-coro.h>
-#include <catl/peer-client/peer-client.h>
+#include <catl/peer-client/peer-client-connect-coro.h>
 #include <catl/rpc-client/rpc-client-coro.h>
 #include <catl/shamap/shamap.h>
 #include <catl/xdata/parse_transaction.h>
@@ -54,7 +53,7 @@ cmd_dev_check_ledger(
     boost::asio::co_spawn(
         io,
         [&]() -> boost::asio::awaitable<void> {
-            std::shared_ptr<PeerClient> client;
+            PeerSessionPtr client;
             auto peer_seq = co_await co_connect(io, host, port, 0, client);
             PLOGI(log_, "Ready! Peer at ledger ", peer_seq);
 

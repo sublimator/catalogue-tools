@@ -4,7 +4,8 @@
 //
 // Stores raw wire bytes keyed by node hash. Provides walk_to() which
 // walks a SHAMap from root hash to target key, fetching on cache miss
-// via PeerClient. Cross-ledger structural sharing is automatic: two
+// via the peer-session request layer. Cross-ledger structural sharing is
+// automatic: two
 // ledgers that share an inner node (same hash) share the cache entry.
 //
 // Usage:
@@ -116,7 +117,7 @@ public:
         uint32_t ledger_seq,
         int tree_type,
         std::shared_ptr<PeerSet> peers,
-        std::shared_ptr<PeerClient> peer = nullptr,
+        PeerSessionPtr peer = nullptr,
         std::shared_ptr<std::atomic<bool>> cancel = nullptr);
 
     /// Insert a node into the cache by hash. Returns true if newly inserted.
@@ -165,7 +166,7 @@ public:
     get_header(
         uint32_t ledger_seq,
         std::shared_ptr<PeerSet> peers,
-        std::shared_ptr<PeerClient> peer = nullptr);
+        PeerSessionPtr peer = nullptr);
 
     /// Number of present entries in the cache.
     size_t
@@ -310,7 +311,7 @@ private:
         SHAMapNodeID position,
         Hash256 const& target_key,
         int speculative_depth,
-        std::shared_ptr<PeerClient> peer,
+        PeerSessionPtr peer,
         std::shared_ptr<PeerSet> peers = nullptr,
         uint32_t ledger_seq = 0,
         std::shared_ptr<std::atomic<bool>> cancel = nullptr);
@@ -327,7 +328,7 @@ private:
         SHAMapNodeID position,
         Hash256 const& target_key,
         int speculative_depth,
-        std::shared_ptr<PeerClient> peer);
+        PeerSessionPtr peer);
 
     /// Compute the content hash of an inner wire node.
     /// Expands compressed format to canonical 16×32 layout, then
@@ -338,7 +339,7 @@ private:
     /// Install our response handler on a peer.
     /// Safe to call repeatedly; PeerClient just overwrites the handler.
     void
-    ensure_response_handler(std::shared_ptr<PeerClient> peer);
+    ensure_response_handler(PeerSessionPtr peer);
 
     /// Called by the response handler for every TMLedgerData node response.
     /// Computes content hash for each node, inserts into cache, wakes waiters.

@@ -1,4 +1,4 @@
-#include <catl/peer-client/peer-client-coro.h>
+#include <catl/peer-client/peer-client-connect-coro.h>
 #include <catl/peer-client/peer-selector.h>
 #include <catl/peer-client/peer-set.h>
 
@@ -371,7 +371,7 @@ PeerSet::notify_waiters()
         wake->cancel();
 }
 
-std::vector<std::shared_ptr<PeerClient>>
+std::vector<PeerSessionPtr>
 PeerSet::select_peers_for(
     uint32_t ledger_seq,
     int max_count,
@@ -391,7 +391,7 @@ PeerSet::select_peers_for(
     {
         std::string key;
         uint64_t span;
-        std::shared_ptr<PeerClient> client;
+        PeerSessionPtr client;
     };
     std::vector<Candidate> candidates;
     auto const now = std::chrono::steady_clock::now();
@@ -429,7 +429,7 @@ PeerSet::select_peers_for(
             return a.span > b.span;  // wider range preferred
         });
 
-    std::vector<std::shared_ptr<PeerClient>> result;
+    std::vector<PeerSessionPtr> result;
     for (auto const& c : candidates)
     {
         if (static_cast<int>(result.size()) >= budget)
@@ -440,7 +440,7 @@ PeerSet::select_peers_for(
     return result;
 }
 
-boost::asio::awaitable<std::vector<std::shared_ptr<PeerClient>>>
+boost::asio::awaitable<std::vector<PeerSessionPtr>>
 PeerSet::co_select_peers_for(
     uint32_t ledger_seq,
     int max_count,
@@ -471,11 +471,11 @@ PeerSet::note_ledger_failure(std::string const& endpoint, uint32_t ledger_seq)
         ledger_seq);
 }
 
-std::shared_ptr<PeerClient>
+PeerSessionPtr
 PeerSet::choose_any_peer(std::unordered_set<std::string> const& excluded)
 {
     ASSERT_ON_STRAND();
-    std::shared_ptr<PeerClient> best;
+    PeerSessionPtr best;
     std::string best_key;
 
     for (auto const& [key, client] : connections_)
@@ -529,13 +529,13 @@ PeerSet::choose_any_peer(std::unordered_set<std::string> const& excluded)
     return best;
 }
 
-std::shared_ptr<PeerClient>
+PeerSessionPtr
 PeerSet::choose_peer_for(
     uint32_t ledger_seq,
     std::unordered_set<std::string> const& excluded)
 {
     ASSERT_ON_STRAND();
-    std::shared_ptr<PeerClient> best;
+    PeerSessionPtr best;
     std::string best_key;
     uint32_t best_span = std::numeric_limits<uint32_t>::max();
 
@@ -1201,7 +1201,7 @@ PeerSet::start_connect(std::string const& host, uint16_t port)
     pump_connects();
 }
 
-boost::asio::awaitable<std::shared_ptr<PeerClient>>
+boost::asio::awaitable<PeerSessionPtr>
 PeerSet::try_connect(std::string const& host, uint16_t port)
 {
     // Hop to strand — touches connections_, in_flight_, etc.
@@ -1519,7 +1519,7 @@ PeerSet::try_candidates_for(uint32_t ledger_seq)
     pump_connects();
 }
 
-boost::asio::awaitable<std::shared_ptr<PeerClient>>
+boost::asio::awaitable<PeerSessionPtr>
 PeerSet::add(std::string const& host, uint16_t port)
 {
     auto client = co_await try_connect(host, port);
@@ -1531,7 +1531,7 @@ PeerSet::add(std::string const& host, uint16_t port)
     co_return client;
 }
 
-std::shared_ptr<PeerClient>
+PeerSessionPtr
 PeerSet::peer_for(uint32_t ledger_seq) const
 {
     ASSERT_ON_STRAND();
@@ -1539,13 +1539,13 @@ PeerSet::peer_for(uint32_t ledger_seq) const
     return peer_for(ledger_seq, empty);
 }
 
-std::shared_ptr<PeerClient>
+PeerSessionPtr
 PeerSet::peer_for(
     uint32_t ledger_seq,
     std::unordered_set<std::string> const& excluded) const
 {
     ASSERT_ON_STRAND();
-    std::shared_ptr<PeerClient> best;
+    PeerSessionPtr best;
     std::string best_key;
 
     for (auto const& [key, client] : connections_)
@@ -1572,14 +1572,14 @@ PeerSet::peer_for(
     return nullptr;
 }
 
-boost::asio::awaitable<std::shared_ptr<PeerClient>>
+boost::asio::awaitable<PeerSessionPtr>
 PeerSet::wait_for_any_peer(int timeout_secs)
 {
     static std::unordered_set<std::string> const empty;
     co_return co_await wait_for_any_peer(timeout_secs, empty);
 }
 
-boost::asio::awaitable<std::shared_ptr<PeerClient>>
+boost::asio::awaitable<PeerSessionPtr>
 PeerSet::wait_for_any_peer(
     int timeout_secs,
     std::unordered_set<std::string> const& excluded)
@@ -1661,7 +1661,7 @@ PeerSet::wait_for_any_peer(
     co_return nullptr;
 }
 
-boost::asio::awaitable<std::shared_ptr<PeerClient>>
+boost::asio::awaitable<PeerSessionPtr>
 PeerSet::wait_for_peer(
     uint32_t ledger_seq,
     int timeout_secs,
@@ -1671,7 +1671,7 @@ PeerSet::wait_for_peer(
     co_return co_await wait_for_peer(ledger_seq, timeout_secs, empty, cancel);
 }
 
-boost::asio::awaitable<std::shared_ptr<PeerClient>>
+boost::asio::awaitable<PeerSessionPtr>
 PeerSet::wait_for_peer(
     uint32_t ledger_seq,
     int timeout_secs,
@@ -1944,7 +1944,7 @@ PeerSet::wait_for_peer(
     co_return nullptr;
 }
 
-std::shared_ptr<PeerClient>
+PeerSessionPtr
 PeerSet::any_peer() const
 {
     ASSERT_ON_STRAND();
@@ -1952,11 +1952,11 @@ PeerSet::any_peer() const
     return any_peer(empty);
 }
 
-std::shared_ptr<PeerClient>
+PeerSessionPtr
 PeerSet::any_peer(std::unordered_set<std::string> const& excluded) const
 {
     ASSERT_ON_STRAND();
-    std::shared_ptr<PeerClient> best;
+    PeerSessionPtr best;
     std::string best_key;
 
     for (auto const& [key, client] : connections_)
@@ -2197,7 +2197,7 @@ PeerSet::evict_for(uint32_t target_ledger_seq)
     auto it = connections_.find(worst_key);
     if (it != connections_.end() && it->second)
     {
-        it->second->raw_connection().close();
+        it->second->disconnect();
     }
     remove_peer(worst_key);
     return true;

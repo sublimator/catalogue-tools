@@ -2,6 +2,7 @@
 
 #include "connection.h"
 #include "endpoint-tracker.h"
+#include "peer-session.h"
 #include "types.h"
 
 #include <catl/core/logger.h>
@@ -20,23 +21,12 @@
 
 namespace catl::peer_client {
 
-//------------------------------------------------------------------------------
-// Callback type — Layer 1 (core)
-//------------------------------------------------------------------------------
-
-template <typename T>
-using Callback = std::function<void(Error, T)>;
-
 /// Called when the client becomes ready (status exchange complete)
 using ReadyCallback = std::function<void(uint32_t peer_ledger_seq)>;
 
 /// Called exactly once when initial setup either becomes ready or fails.
 using ConnectCompletionCallback =
     std::function<void(boost::system::error_code, uint32_t peer_ledger_seq)>;
-
-/// Called for messages PeerClient doesn't handle internally
-using UnsolicitedHandler =
-    std::function<void(uint16_t type, std::vector<uint8_t> const& data)>;
 
 //------------------------------------------------------------------------------
 // Connection state
@@ -106,17 +96,11 @@ enum class State {
  * run on the io_context. Use asio::post(io_context, ...) if calling
  * from another thread.
  */
-class PeerClient : public std::enable_shared_from_this<PeerClient>
+class PeerClient final : public PeerSession,
+                         public std::enable_shared_from_this<PeerClient>
 {
 public:
     using DisconnectCallback = std::function<void()>;
-
-    /// Called for every TMLedgerData node response (liAS_NODE, liTX_NODE)
-    /// BEFORE the pending_nodes dispatch. If set, receives the parsed
-    /// protobuf message. Used by NodeCache to intercept responses and
-    /// feed them into the content-addressed cache.
-    using NodeResponseHandler =
-        std::function<void(std::shared_ptr<protocol::TMLedgerData> const&)>;
 
     /// Pre-connect configuration. Set these before the read loop starts
     /// to avoid cross-strand races.
@@ -149,7 +133,7 @@ public:
         ReadyCallback on_ready,
         ConnectCompletionCallback on_complete);
 
-    ~PeerClient();
+    ~PeerClient() override;
 
     // ---------------------------------------------------------------
     // Requests — safe to call before ready (will be queued)
@@ -159,27 +143,27 @@ public:
     get_ledger_header(
         uint32_t ledger_seq,
         Callback<LedgerHeaderResult> callback,
-        RequestOptions opts = {});
+        RequestOptions opts = {}) override;
 
     void
     get_ledger_header(
         Hash256 const& ledger_hash,
         Callback<LedgerHeaderResult> callback,
-        RequestOptions opts = {});
+        RequestOptions opts = {}) override;
 
     void
     get_tx_proof_path(
         Hash256 const& ledger_hash,
         Hash256 const& key,
         Callback<ProofPathResult> callback,
-        RequestOptions opts = {});
+        RequestOptions opts = {}) override;
 
     void
     get_state_proof_path(
         Hash256 const& ledger_hash,
         Hash256 const& key,
         Callback<ProofPathResult> callback,
-        RequestOptions opts = {});
+        RequestOptions opts = {}) override;
 
     // ---------------------------------------------------------------
     // SHAMap node fetching (TMGetLedger with nodeIDs)
@@ -191,7 +175,7 @@ public:
         Hash256 const& ledger_hash,
         std::vector<SHAMapNodeID> const& node_ids,
         Callback<LedgerNodesResult> callback,
-        RequestOptions opts = {});
+        RequestOptions opts = {}) override;
 
     /// Fetch specific nodes from a ledger's transaction tree.
     void
@@ -199,14 +183,14 @@ public:
         Hash256 const& ledger_hash,
         std::vector<SHAMapNodeID> const& node_ids,
         Callback<LedgerNodesResult> callback,
-        RequestOptions opts = {});
+        RequestOptions opts = {}) override;
 
     // ---------------------------------------------------------------
     // Ping
     // ---------------------------------------------------------------
 
     void
-    ping(Callback<PingResult> callback, RequestOptions opts = {});
+    ping(Callback<PingResult> callback, RequestOptions opts = {}) override;
 
     // ---------------------------------------------------------------
     // State
@@ -219,20 +203,20 @@ public:
     }
 
     bool
-    is_ready() const
+    is_ready() const override
     {
         return state_ == State::Ready;
     }
 
     /// Peer's current ledger seq (known after status exchange)
     uint32_t
-    peer_ledger_seq() const
+    peer_ledger_seq() const override
     {
         return peer_ledger_seq_;
     }
 
     void
-    set_unsolicited_handler(UnsolicitedHandler handler);
+    set_unsolicited_handler(UnsolicitedHandler handler) override;
 
     /// Set a shared endpoint tracker. TMStatusChange updates will
     /// be fed into it automatically.
@@ -242,13 +226,13 @@ public:
 
     /// Peer's advertised ledger range (from TMStatusChange).
     uint32_t
-    peer_first_seq() const
+    peer_first_seq() const override
     {
         return peer_first_seq_;
     }
 
     uint32_t
-    peer_last_seq() const
+    peer_last_seq() const override
     {
         return peer_last_seq_;
     }
@@ -256,7 +240,7 @@ public:
     /// Set a handler that receives every node-type TMLedgerData response
     /// (liAS_NODE, liTX_NODE) before the pending_nodes dispatch.
     void
-    set_node_response_handler(NodeResponseHandler handler);
+    set_node_response_handler(NodeResponseHandler handler) override;
 
     /// Send a raw TMGetLedger for specific node IDs without registering
     /// in pending_nodes. The response will be delivered via the
@@ -271,16 +255,20 @@ public:
         Hash256 const& ledger_hash,
         int type,  // liTX_NODE or liAS_NODE
         std::vector<SHAMapNodeID> const& node_ids,
-        std::function<void(boost::system::error_code)> on_error = nullptr);
+        std::function<void(boost::system::error_code)> on_error = nullptr)
+        override;
+
+    void
+    disconnect() override;
 
     void
     cancel_all();
 
     size_t
-    pending_count() const;
+    pending_count() const override;
 
     std::string const&
-    endpoint() const
+    endpoint() const override
     {
         return endpoint_str_;
     }
@@ -294,7 +282,7 @@ public:
     /// The PeerClient's strand. Callers can use this to hop to the
     /// strand before calling request methods.
     asio::strand<asio::io_context::executor_type>&
-    strand()
+    strand() override
     {
         return strand_;
     }

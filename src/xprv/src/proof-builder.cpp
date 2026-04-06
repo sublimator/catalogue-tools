@@ -1061,7 +1061,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         bool need_flag_hop = false;
         uint32_t distance = 0;
         std::vector<std::tuple<Hash256, StateProofResult>> state_proofs;
-        std::shared_ptr<PeerClient> client;
+        PeerSessionPtr client;
     };
 
     auto ctx = std::make_shared<ProveContext>();
@@ -1080,7 +1080,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                             uint32_t ledger_seq,
                             Hash256 const& state_root_hash,
                             Hash256 const& key,
-                            std::shared_ptr<PeerClient> peer =
+                            PeerSessionPtr peer =
                                 nullptr) -> boost::asio::awaitable<WalkResult> {
         auto result = co_await ctx->node_cache->walk_to(
             state_root_hash,
@@ -1101,7 +1101,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                          uint32_t ledger_seq,
                          Hash256 const& tx_root_hash,
                          Hash256 const& key,
-                         std::shared_ptr<PeerClient> peer =
+                         PeerSessionPtr peer =
                              nullptr) -> boost::asio::awaitable<WalkResult> {
         auto result = co_await ctx->node_cache->walk_to(
             tx_root_hash,
@@ -1226,11 +1226,11 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     };
 
     auto acquire_peer = [ctx, collect_excluded_peers, net_label](
-                            std::shared_ptr<PeerClient>& current,
+                            PeerSessionPtr& current,
                             std::optional<uint32_t> required_ledger,
                             std::string const& purpose)
-        -> boost::asio::awaitable<std::shared_ptr<PeerClient>> {
-        auto peer_covers_ledger = [](std::shared_ptr<PeerClient> const& peer,
+        -> boost::asio::awaitable<PeerSessionPtr> {
+        auto peer_covers_ledger = [](PeerSessionPtr const& peer,
                                      uint32_t ledger_seq) {
             if (!peer || !peer->is_ready())
                 return false;
@@ -1258,7 +1258,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                 co_return current;
             }
 
-            std::shared_ptr<PeerClient> found;
+            PeerSessionPtr found;
             if (required_ledger)
             {
                 found = co_await ctx->peers->wait_for_peer(
@@ -1312,7 +1312,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
 
     auto with_peer_failover =
         [ctx, acquire_peer, is_retryable_peer_error](
-            std::shared_ptr<PeerClient>& current,
+            PeerSessionPtr& current,
             std::optional<uint32_t> required_ledger,
             std::string const& purpose,
             auto op) -> decltype(op(current)) {
@@ -1453,7 +1453,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             anchor_seq,
             "walk short skip list",
             [ctx, skip_key_val, anchor_seq,
-             walk_state](std::shared_ptr<PeerClient> peer)
+             walk_state](PeerSessionPtr peer)
                 -> boost::asio::awaitable<WalkResult> {
                 co_return co_await walk_state(
                     ctx->anchor_hash,
@@ -1475,7 +1475,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             ctx->client,
             tx_ledger_seq,
             "fetch target ledger header",
-            [ctx, tx_ledger_seq](std::shared_ptr<PeerClient> peer)
+            [ctx, tx_ledger_seq](PeerSessionPtr peer)
                 -> boost::asio::awaitable<LedgerHeaderResult> {
                 co_return co_await ctx->node_cache->get_header(
                     tx_ledger_seq, ctx->peers, peer);
@@ -1512,7 +1512,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             anchor_seq,
             "walk long skip list",
             [ctx, long_skip_key, anchor_seq,
-             walk_state](std::shared_ptr<PeerClient> peer)
+             walk_state](PeerSessionPtr peer)
                 -> boost::asio::awaitable<WalkResult> {
                 co_return co_await walk_state(
                     ctx->anchor_hash,
@@ -1536,7 +1536,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             ctx->client,
             flag_seq,
             "fetch flag ledger header",
-            [ctx, flag_seq](std::shared_ptr<PeerClient> peer)
+            [ctx, flag_seq](PeerSessionPtr peer)
                 -> boost::asio::awaitable<LedgerHeaderResult> {
                 co_return co_await ctx->node_cache->get_header(
                     flag_seq, ctx->peers, peer);
@@ -1561,7 +1561,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             flag_seq,
             "walk flag short skip list",
             [ctx, flag_hash, flag_seq, short_skip_key,
-             walk_state](std::shared_ptr<PeerClient> peer)
+             walk_state](PeerSessionPtr peer)
                 -> boost::asio::awaitable<WalkResult> {
                 co_return co_await walk_state(
                     flag_hash,
@@ -1586,7 +1586,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             ctx->client,
             tx_ledger_seq,
             "fetch target ledger header",
-            [ctx, tx_ledger_seq](std::shared_ptr<PeerClient> peer)
+            [ctx, tx_ledger_seq](PeerSessionPtr peer)
                 -> boost::asio::awaitable<LedgerHeaderResult> {
                 co_return co_await ctx->node_cache->get_header(
                     tx_ledger_seq, ctx->peers, peer);
@@ -1612,7 +1612,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             ctx->client,
             tx_ledger_seq,
             "fetch target ledger header",
-            [ctx, tx_ledger_seq](std::shared_ptr<PeerClient> peer)
+            [ctx, tx_ledger_seq](PeerSessionPtr peer)
                 -> boost::asio::awaitable<LedgerHeaderResult> {
                 co_return co_await ctx->node_cache->get_header(
                     tx_ledger_seq, ctx->peers, peer);
@@ -1631,7 +1631,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         tx_ledger_seq,
         "walk transaction tree",
         [ctx, ledger_hash, tx_ledger_seq, target_header, tx_hash,
-         walk_tx](std::shared_ptr<PeerClient> peer)
+         walk_tx](PeerSessionPtr peer)
             -> boost::asio::awaitable<WalkResult> {
             co_return co_await walk_tx(
                 ledger_hash,
