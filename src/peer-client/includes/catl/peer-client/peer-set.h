@@ -19,6 +19,7 @@
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <map>
@@ -143,13 +144,17 @@ public:
     /// Wait until a peer with the given ledger is available.
     /// Returns nullptr on timeout.
     boost::asio::awaitable<std::shared_ptr<PeerClient>>
-    wait_for_peer(uint32_t ledger_seq, int timeout_secs = 300);
+    wait_for_peer(
+        uint32_t ledger_seq,
+        int timeout_secs = 300,
+        std::shared_ptr<std::atomic<bool>> cancel = nullptr);
 
     boost::asio::awaitable<std::shared_ptr<PeerClient>>
     wait_for_peer(
         uint32_t ledger_seq,
         int timeout_secs,
-        std::unordered_set<std::string> const& excluded);
+        std::unordered_set<std::string> const& excluded,
+        std::shared_ptr<std::atomic<bool>> cancel = nullptr);
 
     /// Get any ready peer.
     std::shared_ptr<PeerClient>
@@ -337,6 +342,12 @@ private:
     void
     note_connect_failure(std::string const& endpoint);
 
+    std::shared_ptr<boost::asio::steady_timer>
+    attach_wait_signal();
+
+    void
+    notify_waiters();
+
     std::shared_ptr<PeerClient>
     choose_any_peer(std::unordered_set<std::string> const& excluded);
 
@@ -418,6 +429,7 @@ private:
     // Used by should_connect_endpoint and evict_for to prioritize
     // candidates that cover any active target.
     std::set<uint32_t> wanted_ledgers_;
+    std::shared_ptr<boost::asio::steady_timer> wait_signal_;
     mutable std::mutex unsolicited_handler_mutex_;
     UnsolicitedHandler unsolicited_handler_;
 };

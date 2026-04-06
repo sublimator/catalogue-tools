@@ -70,6 +70,17 @@ public:
     boost::asio::awaitable<std::optional<QuorumEntry>>
     co_latest_quorum();
 
+    struct Stats
+    {
+        size_t recent_quorums = 0;
+        size_t collector_ledgers = 0;
+        size_t collector_validations = 0;
+        size_t waiters = 0;
+    };
+
+    boost::asio::awaitable<Stats>
+    co_stats();
+
 private:
     ValidationBuffer(
         boost::asio::io_context& io,

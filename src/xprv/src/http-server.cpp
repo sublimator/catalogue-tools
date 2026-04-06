@@ -472,7 +472,7 @@ HttpServer::lookup_tx_all(std::string const& tx_hash)
 
     auto net = result_net->load();
     auto seq = result_seq->load();
-    PLOGI(log_, "lookup_tx_all: net=", net, " seq=", seq,
+    PLOGD(log_, "lookup_tx_all: net=", net, " seq=", seq,
         " remaining=", remaining->load());
     co_return std::pair{net, seq};
 }
@@ -601,7 +601,7 @@ HttpServer::handle_session(
                 req_ctx->request_id = std::move(safe);
         }
 
-        PLOGI(log_, req.method_string(), " ", path);
+        PLOGD(log_, req.method_string(), " ", path);
 
         // ── Check for /network/{slug}/... prefix routing ──────────
         ProofEngine* routed_engine = nullptr;
@@ -695,6 +695,15 @@ HttpServer::handle_session(
                     body["vl_loaded"] = status.vl_loaded;
                     if (status.latest_quorum_seq)
                         body["latest_quorum_seq"] = *status.latest_quorum_seq;
+                    boost::json::object vb;
+                    vb["recent_quorums"] =
+                        status.validation_buffer.recent_quorums;
+                    vb["collector_ledgers"] =
+                        status.validation_buffer.collector_ledgers;
+                    vb["collector_validations"] =
+                        status.validation_buffer.collector_validations;
+                    vb["waiters"] = status.validation_buffer.waiters;
+                    body["validation_buffer"] = std::move(vb);
 
                     boost::json::object cache;
                     cache["entries"] = cs.entries;
@@ -740,6 +749,15 @@ HttpServer::handle_session(
                         if (status.latest_quorum_seq)
                             net_body["latest_quorum_seq"] =
                                 *status.latest_quorum_seq;
+                        boost::json::object vb;
+                        vb["recent_quorums"] =
+                            status.validation_buffer.recent_quorums;
+                        vb["collector_ledgers"] =
+                            status.validation_buffer.collector_ledgers;
+                        vb["collector_validations"] =
+                            status.validation_buffer.collector_validations;
+                        vb["waiters"] = status.validation_buffer.waiters;
+                        net_body["validation_buffer"] = std::move(vb);
 
                         boost::json::object cache;
                         cache["entries"] = cs.entries;
@@ -783,6 +801,15 @@ HttpServer::handle_session(
                         if (status.latest_quorum_seq)
                             body["latest_quorum_seq"] =
                                 *status.latest_quorum_seq;
+                        boost::json::object vb;
+                        vb["recent_quorums"] =
+                            status.validation_buffer.recent_quorums;
+                        vb["collector_ledgers"] =
+                            status.validation_buffer.collector_ledgers;
+                        vb["collector_validations"] =
+                            status.validation_buffer.collector_validations;
+                        vb["waiters"] = status.validation_buffer.waiters;
+                        body["validation_buffer"] = std::move(vb);
 
                         boost::json::object cache;
                         cache["entries"] = cs.entries;

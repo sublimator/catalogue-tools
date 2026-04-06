@@ -3,12 +3,15 @@ file(GLOB XPROOF_TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*-gtest.cpp")
 add_executable(xprv_gtest ${XPROOF_TEST_SOURCES})
 
 target_include_directories(xprv_gtest
-                           PRIVATE ${CMAKE_SOURCE_DIR}/src/xprv/includes)
+                           PRIVATE ${CMAKE_SOURCE_DIR}/src/xprv/includes
+                                   ${CMAKE_SOURCE_DIR}/src/peer-client/includes)
 
 target_link_libraries(
   xprv_gtest
   PRIVATE catl::xdata
           catl::crypto
+          catl::peer-client
+          catl::vl-client
           catl::shamap_headers
           catl_shamap_abbreviated
           Boost::json
@@ -19,7 +22,9 @@ target_link_libraries(
 # xprv source files we need (not the main)
 target_sources(
   xprv_gtest PRIVATE ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-binary.cpp
-                       ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-json.cpp)
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-json.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-buffer.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-collector.cpp)
 
 # Share format version with the xprv target
 file(READ ${CMAKE_SOURCE_DIR}/src/xprv/VERSION XPRV_FORMAT_VERSION)

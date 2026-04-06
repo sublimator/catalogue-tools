@@ -498,6 +498,7 @@ ProofEngine::co_health()
     auto latest = co_await val_buffer_->co_latest_quorum();
     if (latest)
         status.latest_quorum_seq = latest->ledger_seq;
+    status.validation_buffer = co_await val_buffer_->co_stats();
 
     co_return status;
 }

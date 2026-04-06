@@ -3,6 +3,7 @@
 
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 namespace xprv {
@@ -196,11 +197,12 @@ ValidationBuffer::prune_old_entries()
 void
 ValidationBuffer::wake_waiters()
 {
-    for (auto& timer : waiters_)
+    auto waiters = std::move(waiters_);
+    waiters_.clear();
+    for (auto& timer : waiters)
     {
         timer->cancel();
     }
-    // Don't clear — each waiter removes itself after waking
 }
 
 asio::awaitable<QuorumEntry>
@@ -222,6 +224,41 @@ ValidationBuffer::co_wait_quorum(std::chrono::seconds timeout)
         strand_, asio::steady_timer::time_point::max());
     waiters_.push_back(signal);
 
+    struct WaiterCleanup
+    {
+        ValidationBuffer* owner = nullptr;
+        asio::strand<asio::io_context::executor_type> strand;
+        std::weak_ptr<ValidationBuffer> self;
+        std::shared_ptr<asio::steady_timer> signal;
+
+        void
+        clean_now()
+        {
+            if (!signal)
+                return;
+            std::erase(owner->waiters_, signal);
+            signal.reset();
+        }
+
+        ~WaiterCleanup()
+        {
+            if (!signal)
+                return;
+            try
+            {
+                asio::post(
+                    strand,
+                    [self = std::move(self), signal = std::move(signal)]() mutable {
+                        if (auto locked = self.lock())
+                            std::erase(locked->waiters_, signal);
+                    });
+            }
+            catch (...)
+            {
+            }
+        }
+    } cleanup{this, strand_, self, signal};
+
     // Deadline
     asio::steady_timer deadline(strand_, timeout);
     deadline.async_wait([signal](boost::system::error_code ec) {
@@ -239,6 +276,11 @@ ValidationBuffer::co_wait_quorum(std::chrono::seconds timeout)
         co_await signal->async_wait(
             asio::redirect_error(asio::use_awaitable, ec));
 
+        auto const cancel_state =
+            co_await asio::this_coro::cancellation_state;
+        if (cancel_state.cancelled() != asio::cancellation_type::none)
+            throw boost::system::system_error(asio::error::operation_aborted);
+
         // co_await resumes on birth executor, not strand.
         // Re-hop to strand before touching shared state.
         co_await asio::post(strand_, asio::use_awaitable);
@@ -251,7 +293,7 @@ ValidationBuffer::co_wait_quorum(std::chrono::seconds timeout)
         if (deadline.expiry() <= std::chrono::steady_clock::now())
         {
             // Remove our signal before throwing
-            std::erase(waiters_, signal);
+            cleanup.clean_now();
             throw std::runtime_error(
                 "Timed out waiting for validation quorum (" +
                 std::to_string(timeout.count()) + "s)");
@@ -259,7 +301,7 @@ ValidationBuffer::co_wait_quorum(std::chrono::seconds timeout)
     }
 
     deadline.cancel();
-    std::erase(waiters_, signal);
+    cleanup.clean_now();
     co_return recent_quorums_.back();
 }
 
@@ -274,6 +316,23 @@ ValidationBuffer::co_latest_quorum()
     }
 
     co_return recent_quorums_.back();
+}
+
+asio::awaitable<ValidationBuffer::Stats>
+ValidationBuffer::co_stats()
+{
+    co_await asio::post(strand_, asio::use_awaitable);
+
+    size_t collector_validations = 0;
+    for (auto const& [_, entries] : collector_.by_ledger)
+        collector_validations += entries.size();
+
+    co_return Stats{
+        .recent_quorums = recent_quorums_.size(),
+        .collector_ledgers = collector_.by_ledger.size(),
+        .collector_validations = collector_validations,
+        .waiters = waiters_.size(),
+    };
 }
 
 void

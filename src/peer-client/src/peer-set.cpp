@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/deferred.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/experimental/parallel_group.hpp>
 #include <cassert>
 #include <limits>
 
@@ -37,18 +39,65 @@ namespace catl::peer_client {
 
 static LogPartition log_("peer-set", LogLevel::INHERIT);
 
-/// Sleep on a strand with automatic re-hop. After co_await, the coroutine
-/// is guaranteed to be running on the strand — unlike a bare timer co_await
-/// which resumes on the coroutine's birth executor.
-static asio::awaitable<void>
-strand_sleep(
+enum class WaitOutcome {
+    signaled,
+    timed_out,
+    canceled,
+};
+
+static asio::awaitable<WaitOutcome>
+wait_for_signal_or_timeout(
     asio::strand<asio::io_context::executor_type>& strand,
-    std::chrono::milliseconds ms)
+    std::shared_ptr<asio::steady_timer> signal,
+    std::chrono::milliseconds timeout,
+    std::shared_ptr<std::atomic<bool>> cancel = nullptr)
 {
-    asio::steady_timer timer(strand, ms);
-    boost::system::error_code ec;
-    co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, ec));
-    co_await asio::post(strand, asio::use_awaitable);
+    if (cancel && cancel->load(std::memory_order_relaxed))
+        co_return WaitOutcome::canceled;
+    if (timeout <= std::chrono::milliseconds::zero())
+        co_return WaitOutcome::timed_out;
+
+    static constexpr auto kCancelPoll = std::chrono::milliseconds(25);
+    auto remaining = timeout;
+
+    while (remaining > std::chrono::milliseconds::zero())
+    {
+        auto slice = cancel ? std::min(remaining, kCancelPoll) : remaining;
+        auto [order, ex0, ec0, ex1, ec1] =
+            co_await asio::experimental::make_parallel_group(
+                asio::co_spawn(
+                    strand,
+                    [signal]() -> asio::awaitable<boost::system::error_code> {
+                        boost::system::error_code ec;
+                        co_await signal->async_wait(
+                            asio::redirect_error(asio::use_awaitable, ec));
+                        co_return ec;
+                    },
+                    asio::deferred),
+                asio::co_spawn(
+                    strand,
+                    [strand, slice]() -> asio::awaitable<boost::system::error_code> {
+                        asio::steady_timer timer(strand, slice);
+                        boost::system::error_code ec;
+                        co_await timer.async_wait(
+                            asio::redirect_error(asio::use_awaitable, ec));
+                        co_return ec;
+                    },
+                    asio::deferred))
+                .async_wait(
+                    asio::experimental::wait_for_one(), asio::use_awaitable);
+
+        co_await asio::post(strand, asio::use_awaitable);
+
+        if (order[0] == 0)
+            co_return WaitOutcome::signaled;
+
+        remaining -= slice;
+        if (cancel && cancel->load(std::memory_order_relaxed))
+            co_return WaitOutcome::canceled;
+    }
+
+    co_return WaitOutcome::timed_out;
 }
 
 namespace {
@@ -96,6 +145,7 @@ static const std::vector<BootstrapPeer> XRPL_BOOTSTRAP = {
 
 static const std::vector<BootstrapPeer> XAHAU_BOOTSTRAP = {
     {"bacab.alloy.ee", 21337},
+    {"hubs.xahau.as16089.net", 21337},
 };
 
 static const std::vector<BootstrapPeer> EMPTY_BOOTSTRAP = {};
@@ -245,6 +295,7 @@ PeerSet::note_discovered(std::string const& endpoint)
     prune_discovery_state();
     pump_crawls();
     pump_connects();
+    notify_waiters();
 }
 
 void
@@ -265,6 +316,7 @@ PeerSet::note_status(std::string const& endpoint, PeerStatus const& status)
     prune_discovery_state();
     pump_crawls();
     pump_connects();
+    notify_waiters();
 }
 
 void
@@ -281,6 +333,7 @@ PeerSet::note_connect_success(
     stats.last_success_at = now;
     stats.success_count++;
     sort_pending_connects();
+    notify_waiters();
 }
 
 void
@@ -292,6 +345,30 @@ PeerSet::note_connect_failure(std::string const& endpoint)
     stats.last_failure_at = now_unix();
     stats.failure_count++;
     sort_pending_connects();
+    notify_waiters();
+}
+
+std::shared_ptr<asio::steady_timer>
+PeerSet::attach_wait_signal()
+{
+    ASSERT_ON_STRAND();
+    if (!wait_signal_)
+    {
+        wait_signal_ = std::make_shared<asio::steady_timer>(
+            strand_, asio::steady_timer::time_point::max());
+    }
+    return wait_signal_;
+}
+
+void
+PeerSet::notify_waiters()
+{
+    ASSERT_ON_STRAND();
+    auto wake = wait_signal_;
+    wait_signal_ = std::make_shared<asio::steady_timer>(
+        strand_, asio::steady_timer::time_point::max());
+    if (wake)
+        wake->cancel();
 }
 
 std::vector<std::shared_ptr<PeerClient>>
@@ -965,7 +1042,7 @@ PeerSet::pump_crawls()
                         }
                     }
 
-                    PLOGD(
+                    PLOGI(
                         log_,
                         "Crawled ",
                         key,
@@ -979,7 +1056,7 @@ PeerSet::pump_crawls()
                 }
                 catch (std::exception const& e)
                 {
-                    PLOGD(log_, "Crawl failed for ", key, ": ", e.what());
+                    PLOGW(log_, "Crawl failed for ", key, ": ", e.what());
                 }
 
                 self->crawl_in_flight_.erase(key);
@@ -1252,7 +1329,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
     }
     catch (std::exception const& e)
     {
-        PLOGD(log_, "Failed to connect to ", key, ": ", e.what());
+        PLOGW(log_, "Failed to connect to ", key, ": ", e.what());
         failed_at_[key] = std::chrono::steady_clock::now();
         note_connect_failure(key);
         if (endpoint_cache_)
@@ -1530,23 +1607,34 @@ PeerSet::wait_for_any_peer(
         tracker_->size(),
         " known, Ctrl-C to cancel)");
 
-    for (int elapsed_ms = 0; elapsed_ms < timeout_secs * 1000;
-         elapsed_ms += 200)
+    auto const start = std::chrono::steady_clock::now();
+    auto const deadline = start + std::chrono::seconds(timeout_secs);
+    auto next_maintenance = start + std::chrono::seconds(1);
+    auto next_log = start + std::chrono::seconds(5);
+
+    for (;;)
     {
-        co_await strand_sleep(strand_, std::chrono::milliseconds(200));
+        auto const now = std::chrono::steady_clock::now();
+
+        if (now >= next_maintenance)
+        {
+            start_tracked_endpoints();
+            try_undiscovered();
+            while (next_maintenance <= now)
+                next_maintenance += std::chrono::seconds(1);
+        }
 
         if (auto client = choose_any_peer(excluded))
         {
             co_return client;
         }
 
-        if (((elapsed_ms + 200) % 1000) == 0)
+        if (now >= deadline)
         {
-            start_tracked_endpoints();
-            try_undiscovered();
+            break;
         }
 
-        if (((elapsed_ms + 200) % 5000) == 0)
+        if (now >= next_log)
         {
             PLOGI(
                 log_,
@@ -1557,7 +1645,16 @@ PeerSet::wait_for_any_peer(
                 " in-flight, ",
                 tracker_->size(),
                 " known)");
+            while (next_log <= now)
+                next_log += std::chrono::seconds(5);
         }
+
+        auto wait_until = std::min({deadline, next_maintenance, next_log});
+        auto wait_signal = attach_wait_signal();
+        auto const wait_for = std::chrono::duration_cast<std::chrono::milliseconds>(
+            wait_until - std::chrono::steady_clock::now());
+        co_await wait_for_signal_or_timeout(
+            strand_, wait_signal, wait_for);
     }
 
     PLOGW(log_, "[", net_label_, "] No ready peer found after ", timeout_secs, "s");
@@ -1565,20 +1662,64 @@ PeerSet::wait_for_any_peer(
 }
 
 boost::asio::awaitable<std::shared_ptr<PeerClient>>
-PeerSet::wait_for_peer(uint32_t ledger_seq, int timeout_secs)
+PeerSet::wait_for_peer(
+    uint32_t ledger_seq,
+    int timeout_secs,
+    std::shared_ptr<std::atomic<bool>> cancel)
 {
     static std::unordered_set<std::string> const empty;
-    co_return co_await wait_for_peer(ledger_seq, timeout_secs, empty);
+    co_return co_await wait_for_peer(ledger_seq, timeout_secs, empty, cancel);
 }
 
 boost::asio::awaitable<std::shared_ptr<PeerClient>>
 PeerSet::wait_for_peer(
     uint32_t ledger_seq,
     int timeout_secs,
-    std::unordered_set<std::string> const& excluded)
+    std::unordered_set<std::string> const& excluded,
+    std::shared_ptr<std::atomic<bool>> cancel)
 {
     // Hop to strand — all PeerSet state access must be serialized
     co_await asio::post(strand_, asio::use_awaitable);
+
+    if (cancel && cancel->load(std::memory_order_relaxed))
+        co_return nullptr;
+
+    auto self = shared_from_this();
+    struct WantedLedgerCleanup
+    {
+        std::weak_ptr<PeerSet> self;
+        asio::strand<asio::io_context::executor_type> strand;
+        uint32_t ledger_seq = 0;
+        bool active = true;
+
+        void
+        clean_now()
+        {
+            if (!active)
+                return;
+            if (auto locked = self.lock())
+                locked->wanted_ledgers_.erase(ledger_seq);
+            active = false;
+        }
+
+        ~WantedLedgerCleanup()
+        {
+            if (!active)
+                return;
+            try
+            {
+                asio::post(
+                    strand,
+                    [self = std::move(self), ledger_seq = ledger_seq]() mutable {
+                        if (auto locked = self.lock())
+                            locked->wanted_ledgers_.erase(ledger_seq);
+                    });
+            }
+            catch (...)
+            {
+            }
+        }
+    } cleanup{self, strand_, ledger_seq};
 
     // Register this ledger as a wanted target so should_connect_endpoint
     // and evict_for can prioritize candidates that cover it.
@@ -1645,7 +1786,7 @@ PeerSet::wait_for_peer(
                     " for ledger ",
                     ledger_seq);
                 note_peer_selected(sel.endpoint);
-                wanted_ledgers_.erase(ledger_seq);
+                cleanup.clean_now();
                 co_return it->second;
             }
         }
@@ -1663,14 +1804,51 @@ PeerSet::wait_for_peer(
         tracker_->size(),
         " known)");
 
-    for (int elapsed_ms = 0; elapsed_ms < timeout_ms;
-         elapsed_ms += 200)
+    auto const start = std::chrono::steady_clock::now();
+    auto const deadline = start + std::chrono::milliseconds(timeout_ms);
+    auto next_maintenance = start + std::chrono::seconds(1);
+    auto next_log = start + std::chrono::seconds(5);
+
+    for (;;)
     {
-        co_await strand_sleep(strand_, std::chrono::milliseconds(200));
+        if (cancel && cancel->load(std::memory_order_relaxed))
+        {
+            cleanup.clean_now();
+            PLOGD(
+                log_,
+                "[", net_label_, "] wait_for_peer canceled for ledger ",
+                ledger_seq);
+            co_return nullptr;
+        }
+
+        auto const now = std::chrono::steady_clock::now();
+        auto const elapsed_ms = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - start)
+                .count());
+
+        if (now >= next_maintenance)
+        {
+            if (at_connection_cap())
+                evict_for(ledger_seq);
+            try_candidates_for(ledger_seq);
+            while (next_maintenance <= now)
+                next_maintenance += std::chrono::seconds(1);
+        }
+
+        if (cancel && cancel->load(std::memory_order_relaxed))
+        {
+            cleanup.clean_now();
+            PLOGD(
+                log_,
+                "[", net_label_, "] wait_for_peer canceled for ledger ",
+                ledger_seq);
+            co_return nullptr;
+        }
 
         auto sel = select_peer(
             ledger_seq, snapshot_peers(), excluded,
-            elapsed_ms + 200, fallback_ms, timeout_ms);
+            elapsed_ms, fallback_ms, timeout_ms);
 
         switch (sel.decision)
         {
@@ -1695,13 +1873,13 @@ PeerSet::wait_for_peer(
                         it->second->peer_last_seq(),
                         ")");
                     note_peer_selected(sel.endpoint);
-                    wanted_ledgers_.erase(ledger_seq);
+                    cleanup.clean_now();
                     co_return it->second;
                 }
                 break;  // selected peer vanished, keep polling
             }
             case PeerDecision::give_up:
-                wanted_ledgers_.erase(ledger_seq);
+                cleanup.clean_now();
                 PLOGW(
                     log_,
                     "[", net_label_, "] No peer found with ledger ",
@@ -1715,15 +1893,12 @@ PeerSet::wait_for_peer(
                 break;
         }
 
-        // Periodic discovery actions
-        if (((elapsed_ms + 200) % 1000) == 0)
+        if (now >= deadline)
         {
-            if (at_connection_cap())
-                evict_for(ledger_seq);
-            try_candidates_for(ledger_seq);
+            break;
         }
 
-        if (((elapsed_ms + 200) % 5000) == 0)
+        if (now >= next_log)
         {
             PLOGI(
                 log_,
@@ -1736,10 +1911,28 @@ PeerSet::wait_for_peer(
                 " in-flight, ",
                 tracker_->size(),
                 " known)");
+            while (next_log <= now)
+                next_log += std::chrono::seconds(5);
+        }
+
+        auto wait_until = std::min({deadline, next_maintenance, next_log});
+        auto wait_signal = attach_wait_signal();
+        auto const wait_for = std::chrono::duration_cast<std::chrono::milliseconds>(
+            wait_until - std::chrono::steady_clock::now());
+        auto outcome = co_await wait_for_signal_or_timeout(
+            strand_, wait_signal, wait_for, cancel);
+        if (outcome == WaitOutcome::canceled)
+        {
+            cleanup.clean_now();
+            PLOGD(
+                log_,
+                "[", net_label_, "] wait_for_peer canceled for ledger ",
+                ledger_seq);
+            co_return nullptr;
         }
     }
 
-    wanted_ledgers_.erase(ledger_seq);
+    cleanup.clean_now();
     PLOGW(
         log_,
         "[", net_label_, "] No peer found with ledger ",
@@ -2020,6 +2213,7 @@ PeerSet::remove_peer(std::string const& key)
         PLOGI(log_, "[", net_label_, "] Removing dead peer: ", key);
         connections_.erase(it);
         tracker_->remove(key);
+        notify_waiters();
     }
 }
 

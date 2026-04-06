@@ -19,6 +19,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <vector>
@@ -83,7 +84,27 @@ public:
             1,                // speculative_depth
             nullptr,          // no peer (wait path)
             nullptr,          // no peers
-            0);               // ledger_seq
+            0,
+            nullptr);         // ledger_seq / cancel
+    }
+
+    static asio::awaitable<std::shared_ptr<std::vector<uint8_t>>>
+    wait_for_hash_with_cancel(
+        std::shared_ptr<NodeCache> cache,
+        Hash256 hash,
+        std::shared_ptr<std::atomic<bool>> cancel)
+    {
+        co_return co_await cache->ensure_present(
+            hash,
+            make_hash(0xBB),  // ledger_hash (unused in wait path)
+            2,                // tree_type
+            SHAMapNodeID::root(),
+            hash,             // target_key
+            1,                // speculative_depth
+            nullptr,          // no peer (wait path)
+            nullptr,          // no peers
+            0,
+            cancel);          // ledger_seq / cancel
     }
 
     /// Get the signal for an entry (for testing expiry behavior).
@@ -135,6 +156,20 @@ public:
         auto& entry = cache.header_cache_[ledger_seq];
         entry.present = true;
         entry.signal = nullptr;
+        cache.touch_header_lru(ledger_seq);
+        cache.evict_headers_if_needed();
+    }
+
+    static void
+    create_in_flight_header(
+        NodeCache& cache,
+        uint32_t ledger_seq,
+        std::chrono::milliseconds timeout)
+    {
+        std::lock_guard lock(cache.mutex_);
+        auto& entry = cache.header_cache_[ledger_seq];
+        entry.present = false;
+        entry.signal = std::make_shared<asio::steady_timer>(cache.io_, timeout);
         cache.touch_header_lru(ledger_seq);
         cache.evict_headers_if_needed();
     }
@@ -485,4 +520,197 @@ TEST(NodeCacheIntegration, HeaderCacheIsBounded)
 
     auto stats = cache->stats();
     EXPECT_EQ(stats.header_entries, max_headers);
+}
+
+TEST(NodeCacheIntegration, TimedOutHeaderWaiterClearsStaleEntry)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(io, {
+        .max_entries = 1024,
+        .fetch_timeout = std::chrono::milliseconds(1000),
+    });
+
+    constexpr uint32_t ledger_seq = 123456u;
+    NodeCacheTestAccess::create_in_flight_header(
+        *cache, ledger_seq, std::chrono::milliseconds(25));
+
+    bool done = false;
+    bool timed_out = false;
+
+    asio::co_spawn(
+        io,
+        [&, cache]() -> asio::awaitable<void> {
+            try
+            {
+                (void)co_await cache->get_header(ledger_seq, nullptr, nullptr);
+            }
+            catch (std::exception const&)
+            {
+                timed_out = true;
+            }
+            done = true;
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(done);
+    EXPECT_TRUE(timed_out);
+    EXPECT_FALSE(NodeCacheTestAccess::has_header(*cache, ledger_seq));
+}
+
+TEST(NodeCacheIntegration, CancelledEnsurePresentReturnsPromptly)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(io, {
+        .max_entries = 1024,
+        .fetch_timeout = std::chrono::seconds(5),
+    });
+
+    auto hash = make_hash(0x31);
+    auto cancel = std::make_shared<std::atomic<bool>>(false);
+    NodeCacheTestAccess::create_in_flight(
+        *cache, hash, std::chrono::seconds(5));
+
+    bool done = false;
+    std::shared_ptr<std::vector<uint8_t>> result;
+    auto const started = std::chrono::steady_clock::now();
+
+    asio::co_spawn(
+        io,
+        [&, cache, cancel]() -> asio::awaitable<void> {
+            result = co_await NodeCacheTestAccess::wait_for_hash_with_cancel(
+                cache, hash, cancel);
+            done = true;
+        },
+        asio::detached);
+
+    asio::steady_timer cancel_timer(io, std::chrono::milliseconds(10));
+    cancel_timer.async_wait([cancel](boost::system::error_code const&) {
+        cancel->store(true, std::memory_order_relaxed);
+    });
+
+    io.run();
+
+    auto const elapsed = std::chrono::steady_clock::now() - started;
+    EXPECT_TRUE(done);
+    EXPECT_EQ(result, nullptr);
+    EXPECT_LT(elapsed, std::chrono::milliseconds(500));
+    EXPECT_TRUE(NodeCacheTestAccess::has_entry(*cache, hash));
+}
+
+TEST(NodeCacheIntegration, CancelledEnsurePresentDoesNotPoisonSharedEntry)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(io, {
+        .max_entries = 1024,
+        .fetch_timeout = std::chrono::seconds(5),
+    });
+
+    auto hash = make_hash(0x32);
+    auto data = make_data(88, 0x55);
+    auto cancel = std::make_shared<std::atomic<bool>>(false);
+    NodeCacheTestAccess::create_in_flight(
+        *cache, hash, std::chrono::seconds(5));
+
+    bool canceled_done = false;
+    bool second_done = false;
+    std::shared_ptr<std::vector<uint8_t>> second_result;
+
+    asio::co_spawn(
+        io,
+        [&, cache, cancel]() -> asio::awaitable<void> {
+            auto result = co_await NodeCacheTestAccess::wait_for_hash_with_cancel(
+                cache, hash, cancel);
+            EXPECT_EQ(result, nullptr);
+            canceled_done = true;
+        },
+        asio::detached);
+
+    asio::steady_timer cancel_timer(io, std::chrono::milliseconds(10));
+    cancel_timer.async_wait([cancel](boost::system::error_code const&) {
+        cancel->store(true, std::memory_order_relaxed);
+    });
+
+    io.run();
+
+    EXPECT_TRUE(canceled_done);
+    io.restart();
+
+    cache->insert_and_notify(hash, data);
+
+    asio::co_spawn(
+        io,
+        [&, cache]() -> asio::awaitable<void> {
+            second_result = co_await NodeCacheTestAccess::wait_for_hash(cache, hash);
+            second_done = true;
+        },
+        asio::detached);
+
+    io.poll();
+
+    EXPECT_TRUE(second_done);
+    ASSERT_NE(second_result, nullptr);
+    EXPECT_EQ(second_result->size(), 88u);
+}
+
+TEST(NodeCacheIntegration, CancelledHeaderFetchClearsInFlightEntry)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(io, {
+        .max_entries = 1024,
+        .fetch_timeout = std::chrono::seconds(5),
+    });
+    auto peers = PeerSet::create(io, PeerSetOptions{
+        .network_id = 0,
+        .max_in_flight_connects = 0,
+        .max_in_flight_crawls = 0,
+    });
+
+    bool done = false;
+    bool cancel_branch_won = false;
+    constexpr uint32_t ledger_seq = 654321u;
+
+    asio::co_spawn(
+        io,
+        [&, cache, peers]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            auto result =
+                co_await asio::experimental::make_parallel_group(
+                    asio::co_spawn(
+                        ex,
+                        cache->get_header(ledger_seq, peers, nullptr),
+                        asio::deferred),
+                    asio::co_spawn(
+                        ex,
+                        []() -> asio::awaitable<void> {
+                            auto ex = co_await asio::this_coro::executor;
+                            asio::steady_timer timer(
+                                ex, std::chrono::milliseconds(10));
+                            boost::system::error_code ec;
+                            co_await timer.async_wait(
+                                asio::redirect_error(
+                                    asio::use_awaitable, ec));
+                        },
+                        asio::deferred))
+                    .async_wait(
+                        asio::experimental::wait_for_one(),
+                        asio::use_awaitable);
+
+            cancel_branch_won = (std::get<0>(result)[0] == 1);
+
+            asio::steady_timer drain(ex, std::chrono::milliseconds(1));
+            boost::system::error_code drain_ec;
+            co_await drain.async_wait(
+                asio::redirect_error(asio::use_awaitable, drain_ec));
+
+            done = true;
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(done);
+    EXPECT_TRUE(cancel_branch_won);
+    EXPECT_FALSE(NodeCacheTestAccess::has_header(*cache, ledger_seq));
 }

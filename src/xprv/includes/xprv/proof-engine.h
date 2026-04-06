@@ -104,6 +104,7 @@ public:
         size_t peer_count = 0;
         bool vl_loaded = false;
         std::optional<uint32_t> latest_quorum_seq;
+        ValidationBuffer::Stats validation_buffer;
     };
     boost::asio::awaitable<Status>
     co_health();

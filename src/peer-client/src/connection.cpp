@@ -445,19 +445,19 @@ peer_connection::handle_http_response(const connection_handler& handler)
     }
 
     // Log important response headers
-    PLOGI(log_, "HTTP upgrade successful - examining response headers:");
+    PLOGD(log_, "HTTP upgrade successful - examining response headers:");
 
     // Check protocol version
     if (auto it = http_response_.find("Upgrade"); it != http_response_.end())
     {
-        PLOGI(log_, "  Protocol version: ", it->value());
+        PLOGD(log_, "  Protocol version: ", it->value());
         protocol_version_ = std::string(it->value());
     }
 
     // Check server version
     if (auto it = http_response_.find("Server"); it != http_response_.end())
     {
-        PLOGI(log_, "  Server: ", it->value());
+        PLOGD(log_, "  Server: ", it->value());
         server_version_ = std::string(it->value());
     }
 
@@ -465,34 +465,34 @@ peer_connection::handle_http_response(const connection_handler& handler)
     if (auto it = http_response_.find("X-Protocol-Ctl");
         it != http_response_.end())
     {
-        PLOGI(log_, "  Protocol features: ", it->value());
+        PLOGD(log_, "  Protocol features: ", it->value());
         // TODO: Parse features like LEDGER_REPLAY=1
     }
 
     // Check network ID
     if (auto it = http_response_.find("Network-ID"); it != http_response_.end())
     {
-        PLOGI(log_, "  Network ID: ", it->value());
+        PLOGD(log_, "  Network ID: ", it->value());
         network_id_ = std::string(it->value());
     }
 
     // Check public key
     if (auto it = http_response_.find("Public-Key"); it != http_response_.end())
     {
-        PLOGI(log_, "  Node public key: ", it->value());
+        PLOGD(log_, "  Node public key: ", it->value());
     }
 
     // Check closed ledger info
     if (auto it = http_response_.find("Closed-Ledger");
         it != http_response_.end())
     {
-        PLOGI(log_, "  Closed ledger: ", it->value());
+        PLOGD(log_, "  Closed ledger: ", it->value());
     }
 
     if (auto it = http_response_.find("Previous-Ledger");
         it != http_response_.end())
     {
-        PLOGI(log_, "  Previous ledger: ", it->value());
+        PLOGD(log_, "  Previous ledger: ", it->value());
     }
 
     // Log any other headers we might not know about
@@ -562,7 +562,14 @@ peer_connection::handle_read_header(
 
         if (ec != asio::error::operation_aborted)
         {
-            PLOGI(log_, "Connection closed during header read");
+            PLOGW(
+                log_,
+                remote_endpoint(),
+                " connection closed during header read: ",
+                ec.message(),
+                " (val=",
+                ec.value(),
+                ")");
             fail_and_close(ec);
         }
         return;
@@ -675,7 +682,14 @@ peer_connection::handle_read_payload(
         // Check if it's EOF or connection closed
         if (ec != asio::error::operation_aborted)
         {
-            PLOGI(log_, "Connection closed during payload read");
+            PLOGW(
+                log_,
+                remote_endpoint(),
+                " connection closed during payload read: ",
+                ec.message(),
+                " (val=",
+                ec.value(),
+                ")");
             fail_and_close(ec);
         }
         return;
@@ -779,7 +793,14 @@ peer_connection::do_write()
             {
                 if (ec != asio::error::operation_aborted)
                 {
-                    PLOGI(log_, "Connection lost during write");
+                    PLOGW(
+                        log_,
+                        self->remote_endpoint(),
+                        " connection lost during write: ",
+                        ec.message(),
+                        " (val=",
+                        ec.value(),
+                        ")");
                     self->fail_and_close(ec);
                 }
                 return;

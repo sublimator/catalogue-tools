@@ -117,7 +117,7 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
                 std::snprintf(buf, sizeof(buf), "%02X", b);
                 hex += buf;
             }
-            PLOGI(
+            PLOGD(
                 log_,
                 "[", net_label_, "] FIRST validation hex (",
                 val_bytes.size(), "B): ", hex);

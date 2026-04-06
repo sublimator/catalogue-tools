@@ -59,6 +59,64 @@ wait_for_signal_or_progress(
     co_return std::pair{1, ec1};
 }
 
+asio::awaitable<std::pair<int, boost::system::error_code>>
+wait_for_signal_or_progress_or_cancel(
+    std::shared_ptr<asio::steady_timer> done_signal,
+    std::shared_ptr<asio::steady_timer> progress_signal,
+    std::shared_ptr<std::atomic<bool>> cancel)
+{
+    if (!cancel)
+        co_return co_await wait_for_signal_or_progress(
+            std::move(done_signal), std::move(progress_signal));
+
+    static constexpr auto kCancelPollInterval = std::chrono::milliseconds(25);
+
+    auto ex = co_await asio::this_coro::executor;
+    while (!cancel->load(std::memory_order_relaxed))
+    {
+        auto [order, ex0, ec0, ex1, ec1, ex2, ec2] =
+            co_await asio::experimental::make_parallel_group(
+                asio::co_spawn(
+                    ex,
+                    [done_signal]() -> asio::awaitable<boost::system::error_code> {
+                        boost::system::error_code ec;
+                        co_await done_signal->async_wait(
+                            asio::redirect_error(asio::use_awaitable, ec));
+                        co_return ec;
+                    },
+                    asio::deferred),
+                asio::co_spawn(
+                    ex,
+                    [progress_signal]()
+                        -> asio::awaitable<boost::system::error_code> {
+                        boost::system::error_code ec;
+                        co_await progress_signal->async_wait(
+                            asio::redirect_error(asio::use_awaitable, ec));
+                        co_return ec;
+                    },
+                    asio::deferred),
+                asio::co_spawn(
+                    ex,
+                    [ex]() -> asio::awaitable<boost::system::error_code> {
+                        asio::steady_timer timer(ex, kCancelPollInterval);
+                        boost::system::error_code ec;
+                        co_await timer.async_wait(
+                            asio::redirect_error(asio::use_awaitable, ec));
+                        co_return ec;
+                    },
+                    asio::deferred))
+                .async_wait(
+                    asio::experimental::wait_for_one(), asio::use_awaitable);
+
+        if (order[0] == 0)
+            co_return std::pair{0, ec0};
+        if (order[0] == 1)
+            co_return std::pair{1, ec1};
+    }
+
+    co_return std::pair{2, boost::system::error_code{}};
+}
+
 }  // namespace
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -370,7 +428,7 @@ NodeCache::walk_to(
                 " doesn't cover ledger ",
                 ledger_seq,
                 " — acquiring one");
-            peer = co_await peers->wait_for_peer(ledger_seq, 10);
+            peer = co_await peers->wait_for_peer(ledger_seq, 10, cancel);
         }
         if (!peer || !peer->is_ready())
         {
@@ -419,7 +477,7 @@ NodeCache::walk_to(
 
         auto wire = co_await ensure_present(
             cursor, ledger_hash, tree_type, pos, target_key, spec_depth,
-            peer, peers, ledger_seq);
+            peer, peers, ledger_seq, cancel);
 
         // Halve speculation after each fetch round
         if (spec_depth > 1)
@@ -514,7 +572,8 @@ NodeCache::walk_to(
                     static_cast<uint8_t>(total_retries),
                     static_cast<uint8_t>(max_retries));
                 auto new_peer =
-                    co_await peers->wait_for_peer(ledger_seq, 10, failed_peers);
+                    co_await peers->wait_for_peer(
+                        ledger_seq, 10, failed_peers, cancel);
                 if (new_peer && new_peer->is_ready())
                 {
                     catl::core::emit_status(
@@ -645,8 +704,12 @@ NodeCache::ensure_present(
     int speculative_depth,
     std::shared_ptr<PeerClient> peer,
     std::shared_ptr<PeerSet> peers,
-    uint32_t ledger_seq)
+    uint32_t ledger_seq,
+    std::shared_ptr<std::atomic<bool>> cancel)
 {
+    if (cancel && cancel->load(std::memory_order_relaxed))
+        co_return nullptr;
+
     enum class Action { hit, return_null, wait, send_and_wait };
     Action action;
     std::shared_ptr<std::vector<uint8_t>> hit_data;
@@ -764,6 +827,8 @@ NodeCache::ensure_present(
         co_return hit_data;
     if (action == Action::return_null)
         co_return nullptr;
+    if (cancel && cancel->load(std::memory_order_relaxed))
+        co_return nullptr;
 
     if (action == Action::wait)
     {
@@ -800,6 +865,9 @@ NodeCache::ensure_present(
             speculative_depth,
             peer);
 
+        if (cancel && cancel->load(std::memory_order_relaxed))
+            co_return nullptr;
+
         // Fan-out: also send to additional peers from PeerSet.
         // First response wins via insert_and_notify (content-addressed).
         // Duplicate responses are harmless (already-present early return).
@@ -831,7 +899,13 @@ NodeCache::ensure_present(
                 }
             }
         }
+
+        if (cancel && cancel->load(std::memory_order_relaxed))
+            co_return nullptr;
     }
+
+    if (cancel && cancel->load(std::memory_order_relaxed))
+        co_return nullptr;
 
     WaitRegistration wait;
     {
@@ -852,8 +926,8 @@ NodeCache::ensure_present(
 
     for (;;)
     {
-        auto [wake_kind, ec] = co_await wait_for_signal_or_progress(
-            wait.done_signal, wait.progress_signal);
+        auto [wake_kind, ec] = co_await wait_for_signal_or_progress_or_cancel(
+            wait.done_signal, wait.progress_signal, cancel);
 
         std::vector<ProgressEvent> progress_events;
         {
@@ -876,6 +950,15 @@ NodeCache::ensure_present(
 
         for (auto const& event : progress_events)
             catl::core::emit_status(format_progress(event));
+
+        if (wake_kind == 2)
+        {
+            PLOGD(
+                log_,
+                "  ensure: CANCELLED hash=",
+                expected_hash.hex().substr(0, 16));
+            co_return nullptr;
+        }
 
         if (wake_kind == 1)
             continue;
@@ -1235,6 +1318,30 @@ NodeCache::get_header(
     if (action == Action::hit)
         co_return hit_result;
 
+    auto abandon_header_fetch =
+        [&](std::shared_ptr<asio::steady_timer> const& expected_signal) {
+            std::shared_ptr<asio::steady_timer> sig;
+            {
+                std::lock_guard lock(mutex_);
+                auto it = header_cache_.find(ledger_seq);
+                if (
+                    it != header_cache_.end() && !it->second.present &&
+                    (!expected_signal || it->second.signal == expected_signal))
+                {
+                    sig = it->second.signal;
+                    header_cache_.erase(it);
+                    if (auto lru_it = header_lru_map_.find(ledger_seq);
+                        lru_it != header_lru_map_.end())
+                    {
+                        header_lru_.erase(lru_it->second);
+                        header_lru_map_.erase(lru_it);
+                    }
+                }
+            }
+            if (sig)
+                sig->cancel();
+        };
+
     if (action == Action::wait)
     {
         catl::core::emit_status(
@@ -1279,6 +1386,10 @@ NodeCache::get_header(
             if (wake_kind == 1)
                 continue;
 
+            // The owner disappeared or exhausted retries without
+            // publishing a result. Drop the stale in-flight slot so the
+            // next caller can start a fresh fetch immediately.
+            abandon_header_fetch(wait.done_signal);
             throw PeerClientException(Error::Timeout);
         }
     }
@@ -1289,6 +1400,33 @@ NodeCache::get_header(
     // provided peer (if any), subsequent attempts get a new peer
     // from the PeerSet. This handles the common case where the
     // first peer times out but another can serve the header.
+    std::shared_ptr<asio::steady_timer> owned_signal;
+    {
+        std::lock_guard lock(mutex_);
+        auto it = header_cache_.find(ledger_seq);
+        if (it != header_cache_.end())
+            owned_signal = it->second.signal;
+    }
+
+    struct HeaderFetchCleanup
+    {
+        decltype(abandon_header_fetch)& abandon;
+        std::shared_ptr<asio::steady_timer> owned_signal;
+        bool active = true;
+
+        void
+        dismiss()
+        {
+            active = false;
+        }
+
+        ~HeaderFetchCleanup()
+        {
+            if (active)
+                abandon(owned_signal);
+        }
+    } cleanup{abandon_header_fetch, owned_signal};
+
     static constexpr int kMaxHeaderRetries = 3;
     std::unordered_set<std::string> tried_peers;
 
@@ -1370,6 +1508,7 @@ NodeCache::get_header(
                 " (attempt ",
                 attempt + 1,
                 ")");
+            cleanup.dismiss();
             co_return result;
         }
         catch (std::exception const& e)
@@ -1412,26 +1551,6 @@ NodeCache::get_header(
         ProgressKind::give_up,
         static_cast<uint8_t>(kMaxHeaderRetries),
         static_cast<uint8_t>(kMaxHeaderRetries));
-    {
-        std::shared_ptr<asio::steady_timer> sig;
-        {
-            std::lock_guard lock(mutex_);
-            auto it = header_cache_.find(ledger_seq);
-            if (it != header_cache_.end())
-            {
-                sig = it->second.signal;
-                header_cache_.erase(it);
-                if (auto lru_it = header_lru_map_.find(ledger_seq);
-                    lru_it != header_lru_map_.end())
-                {
-                    header_lru_.erase(lru_it->second);
-                    header_lru_map_.erase(lru_it);
-                }
-            }
-        }
-        if (sig)
-            sig->cancel();
-    }
     throw PeerClientException(Error::Timeout);
 }
 
