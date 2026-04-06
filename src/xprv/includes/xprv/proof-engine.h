@@ -292,11 +292,6 @@ private:
     get_or_reuse_anchor(std::shared_ptr<catl::vl::ValidatorList> const& vl,
                         uint32_t max_age_secs);
 
-    boost::asio::awaitable<QuorumEntry>
-    co_wait_for_proof_quorum(
-        std::shared_ptr<catl::vl::ValidatorList> const& vl,
-        std::chrono::seconds timeout = std::chrono::seconds(30));
-
     void
     invalidate_anchor_cache();
 

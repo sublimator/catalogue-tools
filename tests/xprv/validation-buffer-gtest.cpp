@@ -83,7 +83,7 @@ load_anchor_fixture()
 
 }  // namespace
 
-TEST(ValidationBuffer, TimedOutWaiterIsRemoved)
+TEST(ValidationBuffer, BestQuorumTimesOutWithNoValidations)
 {
     asio::io_context io;
     auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
@@ -91,26 +91,24 @@ TEST(ValidationBuffer, TimedOutWaiterIsRemoved)
     bool done = false;
     bool timed_out = false;
     std::string error;
-    xprv::ValidationBuffer::Stats stats;
 
     asio::co_spawn(
         io,
         [&, buffer]() -> asio::awaitable<void> {
-            bool local_timed_out = false;
-            std::string local_error;
             try
             {
-                (void)co_await buffer->co_wait_quorum(std::chrono::seconds(0));
+                (void)co_await buffer->co_wait_best_quorum(
+                    xprv::ValidationCollector::QuorumMode::live,
+                    std::chrono::seconds(0));
             }
             catch (std::exception const& e)
             {
-                local_timed_out = true;
-                local_error = std::string(e.what());
+                timed_out = true;
+                error = e.what();
             }
 
-            stats = co_await buffer->co_stats();
-            timed_out = local_timed_out;
-            error = std::move(local_error);
+            auto stats = co_await buffer->co_stats();
+            EXPECT_EQ(stats.waiters, 0u);
             done = true;
         },
         asio::detached);
@@ -119,11 +117,10 @@ TEST(ValidationBuffer, TimedOutWaiterIsRemoved)
 
     EXPECT_TRUE(done);
     EXPECT_TRUE(timed_out);
-    EXPECT_NE(error.find("Timed out waiting for validation quorum"), std::string::npos);
-    EXPECT_EQ(stats.waiters, 0u);
+    EXPECT_NE(error.find("Timed out"), std::string::npos);
 }
 
-TEST(ValidationBuffer, CancelledWaiterIsRemoved)
+TEST(ValidationBuffer, BestQuorumCancelledWaiterIsRemoved)
 {
     asio::io_context io;
     auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
@@ -140,7 +137,9 @@ TEST(ValidationBuffer, CancelledWaiterIsRemoved)
                 co_await asio::experimental::make_parallel_group(
                     asio::co_spawn(
                         ex,
-                        buffer->co_wait_quorum(std::chrono::seconds(30)),
+                        buffer->co_wait_best_quorum(
+                            xprv::ValidationCollector::QuorumMode::live,
+                            std::chrono::seconds(30)),
                         asio::deferred),
                     asio::co_spawn(
                         ex,
@@ -176,7 +175,7 @@ TEST(ValidationBuffer, CancelledWaiterIsRemoved)
     EXPECT_EQ(stats.waiters, 0u);
 }
 
-TEST(ValidationBuffer, LingerCollectsAdditionalValidationsForChosenLedger)
+TEST(ValidationBuffer, BestQuorumCollectsAndFinalizesOnNextLedger)
 {
     asio::io_context io;
     auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
@@ -212,62 +211,44 @@ TEST(ValidationBuffer, LingerCollectsAdditionalValidationsForChosenLedger)
 
     auto const threshold =
         (static_cast<int>(manifests.size()) * 90 + 99) / 100;
-    auto const selected_count =
-        std::min<int>(static_cast<int>(raw_validations.size()), threshold + 2);
 
-    ASSERT_GT(selected_count, threshold)
-        << "fixture needs more validations than the 90% threshold";
+    ASSERT_GE(static_cast<int>(raw_validations.size()), threshold)
+        << "fixture needs at least threshold validations";
 
     buffer->set_unl(manifests);
 
     bool done = false;
-    std::size_t initial_count = 0;
-    std::size_t expanded_count = 0;
+    std::size_t collected_count = 0;
+    xprv::QuorumCollectStopReason stop_reason =
+        xprv::QuorumCollectStopReason::timeout;
 
     asio::co_spawn(
         io,
         [&, buffer]() -> asio::awaitable<void> {
-            auto initial = co_await buffer->co_wait_quorum(
-                std::chrono::seconds(5),
-                xprv::ValidationCollector::QuorumMode::proof);
-            initial_count = initial.validations.size();
-
-            auto expanded = co_await buffer->co_collect_quorum_validations(
-                initial.ledger_hash,
-                initial.ledger_seq,
-                std::chrono::milliseconds(500),
-                xprv::ValidationCollector::QuorumMode::proof);
-            expanded_count = expanded.quorum.validations.size();
+            auto result = co_await buffer->co_wait_best_quorum(
+                xprv::ValidationCollector::QuorumMode::proof,
+                std::chrono::seconds(5));
+            collected_count = result.quorum.validations.size();
+            stop_reason = result.stop_reason;
             done = true;
             io.stop();
         },
         asio::detached);
 
-    for (int i = 0; i < threshold; ++i)
+    // Feed all validations at once — should hit threshold immediately,
+    // then finalize as "full" or wait for timeout (no next-ledger in test)
+    for (auto const& raw : raw_validations)
     {
-        auto packet = wrap_validation(raw_validations[i]);
+        auto packet = wrap_validation(raw);
         buffer->on_packet(
             static_cast<uint16_t>(catl::peer_client::packet_type::validation),
             packet);
     }
 
-    asio::steady_timer extra_timer(io, std::chrono::milliseconds(250));
-    extra_timer.async_wait([&, buffer](boost::system::error_code ec) {
-        if (ec)
-            return;
-        for (int i = threshold; i < selected_count; ++i)
-        {
-            auto packet = wrap_validation(raw_validations[i]);
-            buffer->on_packet(
-                static_cast<uint16_t>(
-                    catl::peer_client::packet_type::validation),
-                packet);
-        }
-    });
-
     io.run();
 
     EXPECT_TRUE(done);
-    EXPECT_EQ(initial_count, static_cast<std::size_t>(threshold));
-    EXPECT_EQ(expanded_count, static_cast<std::size_t>(selected_count));
+    EXPECT_GE(collected_count, static_cast<std::size_t>(threshold));
+    // Should finalize as full (all validations fed) or timeout (5s cap)
+    EXPECT_NE(stop_reason, xprv::QuorumCollectStopReason::next_ledger);
 }

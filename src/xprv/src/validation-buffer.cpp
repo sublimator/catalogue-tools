@@ -179,6 +179,7 @@ ValidationBuffer::check_for_new_quorum()
             {
                 active_live_quorum_log_->validations = live->validations;
             }
+            wake = true;
         }
     }
 
@@ -380,80 +381,105 @@ ValidationBuffer::co_latest_quorum()
 }
 
 asio::awaitable<QuorumCollectResult>
-ValidationBuffer::co_collect_quorum_validations(
-    Hash256 const& ledger_hash,
-    uint32_t ledger_seq,
-    std::chrono::milliseconds linger_timeout,
-    ValidationCollector::QuorumMode mode)
+ValidationBuffer::co_wait_best_quorum(
+    ValidationCollector::QuorumMode mode,
+    std::chrono::seconds timeout)
 {
+    // Step 1: Wait for initial quorum at threshold (event-driven)
+    auto quorum = co_await co_wait_quorum(timeout, mode);
+
+    // Step 2: Already full? Return immediately.
+    if (collector_.unl_size > 0 &&
+        static_cast<int>(quorum.validations.size()) >= collector_.unl_size)
+    {
+        co_return QuorumCollectResult{
+            std::move(quorum), QuorumCollectStopReason::full};
+    }
+
+    // Step 3: Wait event-driven for full or next-ledger.
+    // Reuse the waiter mechanism — wake on each new validation.
+    auto self = shared_from_this();
     co_await asio::post(strand_, asio::use_awaitable);
 
-    auto validations = collector_.get_ledger_validations(ledger_hash, mode);
-    if (validations.empty())
+    auto const ledger_hash = quorum.ledger_hash;
+    auto const ledger_seq = quorum.ledger_seq;
+
+    auto signal = std::make_shared<asio::steady_timer>(
+        strand_, asio::steady_timer::time_point::max());
+    waiters_.push_back(signal);
+
+    struct WaiterCleanup
     {
-        throw std::runtime_error("Selected quorum ledger is no longer available");
-    }
-
-    QuorumCollectResult result{
-        .quorum =
-            QuorumEntry{
-                .ledger_hash = ledger_hash,
-                .ledger_seq = ledger_seq,
-                .validations = std::move(validations),
-                .when = std::chrono::steady_clock::now()},
-        .stop_reason = QuorumCollectStopReason::timeout};
-
-    if (collector_.unl_size > 0 &&
-        static_cast<int>(result.quorum.validations.size()) >=
-            collector_.unl_size)
-    {
-        result.stop_reason = QuorumCollectStopReason::full;
-        co_return result;
-    }
-
-    auto const deadline = std::chrono::steady_clock::now() + linger_timeout;
-    static constexpr auto kPollInterval = std::chrono::milliseconds(100);
-
-    while (std::chrono::steady_clock::now() < deadline)
-    {
-        if (has_newer_ledger_locked(ledger_seq))
+        ValidationBuffer* owner;
+        std::shared_ptr<asio::steady_timer> signal;
+        void clean_now()
         {
-            result.stop_reason = QuorumCollectStopReason::next_ledger;
-            break;
+            if (!signal) return;
+            std::erase(owner->waiters_, signal);
+            signal.reset();
         }
+        ~WaiterCleanup() { clean_now(); }
+    } cleanup{this, signal};
 
-        auto const remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-            deadline - std::chrono::steady_clock::now());
-        auto const slice = std::min(kPollInterval, remaining);
-        if (slice <= std::chrono::milliseconds::zero())
-            break;
+    // Short deadline — we already have quorum, just collecting extras
+    asio::steady_timer deadline(strand_, std::chrono::seconds(5));
+    deadline.async_wait([signal](boost::system::error_code ec) {
+        if (!ec) signal->cancel();
+    });
 
-        asio::steady_timer timer(strand_, slice);
+    while (true)
+    {
+        signal->expires_at(asio::steady_timer::time_point::max());
+
         boost::system::error_code ec;
-        co_await timer.async_wait(
+        co_await signal->async_wait(
             asio::redirect_error(asio::use_awaitable, ec));
 
         auto const cancel_state =
             co_await asio::this_coro::cancellation_state;
         if (cancel_state.cancelled() != asio::cancellation_type::none)
-            throw boost::system::system_error(asio::error::operation_aborted);
-
-        auto updated = collector_.get_ledger_validations(ledger_hash, mode);
-        if (updated.size() > result.quorum.validations.size())
         {
-            result.quorum.validations = std::move(updated);
-            result.quorum.when = std::chrono::steady_clock::now();
-            if (collector_.unl_size > 0 &&
-                static_cast<int>(result.quorum.validations.size()) >=
-                    collector_.unl_size)
-            {
-                result.stop_reason = QuorumCollectStopReason::full;
-                co_return result;
-            }
+            cleanup.clean_now();
+            throw boost::system::system_error(asio::error::operation_aborted);
+        }
+
+        co_await asio::post(strand_, asio::use_awaitable);
+
+        // Refresh validations for this ledger
+        auto updated = collector_.get_ledger_validations(ledger_hash, mode);
+        if (updated.size() > quorum.validations.size())
+        {
+            quorum.validations = std::move(updated);
+            quorum.when = std::chrono::steady_clock::now();
+        }
+
+        // Full?
+        if (collector_.unl_size > 0 &&
+            static_cast<int>(quorum.validations.size()) >= collector_.unl_size)
+        {
+            deadline.cancel();
+            cleanup.clean_now();
+            co_return QuorumCollectResult{
+                std::move(quorum), QuorumCollectStopReason::full};
+        }
+
+        // Next ledger seen?
+        if (has_newer_ledger_locked(ledger_seq))
+        {
+            deadline.cancel();
+            cleanup.clean_now();
+            co_return QuorumCollectResult{
+                std::move(quorum), QuorumCollectStopReason::next_ledger};
+        }
+
+        // Deadline hit?
+        if (deadline.expiry() <= std::chrono::steady_clock::now())
+        {
+            cleanup.clean_now();
+            co_return QuorumCollectResult{
+                std::move(quorum), QuorumCollectStopReason::timeout};
         }
     }
-
-    co_return result;
 }
 
 std::optional<QuorumEntry>

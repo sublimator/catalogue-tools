@@ -68,29 +68,18 @@ public:
     void
     set_unl(std::vector<catl::vl::Manifest> const& validators);
 
-    /// Awaitable: wait until we have a quorum, return the latest.
-    /// Does NOT take a hash — the caller doesn't know the anchor upfront.
-    /// Uses 90% quorum threshold (matching XRPL consensus requirements).
-    boost::asio::awaitable<QuorumEntry>
-    co_wait_quorum(
-        std::chrono::seconds timeout = std::chrono::seconds(30),
-        ValidationCollector::QuorumMode mode =
-            ValidationCollector::QuorumMode::live);
-
     /// Awaitable: snapshot of latest quorum for health checks.
     boost::asio::awaitable<std::optional<QuorumEntry>>
     co_latest_quorum();
 
-    /// After quorum has been reached for a ledger, keep collecting additional
-    /// validations for that same ledger until either a newer ledger appears or
-    /// the linger timeout expires.
+    /// Wait for the best quorum: gets initial quorum at threshold, then
+    /// waits event-driven until full (all UNL) or next-ledger-seen.
+    /// No polling — wakes on each validation via wake_waiters().
     boost::asio::awaitable<QuorumCollectResult>
-    co_collect_quorum_validations(
-        Hash256 const& ledger_hash,
-        uint32_t ledger_seq,
-        std::chrono::milliseconds linger_timeout,
+    co_wait_best_quorum(
         ValidationCollector::QuorumMode mode =
-            ValidationCollector::QuorumMode::proof);
+            ValidationCollector::QuorumMode::proof,
+        std::chrono::seconds timeout = std::chrono::seconds(30));
 
     /// Awaitable: true when live peer manifests can explain a quorum but the
     /// current VL cannot. This is the signal to force a VL refresh rather than
@@ -116,6 +105,12 @@ private:
         uint32_t network_id);
 
     static constexpr int kQuorumPercent = 90;
+
+    /// Internal: wait for initial quorum at threshold. Used by co_wait_best_quorum.
+    boost::asio::awaitable<QuorumEntry>
+    co_wait_quorum(
+        std::chrono::seconds timeout,
+        ValidationCollector::QuorumMode mode);
 
     void
     check_for_new_quorum();

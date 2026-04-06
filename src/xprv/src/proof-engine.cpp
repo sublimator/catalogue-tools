@@ -25,8 +25,6 @@ static LogPartition log_("engine", LogLevel::INFO);
 
 namespace {
 
-constexpr auto kAnchorValidationLinger = std::chrono::milliseconds(2000);
-
 char const*
 to_string(QuorumCollectStopReason reason)
 {
@@ -561,16 +559,12 @@ ProofEngine::get_or_reuse_anchor(
         }
     }
 
-    // Need a fresh anchor — wait for latest proof-safe quorum, then linger
-    // briefly on that chosen ledger to collect additional validations without
-    // ever waiting for 100% indefinitely.
-    auto quorum = co_await co_wait_for_proof_quorum(vl);
-    auto collected = co_await val_buffer_->co_collect_quorum_validations(
-        quorum.ledger_hash,
-        quorum.ledger_seq,
-        kAnchorValidationLinger,
-        ValidationCollector::QuorumMode::proof);
-    quorum = std::move(collected.quorum);
+    // Wait for best quorum: threshold → then event-driven until full or
+    // next-ledger-seen. No polling loops.
+    auto collected = co_await val_buffer_->co_wait_best_quorum(
+        ValidationCollector::QuorumMode::proof,
+        std::chrono::seconds(30));
+    auto quorum = std::move(collected.quorum);
 
     PLOGI(
         log_,
@@ -592,113 +586,6 @@ ProofEngine::get_or_reuse_anchor(
     co_return anchor;
 }
 
-asio::awaitable<QuorumEntry>
-ProofEngine::co_wait_for_proof_quorum(
-    std::shared_ptr<catl::vl::ValidatorList> const& vl,
-    std::chrono::seconds timeout)
-{
-    auto const deadline = std::chrono::steady_clock::now() + timeout;
-    static constexpr auto kPollInterval = std::chrono::seconds(5);
-    static constexpr int kMaxVlRefreshRetries = 3;
-
-    while (std::chrono::steady_clock::now() < deadline)
-    {
-        auto const remaining = std::chrono::duration_cast<std::chrono::seconds>(
-            deadline - std::chrono::steady_clock::now());
-        auto const slice = std::min(kPollInterval, remaining);
-        if (slice <= std::chrono::seconds::zero())
-            break;
-
-        try
-        {
-            co_return co_await val_buffer_->co_wait_quorum(
-                slice, ValidationCollector::QuorumMode::proof);
-        }
-        catch (boost::system::system_error const& e)
-        {
-            if (e.code() == asio::error::operation_aborted)
-                throw;
-            throw;
-        }
-        catch (std::runtime_error const&)
-        {
-        }
-
-        // A stale VL snapshot is acceptable if it still yields proof quorum.
-        // Only force a VL refresh when we have live quorum via newer peer
-        // manifests but no proof-safe quorum under the embedded VL snapshot.
-        auto const live_only = co_await val_buffer_->co_has_live_only_quorum();
-        if (!live_only)
-            continue;
-
-        std::string last_error;
-        bool refreshed = false;
-        for (int attempt = 1; attempt <= kMaxVlRefreshRetries; ++attempt)
-        {
-            try
-            {
-                PLOGW(
-                    log_,
-                    "[", net_label_,
-                    "] Live quorum depends on newer peer manifests than the current VL — refreshing VL (attempt ",
-                    attempt,
-                    "/",
-                    kMaxVlRefreshRetries,
-                    ")");
-
-                auto refreshed_vl = co_await vl_cache_->co_refresh();
-                if (vl)
-                    *vl = std::move(refreshed_vl);
-                invalidate_anchor_cache();
-                refreshed = true;
-                break;
-            }
-            catch (std::exception const& e)
-            {
-                last_error = e.what();
-                PLOGW(
-                    log_,
-                    "[", net_label_, "] VL refresh attempt ",
-                    attempt,
-                    "/",
-                    kMaxVlRefreshRetries,
-                    " failed: ",
-                    e.what());
-            }
-        }
-
-        if (!refreshed)
-        {
-            throw std::runtime_error(
-                "stale validator manifests detected but VL refresh failed after " +
-                std::to_string(kMaxVlRefreshRetries) + " attempts: " +
-                last_error);
-        }
-
-        try
-        {
-            co_return co_await val_buffer_->co_wait_quorum(
-                std::chrono::seconds(5),
-                ValidationCollector::QuorumMode::proof);
-        }
-        catch (boost::system::system_error const& e)
-        {
-            if (e.code() == asio::error::operation_aborted)
-                throw;
-        }
-        catch (std::runtime_error const&)
-        {
-        }
-
-        if (co_await val_buffer_->co_has_live_only_quorum())
-        {
-            throw std::runtime_error(
-                "stale validator manifests detected and VL refresh did not produce a proof-safe quorum");
-        }
-    }
-
-    throw std::runtime_error("Timed out waiting for proof quorum");
-}
 
 void
 ProofEngine::invalidate_anchor_cache_locked()
