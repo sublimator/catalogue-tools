@@ -1,6 +1,7 @@
 #include "ripple.pb.h"
 #include <catl/peer-client/peer-client.h>
 
+#include <catl/common/utils.h>
 #include <catl/crypto/sha512-half-hasher.h>
 
 namespace catl::peer_client {
@@ -835,6 +836,8 @@ PeerClient::send_monitoring_status()
 
     protocol::TMStatusChange status;
     status.set_newstatus(protocol::nsMONITORING);
+    status.set_newevent(protocol::neLOST_SYNC);
+    status.set_networktime(catl::common::current_ripple_time());
 
     std::vector<uint8_t> data(status.ByteSizeLong());
     status.SerializeToArray(data.data(), data.size());
@@ -843,6 +846,55 @@ PeerClient::send_monitoring_status()
         packet_type::status_change, data, [](boost::system::error_code) {});
     PLOGI(
         log_, "[", net_label_, "] Sent monitoring status, waiting for peer...");
+
+    send_initial_probe_ping();
+}
+
+void
+PeerClient::send_initial_probe_ping()
+{
+    auto const seq = static_cast<uint32_t>(next_seq_.fetch_add(1));
+    auto const key = ping_key(seq);
+
+    RequestOptions opts;
+    opts.timeout = std::chrono::seconds{10};
+    register_callback<PingResult>(
+        pending_pings_,
+        key,
+        Callback<PingResult>{[seq](Error err, PingResult) {
+            if (err == Error::Success)
+            {
+                PLOGD(
+                    PeerClient::log_,
+                    "Initial probe ping seq=",
+                    seq,
+                    " received pong");
+                return;
+            }
+
+            if (err != Error::Timeout)
+            {
+                PLOGD(
+                    PeerClient::log_,
+                    "Initial probe ping seq=",
+                    seq,
+                    " completed with err=",
+                    static_cast<int>(err));
+            }
+        }},
+        opts,
+        false);
+
+    protocol::TMPing msg;
+    msg.set_type(protocol::TMPing_pingType_ptPING);
+    msg.set_seq(seq);
+
+    std::vector<uint8_t> data(msg.ByteSizeLong());
+    msg.SerializeToArray(data.data(), data.size());
+
+    connection_->async_send_packet(
+        packet_type::ping, data, [](boost::system::error_code) {});
+    PLOGD(log_, "[", net_label_, "] Sent initial probe ping seq=", seq);
 }
 
 void

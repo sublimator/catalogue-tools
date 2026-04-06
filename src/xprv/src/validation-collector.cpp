@@ -1,10 +1,14 @@
 #include "xprv/validation-collector.h"
 #include "xprv/hex-utils.h"
+#include "xprv/manifest-utils.h"
 #include "xprv/network-config.h"
 
+#include <catl/peer-client/connection-types.h>
 #include <catl/xdata/parser-context.h>
 #include <catl/xdata/parser.h>
 #include <catl/xdata/slice-visitor.h>
+
+#include "ripple.pb.h"
 
 #include <iomanip>
 #include <optional>
@@ -16,12 +20,6 @@ namespace xprv {
 static LogPartition log_("xprv", LogLevel::INFO);
 
 namespace {
-
-std::string
-entry_key_hex(ValidationCollector::Entry const& entry)
-{
-    return entry.signing_key_hex;
-}
 
 std::string
 lower_hex(std::span<const uint8_t> data)
@@ -49,13 +47,27 @@ ValidationCollector::set_unl(std::vector<catl::vl::Manifest> const& validators)
     // Clear old keys first — a VL refresh may remove validators.
     // Without this, revoked validators stay trusted forever.
     unl_signing_keys.clear();
+    unl_master_keys_.clear();
+    vl_signing_to_master_.clear();
+    live_signing_to_master_.clear();
+    vl_manifest_sequence_by_master_.clear();
+    manifest_sequence_by_master_.clear();
+    stale_vl_masters_.clear();
     unl_size = static_cast<int>(validators.size());
     for (auto const& v : validators)
     {
-        if (!v.signing_public_key.empty())
-        {
-            unl_signing_keys.insert(lower_hex(v.signing_public_key));
-        }
+        auto const master_key_hex = v.master_key_hex();
+        if (!master_key_hex.empty())
+            unl_master_keys_.insert(master_key_hex);
+    }
+    for (auto const& v : validators)
+    {
+        (void)apply_manifest(v, true);
+    }
+    for (auto const& [master_key_hex, manifest] : peer_manifests_by_master_)
+    {
+        if (unl_master_keys_.count(master_key_hex))
+            (void)apply_manifest(manifest, false);
     }
     PLOGI(
         log_,
@@ -96,7 +108,20 @@ ValidationCollector::extract_stvalidation(std::vector<uint8_t> const& data)
 void
 ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
 {
-    if (type != 41 || (!continuous && quorum_reached))
+    auto const manifests_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::manifests);
+    auto const validation_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
+
+    if (type == manifests_type)
+    {
+        handle_manifests_packet(data);
+        return;
+    }
+
+    if (type != validation_type ||
+        (!continuous && quorum_reached &&
+         has_quorum(90, QuorumMode::proof)))
         return;
 
     auto val_bytes = extract_stvalidation(data);
@@ -231,9 +256,9 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
 }
 
 std::vector<ValidationCollector::Entry>
-ValidationCollector::get_quorum(int percent) const
+ValidationCollector::get_quorum(int percent, QuorumMode mode) const
 {
-    auto hash = select_quorum_hash(percent);
+    auto hash = select_quorum_hash(percent, mode);
     if (!hash)
     {
         return {};
@@ -250,8 +275,12 @@ ValidationCollector::get_quorum(int percent) const
     result.reserve(
         std::min<int>(threshold, static_cast<int>(it->second.size())));
 
+    std::unordered_set<std::string> seen;
     for (auto const& entry : it->second)
     {
+        auto const key_hex = entry_key_hex(entry, mode);
+        if (key_hex.empty() || !seen.insert(key_hex).second)
+            continue;
         result.push_back(entry);
         if (static_cast<int>(result.size()) >= threshold)
         {
@@ -263,15 +292,15 @@ ValidationCollector::get_quorum(int percent) const
 }
 
 bool
-ValidationCollector::has_quorum(int percent) const
+ValidationCollector::has_quorum(int percent, QuorumMode mode) const
 {
-    return select_quorum_hash(percent).has_value();
+    return select_quorum_hash(percent, mode).has_value();
 }
 
 void
 ValidationCollector::filter_buffer_to_unl()
 {
-    if (unl_signing_keys.empty())
+    if (unl_master_keys_.empty())
     {
         return;
     }
@@ -284,8 +313,8 @@ ValidationCollector::filter_buffer_to_unl()
 
         for (auto const& entry : it->second)
         {
-            auto const& key_hex = entry_key_hex(entry);
-            if (key_hex.empty() || !unl_signing_keys.count(key_hex))
+            auto const key_hex = entry_key_hex(entry, QuorumMode::live);
+            if (key_hex.empty() || !unl_master_keys_.count(key_hex))
             {
                 continue;
             }
@@ -317,7 +346,7 @@ ValidationCollector::recompute_quorum_state(int percent)
     quorum_hash = Hash256();
     quorum_count = 0;
 
-    auto best_hash = select_quorum_hash(percent);
+    auto best_hash = select_quorum_hash(percent, QuorumMode::live);
     if (!best_hash)
     {
         return;
@@ -331,7 +360,7 @@ ValidationCollector::recompute_quorum_state(int percent)
 
     quorum_reached = true;
     quorum_hash = *best_hash;
-    quorum_count = static_cast<int>(it->second.size());
+    quorum_count = static_cast<int>(get_quorum(percent, QuorumMode::live).size());
 
     if (!previous_reached || previous_hash != quorum_hash)
     {
@@ -353,13 +382,13 @@ ValidationCollector::recompute_quorum_state(int percent)
 bool
 ValidationCollector::insert_entry(Entry entry)
 {
-    auto const& key_hex = entry_key_hex(entry);
+    auto const key_hex = entry_key_hex(entry, QuorumMode::live);
     if (key_hex.empty())
     {
         return false;
     }
 
-    if (!unl_signing_keys.empty() && !unl_signing_keys.count(key_hex))
+    if (!unl_master_keys_.empty() && !unl_master_keys_.count(key_hex))
     {
         return false;
     }
@@ -367,7 +396,7 @@ ValidationCollector::insert_entry(Entry entry)
     auto& entries = by_ledger[entry.ledger_hash];
     for (auto const& existing : entries)
     {
-        if (entry_key_hex(existing) == key_hex)
+        if (entry_key_hex(existing, QuorumMode::live) == key_hex)
         {
             return false;
         }
@@ -398,9 +427,15 @@ ValidationCollector::threshold_for(int percent) const
 }
 
 std::optional<Hash256>
-ValidationCollector::select_quorum_hash(int percent) const
+ValidationCollector::select_quorum_hash(int percent, QuorumMode mode) const
 {
-    if (unl_signing_keys.empty())
+    if (mode == QuorumMode::proof && unl_signing_keys.empty())
+    {
+        return std::nullopt;
+    }
+
+    if (mode == QuorumMode::live && !unl_master_keys_.empty() &&
+        live_signing_to_master_.empty())
     {
         return std::nullopt;
     }
@@ -417,7 +452,15 @@ ValidationCollector::select_quorum_hash(int percent) const
             continue;
         }
 
-        auto const matched = static_cast<int>(entries.size());
+        std::unordered_set<std::string> seen;
+        for (auto const& entry : entries)
+        {
+            auto const key_hex = entry_key_hex(entry, mode);
+            if (!key_hex.empty())
+                seen.insert(key_hex);
+        }
+
+        auto const matched = static_cast<int>(seen.size());
         if (matched < threshold)
         {
             continue;
@@ -434,6 +477,142 @@ ValidationCollector::select_quorum_hash(int percent) const
     }
 
     return best_hash;
+}
+
+void
+ValidationCollector::handle_manifests_packet(std::vector<uint8_t> const& data)
+{
+    protocol::TMManifests manifests;
+    if (!manifests.ParseFromArray(data.data(), static_cast<int>(data.size())))
+        return;
+
+    bool updated = false;
+    for (int i = 0; i < manifests.list_size(); ++i)
+    {
+        auto const& sto = manifests.list(i).stobject();
+        auto manifest = parse_and_verify_manifest(
+            std::span<const uint8_t>(
+                reinterpret_cast<uint8_t const*>(sto.data()),
+                sto.size()),
+            protocol_);
+        if (!manifest)
+            continue;
+        updated = apply_manifest(*manifest, false) || updated;
+    }
+
+    if (updated)
+    {
+        filter_buffer_to_unl();
+        recompute_quorum_state();
+    }
+}
+
+bool
+ValidationCollector::apply_manifest(
+    catl::vl::Manifest const& manifest,
+    bool from_vl)
+{
+    auto const master_key_hex = manifest.master_key_hex();
+    if (master_key_hex.empty())
+        return false;
+
+    if (!from_vl && unl_master_keys_.empty())
+        return false;
+
+    if (!unl_master_keys_.empty() && !unl_master_keys_.count(master_key_hex))
+        return false;
+
+    if (!from_vl)
+    {
+        auto const stored = peer_manifests_by_master_.find(master_key_hex);
+        if (stored != peer_manifests_by_master_.end() &&
+            manifest.sequence <= stored->second.sequence)
+        {
+            return false;
+        }
+        peer_manifests_by_master_[master_key_hex] = manifest;
+    }
+
+    auto const current_seq = manifest_sequence_by_master_.find(master_key_hex);
+    if (current_seq != manifest_sequence_by_master_.end() &&
+        manifest.sequence <= current_seq->second)
+    {
+        return false;
+    }
+
+    auto erase_master_mapping =
+        [&](std::map<std::string, std::string>& mapping) {
+            for (auto it = mapping.begin(); it != mapping.end();)
+            {
+                if (it->second == master_key_hex)
+                    it = mapping.erase(it);
+                else
+                    ++it;
+            }
+        };
+
+    erase_master_mapping(live_signing_to_master_);
+
+    if (from_vl)
+    {
+        erase_master_mapping(vl_signing_to_master_);
+        vl_manifest_sequence_by_master_[master_key_hex] = manifest.sequence;
+        stale_vl_masters_.erase(master_key_hex);
+    }
+
+    manifest_sequence_by_master_[master_key_hex] = manifest.sequence;
+
+    if (!manifest.signing_public_key.empty())
+    {
+        auto const signing_key_hex = manifest.signing_key_hex();
+        live_signing_to_master_[signing_key_hex] = master_key_hex;
+        if (from_vl)
+        {
+            unl_signing_keys.insert(signing_key_hex);
+            vl_signing_to_master_[signing_key_hex] = master_key_hex;
+        }
+    }
+
+    auto const vl_seq_it = vl_manifest_sequence_by_master_.find(master_key_hex);
+    auto const vl_seq =
+        (vl_seq_it == vl_manifest_sequence_by_master_.end()) ? 0
+                                                             : vl_seq_it->second;
+    if (!from_vl && manifest.sequence > vl_seq)
+    {
+        auto const inserted = stale_vl_masters_.insert(master_key_hex).second;
+        if (inserted)
+        {
+            PLOGW(
+                log_,
+                "[", net_label_, "] Peer manifest is newer than VL for ",
+                master_key_hex.substr(0, 16),
+                "... (peer seq=",
+                manifest.sequence,
+                ", vl seq=",
+                vl_seq,
+                ")");
+        }
+    }
+
+    return true;
+}
+
+std::string
+ValidationCollector::entry_key_hex(Entry const& entry, QuorumMode mode) const
+{
+    if (entry.signing_key_hex.empty())
+        return {};
+
+    if (unl_master_keys_.empty())
+        return entry.signing_key_hex;
+
+    auto const& mapping =
+        (mode == QuorumMode::proof) ? vl_signing_to_master_
+                                    : live_signing_to_master_;
+    auto it = mapping.find(entry.signing_key_hex);
+    if (it == mapping.end())
+        return {};
+    return it->second;
 }
 
 }  // namespace xprv

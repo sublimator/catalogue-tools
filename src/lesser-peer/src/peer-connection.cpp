@@ -1,11 +1,11 @@
 #include "ripple.pb.h"
+#include <catl/common/utils.h>
 #include <catl/core/logger.h>
 #include <catl/peer/crypto-utils.h>
 #include <catl/peer/peer-connection.h>
 
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
-#include <chrono>
 #include <openssl/ssl.h>
 #include <utility>
 
@@ -239,20 +239,11 @@ peer_connection::send_http_request(const connection_handler& handler)
     // Network ID (configurable)
     req->set("Network-ID", std::to_string(config_.network_id));
 
-    // Add network time (seconds since Ripple epoch - Jan 1, 2000)
-    // Ripple epoch is Unix timestamp 946684800
-    static constexpr uint32_t RIPPLE_EPOCH = 946684800;
-    auto unix_now = std::chrono::duration_cast<std::chrono::seconds>(
-                        std::chrono::system_clock::now().time_since_epoch())
-                        .count();
-    uint32_t ripple_time = unix_now - RIPPLE_EPOCH;
-    req->set("Network-Time", std::to_string(ripple_time));
+    req->set(
+        "Network-Time", std::to_string(catl::common::current_ripple_time()));
 
     req->set("Session-Signature", session_signature_);
     req->set("Public-Key", node_public_key_b58_);
-
-    // Request ledger replay feature (lowercase as per rippled source)
-    req->set("X-Protocol-Ctl", "ledgerreplay=1;");
 
     http::async_write(
         *socket_,

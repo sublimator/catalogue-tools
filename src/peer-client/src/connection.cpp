@@ -1,4 +1,5 @@
 #include "ripple.pb.h"
+#include <catl/common/utils.h>
 #include <catl/core/logger.h>
 #include <catl/peer-client/connection.h>
 #include <catl/peer-client/crypto-utils.h>
@@ -6,7 +7,6 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
-#include <chrono>
 #include <openssl/ssl.h>
 #include <sstream>
 #include <utility>
@@ -245,6 +245,7 @@ peer_connection::perform_http_upgrade(const connection_handler& handler)
                 }
                 else
                 {
+                    self->note_connect_failure("http upgrade request read", ec);
                     handler(ec);
                 }
             });
@@ -273,14 +274,8 @@ peer_connection::send_http_request(const connection_handler& handler)
         req->set("Network-ID", std::to_string(config_.network_id));
     }
 
-    // Add network time (seconds since Ripple epoch - Jan 1, 2000)
-    // Ripple epoch is Unix timestamp 946684800
-    static constexpr uint32_t RIPPLE_EPOCH = 946684800;
-    auto unix_now = std::chrono::duration_cast<std::chrono::seconds>(
-                        std::chrono::system_clock::now().time_since_epoch())
-                        .count();
-    uint32_t ripple_time = unix_now - RIPPLE_EPOCH;
-    req->set("Network-Time", std::to_string(ripple_time));
+    req->set(
+        "Network-Time", std::to_string(catl::common::current_ripple_time()));
 
     req->set("Session-Signature", session_signature_);
     req->set("Public-Key", node_public_key_b58_);
@@ -306,6 +301,7 @@ peer_connection::send_http_request(const connection_handler& handler)
                         }
                         else
                         {
+                            self->note_connect_failure("http upgrade read", ec);
                             handler(ec);
                         }
                     });
@@ -606,6 +602,7 @@ peer_connection::handle_read_header(
 
         if (ec != asio::error::operation_aborted)
         {
+            note_connect_failure("packet header read", ec);
             PLOGW(
                 log_,
                 remote_endpoint(),
@@ -663,6 +660,8 @@ peer_connection::handle_read_header(
                         ec.message());
                     if (ec != asio::error::operation_aborted)
                     {
+                        self->note_connect_failure(
+                            "packet header extension read", ec);
                         self->fail_and_close(ec);
                     }
                     return;
@@ -726,6 +725,7 @@ peer_connection::handle_read_payload(
         // Check if it's EOF or connection closed
         if (ec != asio::error::operation_aborted)
         {
+            note_connect_failure("packet payload read", ec);
             PLOGW(
                 log_,
                 remote_endpoint(),
@@ -841,6 +841,7 @@ peer_connection::do_write()
             {
                 if (ec != asio::error::operation_aborted)
                 {
+                    self->note_connect_failure("packet write", ec);
                     PLOGW(
                         log_,
                         self->remote_endpoint(),

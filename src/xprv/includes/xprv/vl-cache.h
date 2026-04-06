@@ -22,6 +22,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace xprv {
 
@@ -51,6 +52,11 @@ public:
     /// Blocks until the first fetch completes. Hops to strand internally.
     boost::asio::awaitable<catl::vl::ValidatorList>
     co_get();
+
+    /// Awaitable: force a refresh now and wait for the next fetch completion.
+    /// Returns the updated VL or throws if the fetch failed.
+    boost::asio::awaitable<catl::vl::ValidatorList>
+    co_refresh();
 
     /// Awaitable: true if VL has been fetched at least once.
     boost::asio::awaitable<bool>
@@ -84,6 +90,9 @@ private:
     void
     schedule_retry(std::chrono::seconds delay);
 
+    void
+    wake_waiters();
+
     boost::asio::io_context& io_;
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     std::string vl_host_;
@@ -91,12 +100,15 @@ private:
 
     // Strand-owned state:
     std::optional<catl::vl::ValidatorList> vl_;
-    boost::asio::steady_timer signal_;            // wake waiters on first fetch
     boost::asio::steady_timer refresh_;           // periodic refresh
+    std::vector<std::shared_ptr<boost::asio::steady_timer>> waiters_;
     std::chrono::seconds refresh_interval_{900};  // 15 minutes
     std::chrono::seconds initial_retry_{2};       // first retry delay
     std::chrono::seconds initial_retry_cap_{60};  // max retry delay before first success
     bool fetch_in_progress_ = false;
+    uint64_t fetch_generation_ = 0;
+    bool last_fetch_ok_ = false;
+    std::string last_fetch_error_;
     RefreshCallback on_refresh_;
 
     static LogPartition log_;

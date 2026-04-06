@@ -22,6 +22,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <chrono>
 #include <cstddef>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -203,6 +204,18 @@ public:
 
     struct Snapshot
     {
+        struct FailureBucket
+        {
+            std::string kind;
+            std::size_t count = 0;
+        };
+
+        struct FailureEndpoint
+        {
+            std::string endpoint;
+            std::size_t count = 0;
+        };
+
         size_t known_endpoints = 0;
         size_t tracked_endpoints = 0;
         size_t connected_peers = 0;
@@ -212,6 +225,8 @@ public:
         size_t crawl_in_flight = 0;
         size_t queued_crawls = 0;
         std::vector<uint32_t> wanted_ledgers;
+        std::vector<FailureBucket> recent_failures;
+        std::vector<FailureEndpoint> top_failing_endpoints;
         std::vector<SnapshotEntry> peers;
     };
 
@@ -344,7 +359,29 @@ private:
     note_connect_success(std::string const& endpoint, PeerStatus const& status);
 
     void
-    note_connect_failure(std::string const& endpoint);
+    note_peer_headers(
+        std::string const& endpoint,
+        std::map<std::string, std::string> const& headers);
+
+    void
+    note_connect_failure(
+        std::string const& endpoint,
+        std::string detail = {});
+
+    void
+    note_crawl_failure(std::string const& endpoint, std::string detail);
+
+    std::chrono::steady_clock::duration
+    retry_backoff_for(std::string const& endpoint) const;
+
+    void
+    record_failure_event(
+        std::string const& endpoint,
+        std::string const& kind,
+        std::chrono::steady_clock::time_point now);
+
+    void
+    prune_recent_failure_events(std::chrono::steady_clock::time_point now);
 
     std::shared_ptr<boost::asio::steady_timer>
     attach_wait_signal();
@@ -412,6 +449,7 @@ private:
         bool seen_endpoints = false;
         bool seen_redirect = false;
         bool connected_ok = false;
+        std::chrono::steady_clock::time_point crawl_private_until{};
 
         // Ledger seqs this peer has failed to serve. Entries expire
         // after failed_ledger_ttl_secs (default 60s) so peers get
@@ -426,6 +464,13 @@ private:
     std::uint64_t next_selection_ticket_ = 0;
     std::map<std::string, PeerSessionPtr> connections_;
     std::map<std::string, std::chrono::steady_clock::time_point> failed_at_;
+    struct FailureEvent
+    {
+        std::chrono::steady_clock::time_point at;
+        std::string endpoint;
+        std::string kind;
+    };
+    std::deque<FailureEvent> recent_failures_;
     std::set<std::string> in_flight_;  // currently connecting
     std::set<std::string> queued_;
     std::vector<std::string> pending_connects_;

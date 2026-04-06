@@ -46,6 +46,50 @@ trim_copy(std::string_view input)
 }
 
 std::string
+strip_diagnostic(std::string_view error)
+{
+    auto summary = trim_copy(error);
+    auto const diagnostic = summary.find(" [");
+    if (diagnostic != std::string::npos)
+        summary.erase(diagnostic);
+    return summary;
+}
+
+std::string
+truncate_body(std::string_view body, std::size_t limit = 120)
+{
+    auto text = trim_copy(body);
+    if (text.size() <= limit)
+        return text;
+    text.resize(limit);
+    text += "...";
+    return text;
+}
+
+std::runtime_error
+make_crawl_stage_error(std::string_view stage, std::string_view error)
+{
+    return std::runtime_error(
+        "crawl " + std::string(stage) + ": " + strip_diagnostic(error));
+}
+
+std::runtime_error
+make_crawl_http_error(
+    std::string_view stage,
+    http::response<http::string_body> const& res)
+{
+    auto message = std::string("crawl ") + std::string(stage) + ": HTTP " +
+        std::to_string(res.result_int());
+    auto const reason = trim_copy(res.reason());
+    if (!reason.empty())
+        message += " " + reason;
+    auto const body = truncate_body(res.body());
+    if (!body.empty())
+        message += " body=\"" + body + "\"";
+    return std::runtime_error(message);
+}
+
+std::string
 format_endpoint(std::string const& host, uint16_t port)
 {
     if (host.find(':') != std::string::npos &&
@@ -64,30 +108,55 @@ read_crawl_response(
     std::string const& host,
     bool used_tls)
 {
+    auto const scheme = used_tls ? "https" : "http";
     http::request<http::empty_body> req(http::verb::get, "/crawl", 11);
     req.set(http::field::host, host);
     req.set(http::field::accept, "application/json");
     req.set(http::field::user_agent, "catalogue-tools/xprv");
 
-    tcp_stream.expires_after(std::chrono::seconds(5));
-    co_await http::async_write(stream, req, boost::asio::use_awaitable);
+    try
+    {
+        tcp_stream.expires_after(std::chrono::seconds(5));
+        co_await http::async_write(stream, req, boost::asio::use_awaitable);
+    }
+    catch (std::exception const& e)
+    {
+        throw make_crawl_stage_error(std::string(scheme) + "-write", e.what());
+    }
 
     beast::flat_buffer buffer;
     http::response<http::string_body> res;
-    tcp_stream.expires_after(std::chrono::seconds(10));
-    co_await http::async_read(stream, buffer, res, boost::asio::use_awaitable);
+    try
+    {
+        tcp_stream.expires_after(std::chrono::seconds(10));
+        co_await http::async_read(
+            stream, buffer, res, boost::asio::use_awaitable);
+    }
+    catch (std::exception const& e)
+    {
+        throw make_crawl_stage_error(std::string(scheme) + "-read", e.what());
+    }
 
     if (res.result() != http::status::ok)
     {
-        throw std::runtime_error(
-            "crawl returned HTTP " + std::to_string(res.result_int()));
+        throw make_crawl_http_error(std::string(scheme) + "-read", res);
     }
 
-    auto root = boost::json::parse(res.body());
+    boost::json::value root;
+    try
+    {
+        root = boost::json::parse(res.body());
+    }
+    catch (std::exception const& e)
+    {
+        throw make_crawl_stage_error(std::string(scheme) + "-parse", e.what());
+    }
     auto const* root_obj = root.if_object();
     if (!root_obj)
     {
-        throw std::runtime_error("crawl response root is not an object");
+        throw std::runtime_error(
+            "crawl " + std::string(scheme) +
+            "-parse: response root is not an object");
     }
 
     std::vector<CrawlPeer> peers;
@@ -163,8 +232,16 @@ fetch_crawl_https(std::string const& host, uint16_t port)
     ctx.set_verify_mode(ssl::verify_none);
 
     tcp::resolver resolver(executor);
-    auto endpoints = co_await resolver.async_resolve(
-        host, std::to_string(port), boost::asio::use_awaitable);
+    tcp::resolver::results_type endpoints;
+    try
+    {
+        endpoints = co_await resolver.async_resolve(
+            host, std::to_string(port), boost::asio::use_awaitable);
+    }
+    catch (std::exception const& e)
+    {
+        throw make_crawl_stage_error("https-resolve", e.what());
+    }
 
     beast::ssl_stream<beast::tcp_stream> stream(executor, ctx);
     if (!SSL_set_tlsext_host_name(stream.native_handle(), host.c_str()))
@@ -173,12 +250,26 @@ fetch_crawl_https(std::string const& host, uint16_t port)
     }
 
     auto& tcp_stream = beast::get_lowest_layer(stream);
-    tcp_stream.expires_after(std::chrono::seconds(5));
-    co_await tcp_stream.async_connect(endpoints, boost::asio::use_awaitable);
+    try
+    {
+        tcp_stream.expires_after(std::chrono::seconds(5));
+        co_await tcp_stream.async_connect(endpoints, boost::asio::use_awaitable);
+    }
+    catch (std::exception const& e)
+    {
+        throw make_crawl_stage_error("https-connect", e.what());
+    }
 
-    tcp_stream.expires_after(std::chrono::seconds(5));
-    co_await stream.async_handshake(
-        ssl::stream_base::client, boost::asio::use_awaitable);
+    try
+    {
+        tcp_stream.expires_after(std::chrono::seconds(5));
+        co_await stream.async_handshake(
+            ssl::stream_base::client, boost::asio::use_awaitable);
+    }
+    catch (std::exception const& e)
+    {
+        throw make_crawl_stage_error("https-tls", e.what());
+    }
 
     auto response =
         co_await read_crawl_response(stream, tcp_stream, host, true);
@@ -197,12 +288,27 @@ fetch_crawl_http(std::string const& host, uint16_t port)
     auto executor = co_await boost::asio::this_coro::executor;
 
     tcp::resolver resolver(executor);
-    auto endpoints = co_await resolver.async_resolve(
-        host, std::to_string(port), boost::asio::use_awaitable);
+    tcp::resolver::results_type endpoints;
+    try
+    {
+        endpoints = co_await resolver.async_resolve(
+            host, std::to_string(port), boost::asio::use_awaitable);
+    }
+    catch (std::exception const& e)
+    {
+        throw make_crawl_stage_error("http-resolve", e.what());
+    }
 
     beast::tcp_stream stream(executor);
-    stream.expires_after(std::chrono::seconds(5));
-    co_await stream.async_connect(endpoints, boost::asio::use_awaitable);
+    try
+    {
+        stream.expires_after(std::chrono::seconds(5));
+        co_await stream.async_connect(endpoints, boost::asio::use_awaitable);
+    }
+    catch (std::exception const& e)
+    {
+        throw make_crawl_stage_error("http-connect", e.what());
+    }
 
     auto response = co_await read_crawl_response(stream, stream, host, false);
 
@@ -264,12 +370,14 @@ summarize_crawl_error(std::string_view error)
 boost::asio::awaitable<CrawlResponse>
 co_fetch_peer_crawl(std::string host, uint16_t port)
 {
+    std::string https_summary;
     try
     {
         co_return co_await fetch_crawl_https(host, port);
     }
     catch (std::exception const& https_error)
     {
+        https_summary = strip_diagnostic(https_error.what());
         PLOGD(
             log_,
             "HTTPS crawl failed for ",
@@ -277,11 +385,20 @@ co_fetch_peer_crawl(std::string host, uint16_t port)
             ":",
             port,
             ": ",
-            https_error.what(),
+            https_summary,
             " — falling back to HTTP");
     }
 
-    co_return co_await fetch_crawl_http(host, port);
+    try
+    {
+        co_return co_await fetch_crawl_http(host, port);
+    }
+    catch (std::exception const& http_error)
+    {
+        throw std::runtime_error(
+            "crawl fallback failed: https=" + https_summary +
+            "; http=" + strip_diagnostic(http_error.what()));
+    }
 }
 
 }  // namespace catl::peer_client

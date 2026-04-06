@@ -188,17 +188,129 @@ public:
     }
 
     static void
-    note_connect_failure(
+    note_peer_headers(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        std::map<std::string, std::string> headers)
+    {
+        run_on_strand(
+            io,
+            peers,
+            [endpoint = std::move(endpoint), headers = std::move(headers)](
+                auto& set) {
+                set.note_peer_headers(endpoint, headers);
+            });
+    }
+
+    static void
+    set_crawl_private_until(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        std::chrono::steady_clock::time_point until)
+    {
+        run_on_strand(
+            io,
+            peers,
+            [endpoint = std::move(endpoint), until](auto& set) {
+                set.endpoint_stats_[catl::peer_client::EndpointTracker::
+                                        canonical_endpoint(endpoint)]
+                    .crawl_private_until = until;
+            });
+    }
+
+    static void
+    queue_crawl(
         boost::asio::io_context& io,
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         std::string endpoint)
     {
         run_on_strand(
+            io, peers, [endpoint = std::move(endpoint)](auto& set) {
+                set.queue_crawl(endpoint);
+            });
+    }
+
+    static void
+    note_connect_failure(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        std::string detail = {})
+    {
+        run_on_strand(
             io,
             peers,
-            [endpoint = std::move(endpoint)](auto& set) {
-                set.note_connect_failure(endpoint);
+            [endpoint = std::move(endpoint), detail = std::move(detail)](
+                auto& set) mutable {
+                set.note_connect_failure(endpoint, std::move(detail));
             });
+    }
+
+    static catl::peer_client::PeerSet::Snapshot
+    snapshot(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        catl::peer_client::PeerSet::Snapshot snapshot;
+        run_on_strand(io, peers, [&snapshot](auto& set) {
+            snapshot = set.snapshot_unsafe();
+        });
+        return snapshot;
+    }
+
+    static std::chrono::steady_clock::duration
+    retry_backoff_for(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        std::chrono::steady_clock::duration backoff{};
+        run_on_strand(
+            io,
+            peers,
+            [&backoff, endpoint = std::move(endpoint)](auto& set) {
+                backoff = set.retry_backoff_for(endpoint);
+            });
+        return backoff;
+    }
+
+    static void
+    push_pending_connect(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        run_on_strand(
+            io, peers, [endpoint = std::move(endpoint)](auto& set) {
+                set.pending_connects_.push_back(endpoint);
+                set.queued_.insert(endpoint);
+            });
+    }
+
+    static void
+    pump_connects(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        run_on_strand(io, peers, [](auto& set) { set.pump_connects(); });
+    }
+
+    static bool
+    in_flight_contains(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        bool found = false;
+        run_on_strand(
+            io,
+            peers,
+            [&found, endpoint = std::move(endpoint)](auto& set) {
+                found = set.in_flight_.count(endpoint) > 0;
+            });
+        return found;
     }
 
     static bool

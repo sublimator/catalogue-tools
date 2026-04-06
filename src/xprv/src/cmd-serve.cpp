@@ -72,6 +72,8 @@ struct LoggedNetworkStatus
     std::size_t node_cache_entries = 0;
     std::size_t node_cache_resident_entries = 0;
     std::size_t node_cache_header_entries = 0;
+    std::string recent_failures;
+    std::string top_failing_endpoints;
 };
 
 struct LoggedNetworkTrigger
@@ -95,6 +97,8 @@ struct LoggedNetworkTrigger
     std::size_t node_cache_entries_bucket = 0;
     std::size_t node_cache_resident_entries_bucket = 0;
     std::size_t node_cache_header_entries_bucket = 0;
+    std::string recent_failures;
+    std::string top_failing_endpoints;
 };
 
 struct LoggedStatusState
@@ -130,7 +134,43 @@ same_trigger(
         lhs.node_cache_resident_entries_bucket ==
             rhs.node_cache_resident_entries_bucket &&
         lhs.node_cache_header_entries_bucket ==
-            rhs.node_cache_header_entries_bucket;
+            rhs.node_cache_header_entries_bucket &&
+        lhs.recent_failures == rhs.recent_failures &&
+        lhs.top_failing_endpoints == rhs.top_failing_endpoints;
+}
+
+std::string
+format_failure_buckets(
+    std::vector<catl::peer_client::PeerSet::Snapshot::FailureBucket> const&
+        buckets,
+    std::size_t limit = 3)
+{
+    std::ostringstream out;
+    auto const count = std::min(limit, buckets.size());
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        if (i > 0)
+            out << ',';
+        out << buckets[i].kind << 'x' << buckets[i].count;
+    }
+    return out.str();
+}
+
+std::string
+format_failure_endpoints(
+    std::vector<catl::peer_client::PeerSet::Snapshot::FailureEndpoint> const&
+        endpoints,
+    std::size_t limit = 2)
+{
+    std::ostringstream out;
+    auto const count = std::min(limit, endpoints.size());
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        if (i > 0)
+            out << ',';
+        out << endpoints[i].endpoint << 'x' << endpoints[i].count;
+    }
+    return out.str();
 }
 
 std::string
@@ -154,7 +194,14 @@ format_network_status(LoggedNetworkStatus const& status)
         << " proofs=" << status.proof_cache_entries << " node_cache=e"
         << status.node_cache_entries << "/r"
         << status.node_cache_resident_entries << "/h"
-        << status.node_cache_header_entries << ']';
+        << status.node_cache_header_entries;
+    if (!status.recent_failures.empty())
+    {
+        out << " fail=" << status.recent_failures;
+        if (!status.top_failing_endpoints.empty())
+            out << " top=" << status.top_failing_endpoints;
+    }
+    out << ']';
     return out.str();
 }
 
@@ -202,6 +249,8 @@ log_status_if_changed(
                     bucketize(status.node_cache_resident_entries, 32),
                 .node_cache_header_entries_bucket =
                     bucketize(status.node_cache_header_entries, 8),
+                .recent_failures = status.recent_failures,
+                .top_failing_endpoints = status.top_failing_endpoints,
             });
     }
 
@@ -478,6 +527,14 @@ cmd_serve()
                                                 node_cache.resident_entries;
                                             status.node_cache_header_entries =
                                                 node_cache.header_entries;
+                                            status.recent_failures =
+                                                format_failure_buckets(
+                                                    peer_snapshot
+                                                        .recent_failures);
+                                            status.top_failing_endpoints =
+                                                format_failure_endpoints(
+                                                    peer_snapshot
+                                                        .top_failing_endpoints);
                                             networks.emplace(
                                                 network_id, std::move(status));
                                         }

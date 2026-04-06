@@ -327,6 +327,9 @@ private:
     send_monitoring_status();
 
     void
+    send_initial_probe_ping();
+
+    void
     handle_status_change(std::vector<uint8_t> const& payload);
 
     void

@@ -56,6 +56,7 @@ add_executable(
   src/proof-engine.cpp
   src/proof-resolver.cpp
   src/proof-steps.cpp
+  src/manifest-utils.cpp
   src/validation-buffer.cpp
   src/validation-collector.cpp
   src/vl-cache.cpp)
@@ -85,6 +86,7 @@ target_compile_definitions(
 target_link_libraries(
   xprv
   PRIVATE catl::peer-client
+          protobuf::libprotobuf
           catl::rpc-client
           catl::vl-client
           catl::crypto

@@ -39,7 +39,7 @@ struct BuildServices
 {
     boost::asio::io_context& io;
     std::shared_ptr<catl::peer_client::PeerSet> peers;
-    catl::vl::ValidatorList const& vl;
+    std::shared_ptr<catl::vl::ValidatorList> vl;
     catl::xdata::Protocol const& protocol;
     std::shared_ptr<catl::peer_client::NodeCache> node_cache;
     std::shared_ptr<catl::rpc::RpcClient> rpc;

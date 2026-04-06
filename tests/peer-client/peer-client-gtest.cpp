@@ -44,6 +44,17 @@ TEST(PeerClientTypes, SummarizeCrawlErrorStripsBoostSourceNoise)
     EXPECT_EQ(
         summarize_crawl_error("crawl returned HTTP 500"),
         "crawl returned HTTP 500");
+    EXPECT_EQ(
+        summarize_crawl_error(
+            "crawl https-read: The socket was closed due to a timeout "
+            "[boost.beast:1 at /tmp/file.hpp:123]"),
+        "crawl https-read: The socket was closed due to a timeout");
+    EXPECT_EQ(
+        summarize_crawl_error(
+            "crawl fallback failed: https=crawl https-connect: Host not found "
+            "(authoritative); http=crawl http-connect: Connection refused"),
+        "crawl fallback failed: https=crawl https-connect: Host not found "
+        "(authoritative); http=crawl http-connect: Connection refused");
 }
 
 TEST(PeerClientTypes, CanonicalEndpointNormalizesMappedIpv4AndIpv6)

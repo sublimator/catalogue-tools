@@ -30,6 +30,8 @@ add_library(
 target_include_directories(
   catl_peer_client
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/includes
+         ${CMAKE_CURRENT_BINARY_DIR}
+         ${CMAKE_CURRENT_BINARY_DIR}/src
   # protobuf_generate_cpp outputs into ${CMAKE_CURRENT_BINARY_DIR}/src/
   PRIVATE ${CMAKE_CURRENT_BINARY_DIR}
   PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/src)

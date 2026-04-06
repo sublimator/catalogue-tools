@@ -64,11 +64,20 @@ public:
     /// Does NOT take a hash — the caller doesn't know the anchor upfront.
     /// Uses 90% quorum threshold (matching XRPL consensus requirements).
     boost::asio::awaitable<QuorumEntry>
-    co_wait_quorum(std::chrono::seconds timeout = std::chrono::seconds(30));
+    co_wait_quorum(
+        std::chrono::seconds timeout = std::chrono::seconds(30),
+        ValidationCollector::QuorumMode mode =
+            ValidationCollector::QuorumMode::live);
 
     /// Awaitable: snapshot of latest quorum for health checks.
     boost::asio::awaitable<std::optional<QuorumEntry>>
     co_latest_quorum();
+
+    /// Awaitable: true when live peer manifests can explain a quorum but the
+    /// current VL cannot. This is the signal to force a VL refresh rather than
+    /// broadening the proof format.
+    boost::asio::awaitable<bool>
+    co_has_live_only_quorum();
 
     struct Stats
     {
@@ -98,6 +107,9 @@ private:
     void
     wake_waiters();
 
+    std::optional<QuorumEntry>
+    latest_quorum_locked(ValidationCollector::QuorumMode mode) const;
+
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
 
     // Strand-owned state:
@@ -105,6 +117,7 @@ private:
     ValidationCollector collector_;
     std::deque<QuorumEntry> recent_quorums_;  // newest at back
     Hash256 last_quorum_hash_;                // dedup: don't re-add same quorum
+    Hash256 last_proof_quorum_hash_;          // wake proof waiters on VL refresh
 
     // Per-waiter signals — each co_wait_quorum() call gets its own timer.
     // wake_waiters() cancels all of them when a new quorum arrives.

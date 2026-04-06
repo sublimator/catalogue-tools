@@ -9,6 +9,7 @@
 #include <cstring>
 #include <catl/rpc-client/rpc-client-coro.h>
 
+#include <algorithm>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -232,7 +233,8 @@ ProofEngine::prove(
 
     // Step 1: Ensure VL is loaded (UNL push happens once in start(),
     // not per-request — set_unl clears the quorum cache)
-    auto vl = co_await vl_cache_->co_get();
+    auto vl = std::make_shared<catl::vl::ValidatorList>(
+        co_await vl_cache_->co_get());
 
     // Check tx→ledger_seq cache (avoids RPC lookup on repeated requests)
     auto cached_seq = tx_ledger_get(tx_hash);
@@ -252,7 +254,7 @@ ProofEngine::prove(
         .tx_ledger_seq_hint =
             ledger_seq_hint ? ledger_seq_hint : cached_seq.value_or(0),
         .get_anchor =
-            [self, &vl, anchor_age](uint32_t min_seq)
+            [self, vl, anchor_age](uint32_t min_seq)
                 -> boost::asio::awaitable<BuildServices::AnchorData> {
                 auto bundle =
                     co_await self->get_or_reuse_anchor(vl, anchor_age);
@@ -510,7 +512,7 @@ ProofEngine::co_health()
 
 asio::awaitable<ProofEngine::AnchorBundle>
 ProofEngine::get_or_reuse_anchor(
-    catl::vl::ValidatorList const& vl,
+    std::shared_ptr<catl::vl::ValidatorList> const& vl,
     uint32_t max_age_secs)
 {
     // When max_age_secs > 0, reuse the current anchor if fresh enough.
@@ -539,8 +541,7 @@ ProofEngine::get_or_reuse_anchor(
     }
 
     // Need a fresh anchor — wait for latest quorum
-    auto quorum =
-        co_await val_buffer_->co_wait_quorum(std::chrono::seconds(30));
+    auto quorum = co_await co_wait_for_proof_quorum(vl);
 
     PLOGI(
         log_,
@@ -551,13 +552,137 @@ ProofEngine::get_or_reuse_anchor(
         "... (",
         quorum.validations.size(),
         "/",
-        vl.validators.size(),
+        (vl ? vl->validators.size() : 0),
         " validators)");
 
     auto anchor = co_await get_anchor_bundle(
         quorum.ledger_seq, quorum.ledger_hash, quorum.validations);
 
     co_return anchor;
+}
+
+asio::awaitable<QuorumEntry>
+ProofEngine::co_wait_for_proof_quorum(
+    std::shared_ptr<catl::vl::ValidatorList> const& vl,
+    std::chrono::seconds timeout)
+{
+    auto const deadline = std::chrono::steady_clock::now() + timeout;
+    static constexpr auto kPollInterval = std::chrono::seconds(5);
+    static constexpr int kMaxVlRefreshRetries = 3;
+
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        auto const remaining = std::chrono::duration_cast<std::chrono::seconds>(
+            deadline - std::chrono::steady_clock::now());
+        auto const slice = std::min(kPollInterval, remaining);
+        if (slice <= std::chrono::seconds::zero())
+            break;
+
+        try
+        {
+            co_return co_await val_buffer_->co_wait_quorum(
+                slice, ValidationCollector::QuorumMode::proof);
+        }
+        catch (boost::system::system_error const& e)
+        {
+            if (e.code() == asio::error::operation_aborted)
+                throw;
+            throw;
+        }
+        catch (std::runtime_error const&)
+        {
+        }
+
+        auto const live_only = co_await val_buffer_->co_has_live_only_quorum();
+        if (!live_only)
+            continue;
+
+        std::string last_error;
+        bool refreshed = false;
+        for (int attempt = 1; attempt <= kMaxVlRefreshRetries; ++attempt)
+        {
+            try
+            {
+                PLOGW(
+                    log_,
+                    "[", net_label_,
+                    "] Live quorum depends on newer peer manifests than the current VL — refreshing VL (attempt ",
+                    attempt,
+                    "/",
+                    kMaxVlRefreshRetries,
+                    ")");
+
+                auto refreshed_vl = co_await vl_cache_->co_refresh();
+                if (vl)
+                    *vl = std::move(refreshed_vl);
+                invalidate_anchor_cache();
+                refreshed = true;
+                break;
+            }
+            catch (std::exception const& e)
+            {
+                last_error = e.what();
+                PLOGW(
+                    log_,
+                    "[", net_label_, "] VL refresh attempt ",
+                    attempt,
+                    "/",
+                    kMaxVlRefreshRetries,
+                    " failed: ",
+                    e.what());
+            }
+        }
+
+        if (!refreshed)
+        {
+            throw std::runtime_error(
+                "stale validator manifests detected but VL refresh failed after " +
+                std::to_string(kMaxVlRefreshRetries) + " attempts: " +
+                last_error);
+        }
+
+        try
+        {
+            co_return co_await val_buffer_->co_wait_quorum(
+                std::chrono::seconds(5),
+                ValidationCollector::QuorumMode::proof);
+        }
+        catch (boost::system::system_error const& e)
+        {
+            if (e.code() == asio::error::operation_aborted)
+                throw;
+        }
+        catch (std::runtime_error const&)
+        {
+        }
+
+        if (co_await val_buffer_->co_has_live_only_quorum())
+        {
+            throw std::runtime_error(
+                "stale validator manifests detected and VL refresh did not produce a proof-safe quorum");
+        }
+    }
+
+    throw std::runtime_error("Timed out waiting for proof quorum");
+}
+
+void
+ProofEngine::invalidate_anchor_cache_locked()
+{
+    current_anchor_.reset();
+    for (auto& [_, entry] : anchor_cache_)
+    {
+        if (entry.signal)
+            entry.signal->cancel();
+    }
+    anchor_cache_.clear();
+}
+
+void
+ProofEngine::invalidate_anchor_cache()
+{
+    std::lock_guard lock(cache_mutex_);
+    invalidate_anchor_cache_locked();
 }
 
 asio::awaitable<ProofEngine::AnchorBundle>

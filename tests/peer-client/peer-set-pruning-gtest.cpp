@@ -35,6 +35,20 @@ contains_endpoint(
         endpoints.end();
 }
 
+PeerSet::SnapshotEntry const*
+find_snapshot_entry(
+    PeerSet::Snapshot const& snapshot,
+    std::string const& endpoint)
+{
+    auto it = std::find_if(
+        snapshot.peers.begin(),
+        snapshot.peers.end(),
+        [&](auto const& entry) { return entry.endpoint == endpoint; });
+    if (it == snapshot.peers.end())
+        return nullptr;
+    return &*it;
+}
+
 }  // namespace
 
 TEST(PeerSetPruning, WaitSignalWakesOnDiscoveryAcrossThreads)
@@ -291,6 +305,149 @@ TEST(PeerSetPruning, CandidateRankingPrefersHealthyConnectedPeers)
         peers,
         "stale.example.com:51235",
         "healthy.example.com:51235"));
+}
+
+TEST(PeerSetPruning, RetryBackoffUsesFailureCountAndCapsAtFiveMinutes)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{
+        .network_id = 0,
+        .max_in_flight_connects = 0,
+        .max_in_flight_crawls = 0,
+    });
+
+    auto const endpoint = std::string("retry.example.com:51235");
+    PeerSetTestAccess::add_discovered(io, peers, endpoint);
+
+    EXPECT_EQ(
+        PeerSetTestAccess::retry_backoff_for(io, peers, endpoint),
+        std::chrono::steady_clock::duration::zero());
+
+    PeerSetTestAccess::note_connect_failure(io, peers, endpoint);
+    EXPECT_EQ(
+        PeerSetTestAccess::retry_backoff_for(io, peers, endpoint),
+        std::chrono::seconds(5));
+
+    PeerSetTestAccess::note_connect_failure(io, peers, endpoint);
+    EXPECT_EQ(
+        PeerSetTestAccess::retry_backoff_for(io, peers, endpoint),
+        std::chrono::seconds(10));
+
+    PeerSetTestAccess::note_connect_failure(io, peers, endpoint);
+    EXPECT_EQ(
+        PeerSetTestAccess::retry_backoff_for(io, peers, endpoint),
+        std::chrono::seconds(20));
+
+    for (int i = 0; i < 8; ++i)
+    {
+        PeerSetTestAccess::note_connect_failure(io, peers, endpoint);
+    }
+    EXPECT_EQ(
+        PeerSetTestAccess::retry_backoff_for(io, peers, endpoint),
+        std::chrono::minutes(5));
+}
+
+TEST(PeerSetPruning, PumpConnectsHonorsComputedRetryBackoff)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{
+        .network_id = 0,
+        .max_in_flight_connects = 1,
+        .max_in_flight_crawls = 0,
+    });
+
+    auto const endpoint = std::string("backoff.example.com:51235");
+    PeerSetTestAccess::add_discovered(io, peers, endpoint);
+    PeerSetTestAccess::note_connect_failure(io, peers, endpoint);
+    PeerSetTestAccess::note_connect_failure(io, peers, endpoint);
+    PeerSetTestAccess::note_connect_failure(io, peers, endpoint);
+    PeerSetTestAccess::set_failed_at(
+        io,
+        peers,
+        endpoint,
+        std::chrono::steady_clock::now() - std::chrono::seconds(10));
+    PeerSetTestAccess::push_pending_connect(io, peers, endpoint);
+    PeerSetTestAccess::pump_connects(io, peers);
+
+    EXPECT_FALSE(
+        PeerSetTestAccess::in_flight_contains(io, peers, endpoint));
+}
+
+TEST(PeerSetPruning, QueueCrawlSkipsPrivatePeersUntilRecheck)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{
+        .network_id = 21337,
+        .max_in_flight_connects = 0,
+        .max_in_flight_crawls = 1,
+    });
+
+    auto const endpoint = std::string("private.example.com:21337");
+    PeerSetTestAccess::note_peer_headers(
+        io, peers, endpoint, {{"Crawl", "private"}});
+    PeerSetTestAccess::queue_crawl(io, peers, endpoint);
+
+    auto snapshot = PeerSetTestAccess::snapshot(io, peers);
+    auto const* entry = find_snapshot_entry(snapshot, endpoint);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_FALSE(entry->queued_crawl);
+
+    PeerSetTestAccess::set_crawl_private_until(
+        io,
+        peers,
+        endpoint,
+        std::chrono::steady_clock::now() - std::chrono::seconds(1));
+    PeerSetTestAccess::queue_crawl(io, peers, endpoint);
+
+    snapshot = PeerSetTestAccess::snapshot(io, peers);
+    entry = find_snapshot_entry(snapshot, endpoint);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_TRUE(entry->queued_crawl);
+}
+
+TEST(PeerSetPruning, SnapshotSummarizesRecentFailures)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{
+        .network_id = 0,
+        .max_in_flight_connects = 0,
+        .max_in_flight_crawls = 0,
+    });
+
+    auto const forbidden = std::string("forbidden.example.com:51235");
+    auto const flakey = std::string("flakey.example.com:51235");
+    PeerSetTestAccess::add_discovered(io, peers, forbidden);
+    PeerSetTestAccess::add_discovered(io, peers, flakey);
+
+    PeerSetTestAccess::note_connect_failure(
+        io,
+        peers,
+        forbidden,
+        "http upgrade status=403 reason=\"Forbidden\"");
+    PeerSetTestAccess::note_connect_failure(
+        io,
+        peers,
+        forbidden,
+        "http upgrade status=403 reason=\"Forbidden\"");
+    PeerSetTestAccess::note_connect_failure(
+        io,
+        peers,
+        flakey,
+        "PeerClient: Disconnected");
+
+    auto const snapshot = PeerSetTestAccess::snapshot(io, peers);
+
+    ASSERT_GE(snapshot.recent_failures.size(), 2u);
+    EXPECT_EQ(snapshot.recent_failures[0].kind, "connect-403");
+    EXPECT_EQ(snapshot.recent_failures[0].count, 2u);
+    EXPECT_EQ(snapshot.recent_failures[1].kind, "connect-disconnect");
+    EXPECT_EQ(snapshot.recent_failures[1].count, 1u);
+
+    ASSERT_GE(snapshot.top_failing_endpoints.size(), 2u);
+    EXPECT_EQ(snapshot.top_failing_endpoints[0].endpoint, forbidden);
+    EXPECT_EQ(snapshot.top_failing_endpoints[0].count, 2u);
+    EXPECT_EQ(snapshot.top_failing_endpoints[1].endpoint, flakey);
+    EXPECT_EQ(snapshot.top_failing_endpoints[1].count, 1u);
 }
 
 TEST(PeerSetPruning, TimedOutWaitForPeerClearsWantedLedger)

@@ -7,6 +7,8 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
+#include <algorithm>
+
 namespace xprv {
 
 namespace asio = boost::asio;
@@ -18,7 +20,6 @@ VlCache::VlCache(asio::io_context& io, std::string vl_host, uint16_t vl_port)
     , strand_(asio::make_strand(io))
     , vl_host_(std::move(vl_host))
     , vl_port_(vl_port)
-    , signal_(strand_, asio::steady_timer::time_point::max())
     , refresh_(strand_)
 {
 }
@@ -46,11 +47,14 @@ VlCache::do_fetch()
         // Repost onto our strand to update state.
         asio::post(self->strand_, [self, result = std::move(result)]() mutable {
             self->fetch_in_progress_ = false;
+            self->fetch_generation_++;
 
             if (result.success)
             {
                 bool first_load = !self->vl_.has_value();
                 self->vl_ = std::move(result.vl);
+                self->last_fetch_ok_ = true;
+                self->last_fetch_error_.clear();
                 self->initial_retry_ = std::chrono::seconds(2);  // reset for next cold start
                 PLOGI(
                     VlCache::log_,
@@ -60,23 +64,21 @@ VlCache::do_fetch()
                     self->vl_host_,
                     first_load ? " (initial)" : " (refresh)");
 
-                if (first_load)
-                {
-                    // Wake anyone waiting in co_get()
-                    self->signal_.cancel();
-                }
-
                 // Notify subscriber (e.g. ValidationBuffer) on every load
                 if (self->on_refresh_)
                 {
                     self->on_refresh_(*self->vl_);
                 }
 
+                self->wake_waiters();
                 self->schedule_refresh();
             }
             else
             {
+                self->last_fetch_ok_ = false;
+                self->last_fetch_error_ = result.error;
                 PLOGE(VlCache::log_, "VL fetch failed: ", result.error);
+                self->wake_waiters();
 
                 if (!self->vl_.has_value())
                 {
@@ -106,7 +108,7 @@ void
 VlCache::stop()
 {
     refresh_.cancel();
-    signal_.cancel();
+    wake_waiters();
 }
 
 void
@@ -135,6 +137,15 @@ VlCache::schedule_retry(std::chrono::seconds delay)
     });
 }
 
+void
+VlCache::wake_waiters()
+{
+    auto waiters = std::move(waiters_);
+    waiters_.clear();
+    for (auto& timer : waiters)
+        timer->cancel();
+}
+
 asio::awaitable<catl::vl::ValidatorList>
 VlCache::co_get()
 {
@@ -147,16 +158,159 @@ VlCache::co_get()
         co_return *vl_;
     }
 
-    // Wait for first fetch
-    boost::system::error_code ec;
-    co_await signal_.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+    if (!fetch_in_progress_)
+        do_fetch();
 
-    if (!vl_)
+    auto const generation = fetch_generation_;
+    auto signal = std::make_shared<asio::steady_timer>(
+        strand_, asio::steady_timer::time_point::max());
+    waiters_.push_back(signal);
+
+    struct WaiterCleanup
     {
-        throw std::runtime_error("VL fetch failed — no data after signal");
-    }
+        VlCache* owner = nullptr;
+        asio::strand<asio::io_context::executor_type> strand;
+        std::weak_ptr<VlCache> self;
+        std::shared_ptr<asio::steady_timer> signal;
 
-    co_return *vl_;
+        void
+        clean_now()
+        {
+            if (!signal)
+                return;
+            std::erase(owner->waiters_, signal);
+            signal.reset();
+        }
+
+        ~WaiterCleanup()
+        {
+            if (!signal)
+                return;
+            try
+            {
+                asio::post(
+                    strand,
+                    [self = std::move(self), signal = std::move(signal)]() mutable {
+                        if (auto locked = self.lock())
+                            std::erase(locked->waiters_, signal);
+                    });
+            }
+            catch (...)
+            {
+            }
+        }
+    } cleanup{this, strand_, self, signal};
+
+    while (true)
+    {
+        signal->expires_at(asio::steady_timer::time_point::max());
+        boost::system::error_code ec;
+        co_await signal->async_wait(
+            asio::redirect_error(asio::use_awaitable, ec));
+
+        auto const cancel_state =
+            co_await asio::this_coro::cancellation_state;
+        if (cancel_state.cancelled() != asio::cancellation_type::none)
+            throw boost::system::system_error(asio::error::operation_aborted);
+
+        co_await asio::post(strand_, asio::use_awaitable);
+
+        if (fetch_generation_ == generation)
+            continue;
+
+        cleanup.clean_now();
+
+        if (!vl_)
+        {
+            throw std::runtime_error(
+                "VL fetch failed: " +
+                (last_fetch_error_.empty() ? std::string("unknown error")
+                                           : last_fetch_error_));
+        }
+
+        co_return *vl_;
+    }
+}
+
+asio::awaitable<catl::vl::ValidatorList>
+VlCache::co_refresh()
+{
+    auto self = shared_from_this();
+    co_await asio::post(strand_, asio::use_awaitable);
+
+    auto const generation = fetch_generation_;
+    refresh_.cancel();
+    if (!fetch_in_progress_)
+        do_fetch();
+
+    auto signal = std::make_shared<asio::steady_timer>(
+        strand_, asio::steady_timer::time_point::max());
+    waiters_.push_back(signal);
+
+    struct WaiterCleanup
+    {
+        VlCache* owner = nullptr;
+        asio::strand<asio::io_context::executor_type> strand;
+        std::weak_ptr<VlCache> self;
+        std::shared_ptr<asio::steady_timer> signal;
+
+        void
+        clean_now()
+        {
+            if (!signal)
+                return;
+            std::erase(owner->waiters_, signal);
+            signal.reset();
+        }
+
+        ~WaiterCleanup()
+        {
+            if (!signal)
+                return;
+            try
+            {
+                asio::post(
+                    strand,
+                    [self = std::move(self), signal = std::move(signal)]() mutable {
+                        if (auto locked = self.lock())
+                            std::erase(locked->waiters_, signal);
+                    });
+            }
+            catch (...)
+            {
+            }
+        }
+    } cleanup{this, strand_, self, signal};
+
+    while (true)
+    {
+        signal->expires_at(asio::steady_timer::time_point::max());
+        boost::system::error_code ec;
+        co_await signal->async_wait(
+            asio::redirect_error(asio::use_awaitable, ec));
+
+        auto const cancel_state =
+            co_await asio::this_coro::cancellation_state;
+        if (cancel_state.cancelled() != asio::cancellation_type::none)
+            throw boost::system::system_error(asio::error::operation_aborted);
+
+        co_await asio::post(strand_, asio::use_awaitable);
+
+        if (fetch_generation_ == generation)
+            continue;
+
+        cleanup.clean_now();
+
+        if (!last_fetch_ok_ || !vl_)
+        {
+            throw std::runtime_error(
+                "VL refresh failed: " +
+                (last_fetch_error_.empty() ? std::string("unknown error")
+                                           : last_fetch_error_));
+        }
+
+        co_return *vl_;
+    }
 }
 
 asio::awaitable<bool>

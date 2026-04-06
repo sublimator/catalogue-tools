@@ -22,6 +22,8 @@ namespace xprv {
 class ValidationCollector
 {
 public:
+    enum class QuorumMode { live, proof };
+
     struct Entry
     {
         std::vector<uint8_t> raw;          // full STValidation bytes
@@ -47,10 +49,20 @@ public:
 
     /// Get the validations for the quorum ledger.
     std::vector<Entry>
-    get_quorum(int percent = 90) const;
+    get_quorum(
+        int percent = 90,
+        QuorumMode mode = QuorumMode::live) const;
 
     bool
-    has_quorum(int percent = 90) const;
+    has_quorum(
+        int percent = 90,
+        QuorumMode mode = QuorumMode::live) const;
+
+    bool
+    has_stale_vl_manifests() const
+    {
+        return !stale_vl_masters_.empty();
+    }
 
     /// Parse a raw protobuf TMValidation and extract the STValidation.
     static std::vector<uint8_t>
@@ -71,6 +83,13 @@ public:
 private:
     catl::xdata::Protocol const& protocol_;
     std::string net_label_;
+    std::set<std::string> unl_master_keys_;
+    std::map<std::string, catl::vl::Manifest> peer_manifests_by_master_;
+    std::map<std::string, std::string> vl_signing_to_master_;
+    std::map<std::string, std::string> live_signing_to_master_;
+    std::map<std::string, uint32_t> vl_manifest_sequence_by_master_;
+    std::map<std::string, uint32_t> manifest_sequence_by_master_;
+    std::set<std::string> stale_vl_masters_;
 
     void
     filter_buffer_to_unl();
@@ -81,11 +100,20 @@ private:
     bool
     insert_entry(Entry entry);
 
+    void
+    handle_manifests_packet(std::vector<uint8_t> const& data);
+
+    bool
+    apply_manifest(catl::vl::Manifest const& manifest, bool from_vl);
+
+    std::string
+    entry_key_hex(Entry const& entry, QuorumMode mode) const;
+
     int
     threshold_for(int percent) const;
 
     std::optional<Hash256>
-    select_quorum_hash(int percent) const;
+    select_quorum_hash(int percent, QuorumMode mode) const;
 };
 
 }  // namespace xprv

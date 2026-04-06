@@ -1,5 +1,6 @@
 #include "ripple.pb.h"
 #include <boost/filesystem.hpp>
+#include <catl/common/utils.h>
 #include <catl/core/logger.h>
 #include <catl/peer/monitor/monitor.h>
 #include <catl/peer/monitor/packet-logger.h>
@@ -647,12 +648,7 @@ peer_monitor::send_status(
         protocol::NodeEvent::neLOST_SYNC);  // We are just starting, so we are
                                             // effectively out of sync
 
-    // Use basic network time (seconds since Ripple epoch)
-    static constexpr uint32_t RIPPLE_EPOCH = 946684800;
-    auto unix_now = std::chrono::duration_cast<std::chrono::seconds>(
-                        std::chrono::system_clock::now().time_since_epoch())
-                        .count();
-    status.set_networktime(unix_now - RIPPLE_EPOCH);
+    status.set_networktime(catl::common::current_ripple_time());
 
     std::string serialized;
     if (!status.SerializeToString(&serialized))

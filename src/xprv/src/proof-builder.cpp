@@ -1071,7 +1071,9 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     ctx->cancel_token = svc.cancel_token;
 
     // Convenience reference — safe between co_awaits in this frame
-    auto const& vl_data = svc.vl;
+    if (!svc.vl)
+        throw std::runtime_error("No VL snapshot provided");
+    auto const& vl_data = *svc.vl;
 
     // walk_state uses NodeCache::walk_to — content-addressed, cross-ledger
     // sharing, concurrent dedup. Needs the tree root hash (account_hash)

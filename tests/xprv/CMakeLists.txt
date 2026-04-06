@@ -11,6 +11,7 @@ target_link_libraries(
   PRIVATE catl::xdata
           catl::crypto
           catl::peer-client
+          protobuf::libprotobuf
           catl::vl-client
           catl::shamap_headers
           catl_shamap_abbreviated
@@ -23,6 +24,7 @@ target_link_libraries(
 target_sources(
   xprv_gtest PRIVATE ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-binary.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/peer-json.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/manifest-utils.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-json.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-buffer.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-collector.cpp)

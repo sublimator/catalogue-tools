@@ -10,6 +10,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/parallel_group.hpp>
 #include <cassert>
+#include <cctype>
 #include <limits>
 
 // Assert that we're running on the PeerSet strand.
@@ -155,12 +156,99 @@ discovery_source_label(bool seen_crawl, bool seen_endpoints, bool seen_redirect)
     return label;
 }
 
+std::string
+trim_copy(std::string_view text)
+{
+    auto first = text.begin();
+    auto last = text.end();
+    while (first != last && std::isspace(static_cast<unsigned char>(*first)))
+        ++first;
+    while (first != last &&
+           std::isspace(static_cast<unsigned char>(*(last - 1))))
+        --last;
+    return std::string(first, last);
+}
+
+std::string
+lower_copy(std::string_view text)
+{
+    std::string out(text);
+    std::transform(
+        out.begin(),
+        out.end(),
+        out.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return out;
+}
+
+std::string
+classify_failure_kind(std::string_view detail, bool crawl)
+{
+    auto lowered = lower_copy(detail);
+    std::string suffix;
+
+    if (lowered.find("status=403") != std::string::npos ||
+        lowered.find("status: 403") != std::string::npos ||
+        lowered.find("forbidden") != std::string::npos)
+    {
+        suffix = "403";
+    }
+    else if (
+        lowered.find("status=503") != std::string::npos ||
+        lowered.find("status: 503") != std::string::npos ||
+        lowered.find("service unavailable") != std::string::npos)
+    {
+        suffix = "503";
+    }
+    else if (lowered.find("no route to host") != std::string::npos)
+    {
+        suffix = "no-route";
+    }
+    else if (lowered.find("timeout") != std::string::npos)
+    {
+        suffix = "timeout";
+    }
+    else if (lowered.find("stream truncated") != std::string::npos)
+    {
+        suffix = "truncated";
+    }
+    else if (lowered.find("end of stream") != std::string::npos)
+    {
+        suffix = "eof";
+    }
+    else if (lowered.find("tls handshake") != std::string::npos)
+    {
+        suffix = "tls";
+    }
+    else if (
+        lowered.find("resolve") != std::string::npos ||
+        lowered.find("host not found") != std::string::npos)
+    {
+        suffix = "dns";
+    }
+    else if (
+        lowered.empty() ||
+        lowered.find("disconnected") != std::string::npos)
+    {
+        suffix = "disconnect";
+    }
+    else
+    {
+        suffix = "other";
+    }
+
+    return std::string(crawl ? "crawl-" : "connect-") + suffix;
+}
+
 }  // namespace
 
 static constexpr size_t kMaxTrackedEndpoints = 4096;
 static constexpr size_t kMaxCrawlHistory = 4096;
 static constexpr auto kCrawlRetention = std::chrono::minutes(30);
+static constexpr auto kPrivateCrawlRecheck = std::chrono::hours(6);
 static constexpr auto kFailedEndpointRetention = std::chrono::minutes(30);
+static constexpr auto kRecentFailureRetention = std::chrono::minutes(10);
+static constexpr size_t kMaxRecentFailureEvents = 256;
 
 // ── Bootstrap peers by network ──────────────────────────────────
 
@@ -414,23 +502,139 @@ PeerSet::note_connect_success(
 }
 
 void
-PeerSet::note_connect_failure(std::string const& endpoint)
+PeerSet::note_peer_headers(
+    std::string const& endpoint,
+    std::map<std::string, std::string> const& headers)
 {
     if (!strand_.running_in_this_thread())
     {
-        asio::post(strand_, [self = shared_from_this(), endpoint]() {
-            self->note_connect_failure(endpoint);
+        asio::post(strand_, [self = shared_from_this(), endpoint, headers]() {
+            self->note_peer_headers(endpoint, headers);
         });
+        return;
+    }
+
+    auto const key = canonical_endpoint(endpoint);
+    auto it = headers.find("Crawl");
+    if (it == headers.end())
+        return;
+
+    auto const policy = lower_copy(trim_copy(it->second));
+    auto& stats = endpoint_stats_[key];
+    auto const now = std::chrono::steady_clock::now();
+
+    if (policy == "private")
+    {
+        auto const until = now + kPrivateCrawlRecheck;
+        auto const was_suppressed = stats.crawl_private_until > now;
+        if (stats.crawl_private_until < until)
+            stats.crawl_private_until = until;
+        if (!was_suppressed)
+        {
+            PLOGI(
+                log_,
+                "[",
+                net_label_,
+                "] Peer ",
+                key,
+                " advertises Crawl: private; suppressing /crawl for 6h");
+        }
+        return;
+    }
+
+    if (policy == "public")
+    {
+        stats.crawl_private_until = {};
+    }
+}
+
+void
+PeerSet::note_connect_failure(
+    std::string const& endpoint,
+    std::string detail)
+{
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(
+            strand_,
+            [self = shared_from_this(), endpoint, detail = std::move(detail)]() mutable {
+                self->note_connect_failure(endpoint, std::move(detail));
+            });
         return;
     }
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
+    auto const now = std::chrono::steady_clock::now();
     stats.last_failure_at = now_unix();
     stats.last_seen_at = stats.last_failure_at;
     stats.failure_count++;
     stats.connected_ok = false;
+    record_failure_event(key, classify_failure_kind(detail, false), now);
     sort_pending_connects();
     notify_waiters();
+}
+
+void
+PeerSet::note_crawl_failure(std::string const& endpoint, std::string detail)
+{
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(
+            strand_,
+            [self = shared_from_this(), endpoint, detail = std::move(detail)]() mutable {
+                self->note_crawl_failure(endpoint, std::move(detail));
+            });
+        return;
+    }
+    auto const now = std::chrono::steady_clock::now();
+    record_failure_event(
+        canonical_endpoint(endpoint), classify_failure_kind(detail, true), now);
+}
+
+std::chrono::steady_clock::duration
+PeerSet::retry_backoff_for(std::string const& endpoint) const
+{
+    ASSERT_ON_STRAND();
+    auto const key = canonical_endpoint(endpoint);
+    auto stats_it = endpoint_stats_.find(key);
+    uint64_t failures = stats_it != endpoint_stats_.end()
+        ? stats_it->second.failure_count
+        : 0;
+
+    if (failures == 0)
+        return std::chrono::steady_clock::duration::zero();
+
+    auto const exponent = std::min<uint64_t>(failures - 1, 6);
+    auto const backoff = std::chrono::duration_cast<
+        std::chrono::steady_clock::duration>(
+        options_.retry_backoff * (uint64_t{1} << exponent));
+    auto const cap = std::chrono::duration_cast<
+        std::chrono::steady_clock::duration>(std::chrono::minutes(5));
+    return std::min(backoff, cap);
+}
+
+void
+PeerSet::record_failure_event(
+    std::string const& endpoint,
+    std::string const& kind,
+    std::chrono::steady_clock::time_point now)
+{
+    ASSERT_ON_STRAND();
+    recent_failures_.push_back(FailureEvent{.at = now, .endpoint = endpoint, .kind = kind});
+    prune_recent_failure_events(now);
+}
+
+void
+PeerSet::prune_recent_failure_events(std::chrono::steady_clock::time_point now)
+{
+    ASSERT_ON_STRAND();
+    auto const cutoff = now - kRecentFailureRetention;
+    while (!recent_failures_.empty() &&
+           (recent_failures_.front().at < cutoff ||
+            recent_failures_.size() > kMaxRecentFailureEvents))
+    {
+        recent_failures_.pop_front();
+    }
 }
 
 std::shared_ptr<asio::steady_timer>
@@ -1003,14 +1207,7 @@ PeerSet::queue_connect(std::string const& endpoint)
     auto failed = failed_at_.find(key);
     if (failed != failed_at_.end())
     {
-        // Exponential backoff based on failure count:
-        // 1 failure → 5s, 2 → 10s, 3 → 20s, 4 → 40s, cap at 5 min.
-        auto stats_it = endpoint_stats_.find(key);
-        uint64_t failures = stats_it != endpoint_stats_.end()
-            ? stats_it->second.failure_count
-            : 1;
-        auto backoff = options_.retry_backoff *
-            std::min<uint64_t>(1u << std::min(failures, uint64_t{6}), 64);
+        auto backoff = retry_backoff_for(key);
         if (now - failed->second < backoff)
         {
             return;
@@ -1047,6 +1244,12 @@ PeerSet::queue_crawl(std::string const& endpoint)
     {
         return;
     }
+    if (auto stats = endpoint_stats_.find(key); stats != endpoint_stats_.end())
+    {
+        if (stats->second.crawl_private_until > now)
+            return;
+        stats->second.crawl_private_until = {};
+    }
 
     pending_crawls_.push_back(key);
     crawl_queued_.insert(key);
@@ -1081,7 +1284,7 @@ PeerSet::pump_connects()
         auto failed = failed_at_.find(key);
         if (failed != failed_at_.end())
         {
-            if (now - failed->second < options_.retry_backoff)
+            if (now - failed->second < retry_backoff_for(key))
             {
                 continue;
             }
@@ -1207,6 +1410,7 @@ PeerSet::pump_crawls()
                 }
                 catch (std::exception const& e)
                 {
+                    auto const summary = summarize_crawl_error(e.what());
                     PLOGW(
                         log_,
                         "[",
@@ -1214,7 +1418,8 @@ PeerSet::pump_crawls()
                         "] Crawl failed for ",
                         key,
                         ": ",
-                        summarize_crawl_error(e.what()));
+                        summary);
+                    self->note_crawl_failure(key, summary);
                 }
 
                 self->crawl_in_flight_.erase(key);
@@ -1591,6 +1796,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
             {.first_seq = client->peer_first_seq(),
              .last_seq = client->peer_last_seq(),
              .current_seq = client->peer_ledger_seq()});
+        note_peer_headers(key, client->peer_headers());
         if (endpoint_cache_)
         {
             try
@@ -1682,6 +1888,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 
         if (!redirected)
         {
+            auto const detail = trim_connect_failure_detail(e.detail);
             PLOGW(
                 log_,
                 "[",
@@ -1690,9 +1897,14 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
                 key,
                 ": ",
                 e.what());
+            note_connect_failure(key, detail.empty() ? e.what() : detail);
+        }
+        else
+        {
+            auto const detail = trim_connect_failure_detail(e.detail);
+            note_connect_failure(key, detail.empty() ? e.what() : detail);
         }
         failed_at_[key] = std::chrono::steady_clock::now();
-        note_connect_failure(key);
         if (endpoint_cache_)
         {
             try
@@ -1726,7 +1938,7 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
             ": ",
             e.what());
         failed_at_[key] = std::chrono::steady_clock::now();
-        note_connect_failure(key);
+        note_connect_failure(key, e.what());
         if (endpoint_cache_)
         {
             try
@@ -2508,6 +2720,7 @@ PeerSet::snapshot_unsafe() const
     ASSERT_ON_STRAND();
 
     Snapshot out;
+    auto const now = std::chrono::steady_clock::now();
     out.known_endpoints = tracker_->size();
     out.tracked_endpoints = endpoint_stats_.size();
     out.connected_peers = connections_.size();
@@ -2516,6 +2729,55 @@ PeerSet::snapshot_unsafe() const
     out.crawl_in_flight = crawl_in_flight_.size();
     out.queued_crawls = pending_crawls_.size();
     out.wanted_ledgers.assign(wanted_ledgers_.begin(), wanted_ledgers_.end());
+
+    {
+        std::unordered_map<std::string, std::size_t> kind_counts;
+        std::unordered_map<std::string, std::size_t> endpoint_counts;
+        auto const cutoff = now - kRecentFailureRetention;
+
+        for (auto const& failure : recent_failures_)
+        {
+            if (failure.at < cutoff)
+                continue;
+            kind_counts[failure.kind]++;
+            endpoint_counts[failure.endpoint]++;
+        }
+
+        out.recent_failures.reserve(kind_counts.size());
+        for (auto const& [kind, count] : kind_counts)
+        {
+            out.recent_failures.push_back(
+                Snapshot::FailureBucket{.kind = kind, .count = count});
+        }
+        std::sort(
+            out.recent_failures.begin(),
+            out.recent_failures.end(),
+            [](Snapshot::FailureBucket const& lhs,
+               Snapshot::FailureBucket const& rhs) {
+                if (lhs.count != rhs.count)
+                    return lhs.count > rhs.count;
+                return lhs.kind < rhs.kind;
+            });
+
+        out.top_failing_endpoints.reserve(endpoint_counts.size());
+        for (auto const& [endpoint, count] : endpoint_counts)
+        {
+            out.top_failing_endpoints.push_back(
+                Snapshot::FailureEndpoint{
+                    .endpoint = endpoint,
+                    .count = count,
+                });
+        }
+        std::sort(
+            out.top_failing_endpoints.begin(),
+            out.top_failing_endpoints.end(),
+            [](Snapshot::FailureEndpoint const& lhs,
+               Snapshot::FailureEndpoint const& rhs) {
+                if (lhs.count != rhs.count)
+                    return lhs.count > rhs.count;
+                return lhs.endpoint < rhs.endpoint;
+            });
+    }
 
     std::set<std::string> endpoints;
     for (auto const& [key, _] : endpoint_stats_)

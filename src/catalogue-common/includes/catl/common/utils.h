@@ -23,6 +23,21 @@ uint32_t
 to_unix_time(uint32_t netClockTime);
 
 /**
+ * Convert Unix timestamp to Ripple network time
+ * @param unix_time Time in Unix epoch
+ * @return Ripple epoch time (seconds since January 1st, 2000)
+ */
+uint32_t
+to_ripple_time(uint32_t unix_time);
+
+/**
+ * Get the current Ripple network time
+ * @return Current time in Ripple epoch (seconds since January 1st, 2000)
+ */
+uint32_t
+current_ripple_time();
+
+/**
  * Write uint32_t to buffer in big-endian format (platform-independent)
  * @param buffer Output buffer (must have at least 4 bytes available)
  * @param value Value to write

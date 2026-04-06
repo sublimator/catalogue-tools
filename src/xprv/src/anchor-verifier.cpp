@@ -1,13 +1,10 @@
 #include "xprv/anchor-verifier.h"
+#include "xprv/manifest-utils.h"
 
 #include <catl/core/base64.h>
 #include <catl/core/logger.h>
 #include <catl/crypto/sig-verify.h>
 #include <catl/vl-client/vl-client.h>
-#include <catl/xdata/codecs/codecs.h>
-#include <catl/xdata/json-visitor.h>
-#include <catl/xdata/parser-context.h>
-#include <catl/xdata/parser.h>
 #include <catl/xdata/protocol.h>
 
 #include <cstring>
@@ -200,38 +197,6 @@ done:
         result.without_signature.end(), raw.begin() + sig_end, raw.end());
 
     result.valid = true;
-    return result;
-}
-
-//------------------------------------------------------------------------------
-// Manifest signing data — parse → re-serialize signing fields only
-//------------------------------------------------------------------------------
-
-std::vector<uint8_t>
-AnchorVerifier::manifest_signing_data(
-    std::vector<uint8_t> const& raw,
-    catl::xdata::Protocol const& protocol)
-{
-
-    // Parse raw manifest bytes → JSON object
-    Slice slice(raw.data(), raw.size());
-    catl::xdata::JsonVisitor visitor(protocol);
-    catl::xdata::ParserContext ctx(slice);
-    catl::xdata::parse_with_visitor(ctx, protocol, visitor);
-    auto json = visitor.get_result().as_object();
-
-    // Re-serialize with only_signing=true (strips Signature, MasterSignature)
-    auto signing_bytes =
-        catl::xdata::codecs::serialize_object(json, protocol, true);
-
-    // Prepend MAN\0 prefix
-    std::vector<uint8_t> result;
-    result.reserve(4 + signing_bytes.size());
-    result.push_back('M');
-    result.push_back('A');
-    result.push_back('N');
-    result.push_back(0x00);
-    result.insert(result.end(), signing_bytes.begin(), signing_bytes.end());
     return result;
 }
 

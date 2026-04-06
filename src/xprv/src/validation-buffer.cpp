@@ -6,6 +6,8 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
+#include <algorithm>
+
 namespace xprv {
 
 namespace asio = boost::asio;
@@ -30,19 +32,16 @@ ValidationBuffer::ValidationBuffer(
 void
 ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
 {
-    if (type != 41)
-        return;
-
     auto owned = std::make_shared<std::vector<uint8_t>>(data);
     auto self = shared_from_this();
 
-    asio::post(strand_, [self, owned]() {
+    asio::post(strand_, [self, type, owned]() {
         if (!self->heartbeat_started_)
         {
             self->heartbeat_started_ = true;
             self->start_heartbeat();
         }
-        self->collector_.on_packet(41, *owned);
+        self->collector_.on_packet(type, *owned);
         self->check_for_new_quorum();
         self->prune_old_entries();
     });
@@ -75,6 +74,7 @@ ValidationBuffer::set_unl(std::vector<catl::vl::Manifest> const& validators)
             // UNL actually changed — old quorum entries may contain
             // validators no longer in the UNL. Invalidate cache.
             self->last_quorum_hash_ = Hash256();
+            self->last_proof_quorum_hash_ = Hash256();
             self->recent_quorums_.clear();
         }
         else
@@ -98,38 +98,44 @@ ValidationBuffer::check_for_new_quorum()
     if (collector_.unl_signing_keys.empty())
         return;
 
-    auto validations = collector_.get_quorum(kQuorumPercent);
-    if (validations.empty())
-        return;
+    bool wake = false;
 
-    auto const& hash = validations.front().ledger_hash;
-    if (hash == last_quorum_hash_)
-        return;
+    if (auto live = latest_quorum_locked(ValidationCollector::QuorumMode::live))
+    {
+        if (live->ledger_hash != last_quorum_hash_)
+        {
+            last_quorum_hash_ = live->ledger_hash;
 
-    last_quorum_hash_ = hash;
+            PLOGI(
+                log_,
+                "[", net_label_, "] New quorum: seq=",
+                live->ledger_seq,
+                " hash=",
+                live->ledger_hash.hex().substr(0, 16),
+                "... (",
+                live->validations.size(),
+                "/",
+                collector_.unl_size,
+                " validators)");
 
-    QuorumEntry entry;
-    entry.ledger_hash = hash;
-    entry.ledger_seq = validations.front().ledger_seq;
-    entry.validations = std::move(validations);
-    entry.when = std::chrono::steady_clock::now();
+            last_quorum_at_ = std::chrono::steady_clock::now();
+            recent_quorums_.push_back(std::move(*live));
+            prune_old_entries();
+            wake = true;
+        }
+    }
 
-    PLOGI(
-        log_,
-        "[", net_label_, "] New quorum: seq=",
-        entry.ledger_seq,
-        " hash=",
-        entry.ledger_hash.hex().substr(0, 16),
-        "... (",
-        entry.validations.size(),
-        "/",
-        collector_.unl_size,
-        " validators)");
+    auto proof = latest_quorum_locked(ValidationCollector::QuorumMode::proof);
+    auto const proof_hash = proof ? proof->ledger_hash : Hash256();
+    if (proof_hash != last_proof_quorum_hash_)
+    {
+        last_proof_quorum_hash_ = proof_hash;
+        if (proof)
+            wake = true;
+    }
 
-    last_quorum_at_ = std::chrono::steady_clock::now();
-    recent_quorums_.push_back(std::move(entry));
-    prune_old_entries();
-    wake_waiters();
+    if (wake)
+        wake_waiters();
 }
 
 void
@@ -206,7 +212,9 @@ ValidationBuffer::wake_waiters()
 }
 
 asio::awaitable<QuorumEntry>
-ValidationBuffer::co_wait_quorum(std::chrono::seconds timeout)
+ValidationBuffer::co_wait_quorum(
+    std::chrono::seconds timeout,
+    ValidationCollector::QuorumMode mode)
 {
     auto self = shared_from_this();
 
@@ -214,9 +222,9 @@ ValidationBuffer::co_wait_quorum(std::chrono::seconds timeout)
     co_await asio::post(strand_, asio::use_awaitable);
 
     // Already have one?
-    if (!recent_quorums_.empty())
+    if (auto latest = latest_quorum_locked(mode))
     {
-        co_return recent_quorums_.back();
+        co_return *latest;
     }
 
     // Create a per-waiter signal — not shared with other callers
@@ -268,7 +276,7 @@ ValidationBuffer::co_wait_quorum(std::chrono::seconds timeout)
         }
     });
 
-    while (recent_quorums_.empty())
+    while (true)
     {
         signal->expires_at(asio::steady_timer::time_point::max());
 
@@ -285,9 +293,11 @@ ValidationBuffer::co_wait_quorum(std::chrono::seconds timeout)
         // Re-hop to strand before touching shared state.
         co_await asio::post(strand_, asio::use_awaitable);
 
-        if (!recent_quorums_.empty())
+        if (auto latest = latest_quorum_locked(mode))
         {
-            break;
+            deadline.cancel();
+            cleanup.clean_now();
+            co_return *latest;
         }
 
         if (deadline.expiry() <= std::chrono::steady_clock::now())
@@ -302,20 +312,60 @@ ValidationBuffer::co_wait_quorum(std::chrono::seconds timeout)
 
     deadline.cancel();
     cleanup.clean_now();
-    co_return recent_quorums_.back();
+    throw std::runtime_error("validation quorum waiter exited unexpectedly");
 }
 
 asio::awaitable<std::optional<QuorumEntry>>
 ValidationBuffer::co_latest_quorum()
 {
     co_await asio::post(strand_, asio::use_awaitable);
+    co_return latest_quorum_locked(ValidationCollector::QuorumMode::live);
+}
 
-    if (recent_quorums_.empty())
+std::optional<QuorumEntry>
+ValidationBuffer::latest_quorum_locked(
+    ValidationCollector::QuorumMode mode) const
+{
+    if (mode == ValidationCollector::QuorumMode::live &&
+        !recent_quorums_.empty())
     {
-        co_return std::nullopt;
+        return recent_quorums_.back();
     }
 
-    co_return recent_quorums_.back();
+    auto validations = collector_.get_quorum(kQuorumPercent, mode);
+    if (validations.empty())
+        return std::nullopt;
+
+    QuorumEntry entry;
+    entry.ledger_hash = validations.front().ledger_hash;
+    entry.ledger_seq = validations.front().ledger_seq;
+    entry.validations = std::move(validations);
+    entry.when = std::chrono::steady_clock::now();
+
+    if (mode == ValidationCollector::QuorumMode::live)
+    {
+        for (auto const& existing : recent_quorums_)
+        {
+            if (existing.ledger_hash == entry.ledger_hash)
+            {
+                entry.when = existing.when;
+                break;
+            }
+        }
+    }
+
+    return entry;
+}
+
+asio::awaitable<bool>
+ValidationBuffer::co_has_live_only_quorum()
+{
+    co_await asio::post(strand_, asio::use_awaitable);
+    co_return collector_.has_stale_vl_manifests() &&
+        collector_.has_quorum(
+            kQuorumPercent, ValidationCollector::QuorumMode::live) &&
+        !collector_.has_quorum(
+            kQuorumPercent, ValidationCollector::QuorumMode::proof);
 }
 
 asio::awaitable<ValidationBuffer::Stats>

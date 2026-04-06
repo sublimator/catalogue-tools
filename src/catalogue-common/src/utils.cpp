@@ -1,15 +1,22 @@
 #include "catl/common/utils.h"
+
+#include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <string>
 
 namespace catl::common {
 
+namespace {
+
+static constexpr uint32_t RIPPLE_EPOCH = 946684800;
+
+}  // namespace
+
 std::string
 format_ripple_time(uint64_t net_clock_time)
 {
-    static constexpr time_t ripple_epoch_offset = 946684800;
-    time_t unix_time = net_clock_time + ripple_epoch_offset;
+    time_t unix_time = net_clock_time + RIPPLE_EPOCH;
     const std::tm* tm = std::gmtime(&unix_time);
     if (!tm)
         return "Invalid time";
@@ -21,9 +28,24 @@ format_ripple_time(uint64_t net_clock_time)
 uint32_t
 to_unix_time(const uint32_t ripple_time)
 {
-    // The Ripple Epoch is January 1st, 2000 (946684800 Unix time)
-    static constexpr uint32_t RIPPLE_EPOCH = 946684800;
     return ripple_time + RIPPLE_EPOCH;
+}
+
+uint32_t
+to_ripple_time(const uint32_t unix_time)
+{
+    if (unix_time <= RIPPLE_EPOCH)
+        return 0;
+    return unix_time - RIPPLE_EPOCH;
+}
+
+uint32_t
+current_ripple_time()
+{
+    auto const unix_now = std::chrono::duration_cast<std::chrono::seconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+    return to_ripple_time(static_cast<uint32_t>(unix_now));
 }
 
 }  // namespace catl::common
