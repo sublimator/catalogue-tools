@@ -98,7 +98,6 @@ TEST(ValidationBuffer, BestQuorumTimesOutWithNoValidations)
             try
             {
                 (void)co_await buffer->co_wait_best_quorum(
-                    xprv::ValidationCollector::QuorumMode::live,
                     std::chrono::seconds(0));
             }
             catch (std::exception const& e)
@@ -138,7 +137,6 @@ TEST(ValidationBuffer, BestQuorumCancelledWaiterIsRemoved)
                     asio::co_spawn(
                         ex,
                         buffer->co_wait_best_quorum(
-                            xprv::ValidationCollector::QuorumMode::live,
                             std::chrono::seconds(30)),
                         asio::deferred),
                     asio::co_spawn(
@@ -226,7 +224,6 @@ TEST(ValidationBuffer, BestQuorumCollectsAndFinalizesOnNextLedger)
         io,
         [&, buffer]() -> asio::awaitable<void> {
             auto result = co_await buffer->co_wait_best_quorum(
-                xprv::ValidationCollector::QuorumMode::proof,
                 std::chrono::seconds(5));
             collected_count = result.quorum.validations.size();
             stop_reason = result.stop_reason;
