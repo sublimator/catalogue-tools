@@ -593,7 +593,7 @@ ProofEngine::get_or_reuse_anchor(
     }
     else
     {
-        catl::core::emit_status("waiting for first quorum (cold start)...");
+        catl::core::emit_status("waiting for fresh quorum...");
         PLOGI(log_, "[", net_label_,
             "] get_or_reuse_anchor: no full quorum yet, waiting...");
         auto collected = co_await val_buffer_->co_wait_best_quorum(

@@ -382,7 +382,7 @@ animation:sk-pulse 1.5s ease-in-out infinite}
   <div class="title-wrap"><h1>xprv.it</h1></div>
   <div class="search-shell">
     <div class="search">
-      <input type="text" id="tx" placeholder="enter an XRPL transaction hash" spellcheck="false" autocomplete="off">
+      <input type="text" id="tx" placeholder="enter a Xahau/XRPL transaction hash" spellcheck="false" autocomplete="off">
       <button class="clear" id="clear" onclick="tx.value='';tx.dispatchEvent(new Event('input'));tx.focus()">&times;</button>
       <button class="paste" id="paste" onclick="doPaste()">paste</button>
     </div>
@@ -1541,10 +1541,6 @@ async function prove(hash, {history = 'push'} = {}) {
   const stepTimes = [];  // elapsed ms per step
 
   return new Promise((resolve) => {
-    // TODO: deep links include network (e.g. /network/xahau-mainnet/tx/...)
-    // but we ignore it here — always hit /prove which does lookup_tx_all.
-    // Should use /network/{slug}/prove?tx=... when network is known from
-    // the URL, so we don't accidentally prove on the wrong network.
     const es = new EventSource(`/prove?tx=${hash}&xrid=${rid}`);
     activeSSE = es;
     activeProveTimeout = setTimeout(() => {
