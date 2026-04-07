@@ -66,16 +66,16 @@ target_include_directories(xprv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/includes
                                         ${CMAKE_CURRENT_BINARY_DIR})
 
 # Bake git short hash into the binary at compile time.
-# Try git first, fall back to BUILD_ID file (for Docker builds without .git).
+# .gcloudignore/.dockerignore include .git/ minus objects/ and lfs/ (~800KB).
+# git needs an objects dir to recognize a repo, so create it if missing.
+if(EXISTS "${CMAKE_SOURCE_DIR}/.git" AND NOT EXISTS "${CMAKE_SOURCE_DIR}/.git/objects")
+  file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/.git/objects")
+endif()
 execute_process(
   COMMAND git rev-parse --short HEAD
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   OUTPUT_VARIABLE XPRV_BUILD_ID
   OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-if(NOT XPRV_BUILD_ID AND EXISTS "${CMAKE_SOURCE_DIR}/BUILD_ID")
-  file(READ "${CMAKE_SOURCE_DIR}/BUILD_ID" XPRV_BUILD_ID)
-  string(STRIP "${XPRV_BUILD_ID}" XPRV_BUILD_ID)
-endif()
 if(NOT XPRV_BUILD_ID)
   set(XPRV_BUILD_ID "unknown")
 endif()

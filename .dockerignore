@@ -1,6 +1,8 @@
 build/
 build-*/
-.git/
+# Include .git for rev-parse, exclude heavy parts
+.git/objects/**
+.git/lfs/**
 .ai-docs/
 .claude/
 .mypy_cache/

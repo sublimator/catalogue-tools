@@ -1,7 +1,10 @@
 # Use .gitignore rules as base
 #!include:.gitignore
 
-.git/
+# Include .git for rev-parse, but exclude the heavy parts (blobs, lfs)
+!.git/
+.git/objects/**
+.git/lfs/**
 .ai-docs/
 .claude/
 .specstory/

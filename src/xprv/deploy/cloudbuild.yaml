@@ -1,14 +1,51 @@
+substitutions:
+  _PREV_IMAGE: "auto"
+  _REGISTRY: us-central1-docker.pkg.dev/xprv-server/xprv
+
 steps:
+  # Pull previous builder for ccache seed (ignore failure on first build)
   - name: gcr.io/cloud-builders/docker
+    entrypoint: bash
     args:
-      - build
-      - -f
-      - src/xprv/deploy/Dockerfile
-      - -t
-      - us-central1-docker.pkg.dev/xprv-server/xprv/xprv:latest
-      - .
+      - -c
+      - docker pull ${_REGISTRY}/xprv:builder || echo "No previous builder, clean build"
+
+  # Build
+  - name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        PREV="${_PREV_IMAGE}"
+        if [ "$$PREV" = "auto" ]; then
+          if docker images -q ${_REGISTRY}/xprv:builder 2>/dev/null | grep -q .; then
+            PREV=${_REGISTRY}/xprv:builder
+          else
+            PREV=""
+          fi
+        fi
+        PREV_ARG=""
+        if [ -n "$$PREV" ]; then
+          echo "=== Incremental build (ccache from $$PREV) ==="
+          PREV_ARG="--build-arg PREV_IMAGE=$$PREV"
+        else
+          echo "=== Clean build (no ccache) ==="
+        fi
+        docker build --progress=plain \
+          -f src/xprv/deploy/Dockerfile \
+          $$PREV_ARG \
+          --target builder \
+          -t ${_REGISTRY}/xprv:builder \
+          . && \
+        docker build --progress=plain \
+          -f src/xprv/deploy/Dockerfile \
+          $$PREV_ARG \
+          -t ${_REGISTRY}/xprv:latest \
+          .
+
 images:
-  - us-central1-docker.pkg.dev/xprv-server/xprv/xprv:latest
+  - ${_REGISTRY}/xprv:latest
+  - ${_REGISTRY}/xprv:builder
 timeout: 600s
 options:
   machineType: E2_HIGHCPU_8
