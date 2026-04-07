@@ -1195,6 +1195,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     if (!svc.get_anchor)
         throw std::runtime_error("No anchor provider");
 
+    catl::core::emit_status("fetching anchor...");
     auto anchor = co_await svc.get_anchor(tx_ledger_seq);
     ctx->anchor_hdr = anchor.hdr;
     ctx->anchor_hash = anchor.hash;

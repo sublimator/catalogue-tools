@@ -1628,8 +1628,11 @@ async function prove(hash, {history = 'push'} = {}) {
             steps: streamedSteps
           };
           finishProve(json, hash);
-          if (history !== 'none')
-            syncProofPath(hash, json.network_id, history);
+          // Always update URL to match actual network (e.g. deep link
+          // said xahau but tx was found on xrpl). Use 'replace' for
+          // initial page load so we don't pollute browser history.
+          syncProofPath(hash, json.network_id,
+            history === 'none' ? 'replace' : history);
           // Re-render all steps with full context for correct links
           showSteps();
           resolve();
