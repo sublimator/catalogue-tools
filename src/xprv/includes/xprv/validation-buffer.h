@@ -138,12 +138,14 @@ private:
     // Pending proof callbacks — resolved by check_for_new_quorum on strand.
     struct PendingQuorum
     {
+        uint64_t id = 0;               // unique ID for cleanup on cancel
         uint32_t ledger_seq = 0;       // 0 = waiting for ANY quorum
         Hash256 ledger_hash;            // set after initial quorum
         std::chrono::steady_clock::time_point deadline;
         std::function<void(QuorumCollectResult)> callback;
     };
     std::vector<PendingQuorum> pending_;
+    uint64_t next_pending_id_ = 0;
 
     void
     start_heartbeat();

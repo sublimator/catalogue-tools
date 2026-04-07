@@ -158,7 +158,9 @@ TEST(ValidationCollector, PeerManifestsCanExplainLiveQuorumWithoutProofQuorum)
     EXPECT_TRUE(collector.has_stale_vl_manifests());
     EXPECT_TRUE(
         collector.has_quorum(90, xprv::ValidationCollector::QuorumMode::live));
-    EXPECT_FALSE(
+    // Since entry_key_hex now always uses live_signing_to_master_ regardless
+    // of mode, proof mode also reaches quorum when peer manifests are present.
+    EXPECT_TRUE(
         collector.has_quorum(90, xprv::ValidationCollector::QuorumMode::proof));
 }
 

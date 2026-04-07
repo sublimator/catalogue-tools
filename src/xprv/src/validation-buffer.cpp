@@ -474,7 +474,9 @@ ValidationBuffer::co_wait_best_quorum(
             "] co_wait_best_quorum: waiting for initial quorum...");
     }
 
+    auto pending_id = next_pending_id_++;
     pending_.push_back(PendingQuorum{
+        .id = pending_id,
         .ledger_seq = seed_seq,
         .ledger_hash = seed_hash,
         .deadline = deadline,
@@ -484,10 +486,34 @@ ValidationBuffer::co_wait_best_quorum(
         },
     });
 
+    // Start a deadline timer so resolve_pending() fires even if no
+    // validations arrive (e.g. cold start with 0s timeout).
+    auto deadline_timer = std::make_shared<asio::steady_timer>(strand_, deadline);
+    deadline_timer->async_wait([weak = weak_from_this(), deadline_timer](boost::system::error_code ec) {
+        if (ec)
+            return;
+        if (auto self = weak.lock())
+            self->resolve_pending();
+    });
+
     // One single co_await — woken by the callback cancelling the timer
     boost::system::error_code ec;
     co_await signal->async_wait(
         asio::redirect_error(asio::use_awaitable, ec));
+
+    // Cancel deadline timer if we resolved early (quorum arrived)
+    deadline_timer->cancel();
+
+    // Clean up orphaned pending entry (e.g. if coroutine was cancelled
+    // by parallel_group before the callback fired).
+    for (auto it = pending_.begin(); it != pending_.end(); ++it)
+    {
+        if (it->id == pending_id)
+        {
+            pending_.erase(it);
+            break;
+        }
+    }
 
     // Re-hop to caller's executor before returning — don't leave
     // the caller running on the validation buffer's strand.

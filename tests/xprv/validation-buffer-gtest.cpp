@@ -89,22 +89,15 @@ TEST(ValidationBuffer, BestQuorumTimesOutWithNoValidations)
     auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
 
     bool done = false;
-    bool timed_out = false;
-    std::string error;
+    xprv::QuorumCollectStopReason stop_reason =
+        xprv::QuorumCollectStopReason::full;
 
     asio::co_spawn(
         io,
         [&, buffer]() -> asio::awaitable<void> {
-            try
-            {
-                (void)co_await buffer->co_wait_best_quorum(
-                    std::chrono::seconds(0));
-            }
-            catch (std::exception const& e)
-            {
-                timed_out = true;
-                error = e.what();
-            }
+            auto result = co_await buffer->co_wait_best_quorum(
+                std::chrono::seconds(0));
+            stop_reason = result.stop_reason;
 
             auto stats = co_await buffer->co_stats();
             EXPECT_EQ(stats.pending_callbacks, 0u);
@@ -115,8 +108,7 @@ TEST(ValidationBuffer, BestQuorumTimesOutWithNoValidations)
     io.run();
 
     EXPECT_TRUE(done);
-    EXPECT_TRUE(timed_out);
-    EXPECT_NE(error.find("Timed out"), std::string::npos);
+    EXPECT_EQ(stop_reason, xprv::QuorumCollectStopReason::timeout);
 }
 
 TEST(ValidationBuffer, BestQuorumCancelledWaiterIsRemoved)
