@@ -171,6 +171,22 @@ public:
         return connections_.size();
     }
 
+    struct ConnectionStats
+    {
+        size_t connected = 0;
+        uint64_t total_connects = 0;
+        uint64_t total_disconnects = 0;
+    };
+
+    /// Awaitable connection stats — hops to strand for safe read.
+    boost::asio::awaitable<ConnectionStats>
+    co_connection_stats()
+    {
+        co_await boost::asio::post(strand_, boost::asio::use_awaitable);
+        co_return ConnectionStats{
+            connections_.size(), total_connects_, total_disconnects_};
+    }
+
     /// Awaitable peer count — hops to strand for safe read.
     boost::asio::awaitable<size_t>
     co_size()
@@ -224,6 +240,8 @@ public:
         size_t queued_connects = 0;
         size_t crawl_in_flight = 0;
         size_t queued_crawls = 0;
+        uint64_t total_connects = 0;
+        uint64_t total_disconnects = 0;
         std::vector<uint32_t> wanted_ledgers;
         std::vector<FailureBucket> recent_failures;
         std::vector<FailureEndpoint> top_failing_endpoints;
@@ -364,9 +382,7 @@ private:
         std::map<std::string, std::string> const& headers);
 
     void
-    note_connect_failure(
-        std::string const& endpoint,
-        std::string detail = {});
+    note_connect_failure(std::string const& endpoint, std::string detail = {});
 
     void
     note_crawl_failure(std::string const& endpoint, std::string detail);
@@ -463,6 +479,8 @@ private:
     std::unordered_map<std::string, EndpointStats> endpoint_stats_;
     std::uint64_t next_selection_ticket_ = 0;
     std::map<std::string, PeerSessionPtr> connections_;
+    uint64_t total_connects_ = 0;
+    uint64_t total_disconnects_ = 0;
     std::map<std::string, std::chrono::steady_clock::time_point> failed_at_;
     struct FailureEvent
     {

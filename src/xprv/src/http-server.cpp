@@ -702,6 +702,8 @@ HttpServer::handle_session(
                     body["network_id"] = routed_network_id;
                     body["network"] = network_slug_for_id(routed_network_id);
                     body["peer_count"] = status.peer_count;
+                    body["total_connects"] = status.total_connects;
+                    body["total_disconnects"] = status.total_disconnects;
                     body["vl_loaded"] = status.vl_loaded;
                     if (status.latest_quorum_seq)
                         body["latest_quorum_seq"] = *status.latest_quorum_seq;
@@ -755,6 +757,9 @@ HttpServer::handle_session(
                         boost::json::object net_body;
                         net_body["network_id"] = net_id;
                         net_body["peer_count"] = status.peer_count;
+                        net_body["total_connects"] = status.total_connects;
+                        net_body["total_disconnects"] =
+                            status.total_disconnects;
                         net_body["vl_loaded"] = status.vl_loaded;
                         if (status.latest_quorum_seq)
                             net_body["latest_quorum_seq"] =
@@ -766,7 +771,8 @@ HttpServer::handle_session(
                             status.validation_buffer.collector_ledgers;
                         vb["collector_validations"] =
                             status.validation_buffer.collector_validations;
-                        vb["waiters"] = status.validation_buffer.pending_callbacks;
+                        vb["waiters"] =
+                            status.validation_buffer.pending_callbacks;
                         net_body["validation_buffer"] = std::move(vb);
 
                         boost::json::object cache;
@@ -807,6 +813,8 @@ HttpServer::handle_session(
                         auto status = co_await engine->co_health();
                         auto cs = engine->cache_stats();
                         body["peer_count"] = status.peer_count;
+                        body["total_connects"] = status.total_connects;
+                        body["total_disconnects"] = status.total_disconnects;
                         body["vl_loaded"] = status.vl_loaded;
                         if (status.latest_quorum_seq)
                             body["latest_quorum_seq"] =
@@ -818,7 +826,8 @@ HttpServer::handle_session(
                             status.validation_buffer.collector_ledgers;
                         vb["collector_validations"] =
                             status.validation_buffer.collector_validations;
-                        vb["waiters"] = status.validation_buffer.pending_callbacks;
+                        vb["waiters"] =
+                            status.validation_buffer.pending_callbacks;
                         body["validation_buffer"] = std::move(vb);
 
                         boost::json::object cache;
@@ -962,7 +971,8 @@ HttpServer::handle_session(
                         accept.find("text/event-stream") != std::string::npos;
 
                     // Optional max_anchor_age — reuse recent anchor (seconds).
-                    // Default 10s — reuse the cached anchor for repeated requests.
+                    // Default 10s — reuse the cached anchor for repeated
+                    // requests.
                     uint32_t max_anchor_age = 10;
                     auto ma_it = params.find("max_anchor_age");
                     if (ma_it != params.end() && !ma_it->second.empty())

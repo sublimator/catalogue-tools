@@ -1316,6 +1316,13 @@ peer_connection::close_impl()
             PLOGD(log_, "Error closing socket: ", ec.message());
         }
     }
+
+    // Break shared_ptr cycles: packet_handler_ and disconnect_handler_
+    // capture shared_ptr<PeerClient> which holds shared_ptr<peer_connection>.
+    // fail_and_close() moves disconnect_handler_ out before calling it,
+    // but close() (used by eviction) never fires it — clear both here.
+    packet_handler_ = nullptr;
+    disconnect_handler_ = nullptr;
 }
 
 void
@@ -1325,12 +1332,15 @@ peer_connection::fail_and_close(boost::system::error_code ec)
         return;
 
     PLOGD(log_, "fail_and_close: ", ec.message());
+
+    // Save disconnect handler BEFORE close_impl() clears it.
+    auto handler = std::move(disconnect_handler_);
+
     fail_queued_writes(ec);
     close_impl();
 
-    if (disconnect_handler_)
+    if (handler)
     {
-        auto handler = std::move(disconnect_handler_);
         handler(ec);
     }
 }

@@ -726,50 +726,58 @@ PeerClient::do_connect(
 
     PLOGI(log_, "[", net_label_, "] Connecting to ", host, ":", port, "...");
 
-    auto self = shared_from_this();
     // Disconnect handler fires on the strand (socket is strand-aware).
     // Notifies both PeerClient (state update) and any registered observer
-    // (PeerSet removal).
-    connection_->set_disconnect_handler([self](boost::system::error_code ec) {
-        // Always notify the observer (PeerSet needs to know)
-        if (self->on_disconnect_)
-        {
-            self->on_disconnect_();
-        }
+    // (PeerSet removal).  Uses weak_ptr to avoid shared_ptr cycle:
+    // peer_connection -> disconnect_handler_ -> PeerClient -> connection_
+    connection_->set_disconnect_handler(
+        [weak = weak_from_this()](boost::system::error_code ec) {
+            auto self = weak.lock();
+            if (!self)
+                return;
 
-        if (self->state_ == State::Ready || self->state_ == State::Failed)
-        {
-            return;
-        }
+            // Always notify the observer (PeerSet needs to know)
+            if (self->on_disconnect_)
+            {
+                self->on_disconnect_();
+            }
 
-        if (ec == boost::asio::error::invalid_argument ||
-            ec == boost::asio::error::operation_aborted)
-        {
-            PLOGD(
-                PeerClient::log_,
-                "[",
-                self->net_label_,
-                "] [",
-                self->endpoint_str_,
-                "] Connection lost before ready: ",
-                ec.message());
-        }
-        else
-        {
-            PLOGE(
-                PeerClient::log_,
-                "[",
-                self->net_label_,
-                "] [",
-                self->endpoint_str_,
-                "] Connection lost before ready: ",
-                ec.message());
-        }
-        self->state_ = State::Failed;
-        self->complete_connect(ec);
-    });
+            if (self->state_ == State::Ready || self->state_ == State::Failed)
+            {
+                return;
+            }
 
-    // Connect callback fires on the strand (socket is strand-aware)
+            if (ec == boost::asio::error::invalid_argument ||
+                ec == boost::asio::error::operation_aborted)
+            {
+                PLOGD(
+                    PeerClient::log_,
+                    "[",
+                    self->net_label_,
+                    "] [",
+                    self->endpoint_str_,
+                    "] Connection lost before ready: ",
+                    ec.message());
+            }
+            else
+            {
+                PLOGE(
+                    PeerClient::log_,
+                    "[",
+                    self->net_label_,
+                    "] [",
+                    self->endpoint_str_,
+                    "] Connection lost before ready: ",
+                    ec.message());
+            }
+            self->state_ = State::Failed;
+            self->complete_connect(ec);
+        });
+
+    // Connect callback fires on the strand (socket is strand-aware).
+    // One-shot callback — shared_ptr capture is fine here, it completes
+    // promptly and doesn't create a cycle (not stored as a member).
+    auto self = shared_from_this();
     connection_->async_connect([self, on_ready = std::move(on_ready)](
                                    boost::system::error_code ec) mutable {
         if (ec)
@@ -815,15 +823,16 @@ PeerClient::on_connected(ReadyCallback on_ready)
         "] Connected to ",
         connection_->remote_endpoint());
 
-    auto self = shared_from_this();
     ready_callback_ = std::move(on_ready);
 
     // Packet handler fires on the strand (socket is strand-aware).
-    // No manual dispatch needed.
+    // Uses weak_ptr to avoid shared_ptr cycle:
+    // peer_connection -> packet_handler_ -> PeerClient -> connection_
     connection_->start_read(
-        [self](
+        [weak = weak_from_this()](
             packet_header const& header, std::vector<uint8_t> const& payload) {
-            self->on_packet(header, payload);
+            if (auto self = weak.lock())
+                self->on_packet(header, payload);
         });
 
     send_monitoring_status();

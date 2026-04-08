@@ -7,8 +7,8 @@
 
 #include <catl/core/logger.h>
 #include <catl/core/request-context.h>
-#include <cstring>
 #include <catl/rpc-client/rpc-client-coro.h>
+#include <cstring>
 
 #include <algorithm>
 #include <boost/asio/co_spawn.hpp>
@@ -41,7 +41,7 @@ to_string(QuorumCollectStopReason reason)
     return "unknown";
 }
 
-}
+}  // namespace
 
 // ═══════════════════════════════════════════════════════════════════════
 // Lifecycle
@@ -100,7 +100,9 @@ ProofEngine::start()
     peer_opts.archival_range_threshold = config_.archival_range_threshold;
     PLOGI(
         log_,
-        "[", net_label_, "] Peer pool (",
+        "[",
+        net_label_,
+        "] Peer pool (",
         single_shot_ ? "cli" : "server",
         "): hubs=",
         pool.max_hub_peers,
@@ -143,7 +145,9 @@ ProofEngine::start()
             {
                 PLOGI(
                     log_,
-                    "[", self->net_label_, "] Initial peer connected: ",
+                    "[",
+                    self->net_label_,
+                    "] Initial peer connected: ",
                     client->endpoint(),
                     " (ledger ",
                     client->peer_ledger_seq(),
@@ -153,7 +157,9 @@ ProofEngine::start()
             {
                 PLOGW(
                     log_,
-                    "[", self->net_label_, "] Initial peer ",
+                    "[",
+                    self->net_label_,
+                    "] Initial peer ",
                     self->config_.peer_host,
                     ":",
                     self->config_.peer_port,
@@ -175,7 +181,9 @@ ProofEngine::start()
                 results.begin()->endpoint().address().to_string();
             PLOGI(
                 log_,
-                "[", net_label_, "] Resolved RPC host ",
+                "[",
+                net_label_,
+                "] Resolved RPC host ",
                 config_.rpc_host,
                 " → ",
                 resolved_ip);
@@ -184,13 +192,20 @@ ProofEngine::start()
     }
     catch (std::exception const& e)
     {
-        PLOGW(log_, "[", net_label_, "] Failed to pre-resolve RPC host: ", e.what());
+        PLOGW(
+            log_,
+            "[",
+            net_label_,
+            "] Failed to pre-resolve RPC host: ",
+            e.what());
         // Continue with hostname — individual requests will resolve
     }
 
     PLOGI(
         log_,
-        "[", net_label_, "] Engine started (network=",
+        "[",
+        net_label_,
+        "] Engine started (network=",
         config_.network_id,
         ", vl=",
         config_.vl_host,
@@ -240,7 +255,13 @@ ProofEngine::prove(
     {
         if (auto cached = cache_get(tx_hash))
         {
-            PLOGI(log_, "[", net_label_, "] Cache hit for ", tx_hash.substr(0, 16), "...");
+            PLOGI(
+                log_,
+                "[",
+                net_label_,
+                "] Cache hit for ",
+                tx_hash.substr(0, 16),
+                "...");
             // Replay cached steps through the callback for SSE
             if (on_step)
             {
@@ -253,8 +274,8 @@ ProofEngine::prove(
 
     // Step 1: Ensure VL is loaded (UNL push happens once in start(),
     // not per-request — set_unl clears the quorum cache)
-    auto vl = std::make_shared<catl::vl::ValidatorList>(
-        co_await vl_cache_->co_get());
+    auto vl =
+        std::make_shared<catl::vl::ValidatorList>(co_await vl_cache_->co_get());
 
     // Check tx→ledger_seq cache (avoids RPC lookup on repeated requests)
     auto cached_seq = tx_ledger_get(tx_hash);
@@ -273,30 +294,30 @@ ProofEngine::prove(
         .network_id = config_.network_id,
         .tx_ledger_seq_hint =
             ledger_seq_hint ? ledger_seq_hint : cached_seq.value_or(0),
-        .get_anchor =
-            [self, vl, anchor_age](uint32_t min_seq)
-                -> boost::asio::awaitable<BuildServices::AnchorData> {
-                auto bundle =
-                    co_await self->get_or_reuse_anchor(vl, anchor_age);
-                // If anchor is behind min_seq, force a fresh one once.
-                if (min_seq > 0 && bundle.seq < min_seq)
-                {
-                    PLOGW(
-                        log_,
-                        "[", self->net_label_, "] Anchor seq=",
-                        bundle.seq,
-                        " behind min_seq=",
-                        min_seq,
-                        " — fetching fresh");
-                    bundle = co_await self->get_or_reuse_anchor(vl, 0);
-                }
-                co_return BuildServices::AnchorData{
-                    .hdr = bundle.header_result,
-                    .hash = bundle.anchor_hash,
-                    .account_hash = bundle.account_hash,
-                    .validations = bundle.validations,
-                };
-            },
+        .get_anchor = [self, vl, anchor_age](uint32_t min_seq)
+            -> boost::asio::awaitable<BuildServices::AnchorData> {
+            auto bundle = co_await self->get_or_reuse_anchor(vl, anchor_age);
+            // If anchor is behind min_seq, force a fresh one once.
+            if (min_seq > 0 && bundle.seq < min_seq)
+            {
+                PLOGW(
+                    log_,
+                    "[",
+                    self->net_label_,
+                    "] Anchor seq=",
+                    bundle.seq,
+                    " behind min_seq=",
+                    min_seq,
+                    " — fetching fresh");
+                bundle = co_await self->get_or_reuse_anchor(vl, 0);
+            }
+            co_return BuildServices::AnchorData{
+                .hdr = bundle.header_result,
+                .hash = bundle.anchor_hash,
+                .account_hash = bundle.account_hash,
+                .validations = bundle.validations,
+            };
+        },
         .cancel_token = cancel_token,
         .on_step = std::move(on_step),
     };
@@ -341,7 +362,8 @@ ProofEngine::lookup_tx(std::string const& tx_hash)
             tx_ledger_put(tx_hash, seq);
             co_return seq;
         }
-        PLOGW(log_, "[", net_label_, "] lookup_tx: no ledger_index in response");
+        PLOGW(
+            log_, "[", net_label_, "] lookup_tx: no ledger_index in response");
         co_return 0u;
     }
     catch (catl::rpc::RpcTxNotFound const&)
@@ -352,10 +374,14 @@ ProofEngine::lookup_tx(std::string const& tx_hash)
     {
         PLOGW(
             log_,
-            "[", net_label_, "] lookup_tx(",
+            "[",
+            net_label_,
+            "] lookup_tx(",
             tx_hash.substr(0, 16),
             "...) rpc=",
-            config_.rpc_host, ":", config_.rpc_port,
+            config_.rpc_host,
+            ":",
+            config_.rpc_port,
             " error: ",
             e.what());
         co_return 0u;
@@ -389,7 +415,9 @@ ProofEngine::cache_put(std::string const& tx_hash, ProveResult const& result)
     cache_map_[tx_hash] = cache_lru_.begin();
     PLOGD(
         log_,
-        "[", net_label_, "] Cached proof for ",
+        "[",
+        net_label_,
+        "] Cached proof for ",
         tx_hash.substr(0, 16),
         "... (",
         cache_lru_.size(),
@@ -439,8 +467,7 @@ ProofEngine::verify(
     {
         // Auto-detect format
         ProofChain chain;
-        if (data.size() >= 4 &&
-            std::memcmp(data.data(), XPRV_MAGIC, 4) == 0)
+        if (data.size() >= 4 && std::memcmp(data.data(), XPRV_MAGIC, 4) == 0)
         {
             chain = from_binary(data);
         }
@@ -514,7 +541,10 @@ asio::awaitable<ProofEngine::Status>
 ProofEngine::co_health()
 {
     Status status;
-    status.peer_count = co_await peers_->co_size();
+    auto conn_stats = co_await peers_->co_connection_stats();
+    status.peer_count = conn_stats.connected;
+    status.total_connects = conn_stats.total_connects;
+    status.total_disconnects = conn_stats.total_disconnects;
 
     status.vl_loaded = co_await vl_cache_->co_is_loaded();
 
@@ -535,7 +565,12 @@ ProofEngine::get_or_reuse_anchor(
     std::shared_ptr<catl::vl::ValidatorList> const& vl,
     uint32_t max_age_secs)
 {
-    PLOGI(log_, "[", net_label_, "] get_or_reuse_anchor: ENTER max_age=", max_age_secs);
+    PLOGI(
+        log_,
+        "[",
+        net_label_,
+        "] get_or_reuse_anchor: ENTER max_age=",
+        max_age_secs);
     // TODO: why wait for a NEW quorum at all? recent_quorums_ already has
     // the last 30 finalized quorums. The one at .back() is at most ~4s old
     // and already has 34-35/35 validations. Just use it:
@@ -558,19 +593,22 @@ ProofEngine::get_or_reuse_anchor(
                 std::chrono::seconds(max_age_secs))
         {
             auto age_s = std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::steady_clock::now() -
-                    current_anchor_->built_at)
-                    .count();
+                             std::chrono::steady_clock::now() -
+                             current_anchor_->built_at)
+                             .count();
             PLOGI(
                 log_,
-                "[", net_label_, "] Anchor: reusing seq=",
+                "[",
+                net_label_,
+                "] Anchor: reusing seq=",
                 current_anchor_->seq,
                 " hash=",
                 current_anchor_->anchor_hash.hex().substr(0, 16),
-                "... (age=", age_s, "s)");
+                "... (age=",
+                age_s,
+                "s)");
             catl::core::emit_status(
-                "anchor: reusing seq=" +
-                std::to_string(current_anchor_->seq) +
+                "anchor: reusing seq=" + std::to_string(current_anchor_->seq) +
                 " (age=" + std::to_string(age_s) + "s)");
             co_return *current_anchor_;
         }
@@ -582,29 +620,39 @@ ProofEngine::get_or_reuse_anchor(
         std::chrono::seconds(max_age_secs > 0 ? max_age_secs : 10));
     if (full)
     {
-        PLOGI(log_, "[", net_label_,
+        PLOGI(
+            log_,
+            "[",
+            net_label_,
             "] get_or_reuse_anchor: using last full quorum seq=",
-            full->ledger_seq, " (",
-            full->validations.size(), "/",
-            (vl ? vl->validators.size() : 0), ")");
+            full->ledger_seq,
+            " (",
+            full->validations.size(),
+            "/",
+            (vl ? vl->validators.size() : 0),
+            ")");
         catl::core::emit_status(
-            "using recent full quorum seq=" +
-            std::to_string(full->ledger_seq));
+            "using recent full quorum seq=" + std::to_string(full->ledger_seq));
     }
     else
     {
         catl::core::emit_status("waiting for fresh quorum...");
-        PLOGI(log_, "[", net_label_,
+        PLOGI(
+            log_,
+            "[",
+            net_label_,
             "] get_or_reuse_anchor: no full quorum yet, waiting...");
-        auto collected = co_await val_buffer_->co_wait_best_quorum(
-            std::chrono::seconds(30));
+        auto collected =
+            co_await val_buffer_->co_wait_best_quorum(std::chrono::seconds(30));
         full = std::move(collected.quorum);
     }
     auto quorum = std::move(*full);
 
     PLOGI(
         log_,
-        "[", net_label_, "] Anchor: seq=",
+        "[",
+        net_label_,
+        "] Anchor: seq=",
         quorum.ledger_seq,
         " hash=",
         quorum.ledger_hash.hex().substr(0, 16),
@@ -614,17 +662,15 @@ ProofEngine::get_or_reuse_anchor(
         (vl ? vl->validators.size() : 0),
         " validators)");
     catl::core::emit_status(
-        "quorum: seq=" + std::to_string(quorum.ledger_seq) +
-        " (" + std::to_string(quorum.validations.size()) + "/" +
-        std::to_string(vl ? vl->validators.size() : 0) +
-        " validators)");
+        "quorum: seq=" + std::to_string(quorum.ledger_seq) + " (" +
+        std::to_string(quorum.validations.size()) + "/" +
+        std::to_string(vl ? vl->validators.size() : 0) + " validators)");
 
     auto anchor = co_await get_anchor_bundle(
         quorum.ledger_seq, quorum.ledger_hash, quorum.validations);
 
     co_return anchor;
 }
-
 
 void
 ProofEngine::invalidate_anchor_cache_locked()
@@ -664,13 +710,19 @@ ProofEngine::get_anchor_bundle(
         {
             action = Action::hit;
             hit_bundle = it->second.bundle;
-            PLOGI(log_, "[", net_label_, "] anchor_bundle: HIT seq=", anchor_seq);
+            PLOGI(
+                log_, "[", net_label_, "] anchor_bundle: HIT seq=", anchor_seq);
         }
         else if (!inserted && it->second.signal)
         {
             action = Action::wait;
             signal = it->second.signal;
-            PLOGI(log_, "[", net_label_, "] anchor_bundle: WAIT seq=", anchor_seq,
+            PLOGI(
+                log_,
+                "[",
+                net_label_,
+                "] anchor_bundle: WAIT seq=",
+                anchor_seq,
                 " — another request is building it");
         }
         else
@@ -679,7 +731,13 @@ ProofEngine::get_anchor_bundle(
                 io_, std::chrono::seconds(30));
             it->second.present = false;
             action = Action::fetch;
-            PLOGI(log_, "[", net_label_, "] anchor_bundle: FETCH seq=", anchor_seq, " — building");
+            PLOGI(
+                log_,
+                "[",
+                net_label_,
+                "] anchor_bundle: FETCH seq=",
+                anchor_seq,
+                " — building");
         }
     }
 
@@ -762,7 +820,9 @@ ProofEngine::get_anchor_bundle(
 
         PLOGI(
             log_,
-            "[", net_label_, "] anchor_bundle: built seq=",
+            "[",
+            net_label_,
+            "] anchor_bundle: built seq=",
             anchor_seq,
             " hash=",
             anchor_hash.hex().substr(0, 16));

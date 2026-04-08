@@ -24,8 +24,8 @@
 
 #include <atomic>
 #include <boost/asio/awaitable.hpp>
-#include <chrono>
 #include <boost/asio/io_context.hpp>
+#include <chrono>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -77,7 +77,8 @@ public:
     using StepCallback =
         std::function<boost::asio::awaitable<void>(ChainStep const&)>;
 
-    /// @param max_anchor_age_secs  Max age of cached anchor to reuse (0 = always
+    /// @param max_anchor_age_secs  Max age of cached anchor to reuse (0 =
+    /// always
     ///                             wait for latest quorum, the default).
     boost::asio::awaitable<ProveResult>
     prove(
@@ -102,6 +103,8 @@ public:
     struct Status
     {
         size_t peer_count = 0;
+        uint64_t total_connects = 0;
+        uint64_t total_disconnects = 0;
         bool vl_loaded = false;
         std::optional<uint32_t> latest_quorum_seq;
         ValidationBuffer::Stats validation_buffer;
@@ -282,15 +285,18 @@ private:
     /// Get or build anchor bundle for a given seq. First caller builds,
     /// others co_await the signal.
     boost::asio::awaitable<AnchorBundle>
-    get_anchor_bundle(uint32_t anchor_seq, Hash256 anchor_hash,
-                      std::vector<ValidationCollector::Entry> validations);
+    get_anchor_bundle(
+        uint32_t anchor_seq,
+        Hash256 anchor_hash,
+        std::vector<ValidationCollector::Entry> validations);
 
     /// Reuse the current anchor if recent enough, otherwise wait for
     /// a new quorum and build a fresh one.
     /// @param max_age_secs  0 = always fresh (wait for latest quorum)
     boost::asio::awaitable<AnchorBundle>
-    get_or_reuse_anchor(std::shared_ptr<catl::vl::ValidatorList> const& vl,
-                        uint32_t max_age_secs);
+    get_or_reuse_anchor(
+        std::shared_ptr<catl::vl::ValidatorList> const& vl,
+        uint32_t max_age_secs);
 
     void
     invalidate_anchor_cache();

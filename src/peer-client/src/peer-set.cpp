@@ -173,11 +173,9 @@ std::string
 lower_copy(std::string_view text)
 {
     std::string out(text);
-    std::transform(
-        out.begin(),
-        out.end(),
-        out.begin(),
-        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
     return out;
 }
 
@@ -227,8 +225,7 @@ classify_failure_kind(std::string_view detail, bool crawl)
         suffix = "dns";
     }
     else if (
-        lowered.empty() ||
-        lowered.find("disconnected") != std::string::npos)
+        lowered.empty() || lowered.find("disconnected") != std::string::npos)
     {
         suffix = "disconnect";
     }
@@ -549,15 +546,15 @@ PeerSet::note_peer_headers(
 }
 
 void
-PeerSet::note_connect_failure(
-    std::string const& endpoint,
-    std::string detail)
+PeerSet::note_connect_failure(std::string const& endpoint, std::string detail)
 {
     if (!strand_.running_in_this_thread())
     {
         asio::post(
             strand_,
-            [self = shared_from_this(), endpoint, detail = std::move(detail)]() mutable {
+            [self = shared_from_this(),
+             endpoint,
+             detail = std::move(detail)]() mutable {
                 self->note_connect_failure(endpoint, std::move(detail));
             });
         return;
@@ -581,7 +578,9 @@ PeerSet::note_crawl_failure(std::string const& endpoint, std::string detail)
     {
         asio::post(
             strand_,
-            [self = shared_from_this(), endpoint, detail = std::move(detail)]() mutable {
+            [self = shared_from_this(),
+             endpoint,
+             detail = std::move(detail)]() mutable {
                 self->note_crawl_failure(endpoint, std::move(detail));
             });
         return;
@@ -597,19 +596,19 @@ PeerSet::retry_backoff_for(std::string const& endpoint) const
     ASSERT_ON_STRAND();
     auto const key = canonical_endpoint(endpoint);
     auto stats_it = endpoint_stats_.find(key);
-    uint64_t failures = stats_it != endpoint_stats_.end()
-        ? stats_it->second.failure_count
-        : 0;
+    uint64_t failures =
+        stats_it != endpoint_stats_.end() ? stats_it->second.failure_count : 0;
 
     if (failures == 0)
         return std::chrono::steady_clock::duration::zero();
 
     auto const exponent = std::min<uint64_t>(failures - 1, 6);
-    auto const backoff = std::chrono::duration_cast<
-        std::chrono::steady_clock::duration>(
-        options_.retry_backoff * (uint64_t{1} << exponent));
-    auto const cap = std::chrono::duration_cast<
-        std::chrono::steady_clock::duration>(std::chrono::minutes(5));
+    auto const backoff =
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            options_.retry_backoff * (uint64_t{1} << exponent));
+    auto const cap =
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::minutes(5));
     return std::min(backoff, cap);
 }
 
@@ -620,7 +619,8 @@ PeerSet::record_failure_event(
     std::chrono::steady_clock::time_point now)
 {
     ASSERT_ON_STRAND();
-    recent_failures_.push_back(FailureEvent{.at = now, .endpoint = endpoint, .kind = kind});
+    recent_failures_.push_back(
+        FailureEvent{.at = now, .endpoint = endpoint, .kind = kind});
     prune_recent_failure_events(now);
 }
 
@@ -1699,7 +1699,8 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
 
     auto key = make_key(host, port);
 
-    // Already connected?
+    // Already connected?  Note: this check can go stale across the
+    // co_await in co_connect() below — see the re-check after hop-back.
     auto it = connections_.find(key);
     if (it != connections_.end())
     {
@@ -1789,7 +1790,19 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
         // the signal timer uses, which may not be our strand.
         co_await asio::post(strand_, asio::use_awaitable);
 
+        // Re-check: co_connect() left the strand, so another coroutine
+        // (e.g. connect_batch at startup) may have inserted this key.
+        // Drop ours — first one wins.
+        if (auto existing = connections_.find(key);
+            existing != connections_.end())
+        {
+            PLOGD(log_, "[", net_label_,
+                "] Discarding duplicate connection for ", key);
+            client->disconnect();
+            co_return existing->second;
+        }
         connections_[key] = client;
+        ++total_connects_;
         failed_at_.erase(key);
         note_connect_success(
             key,
@@ -1925,6 +1938,9 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
             }
         }
 
+        // Break shared_ptr cycle: PeerClient <-> peer_connection
+        if (client)
+            client->disconnect();
         co_return nullptr;
     }
     catch (std::exception const& e)
@@ -1958,6 +1974,9 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
                     cache_error.what());
             }
         }
+        // Break shared_ptr cycle: PeerClient <-> peer_connection
+        if (client)
+            client->disconnect();
         co_return nullptr;
     }
 }
@@ -2724,6 +2743,8 @@ PeerSet::snapshot_unsafe() const
     out.known_endpoints = tracker_->size();
     out.tracked_endpoints = endpoint_stats_.size();
     out.connected_peers = connections_.size();
+    out.total_connects = total_connects_;
+    out.total_disconnects = total_disconnects_;
     out.in_flight_connects = in_flight_.size();
     out.queued_connects = pending_connects_.size();
     out.crawl_in_flight = crawl_in_flight_.size();
@@ -2762,11 +2783,10 @@ PeerSet::snapshot_unsafe() const
         out.top_failing_endpoints.reserve(endpoint_counts.size());
         for (auto const& [endpoint, count] : endpoint_counts)
         {
-            out.top_failing_endpoints.push_back(
-                Snapshot::FailureEndpoint{
-                    .endpoint = endpoint,
-                    .count = count,
-                });
+            out.top_failing_endpoints.push_back(Snapshot::FailureEndpoint{
+                .endpoint = endpoint,
+                .count = count,
+            });
         }
         std::sort(
             out.top_failing_endpoints.begin(),
@@ -2945,6 +2965,7 @@ PeerSet::remove_peer(std::string const& key)
     {
         PLOGI(log_, "[", net_label_, "] Removing dead peer: ", key);
         connections_.erase(it);
+        ++total_disconnects_;
         tracker_->remove(key);
         notify_waiters();
     }
