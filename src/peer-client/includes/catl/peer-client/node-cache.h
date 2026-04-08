@@ -161,7 +161,8 @@ public:
     stats() const;
 
     /// Fetch a ledger header, with cache + in-flight dedup.
-    /// First requester fetches via co_get_ledger_header, others wait.
+    /// First requester fans out to up to 3 peers; first response wins.
+    /// Subsequent callers join the shared wait.
     asio::awaitable<LedgerHeaderResult>
     get_header(
         uint32_t ledger_seq,
@@ -262,6 +263,7 @@ private:
         std::shared_ptr<asio::steady_timer> done_signal;
         std::shared_ptr<asio::steady_timer> progress_signal;
         ProgressCursor cursor;
+        uint8_t round_seen = 0;  // for header retry detection
     };
 
     // ── Cache entry ─────────────────────────────────────────────
@@ -298,6 +300,8 @@ private:
         std::shared_ptr<asio::steady_timer> signal;  // non-null while in-flight
         ProgressState progress;
         bool present = false;
+        bool retry_pending = false;  // owner is dispatching next round
+        uint8_t round = 0;           // incremented on fan-out retry
     };
 
     /// Ensure a node is in the cache. Fetches from peer on miss.
@@ -329,6 +333,17 @@ private:
         Hash256 const& target_key,
         int speculative_depth,
         PeerSessionPtr peer);
+
+    /// Send a header request to a single peer (fire-and-forget).
+    /// On success: populate header_cache_ entry, cancel signal.
+    /// On failure: decrement outstanding counter; if all peers failed,
+    /// cancel signal to wake waiters immediately.
+    void
+    send_header_fetch(
+        uint32_t ledger_seq,
+        PeerSessionPtr peer,
+        std::shared_ptr<std::atomic<int>> outstanding,
+        std::shared_ptr<PeerSet> peers);
 
     /// Compute the content hash of an inner wire node.
     /// Expands compressed format to canonical 16×32 layout, then

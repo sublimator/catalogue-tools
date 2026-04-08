@@ -772,14 +772,39 @@ ProofEngine::get_anchor_bundle(
     }
 
     // Build: fetch the anchor header
+    //
+    // TODO: retry layering cleanup
+    //
+    // Problem: retries exist at TWO levels that don't know about each other.
+    //
+    //   1. get_header() — 3-peer fan-out per round, up to 3 rounds with
+    //      generation counter + retry_pending flag so joiners stay attached.
+    //      Uses PeerSet::note_ledger_failure + co_select_peers_for for
+    //      ledger-aware peer exclusion. Emits "giving up" on final timeout.
+    //
+    //   2. proof-builder's with_peer_failover() — catches PeerClientException
+    //      from get_header, picks a new peer, retries the whole anchor fetch.
+    //      Has its own per-peer retry counts, 30s cooldowns, 60s deadline.
+    //
+    // Result: get_header "gives up" after 3 rounds (~18s), proof-builder
+    // catches the timeout and retries — which often succeeds. The user sees
+    // "giving up" but the proof completes. Confusing UX and wasted time.
+    //
+    // Proposed fix:
+    //   - get_header owns ALL header fetch retries (fan-out + rounds).
+    //     It already has PeerSet for ledger-aware exclusions.
+    //   - proof-builder's with_peer_failover covers node walks only,
+    //     NOT header fetches. Remove the catch-and-retry around get_header.
+    //   - proof-builder's per-peer tracking (retry counts, cooldowns) is
+    //     redundant with PeerSet's note_ledger_failure + failed_ledgers
+    //     (60s TTL). Consider removing it entirely and relying on PeerSet.
+    //   - This keeps header dedup/fan-out/retry in one place where
+    //     concurrent proof requests share in-flight state.
     try
     {
         catl::core::emit_status(
             "anchor header: fetching from peer seq=" +
             std::to_string(anchor_seq));
-        // TODO: get_header has its own timeout/retry path that may not
-        // use fetch_timeout_. Verify it uses the configured 1500ms, not
-        // some hardcoded 5s default. Each peer switch adds a full timeout.
         auto hdr = co_await node_cache_->get_header(anchor_seq, peers_);
 
         AnchorBundle bundle;
