@@ -1124,7 +1124,7 @@ function redrawStepLinks({animate = false} = {}) {
 
   const badges = Array.from(content.querySelectorAll('.link-badge[data-link-group]'));
   const width = Math.ceil(scene.clientWidth || content.clientWidth || 1);
-  const height = Math.ceil(content.offsetHeight || 1);
+  const height = Math.ceil(scene.clientHeight || content.offsetHeight || 1);
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   debug.setAttribute('viewBox', `0 0 ${width} ${height}`);
 
@@ -1187,10 +1187,11 @@ function nextAnimationFrame() {
 
 function stepLinkLayoutSignature() {
   const content = document.getElementById('step-content');
+  const scene = document.getElementById('step-scene');
   if (!content) return '';
   const badges = Array.from(content.querySelectorAll('.link-badge[data-link-group]'));
   return [
-    Math.round(content.offsetHeight * 2) / 2,
+    Math.round((scene?.clientHeight || content.offsetHeight) * 2) / 2,
     ...badges.map((badge) => {
       const rect = badge.getBoundingClientRect();
       return [
