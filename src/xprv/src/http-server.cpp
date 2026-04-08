@@ -694,6 +694,7 @@ HttpServer::handle_session(
         // ── Route dispatch ────────────────────────────────────────
 
         std::optional<http::response<http::string_body>> caught_error;
+        std::string sse_error_msg;  // set in catch for SSE tx-not-found
         try
         {
             if (effective_path == "/health" && req.method() == http::verb::get)
@@ -972,6 +973,12 @@ HttpServer::handle_session(
                         }
                     }
 
+                    // Check if client wants SSE (needed before tx lookup
+                    // so not-found errors can be sent as SSE events)
+                    auto accept = std::string(req[http::field::accept]);
+                    bool wants_sse =
+                        accept.find("text/event-stream") != std::string::npos;
+
                     if (routed_engine)
                     {
                         // Network-specific route — use that engine directly
@@ -997,11 +1004,6 @@ HttpServer::handle_session(
                         if (ledger_seq_hint == 0)
                             ledger_seq_hint = found_seq;
                     }
-
-                    // Check if client wants SSE
-                    auto accept = std::string(req[http::field::accept]);
-                    bool wants_sse =
-                        accept.find("text/event-stream") != std::string::npos;
 
                     // Optional max_anchor_age — reuse recent anchor (seconds).
                     // Default 10s — reuse the cached anchor for repeated
@@ -1391,7 +1393,21 @@ HttpServer::handle_session(
         catch (catl::rpc::RpcTxNotFound const& e)
         {
             PLOGW(log_, "TX not found: ", e.what());
-            caught_error = error_response(404, e.what(), version, keep_alive);
+            auto accept_hdr = std::string(req[http::field::accept]);
+            if (accept_hdr.find("text/event-stream") != std::string::npos)
+            {
+                // SSE client — send error as SSE event so the frontend
+                // shows the actual message instead of "failed to connect".
+                // Can't co_await in catch (C++20), so stash and handle below.
+                sse_error_msg =
+                    "data: {\"type\":\"error\",\"error\":\"" +
+                    std::string(e.what()) + "\"}\n\n";
+            }
+            else
+            {
+                caught_error =
+                    error_response(404, e.what(), version, keep_alive);
+            }
         }
         catch (catl::rpc::RpcTransientError const& e)
         {
@@ -1412,6 +1428,23 @@ HttpServer::handle_session(
         {
             PLOGE(log_, "Request failed: ", e.what());
             caught_error = error_response(500, e.what(), version, keep_alive);
+        }
+
+        // SSE error for tx-not-found (can't co_await in catch)
+        if (!sse_error_msg.empty())
+        {
+            std::string sse_resp =
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/event-stream\r\n"
+                "Cache-Control: no-cache\r\n"
+                "Connection: close\r\n\r\n" +
+                sse_error_msg;
+            stream.expires_after(opts_.write_timeout);
+            co_await asio::async_write(
+                stream,
+                asio::buffer(sse_resp),
+                asio::redirect_error(asio::use_awaitable, ec));
+            break;
         }
 
         // Send error response outside the catch block

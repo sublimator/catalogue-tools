@@ -1548,11 +1548,14 @@ async function prove(hash, {history = 'push'} = {}) {
       if (proveToken !== activeProveToken) return;
       es.close(); activeSSE = null;
       activeProveTimeout = null;
+      settled = true;
       statusEl.className = 'status error';
       statusEl.textContent = 'timed out';
       showModalError('timed out', hash);
       resolve();
     }, 60000);
+
+    let settled = false;  // true once done/error handled
 
     es.onmessage = async (e) => {
       try {
@@ -1613,6 +1616,7 @@ async function prove(hash, {history = 'push'} = {}) {
         }
 
         if (msg.type === 'done') {
+          settled = true;
           if (activeProveTimeout) {
             clearTimeout(activeProveTimeout);
             activeProveTimeout = null;
@@ -1636,6 +1640,7 @@ async function prove(hash, {history = 'push'} = {}) {
         }
 
         if (msg.type === 'error') {
+          settled = true;
           if (activeProveTimeout) {
             clearTimeout(activeProveTimeout);
             activeProveTimeout = null;
@@ -1653,6 +1658,7 @@ async function prove(hash, {history = 'push'} = {}) {
 
     es.onerror = () => {
       if (proveToken !== activeProveToken) return;
+      if (settled) return;  // error/done already handled
       if (activeProveTimeout) {
         clearTimeout(activeProveTimeout);
         activeProveTimeout = null;
