@@ -242,6 +242,8 @@ public:
         size_t queued_crawls = 0;
         uint64_t total_connects = 0;
         uint64_t total_disconnects = 0;
+        size_t crawled_size = 0;
+        size_t failed_at_size = 0;
         std::vector<uint32_t> wanted_ledgers;
         std::vector<FailureBucket> recent_failures;
         std::vector<FailureEndpoint> top_failing_endpoints;

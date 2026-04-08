@@ -18,6 +18,7 @@
 
 #include "proof-engine.h"
 
+#include <atomic>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/beast/http.hpp>
@@ -119,6 +120,11 @@ private:
     boost::asio::ip::tcp::acceptor acceptor_;
     bool accepting_ = false;
     std::string xprv_header_;  // pre-built X-XPRV header value
+
+    // Request stats
+    std::atomic<uint64_t> total_requests_{0};
+    std::atomic<uint64_t> total_proofs_{0};
+    std::atomic<uint32_t> active_proofs_{0};
 };
 
 }  // namespace xprv

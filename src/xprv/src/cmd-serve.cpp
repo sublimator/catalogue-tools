@@ -72,6 +72,8 @@ struct LoggedNetworkStatus
     std::size_t node_cache_entries = 0;
     std::size_t node_cache_resident_entries = 0;
     std::size_t node_cache_header_entries = 0;
+    std::size_t crawled_size = 0;
+    std::size_t failed_at_size = 0;
     std::string recent_failures;
     std::string top_failing_endpoints;
 };
@@ -194,7 +196,9 @@ format_network_status(LoggedNetworkStatus const& status)
         << " proofs=" << status.proof_cache_entries << " node_cache=e"
         << status.node_cache_entries << "/r"
         << status.node_cache_resident_entries << "/h"
-        << status.node_cache_header_entries;
+        << status.node_cache_header_entries
+        << " crawled=" << status.crawled_size
+        << " failed=" << status.failed_at_size;
     if (!status.recent_failures.empty())
     {
         out << " fail=" << status.recent_failures;
@@ -527,6 +531,10 @@ cmd_serve()
                                                 node_cache.resident_entries;
                                             status.node_cache_header_entries =
                                                 node_cache.header_entries;
+                                            status.crawled_size =
+                                                peer_snapshot.crawled_size;
+                                            status.failed_at_size =
+                                                peer_snapshot.failed_at_size;
                                             status.recent_failures =
                                                 format_failure_buckets(
                                                     peer_snapshot

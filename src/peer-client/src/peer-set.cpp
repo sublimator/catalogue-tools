@@ -2742,6 +2742,8 @@ PeerSet::snapshot_unsafe() const
     auto const now = std::chrono::steady_clock::now();
     out.known_endpoints = tracker_->size();
     out.tracked_endpoints = endpoint_stats_.size();
+    out.crawled_size = crawled_.size();
+    out.failed_at_size = failed_at_.size();
     out.connected_peers = connections_.size();
     out.total_connects = total_connects_;
     out.total_disconnects = total_disconnects_;
@@ -3253,6 +3255,10 @@ PeerSet::prune_discovery_state()
             failed_at_.size(),
             ")");
     }
+
+    // Also prune endpoint_stats_ here — it was previously only pruned from
+    // try_undiscovered() which doesn't run during idle operation.
+    prune_endpoint_stats();
 }
 
 }  // namespace catl::peer_client

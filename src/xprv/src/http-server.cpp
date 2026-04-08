@@ -31,6 +31,10 @@
 #include <string>
 #include <string_view>
 
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
+
 namespace xprv {
 
 namespace asio = boost::asio;
@@ -617,6 +621,7 @@ HttpServer::handle_session(
         }
 
         PLOGD(log_, req.method_string(), " ", path);
+        ++total_requests_;
 
         // ── Check for /network/{slug}/... prefix routing ──────────
         ProofEngine* routed_engine = nullptr;
@@ -805,6 +810,26 @@ HttpServer::handle_session(
                     if (!opts_.build_id.empty())
                         body["build_id"] = opts_.build_id;
 
+                    // Request stats
+                    boost::json::object req_stats;
+                    req_stats["total_requests"] = total_requests_.load();
+                    req_stats["total_proofs"] = total_proofs_.load();
+                    req_stats["active_proofs"] = active_proofs_.load();
+                    body["requests"] = std::move(req_stats);
+
+                    // Allocator stats (glibc only)
+#ifdef __GLIBC__
+                    {
+                        auto mi = mallinfo2();
+                        boost::json::object alloc;
+                        alloc["arena_bytes"] = static_cast<int64_t>(mi.arena);
+                        alloc["mmap_bytes"] = static_cast<int64_t>(mi.hblkhd);
+                        alloc["used_bytes"] = static_cast<int64_t>(mi.uordblks);
+                        alloc["free_bytes"] = static_cast<int64_t>(mi.fordblks);
+                        body["allocator"] = std::move(alloc);
+                    }
+#endif
+
                     // For backwards compat with single-engine mode,
                     // also include top-level fields from the default engine
                     if (engines_.size() == 1)
@@ -910,6 +935,14 @@ HttpServer::handle_session(
             else if (
                 effective_path == "/prove" && req.method() == http::verb::get)
             {
+                ++total_proofs_;
+                ++active_proofs_;
+                auto proof_guard = [this] { --active_proofs_; };
+                struct ProofGuard {
+                    std::function<void()> fn;
+                    ~ProofGuard() { if (fn) fn(); }
+                } proof_scope{std::move(proof_guard)};
+
                 auto tx_it = params.find("tx");
                 if (tx_it == params.end() || tx_it->second.empty())
                 {
