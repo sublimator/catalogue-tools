@@ -1366,7 +1366,13 @@ async function describeStep(step, i, allSteps) {
           let show;
           if (matchIdx >= 0) {
             const matched = lnk('link-anchor', hashes[matchIdx].substring(0,24)+'\u2026', 'header');
-            show = `\u2026${num(matchIdx)} before\u2026, ${matched}, \u2026${num(hashes.length - matchIdx - 1)} after\u2026`;
+            const before = matchIdx;
+            const after = hashes.length - matchIdx - 1;
+            const parts = [];
+            if (before > 0) parts.push(`\u2026${num(before)} before\u2026`);
+            parts.push(matched);
+            if (after > 0) parts.push(`\u2026${num(after)} after\u2026`);
+            show = parts.join(', ');
           } else {
             show = hashes.length <= 3
               ? hashes.map(x => hx(x, 12)).join(', ')
