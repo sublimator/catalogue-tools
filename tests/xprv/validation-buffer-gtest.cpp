@@ -1,14 +1,13 @@
 #include "xprv/validation-buffer.h"
+#include "xprv/validation-collector.h"
 #include "xprv/proof-chain-json.h"
 
-#include <catl/core/base64.h>
 #include <catl/peer-client/connection-types.h>
 #include <catl/xdata/protocol.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/parallel_group.hpp>
-#include <boost/json.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -18,9 +17,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
-#include <cctype>
 #include <fstream>
-#include <set>
 #include <sstream>
 #include <string>
 
@@ -32,14 +29,6 @@ catl::xdata::Protocol
 test_protocol()
 {
     return catl::xdata::Protocol::load_embedded_xrpl_protocol();
-}
-
-std::string
-lower_ascii(std::string value)
-{
-    for (auto& ch : value)
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    return value;
 }
 
 std::vector<uint8_t>
@@ -79,6 +68,70 @@ load_anchor_fixture()
         throw std::runtime_error("proof.json does not start with an anchor");
     }
     return std::get<xprv::AnchorData>(chain.steps.front());
+}
+
+struct QuorumFixture
+{
+    std::vector<catl::vl::Manifest> manifests;
+    std::vector<std::vector<uint8_t>> quorum_packets;
+    uint32_t quorum_seq = 0;
+    std::size_t threshold = 0;
+};
+
+QuorumFixture
+prepare_quorum_fixture(
+    catl::xdata::Protocol const& protocol,
+    std::map<std::string, std::vector<uint8_t>> const& validations)
+{
+    constexpr uint16_t kValidationType =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
+
+    xprv::ValidationCollector collector(protocol, 0);
+    for (auto const& [_, raw] : validations)
+        collector.on_packet(kValidationType, wrap_validation(raw));
+
+    QuorumFixture fixture;
+    std::vector<xprv::ValidationCollector::Entry> best_entries;
+
+    for (auto const& [hash, entries] : collector.by_ledger)
+    {
+        if (entries.empty())
+            continue;
+
+        auto const seq = entries.front().ledger_seq;
+        auto ledger_validations = collector.get_ledger_validations(
+            hash, xprv::ValidationCollector::QuorumMode::live);
+
+        if (!best_entries.empty())
+        {
+            if (ledger_validations.size() < best_entries.size())
+                continue;
+
+            if (ledger_validations.size() == best_entries.size() &&
+                seq < fixture.quorum_seq)
+            {
+                continue;
+            }
+        }
+
+        fixture.quorum_seq = seq;
+        best_entries = std::move(ledger_validations);
+    }
+
+    fixture.manifests.reserve(best_entries.size());
+    fixture.quorum_packets.reserve(best_entries.size());
+    for (auto const& validation : best_entries)
+    {
+        catl::vl::Manifest manifest;
+        manifest.master_public_key = validation.signing_key;
+        manifest.signing_public_key = validation.signing_key;
+        fixture.manifests.push_back(manifest);
+        fixture.quorum_packets.push_back(wrap_validation(validation.raw));
+    }
+    fixture.threshold =
+        (static_cast<int>(fixture.manifests.size()) * 90 + 99) / 100;
+
+    return fixture;
 }
 
 }  // namespace
@@ -165,50 +218,28 @@ TEST(ValidationBuffer, BestQuorumCancelledWaiterIsRemoved)
     EXPECT_EQ(stats.pending_callbacks, 0u);
 }
 
-TEST(ValidationBuffer, BestQuorumCollectsAndFinalizesOnNextLedger)
+TEST(ValidationBuffer, BestQuorumCollectsAndFinalizesAtFullQuorum)
 {
     asio::io_context io;
-    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto const protocol = test_protocol();
+    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
     auto const anchor = load_anchor_fixture();
-
-    std::string blob_json(anchor.blob.begin(), anchor.blob.end());
-    auto const blob = boost::json::parse(blob_json).as_object();
-    auto const& validators_json = blob.at("validators").as_array();
-
-    std::set<std::string> validation_keys;
-    for (auto const& [key, _] : anchor.validations)
-        validation_keys.insert(lower_ascii(key));
-
-    std::vector<catl::vl::Manifest> manifests;
-    for (auto const& entry : validators_json)
-    {
-        auto const& obj = entry.as_object();
-        auto manifest_bytes = catl::base64_decode(
-            std::string(obj.at("manifest").as_string()));
-        auto manifest = catl::vl::parse_manifest(manifest_bytes);
-        if (!manifest.signing_public_key.empty() &&
-            validation_keys.count(lower_ascii(manifest.signing_key_hex())) > 0)
-            manifests.push_back(std::move(manifest));
-    }
-
-    ASSERT_FALSE(manifests.empty());
     ASSERT_FALSE(anchor.validations.empty());
 
-    std::vector<std::vector<uint8_t>> raw_validations;
-    raw_validations.reserve(anchor.validations.size());
-    for (auto const& [_, raw] : anchor.validations)
-        raw_validations.push_back(raw);
+    auto const fixture =
+        prepare_quorum_fixture(protocol, anchor.validations);
+    ASSERT_FALSE(fixture.manifests.empty())
+        << "fixture must contain at least one ledger with validations";
+    ASSERT_GE(fixture.quorum_packets.size(), fixture.threshold)
+        << "fixture must provide a threshold quorum for one ledger";
 
-    auto const threshold =
-        (static_cast<int>(manifests.size()) * 90 + 99) / 100;
-
-    ASSERT_GE(static_cast<int>(raw_validations.size()), threshold)
-        << "fixture needs at least threshold validations";
-
-    buffer->set_unl(manifests);
+    buffer->set_unl(fixture.manifests);
+    io.run();
+    io.restart();
 
     bool done = false;
     std::size_t collected_count = 0;
+    uint32_t collected_seq = 0;
     xprv::QuorumCollectStopReason stop_reason =
         xprv::QuorumCollectStopReason::timeout;
 
@@ -218,26 +249,37 @@ TEST(ValidationBuffer, BestQuorumCollectsAndFinalizesOnNextLedger)
             auto result = co_await buffer->co_wait_best_quorum(
                 std::chrono::seconds(5));
             collected_count = result.quorum.validations.size();
+            collected_seq = result.quorum.ledger_seq;
             stop_reason = result.stop_reason;
             done = true;
             io.stop();
         },
         asio::detached);
 
-    // Feed all validations at once — should hit threshold immediately,
-    // then finalize as "full" or wait for timeout (no next-ledger in test)
-    for (auto const& raw : raw_validations)
-    {
-        auto packet = wrap_validation(raw);
-        buffer->on_packet(
-            static_cast<uint16_t>(catl::peer_client::packet_type::validation),
-            packet);
-    }
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            auto const packet_type = static_cast<uint16_t>(
+                catl::peer_client::packet_type::validation);
+
+            while (true)
+            {
+                auto stats = co_await buffer->co_stats();
+                if (stats.pending_callbacks > 0)
+                    break;
+                co_await asio::post(ex, asio::use_awaitable);
+            }
+
+            for (auto const& packet : fixture.quorum_packets)
+                buffer->on_packet(packet_type, packet);
+        },
+        asio::detached);
 
     io.run();
 
     EXPECT_TRUE(done);
-    EXPECT_GE(collected_count, static_cast<std::size_t>(threshold));
-    // Should finalize as full (all validations fed) or timeout (5s cap)
-    EXPECT_NE(stop_reason, xprv::QuorumCollectStopReason::next_ledger);
+    EXPECT_EQ(collected_count, fixture.quorum_packets.size());
+    EXPECT_EQ(collected_seq, fixture.quorum_seq);
+    EXPECT_EQ(stop_reason, xprv::QuorumCollectStopReason::full);
 }
