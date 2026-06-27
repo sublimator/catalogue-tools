@@ -230,7 +230,7 @@ peer_connection::send_http_request(const connection_handler& handler)
 {
     auto req = std::make_shared<http::request<http::string_body>>(
         http::verb::get, "/", 11);
-    req->set(http::field::user_agent, "xahaud-2025.11.4-HEAD+2427");
+    req->set(http::field::user_agent, "catl-lesser-peer/0.1");
     req->set(http::field::upgrade, "XRPL/2.2");
     req->set(http::field::connection, "Upgrade");
     req->set("Connect-As", "Peer");
@@ -286,7 +286,7 @@ peer_connection::handle_http_request(const connection_handler& handler)
     res->set(http::field::connection, "Upgrade");
     res->set(http::field::upgrade, http_request_["Upgrade"]);
     res->set("Connect-As", "Peer");
-    res->set(http::field::server, "xahaud-2025.11.4-HEAD+2427");
+    res->set(http::field::server, "catl-lesser-peer/0.1");
     res->set("Crawl", "private");
     res->set("Public-Key", node_public_key_b58_);
     res->set("Session-Signature", session_signature_);
