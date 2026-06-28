@@ -1,4 +1,5 @@
 #include "xprv/http-server.h"
+#include "xprv/static-path.h"
 #include "web_assets.h"
 #include "xprv/peer-json.h"
 #include "xprv/proof-chain-binary.h"
@@ -263,37 +264,36 @@ asset_name_for_path(std::string_view path)
 
 /// Try to serve a static file: dev mode (disk) first, then embedded.
 /// Returns true if served, false if not found.
+///
+/// SECURITY: `path` is attacker-controlled. The dev-mode disk branch is
+/// guarded by resolve_static_path() (see static-path.h), which rejects NUL/
+/// ".." and enforces weakly_canonical containment within the static root so
+/// a request like "//etc/passwd" can't escape to an absolute path. The
+/// resolution logic is factored into that header so it can be unit-tested.
 static bool
 try_serve_static(
     std::string_view path,
     std::string& out_body,
     std::string& out_content_type)
 {
-    // Sanitize: reject paths with ".." or starting with "/"
-    if (path.find("..") != std::string_view::npos)
-        return false;
+    namespace fs = std::filesystem;
 
-    // Strip leading /
-    auto relative = path;
-    if (!relative.empty() && relative[0] == '/')
-        relative = relative.substr(1);
-    if (relative.empty())
-        relative = "index.html";
-
-    // Dev mode: try disk first
-    auto dev_path = std::filesystem::path("src/xprv/web/static") / relative;
-    if (std::filesystem::exists(dev_path))
+    // Dev mode: serve from disk only if the path resolves to a regular file
+    // contained within the static root. In production the dev tree is
+    // absent, so this returns nullopt and we fall through to embedded assets.
+    if (auto resolved =
+            resolve_static_path(path, fs::path("src/xprv/web/static")))
     {
-        std::ifstream f(dev_path);
+        std::ifstream f(*resolved, std::ios::binary);
         out_body.assign(
             std::istreambuf_iterator<char>(f),
             std::istreambuf_iterator<char>());
-        auto ext = dev_path.extension().string();
-        out_content_type = std::string(mime_for_extension(ext));
+        out_content_type =
+            std::string(mime_for_extension(resolved->extension().string()));
         return true;
     }
 
-    // Embedded: look up by normalized name
+    // Embedded: look up by normalized name (fixed allowlist).
     auto name = asset_name_for_path(path);
 
     // Check known embedded assets
