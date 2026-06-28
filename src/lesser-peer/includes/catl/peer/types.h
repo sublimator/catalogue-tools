@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -21,6 +23,66 @@ namespace catl::peer {
 // realistically received and keeps aggregate memory survivable across many
 // peers. Mirrors peer-client's kMaxFramePayloadSize (see its rationale).
 inline constexpr std::uint32_t kMaxFramePayloadSize = 16u * 1024 * 1024;
+
+// Process-wide ceiling on the SUM of in-flight inbound frame buffers across
+// all peer connections (security #0055). The per-frame cap above bounds a
+// single frame; this bounds a coordinated fill across many peers. Mirrors
+// peer-client's InboundBudget (see its rationale).
+inline constexpr std::size_t kAggregateInboundBudget = 256u * 1024 * 1024;
+
+// Lock-free tracker of total in-flight inbound-buffer bytes against a ceiling;
+// one process-wide instance via global_inbound_budget(). See peer-client.
+class InboundBudget
+{
+public:
+    explicit InboundBudget(std::size_t ceiling) : ceiling_(ceiling)
+    {
+    }
+
+    // Reserve n bytes iff that keeps the running total within the ceiling
+    // (overflow-safe). Reserves nothing on failure.
+    bool
+    try_acquire(std::size_t n)
+    {
+        std::size_t cur = in_flight_.load(std::memory_order_relaxed);
+        do
+        {
+            if (n > ceiling_ - cur)
+                return false;
+        } while (!in_flight_.compare_exchange_weak(
+            cur, cur + n, std::memory_order_relaxed));
+        return true;
+    }
+
+    void
+    release(std::size_t n)
+    {
+        in_flight_.fetch_sub(n, std::memory_order_relaxed);
+    }
+
+    std::size_t
+    in_flight() const
+    {
+        return in_flight_.load(std::memory_order_relaxed);
+    }
+
+    std::size_t
+    ceiling() const
+    {
+        return ceiling_;
+    }
+
+private:
+    std::size_t const ceiling_;
+    std::atomic<std::size_t> in_flight_{0};
+};
+
+inline InboundBudget&
+global_inbound_budget()
+{
+    static InboundBudget budget(kAggregateInboundBudget);
+    return budget;
+}
 
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;

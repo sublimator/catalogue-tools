@@ -600,6 +600,29 @@ peer_connection::handle_read_header(
         return;
     }
 
+    // Reserve this frame's bytes from the process-wide inbound budget
+    // (sec #0055); drop the connection if the aggregate ceiling across all
+    // peers would be exceeded.
+    if (!global_inbound_budget().try_acquire(payload_size))
+    {
+        LOGW(
+            remote_endpoint(),
+            " inbound budget exhausted (in_flight=",
+            global_inbound_budget().in_flight(),
+            " + ",
+            payload_size,
+            " > ",
+            global_inbound_budget().ceiling(),
+            "); dropping connection");
+        close();
+        if (disconnect_handler_)
+        {
+            disconnect_handler_(asio::error::no_buffer_space);
+        }
+        return;
+    }
+    inbound_charge_ = payload_size;
+
     if (current_header_.compressed && bytes_transferred < 10)
     {
         // Need to read the additional 4 bytes for uncompressed size
@@ -704,6 +727,9 @@ peer_connection::handle_read_payload(
             LOGE("Exception in packet handler: ", e.what());
         }
     }
+
+    // Frame consumed — return its bytes to the inbound budget (sec #0055).
+    release_inbound_charge();
 
     // Continue reading
     async_read_header();
@@ -1117,9 +1143,23 @@ peer_connection::set_disconnect_handler(disconnect_handler handler)
 }
 
 void
+peer_connection::release_inbound_charge()
+{
+    if (inbound_charge_ != 0)
+    {
+        global_inbound_budget().release(inbound_charge_);
+        inbound_charge_ = 0;
+    }
+}
+
+void
 peer_connection::close()
 {
     connected_ = false;
+
+    // Return any in-flight frame's bytes to the inbound budget (sec #0055);
+    // the catch-all for every teardown path (the dtor also routes here).
+    release_inbound_charge();
 
     if (socket_ && socket_->lowest_layer().is_open())
     {

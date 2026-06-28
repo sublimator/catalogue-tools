@@ -149,6 +149,11 @@ private:
         std::string const& public_key_b58,
         std::string const& session_signature_b64);
 
+    // Release any bytes held against the process-wide inbound budget
+    // (security #0055). Idempotent.
+    void
+    release_inbound_charge();
+
 private:
     asio::io_context& io_context_;
     std::unique_ptr<ssl_socket> socket_;
@@ -159,6 +164,10 @@ private:
     std::array<std::uint8_t, 10> header_buffer_;
     std::vector<std::uint8_t> payload_buffer_;
     packet_header current_header_;
+
+    // Bytes reserved from the process-wide inbound budget for the in-flight
+    // frame (security #0055); released on dispatch or teardown.
+    std::size_t inbound_charge_ = 0;
 
     // HTTP upgrade state
     bool http_upgraded_ = false;
