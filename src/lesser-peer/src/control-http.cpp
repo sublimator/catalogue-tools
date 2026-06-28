@@ -152,7 +152,7 @@ ControlHttpServer::start()
         return;
     }
 
-    LOGI("HTTP control listening on port ", port_);
+    LOGI("HTTP control listening on 127.0.0.1:", port_);
     do_accept();
 }
 

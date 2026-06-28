@@ -193,25 +193,32 @@ public:
     void
     accept()
     {
-        acceptor_.async_accept([this](
-                                   beast::error_code ec, tcp::socket socket) {
-            if (!ec)
-            {
-                // Create the session and start it
-                std::make_shared<Session>(std::move(socket), handler_)->start();
-            }
-            else
-            {
-                std::cerr << "Error accepting connection: " << ec.message()
-                          << std::endl;
-            }
+        // Accept onto a per-connection strand so each session's stream and its
+        // internal deadline timer (added with beast::tcp_stream + expires_after,
+        // sec #0054) serialize. The io_context runs on multiple threads and
+        // basic_stream is not thread-safe: without the strand the timer-expiry
+        // and I/O completions for one stream could run on two threads at once.
+        acceptor_.async_accept(
+            net::make_strand(ioc_),
+            [this](beast::error_code ec, tcp::socket socket) {
+                if (!ec)
+                {
+                    // Create the session and start it
+                    std::make_shared<Session>(std::move(socket), handler_)
+                        ->start();
+                }
+                else
+                {
+                    std::cerr << "Error accepting connection: " << ec.message()
+                              << std::endl;
+                }
 
-            // Accept another connection
-            if (running_)
-            {
-                accept();
-            }
-        });
+                // Accept another connection
+                if (running_)
+                {
+                    accept();
+                }
+            });
     }
 
     void

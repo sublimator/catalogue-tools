@@ -293,6 +293,43 @@ TEST_F(ReaderShaMapTest, ErrorHandling)
     }
 }
 
+// A node-data length prefix beyond kMaxNodeDataSize (64 MiB) must be rejected
+// before read_node_data attempts the resize (sec #0054), so a corrupt or
+// hostile catalogue can't drive a multi-GiB allocation off a 4-byte field.
+// Driven through the default resize_to_fit==true path (read_node_data direct).
+TEST_F(ReaderShaMapTest, ReadNodeDataRejectsOversizedLength)
+{
+    std::string temp_file = createTempFile();
+
+    CatlHeader header{};
+    header.magic = CATL_MAGIC;
+    header.min_ledger = 1;
+    header.max_ledger = 1;
+    header.version = BASE_CATALOGUE_VERSION;  // uncompressed, base version
+    header.network_id = 0;
+
+    // 4-byte node-data length prefix that exceeds the 64 MiB cap.
+    const uint32_t oversized_len = 100u * 1024 * 1024;
+    header.filesize = sizeof(CatlHeader) + sizeof(oversized_len);
+
+    {
+        std::ofstream out(temp_file, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        out.write(
+            reinterpret_cast<const char*>(&oversized_len),
+            sizeof(oversized_len));
+    }
+
+    // Header validates and is consumed by the ctor; the reader is now
+    // positioned exactly at the oversized length prefix.
+    Reader reader(temp_file);
+    std::vector<uint8_t> data;
+    EXPECT_THROW(reader.read_node_data(data), CatlV1Error);
+    EXPECT_TRUE(data.empty()) << "no allocation should occur on rejection";
+
+    boost::filesystem::remove(temp_file);
+}
+
 // Test with compressed file specifically
 TEST_F(ReaderShaMapTest, CompressedFileSpecificTests)
 {
