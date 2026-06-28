@@ -1250,6 +1250,38 @@ def test_health_shape(health: dict[str, Any]) -> None:
         assert isinstance(health["latest_quorum_seq"], int)
 
 
+def test_server_connects_peers(server: RunningServer, config: TestConfig) -> None:
+    """Peering must actually establish. Guards the frame-cap class of regression
+    (e.g. a too-small kMaxFramePayloadSize) where every peer is dropped right
+    after handshake on an oversized frame — with a cold cache that means 0 peers
+    and every /prove 504s. Polls /health until peer_count > 0 so the failure is
+    an obvious 'connected 0 peers' rather than cascading proof timeouts."""
+    deadline = time.monotonic() + max(config.startup_timeout, 25.0)
+    last = 0
+    while time.monotonic() < deadline:
+        body = decode_json_bytes(
+            server.request("GET", "/health", timeout=5.0).body,
+            context="peer-connect health",
+        )
+        last = int(body.get("peer_count", 0))
+        if last > 0:
+            LOG.info("peers connected: peer_count=%s", last)
+            return
+        time.sleep(0.5)
+
+    # Surface the most likely cause directly from the server log.
+    hint = ""
+    if server.logs_contain("rejecting oversized frame"):
+        hint = (
+            " — server log has 'rejecting oversized frame': peers are being "
+            "dropped by the per-frame cap (kMaxFramePayloadSize too small)"
+        )
+    pytest.fail(
+        f"server connected 0 peers within {deadline:.0f}s deadline (last "
+        f"peer_count={last}){hint}\n{server._failure_context()}"
+    )
+
+
 def test_keep_alive_supports_multiple_requests(server: RunningServer) -> None:
     conn = server.open_connection(timeout=5.0)
     try:
