@@ -24,14 +24,29 @@ public:
         std::string public_key_b58;
     };
 
+    // Where load_or_generate_node_keys's result came from, so callers can log
+    // a stable vs ephemeral identity accurately instead of inferring it from a
+    // file_size==32 proxy (sec #0054): a pre-existing 32-byte file whose key
+    // fails to derive yields fresh ephemeral keys while the file is unchanged,
+    // which the proxy would mislabel as persisted.
+    enum class node_key_origin
+    {
+        loaded,               // read from an existing key file (stable)
+        generated_persisted,  // generated and written to disk (stable)
+        generated_ephemeral,  // generated but NOT persisted (rotates each run)
+    };
+
     node_keys
     generate_node_keys() const;
 
     node_keys
     derive_public_keys(std::array<std::uint8_t, 32> const& secret_key) const;
 
+    // If origin is non-null, it receives where the returned keys came from.
     node_keys
-    load_or_generate_node_keys(std::string const& key_file_path);
+    load_or_generate_node_keys(
+        std::string const& key_file_path,
+        node_key_origin* origin = nullptr);
 
     node_keys
     node_keys_from_private(std::string const& base58_private) const;

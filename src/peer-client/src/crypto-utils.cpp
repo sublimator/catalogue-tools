@@ -124,8 +124,19 @@ crypto_utils::generate_node_keys() const
 }
 
 crypto_utils::node_keys
-crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
+crypto_utils::load_or_generate_node_keys(
+    std::string const& key_file_path,
+    node_key_origin* origin)
 {
+    // Report the true provenance of the returned keys so callers log a stable
+    // vs ephemeral identity accurately, rather than inferring it from a
+    // file_size==32 proxy (sec #0054).
+    auto set_origin = [origin](node_key_origin o) {
+        if (origin)
+        {
+            *origin = o;
+        }
+    };
     namespace fs = std::filesystem;
     std::error_code fs_ec;
     bool exists = fs::exists(fs::path(key_file_path), fs_ec);
@@ -143,7 +154,10 @@ crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
             ": ",
             fs_ec.message(),
             " — using ephemeral keys (file untouched)");
-        return generate_node_keys();
+        {
+            set_origin(node_key_origin::generated_ephemeral);
+            return generate_node_keys();
+        }
     }
 
     if (exists)
@@ -170,6 +184,7 @@ crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
                         key_file_path,
                         ": ",
                         keys.public_key_b58);
+                    set_origin(node_key_origin::loaded);
                     return keys;
                 }
                 catch (std::exception const& e)
@@ -181,7 +196,10 @@ crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
                         ": ",
                         e.what(),
                         " — using ephemeral keys (file unchanged)");
-                    return generate_node_keys();
+                    {
+                        set_origin(node_key_origin::generated_ephemeral);
+                        return generate_node_keys();
+                    }
                 }
             }
             PLOGW(
@@ -189,7 +207,10 @@ crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
                 "Short read from ",
                 key_file_path,
                 " — using ephemeral keys (file unchanged)");
-            return generate_node_keys();
+            {
+                set_origin(node_key_origin::generated_ephemeral);
+                return generate_node_keys();
+            }
         }
         // File exists but can't be opened (transient EACCES, in-use, etc).
         // Do NOT overwrite — the operator's existing identity is more
@@ -201,7 +222,10 @@ crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
             " exists but cannot be opened: ",
             std::strerror(errno),
             " — using ephemeral keys (file unchanged)");
-        return generate_node_keys();
+        {
+            set_origin(node_key_origin::generated_ephemeral);
+            return generate_node_keys();
+        }
     }
 
     // Generate fresh keys and try to persist atomically so the same
@@ -246,6 +270,7 @@ crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
             ": ",
             std::strerror(errno),
             " — using ephemeral keys (peers will see a new node on restart)");
+        set_origin(node_key_origin::generated_ephemeral);
         return keys;
     }
 
@@ -288,6 +313,7 @@ crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
                 " — using ephemeral keys");
         }
         ::unlink(tmp.c_str());
+        set_origin(node_key_origin::generated_ephemeral);
         return keys;
     }
 
@@ -320,6 +346,7 @@ crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
         key_file_path,
         ": ",
         keys.public_key_b58);
+    set_origin(node_key_origin::generated_persisted);
     return keys;
 }
 

@@ -99,15 +99,16 @@ apply_node_identity()
             source = "default file " + path;
         }
 
-        // load_or_generate_node_keys returns ephemeral keys if it can't
-        // write (read-only FS, EACCES, pre-existing-but-unopenable).
-        // Detect by checking whether the file ended up with 32 bytes —
-        // drives the PLOGW vs PLOGI choice below.
-        keys = crypto.load_or_generate_node_keys(path);
-
-        std::error_code ec;
-        auto sz = std::filesystem::file_size(path, ec);
-        persisted = !ec && sz == 32;
+        // load_or_generate_node_keys reports the true provenance of the keys
+        // so we log a stable vs ephemeral identity accurately (sec #0054). The
+        // old file_size==32 proxy mislabeled a pre-existing-but-underivable
+        // 32-byte file (which yields fresh ephemeral keys, file unchanged) as
+        // persisted — defeating the phantom-node diagnostic this exists for.
+        catl::peer_client::crypto_utils::node_key_origin key_origin{};
+        keys = crypto.load_or_generate_node_keys(path, &key_origin);
+        persisted = key_origin !=
+            catl::peer_client::crypto_utils::node_key_origin::
+                generated_ephemeral;
 
         std::vector<std::uint8_t> bytes(
             keys.secret_key.begin(), keys.secret_key.end());

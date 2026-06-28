@@ -45,11 +45,14 @@ TEST_F(NodeCredentialsTest, WritesFileWhenMissing)
     ASSERT_FALSE(fs::exists(path));
 
     crypto_utils crypto;
-    auto keys = crypto.load_or_generate_node_keys(path.string());
+    crypto_utils::node_key_origin origin{};
+    auto keys = crypto.load_or_generate_node_keys(path.string(), &origin);
 
     ASSERT_TRUE(fs::exists(path));
     EXPECT_EQ(fs::file_size(path), 32u);
     EXPECT_FALSE(keys.public_key_b58.empty());
+    // Freshly generated and written to disk (sec #0054 origin reporting).
+    EXPECT_EQ(origin, crypto_utils::node_key_origin::generated_persisted);
 
     // Verify group/other have no access (owner-only). Don't require
     // exactly 0600 — hardened CI environments may set umask such that
@@ -72,9 +75,13 @@ TEST_F(NodeCredentialsTest, RoundTripReturnsSamePublicKey)
     auto path = unique_tmp_path("round-trip");
 
     crypto_utils crypto;
-    auto first = crypto.load_or_generate_node_keys(path.string());
-    auto second = crypto.load_or_generate_node_keys(path.string());
+    crypto_utils::node_key_origin o1{}, o2{};
+    auto first = crypto.load_or_generate_node_keys(path.string(), &o1);
+    auto second = crypto.load_or_generate_node_keys(path.string(), &o2);
 
+    // First call generates + persists; the second loads the same file.
+    EXPECT_EQ(o1, crypto_utils::node_key_origin::generated_persisted);
+    EXPECT_EQ(o2, crypto_utils::node_key_origin::loaded);
     EXPECT_EQ(first.public_key_b58, second.public_key_b58);
     EXPECT_EQ(first.secret_key, second.secret_key);
 
@@ -108,8 +115,10 @@ TEST_F(NodeCredentialsTest, ReadOnlyParentDoesNotCrash)
     fs::path bad = "/this/path/must/not/be/writable/node.seed";
 
     crypto_utils crypto;
-    auto keys = crypto.load_or_generate_node_keys(bad.string());
+    crypto_utils::node_key_origin origin{};
+    auto keys = crypto.load_or_generate_node_keys(bad.string(), &origin);
     EXPECT_FALSE(keys.public_key_b58.empty());
+    EXPECT_EQ(origin, crypto_utils::node_key_origin::generated_ephemeral);
     EXPECT_FALSE(fs::exists(bad));
 }
 
