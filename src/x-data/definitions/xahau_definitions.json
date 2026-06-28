@@ -181,6 +181,16 @@
       }
     ],
     [
+      "EntropyCount",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 99,
+        "type": "UInt16"
+      }
+    ],
+    [
       "NetworkID",
       {
         "isSerialized": true,
@@ -1291,6 +1301,36 @@
       }
     ],
     [
+      "NextRandomDigest",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 92,
+        "type": "Hash256"
+      }
+    ],
+    [
+      "LastRandomData",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 93,
+        "type": "Hash256"
+      }
+    ],
+    [
+      "RandomData",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 94,
+        "type": "Hash256"
+      }
+    ],
+    [
       "Cron",
       {
         "isSerialized": true,
@@ -1347,16 +1387,6 @@
         "isSigningField": false,
         "isVLEncoded": false,
         "nth": 1,
-        "type": "Hash256"
-      }
-    ],
-    [
-      "index",
-      {
-        "isSerialized": true,
-        "isSigningField": false,
-        "isVLEncoded": false,
-        "nth": 2,
         "type": "Hash256"
       }
     ],
@@ -1921,6 +1951,16 @@
       }
     ],
     [
+      "Validator",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": true,
+        "nth": 98,
+        "type": "AccountID"
+      }
+    ],
+    [
       "Inform",
       {
         "isSerialized": true,
@@ -2141,6 +2181,16 @@
       }
     ],
     [
+      "RandomDigestEntry",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 89,
+        "type": "STObject"
+      }
+    ],
+    [
       "AmountEntry",
       {
         "isSerialized": true,
@@ -2347,6 +2397,16 @@
         "isSigningField": true,
         "isVLEncoded": false,
         "nth": 20,
+        "type": "STArray"
+      }
+    ],
+    [
+      "RandomDigests",
+      {
+        "isSerialized": true,
+        "isSigningField": true,
+        "isVLEncoded": false,
+        "nth": 91,
         "type": "STArray"
       }
     ],
@@ -2934,6 +2994,7 @@
     "CronSet": 93,
     "DepositPreauth": 19,
     "EmitFailure": 103,
+    "Entropy": 89,
     "EscrowCancel": 4,
     "EscrowCreate": 1,
     "EscrowFinish": 2,
@@ -2958,6 +3019,7 @@
     "SetHook": 22,
     "SetRegularKey": 5,
     "SetRemarks": 94,
+    "Shuffle": 88,
     "SignerListSet": 12,
     "SpinalTap": 11,
     "TicketCreate": 10,
@@ -3010,10 +3072,9 @@
       "vetoed": true
     },
     "0285B7E5E08E1A8E4C15636F0591D87F73CB6A7B6452A932AD72BBC8E5D1CBE3": {
-      "enabled": false,
+      "enabled": true,
       "name": "fixNFTokenDirV1",
-      "supported": true,
-      "vetoed": "Obsolete"
+      "supported": true
     },
     "07D43DCE529B15A10827E5E04943B496762F9A88E3268269D69C44BE49E21104": {
       "enabled": false,
@@ -3044,6 +3105,12 @@
       "name": "Checks",
       "supported": true
     },
+    "17C342EA7EFA25D809FC0DD7BC885190DAF54582E5A683ED0BBA200877A0BFDE": {
+      "enabled": false,
+      "name": "fixHookAPI20251128",
+      "supported": true,
+      "vetoed": false
+    },
     "1D3463A5891F9E589C5AE839FFAC4A917CE96197098A1EF22304E1BC5B98A454": {
       "enabled": false,
       "name": "fix1528",
@@ -3062,9 +3129,10 @@
       "vetoed": true
     },
     "22DD15A56DFD886A7B7D37B656DC4F974BB0FE4BECB83055B01AE8B5A8466D34": {
-      "enabled": true,
+      "enabled": false,
       "name": "fixProvisionalDoubleThreading",
-      "supported": true
+      "supported": true,
+      "vetoed": false
     },
     "25BA44241B3BD880770BFA4DA21C7180576831855368CBEC6A3154FDE4A7676E": {
       "enabled": true,
@@ -3077,10 +3145,9 @@
       "supported": true
     },
     "2E2FB9CF8A44EB80F4694D38AADAE9B8B7ADAFD2F092E10068E61C98C4F092B0": {
-      "enabled": false,
+      "enabled": true,
       "name": "fixUniversalNumber",
-      "supported": true,
-      "vetoed": true
+      "supported": true
     },
     "3012E8230864E95A58C60FD61430D7E1B4D3353195F2981DC12B0C7C0950FFAC": {
       "enabled": true,
@@ -3088,28 +3155,24 @@
       "supported": true
     },
     "30CD365592B8EE40489BA01AE2F7555CAC9C983145871DC82A42A31CF5BAE7D9": {
-      "enabled": false,
+      "enabled": true,
       "name": "DeletableAccounts",
-      "supported": true,
-      "vetoed": true
+      "supported": true
     },
     "32A122F1352A4C7B3A6D790362CC34749C5E57FCE896377BFDC6CCD14F6CD627": {
-      "enabled": false,
+      "enabled": true,
       "name": "NonFungibleTokensV1_1",
-      "supported": true,
-      "vetoed": true
+      "supported": true
     },
     "36799EA497B1369B170805C078AEFE6188345F9B3E324C21E9CA3FF574E3C3D6": {
-      "enabled": false,
+      "enabled": true,
       "name": "fixNFTokenNegOffer",
-      "supported": true,
-      "vetoed": "Obsolete"
+      "supported": true
     },
     "3C43D9A973AA4443EF3FC38E42DD306160FBFFDAB901CD8BAA15D09F2597EB87": {
-      "enabled": false,
+      "enabled": true,
       "name": "NonFungibleTokensV1",
-      "supported": true,
-      "vetoed": "Obsolete"
+      "supported": true
     },
     "3CBC5C4E630A1B82380295CDA84B32B49DD066602E74E39B85EF64137FA65194": {
       "enabled": true,
@@ -3144,9 +3207,10 @@
       "supported": true
     },
     "4B8466415FAB32FFA89D9DCBE166A42340115771DF611A7160F8D7439C87ECD8": {
-      "enabled": true,
+      "enabled": false,
       "name": "fixNSDelete",
-      "supported": true
+      "supported": true,
+      "vetoed": true
     },
     "4C499D17719BB365B69010A436B64FD1A82AAB199FC1CEB06962EBD01059FB09": {
       "enabled": false,
@@ -3172,9 +3236,10 @@
       "vetoed": "Obsolete"
     },
     "56B241D7A43D40354D02A9DC4C8DF5C7A1F930D92A9035C4E12291B3CA3E1C2B": {
-      "enabled": true,
+      "enabled": false,
       "name": "Clawback",
-      "supported": true
+      "supported": true,
+      "vetoed": true
     },
     "586480873651E106F1D6339B0C4A8945BA705A777F3F4524626FF1FC07EFE41D": {
       "enabled": true,
@@ -3187,9 +3252,10 @@
       "supported": true
     },
     "5B8E5D8F3D8687D3CE567FB5BDAED152204D195ED2EAEC346E3AA0607D51752A": {
-      "enabled": true,
+      "enabled": false,
       "name": "fixRewardClaimFlags",
-      "supported": true
+      "supported": true,
+      "vetoed": false
     },
     "5D08145F0A4983F23AFFFF514E83FAD355C5ABFBB6CAB76FB5BC8519FF5F33BE": {
       "enabled": true,
@@ -3229,15 +3295,15 @@
       "supported": true
     },
     "717F060C0C237F122F8065781528B1CA047D82B4E787022984F26D7B997E3D9C": {
-      "enabled": true,
+      "enabled": false,
       "name": "fix20250131",
-      "supported": true
+      "supported": true,
+      "vetoed": false
     },
     "73761231F7F3D94EC3D8C63D91BDD0D89045C6F71B917D1925C01253515A6669": {
-      "enabled": false,
+      "enabled": true,
       "name": "fixNonFungibleTokensV1_2",
-      "supported": true,
-      "vetoed": true
+      "supported": true
     },
     "740352F2412A9909880C23A559FCECEDA3BE2126FED62FC7660D628A06927F11": {
       "enabled": true,
@@ -3256,30 +3322,33 @@
       "vetoed": true
     },
     "7FE392C21A2880B3223A2CAF8DC59ADDAE5B03BD4B0500A1F63DF9893E852DBA": {
-      "enabled": true,
+      "enabled": false,
       "name": "ExtendedHookState",
-      "supported": true
+      "supported": true,
+      "vetoed": true
     },
     "8063140E9260799D6716756B891CEC3E7006C4E4F277AB84670663A88F94B9C4": {
-      "enabled": true,
+      "enabled": false,
       "name": "fixPageCap",
-      "supported": true
+      "supported": true,
+      "vetoed": false
     },
     "86E83A7D2ECE3AD5FA87AB2195AE015C950469ABF0B72EAACED318F74886AE90": {
-      "enabled": false,
+      "enabled": true,
       "name": "CryptoConditionsSuite",
-      "supported": true,
-      "vetoed": "Obsolete"
+      "supported": true
     },
     "88693F108C3CD8A967F3F4253A32DEF5E35F9406ACD2A11B88B11D90865763A9": {
-      "enabled": true,
+      "enabled": false,
       "name": "fix240911",
-      "supported": true
+      "supported": true,
+      "vetoed": false
     },
     "88FEC10C8272D690124E923FBB47A95013C6AA20D9B27B871A99790D05055421": {
-      "enabled": true,
+      "enabled": false,
       "name": "fixXahauV3",
-      "supported": true
+      "supported": true,
+      "vetoed": false
     },
     "89308AF3B8B10B7192C4E613E1D2E4D9BA64B2EE2D5232402AE82A6A7220D953": {
       "enabled": true,
@@ -3287,9 +3356,10 @@
       "supported": true
     },
     "8EC4304A06AF03BE953EA6EDA494864F6F3F30AA002BABA35869FBB8C6AE5D52": {
-      "enabled": true,
+      "enabled": false,
       "name": "fixInvalidTxFlags",
-      "supported": true
+      "supported": true,
+      "vetoed": false
     },
     "8F81B066ED20DAECA20DF57187767685EEF3980B228E0667A650BAF24426D3B4": {
       "enabled": true,
@@ -3297,9 +3367,10 @@
       "supported": true
     },
     "9000B5F96F9E129D1CB42F2B07AF4CEFEFBFDF49CFCD8B6FF46E719A3F19B436": {
-      "enabled": true,
+      "enabled": false,
       "name": "HookCanEmit",
-      "supported": true
+      "supported": true,
+      "vetoed": true
     },
     "919857E4B902A20216E4819B9BD9FD1FD19A66ECF63151C18A4C48C873DB9578": {
       "enabled": true,
@@ -3312,9 +3383,10 @@
       "supported": true
     },
     "94312150FFBA0E21B46244D7C4C6D66219C53C5F82FB7949F0832A6B56FB9631": {
-      "enabled": true,
+      "enabled": false,
       "name": "Touch",
-      "supported": true
+      "supported": true,
+      "vetoed": true
     },
     "955DF3FA5891195A9DAEFA1DDC6BB244B545DDE1BAA84CBB25D5F12A8DA68A0C": {
       "enabled": true,
@@ -3326,11 +3398,15 @@
       "name": "CheckCashMakesTrustLine",
       "supported": true
     },
+    "A482912CE1E7026F8BC5F63F5A2394768455B71CD8117104F4BFE3A7EAE1AA45": {
+      "enabled": true,
+      "name": "RNG",
+      "supported": true
+    },
     "AE35ABDEFBDE520372B31C957020B34A7A4A9DC3115A69803A44016477C84D6E": {
-      "enabled": false,
+      "enabled": true,
       "name": "fixNFTokenRemint",
-      "supported": true,
-      "vetoed": true
+      "supported": true
     },
     "AF8DF7465C338AE64B1E937D6C8DA138C0D63AD5134A68792BBBE1F63356C422": {
       "enabled": true,
@@ -3365,9 +3441,10 @@
       "vetoed": "Obsolete"
     },
     "BA993DF6058701246DAF748BDE237B0C980164D0034CEB1D831C089A90D9000D": {
-      "enabled": true,
+      "enabled": false,
       "name": "fixFloatDivide",
-      "supported": true
+      "supported": true,
+      "vetoed": false
     },
     "C4483A1896170C66C098DEA5B0E024309C60DC960DE5F01CD7AF986AA3D9AD37": {
       "enabled": true,
@@ -3375,9 +3452,10 @@
       "supported": true
     },
     "C962119A75111083D118901B0D331959C620157FDEABA044398B992B829938C5": {
-      "enabled": true,
+      "enabled": false,
       "name": "fixReduceImport",
-      "supported": true
+      "supported": true,
+      "vetoed": false
     },
     "CA7C02118BA27599528543DFE77BA6838D1B0F43B447D4D7F53523CE6A0E9AC2": {
       "enabled": true,
@@ -3396,9 +3474,10 @@
       "supported": true
     },
     "DAF3A6EB04FA5DC51E8E4F23E9B7022B693EFA636F23F22664746C77B5786B23": {
-      "enabled": true,
+      "enabled": false,
       "name": "DeepFreeze",
-      "supported": true
+      "supported": true,
+      "vetoed": true
     },
     "DC9CA96AEA1DCF83E527D1AFC916EFAF5D27388ECA4060A88817C1238CAEE0BF": {
       "enabled": false,
@@ -3407,21 +3486,27 @@
       "vetoed": "Obsolete"
     },
     "DD6ABC68C1F37392E521EF6FF1475A11576D87C1BC36D9C9E4F0E6C09D18C120": {
-      "enabled": true,
-      "name": "Cron",
-      "supported": true
-    },
-    "DF8B4536989BDACE3F934F29423848B9F1D76D09BE6A1FCFE7E7F06AA26ABEAD": {
       "enabled": false,
-      "name": "fixRemoveNFTokenAutoTrustLine",
+      "name": "Cron",
       "supported": true,
       "vetoed": true
+    },
+    "DF8B4536989BDACE3F934F29423848B9F1D76D09BE6A1FCFE7E7F06AA26ABEAD": {
+      "enabled": true,
+      "name": "fixRemoveNFTokenAutoTrustLine",
+      "supported": true
     },
     "E2E6F2866106419B88C50045ACE96368558C345566AC8F2BDF5A5B5587F0E6FA": {
       "enabled": false,
       "name": "fix1368",
       "supported": true,
       "vetoed": "Obsolete"
+    },
+    "E331BED1F9C4F5F6B6E307D40323D81C3AAAD093A61AB8CFAC7BCFBEBE31F758": {
+      "enabled": false,
+      "name": "fixCronStacking",
+      "supported": true,
+      "vetoed": false
     },
     "ECE6819DBA5DB528F1A241695F5A9811EF99467CDE22510954FD357780BBD078": {
       "enabled": true,
@@ -3434,9 +3519,10 @@
       "supported": true
     },
     "EDB4EE4C524E16BDD91D9A529332DED08DCAAA51CC6DC897ACFA1A0ED131C5B6": {
-      "enabled": true,
+      "enabled": false,
       "name": "fix240819",
-      "supported": true
+      "supported": true,
+      "vetoed": false
     },
     "F5751842D26FC057B92CAA435ABF4F1428C2BCC4180D18775ADE92CB2643BBA3": {
       "enabled": true,
@@ -3449,9 +3535,10 @@
       "supported": true
     },
     "FA4E4881FDB038DCD8D7DFD850A304546E0B2844CACC3AB97CA41136A03E49F5": {
-      "enabled": true,
+      "enabled": false,
       "name": "Remarks",
-      "supported": true
+      "supported": true,
+      "vetoed": true
     },
     "FBD513F1B893AC765B78F250E6FFA6A11B573209D1842ADC787C850696741288": {
       "enabled": true,
@@ -3459,7 +3546,6 @@
       "supported": true
     }
   },
-  "hash": "89DF66D702C009F5FABD29B287CBFD0EF6CB2072B0F4E96A8F1AA25CA823B29C",
-  "native_currency_code": "XAH",
-  "status": "success"
+  "hash": "4ACA2A39F0DDBE0F332DB3B2AE5FF27F1FAFE10A357A918036CF494FAE2E1EEB",
+  "native_currency_code": "XAH"
 }
