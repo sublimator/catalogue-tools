@@ -4,6 +4,7 @@
 #include "catl/xdata/fields.h"
 #include <concepts>
 #include <functional>
+#include <type_traits>
 #include <vector>
 
 namespace catl::xdata {
@@ -90,79 +91,112 @@ struct FieldSlice
  * - Field callbacks: data slice contains the field value
  * - Return values: bool indicates whether to descend into containers
  */
+namespace detail {
+
+// Each callback is OPTIONAL. A visitor implements only the ones it needs; the
+// parser supplies a default for any it omits (see the call_* dispatchers).
+// A callback that IS present must have the correct signature — these concepts
+// check exactly that, so a wrong return type degrades to "absent" (default)
+// rather than a hard error, and the call sites stay clean.
+
+template <typename T>
+concept HasObjectStart =
+    requires(T& v, const FieldPath& p, const FieldSlice& fs) {
+        { v.visit_object_start(p, fs) } -> std::convertible_to<bool>;
+    };
+template <typename T>
+concept HasObjectEnd = requires(T& v, const FieldPath& p, const FieldSlice& fs) {
+    v.visit_object_end(p, fs);
+};
+template <typename T>
+concept HasArrayStart =
+    requires(T& v, const FieldPath& p, const FieldSlice& fs) {
+        { v.visit_array_start(p, fs) } -> std::convertible_to<bool>;
+    };
+template <typename T>
+concept HasArrayEnd = requires(T& v, const FieldPath& p, const FieldSlice& fs) {
+    v.visit_array_end(p, fs);
+};
+template <typename T>
+concept HasField = requires(T& v, const FieldPath& p, const FieldSlice& fs) {
+    v.visit_field(p, fs);
+};
+
+// A missing *_start defaults to "descend" (true) — the common case; a visitor
+// prunes nested structures by implementing the callback and returning false.
+// Missing *_end / field callbacks are no-ops.
+template <typename V>
+inline bool
+call_object_start(V& v, const FieldPath& p, const FieldSlice& fs)
+{
+    if constexpr (HasObjectStart<V>)
+        return v.visit_object_start(p, fs);
+    else
+        return true;
+}
+template <typename V>
+inline void
+call_object_end(V& v, const FieldPath& p, const FieldSlice& fs)
+{
+    if constexpr (HasObjectEnd<V>)
+        v.visit_object_end(p, fs);
+}
+template <typename V>
+inline bool
+call_array_start(V& v, const FieldPath& p, const FieldSlice& fs)
+{
+    if constexpr (HasArrayStart<V>)
+        return v.visit_array_start(p, fs);
+    else
+        return true;
+}
+template <typename V>
+inline void
+call_array_end(V& v, const FieldPath& p, const FieldSlice& fs)
+{
+    if constexpr (HasArrayEnd<V>)
+        v.visit_array_end(p, fs);
+}
+template <typename V>
+inline void
+call_field(V& v, const FieldPath& p, const FieldSlice& fs)
+{
+    if constexpr (HasField<V>)
+        v.visit_field(p, fs);
+}
+
+}  // namespace detail
+
+/**
+ * A SliceVisitor may implement ANY SUBSET of the five callbacks:
+ *
+ *   bool visit_object_start(const FieldPath&, const FieldSlice&)  // descend?
+ *   void visit_object_end  (const FieldPath&, const FieldSlice&)
+ *   bool visit_array_start (const FieldPath&, const FieldSlice&)  // descend?
+ *   void visit_array_end   (const FieldPath&, const FieldSlice&)
+ *   void visit_field       (const FieldPath&, const FieldSlice&)
+ *
+ * Whatever it omits gets a default: the *_start callbacks default to "descend"
+ * (true); the rest are no-ops. A visitor that only inspects leaf fields needs
+ * just visit_field. At least one recognized callback must be present — a type
+ * with none is almost certainly a mistake (e.g. a misspelled method) that
+ * would otherwise silently do nothing.
+ */
 template <typename T>
 concept SliceVisitor =
-    requires(T v, const FieldPath& path, const FieldSlice& fs)
-{
-    /**
-     * Called when entering an STObject field.
-     *
-     * @param path Current path in the parse tree
-     * @param fs Field slice with empty data (content not yet parsed)
-     * @return true to parse object contents, false to skip
-     *
-     * Note: For array elements like CreatedNode, check
-     * path.back().is_array_element()
-     */
-    {
-        v.visit_object_start(path, fs)
-    }
-    ->std::convertible_to<bool>;
-
-    /**
-     * Called when exiting an STObject field.
-     *
-     * @param path Current path in the parse tree
-     * @param fs Field slice with complete object data (excluding end marker)
-     */
-    {
-        v.visit_object_end(path, fs)
-    }
-    ->std::same_as<void>;
-
-    /**
-     * Called when entering an STArray field.
-     *
-     * @param path Current path in the parse tree
-     * @param fs Field slice with empty data (content not yet parsed)
-     * @return true to parse array contents, false to skip
-     */
-    {
-        v.visit_array_start(path, fs)
-    }
-    ->std::convertible_to<bool>;
-
-    /**
-     * Called when exiting an STArray field.
-     *
-     * @param path Current path in the parse tree
-     * @param fs Field slice with complete array data (excluding end marker)
-     */
-    {
-        v.visit_array_end(path, fs)
-    }
-    ->std::same_as<void>;
-
-    /**
-     * Called for leaf fields only (not objects or arrays).
-     *
-     * @param path Current path in the parse tree
-     * @param fs Field slice with complete field data
-     *
-     * Examples of leaf fields: UInt32, Hash256, AccountID, Amount, Blob, etc.
-     */
-    {
-        v.visit_field(path, fs)
-    }
-    ->std::same_as<void>;
-};
+    detail::HasObjectStart<std::remove_cvref_t<T>> ||
+    detail::HasObjectEnd<std::remove_cvref_t<T>> ||
+    detail::HasArrayStart<std::remove_cvref_t<T>> ||
+    detail::HasArrayEnd<std::remove_cvref_t<T>> ||
+    detail::HasField<std::remove_cvref_t<T>>;
 
 /**
  * SimpleSliceEmitter - Example visitor that emits all leaf field slices.
  *
- * This visitor always descends into all containers and emits every
- * leaf field it encounters. Useful for extracting all field data
- * from a structure.
+ * It emits every leaf field it encounters and relies on the default "descend"
+ * behaviour for containers — so it only needs visit_field. This is the minimal
+ * shape a visitor can take (contrast TopLevelOnlyVisitor below, which DOES
+ * implement the *_start callbacks because it prunes nested structures).
  */
 class SimpleSliceEmitter
 {
@@ -172,30 +206,6 @@ public:
     explicit SimpleSliceEmitter(std::function<void(const FieldSlice&)> emit)
         : emit_(emit)
     {
-    }
-
-    bool
-    visit_object_start(const FieldPath&, const FieldSlice&)
-    {
-        return true;  // Always descend
-    }
-
-    void
-    visit_object_end(const FieldPath&, const FieldSlice&)
-    {
-        // Could use the complete object data here if needed
-    }
-
-    bool
-    visit_array_start(const FieldPath&, const FieldSlice&)
-    {
-        return true;  // Always descend
-    }
-
-    void
-    visit_array_end(const FieldPath&, const FieldSlice&)
-    {
-        // Could use the complete array data here if needed
     }
 
     void

@@ -127,32 +127,8 @@ ValidationCollector::verify_validation_signature(
         size_t sig_end = 0;    // offset just past the Signature value
         bool have_sig = false;
 
-        bool
-        visit_object_start(
-            catl::xdata::FieldPath const&,
-            catl::xdata::FieldSlice const&)
-        {
-            return true;  // descend so top-level fields are visited
-        }
-        void
-        visit_object_end(
-            catl::xdata::FieldPath const&,
-            catl::xdata::FieldSlice const&)
-        {
-        }
-        bool
-        visit_array_start(
-            catl::xdata::FieldPath const&,
-            catl::xdata::FieldSlice const&)
-        {
-            return false;
-        }
-        void
-        visit_array_end(
-            catl::xdata::FieldPath const&,
-            catl::xdata::FieldSlice const&)
-        {
-        }
+        // Only visit_field is needed — the parser descends by default, and the
+        // path.size()==1 guard keeps us to the top-level fields.
         void
         visit_field(
             catl::xdata::FieldPath const& path,
@@ -288,32 +264,7 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     struct Visitor
     {
         Entry& e;
-        bool
-        visit_object_start(
-            catl::xdata::FieldPath const&,
-            catl::xdata::FieldSlice const&)
-        {
-            return false;
-        }
-        void
-        visit_object_end(
-            catl::xdata::FieldPath const&,
-            catl::xdata::FieldSlice const&)
-        {
-        }
-        bool
-        visit_array_start(
-            catl::xdata::FieldPath const&,
-            catl::xdata::FieldSlice const&)
-        {
-            return false;
-        }
-        void
-        visit_array_end(
-            catl::xdata::FieldPath const&,
-            catl::xdata::FieldSlice const&)
-        {
-        }
+        // STValidation is flat; only the top-level leaf fields are needed.
         void
         visit_field(
             catl::xdata::FieldPath const& path,

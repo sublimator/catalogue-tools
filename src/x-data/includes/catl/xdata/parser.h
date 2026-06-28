@@ -227,7 +227,7 @@ parse_with_visitor_impl(
 
             //@@start selective-descent
             // Ask visitor if they want to descend
-            if (visitor.visit_object_start(path, start_slice))
+            if (detail::call_object_start(visitor, path, start_slice))
             {
                 // Add to path and recurse
                 path.push_back({field, -1});
@@ -252,7 +252,7 @@ parse_with_visitor_impl(
                 object_size};
             FieldSlice end_slice{field, header_slice, object_data};
 
-            visitor.visit_object_end(path, end_slice);
+            detail::call_object_end(visitor, path, end_slice);
         }
         else if (field->meta.type == FieldTypes::STArray)
         {
@@ -263,7 +263,7 @@ parse_with_visitor_impl(
             FieldSlice start_slice{field, header_slice, Slice{}};
 
             // Ask visitor if they want to descend
-            if (visitor.visit_array_start(path, start_slice))
+            if (detail::call_array_start(visitor, path, start_slice))
             {
                 // Add to path
                 path.push_back({field, -1});
@@ -308,7 +308,8 @@ parse_with_visitor_impl(
                             elem_field, elem_header, Slice{}};
 
                         // Parse the STObject content
-                        if (visitor.visit_object_start(path, elem_start_slice))
+                        if (detail::call_object_start(
+                                visitor, path, elem_start_slice))
                         {
                             // Parse the object's fields
                             parse_with_visitor_impl(
@@ -330,7 +331,8 @@ parse_with_visitor_impl(
                         FieldSlice elem_end_slice{
                             elem_field, elem_header, elem_data};
 
-                        visitor.visit_object_end(path, elem_end_slice);
+                        detail::call_object_end(
+                            visitor, path, elem_end_slice);
 
                         path.pop_back();
                     }
@@ -368,7 +370,7 @@ parse_with_visitor_impl(
                 array_size};
             FieldSlice end_slice{field, header_slice, array_data};
 
-            visitor.visit_array_end(path, end_slice);
+            detail::call_array_end(visitor, path, end_slice);
         }
         else
         {
@@ -418,8 +420,8 @@ parse_with_visitor_impl(
 
             Slice field_data = ctx.cursor.read_slice(field_size);
             path.push_back({field, -1});
-            visitor.visit_field(
-                path, FieldSlice{field, header_slice, field_data});
+            detail::call_field(
+                visitor, path, FieldSlice{field, header_slice, field_data});
             path.pop_back();
             //@@end leaf-field
         }

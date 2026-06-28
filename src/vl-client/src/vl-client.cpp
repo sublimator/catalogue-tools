@@ -67,37 +67,12 @@ using catl::base64_decode;
 // Manifest parsing
 //------------------------------------------------------------------------------
 
-/// Visitor that extracts specific fields from a manifest STObject.
+/// Visitor that extracts specific fields from a manifest STObject. A manifest
+/// is flat, so only visit_field is needed (the parser descends by default).
 struct ManifestVisitor
 {
     Manifest& out;
 
-    bool
-    visit_object_start(
-        catl::xdata::FieldPath const&,
-        catl::xdata::FieldSlice const&)
-    {
-        return false;
-    }
-    void
-    visit_object_end(
-        catl::xdata::FieldPath const&,
-        catl::xdata::FieldSlice const&)
-    {
-    }
-    bool
-    visit_array_start(
-        catl::xdata::FieldPath const&,
-        catl::xdata::FieldSlice const&)
-    {
-        return false;
-    }
-    void
-    visit_array_end(
-        catl::xdata::FieldPath const&,
-        catl::xdata::FieldSlice const&)
-    {
-    }
     void
     visit_field(
         catl::xdata::FieldPath const& path,
