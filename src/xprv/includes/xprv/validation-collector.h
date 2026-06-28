@@ -76,6 +76,17 @@ public:
     static std::vector<uint8_t>
     extract_stvalidation(std::vector<uint8_t> const& data);
 
+    /// Verify an STValidation's signature against its embedded SigningPubKey
+    /// (sec #0053). Rebuilds the rippled signing serialization — the
+    /// "VAL\0" hash prefix followed by the object with the sfSignature field
+    /// excised — and checks sfSignature over it. Returns false on any parse
+    /// failure, missing field, or signature mismatch. Static + self-contained
+    /// so it can be unit-tested against captured validations.
+    static bool
+    verify_validation_signature(
+        std::vector<uint8_t> const& stvalidation,
+        catl::xdata::Protocol const& protocol);
+
     // Public state
     std::map<Hash256, std::vector<Entry>> by_ledger;
     std::set<std::string> unl_signing_keys;

@@ -3,6 +3,7 @@
 #include "xprv/manifest-utils.h"
 #include "xprv/network-config.h"
 
+#include <catl/crypto/sig-verify.h>
 #include <catl/peer-client/connection-types.h>
 #include <catl/xdata/parser-context.h>
 #include <catl/xdata/parser.h>
@@ -105,6 +106,121 @@ ValidationCollector::extract_stvalidation(std::vector<uint8_t> const& data)
     return {data.data() + pos, data.data() + pos + length};
 }
 
+bool
+ValidationCollector::verify_validation_signature(
+    std::vector<uint8_t> const& stvalidation,
+    catl::xdata::Protocol const& protocol)
+{
+    // Capture the SigningPubKey, the Signature, and the exact byte extent of
+    // the Signature field's full TLV (field header + VL-length prefix + value)
+    // so we can rebuild the signing serialization: rippled signs/verifies the
+    // SHA512-Half of "VAL\0" || <object serialized WITHOUT sfSignature>.
+    struct SigVisitor
+    {
+        const uint8_t* base = nullptr;
+        std::vector<uint8_t> signing_key;
+        std::vector<uint8_t> signature;
+        size_t sig_begin = 0;  // offset of the Signature field header
+        size_t sig_end = 0;    // offset just past the Signature value
+        bool have_sig = false;
+
+        bool
+        visit_object_start(
+            catl::xdata::FieldPath const&,
+            catl::xdata::FieldSlice const&)
+        {
+            return true;  // descend so top-level fields are visited
+        }
+        void
+        visit_object_end(
+            catl::xdata::FieldPath const&,
+            catl::xdata::FieldSlice const&)
+        {
+        }
+        bool
+        visit_array_start(
+            catl::xdata::FieldPath const&,
+            catl::xdata::FieldSlice const&)
+        {
+            return false;
+        }
+        void
+        visit_array_end(
+            catl::xdata::FieldPath const&,
+            catl::xdata::FieldSlice const&)
+        {
+        }
+        void
+        visit_field(
+            catl::xdata::FieldPath const& path,
+            catl::xdata::FieldSlice const& fs)
+        {
+            if (path.size() != 1)
+                return;
+            if (fs.field->name == "SigningPubKey")
+            {
+                signing_key.assign(
+                    fs.data.data(), fs.data.data() + fs.data.size());
+            }
+            else if (fs.field->name == "Signature")
+            {
+                signature.assign(
+                    fs.data.data(), fs.data.data() + fs.data.size());
+                // The TLV spans from the field header through the value; the
+                // VL-length prefix sits between header and value and is also
+                // excised by this range.
+                sig_begin = static_cast<size_t>(fs.header.data() - base);
+                sig_end = static_cast<size_t>(
+                    (fs.data.data() + fs.data.size()) - base);
+                have_sig = true;
+            }
+        }
+    };
+
+    SigVisitor v;
+    v.base = stvalidation.data();
+    try
+    {
+        Slice slice(stvalidation.data(), stvalidation.size());
+        catl::xdata::SliceCursor cursor{slice, 0};
+        catl::xdata::ParserContext ctx{cursor};
+        catl::xdata::parse_with_visitor(ctx, protocol, v);
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    if (!v.have_sig || v.signing_key.size() != 33 || v.signature.empty())
+        return false;
+    if (v.sig_begin > v.sig_end || v.sig_end > stvalidation.size())
+        return false;
+
+    // "VAL\0" — rippled HashPrefix::validation (0x56414C00).
+    static constexpr uint8_t kValidationPrefix[4] = {0x56, 0x41, 0x4C, 0x00};
+
+    std::vector<uint8_t> msg;
+    msg.reserve(
+        sizeof(kValidationPrefix) + stvalidation.size() -
+        (v.sig_end - v.sig_begin));
+    msg.insert(msg.end(), kValidationPrefix, kValidationPrefix + 4);
+    msg.insert(
+        msg.end(),
+        stvalidation.begin(),
+        stvalidation.begin() + static_cast<std::ptrdiff_t>(v.sig_begin));
+    msg.insert(
+        msg.end(),
+        stvalidation.begin() + static_cast<std::ptrdiff_t>(v.sig_end),
+        stvalidation.end());
+
+    // verify_message hashes for secp256k1 (SHA512-Half) and passes the raw
+    // message for ed25519 — matching how rippled signs each key type.
+    return catl::crypto::verify_message(
+        std::span<const uint8_t>(v.signing_key.data(), v.signing_key.size()),
+        std::span<const uint8_t>(v.signature.data(), v.signature.size()),
+        std::span<const uint8_t>(msg.data(), msg.size()));
+}
+
 void
 ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
 {
@@ -127,6 +243,20 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     auto val_bytes = extract_stvalidation(data);
     if (val_bytes.empty())
         return;
+
+    // Verify the signature before trusting the validation (sec #0053). A
+    // forged or corrupt validation is worthless and would pollute quorum
+    // state, so drop it outright. Logged at debug to avoid a flood of
+    // bad validations becoming a log-amplification vector.
+    if (!verify_validation_signature(val_bytes, protocol_))
+    {
+        PLOGD(
+            log_,
+            "[",
+            net_label_,
+            "] dropping validation with invalid signature");
+        return;
+    }
 
     // Diagnostic: log full hex of first validation per network
     {
@@ -230,6 +360,7 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     auto seq = entry.ledger_seq;
 
     entry.signing_key_hex = lower_hex(entry.signing_key);
+    entry.sig_verified = true;  // dropped above unless the signature verified
 
     if (!insert_entry(std::move(entry)))
     {
