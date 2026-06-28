@@ -1399,9 +1399,15 @@ HttpServer::handle_session(
                 // SSE client — send error as SSE event so the frontend
                 // shows the actual message instead of "failed to connect".
                 // Can't co_await in catch (C++20), so stash and handle below.
+                // Serialize via boost::json so e.what() (which can carry
+                // request-derived text) is escaped — raw concatenation here
+                // would let a crafted message break out of the JSON string
+                // (sec #0054).
+                boost::json::object sse_err;
+                sse_err["type"] = "error";
+                sse_err["error"] = e.what();
                 sse_error_msg =
-                    "data: {\"type\":\"error\",\"error\":\"" +
-                    std::string(e.what()) + "\"}\n\n";
+                    "data: " + boost::json::serialize(sse_err) + "\n\n";
             }
             else
             {
@@ -1426,8 +1432,13 @@ HttpServer::handle_session(
         }
         catch (std::exception const& e)
         {
+            // Log the real reason, but don't leak internal exception detail
+            // (paths, type names, internal state) to the client (sec #0054).
+            // The specific RPC/peer catches above surface controlled,
+            // user-meaningful messages; this catch-all is the unknown bucket.
             PLOGE(log_, "Request failed: ", e.what());
-            caught_error = error_response(500, e.what(), version, keep_alive);
+            caught_error =
+                error_response(500, "internal error", version, keep_alive);
         }
 
         // SSE error for tx-not-found (can't co_await in catch)
