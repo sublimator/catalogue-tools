@@ -5,6 +5,7 @@
 
 #include <catl/crypto/sig-verify.h>
 #include <catl/peer-client/connection-types.h>
+#include <catl/shamap/binary-trie.h>  // leb128_decode (bounds/overflow-safe)
 #include <catl/xdata/known-fields.h>
 #include <catl/xdata/parser-context.h>
 #include <catl/xdata/parser.h>
@@ -91,19 +92,27 @@ ValidationCollector::extract_stvalidation(std::vector<uint8_t> const& data)
     if (data.size() < 2 || data[0] != 0x0A)
         return {};
 
+    // Parse the protobuf field-1 (0x0A, already checked) LEB128 length via the
+    // bounds- and overflow-safe decoder (sec #0060). The previous hand-rolled
+    // varint had no shift>=64 guard and used the overflow-prone
+    // `pos + length > data.size()` form: a crafted 10-byte length (e.g. all
+    // 0xFF) wraps `pos + length` below data.size(), bypassing the bound, then
+    // constructs a vector from an inverted pointer range → throw. This runs
+    // outside any try in on_packet on a strand handler, so the throw would
+    // crash a worker thread (remote pre-auth DoS — TMValidation is gossiped).
     size_t pos = 1;
     size_t length = 0;
-    int shift = 0;
-    while (pos < data.size())
+    try
     {
-        uint8_t byte = data[pos++];
-        length |= (static_cast<size_t>(byte & 0x7F) << shift);
-        if ((byte & 0x80) == 0)
-            break;
-        shift += 7;
+        length = catl::shamap::leb128_decode(data, pos);
+    }
+    catch (std::exception const&)
+    {
+        return {};  // malformed or overflowing length varint
     }
 
-    if (pos + length > data.size() || length < 50)
+    // Overflow-safe: pos <= data.size() is guaranteed by leb128_decode.
+    if (length < 50 || length > data.size() - pos)
         return {};
 
     return {data.data() + pos, data.data() + pos + length};

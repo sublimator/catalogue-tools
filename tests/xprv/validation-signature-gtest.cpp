@@ -107,3 +107,46 @@ TEST(ValidationSignature, EmptyOrGarbageFails)
     EXPECT_FALSE(
         ValidationCollector::verify_validation_signature(garbage, protocol));
 }
+
+// extract_stvalidation parses an attacker-controlled protobuf length prefix
+// (TMValidation is gossiped pre-auth). A crafted length must never overflow the
+// bound and construct an inverted pointer range (sec #0060) — the old
+// hand-rolled varint crashed a worker thread on this input.
+TEST(ExtractStValidation, RejectsOverflowingLength)
+{
+    // 0x0A tag + a 10-byte LEB128 length that decodes to a near-2^64 value;
+    // the old `pos + length` check wrapped and let this through.
+    std::vector<std::uint8_t> overflow{
+        0x0A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F};
+    EXPECT_TRUE(ValidationCollector::extract_stvalidation(overflow).empty());
+
+    // A varint with too many continuation bytes (shift >= 64): the decoder
+    // throws, extract_stvalidation catches it and returns empty.
+    std::vector<std::uint8_t> overlong(12, 0xFF);
+    overlong[0] = 0x0A;
+    EXPECT_TRUE(ValidationCollector::extract_stvalidation(overlong).empty());
+}
+
+TEST(ExtractStValidation, RejectsTruncatedOrTooShort)
+{
+    // length=100 declared but only 10 body bytes present.
+    std::vector<std::uint8_t> truncated{0x0A, 100};
+    truncated.resize(2 + 10, 0x00);
+    EXPECT_TRUE(ValidationCollector::extract_stvalidation(truncated).empty());
+
+    // length=5 is below the 50-byte minimum STValidation size.
+    std::vector<std::uint8_t> too_short{0x0A, 5, 1, 2, 3, 4, 5};
+    EXPECT_TRUE(ValidationCollector::extract_stvalidation(too_short).empty());
+}
+
+TEST(ExtractStValidation, AcceptsWellFormed)
+{
+    // 0x0A tag + single-byte length 50 + exactly 50 body bytes.
+    std::vector<std::uint8_t> data{0x0A, 50};
+    for (int i = 0; i < 50; ++i)
+        data.push_back(static_cast<std::uint8_t>(i));
+    auto body = ValidationCollector::extract_stvalidation(data);
+    ASSERT_EQ(body.size(), 50u);
+    EXPECT_EQ(body.front(), 0u);
+    EXPECT_EQ(body.back(), 49u);
+}
