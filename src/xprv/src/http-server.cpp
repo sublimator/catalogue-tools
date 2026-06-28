@@ -509,8 +509,19 @@ HttpServer::accept_loop()
     while (accepting_)
     {
         boost::system::error_code ec;
-        auto socket = co_await acceptor_.async_accept(
-            asio::redirect_error(asio::use_awaitable, ec));
+        // Per-connection strand (security #0059). beast::tcp_stream implements
+        // its expires_after timeout by keeping the socket op AND an internal
+        // deadline timer outstanding at once; on a multi-thread io_context
+        // (the deploy runs --threads 2) their completions can land on two
+        // threads and race basic_stream's internal state — UB. Accepting onto
+        // this strand binds the socket → tcp_stream → its timer to one strand,
+        // and spawning the session on it (below) makes the inner co_spawns that
+        // inherit stream.get_executor()/this_coro::executor serialize too.
+        // Empirically verified with a TSan reproducer (~/projects/asio-patterns,
+        // beast-stream-strand-tsan): nostrand races, strand is clean.
+        auto strand = asio::make_strand(io_);
+        boost::asio::ip::tcp::socket socket = co_await acceptor_.async_accept(
+            strand, asio::redirect_error(asio::use_awaitable, ec));
         if (ec)
         {
             if (accepting_)
@@ -528,7 +539,8 @@ HttpServer::accept_loop()
                 generate_request_id(),
                 {},  // tx_hash filled later
                 std::chrono::steady_clock::now()));
-        auto ctx_ex = catl::core::ContextExecutor(io_.get_executor(), req_ctx);
+        // Wrap the per-connection strand so the session coroutine runs on it.
+        auto ctx_ex = catl::core::ContextExecutor(strand, req_ctx);
         asio::co_spawn(
             ctx_ex,
             [self, s = std::move(socket), req_ctx]() mutable {
@@ -1089,9 +1101,10 @@ HttpServer::handle_session(
                         };
 
                         // Status drain loop — runs concurrently with prove,
-                        // flushing status events every 500ms. Single-threaded
-                        // io_context means writes interleave at co_await
-                        // points, never concurrently.
+                        // flushing status events every 500ms. The per-connection
+                        // strand (sec #0059) serializes this connection's
+                        // coroutines, so writes interleave at co_await points,
+                        // never truly concurrently — even at --threads > 1.
                         auto drain_done = std::make_shared<bool>(false);
                         auto drain_timer = std::make_shared<asio::steady_timer>(
                             stream.get_executor());

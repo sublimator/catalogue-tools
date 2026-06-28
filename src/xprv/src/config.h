@@ -31,8 +31,9 @@ struct Config
     /// HTTP server port for `xprv serve`.
     uint16_t port = 8080;
 
-    /// Number of I/O threads. 1 = single-threaded (simplest).
-    /// Higher values use per-object strands for thread safety.
+    /// Number of I/O threads. 1 = single-threaded (simplest). Higher values run
+    /// the io_context on N threads; each HTTP connection is bound to its own
+    /// strand so its stream + deadline timer stay serialized (sec #0059).
     unsigned int threads = 1;
 
     /// Disable the proof-level LRU cache. When true, every /prove
