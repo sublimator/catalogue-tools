@@ -121,9 +121,11 @@ TEST(InboundBudget, OverReleaseClampsAndDoesNotWrap)
 TEST(InboundBudget, FrameCapFitsWithinAggregateBudget)
 {
     // Sanity on the production constants: a single max frame fits, and the
-    // aggregate is a small multiple of it (so legit traffic is never refused).
+    // aggregate holds several concurrent max-size frames (so legit traffic is
+    // never refused). With 64 MiB frames and a 256 MiB budget that's 4
+    // concurrent max frames (many more for typical smaller frames).
     EXPECT_GT(kAggregateInboundBudget, kMaxFramePayloadSize);
-    EXPECT_GE(kAggregateInboundBudget / kMaxFramePayloadSize, 8u);
+    EXPECT_GE(kAggregateInboundBudget / kMaxFramePayloadSize, 4u);
 
     InboundBudget b(kAggregateInboundBudget);
     EXPECT_TRUE(b.try_acquire(kMaxFramePayloadSize));

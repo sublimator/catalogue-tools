@@ -19,10 +19,11 @@ namespace catl::peer {
 
 // Maximum accepted wire-frame payload size. The on-wire length field is
 // 28 bits (max ~256 MiB); an untrusted peer could otherwise force a
-// quarter-gigabyte allocation per frame. 16 MiB is ~2x the largest message
-// realistically received and keeps aggregate memory survivable across many
-// peers. Mirrors peer-client's kMaxFramePayloadSize (see its rationale).
-inline constexpr std::uint32_t kMaxFramePayloadSize = 16u * 1024 * 1024;
+// quarter-gigabyte allocation per frame. 64 MiB: real rippled hubs send
+// ~60 MiB frames after handshake, so a tighter 16 MiB cap rejected legitimate
+// peers (see peer-client's kMaxFramePayloadSize). Aggregate memory across many
+// peers is bounded independently by InboundBudget (security #0055).
+inline constexpr std::uint32_t kMaxFramePayloadSize = 64u * 1024 * 1024;
 
 // Process-wide ceiling on the SUM of in-flight inbound frame buffers across
 // all peer connections (security #0055). The per-frame cap above bounds a

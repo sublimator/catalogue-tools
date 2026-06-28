@@ -21,18 +21,21 @@ namespace catl::peer_client {
 // 28 bits (max ~256 MiB); an untrusted peer could set it arbitrarily and
 // force a quarter-gigabyte allocation per frame.
 //
-// 16 MiB is ~2x headroom over the largest message this read-only client
-// realistically receives (a TMLedgerData node batch ≈ rippled's
-// maxReplyNodes × ~932 B ≲ 8 MiB), so it never rejects legitimate traffic.
-// It also keeps AGGREGATE memory survivable: payload_buffer_ is one
-// in-flight buffer per connection, so a coordinated fill across ~20 peers
-// is 20 × 16 = 320 MiB, under a 512 MiB instance — whereas 64 MiB would be
-// 1.28 GiB. (A hard aggregate inbound budget is the complete fix for the
-// multi-peer vector; tracked as a follow-up in security issue #0055.)
-inline constexpr std::uint32_t kMaxFramePayloadSize = 16u * 1024 * 1024;
+// 64 MiB. An earlier 16 MiB value (c4cd8bd) broke peering: real rippled hubs
+// send ~60 MiB frames shortly after handshake (observed e.g.
+// payload_size=60426989), so 16 MiB rejected legitimate peers right after a
+// successful handshake — with a cold peer cache this dropped the DNS bootstrap
+// seeds and left the client with zero peers. The original 8 MiB "largest
+// message" estimate was simply wrong for hub traffic. 64 MiB is the
+// proven-good value (what rippled is known not to exceed for these frames).
+// AGGREGATE memory across many peers is bounded independently and completely by
+// the process-wide InboundBudget (kAggregateInboundBudget, security #0055), so
+// the per-frame cap no longer has to carry the aggregate concern — its only job
+// is to bound a single allocation against a hostile 256 MiB-wide length field.
+inline constexpr std::uint32_t kMaxFramePayloadSize = 64u * 1024 * 1024;
 
 // Maximum node entries accepted in a single TMLedgerData response. The frame
-// cap bounds the message to 16 MiB, but a densely-packed message could still
+// cap bounds the message to 64 MiB, but a densely-packed message could still
 // encode ~millions of tiny repeated node entries; iterating them builds an
 // O(N) nodeid vector and runs an O(N × pending × requested) match
 // (peer-client.cpp find_node_key) — CPU + transient-memory amplification.
@@ -41,13 +44,14 @@ inline constexpr std::uint32_t kMaxFramePayloadSize = 16u * 1024 * 1024;
 inline constexpr int kMaxLedgerReplyNodes = 8192;
 
 // Process-wide ceiling on the SUM of in-flight inbound frame buffers across
-// ALL peer connections (security issue #0055). The per-connection 16 MiB
+// ALL peer connections (security issue #0055). The per-connection 64 MiB
 // kMaxFramePayloadSize bounds a single frame, but a coordinated fill across
-// many peers (each holding a max-size frame mid-read) could still pressure
-// memory — 20 peers × 16 MiB = 320 MiB. This caps the aggregate so the total
-// stays well under a 512 MiB instance regardless of peer count. 256 MiB = 16
-// concurrent max-size frames, far above legitimate traffic (the largest reply,
-// a TMLedgerData node batch, is ≲ 8 MiB and rarely concurrent).
+// many peers (each holding a max-size frame mid-read) could otherwise pressure
+// memory — 20 peers × 64 MiB = 1.28 GiB. This caps the aggregate so the total
+// stays well under a 512 MiB instance regardless of peer count and is what
+// makes the larger per-frame cap safe. 256 MiB = 4 concurrent 64 MiB frames
+// (or many more smaller ones); legitimate large hub frames are rarely
+// concurrent, so this is ample for real traffic.
 inline constexpr std::size_t kAggregateInboundBudget = 256u * 1024 * 1024;
 
 // Tracks total in-flight inbound-buffer bytes against a ceiling. A connection
