@@ -26,7 +26,7 @@ namespace catl::peer_client {
 // in-flight buffer per connection, so a coordinated fill across ~20 peers
 // is 20 × 16 = 320 MiB, under a 512 MiB instance — whereas 64 MiB would be
 // 1.28 GiB. (A hard aggregate inbound budget is the complete fix for the
-// multi-peer vector; tracked as a follow-up in #0049.)
+// multi-peer vector; tracked as a follow-up in security issue #0055.)
 inline constexpr std::uint32_t kMaxFramePayloadSize = 16u * 1024 * 1024;
 
 // Maximum node entries accepted in a single TMLedgerData response. The frame
