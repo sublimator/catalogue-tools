@@ -30,6 +30,11 @@ add_executable(node-credentials-gtest node-credentials-gtest.cpp)
 target_link_libraries(node-credentials-gtest
                       PRIVATE catl::peer-client catl::base58 GTest::gtest_main)
 
+add_executable(session-signature-gtest session-signature-gtest.cpp)
+target_link_libraries(session-signature-gtest
+                      PRIVATE catl::peer-client catl::base58 catl::crypto
+                              libsodium::libsodium GTest::gtest_main)
+
 include(GoogleTest)
 gtest_discover_tests(peer-client-gtest DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(peer-endpoint-cache-gtest DISCOVERY_TIMEOUT 30)
@@ -39,3 +44,4 @@ gtest_discover_tests(peer-set-pruning-gtest DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(node-cache-signal-gtest DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(peer-session-interface-gtest DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(node-credentials-gtest DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(session-signature-gtest DISCOVERY_TIMEOUT 30)

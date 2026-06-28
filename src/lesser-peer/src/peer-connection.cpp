@@ -1,12 +1,16 @@
 #include "ripple.pb.h"
+#include <catl/base58/base58.h>
 #include <catl/common/utils.h>
 #include <catl/core/logger.h>
+#include <catl/crypto/sig-verify.h>
 #include <catl/peer/crypto-utils.h>
 #include <catl/peer/peer-connection.h>
 
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <openssl/ssl.h>
+#include <sodium.h>
+#include <span>
 #include <utility>
 
 namespace catl::peer {
@@ -164,6 +168,8 @@ peer_connection::handle_handshake(
 
     // Store signature for HTTP upgrade
     session_signature_ = signature;
+    // Retain the shared cookie to verify the peer's signature (sec #0053).
+    session_cookie_ = cookie;
 
     // Perform HTTP upgrade
     perform_http_upgrade(handler);
@@ -193,6 +199,78 @@ peer_connection::generate_node_keys()
     secret_key_ = keys.secret_key;
     public_key_compressed_ = keys.public_key_compressed;
     node_public_key_b58_ = keys.public_key_b58;
+}
+
+void
+peer_connection::verify_peer_session_signature(
+    std::string const& public_key_b58,
+    std::string const& session_signature_b64)
+{
+    if (public_key_b58.empty() || session_signature_b64.empty())
+    {
+        LOGW(
+            "peer omitted Public-Key/Session-Signature; "
+            "cannot verify session identity");
+        return;
+    }
+
+    // Decode the peer's node public key (base58, NODE_PUBLIC version → 33 B).
+    auto pub = base58::decode_node_public(public_key_b58);
+    if (!pub || pub->size() != 33)
+    {
+        LOGW("peer Public-Key not decodable; skipping session-sig verify");
+        return;
+    }
+
+    // Decode the base64 (original variant) Session-Signature → DER bytes.
+    std::array<std::uint8_t, 128> der{};
+    std::size_t der_len = 0;
+    if (sodium_base642bin(
+            der.data(),
+            der.size(),
+            session_signature_b64.data(),
+            session_signature_b64.size(),
+            nullptr,
+            &der_len,
+            nullptr,
+            sodium_base64_VARIANT_ORIGINAL) != 0)
+    {
+        LOGW("peer Session-Signature not valid base64; skipping verify");
+        return;
+    }
+
+    // The signature is over the 32-byte shared cookie DIRECTLY, so verify
+    // against the raw cookie — not verify_message, which would re-hash it.
+    bool ok = false;
+    switch (catl::crypto::detect_key_type(*pub))
+    {
+        case catl::crypto::KeyType::secp256k1:
+            ok = catl::crypto::verify_secp256k1(
+                *pub,
+                std::span<const std::uint8_t>(der.data(), der_len),
+                session_cookie_);
+            break;
+        case catl::crypto::KeyType::ed25519:
+            ok = catl::crypto::verify_ed25519(
+                std::span<const std::uint8_t>(pub->data() + 1, 32),
+                std::span<const std::uint8_t>(der.data(), der_len),
+                session_cookie_);
+            break;
+        case catl::crypto::KeyType::unknown:
+            break;
+    }
+
+    if (ok)
+    {
+        LOGD("session-signature verified (", public_key_b58, ")");
+    }
+    else
+    {
+        LOGW(
+            "session-signature verification FAILED for ",
+            public_key_b58,
+            " — peer may not control the advertised node key (continuing)");
+    }
 }
 
 void
@@ -280,6 +358,19 @@ peer_connection::send_http_request(const connection_handler& handler)
 void
 peer_connection::handle_http_request(const connection_handler& handler)
 {
+    // Verify the connecting peer's Session-Signature (sec #0053).
+    {
+        std::string peer_pubkey;
+        std::string peer_sig;
+        if (auto it = http_request_.find("Public-Key");
+            it != http_request_.end())
+            peer_pubkey = std::string(it->value());
+        if (auto it = http_request_.find("Session-Signature");
+            it != http_request_.end())
+            peer_sig = std::string(it->value());
+        verify_peer_session_signature(peer_pubkey, peer_sig);
+    }
+
     // Send upgrade response
     auto res = std::make_shared<http::response<http::string_body>>(
         http::status::switching_protocols, 11);
@@ -394,6 +485,19 @@ peer_connection::handle_http_response(const connection_handler& handler)
         {
             LOGD("  ", field.name_string(), ": ", field.value());
         }
+    }
+
+    // Verify the peer authenticated the TLS session (sec #0053).
+    {
+        std::string peer_pubkey;
+        std::string peer_sig;
+        if (auto it = http_response_.find("Public-Key");
+            it != http_response_.end())
+            peer_pubkey = std::string(it->value());
+        if (auto it = http_response_.find("Session-Signature");
+            it != http_response_.end())
+            peer_sig = std::string(it->value());
+        verify_peer_session_signature(peer_pubkey, peer_sig);
     }
 
     http_upgraded_ = true;

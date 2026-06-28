@@ -1,6 +1,8 @@
 #include "ripple.pb.h"
+#include <catl/base58/base58.h>
 #include <catl/common/utils.h>
 #include <catl/core/logger.h>
+#include <catl/crypto/sig-verify.h>
 #include <catl/peer-client/connection.h>
 #include <catl/peer-client/crypto-utils.h>
 #include <catl/peer-client/node-identity.h>
@@ -10,6 +12,7 @@
 #include <boost/json.hpp>
 #include <openssl/ssl.h>
 #include <sodium.h>
+#include <span>
 #include <sstream>
 #include <utility>
 
@@ -207,6 +210,10 @@ peer_connection::handle_handshake(
 
     // Store signature for HTTP upgrade
     session_signature_ = signature;
+    // Retain the shared cookie so we can verify the peer's Session-Signature
+    // once the upgrade headers arrive (sec #0053). The cookie is symmetric:
+    // both peers derive the same value from the TLS finished messages.
+    session_cookie_ = cookie;
 
     // Perform HTTP upgrade
     perform_http_upgrade(handler);
@@ -254,6 +261,111 @@ peer_connection::generate_node_keys()
     // Note: no startup log here — apply_node_identity (xprv main) logs
     // the resolved public key once at process start. Doing it again
     // per-handshake would spam Cloud Run logs.
+}
+
+void
+peer_connection::verify_peer_session_signature(
+    std::string const& public_key_b58,
+    std::string const& session_signature_b64)
+{
+    if (public_key_b58.empty() || session_signature_b64.empty())
+    {
+        PLOGW(
+            log_,
+            "[",
+            config_.host,
+            ":",
+            config_.port,
+            "] peer omitted Public-Key/Session-Signature; "
+            "cannot verify session identity");
+        return;
+    }
+
+    // Decode the peer's node public key (base58, NODE_PUBLIC version → 33 B).
+    auto pub = base58::decode_node_public(public_key_b58);
+    if (!pub || pub->size() != 33)
+    {
+        PLOGW(
+            log_,
+            "[",
+            config_.host,
+            ":",
+            config_.port,
+            "] peer Public-Key not decodable; skipping session-sig verify");
+        return;
+    }
+
+    // Decode the base64 (original variant) Session-Signature → DER bytes.
+    // A secp256k1 DER signature is ≤ 72 bytes; 128 is comfortable headroom.
+    std::array<std::uint8_t, 128> der{};
+    std::size_t der_len = 0;
+    if (sodium_base642bin(
+            der.data(),
+            der.size(),
+            session_signature_b64.data(),
+            session_signature_b64.size(),
+            nullptr,
+            &der_len,
+            nullptr,
+            sodium_base64_VARIANT_ORIGINAL) != 0)
+    {
+        PLOGW(
+            log_,
+            "[",
+            config_.host,
+            ":",
+            config_.port,
+            "] peer Session-Signature not valid base64; skipping verify");
+        return;
+    }
+
+    // The signature is over the 32-byte shared cookie DIRECTLY (the cookie is
+    // already a digest), so verify against the raw cookie — NOT verify_message,
+    // which would SHA512 it again. Handle both node-key flavours.
+    bool ok = false;
+    switch (catl::crypto::detect_key_type(*pub))
+    {
+        case catl::crypto::KeyType::secp256k1:
+            ok = catl::crypto::verify_secp256k1(
+                *pub,
+                std::span<const std::uint8_t>(der.data(), der_len),
+                session_cookie_);
+            break;
+        case catl::crypto::KeyType::ed25519:
+            ok = catl::crypto::verify_ed25519(
+                std::span<const std::uint8_t>(pub->data() + 1, 32),
+                std::span<const std::uint8_t>(der.data(), der_len),
+                session_cookie_);
+            break;
+        case catl::crypto::KeyType::unknown:
+            break;
+    }
+
+    if (ok)
+    {
+        PLOGD(
+            log_,
+            "[",
+            config_.host,
+            ":",
+            config_.port,
+            "] session-signature verified (",
+            public_key_b58,
+            ")");
+    }
+    else
+    {
+        PLOGW(
+            log_,
+            "[",
+            config_.host,
+            ":",
+            config_.port,
+            "] session-signature verification FAILED for ",
+            public_key_b58,
+            " — peer may not control the advertised node key "
+            "(continuing; no trust decision keys off this)");
+    }
 }
 
 void
@@ -351,6 +463,19 @@ peer_connection::handle_http_request(const connection_handler& handler)
     for (auto const& field : http_request_)
         upgrade_headers_[std::string(field.name_string())] =
             std::string(field.value());
+
+    // Verify the connecting peer's Session-Signature (sec #0053).
+    {
+        std::string peer_pubkey;
+        std::string peer_sig;
+        if (auto it = http_request_.find("Public-Key");
+            it != http_request_.end())
+            peer_pubkey = std::string(it->value());
+        if (auto it = http_request_.find("Session-Signature");
+            it != http_request_.end())
+            peer_sig = std::string(it->value());
+        verify_peer_session_signature(peer_pubkey, peer_sig);
+    }
 
     // Send upgrade response
     auto res = std::make_shared<http::response<http::string_body>>(
@@ -579,6 +704,20 @@ peer_connection::handle_http_response(const connection_handler& handler)
         {
             PLOGD(log_, "  ", field.name_string(), ": ", field.value());
         }
+    }
+
+    // Verify the peer authenticated the TLS session with its node key
+    // (sec #0053). Detection-only — see verify_peer_session_signature.
+    {
+        std::string peer_pubkey;
+        std::string peer_sig;
+        if (auto it = http_response_.find("Public-Key");
+            it != http_response_.end())
+            peer_pubkey = std::string(it->value());
+        if (auto it = http_response_.find("Session-Signature");
+            it != http_response_.end())
+            peer_sig = std::string(it->value());
+        verify_peer_session_signature(peer_pubkey, peer_sig);
     }
 
     http_upgraded_ = true;

@@ -141,6 +141,14 @@ private:
     void
     generate_node_keys();
 
+    // Verify the peer's Session-Signature against the shared TLS cookie
+    // (sec #0053). Detection-only: warns on mismatch, does not drop the
+    // connection (no trust decision keys off this signature).
+    void
+    verify_peer_session_signature(
+        std::string const& public_key_b58,
+        std::string const& session_signature_b64);
+
 private:
     asio::io_context& io_context_;
     std::unique_ptr<ssl_socket> socket_;
@@ -171,6 +179,9 @@ private:
 
     // HTTP upgrade
     std::string session_signature_;
+    // Shared TLS-finished cookie, retained to verify the peer's
+    // Session-Signature after upgrade (sec #0053).
+    std::array<std::uint8_t, 32> session_cookie_{};
     boost::beast::http::request<boost::beast::http::string_body> http_request_;
     boost::beast::http::response<boost::beast::http::string_body>
         http_response_;
