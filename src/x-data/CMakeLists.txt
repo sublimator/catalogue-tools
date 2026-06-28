@@ -10,6 +10,9 @@ set(GENERATED_XAHAU_HEADER
     ${CMAKE_CURRENT_BINARY_DIR}/generated/embedded_xahau_definitions.h)
 set(GENERATED_XRPL_HEADER
     ${CMAKE_CURRENT_BINARY_DIR}/generated/embedded_xrpl_definitions.h)
+# Public header: compile-time field-code constants common to both networks.
+set(GENERATED_KNOWN_FIELDS
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/catl/xdata/known-fields.h)
 
 # Generate Xahau definitions header
 add_custom_command(
@@ -41,9 +44,25 @@ add_custom_command(
           ${CMAKE_SOURCE_DIR}/scripts/generate-definitions.py
   COMMENT "Generating embedded XRPL definitions header")
 
+# Generate the common (XRPL ∩ Xahau) field-code constants header.
+add_custom_command(
+  OUTPUT ${GENERATED_KNOWN_FIELDS}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          ${CMAKE_CURRENT_BINARY_DIR}/generated/catl/xdata
+  COMMAND
+    ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/generate-known-fields.py
+    ${XAHAU_DEFINITIONS_JSON} ${XRPL_DEFINITIONS_JSON}
+    ${GENERATED_KNOWN_FIELDS}.tmp
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${GENERATED_KNOWN_FIELDS}.tmp
+          ${GENERATED_KNOWN_FIELDS}
+  DEPENDS ${XAHAU_DEFINITIONS_JSON} ${XRPL_DEFINITIONS_JSON}
+          ${CMAKE_SOURCE_DIR}/scripts/generate-known-fields.py
+  COMMENT "Generating common field-code constants header")
+
 # Create a custom target to ensure the headers are generated
 add_custom_target(generate_xdata_definitions DEPENDS ${GENERATED_XAHAU_HEADER}
-                                                     ${GENERATED_XRPL_HEADER})
+                                                     ${GENERATED_XRPL_HEADER}
+                                                     ${GENERATED_KNOWN_FIELDS})
 
 add_library(
   catl_xdata STATIC
@@ -52,7 +71,8 @@ add_library(
   src/parse_leaf.cpp
   src/parse_transaction.cpp
   ${GENERATED_XAHAU_HEADER}
-  ${GENERATED_XRPL_HEADER})
+  ${GENERATED_XRPL_HEADER}
+  ${GENERATED_KNOWN_FIELDS})
 
 # Make sure the definitions are generated before building the library
 add_dependencies(catl_xdata generate_xdata_definitions)
@@ -67,6 +87,8 @@ target_include_directories(
   catl_xdata
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/includes> # Public
                                                                  # headers
+         # Generated public header: <catl/xdata/known-fields.h>
+         $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
          $<INSTALL_INTERFACE:include> # For installed headers
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src # Private implementation headers
           ${CMAKE_CURRENT_BINARY_DIR}/generated # Generated headers
