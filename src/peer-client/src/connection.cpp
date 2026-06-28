@@ -375,10 +375,12 @@ peer_connection::verify_peer_session_signature(
 void
 peer_connection::release_inbound_charge()
 {
-    if (inbound_charge_ != 0)
+    // exchange → release exactly once even if a cross-thread close() races a
+    // frame completion (sec #0055).
+    std::size_t prev = inbound_charge_.exchange(0, std::memory_order_relaxed);
+    if (prev != 0)
     {
-        global_inbound_budget().release(inbound_charge_);
-        inbound_charge_ = 0;
+        global_inbound_budget().release(prev);
     }
 }
 
@@ -867,7 +869,7 @@ peer_connection::handle_read_header(
         fail_and_close(asio::error::no_buffer_space);
         return;
     }
-    inbound_charge_ = payload_size;
+    inbound_charge_.store(payload_size, std::memory_order_relaxed);
 
     if (current_header_.compressed && bytes_transferred < 10)
     {

@@ -629,7 +629,7 @@ peer_connection::handle_read_header(
         }
         return;
     }
-    inbound_charge_ = payload_size;
+    inbound_charge_.store(payload_size, std::memory_order_relaxed);
 
     if (current_header_.compressed && bytes_transferred < 10)
     {
@@ -1153,10 +1153,12 @@ peer_connection::set_disconnect_handler(disconnect_handler handler)
 void
 peer_connection::release_inbound_charge()
 {
-    if (inbound_charge_ != 0)
+    // exchange → release exactly once even if stop() closes from a control
+    // thread while an io thread completes a frame (sec #0055).
+    std::size_t prev = inbound_charge_.exchange(0, std::memory_order_relaxed);
+    if (prev != 0)
     {
-        global_inbound_budget().release(inbound_charge_);
-        inbound_charge_ = 0;
+        global_inbound_budget().release(prev);
     }
 }
 

@@ -166,8 +166,11 @@ private:
     packet_header current_header_;
 
     // Bytes reserved from the process-wide inbound budget for the in-flight
-    // frame (security #0055); released on dispatch or teardown.
-    std::size_t inbound_charge_ = 0;
+    // frame (security #0055); released on dispatch or teardown. Atomic +
+    // exchange-based release so it is exactly-once even when stop() closes
+    // from a control thread while an io thread completes a frame (lesser-peer
+    // has no per-connection strand).
+    std::atomic<std::size_t> inbound_charge_{0};
 
     // HTTP upgrade state
     bool http_upgraded_ = false;
