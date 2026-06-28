@@ -3,11 +3,13 @@
 #include <catl/core/logger.h>
 #include <catl/peer-client/connection.h>
 #include <catl/peer-client/crypto-utils.h>
+#include <catl/peer-client/node-identity.h>
 
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
 #include <openssl/ssl.h>
+#include <sodium.h>
 #include <sstream>
 #include <utility>
 
@@ -48,6 +50,16 @@ peer_connection::~peer_connection()
             log_, "Socket still open in destructor — was close() not called?");
         boost::system::error_code ec;
         socket_->lowest_layer().close(ec);
+    }
+
+    // Wipe per-connection copies of the node identity. Bytes will be
+    // freed back to the heap allocator and may be reused for other
+    // data; zeroing first prevents the secret from leaking into
+    // future allocations or core dumps.
+    ::sodium_memzero(secret_key_.data(), secret_key_.size());
+    if (!session_signature_.empty())
+    {
+        ::sodium_memzero(session_signature_.data(), session_signature_.size());
     }
 }
 
@@ -207,23 +219,41 @@ peer_connection::generate_node_keys()
 
     crypto_utils::node_keys keys;
 
-    // Check if a private key was provided in the config
-    if (config_.node_private_key.has_value())
+    // Precedence:
+    //   1. process-global base58 seed (CATL_NODE_SEED via xprv)
+    //   2. per-connection peer_config.node_private_key override
+    //   3. process-global keys file path (CATL_NODE_CREDENTIALS via xprv)
+    //   4. $HOME/.peermon (default — now persisted on first run)
+    if (auto seed = node_identity::seed_b58(); seed.has_value())
     {
-        // Use the provided private key
+        keys = crypto.node_keys_from_private(*seed);
+    }
+    else if (config_.node_private_key.has_value())
+    {
         keys = crypto.node_keys_from_private(config_.node_private_key.value());
     }
     else
     {
-        // Fall back to loading from file or generating new keys
-        const char* home = std::getenv("HOME");
-        std::string key_file = std::string(home ? home : "") + "/.peermon";
+        std::string key_file;
+        if (auto path = node_identity::keys_path(); path.has_value())
+        {
+            key_file = *path;
+        }
+        else
+        {
+            const char* home = std::getenv("HOME");
+            key_file = std::string(home ? home : "") + "/.peermon";
+        }
         keys = crypto.load_or_generate_node_keys(key_file);
     }
 
     secret_key_ = keys.secret_key;
     public_key_compressed_ = keys.public_key_compressed;
     node_public_key_b58_ = keys.public_key_b58;
+
+    // Note: no startup log here — apply_node_identity (xprv main) logs
+    // the resolved public key once at process start. Doing it again
+    // per-handshake would spam Cloud Run logs.
 }
 
 void

@@ -49,6 +49,12 @@ cmd_verify(
 int
 cmd_serve();
 
+// Generate a fresh base58 NODE_PRIVATE seed and print it to stdout.
+// Used by deploy scripts to bootstrap a persistent identity in
+// Secret Manager / K8s secrets.
+int
+cmd_gen_node_seed();
+
 // Dev commands (unlisted)
 int
 cmd_dev_check_ledger(

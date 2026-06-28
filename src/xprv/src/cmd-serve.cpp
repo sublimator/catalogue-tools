@@ -369,7 +369,9 @@ cmd_serve()
     // CLI flags are applied by main.cpp before calling us.
     auto config = xprv::load_config();
 
-    // Dump resolved config
+    // Dump resolved config. Identity resolution happened in main()
+    // before dispatch (see apply_node_identity); this is just the
+    // server-side configuration.
     xprv::dump_config(config, std::cerr);
 
     // Raise fd limit for server mode (only increase, never lower)

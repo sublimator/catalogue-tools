@@ -6,11 +6,22 @@
 #include <secp256k1.h>
 #include <sodium.h>
 
+#include <cerrno>
 #include <cstring>
+#include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <random>
+#include <system_error>
+#include <unistd.h>
 
 namespace catl::peer_client {
+
+// Persistence + key-file events. Kept on its own partition so xprv can
+// surface load/persist/fallback warnings at INFO/WARNING without
+// dragging the rest of peer-client up. Defaults to INHERIT — xprv
+// pins it to INFO in configure_logging.
+static LogPartition log_id_("node-id", LogLevel::INHERIT);
 
 crypto_utils::crypto_utils()
     : ctx_(
@@ -116,32 +127,201 @@ crypto_utils::generate_node_keys() const
 crypto_utils::node_keys
 crypto_utils::load_or_generate_node_keys(std::string const& key_file_path)
 {
-    // Try to load from file
-    std::ifstream key_file(key_file_path, std::ios::binary);
-    if (key_file.good())
+    namespace fs = std::filesystem;
+    std::error_code fs_ec;
+    bool exists = fs::exists(fs::path(key_file_path), fs_ec);
+
+    if (fs_ec)
     {
-        std::array<std::uint8_t, 32> secret_key;
-        key_file.read(
-            reinterpret_cast<char*>(secret_key.data()),
-            32);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-        if (key_file.gcount() == 32)
+        // Transient stat error (EIO, ELOOP, EACCES on parent traversal).
+        // We can neither prove the file exists nor safely declare it
+        // missing — bail with ephemeral keys rather than risk
+        // generating-and-overwriting a perfectly good existing file.
+        PLOGW(
+            log_id_,
+            "Could not stat node keys file ",
+            key_file_path,
+            ": ",
+            fs_ec.message(),
+            " — using ephemeral keys (file untouched)");
+        return generate_node_keys();
+    }
+
+    if (exists)
+    {
+        std::ifstream key_file(key_file_path, std::ios::binary);
+        if (key_file.good())
         {
-            try
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
+            std::array<std::uint8_t, 32> secret_key;
+            key_file.read(
+                reinterpret_cast<char*>(secret_key.data()),
+                32);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+            if (key_file.gcount() == 32)
             {
-                auto keys = derive_public_keys(secret_key);
-                LOGI("Loaded node keys from ", key_file_path);
-                return keys;
+                try
+                {
+                    auto keys = derive_public_keys(secret_key);
+                    // DEBUG-level — cmd-serve's resolver already logs
+                    // the resolved public key at INFO. Surfacing it
+                    // again here just duplicates the line.
+                    PLOGD(
+                        log_id_,
+                        "Loaded node keys from ",
+                        key_file_path,
+                        ": ",
+                        keys.public_key_b58);
+                    return keys;
+                }
+                catch (std::exception const& e)
+                {
+                    PLOGW(
+                        log_id_,
+                        "Failed to derive public keys from ",
+                        key_file_path,
+                        ": ",
+                        e.what(),
+                        " — using ephemeral keys (file unchanged)");
+                    return generate_node_keys();
+                }
             }
-            catch (std::exception const& e)
-            {
-                LOGW("Failed to derive public keys from file: ", e.what());
-            }
+            PLOGW(
+                log_id_,
+                "Short read from ",
+                key_file_path,
+                " — using ephemeral keys (file unchanged)");
+            return generate_node_keys();
+        }
+        // File exists but can't be opened (transient EACCES, in-use, etc).
+        // Do NOT overwrite — the operator's existing identity is more
+        // valuable than a fresh ephemeral one. Bail with ephemeral keys.
+        PLOGW(
+            log_id_,
+            "Node keys file ",
+            key_file_path,
+            " exists but cannot be opened: ",
+            std::strerror(errno),
+            " — using ephemeral keys (file unchanged)");
+        return generate_node_keys();
+    }
+
+    // Generate fresh keys and try to persist atomically so the same
+    // identity is reused on subsequent runs.
+    auto keys = generate_node_keys();
+
+    fs::path target(key_file_path);
+    auto parent = target.parent_path();
+    if (!parent.empty())
+    {
+        fs::create_directories(parent, fs_ec);  // best-effort
+        fs_ec.clear();
+    }
+
+    fs::path tmp = target;
+    tmp += ".tmp";
+
+    // O_NOFOLLOW prevents a symlink planted at <path>.tmp from
+    // redirecting the write to an attacker-controlled location. Matches
+    // the spirit of mode 0600 — caller asked for this to be a private
+    // file at this exact path.
+    //
+    // O_CLOEXEC is general hygiene (don't leak the fd to a fork+exec).
+    int open_flags = O_WRONLY | O_CREAT | O_TRUNC;
+#ifdef O_NOFOLLOW
+    open_flags |= O_NOFOLLOW;
+#endif
+#ifdef O_CLOEXEC
+    open_flags |= O_CLOEXEC;
+#endif
+
+    int fd = ::open(
+        tmp.c_str(),
+        open_flags,
+        0600);  // NOLINT(cppcoreguidelines-pro-type-vararg)
+    if (fd < 0)
+    {
+        PLOGW(
+            log_id_,
+            "Could not persist node identity to ",
+            key_file_path,
+            ": ",
+            std::strerror(errno),
+            " — using ephemeral keys (peers will see a new node on restart)");
+        return keys;
+    }
+
+    ssize_t written = ::write(fd, keys.secret_key.data(), 32);
+    bool ok = (written == 32);
+    if (!ok)
+    {
+        PLOGW(
+            log_id_,
+            "Short write persisting node identity to ",
+            tmp.string(),
+            ": ",
+            std::strerror(errno));
+    }
+    if (ok)
+    {
+        // Durably flush the secret bytes before rename. On Darwin
+        // plain fsync only flushes to the disk cache, not the platter;
+        // F_FULLFSYNC issues the underlying platform sync. On Linux
+        // fsync is sufficient.
+#ifdef F_FULLFSYNC
+        if (::fcntl(fd, F_FULLFSYNC, 0) != 0)
+        {
+            ::fsync(fd);
+        }
+#else
+        ::fsync(fd);
+#endif
+    }
+    ::close(fd);
+
+    if (!ok || ::rename(tmp.c_str(), key_file_path.c_str()) != 0)
+    {
+        if (ok)
+        {
+            PLOGW(
+                log_id_,
+                "Could not rename node identity tmp file: ",
+                std::strerror(errno),
+                " — using ephemeral keys");
+        }
+        ::unlink(tmp.c_str());
+        return keys;
+    }
+
+    // Durably commit the rename itself by fsyncing the parent
+    // directory. Without this, the directory entry for the new file
+    // can be lost on a power cut even after the file data is on disk.
+    if (!parent.empty())
+    {
+        int dir_open_flags = O_RDONLY;
+#ifdef O_DIRECTORY
+        dir_open_flags |= O_DIRECTORY;
+#endif
+#ifdef O_CLOEXEC
+        dir_open_flags |= O_CLOEXEC;
+#endif
+        int dir_fd = ::open(parent.c_str(), dir_open_flags);
+        if (dir_fd >= 0)
+        {
+            ::fsync(dir_fd);  // best-effort; nothing actionable on failure
+            ::close(dir_fd);
         }
     }
 
-    // Generate new keys
-    LOGI("Generating new random node keys");
-    return generate_node_keys();
+    // DEBUG-level — cmd-serve / apply_node_identity logs the resolved
+    // public key at INFO already. Surfacing the persistence event a
+    // second time at INFO duplicates the operator-facing line.
+    PLOGD(
+        log_id_,
+        "Persisted new node identity to ",
+        key_file_path,
+        ": ",
+        keys.public_key_b58);
+    return keys;
 }
 
 crypto_utils::node_keys

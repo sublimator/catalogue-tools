@@ -120,6 +120,13 @@ struct Config
     /// Populated from XPRV_NETWORKS env var (comma-separated, e.g. "0,21337")
     /// or [server].networks TOML array. Defaults to {network_id}.
     std::vector<uint32_t> enabled_networks;
+
+    // Note: node identity (CATL_NODE_SEED / CATL_NODE_CREDENTIALS /
+    // --node-credentials) is NOT held on Config. It's resolved by
+    // xprv::apply_node_identity() (see node-identity-resolver.h),
+    // which reads the env vars and pushes the resolved seed straight
+    // into peer_client::node_identity. Layering it through Config
+    // would just create two sources of truth for the same value.
 };
 
 /// Find config file: $XDG_CONFIG_HOME/xprv/config.toml or

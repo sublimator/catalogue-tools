@@ -45,7 +45,9 @@ add_executable(
   src/cmd-prove.cpp
   src/cmd-verify.cpp
   src/cmd-dev.cpp
+  src/cmd-gen-node-seed.cpp
   src/cmd-serve.cpp
+  src/node-identity-resolver.cpp
   src/http-server.cpp
   src/peer-json.cpp
   src/anchor-verifier.cpp
@@ -91,6 +93,8 @@ target_compile_definitions(
 target_link_libraries(
   xprv
   PRIVATE catl::peer-client
+          catl::base58
+          libsodium::libsodium
           protobuf::libprotobuf
           catl::rpc-client
           catl::vl-client

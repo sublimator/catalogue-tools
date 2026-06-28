@@ -19,6 +19,7 @@ add_library(
   src/connection.cpp
   src/crypto-utils.cpp
   src/endpoint-tracker.cpp
+  src/node-identity.cpp
   src/peer-endpoint-cache.cpp
   src/peer-selector.cpp
   src/peer-set.cpp

@@ -271,6 +271,10 @@ apply_env_overrides(Config& config)
             }
         }
     }
+
+    // Node identity (CATL_NODE_SEED / CATL_NODE_CREDENTIALS) is NOT read
+    // here — apply_node_identity() in node-identity-resolver.cpp owns it
+    // and also scrubs CATL_NODE_SEED from environ after the read.
 }
 
 // ─── Public API ──────────────────────────────────────────────────────

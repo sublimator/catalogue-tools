@@ -1,5 +1,6 @@
 #include "commands.h"
 #include "config.h"
+#include "node-identity-resolver.h"
 
 #include <catl/core/logger.h>
 #include <catl/core/request-context.h>
@@ -146,6 +147,7 @@ configure_logging(LoggingOptions const& opts, std::string& error)
     set_exact("anchor-verify", LogLevel::INFO);
 
     set_exact("node-cache", LogLevel::WARNING);
+    set_exact("node-id", LogLevel::INFO);
     set_exact("peer-cache", LogLevel::WARNING);
     set_exact("peer-client", LogLevel::WARNING);
     set_exact("peer-conn", LogLevel::WARNING);
@@ -249,6 +251,8 @@ print_usage()
         << "  xprv serve [options]              run HTTP proof server\n"
         << "  xprv ping <peer:port>             peer protocol ping\n"
         << "  xprv header <peer:port> <seq>     fetch ledger header\n"
+        << "  xprv gen-node-seed                emit a fresh base58 node "
+           "seed\n"
         << "\n"
         << "Options for prove/serve:\n"
         << "  --rpc <host:port>   RPC endpoint (default: " << DEFAULT_RPC
@@ -264,8 +268,11 @@ print_usage()
            "proof-<ledger>-<txid12>)\n"
         << "\n"
         << "Options for serve:\n"
-        << "  --bind <addr:port>  listen address (default: 127.0.0.1:8080)\n"
-        << "  --threads <N>       I/O threads (default: 1)\n"
+        << "  --bind <addr:port>      listen address (default: "
+           "127.0.0.1:8080)\n"
+        << "  --threads <N>           I/O threads (default: 1)\n"
+        << "  --node-credentials <p>  path to persistent node seed file "
+           "(or set CATL_NODE_CREDENTIALS; CATL_NODE_SEED env wins)\n"
         << "\n"
         << "Logging options:\n"
         << "  --debug                 enable DEBUG for xprv partitions\n"
@@ -303,6 +310,15 @@ main(int argc, char* argv[])
         return 1;
     }
 
+    // Short-circuit pure-stdout subcommands BEFORE configure_logging so
+    // the Logger's INFO output (which defaults to stdout) doesn't
+    // contaminate piped output. Required for `xprv gen-node-seed |
+    // gcloud secrets create --data-file=-`.
+    if (command == "gen-node-seed")
+    {
+        return cmd_gen_node_seed();
+    }
+
     if (!configure_logging(logging, error))
     {
         std::cerr << error << "\n";
@@ -323,11 +339,15 @@ main(int argc, char* argv[])
 
     if (command == "ping" && command_args.size() >= 1)
     {
+        if (auto rc = xprv::apply_node_identity(); rc != 0)
+            return rc;
         return cmd_ping(command_args[0]);
     }
 
     if (command == "header" && command_args.size() >= 2)
     {
+        if (auto rc = xprv::apply_node_identity(); rc != 0)
+            return rc;
         return cmd_header(command_args[0], std::stoul(command_args[1]));
     }
 
@@ -372,6 +392,15 @@ main(int argc, char* argv[])
                 opts.output = command_args[pos + 1];
                 pos += 2;
             }
+            else if (
+                arg == "--node-credentials" && pos + 1 < command_args.size())
+            {
+                setenv(
+                    "CATL_NODE_CREDENTIALS",
+                    command_args[pos + 1].c_str(),
+                    1);
+                pos += 2;
+            }
             else if (arg[0] == '-')
             {
                 std::cerr << "Unknown option: " << arg << "\n";
@@ -390,6 +419,9 @@ main(int argc, char* argv[])
             std::cerr << "Usage: xprv prove <tx_hash> [options]\n";
             return 1;
         }
+
+        if (auto rc = xprv::apply_node_identity(); rc != 0)
+            return rc;
 
         opts.tx_hash = tx_hash;
         auto net_config = xprv::NetworkConfig::for_network(opts.network_id);
@@ -535,6 +567,15 @@ main(int argc, char* argv[])
                 setenv("XPRV_FD_LIMIT", command_args[pos + 1].c_str(), 1);
                 pos += 2;
             }
+            else if (
+                arg == "--node-credentials" && pos + 1 < command_args.size())
+            {
+                setenv(
+                    "CATL_NODE_CREDENTIALS",
+                    command_args[pos + 1].c_str(),
+                    1);
+                pos += 2;
+            }
             else if (arg[0] == '-')
             {
                 std::cerr << "Unknown option: " << arg << "\n";
@@ -547,6 +588,8 @@ main(int argc, char* argv[])
             }
         }
 
+        if (auto rc = xprv::apply_node_identity(); rc != 0)
+            return rc;
         return cmd_serve();
     }
 

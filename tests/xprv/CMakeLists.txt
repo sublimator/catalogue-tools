@@ -4,6 +4,7 @@ add_executable(xprv_gtest ${XPROOF_TEST_SOURCES})
 
 target_include_directories(xprv_gtest
                            PRIVATE ${CMAKE_SOURCE_DIR}/src/xprv/includes
+                                   ${CMAKE_SOURCE_DIR}/src/xprv/src
                                    ${CMAKE_SOURCE_DIR}/src/peer-client/includes)
 
 target_link_libraries(
@@ -18,11 +19,17 @@ target_link_libraries(
           Boost::json
           Boost::iostreams
           OpenSSL::SSL
+          libsodium::libsodium
+          catl::base58
+          tomlplusplus::tomlplusplus
           GTest::gtest_main)
 
 # xprv source files we need (not the main)
 target_sources(
-  xprv_gtest PRIVATE ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-binary.cpp
+  xprv_gtest PRIVATE ${CMAKE_SOURCE_DIR}/src/xprv/src/config.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/network-config.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/node-identity-resolver.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-binary.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/peer-json.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/manifest-utils.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-json.cpp
