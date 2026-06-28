@@ -1189,6 +1189,23 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         " has_cookie=",
         msg->has_requestcookie());
 
+    // Reject responses with an absurd node count before any iteration. The
+    // frame cap bounds the message size, but a densely-packed message could
+    // still encode millions of tiny node entries that amplify into O(N) /
+    // O(N×pending) work below. A legitimate reply to our small batch requests
+    // is well under this ceiling.
+    if (msg->nodes_size() > kMaxLedgerReplyNodes)
+    {
+        PLOGW(
+            log_,
+            "dispatch_ledger_data: rejecting response with ",
+            msg->nodes_size(),
+            " nodes (> max ",
+            kMaxLedgerReplyNodes,
+            ")");
+        return;
+    }
+
     // Feed node responses to the NodeCache interceptor FIRST.
     // This handles responses from send_get_nodes() which bypass pending_nodes.
     if (msg->type() != protocol::liBASE && !msg->has_error())

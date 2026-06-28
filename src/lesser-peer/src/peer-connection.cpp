@@ -481,7 +481,8 @@ peer_connection::handle_read_header(
     if (payload_size > kMaxFramePayloadSize)
     {
         LOGW(
-            "Rejecting oversized frame: payload_size=",
+            remote_endpoint(),
+            " rejecting oversized frame: payload_size=",
             payload_size,
             " > max=",
             kMaxFramePayloadSize);

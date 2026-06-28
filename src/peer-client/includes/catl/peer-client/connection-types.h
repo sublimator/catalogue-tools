@@ -17,12 +17,26 @@ namespace catl::peer_client {
 
 // Maximum accepted wire-frame payload size. The on-wire length field is
 // 28 bits (max ~256 MiB); an untrusted peer could set it arbitrarily and
-// force a quarter-gigabyte allocation per frame (memory DoS — a single
-// hostile peer can OOM-kill a small Cloud Run instance). 64 MiB matches
-// rippled's overlay `maximumMessageSize`, so we never reject a frame a
-// real node would send while rejecting the 64 MiB–256 MiB abuse range
-// before allocation.
-inline constexpr std::uint32_t kMaxFramePayloadSize = 64u * 1024 * 1024;
+// force a quarter-gigabyte allocation per frame.
+//
+// 16 MiB is ~2x headroom over the largest message this read-only client
+// realistically receives (a TMLedgerData node batch ≈ rippled's
+// maxReplyNodes × ~932 B ≲ 8 MiB), so it never rejects legitimate traffic.
+// It also keeps AGGREGATE memory survivable: payload_buffer_ is one
+// in-flight buffer per connection, so a coordinated fill across ~20 peers
+// is 20 × 16 = 320 MiB, under a 512 MiB instance — whereas 64 MiB would be
+// 1.28 GiB. (A hard aggregate inbound budget is the complete fix for the
+// multi-peer vector; tracked as a follow-up in #0049.)
+inline constexpr std::uint32_t kMaxFramePayloadSize = 16u * 1024 * 1024;
+
+// Maximum node entries accepted in a single TMLedgerData response. The frame
+// cap bounds the message to 16 MiB, but a densely-packed message could still
+// encode ~millions of tiny repeated node entries; iterating them builds an
+// O(N) nodeid vector and runs an O(N × pending × requested) match
+// (peer-client.cpp find_node_key) — CPU + transient-memory amplification.
+// Our tree-walk only ever requests small node batches, so a few thousand is
+// far above any legitimate reply (generous vs rippled's reply-node limit).
+inline constexpr int kMaxLedgerReplyNodes = 8192;
 
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
