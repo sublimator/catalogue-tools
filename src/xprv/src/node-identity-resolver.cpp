@@ -104,7 +104,11 @@ apply_node_identity()
         // old file_size==32 proxy mislabeled a pre-existing-but-underivable
         // 32-byte file (which yields fresh ephemeral keys, file unchanged) as
         // persisted — defeating the phantom-node diagnostic this exists for.
-        catl::peer_client::crypto_utils::node_key_origin key_origin{};
+        // Default to ephemeral so any future return path that forgets to set
+        // the origin fails toward the [EPHEMERAL] warning rather than a false
+        // "persisted" claim (fail-safe; coverage is complete today).
+        auto key_origin = catl::peer_client::crypto_utils::node_key_origin::
+            generated_ephemeral;
         keys = crypto.load_or_generate_node_keys(path, &key_origin);
         persisted = key_origin !=
             catl::peer_client::crypto_utils::node_key_origin::
