@@ -97,6 +97,27 @@ TEST(InboundBudget, ConcurrentAcquiresNeverExceedCeiling)
     EXPECT_GT(granted.load(), 0);
 }
 
+TEST(InboundBudget, OverReleaseClampsAndDoesNotWrap)
+{
+    // A stray double-release must not underflow in_flight_ and wrap to ~SIZE_MAX
+    // — which would silently disable the budget, since try_acquire's headroom
+    // check (n > ceiling_ - cur) would then always pass (sec #0054). release()
+    // clamps to the current total.
+    InboundBudget b(1000);
+    ASSERT_TRUE(b.try_acquire(300));
+    b.release(300);
+    EXPECT_EQ(b.in_flight(), 0u);
+
+    // Buggy extra release: must clamp at 0, not wrap.
+    b.release(300);
+    EXPECT_EQ(b.in_flight(), 0u);
+
+    // The budget still enforces its ceiling (not disabled by a wrapped counter).
+    EXPECT_TRUE(b.try_acquire(1000));
+    EXPECT_FALSE(b.try_acquire(1));
+    EXPECT_EQ(b.in_flight(), 1000u);
+}
+
 TEST(InboundBudget, FrameCapFitsWithinAggregateBudget)
 {
     // Sanity on the production constants: a single max frame fits, and the

@@ -72,3 +72,28 @@ TEST(OptionalVisitor, MinimalVisitorReceivesField)
     EXPECT_EQ(visitor.count, 1);
     EXPECT_EQ(visitor.last_code, catl::xdata::sf::Flags);
 }
+
+// A pathologically deep STObject chain must be rejected at kMaxParseDepth rather
+// than recursing until the stack is exhausted (sec #0054 — the depth cap from
+// #0051, here pinned against regression on the visitor parse path). Each 0xEA
+// byte is an sfMemo (STObject) field header; a chain longer than kMaxParseDepth
+// drives the recursion past the cap and must throw ParserError, NOT crash.
+TEST(OptionalVisitor, RejectsExcessiveNestingDepth)
+{
+    auto const protocol = catl::xdata::Protocol::load_from_file(
+        std::string(PROJECT_ROOT) +
+        "src/x-data/definitions/xahau_definitions.json");
+
+    // kMaxParseDepth + margin nested STObject (sfMemo = 0xEA) headers. No end
+    // markers are needed: the depth guard throws before they would be consumed.
+    std::vector<std::uint8_t> bytes(
+        static_cast<std::size_t>(catl::xdata::kMaxParseDepth) + 5, 0xEA);
+    Slice slice(bytes.data(), bytes.size());
+    catl::xdata::SliceCursor cursor{slice, 0};
+    catl::xdata::ParserContext ctx{cursor};
+
+    FieldOnly visitor;
+    EXPECT_THROW(
+        catl::xdata::parse_with_visitor(ctx, protocol, visitor),
+        catl::xdata::ParserError);
+}

@@ -57,7 +57,17 @@ public:
     void
     release(std::size_t n)
     {
-        in_flight_.fetch_sub(n, std::memory_order_relaxed);
+        // Clamp so a stray double-release can't underflow in_flight_ and wrap
+        // to ~SIZE_MAX, which would silently disable the budget (try_acquire's
+        // headroom check would then always pass). Mirrors peer-client; defense
+        // in depth (sec #0054).
+        std::size_t cur = in_flight_.load(std::memory_order_relaxed);
+        std::size_t dec;
+        do
+        {
+            dec = n < cur ? n : cur;
+        } while (!in_flight_.compare_exchange_weak(
+            cur, cur - dec, std::memory_order_relaxed));
     }
 
     std::size_t
