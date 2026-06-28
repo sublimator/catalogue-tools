@@ -33,3 +33,10 @@ proof.bin
 proof.json
 build-tsan/
 BUILD_ID
+
+# Operational logs / generated proofs — may contain tokens or peer data (sec #0054)
+cloud-run-logs*.txt
+server-logs.txt
+results.txt
+proof-*.bin
+proof-*.json
