@@ -8,6 +8,7 @@
 #include <sodium.h>
 
 #include <cstdlib>
+#include <cstring>  // strncmp — not transitively included on libstdc++ (CI)
 #include <filesystem>
 #include <string>
 #include <system_error>

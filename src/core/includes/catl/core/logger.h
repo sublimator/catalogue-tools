@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstring>  // strncmp in __RELATIVE_FILEPATH__ (not transitive on libstdc++)
 #include <iomanip>
 #include <iostream>
 #include <mutex>
