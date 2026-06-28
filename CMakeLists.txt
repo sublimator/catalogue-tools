@@ -49,6 +49,26 @@ if(is_apple_clang)
   add_compile_options(-Werror=reorder-init-list)
 endif()
 
+# Reusable, opt-in sanitizer build: -DCATL_SANITIZE=thread|address|undefined
+# Applies -fsanitize to every target defined after this point (subdirectories
+# are added below). Use a SEPARATE build dir — the Conan deps are
+# non-instrumented Release libs, but our own code plus the header-only
+# boost::asio/beast get instrumented, which is what catches races in code we
+# control (e.g. the beast::tcp_stream + expires_after strand race, security
+# #0059). Example:
+#   conan install . --output-folder=build-tsan --build=missing -s build_type=Release
+#   cmake --preset conan-release -B build-tsan -DCATL_SANITIZE=thread
+#   cmake --build build-tsan --target xprv -j8
+set(CATL_SANITIZE
+    ""
+    CACHE STRING
+          "Enable a sanitizer for all targets: thread, address, or undefined")
+if(CATL_SANITIZE)
+  message(STATUS "Sanitizer ENABLED: -fsanitize=${CATL_SANITIZE}")
+  add_compile_options(-fsanitize=${CATL_SANITIZE} -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=${CATL_SANITIZE})
+endif()
+
 # Define the include directory structure to be shared by all subprojects Only
 # set if directory exists to avoid compiler warnings
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/includes)
