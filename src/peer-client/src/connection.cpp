@@ -55,6 +55,9 @@ peer_connection::~peer_connection()
         socket_->lowest_layer().close(ec);
     }
 
+    // Safety net: normally close_impl() already released this (sec #0055).
+    release_inbound_charge();
+
     // Wipe per-connection copies of the node identity. Bytes will be
     // freed back to the heap allocator and may be reused for other
     // data; zeroing first prevents the secret from leaking into
@@ -366,6 +369,16 @@ peer_connection::verify_peer_session_signature(
             public_key_b58,
             " — peer may not control the advertised node key "
             "(continuing; no trust decision keys off this)");
+    }
+}
+
+void
+peer_connection::release_inbound_charge()
+{
+    if (inbound_charge_ != 0)
+    {
+        global_inbound_budget().release(inbound_charge_);
+        inbound_charge_ = 0;
     }
 }
 
@@ -832,6 +845,30 @@ peer_connection::handle_read_header(
         return;
     }
 
+    // Reserve this frame's bytes from the process-wide inbound budget
+    // (sec #0055). Refuse if the aggregate across all peers would exceed the
+    // ceiling — bounds a coordinated multi-peer memory fill that the
+    // per-frame cap alone can't. Held until the frame is dispatched (or the
+    // connection tears down).
+    if (!global_inbound_budget().try_acquire(payload_size))
+    {
+        PLOGW(
+            log_,
+            remote_endpoint(),
+            " inbound budget exhausted (in_flight=",
+            global_inbound_budget().in_flight(),
+            " + ",
+            payload_size,
+            " > ",
+            global_inbound_budget().ceiling(),
+            "); dropping connection");
+        note_connect_failure(
+            "inbound budget exhausted", asio::error::no_buffer_space);
+        fail_and_close(asio::error::no_buffer_space);
+        return;
+    }
+    inbound_charge_ = payload_size;
+
     if (current_header_.compressed && bytes_transferred < 10)
     {
         // Need to read the additional 4 bytes for uncompressed size
@@ -946,6 +983,10 @@ peer_connection::handle_read_payload(
             PLOGE(log_, "Exception in packet handler: ", e.what());
         }
     }
+
+    // Frame consumed — return its bytes to the inbound budget before the
+    // next read (sec #0055).
+    release_inbound_charge();
 
     // Continue reading
     async_read_header();
@@ -1489,6 +1530,10 @@ peer_connection::close_impl()
         return;
     closing_ = true;
     connected_ = false;
+
+    // Return any in-flight frame's bytes to the inbound budget (sec #0055);
+    // this is the catch-all for every teardown path (eviction + errors).
+    release_inbound_charge();
 
     // Drain queued writes so no handlers are left stranded
     fail_queued_writes(asio::error::operation_aborted);

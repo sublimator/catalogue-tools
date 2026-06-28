@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -37,6 +39,76 @@ inline constexpr std::uint32_t kMaxFramePayloadSize = 16u * 1024 * 1024;
 // Our tree-walk only ever requests small node batches, so a few thousand is
 // far above any legitimate reply (generous vs rippled's reply-node limit).
 inline constexpr int kMaxLedgerReplyNodes = 8192;
+
+// Process-wide ceiling on the SUM of in-flight inbound frame buffers across
+// ALL peer connections (security issue #0055). The per-connection 16 MiB
+// kMaxFramePayloadSize bounds a single frame, but a coordinated fill across
+// many peers (each holding a max-size frame mid-read) could still pressure
+// memory — 20 peers × 16 MiB = 320 MiB. This caps the aggregate so the total
+// stays well under a 512 MiB instance regardless of peer count. 256 MiB = 16
+// concurrent max-size frames, far above legitimate traffic (the largest reply,
+// a TMLedgerData node batch, is ≲ 8 MiB and rarely concurrent).
+inline constexpr std::size_t kAggregateInboundBudget = 256u * 1024 * 1024;
+
+// Tracks total in-flight inbound-buffer bytes against a ceiling. A connection
+// reserves a frame's payload_size before allocating its buffer and releases it
+// once the frame is dispatched (or the connection tears down); when the
+// ceiling would be exceeded the allocation is refused (the connection is
+// dropped) instead of growing memory without bound. Lock-free / thread-safe;
+// one process-wide instance via global_inbound_budget().
+class InboundBudget
+{
+public:
+    explicit InboundBudget(std::size_t ceiling) : ceiling_(ceiling)
+    {
+    }
+
+    // Reserve n bytes iff that keeps the running total within the ceiling.
+    // Returns true and reserves on success; returns false and reserves
+    // nothing on failure. Overflow-safe (n is checked against headroom).
+    bool
+    try_acquire(std::size_t n)
+    {
+        std::size_t cur = in_flight_.load(std::memory_order_relaxed);
+        do
+        {
+            if (n > ceiling_ - cur)
+                return false;
+        } while (!in_flight_.compare_exchange_weak(
+            cur, cur + n, std::memory_order_relaxed));
+        return true;
+    }
+
+    void
+    release(std::size_t n)
+    {
+        in_flight_.fetch_sub(n, std::memory_order_relaxed);
+    }
+
+    std::size_t
+    in_flight() const
+    {
+        return in_flight_.load(std::memory_order_relaxed);
+    }
+
+    std::size_t
+    ceiling() const
+    {
+        return ceiling_;
+    }
+
+private:
+    std::size_t const ceiling_;
+    std::atomic<std::size_t> in_flight_{0};
+};
+
+// The process-wide inbound budget shared by every peer connection.
+inline InboundBudget&
+global_inbound_budget()
+{
+    static InboundBudget budget(kAggregateInboundBudget);
+    return budget;
+}
 
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
