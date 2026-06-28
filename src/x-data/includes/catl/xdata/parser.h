@@ -21,6 +21,14 @@
 
 namespace catl::xdata {
 
+// Maximum STObject/STArray nesting depth. XRPL serialized objects nest only
+// a handful of levels deep (tx → metadata → affected nodes → fields); this
+// cap is far above any legitimate structure but bounds stack usage so a
+// hostile blob of nested-object headers from an untrusted peer or file can't
+// drive unbounded recursion into a stack-exhaustion SIGSEGV (which escapes
+// the std::exception handlers callers wrap us in).
+inline constexpr int kMaxParseDepth = 256;
+
 // Helper functions to check for end markers
 inline bool
 is_object_end_marker(const FieldDef* field)
@@ -38,7 +46,7 @@ is_array_end_marker(const FieldDef* field)
 
 // Forward declarations
 inline void
-skip_array(ParserContext& ctx, const Protocol& protocol);
+skip_array(ParserContext& ctx, const Protocol& protocol, int depth = 0);
 
 // Get fixed size for a type (returns 0 for variable/special types)
 inline size_t
@@ -50,8 +58,10 @@ get_fixed_size(const FieldType& type)
 // Skip an entire object (find end marker) - only used when visitor returns
 // false
 inline void
-skip_object(ParserContext& ctx, const Protocol& protocol)
+skip_object(ParserContext& ctx, const Protocol& protocol, int depth = 0)
 {
+    if (depth > kMaxParseDepth)
+        throw ParserError("STObject nesting exceeds maximum depth");
     while (!ctx.cursor.empty())
     {
         auto [header_slice, field_code] = read_field_header(ctx.cursor);
@@ -77,11 +87,11 @@ skip_object(ParserContext& ctx, const Protocol& protocol)
         // Skip field data
         if (field->meta.type == FieldTypes::STObject)
         {
-            skip_object(ctx, protocol);
+            skip_object(ctx, protocol, depth + 1);
         }
         else if (field->meta.type == FieldTypes::STArray)
         {
-            skip_array(ctx, protocol);
+            skip_array(ctx, protocol, depth + 1);
         }
         else if (field->meta.type == FieldTypes::PathSet)
         {
@@ -128,8 +138,10 @@ skip_object(ParserContext& ctx, const Protocol& protocol)
 
 // Skip an entire array - only used when visitor returns false
 inline void
-skip_array(ParserContext& ctx, const Protocol& protocol)
+skip_array(ParserContext& ctx, const Protocol& protocol, int depth)
 {
+    if (depth > kMaxParseDepth)
+        throw ParserError("STArray nesting exceeds maximum depth");
     while (!ctx.cursor.empty())
     {
         auto [header_slice, field_code] = read_field_header(ctx.cursor);
@@ -152,7 +164,7 @@ skip_array(ParserContext& ctx, const Protocol& protocol)
         {
             // skip_object will consume everything up to and including the
             // ObjectEndMarker
-            skip_object(ctx, protocol);
+            skip_object(ctx, protocol, depth + 1);
         }
         else
         {
@@ -170,7 +182,7 @@ parse_with_visitor(
     Visitor&& visitor)
 {
     FieldPath path;
-    parse_with_visitor_impl(ctx, protocol, visitor, path);
+    parse_with_visitor_impl(ctx, protocol, visitor, path, 0);
 }
 
 // Implementation that maintains the path
@@ -180,8 +192,11 @@ parse_with_visitor_impl(
     ParserContext& ctx,
     const Protocol& protocol,
     Visitor&& visitor,
-    FieldPath& path)
+    FieldPath& path,
+    int depth = 0)
 {
+    if (depth > kMaxParseDepth)
+        throw ParserError("STObject/STArray nesting exceeds maximum depth");
     while (!ctx.cursor.empty())
     {
         auto [header_slice, field_code] = read_field_header(ctx.cursor);
@@ -216,7 +231,8 @@ parse_with_visitor_impl(
             {
                 // Add to path and recurse
                 path.push_back({field, -1});
-                parse_with_visitor_impl(ctx, protocol, visitor, path);
+                parse_with_visitor_impl(
+                    ctx, protocol, visitor, path, depth + 1);
                 path.pop_back();
 
                 // parse_with_visitor_impl consumes the ObjectEndMarker when it
@@ -225,7 +241,7 @@ parse_with_visitor_impl(
             else
             {
                 // Skip the object
-                skip_object(ctx, protocol);
+                skip_object(ctx, protocol, depth + 1);
             }
             //@@end selective-descent
             // Create FieldSlice with complete object data
@@ -296,11 +312,11 @@ parse_with_visitor_impl(
                         {
                             // Parse the object's fields
                             parse_with_visitor_impl(
-                                ctx, protocol, visitor, path);
+                                ctx, protocol, visitor, path, depth + 1);
                         }
                         else
                         {
-                            skip_object(ctx, protocol);
+                            skip_object(ctx, protocol, depth + 1);
                         }
 
                         // Create FieldSlice with complete object data
@@ -342,7 +358,7 @@ parse_with_visitor_impl(
             else
             {
                 // Skip the array
-                skip_array(ctx, protocol);
+                skip_array(ctx, protocol, depth + 1);
             }
             // Create FieldSlice with complete array data
             size_t end_pos = ctx.cursor.pos;

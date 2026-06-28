@@ -51,6 +51,21 @@ TreeWalkState::feed_node(
     pending_.erase(nid_vec);
 
     uint8_t depth = nodeid[32];
+
+    // `depth` is attacker-controlled (last byte of the peer-supplied node id).
+    // A 256-bit key has 64 nibbles, so valid inner depths are 0..63. Below we
+    // index `key[depth/2]` (nibble_at reads a 32-byte key — OOB at depth >= 64)
+    // and write `nid[depth/2]` (child_nodeid, 33-byte vector — OOB at depth
+    // >= 66). Reject anything past the structural maximum up front.
+    if (depth >= 64)
+    {
+        PLOGW(
+            log_,
+            "feed_node: rejecting node with out-of-range depth ",
+            static_cast<int>(depth));
+        return;
+    }
+
     uint8_t wire_type = wire_data.back();
 
     PLOGD(
@@ -170,6 +185,10 @@ TreeWalkState::feed_node(
 int
 TreeWalkState::nibble_at(uint8_t const* key, int depth)
 {
+    // key is a 32-byte hash (64 nibbles); valid depths are 0..63.
+    // feed_node already rejects out-of-range depth, but guard here too.
+    if (depth < 0 || depth >= 64)
+        return 0;
     int byte_idx = depth / 2;
     if (depth % 2 == 0)
         return (key[byte_idx] >> 4) & 0xF;
@@ -195,6 +214,11 @@ TreeWalkState::child_nodeid(
     std::vector<uint8_t> nid(33);
     std::memcpy(nid.data(), parent_path, 32);
     int d = parent_depth;
+    // Defense in depth: feed_node already rejects depth >= 64, but guard the
+    // buffer write here too so any future caller can't drive nid[d/2] past
+    // the 33-byte vector.
+    if (d >= 64)
+        return nid;
     int byte_idx = d / 2;
     if (d % 2 == 0)
         nid[byte_idx] = (nid[byte_idx] & 0x0F) | (branch << 4);

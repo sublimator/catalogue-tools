@@ -150,6 +150,53 @@ TEST(TreeWalkState, SingleTargetFromFixture)
               << "\n";
 }
 
+// Regression: a malicious peer can set the depth byte (nodeid[32]) to any
+// value. A 256-bit key has 64 nibbles, so depths >= 64 used to index
+// key[depth/2] / nid[depth/2] off the end of their buffers (heap OOB read in
+// nibble_at, OOB write in child_nodeid). feed_node must reject such nodes
+// rather than corrupt memory. With ASan this would trap pre-fix; without it,
+// it would silently corrupt. Either way the guard must make this a no-op.
+TEST(TreeWalkState, RejectsOutOfRangeDepth)
+{
+    TreeWalkState state(TreeWalkState::TreeType::state);
+
+    int placeholders = 0;
+    int leaves = 0;
+    state.set_on_placeholder(
+        [&](std::span<const uint8_t>, Hash256 const&) { placeholders++; });
+    state.set_on_leaf([&](std::span<const uint8_t>,
+                          Hash256 const&,
+                          std::span<const uint8_t>) { leaves++; });
+
+    // Build an "inner node" wire blob (type 2, uncompressed: 512 bytes of
+    // hashes + 1 type byte) so feed_node would reach the child-path indexing
+    // path if the depth guard weren't there.
+    std::vector<uint8_t> inner_wire(513, 0);
+    // Put a non-zero hash in branch 0 so it would try to descend.
+    inner_wire[0] = 0xAB;
+    inner_wire[512] = 2;  // wire type: uncompressed inner
+
+    for (uint8_t depth : {uint8_t{64}, uint8_t{100}, uint8_t{255}})
+    {
+        std::vector<uint8_t> nid(33, 0);
+        nid[32] = depth;
+        // Must not crash / corrupt; node is rejected so nothing is emitted.
+        EXPECT_NO_FATAL_FAILURE(state.feed_node(nid, inner_wire));
+    }
+
+    EXPECT_EQ(placeholders, 0);
+    EXPECT_EQ(leaves, 0);
+
+    // A valid depth (just below the limit) is still processed: branch 0 has a
+    // non-zero hash and no targets are set, so it emits a placeholder.
+    {
+        std::vector<uint8_t> nid(33, 0);
+        nid[32] = 63;
+        EXPECT_NO_FATAL_FAILURE(state.feed_node(nid, inner_wire));
+    }
+    EXPECT_GT(placeholders, 0);
+}
+
 TEST(TreeWalkState, MultipleTargetsSharePath)
 {
     auto fixture = load_fixture("tx-tree-fixture-102992073.json");

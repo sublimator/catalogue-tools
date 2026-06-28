@@ -61,15 +61,16 @@ apply_node_identity()
         }
         catch (std::exception const& e)
         {
+            // Report length only — never any bytes of the (secret) seed,
+            // even one character. Length alone distinguishes the common
+            // failure modes (trailing newline → 52, truncation → short).
             PLOGE(
                 log_,
                 "CATL_NODE_SEED is malformed: ",
                 e.what(),
                 " (length=",
                 seed_env.size(),
-                ", first_char='",
-                (seed_env.empty() ? '?' : seed_env.front()),
-                "'). Expected 51 characters starting with 'p'. "
+                "). Expected 51 characters starting with 'p'. "
                 "Check Secret Manager / env var wiring — a stray "
                 "newline or truncation is the usual cause.");
             // Best-effort zeroize before bailing.

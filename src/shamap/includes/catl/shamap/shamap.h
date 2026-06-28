@@ -408,6 +408,15 @@ public:
                 uint8_t depth,
                 uint8_t path[32])
             {
+                // A SHAMap key is 256 bits = 64 nibbles, so inner nodes live
+                // at depths 0..63 and the deepest child path index is 31.
+                // A hostile/over-deep trie would drive `byte_idx = depth/2`
+                // past the 32-byte child_path stack buffer below. Throw on
+                // untrusted input (matches from_trie_binary) rather than
+                // silently returning a truncated tree that could mis-verify.
+                if (depth >= 64)
+                    throw std::runtime_error(
+                        "json trie: depth exceeds maximum (64)");
                 if (node.is_string())
                 {
                     // Placeholder hash
@@ -505,6 +514,12 @@ public:
             void
             walk(uint8_t depth, uint8_t path[32])
             {
+                // Inner nodes exist at depths 0..63 (a 256-bit key has 64
+                // nibbles). An over-deep trie from an untrusted blob would
+                // write child_path[depth/2] past the 32-byte stack buffer.
+                if (depth >= 64)
+                    throw std::runtime_error(
+                        "binary trie: depth exceeds maximum (64)");
                 uint32_t header = read_u32_le(data, pos);
 
                 for (int i = 0; i < 16; i++)

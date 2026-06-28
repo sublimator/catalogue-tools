@@ -227,9 +227,12 @@ struct SHAMapNodeID
     }
 
     /// Extract nibble at a given depth (0 = high nibble of byte 0).
+    /// `id` is a 32-byte key (64 nibbles); valid depths are 0..63.
     int
     nibble_at(int d) const
     {
+        if (d < 0 || d >= 64)
+            return 0;
         int byte_idx = d / 2;
         if (d % 2 == 0)
             return (id.data()[byte_idx] >> 4) & 0xF;
@@ -244,6 +247,10 @@ struct SHAMapNodeID
         SHAMapNodeID c;
         std::memcpy(c.id.data(), id.data(), 32);
         int d = depth;
+        // Guard: id is 32 bytes (64 nibbles); a child below depth 64 would
+        // write id[d/2] off the end of the array.
+        if (d >= 64)
+            return c;
         int byte_idx = d / 2;
         if (d % 2 == 0)
             c.id.data()[byte_idx] =
