@@ -19,12 +19,18 @@ class WriterTest : public ::testing::Test
 protected:
     std::vector<std::vector<uint8_t>> data_;
 
-    // Create a temporary directory for test files
+    // Create a temporary directory for test files. Use a UNIQUE per-process
+    // path: gtest_discover_tests runs each case as its own process, so under
+    // `ctest -j` several WriterTest cases run concurrently — a shared
+    // /tmp/writer_test meant one case's TearDown remove_all() could wipe the
+    // dir mid-run for another, causing flaky failures (e.g. SimpleMapReadTest).
     void
     SetUp() override
     {
-        test_dir_ = boost::filesystem::temp_directory_path() / "writer_test";
-        boost::filesystem::create_directory(test_dir_);
+        test_dir_ = boost::filesystem::temp_directory_path() /
+            boost::filesystem::unique_path(
+                        "writer_test-%%%%-%%%%-%%%%-%%%%");
+        boost::filesystem::create_directories(test_dir_);
     }
 
     // Clean up temporary files
