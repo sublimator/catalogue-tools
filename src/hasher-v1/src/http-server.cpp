@@ -4,10 +4,12 @@
 #include <boost/asio.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <boost/beast.hpp>
+#include <chrono>
 #include <csignal>
 #include <cstddef>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -17,6 +19,13 @@ namespace beast = boost::beast;
 namespace http = beast::http;
 namespace net = boost::asio;
 using tcp = boost::asio::ip::tcp;
+
+// Bound the request body and put deadlines on reads/writes so a slow or
+// hostile client can't pin a connection open indefinitely or force a large
+// buffer allocation (sec #0054). hasher-v1 requests are tiny (hash queries),
+// so 1 MiB is generous headroom.
+static constexpr std::size_t kMaxRequestBody = 1u * 1024 * 1024;
+static constexpr std::chrono::seconds kHttpTimeout{30};
 
 // Adapter to convert from AbstractResponse to Beast's response
 class BeastResponseAdapter : public AbstractResponse
@@ -64,15 +73,16 @@ private:
     class Session : public std::enable_shared_from_this<Session>
     {
     private:
-        tcp::socket socket_;
+        beast::tcp_stream stream_;
         beast::flat_buffer buffer_;
         http::request<http::string_body> req_;
+        std::optional<http::request_parser<http::string_body>> parser_;
         http::response<http::string_body> res_;
         std::shared_ptr<HttpRequestHandler> handler_;
 
     public:
         Session(tcp::socket socket, std::shared_ptr<HttpRequestHandler> handler)
-            : socket_(std::move(socket)), handler_(handler)
+            : stream_(std::move(socket)), handler_(handler)
         {
         }
 
@@ -87,16 +97,22 @@ private:
         {
             auto self = shared_from_this();
 
-            // Clear previous request
+            // Fresh parser per request with an explicit body cap (sec #0054).
             req_ = {};
+            parser_.emplace();
+            parser_->body_limit(kMaxRequestBody);
+
+            // Deadline so a stalled client can't pin the connection open.
+            stream_.expires_after(kHttpTimeout);
 
             http::async_read(
-                socket_,
+                stream_,
                 buffer_,
-                req_,
+                *parser_,
                 [self](beast::error_code ec, std::size_t) {
                     if (!ec)
                     {
+                        self->req_ = self->parser_->release();
                         self->process_request();
                     }
                     else if (ec != http::error::end_of_stream)
@@ -133,15 +149,16 @@ private:
         {
             auto self = shared_from_this();
 
+            stream_.expires_after(kHttpTimeout);
             http::async_write(
-                socket_, res_, [self](beast::error_code ec, std::size_t) {
+                stream_, res_, [self](beast::error_code ec, std::size_t) {
                     if (!ec)
                     {
                         // Check if we should close the connection
                         if (!self->res_.keep_alive())
                         {
                             beast::error_code shutdown_ec;
-                            self->socket_.shutdown(
+                            self->stream_.socket().shutdown(
                                 tcp::socket::shutdown_send, shutdown_ec);
                             if (shutdown_ec)
                             {

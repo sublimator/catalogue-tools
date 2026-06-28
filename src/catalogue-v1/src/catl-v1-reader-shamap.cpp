@@ -13,6 +13,13 @@ namespace catl::v1 {
 // map_ops_log.enable() at start of function
 LogPartition map_ops_log("MAP_OPS", LogLevel::NONE);
 
+// Upper bound on a single SHAMap node's serialized data (sec #0054). The 4-byte
+// length prefix read from a corrupt or hostile catalogue could otherwise drive
+// an arbitrary allocation (up to 4 GiB) via resize() before the subsequent
+// short read is detected. No legitimate node approaches this; the cap only
+// rejects absurd lengths.
+static constexpr uint32_t kMaxNodeDataSize = 64u * 1024 * 1024;
+
 class OwnedMmapItem : public MmapItem
 {
 private:
@@ -350,6 +357,15 @@ Reader::read_node_data(std::vector<uint8_t>& data_out, bool resize_to_fit)
 
     if (resize_to_fit)
     {
+        // Reject an implausible length before allocating (sec #0054).
+        if (data_length > kMaxNodeDataSize)
+        {
+            throw CatlV1Error(
+                "node data length " + std::to_string(data_length) +
+                " exceeds maximum " + std::to_string(kMaxNodeDataSize) +
+                " (corrupt or hostile catalogue?)");
+        }
+
         // Resize vector to hold exactly the data - this ensures the vector size
         // matches the exact data length and allows the caller to rely on this
         // size

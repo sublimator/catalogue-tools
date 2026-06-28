@@ -125,7 +125,9 @@ ControlHttpServer::start()
         return;
 
     acceptor_ = std::make_unique<tcp::acceptor>(io_context_);
-    tcp::endpoint endpoint(tcp::v4(), port_);
+    // Bind the unauthenticated control plane to loopback by default rather
+    // than all interfaces (sec #0054) — it has no auth and no remote callers.
+    tcp::endpoint endpoint(boost::asio::ip::address_v4::loopback(), port_);
     beast::error_code ec;
     acceptor_->open(endpoint.protocol(), ec);
     if (ec)
