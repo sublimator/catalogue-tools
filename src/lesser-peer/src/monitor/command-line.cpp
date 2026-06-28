@@ -48,7 +48,7 @@ command_line_parser::command_line_parser()
         "protocol-definitions",
         po::value<std::string>()->default_value(
             std::string(PROJECT_ROOT) +
-            "src/lesser-peer/definitions/xrpl_definitions.json"),
+            "src/x-data/definitions/xrpl_definitions.json"),
         "Path to XRPL protocol definitions JSON file");
 
     display_desc_.add_options()(

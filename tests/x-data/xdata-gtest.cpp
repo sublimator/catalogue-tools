@@ -158,9 +158,9 @@ TEST(XData, ReadFieldHeader)
 
 TEST(XData, LoadXahauDefinitions)
 {
-    // Load the Xahau definitions JSON file
+    // Load the canonical Xahau definitions JSON file
     std::string definitions_path =
-        TestDataPath::get_path("x-data/fixture/xahau_definitions.json");
+        std::string(PROJECT_ROOT) + "src/x-data/definitions/xahau_definitions.json";
 
     // Try to load and parse the protocol from the definitions
     auto protocol = Protocol::load_from_file(definitions_path);
@@ -357,7 +357,7 @@ process_map_type(
 TEST(XData, ParseCatlFile)
 {
     std::string definitions =
-        TestDataPath::get_path("x-data/fixture/xahau_definitions.json");
+        std::string(PROJECT_ROOT) + "src/x-data/definitions/xahau_definitions.json";
 
     auto protocol = Protocol::load_from_file(definitions);
 

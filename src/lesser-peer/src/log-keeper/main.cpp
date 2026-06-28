@@ -56,7 +56,7 @@ main(int argc, char* argv[])
         "protocol-definitions",
         po::value<std::string>()->default_value(
             std::string(PROJECT_ROOT) +
-            "src/lesser-peer/definitions/xrpl_definitions.json"),
+            "src/x-data/definitions/xrpl_definitions.json"),
         "Path to protocol definitions JSON")(
         "node-private",
         po::value<std::string>(),

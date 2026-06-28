@@ -5,7 +5,7 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(XAHAU_DEFINITIONS_JSON
     ${CMAKE_CURRENT_SOURCE_DIR}/definitions/xahau_definitions.json)
 set(XRPL_DEFINITIONS_JSON
-    ${CMAKE_SOURCE_DIR}/src/lesser-peer/definitions/xrpl_definitions.json)
+    ${CMAKE_CURRENT_SOURCE_DIR}/definitions/xrpl_definitions.json)
 set(GENERATED_XAHAU_HEADER
     ${CMAKE_CURRENT_BINARY_DIR}/generated/embedded_xahau_definitions.h)
 set(GENERATED_XRPL_HEADER

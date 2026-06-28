@@ -37,9 +37,9 @@ TEST(XDataJson, ParseShuffleTransaction)
     auto bytes = hex_to_bytes(hex);
     Slice data(bytes.data(), bytes.size());
 
-    // Load protocol from fixture (has Shuffle/Entropy types)
+    // Load the canonical Xahau definitions (has Shuffle/Entropy/RNG types)
     std::string defs_path =
-        TestDataPath::get_path("xdata-json/fixture/server-definitions.json");
+        std::string(PROJECT_ROOT) + "src/x-data/definitions/xahau_definitions.json";
     auto protocol = Protocol::load_from_file(defs_path);
 
     // Parse and print JSON
