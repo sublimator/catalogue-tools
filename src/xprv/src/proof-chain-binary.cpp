@@ -100,7 +100,11 @@ static std::vector<uint8_t>
 read_vl(std::span<const uint8_t> data, size_t& pos)
 {
     size_t len = leb128_decode(data, pos);
-    if (pos + len > data.size())
+    // Subtraction form: `pos + len` can overflow when len is attacker-
+    // controlled (leb128 returns up to ~2^63), wrapping past the check and
+    // letting the copy below walk off the buffer. pos <= data.size() is
+    // guaranteed (leb128_decode only advances within bounds).
+    if (len > data.size() - pos)
         throw std::runtime_error(
             "binary proof: unexpected end reading VL data");
     std::vector<uint8_t> result(data.data() + pos, data.data() + pos + len);
@@ -111,7 +115,8 @@ read_vl(std::span<const uint8_t> data, size_t& pos)
 static void
 read_bytes(std::span<const uint8_t> data, size_t& pos, uint8_t* out, size_t len)
 {
-    if (pos + len > data.size())
+    // Overflow-safe: guard pos first, then subtraction form for len.
+    if (pos > data.size() || len > data.size() - pos)
         throw std::runtime_error("binary proof: unexpected end reading bytes");
     std::memcpy(out, data.data() + pos, len);
     pos += len;
@@ -167,6 +172,39 @@ zlib_compress(std::vector<uint8_t> const& input, int level = 9)
     return {output.begin(), output.end()};
 }
 
+// Hard ceiling on decompressed proof size. A real proof body is a few KB to
+// a few hundred KB (a handful of SHAMap nodes per ledger across the skip-list
+// chain); 16 MiB is far above any legitimate proof. Without it, a hostile
+// /verify body of a few hundred KB of zeros expands to hundreds of MB
+// (decompression bomb) and OOM-kills the instance.
+static constexpr size_t kMaxDecompressedProofSize = 16u * 1024 * 1024;
+
+namespace {
+
+// boost::iostreams sink that appends to a vector but throws once the total
+// would exceed `cap` — bounds decompression output DURING inflation rather
+// than after the bomb has already allocated.
+struct CappedSink
+{
+    using char_type = char;
+    using category = boost::iostreams::sink_tag;
+
+    std::vector<char>* out;
+    size_t cap;
+
+    std::streamsize
+    write(char const* s, std::streamsize n)
+    {
+        if (out->size() + static_cast<size_t>(n) > cap)
+            throw std::runtime_error(
+                "binary proof: decompressed size exceeds cap");
+        out->insert(out->end(), s, s + n);
+        return n;
+    }
+};
+
+}  // namespace
+
 static std::vector<uint8_t>
 zlib_decompress(std::span<const uint8_t> input)
 {
@@ -174,7 +212,7 @@ zlib_decompress(std::span<const uint8_t> input)
     std::vector<char> output;
     io::filtering_ostream out;
     out.push(io::zlib_decompressor());
-    out.push(io::back_inserter(output));
+    out.push(CappedSink{&output, kMaxDecompressedProofSize});
     io::write(
         out,
         reinterpret_cast<const char*>(input.data()),
@@ -617,7 +655,7 @@ decode_anchor_core(std::span<const uint8_t> payload)
     for (size_t i = 0; i < num_unique_keys; i++)
     {
         size_t name_len = leb128_decode(payload, pos);
-        if (pos + name_len > payload.size())
+        if (name_len > payload.size() - pos)
         {
             throw std::runtime_error(
                 "binary proof: unexpected end reading field name");
@@ -785,7 +823,7 @@ decode_tlv_body(std::span<const uint8_t> data)
         uint8_t type = data[pos++];
         size_t length = leb128_decode(data, pos);
 
-        if (pos + length > data.size())
+        if (length > data.size() - pos)
             throw std::runtime_error("binary proof: TLV length exceeds data");
 
         std::span<const uint8_t> payload(data.data() + pos, length);

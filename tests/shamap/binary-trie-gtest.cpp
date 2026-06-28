@@ -185,6 +185,47 @@ TEST(BinaryTrie, BranchHeader)
     EXPECT_EQ(get_branch_type(header, 1), BranchType::empty);
 }
 
+// ─── Malformed / hostile input ──────────────────────────────────
+
+// Regression: a leaf's data_len is an LEB128 varint that can encode values
+// up to 2^64-1 (10 bytes). The old bounds check `pos + data_len > size`
+// overflowed and wrapped past the guard, letting the leaf read walk off the
+// buffer (heap OOB read, uncatchable SIGSEGV). The subtraction-form check
+// must reject it cleanly instead.
+TEST(BinaryTrie, RejectsOverflowingLeafLength)
+{
+    std::vector<uint8_t> blob;
+    // 4-byte LE branch header: branch 0 = leaf (BranchType::leaf == 1).
+    blob.insert(blob.end(), {0x01, 0x00, 0x00, 0x00});
+    // 32-byte key (any value).
+    blob.insert(blob.end(), 32, 0xAB);
+    // data_len varint encoding 0xFFFFFFFFFFFFFFFF: nine 0xFF bytes (bits
+    // 0..62) + 0x01 (bit 63), so `pos + data_len` wraps below `size`.
+    blob.insert(blob.end(), {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                             0xFF, 0x01});
+
+    EXPECT_THROW(
+        AbbrevMap::from_trie_binary(
+            std::span<const uint8_t>(blob), tnACCOUNT_STATE),
+        std::runtime_error);
+}
+
+// Regression: a deeply-nested inner chain must not recurse past the
+// structural maximum (a 256-bit key has 64 nibbles). Each inner header that
+// marks branch 0 as another inner drives the walker one level deeper.
+TEST(BinaryTrie, RejectsOverDeepInnerChain)
+{
+    std::vector<uint8_t> blob;
+    // 70 inner-header frames, each: branch 0 = inner (BranchType::inner == 2).
+    for (int i = 0; i < 70; ++i)
+        blob.insert(blob.end(), {0x02, 0x00, 0x00, 0x00});
+
+    EXPECT_THROW(
+        AbbrevMap::from_trie_binary(
+            std::span<const uint8_t>(blob), tnACCOUNT_STATE),
+        std::runtime_error);
+}
+
 // ─── Synthetic abbreviated tree round-trips ─────────────────────
 
 TEST(BinaryTrie, OneLeafOneReal)

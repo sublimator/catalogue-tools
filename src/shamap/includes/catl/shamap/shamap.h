@@ -551,9 +551,12 @@ public:
                                 "binary trie: unexpected end reading leaf key");
                         Hash256 key(data.data() + pos);
                         pos += 32;
-                        // data_len: varint
+                        // data_len: varint. Subtraction form — `pos +
+                        // data_len` overflows when data_len is attacker-
+                        // controlled (leb128 returns up to ~2^63), wrapping
+                        // past the check. pos <= data.size() here.
                         size_t data_len = leb128_decode(data, pos);
-                        if (pos + data_len > data.size())
+                        if (data_len > data.size() - pos)
                             throw std::runtime_error(
                                 "binary trie: unexpected end reading leaf "
                                 "data");
