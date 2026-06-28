@@ -97,6 +97,39 @@ TEST_F(StaticPathTest, RejectsNulByte)
             .has_value());
 }
 
+// The deepest guard: a symlink INSIDE the root that points OUTSIDE it. This
+// bypasses both earlier guards — the path has no "..", and the symlink IS a
+// real regular file when followed — so only the weakly_canonical containment
+// check can stop it. Without containment this would serve the out-of-root
+// secret. (If a refactor broke containment, every other test would still
+// pass; this is the one that catches it.)
+TEST_F(StaticPathTest, RejectsSymlinkEscapingRoot)
+{
+    auto link = root_ / "escape.txt";
+    std::error_code ec;
+    fs::create_symlink(outside_, link, ec);
+    if (ec)
+        GTEST_SKIP() << "cannot create symlink: " << ec.message();
+
+    // Sanity: following the link really does reach the out-of-root secret.
+    ASSERT_TRUE(fs::exists(link));
+    ASSERT_TRUE(fs::is_regular_file(fs::weakly_canonical(link)));
+
+    EXPECT_FALSE(resolve_static_path("/escape.txt", root_).has_value())
+        << "symlink escaping the root must fail containment";
+}
+
+// Percent-encoded traversal is NOT decoded by the server (Beast hands us the
+// raw target), so "%2e%2e" reaches here as a literal directory name — it does
+// not contain the substring ".." and is caught by non-existence/containment.
+// Documents the literal-handling contract.
+TEST_F(StaticPathTest, RejectsPercentEncodedTraversalAsLiteral)
+{
+    EXPECT_FALSE(
+        resolve_static_path("/%2e%2e/%2e%2e/etc/passwd", root_).has_value());
+    EXPECT_FALSE(resolve_static_path("/%2f%2fetc%2fpasswd", root_).has_value());
+}
+
 TEST_F(StaticPathTest, NonexistentFileUnderRootIsNotServed)
 {
     // Contained but not a real file → nullopt (so try_serve_static falls

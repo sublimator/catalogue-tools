@@ -52,6 +52,11 @@ resolve_static_path(
 
     auto root_str = canon_root.string();
     auto cand_str = candidate.string();
+    // Defensive: an empty root would make the prefix check below degenerate
+    // ("" + sep == "/"), treating any absolute candidate as contained.
+    // Can't happen with the hardcoded non-empty root, but fail closed.
+    if (root_str.empty())
+        return std::nullopt;
     bool contained = cand_str == root_str ||
         cand_str.starts_with(
             root_str + static_cast<char>(fs::path::preferred_separator));

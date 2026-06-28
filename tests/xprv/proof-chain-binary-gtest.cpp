@@ -9,11 +9,16 @@
 #include <catl/xdata/protocol.h>
 #include <catl/xdata/serialize.h>
 
+#include <boost/iostreams/copy.hpp>
+#include <boost/iostreams/device/back_inserter.hpp>
+#include <boost/iostreams/filter/zlib.hpp>
+#include <boost/iostreams/filtering_stream.hpp>
 #include <boost/json.hpp>
 #include <cstring>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <iostream>
+#include <span>
 #include <sstream>
 
 using namespace xprv;
@@ -59,7 +64,91 @@ make_blob(int num_validators = 2)
     return {json.begin(), json.end()};
 }
 
+// Build a FLAG_ZLIB binary-proof blob wrapping `compressed` as its body.
+std::vector<uint8_t>
+make_zlib_proof(std::vector<char> const& compressed)
+{
+    std::vector<uint8_t> blob = {'X', 'P', 'R', 'V'};
+    blob.push_back(static_cast<uint8_t>(XPRV_FORMAT_VERSION));
+    blob.push_back(0x01);  // FLAG_ZLIB
+    if (XPRV_FORMAT_VERSION >= 0x02)
+        blob.insert(blob.end(), {0, 0, 0, 0});  // network_id (LE)
+    blob.insert(blob.end(), compressed.begin(), compressed.end());
+    return blob;
+}
+
+// zlib-compress `n` zero bytes — a classic decompression bomb (huge output,
+// tiny compressed form).
+std::vector<char>
+zlib_compress_zeros(size_t n)
+{
+    namespace io = boost::iostreams;
+    std::vector<char> zeros(n, 0);
+    std::vector<char> compressed;
+    io::filtering_ostream os;
+    os.push(io::zlib_compressor());
+    os.push(io::back_inserter(compressed));
+    io::write(os, zeros.data(), static_cast<std::streamsize>(zeros.size()));
+    os.reset();
+    return compressed;
+}
+
 }  // namespace
+
+// ─── Decompression-bomb guard (#0050) ───────────────────────────
+
+// Regression: a /verify body with FLAG_ZLIB whose payload inflates past the
+// 16 MiB cap must not be fully expanded (decompression bomb). The CappedSink
+// bounds output during inflation; from_binary must reject the blob rather
+// than allocate the full decompressed size.
+TEST(ProofChainBinary, RejectsZlibDecompressionBomb)
+{
+    // 32 MiB of zeros — well past the 16 MiB cap — compresses to a few KB.
+    auto compressed = zlib_compress_zeros(32u * 1024 * 1024);
+    ASSERT_LT(compressed.size(), 1u * 1024 * 1024)
+        << "bomb should compress small";
+
+    auto blob = make_zlib_proof(compressed);
+
+    // Must surface the cap error specifically (not OOM, not an incidental
+    // decode error) — proves the CappedSink, not something downstream,
+    // stopped it.
+    try
+    {
+        from_binary(std::span<const uint8_t>(blob));
+        FAIL() << "expected decompression-bomb rejection";
+    }
+    catch (std::exception const& e)
+    {
+        EXPECT_NE(
+            std::string(e.what()).find("decompressed size exceeds cap"),
+            std::string::npos)
+            << "expected the cap to trip, got: " << e.what();
+    }
+}
+
+// Control: a small FLAG_ZLIB body under the cap inflates fine (the cap
+// doesn't reject legitimate compressed proofs — it gets past decompression
+// and fails later in TLV decode, NOT in the decompressor).
+TEST(ProofChainBinary, AcceptsSmallZlibBodyPastDecompression)
+{
+    auto compressed = zlib_compress_zeros(1024);  // 1 KiB, well under cap
+    auto blob = make_zlib_proof(compressed);
+
+    // 1 KiB of zeros isn't a valid TLV body, so decode still throws — but the
+    // point is it does NOT throw the decompressor's "exceeds cap" error.
+    try
+    {
+        from_binary(std::span<const uint8_t>(blob));
+    }
+    catch (std::exception const& e)
+    {
+        EXPECT_EQ(
+            std::string(e.what()).find("decompressed size exceeds cap"),
+            std::string::npos)
+            << "small body must not trip the decompression cap";
+    }
+}
 
 // ─── Header round-trip ──────────────────────────────────────────
 
