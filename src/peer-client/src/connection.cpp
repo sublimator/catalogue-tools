@@ -894,9 +894,12 @@ peer_connection::handle_read_header(
                     return;
                 }
                 self->current_header_.uncompressed_size =
-                    (self->header_buffer_[6] << 24) |
-                    (self->header_buffer_[7] << 16) |
-                    (self->header_buffer_[8] << 8) | self->header_buffer_[9];
+                    (static_cast<std::uint32_t>(self->header_buffer_[6])
+                     << 24) |
+                    (static_cast<std::uint32_t>(self->header_buffer_[7])
+                     << 16) |
+                    (static_cast<std::uint32_t>(self->header_buffer_[8]) << 8) |
+                    static_cast<std::uint32_t>(self->header_buffer_[9]);
 
                 // Cap the attacker-declared post-inflate size too (sec #0058).
                 // The wire frame already passed the budget + payload cap, but a
@@ -936,9 +939,11 @@ peer_connection::handle_read_header(
     }
     else if (current_header_.compressed && bytes_transferred >= 10)
     {
-        current_header_.uncompressed_size = (header_buffer_[6] << 24) |
-            (header_buffer_[7] << 16) | (header_buffer_[8] << 8) |
-            header_buffer_[9];
+        current_header_.uncompressed_size =
+            (static_cast<std::uint32_t>(header_buffer_[6]) << 24) |
+            (static_cast<std::uint32_t>(header_buffer_[7]) << 16) |
+            (static_cast<std::uint32_t>(header_buffer_[8]) << 8) |
+            static_cast<std::uint32_t>(header_buffer_[9]);
         // Same post-inflate cap as the async-extension path above (sec #0058).
         if (current_header_.uncompressed_size > kMaxFramePayloadSize)
         {
