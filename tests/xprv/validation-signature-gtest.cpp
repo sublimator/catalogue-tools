@@ -15,6 +15,7 @@
 
 #include <boost/json.hpp>
 #include <gtest/gtest.h>
+#include <sodium.h>
 
 #include <cstdint>
 #include <fstream>
@@ -149,4 +150,71 @@ TEST(ExtractStValidation, AcceptsWellFormed)
     ASSERT_EQ(body.size(), 50u);
     EXPECT_EQ(body.front(), 0u);
     EXPECT_EQ(body.back(), 49u);
+}
+
+// All captured fixtures are secp256k1, so the ed25519 verify path (raw message,
+// no SHA512-Half) is otherwise unexercised — yet on_packet DROPS on sig-fail
+// (#0053), so a broken ed25519 path would silently discard every ed25519
+// validator's validations (quorum harm). Synthesize an ed25519 STValidation and
+// prove the live verify path accepts it (sec #0061).
+TEST(ValidationSignature, Ed25519Verifies)
+{
+    ASSERT_GE(sodium_init(), 0);
+
+    unsigned char pk[crypto_sign_ed25519_PUBLICKEYBYTES];  // 32
+    unsigned char sk[crypto_sign_ed25519_SECRETKEYBYTES];  // 64
+    ASSERT_EQ(crypto_sign_ed25519_keypair(pk, sk), 0);
+
+    // Minimal STValidation body, canonical field order, WITHOUT sfSignature:
+    //   sfLedgerSequence (UInt32, type 2 / nth 6) header 0x26
+    //   sfSigningPubKey  (Blob,  type 7 / nth 3) header 0x73, 0xED-prefixed key
+    std::vector<std::uint8_t> body;
+    body.push_back(0x26);
+    std::uint32_t const seq = 12345;
+    body.push_back((seq >> 24) & 0xFF);
+    body.push_back((seq >> 16) & 0xFF);
+    body.push_back((seq >> 8) & 0xFF);
+    body.push_back(seq & 0xFF);
+    body.push_back(0x73);
+    body.push_back(33);  // VL length (<=192 → single byte)
+    body.push_back(0xED);
+    body.insert(body.end(), pk, pk + 32);
+
+    // Signing message: "VAL\0" (HashPrefix::validation) || body-without-sig.
+    static constexpr std::uint8_t kPrefix[4] = {0x56, 0x41, 0x4C, 0x00};
+    std::vector<std::uint8_t> msg;
+    msg.insert(msg.end(), kPrefix, kPrefix + 4);
+    msg.insert(msg.end(), body.begin(), body.end());
+
+    // Ed25519 signs the raw message — matching verify_message's ed25519 path.
+    unsigned char sig[crypto_sign_ed25519_BYTES];  // 64
+    unsigned long long siglen = 0;
+    ASSERT_EQ(
+        crypto_sign_ed25519_detached(sig, &siglen, msg.data(), msg.size(), sk),
+        0);
+    ASSERT_EQ(siglen, 64u);
+
+    // Full STValidation = body || sfSignature (Blob, type 7 / nth 6) header 0x76
+    std::vector<std::uint8_t> stval = body;
+    stval.push_back(0x76);
+    stval.push_back(64);  // VL length
+    stval.insert(stval.end(), sig, sig + 64);
+
+    auto const protocol = Protocol::load_embedded_xrpl_protocol();
+    EXPECT_TRUE(
+        ValidationCollector::verify_validation_signature(stval, protocol))
+        << "synthesized ed25519 STValidation must verify on the live path";
+
+    // Tampering the signature must fail.
+    auto bad_sig = stval;
+    bad_sig.back() ^= 0x01;
+    EXPECT_FALSE(
+        ValidationCollector::verify_validation_signature(bad_sig, protocol));
+
+    // Tampering a signed body byte (LedgerSequence low byte at index 4) must
+    // fail — proves the body is actually covered by the signature.
+    auto bad_body = stval;
+    bad_body[4] ^= 0x01;
+    EXPECT_FALSE(
+        ValidationCollector::verify_validation_signature(bad_body, protocol));
 }
