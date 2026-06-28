@@ -51,11 +51,12 @@ make_blob(int num_validators = 2)
     {
         if (i > 0)
             json += ',';
-        // 33-byte pubkey as hex (66 chars)
+        // 33-byte pubkey as hex (66 chars). pk[2] varies per validator but
+        // must stay a valid hex digit ('A'+i would reach 'G' at i>=6).
         std::string pk(66, '0');
         pk[0] = 'E';
         pk[1] = 'D';
-        pk[2] = static_cast<char>('A' + i);
+        pk[2] = "0123456789ABCDEF"[i % 16];
         // Minimal base64 manifest (just some bytes)
         json += R"({"validation_public_key":")" + pk +
             R"(","manifest":"AQAAAA=="})";

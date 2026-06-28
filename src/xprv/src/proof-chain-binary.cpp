@@ -122,16 +122,34 @@ read_bytes(std::span<const uint8_t> data, size_t& pos, uint8_t* out, size_t len)
     pos += len;
 }
 
+static int
+hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
 static std::vector<uint8_t>
 hex_decode(std::string_view hex)
 {
+    // Bounds-safe, validated nibble decode. The previous sscanf("%2x") on a
+    // non-null-terminated string_view left `byte` uninitialized and its return
+    // unchecked, so malformed hex pushed garbage bytes (sec #0054). Now reject
+    // a bad digit instead.
     std::vector<uint8_t> result;
     result.reserve(hex.size() / 2);
     for (size_t i = 0; i + 1 < hex.size(); i += 2)
     {
-        unsigned int byte;
-        std::sscanf(hex.data() + i, "%2x", &byte);
-        result.push_back(static_cast<uint8_t>(byte));
+        int hi = hex_nibble(hex[i]);
+        int lo = hex_nibble(hex[i + 1]);
+        if (hi < 0 || lo < 0)
+            throw std::runtime_error("binary proof: invalid hex digit");
+        result.push_back(static_cast<uint8_t>((hi << 4) | lo));
     }
     return result;
 }
