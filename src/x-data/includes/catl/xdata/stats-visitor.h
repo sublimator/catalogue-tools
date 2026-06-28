@@ -3,6 +3,7 @@
 #include "catl/base58/base58.h"
 #include "catl/core/types.h"  // For Slice, Hash256
 #include "catl/xdata/fields.h"
+#include "catl/xdata/known-fields.h"
 #include "catl/xdata/protocol.h"
 #include "catl/xdata/slice-cursor.h"
 #include "catl/xdata/slice-visitor.h"
@@ -67,28 +68,11 @@ public:
         std::string native_currency_code = "XAH";  // Native currency code
     };
 
-    void
-    find_fields()
-    {
-        // Currency fields
-        taker_pays_currency_field_code =
-            protocol_.find_field("TakerPaysCurrency").value().code;
-        taker_gets_currency_field_code =
-            protocol_.find_field("TakerGetsCurrency").value().code;
-
-        // Type fields
-        transaction_type_field_code =
-            protocol_.find_field("TransactionType").value().code;
-        ledger_entry_type_field_code =
-            protocol_.find_field("LedgerEntryType").value().code;
-    }
-
     explicit StatsVisitor(const Protocol& protocol)
         : protocol_(protocol)
         , config_()
         , start_time_(std::chrono::steady_clock::now())
     {
-        find_fields();
     }
 
     explicit StatsVisitor(const Protocol& protocol, const Config& config)
@@ -96,7 +80,6 @@ public:
         , config_(config)
         , start_time_(std::chrono::steady_clock::now())
     {
-        find_fields();
     }
 
     // SliceVisitor interface implementation
@@ -250,7 +233,7 @@ public:
         }
 
         // Track transaction types
-        if (field.code == transaction_type_field_code && fs.data.size() >= 2)
+        if (field.code == sf::TransactionType && fs.data.size() >= 2)
         {
             // TransactionType is stored as UInt16
             SliceCursor cursor{fs.data};
@@ -264,7 +247,7 @@ public:
 
         // Track ledger entry types
         else if (
-            field.code == ledger_entry_type_field_code && fs.data.size() >= 2)
+            field.code == sf::LedgerEntryType && fs.data.size() >= 2)
         {
             // LedgerEntryType is stored as UInt16
             SliceCursor cursor{fs.data};
@@ -395,12 +378,6 @@ private:
     Config config_;
     std::chrono::steady_clock::time_point start_time_;
 
-    // Cached field codes for performance
-    uint32_t taker_pays_currency_field_code;
-    uint32_t taker_gets_currency_field_code;
-    uint32_t transaction_type_field_code;
-    uint32_t ledger_entry_type_field_code;
-
     // Global counters
     uint64_t total_fields_ = 0;
     uint64_t total_bytes_ = 0;
@@ -506,8 +483,8 @@ private:
         }
         // Track currency fields
         else if (
-            field.code == taker_gets_currency_field_code ||
-            field.code == taker_pays_currency_field_code)
+            field.code == sf::TakerGetsCurrency ||
+            field.code == sf::TakerPaysCurrency)
         {
             if (fs.data.size() >= 20)
             {

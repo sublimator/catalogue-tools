@@ -1,6 +1,7 @@
 #include <catl/vl-client/vl-client.h>
 
 #include <catl/core/base64.h>
+#include <catl/xdata/known-fields.h>
 #include <catl/xdata/parser-context.h>
 #include <catl/xdata/parser.h>
 #include <catl/xdata/protocol.h>
@@ -22,6 +23,7 @@
 
 namespace catl::vl {
 
+namespace sf = catl::xdata::sf;
 namespace beast = boost::beast;
 namespace http = beast::http;
 namespace ssl = asio::ssl;
@@ -104,20 +106,20 @@ struct ManifestVisitor
         if (path.size() != 1)
             return;
 
-        auto const& name = fs.field->name;
+        auto const code = fs.field->code;
         auto data = fs.data;
 
-        if (name == "PublicKey" || name == "publicKey")
+        if (code == sf::PublicKey)
         {
             out.master_public_key.assign(
                 data.data(), data.data() + data.size());
         }
-        else if (name == "SigningPubKey" || name == "signingPubKey")
+        else if (code == sf::SigningPubKey)
         {
             out.signing_public_key.assign(
                 data.data(), data.data() + data.size());
         }
-        else if (name == "Sequence" || name == "sequence")
+        else if (code == sf::Sequence)
         {
             if (data.size() >= 4)
             {
@@ -127,16 +129,16 @@ struct ManifestVisitor
                     static_cast<uint32_t>(data.data()[3]);
             }
         }
-        else if (name == "MasterSignature" || name == "masterSignature")
+        else if (code == sf::MasterSignature)
         {
             out.master_signature.assign(data.data(), data.data() + data.size());
         }
-        else if (name == "Signature" || name == "signature")
+        else if (code == sf::Signature)
         {
             out.signing_signature.assign(
                 data.data(), data.data() + data.size());
         }
-        else if (name == "Domain" || name == "domain")
+        else if (code == sf::Domain)
         {
             out.domain.assign(data.data(), data.data() + data.size());
         }

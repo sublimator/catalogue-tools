@@ -5,6 +5,7 @@
 
 #include <catl/crypto/sig-verify.h>
 #include <catl/peer-client/connection-types.h>
+#include <catl/xdata/known-fields.h>
 #include <catl/xdata/parser-context.h>
 #include <catl/xdata/parser.h>
 #include <catl/xdata/slice-visitor.h>
@@ -17,6 +18,8 @@
 #include <unordered_set>
 
 namespace xprv {
+
+namespace sf = catl::xdata::sf;
 
 static LogPartition log_("xprv", LogLevel::INFO);
 
@@ -157,12 +160,12 @@ ValidationCollector::verify_validation_signature(
         {
             if (path.size() != 1)
                 return;
-            if (fs.field->name == "SigningPubKey")
+            if (fs.field->code == sf::SigningPubKey)
             {
                 signing_key.assign(
                     fs.data.data(), fs.data.data() + fs.data.size());
             }
-            else if (fs.field->name == "Signature")
+            else if (fs.field->code == sf::Signature)
             {
                 signature.assign(
                     fs.data.data(), fs.data.data() + fs.data.size());
@@ -318,21 +321,21 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
         {
             if (path.size() != 1)
                 return;
-            if (fs.field->name == "LedgerHash" && fs.data.size() == 32)
+            if (fs.field->code == sf::LedgerHash && fs.data.size() == 32)
             {
                 e.ledger_hash = Hash256(fs.data.data());
             }
-            else if (fs.field->name == "SigningPubKey")
+            else if (fs.field->code == sf::SigningPubKey)
             {
                 e.signing_key.assign(
                     fs.data.data(), fs.data.data() + fs.data.size());
             }
-            else if (fs.field->name == "Signature")
+            else if (fs.field->code == sf::Signature)
             {
                 e.signature.assign(
                     fs.data.data(), fs.data.data() + fs.data.size());
             }
-            else if (fs.field->name == "LedgerSequence" && fs.data.size() >= 4)
+            else if (fs.field->code == sf::LedgerSequence && fs.data.size() >= 4)
             {
                 e.ledger_seq =
                     (static_cast<uint32_t>(fs.data.data()[0]) << 24) |
