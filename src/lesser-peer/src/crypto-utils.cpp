@@ -102,13 +102,11 @@ crypto_utils::derive_public_keys(
 crypto_utils::node_keys
 crypto_utils::generate_node_keys() const
 {
-    // Generate random secret key
+    // Generate a cryptographically-random secret key via libsodium's CSPRNG
+    // (std::random_device is not guaranteed strong on every platform).
+    // sodium_init() ran in the constructor. (sec #0054)
     std::array<std::uint8_t, 32> secret_key;
-    std::random_device random_dev;
-    for (auto& byte : secret_key)
-    {
-        byte = static_cast<std::uint8_t>(random_dev());
-    }
+    ::randombytes_buf(secret_key.data(), secret_key.size());
 
     return derive_public_keys(secret_key);
 }

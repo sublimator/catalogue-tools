@@ -30,10 +30,20 @@ base58::base58(std::string_view alphabet)
     encoded_zero_ = alphabet[0];
 }
 
+// base58 encode/decode are O(n^2) in length, and some callers decode
+// attacker-controlled strings (e.g. the peer Public-Key handshake header), so
+// reject absurd lengths to bound CPU. No legitimate XRPL base58 value (keys,
+// seeds, addresses) comes close. (sec #0054)
+static constexpr size_t kMaxBase58Len = 1024;
+
 std::string
 base58::encode(const uint8_t* input, size_t length) const
 {
     if (length == 0)
+    {
+        return "";
+    }
+    if (length > kMaxBase58Len)
     {
         return "";
     }
@@ -92,6 +102,10 @@ base58::decode(std::string_view input) const
     if (input.empty())
     {
         return std::vector<uint8_t>{};
+    }
+    if (input.size() > kMaxBase58Len)
+    {
+        return std::nullopt;
     }
 
     // Count leading zeros (encoded as first char of alphabet)

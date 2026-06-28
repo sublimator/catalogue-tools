@@ -31,6 +31,14 @@ peer_connection::peer_connection(
 peer_connection::~peer_connection()
 {
     close();
+
+    // Wipe the per-connection node secret (and session signature) so the
+    // bytes don't linger in freed heap for reuse / core dumps (sec #0054).
+    ::sodium_memzero(secret_key_.data(), secret_key_.size());
+    if (!session_signature_.empty())
+    {
+        ::sodium_memzero(session_signature_.data(), session_signature_.size());
+    }
 }
 
 void

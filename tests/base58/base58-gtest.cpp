@@ -183,3 +183,20 @@ TEST(Base58, ED25519Seed)
     EXPECT_STREQ(decoded->version_name, "seed_ed25519");
     EXPECT_EQ(decoded->payload, ed_seed_bytes);
 }
+
+TEST(Base58, RejectsOverlongInput)
+{
+    // base58 encode/decode are O(n^2); over-long inputs are rejected to bound
+    // CPU (sec #0054). The cap (1024) is far above any real key/seed/address,
+    // so legitimate values are unaffected; attacker-controlled strings (e.g. a
+    // peer Public-Key header) can't drive quadratic blowup.
+    std::string overlong(2000, 'r');
+    EXPECT_FALSE(catl::base58::xrpl_codec.decode(overlong).has_value());
+
+    std::vector<uint8_t> overlong_bytes(2000, 0xAB);
+    EXPECT_TRUE(catl::base58::xrpl_codec.encode(overlong_bytes).empty());
+
+    // A normal-length value still encodes fine.
+    std::vector<uint8_t> small(16, 0x11);
+    EXPECT_FALSE(catl::base58::xrpl_codec.encode(small).empty());
+}
