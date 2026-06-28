@@ -122,6 +122,29 @@ TEST_F(SessionSignatureTest, WrongKeyFails)
         cookie));
 }
 
+TEST_F(SessionSignatureTest, OversizedSignatureRejectedByDecodeBound)
+{
+    // The verifier decodes the base64 signature into a fixed 128-byte buffer
+    // (≫ the ~72-byte max secp256k1 DER sig). A hostile peer sending a huge
+    // "signature" must be rejected at the decode step, not overflow the buffer.
+    // sodium_base642bin returns non-zero when the decoded length would exceed
+    // bin_maxlen — pin that bound here (the verifier treats non-zero as
+    // "skip verify").
+    std::string huge(4096, 'A');  // valid base64 chars, decodes to ~3 KB
+    std::array<std::uint8_t, 128> der{};
+    std::size_t der_len = 0;
+    int rc = sodium_base642bin(
+        der.data(),
+        der.size(),
+        huge.data(),
+        huge.size(),
+        nullptr,
+        &der_len,
+        nullptr,
+        sodium_base64_VARIANT_ORIGINAL);
+    EXPECT_NE(rc, 0) << "oversized signature must not fit the decode buffer";
+}
+
 TEST_F(SessionSignatureTest, HashingTheCookieWouldFail)
 {
     // Guard against a regression where someone "fixes" the verifier to use

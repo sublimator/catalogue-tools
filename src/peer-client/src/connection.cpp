@@ -315,7 +315,8 @@ peer_connection::verify_peer_session_signature(
             config_.host,
             ":",
             config_.port,
-            "] peer Session-Signature not valid base64; skipping verify");
+            "] could not decode peer Session-Signature (bad base64 or too "
+            "long); skipping verify");
         return;
     }
 

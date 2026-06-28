@@ -235,7 +235,9 @@ peer_connection::verify_peer_session_signature(
             nullptr,
             sodium_base64_VARIANT_ORIGINAL) != 0)
     {
-        LOGW("peer Session-Signature not valid base64; skipping verify");
+        LOGW(
+            "could not decode peer Session-Signature (bad base64 or too "
+            "long); skipping verify");
         return;
     }
 
