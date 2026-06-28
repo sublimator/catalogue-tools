@@ -897,6 +897,28 @@ peer_connection::handle_read_header(
                     (self->header_buffer_[6] << 24) |
                     (self->header_buffer_[7] << 16) |
                     (self->header_buffer_[8] << 8) | self->header_buffer_[9];
+
+                // Cap the attacker-declared post-inflate size too (sec #0058).
+                // The wire frame already passed the budget + payload cap, but a
+                // compressed frame can declare an arbitrary uncompressed_size;
+                // reject it here so the bound is in place before any future
+                // decompress path can honor it (decompression-bomb gap).
+                if (self->current_header_.uncompressed_size >
+                    kMaxFramePayloadSize)
+                {
+                    PLOGW(
+                        log_,
+                        self->remote_endpoint(),
+                        " rejecting frame: uncompressed_size=",
+                        self->current_header_.uncompressed_size,
+                        " > max=",
+                        kMaxFramePayloadSize);
+                    self->note_connect_failure(
+                        "oversized uncompressed frame",
+                        asio::error::message_size);
+                    self->fail_and_close(asio::error::message_size);
+                    return;
+                }
                 self->current_header_.payload_size = payload_size;
 
                 // Now read the payload
@@ -917,6 +939,21 @@ peer_connection::handle_read_header(
         current_header_.uncompressed_size = (header_buffer_[6] << 24) |
             (header_buffer_[7] << 16) | (header_buffer_[8] << 8) |
             header_buffer_[9];
+        // Same post-inflate cap as the async-extension path above (sec #0058).
+        if (current_header_.uncompressed_size > kMaxFramePayloadSize)
+        {
+            PLOGW(
+                log_,
+                remote_endpoint(),
+                " rejecting frame: uncompressed_size=",
+                current_header_.uncompressed_size,
+                " > max=",
+                kMaxFramePayloadSize);
+            note_connect_failure(
+                "oversized uncompressed frame", asio::error::message_size);
+            fail_and_close(asio::error::message_size);
+            return;
+        }
     }
     else
     {

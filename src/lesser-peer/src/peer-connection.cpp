@@ -658,6 +658,28 @@ peer_connection::handle_read_header(
                     (self->header_buffer_[6] << 24) |
                     (self->header_buffer_[7] << 16) |
                     (self->header_buffer_[8] << 8) | self->header_buffer_[9];
+
+                // Cap the attacker-declared post-inflate size too (sec #0058);
+                // mirrors peer-client. The wire frame already passed the budget
+                // + payload cap, but a compressed frame can declare an
+                // arbitrary uncompressed_size — reject it before any future
+                // decompress path can honor it (decompression-bomb gap).
+                if (self->current_header_.uncompressed_size >
+                    kMaxFramePayloadSize)
+                {
+                    LOGW(
+                        self->remote_endpoint(),
+                        " rejecting frame: uncompressed_size=",
+                        self->current_header_.uncompressed_size,
+                        " > max=",
+                        kMaxFramePayloadSize);
+                    self->close();
+                    if (self->disconnect_handler_)
+                    {
+                        self->disconnect_handler_(asio::error::message_size);
+                    }
+                    return;
+                }
                 self->current_header_.payload_size = payload_size;
 
                 // Now read the payload
@@ -678,6 +700,22 @@ peer_connection::handle_read_header(
         current_header_.uncompressed_size = (header_buffer_[6] << 24) |
             (header_buffer_[7] << 16) | (header_buffer_[8] << 8) |
             header_buffer_[9];
+        // Same post-inflate cap as the async-extension path above (sec #0058).
+        if (current_header_.uncompressed_size > kMaxFramePayloadSize)
+        {
+            LOGW(
+                remote_endpoint(),
+                " rejecting frame: uncompressed_size=",
+                current_header_.uncompressed_size,
+                " > max=",
+                kMaxFramePayloadSize);
+            close();
+            if (disconnect_handler_)
+            {
+                disconnect_handler_(asio::error::message_size);
+            }
+            return;
+        }
     }
     else
     {
