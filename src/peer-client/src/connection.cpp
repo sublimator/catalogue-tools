@@ -674,6 +674,24 @@ peer_connection::handle_read_header(
         " compressed=",
         current_header_.compressed);
 
+    // Reject oversized frames before allocating. Guards both resize sites
+    // below (the compressed-extension path and the main path) since both
+    // flow from here. A hostile peer can otherwise force up to a 256 MiB
+    // allocation per frame.
+    if (payload_size > kMaxFramePayloadSize)
+    {
+        PLOGW(
+            log_,
+            remote_endpoint(),
+            " rejecting oversized frame: payload_size=",
+            payload_size,
+            " > max=",
+            kMaxFramePayloadSize);
+        note_connect_failure("oversized frame", asio::error::message_size);
+        fail_and_close(asio::error::message_size);
+        return;
+    }
+
     if (current_header_.compressed && bytes_transferred < 10)
     {
         // Need to read the additional 4 bytes for uncompressed size

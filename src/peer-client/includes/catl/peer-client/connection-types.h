@@ -15,6 +15,15 @@
 
 namespace catl::peer_client {
 
+// Maximum accepted wire-frame payload size. The on-wire length field is
+// 28 bits (max ~256 MiB); an untrusted peer could set it arbitrarily and
+// force a quarter-gigabyte allocation per frame (memory DoS — a single
+// hostile peer can OOM-kill a small Cloud Run instance). 64 MiB matches
+// rippled's overlay `maximumMessageSize`, so we never reject a frame a
+// real node would send while rejecting the 64 MiB–256 MiB abuse range
+// before allocation.
+inline constexpr std::uint32_t kMaxFramePayloadSize = 64u * 1024 * 1024;
+
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
 using strand_type = asio::strand<asio::io_context::executor_type>;

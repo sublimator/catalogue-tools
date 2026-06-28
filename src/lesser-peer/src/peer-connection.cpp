@@ -475,6 +475,24 @@ peer_connection::handle_read_header(
         " compressed=",
         current_header_.compressed);
 
+    // Reject oversized frames before allocating. Guards both resize sites
+    // below; an untrusted peer can otherwise force up to a 256 MiB
+    // allocation per frame.
+    if (payload_size > kMaxFramePayloadSize)
+    {
+        LOGW(
+            "Rejecting oversized frame: payload_size=",
+            payload_size,
+            " > max=",
+            kMaxFramePayloadSize);
+        close();
+        if (disconnect_handler_)
+        {
+            disconnect_handler_(asio::error::message_size);
+        }
+        return;
+    }
+
     if (current_header_.compressed && bytes_transferred < 10)
     {
         // Need to read the additional 4 bytes for uncompressed size
