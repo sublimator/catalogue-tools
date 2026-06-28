@@ -8,6 +8,7 @@ CMakeUserPresets.json
 catenv
 .ai-docs
 .reviews
+worktrees
 test-decompressed.catl
 
 **/.claude/settings.local.json
