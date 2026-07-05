@@ -70,9 +70,13 @@ template <typename Traits>
 void
 intrusive_ptr_release(const SHAMapTreeNodeT<Traits>* p)
 {
-    if (p->ref_count_.fetch_sub(1, std::memory_order_release) == 1)
+    // acq_rel on the RMW rather than release + a standalone acquire fence:
+    // same ordering guarantee for the delete, but ThreadSanitizer models the
+    // RMW's acquire and does NOT model standalone atomic_thread_fence, so this
+    // stays race-clean under TSan (shared nodes are released concurrently by
+    // the builder and hasher threads of a CoW snapshot).
+    if (p->ref_count_.fetch_sub(1, std::memory_order_acq_rel) == 1)
     {
-        std::atomic_thread_fence(std::memory_order_acquire);
         delete p;
     }
 }

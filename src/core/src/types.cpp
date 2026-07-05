@@ -44,9 +44,13 @@ intrusive_ptr_add_ref(MmapItem* p)
 void
 intrusive_ptr_release(MmapItem* p)
 {
-    if (p->refCount_.fetch_sub(1, std::memory_order_release) == 1)
+    // acq_rel on the RMW rather than release + a standalone acquire fence:
+    // same ordering for the delete, but ThreadSanitizer models the RMW's
+    // acquire and does NOT model standalone atomic_thread_fence. MmapItems are
+    // shared across CoW SHAMap snapshots and released concurrently by the
+    // builder/hasher threads, so this must be TSan-clean.
+    if (p->refCount_.fetch_sub(1, std::memory_order_acq_rel) == 1)
     {
-        std::atomic_thread_fence(std::memory_order_acquire);
         delete p;
     }
 }
