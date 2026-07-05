@@ -816,6 +816,14 @@ outputs to their expectations:
 
 ## 6. Composition Patterns
 
+Producers select the shortest available hop. A **flag-ledger target**
+(`ledger_index % 256 == 0`) is reached in one hop via the anchor's long (era)
+skip list regardless of distance — its era-list leaf is never larger than the
+always-full recent list, so this is the shortest path even for a recent flag
+ledger. A near **non-flag** target uses the recent short skip list; only a
+distant non-flag target needs the 2-hop path through an intermediate flag
+ledger.
+
 If the transaction is in the anchor ledger itself, no skip-list hop is needed:
 
 ```

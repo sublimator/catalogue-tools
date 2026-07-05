@@ -1445,11 +1445,39 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
 
     ctx->need_flag_hop = (ctx->distance > 256);
 
-    if (!ctx->need_flag_hop)
+    // Prefer the anchor's long (era) skip list for ANY flag-ledger target
+    // (index % 256 == 0), near or far. A flag ledger's hash sits directly in
+    // its era list, so it is always one hop from the anchor. The era list is
+    // capped at 256 flag hashes and only partially filled for the anchor's
+    // current era, so its leaf is never larger than the always-full 256-entry
+    // recent list — about half the size on average — while the Merkle path is
+    // a statistical wash. So the era list is the shortest single hop even for a
+    // near flag target. Only a distant *non-flag* target needs the 2-hop path
+    // through an intermediate flag ledger; a near non-flag target uses the
+    // recent short list.
+    bool const target_is_flag = (tx_ledger_seq % 256 == 0);
+
+    if (!ctx->need_flag_hop || target_is_flag)
     {
-        PLOGI(log_, "[", net_label, "] Short skip list (within 256)");
-        catl::core::emit_status("short skip list (within 256)");
-        auto skip_key_val = skip_list_key();
+        bool const long_direct = target_is_flag;
+        if (long_direct)
+        {
+            PLOGI(
+                log_,
+                "[",
+                net_label,
+                "] Long/era skip list (1-hop flag target, distance=",
+                ctx->distance,
+                ")");
+            catl::core::emit_status("long/era skip list (1-hop flag target)");
+        }
+        else
+        {
+            PLOGI(log_, "[", net_label, "] Short skip list (within 256)");
+            catl::core::emit_status("short skip list (within 256)");
+        }
+        auto skip_key_val =
+            long_direct ? skip_list_key(tx_ledger_seq) : skip_list_key();
 
         auto wr = co_await with_peer_failover(
             ctx->client,
@@ -1502,10 +1530,11 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             "long skip list (2-hop, distance=" +
             std::to_string(ctx->distance) + ")");
 
-        // Flag ledger: the nearest multiple of 256 AT OR ABOVE the target.
-        // When the target IS a flag ledger (target % 256 == 0), the flag's
-        // own short skip list doesn't contain its own hash — it only has
-        // hashes of the 256 ledgers BEFORE it. So bump to the next flag.
+        // Distant non-flag target: hop through the flag ledger just above it.
+        // Flag-ledger targets are handled one hop above via the anchor's long
+        // skip list, so tx_ledger_seq is always non-flag here and
+        // flag_ledger_for returns the nearest multiple of 256 above it, whose
+        // short skip list contains the target.
         uint32_t flag_seq = flag_ledger_for(tx_ledger_seq);
         PLOGI(log_, "  Flag ledger: ", flag_seq);
 
