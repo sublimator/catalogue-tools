@@ -158,8 +158,104 @@ jobs:
       # both JSON and binary form. Non-gating (continue-on-error) because it
       # depends on live mainnet peer availability; flip to false to require it.
       - name: Live xprv prove/verify smoke
-        if: matrix.compiler == 'gcc' && matrix.build_type == 'Release' && matrix.generator == 'Ninja'
+        # !cancelled() so an unrelated earlier failure (e.g. a flaky ctest)
+        # doesn't silently skip this — it exercises the built binary, not ctest.
+        if: ${{ !cancelled() && matrix.compiler == 'gcc' && matrix.build_type == 'Release' && matrix.generator == 'Ninja' }}
         continue-on-error: true
         run: |
           XPRV_BIN=${{ env.build_dir }}/src/xprv/xprv bash scripts/ci-xprv-live-smoke.sh
+
+  # ── Sanitizers ────────────────────────────────────────────────────────
+  # Build the SHAMap/xprv test binaries with TSan and ASan (one compiler,
+  # two separate builds — the sanitizers are mutually exclusive) and run the
+  # CoW concurrency stress test plus the full suites under each. Gating:
+  # a data race or memory error here is a real bug, and TSan flags the
+  # unsynchronized-access pattern deterministically (not by timing luck).
+  sanitizers:
+    name: sanitizers (${{ matrix.san }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        san: [thread, address]
+    env:
+      build_dir: build-san
+      CACHE_VERSION: 7
+      cc: clang-16
+      cxx: clang++-16
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang-16 build-essential libstdc++-14-dev
+          pip install --upgrade conan
+
+      - name: Restore Conan cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.conan2
+          key: ${{ runner.os }}-conan-${{ env.CACHE_VERSION }}-clang-Release-${{ hashFiles('**/conanfile.txt', '**/conanfile.py') }}
+          restore-keys: |
+            ${{ runner.os }}-conan-${{ env.CACHE_VERSION }}-clang-Release-
+
+      - name: Configure Conan
+        run: |
+          conan profile detect --name detected --force
+          mkdir -p "$(conan config home)/profiles"
+          cat >$(conan config home)/profiles/default <<EOF
+          include(detected)
+          [settings]
+          compiler.cppstd=20
+          compiler.libcxx=libstdc++
+          build_type=Release
+          [conf]
+          tools.build:compiler_executables={"c": "/usr/bin/${{ env.cc }}", "cpp": "/usr/bin/${{ env.cxx }}"}
+          EOF
+
+      - name: Export local recipes
+        run: |
+          conan export external/ftxui/all --name=ftxui --version=6.1.9 --user=catalogue-tools --channel=stable
+          conan export external/libsecp256k1/all --name=libsecp256k1 --version=0.6.0 --user=catalogue-tools --channel=stable
+
+      - name: Install dependencies
+        run: |
+          mkdir -p ${{ env.build_dir }}
+          cd ${{ env.build_dir }}
+          conan install --output-folder . --build missing --settings build_type=Release ..
+
+      - name: Configure CMake (CATL_SANITIZE=${{ matrix.san }})
+        run: |
+          cd ${{ env.build_dir }}
+          cmake -G "Ninja" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=/usr/bin/${{ env.cc }} \
+            -DCMAKE_CXX_COMPILER=/usr/bin/${{ env.cxx }} \
+            -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake \
+            -DCATL_SANITIZE=${{ matrix.san }} \
+            ..
+
+      - name: Build instrumented test binaries
+        run: cmake --build ${{ env.build_dir }} --target shamap_gtest xprv_gtest -j"$(nproc)"
+
+      - name: Run tests under ${{ matrix.san }} sanitizer
+        run: |
+          shamap=${{ env.build_dir }}/tests/shamap/shamap_gtest
+          xprv=${{ env.build_dir }}/tests/xprv/xprv_gtest
+          if [ "${{ matrix.san }}" = "thread" ]; then
+            export TSAN_OPTIONS="halt_on_error=1"
+          else
+            export ASAN_OPTIONS="detect_leaks=0:halt_on_error=1"
+          fi
+          # CoW concurrency stress test is the key race guard — repeat it hard.
+          "$shamap" --gtest_filter=ShaMapCoWConcurrency.StressTest \
+            --gtest_repeat=100 --gtest_break_on_failure --gtest_brief=1
+          # Full SHAMap + xprv suites under the sanitizer.
+          "$shamap" --gtest_brief=1
+          "$xprv" --gtest_brief=1
 
