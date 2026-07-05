@@ -82,7 +82,13 @@ if(NOT XPRV_BUILD_ID)
   set(XPRV_BUILD_ID "unknown")
 endif()
 
-# Read proof format version from VERSION file
+# Read proof format version from VERSION file. Re-run CMake configure when the
+# file changes so a plain `cmake --build` picks up a version bump (file(READ)
+# does not register a configure dependency on its own).
+set_property(
+  DIRECTORY
+  APPEND
+  PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/VERSION)
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/VERSION XPRV_FORMAT_VERSION)
 string(STRIP "${XPRV_FORMAT_VERSION}" XPRV_FORMAT_VERSION)
 
