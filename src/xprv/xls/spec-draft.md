@@ -6,7 +6,7 @@
 | **Date** | 2026-03-29 |
 | **Authors** | Nicholas Dudfield ([@sublimator](https://github.com/sublimator)) |
 | **Discussion** | [XRPLF/XRPL-Standards#107](https://github.com/XRPLF/XRPL-Standards/discussions/107) |
-| **Reference** | [XLS-41d XPOP](https://github.com/XRPLF/XRPL-Standards/discussions/107) (Richard Holland) |
+| **Reference** | [XLS-41d XPOP](../../../.ai-docs/xpop/xls-41d-xpop-spec.md) (Richard Holland) |
 
 ## Acknowledgements
 
@@ -20,6 +20,9 @@ See [XRPLF/XRPL-Standards#107 comment](https://github.com/XRPLF/XRPL-Standards/d
 
 XPRV is a compact, offline-verifiable proof that data exists (or existed) in an XRPL or Xahau ledger. It extends the XPOP concept (XLS-41d) with composable proof steps that can reach any historical ledger via skip list navigation, and adds a compact binary representation designed for progressive verification.
 
+The name XPRV refers to **XRPL Proof Verification**. It is unrelated to the
+`xprv` prefix used for BIP32 extended private keys.
+
 Two representations of the same proof, no mixing:
 
 - **JSON form** — human-readable, for debugging and review
@@ -27,6 +30,30 @@ Two representations of the same proof, no mixing:
 
 Both forms verify identically and encode the same proof data. JSON is the
 human-readable form; binary is the compact transport and storage form.
+
+## Normative Language
+
+The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
+and **MAY** in this document are to be interpreted as described in RFC 2119.
+
+## Normative References
+
+XPRV depends on existing XRPL protocol encodings rather than redefining them.
+When this document says "canonical STObject serialization", "field order",
+or "XRPL variable-length prefix", it means the XRPL binary codec rules and
+definitions referenced below.
+
+| Reference | Used for |
+|-----------|----------|
+| [XRPL Binary Format](https://xrpl.org/docs/references/protocol/binary-format) | Canonical STObject serialization, field IDs, canonical field order, and XRPL variable-length `Blob` prefix encoding |
+| [XRPL LedgerHashes](https://xrpl.org/docs/references/protocol/ledger-data/ledger-entry-types/ledgerhashes) | Skip-list SLE fields, recent/previous-history semantics, and LedgerHashes keylet derivation |
+| [XRPL binary codec definitions](https://github.com/XRPLF/xrpl.js/blob/main/packages/ripple-binary-codec/src/enums/definitions.json) | Type codes, field codes, ledger-entry codes, transaction result codes, and field metadata |
+| [XRPL rippled protocol layer](https://github.com/XRPLF/rippled/tree/develop/src/xrpl/protocol) | Manifest and STValidation signing formats, `MAN\0` and `VAL\0` signing data, signatures, and public-key formats |
+| [XLS-41d XPOP](../../../.ai-docs/xpop/xls-41d-xpop-spec.md) | Prior proof-of-payment trust chain and proof vocabulary |
+| [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) | Normative language |
+| [RFC 4648](https://www.rfc-editor.org/rfc/rfc4648) | Base64 encoding for decomposed validator manifests |
+| [FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final) | SHA-512 |
+| [RFC 1950](https://www.rfc-editor.org/rfc/rfc1950) | zlib compressed data format |
 
 ## 1. Proof Graph Model
 
@@ -39,8 +66,8 @@ Three step types:
 | Type | Consumes | Produces |
 |------|----------|----------|
 | `anchor` | nothing | trusted ledger hash |
-| `ledger_header` | trusted ledger hash (from an anchor, a parent header, or a skip list leaf) | trusted header plus its `transaction_hash` and `account_hash` roots |
-| `map_proof` | trusted tree root | one or more trusted leaves from that tree |
+| `ledger_header` | trusted ledger hash (from an anchor, a parent header, or a skip list leaf) | trusted header plus its `parent_hash`, `transaction_hash`, and `account_hash` |
+| `map_proof` | trusted tree root | one or more trusted leaves from that tree; recognized LedgerHashes leaves also produce ledger hashes |
 
 Validity rules:
 
@@ -57,11 +84,73 @@ Validity rules:
 - Multiple later steps MAY share the same supporting ancestor, so the logical
   proof is a tree/DAG even though the serialized form is a list.
 
-> **Reference status:** The current C++ and Python reference verifiers implement
-> capability-based verification of this parent-before-child DAG model. They
-> keep authenticated ledger hashes and tree roots alive across sibling fan-out,
-> and may emit warnings for non-canonical duplication or ordering while still
-> accepting a valid proof.
+Implementation status notes are collected in Appendix A.
+
+### 1.1 Trust and Field Authentication
+
+Trust enters the proof exactly once: the verifier's configured Validator List
+(VL) publisher key. Every subsequent object is authenticated by signature or
+by preimage membership — a field is trusted only because it lies inside bytes
+whose hash or signature is already trusted, never because a step asserts it.
+
+The anchor's validators sign full STValidation messages — which include a
+`LedgerSequence` field alongside the ledger hash — but chain verification
+consumes precisely one attested value from them: the 32-byte ledger hash.
+Because the ledger hash is `SHA512-Half` of the full header preimage
+(§5), a `ledger_header` step that matches a trusted hash authenticates **all**
+of its fields simultaneously — `ledger_index`, `total_coins`, `parent_hash`,
+`transaction_hash`, `account_hash`, and the close-time fields. Ledger indices
+in a verified proof therefore come from header preimages, not from step
+metadata, and cannot be forged without a hash collision.
+
+The full chain of custody:
+
+```
+verifier config: trusted publisher master key
+ └─ MAN\0 manifest sig ──────────→ publisher signing key
+     └─ sig over raw blob bytes ─→ VL blob (validator manifests)
+         └─ MAN\0 manifest sigs ─→ validator signing keys (the Unique Node
+                                     List, UNL)
+             └─ VAL\0 sigs, quorum ≥ ⌈0.8·N⌉ ─→ anchor ledger hash (32 bytes;
+                 │                               the only attested value the
+                 │                               chain consumes)
+                 └─ LWR\0 preimage match ─→ all 9 header fields at once
+                     ├─ parent_hash ──────→ previous ledger hash
+                     ├─ account_hash ─────→ state map root
+                     │   └─ trie root recompute ─→ state leaves
+                     │       └─ Hashes (skip-list serialized ledger entry,
+                     │                  SLE) ────→ up to 256 more
+                     │           │                        ledger hashes
+                     │           └─ LWR\0 preimage match ─→ historical
+                     │                                      header … (recurse)
+                     └─ transaction_hash ─→ tx map root
+                         └─ trie root recompute ─→ tx + metadata leaves
+```
+
+A skip list's `Hashes` vector is positional, but verification does not rely
+on position: whichever header matches one of those hashes carries its own
+`ledger_index` inside its preimage, so the index is self-authenticating.
+
+### 1.2 Canonical Proof Order
+
+Both JSON and binary forms use the same canonical parent-before-child order:
+
+1. All non-UNL steps MUST be serialized parent-before-child.
+2. The canonical traversal is depth-first pre-order over the logical proof DAG.
+3. Children of a `ledger_header` are canonically ordered as: state-tree subtree
+   first, then tx-tree subtree.
+4. A given authenticated tree root MUST appear at most once in canonical form.
+   If multiple leaves are required from that root, they MUST be merged into one
+   multi-leaf `map_proof`.
+5. If one authenticated skip-list leaf supports multiple child
+   `ledger_header` steps, those child headers MUST be ordered by descending
+   `ledger_index`.
+6. Within a `map_proof`, trie branch order (`0`-`F` at every inner node)
+   defines the canonical leaf ordering.
+
+Other parent-before-child orders may still be verifiable, but they are
+non-canonical and SHOULD NOT be emitted when a stable proof hash, signature, or
+cache key is required.
 
 ## 2. JSON Form
 
@@ -71,7 +160,7 @@ parent-first linearization of the logical proof DAG.
 
 ```json
 {
-    "format_version": 3,
+    "format_version": 5,
     "network_id": 0,
     "steps": [
         { "type": "anchor", ... },
@@ -83,11 +172,18 @@ parent-first linearization of the logical proof DAG.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `format_version` | uint32 | JSON proof format version |
+| `format_version` | uint32 | XPRV format version (shared with the binary form) |
 | `network_id` | uint32 | `0` = XRPL mainnet, `21337` = Xahau mainnet |
 | `steps` | array | Ordered sequence of step objects |
 
-All hashes and binary data are hex-encoded strings. Leaf data is JSON objects (decoded XRPL objects). Ledger header fields are named and typed.
+XPRV has a single format version: the JSON `format_version` and the binary
+file header `version` byte (§3.1) carry the same number. Verifiers MUST
+reject proofs with an unrecognized version.
+
+All hashes and binary data are hex-encoded strings. Canonical JSON uses
+uppercase hexadecimal (`A`-`F`); verifiers MAY accept lowercase input but MUST
+normalize before comparing or emitting canonical JSON. Ledger header fields are
+named and typed.
 
 ### 2.1 Anchor Step
 
@@ -112,14 +208,14 @@ All hashes and binary data are hex-encoded strings. Leaf data is JSON objects (d
 | Field | Type | Description |
 |-------|------|-------------|
 | `ledger_hash` | hex string (32 bytes) | Hash of the anchor ledger |
-| `ledger_index` | uint32 | Sequence number of the anchor ledger |
-| `unl.public_key` | hex string (33 bytes) | VL publisher's Ed25519 master public key |
+| `ledger_index` | uint32 | Sequence number of the anchor ledger. **Advisory** — this field itself lies outside every signed preimage. Verifiers MUST NOT report it as authenticated unless cross-checked: the embedded STValidations carry a signed `LedgerSequence` field, and verifiers SHOULD verify it equals `ledger_index` for the validations that form quorum; the `ledger_index` of the `ledger_header` step whose computed hash equals `ledger_hash` is equally authoritative (§1.1). |
+| `unl.public_key` | hex string (33 bytes) | VL publisher's master public key, XRPL format (`0xED` prefix + 32-byte Ed25519 key) |
 | `unl.manifest` | hex string | Publisher manifest (binary STObject) binding master → signing key |
 | `unl.blob` | hex string | Raw UNL blob (JSON validator list) |
 | `unl.signature` | hex string | Signature over blob by manifest's signing key |
-| `validations` | object | Map of signing_key_hex → raw STValidation bytes |
+| `validations` | object | Map of signing_key_hex → raw STValidation bytes. The map key MUST be exactly the embedded STValidation `SigningPubKey` encoded as uppercase hex. |
 
-> **TBD: verifier modes and signature set policy.**
+> **Open decision: verifier modes and signature set policy.**
 >
 > The current format embeds the VL snapshot used when the proof was built, so
 > an offline verifier can validate the anchor strictly against that embedded
@@ -172,7 +268,7 @@ All fields REQUIRED:
 | `transaction_hash` | hex string | 32 bytes |
 | `account_hash` | hex string | 32 bytes |
 | `parent_close_time` | uint32 | 4 bytes |
-| `close_time` | uint32 | 4 bytes |
+| `close_time` | uint32 | 4 bytes (seconds since the Ripple Epoch: 2000-01-01 00:00:00 UTC) |
 | `close_time_resolution` | uint8 | 1 byte |
 | `close_flags` | uint8 | 1 byte |
 
@@ -196,9 +292,24 @@ The trie is a nested JSON structure. Three JSON types discriminate three node ty
 | **Object** (keys `"0"`-`"F"`) | Inner node |
 | **Array** `[key, data]` | Leaf node |
 
-Leaf `data` is a JSON object — the decoded XRPL ledger entry, transaction, or
-transaction+metadata. The verifier re-serializes to canonical binary for
-hashing.
+The leaf `key` is a 64-character uppercase hex string (32 bytes). Leaf `data`
+is either decoded JSON or a raw-byte fallback:
+
+- State-tree decoded form: the decoded ledger entry, also called a serialized
+  ledger entry (SLE) after canonical STObject serialization.
+- Transaction-tree decoded form: an object with `tx` and `meta` members — the
+  decoded transaction and its metadata.
+- Raw form: an uppercase hex string containing exactly the bytes hashed in
+  §5.2. For state leaves this is canonical STObject bytes. For transaction
+  leaves this is `VL(tx) || VL(meta)`.
+
+Producers MUST use raw form when the decoded object cannot be serialized back
+to the exact hashed bytes using the referenced XRPL codec definitions.
+Verifiers MUST hash raw-form bytes directly. Verifiers MAY decode raw-form
+bytes for display, but decoded display data is not part of canonical JSON.
+For decoded form, the verifier re-serializes to canonical binary for hashing
+(§5.2): state leaves as canonical STObject bytes, tx leaves as
+`VL(tx) || VL(meta)`.
 
 At each inner node, ALL non-empty branches MUST be present so the verifier can
 recompute the parent hash. Branches on the proof path are objects (recurse);
@@ -223,12 +334,18 @@ Every binary proof begins with a **10-byte file header**:
 ```
 Offset  Size  Field
   0       4   magic       "XPRV" (0x58 0x50 0x52 0x56)
-  4       1   version     0x04
+  4       1   version     0x05 (same version space as JSON format_version)
   5       1   flags       bit 0: zlib compressed body
-  6       4   network_id  little-endian uint32 (0 = XRPL, 21337 = Xahau)
+  6       4   network_id  big-endian uint32 (0 = XRPL, 21337 = Xahau)
 ```
 
-When flag bit 0 is set, the entire body (all TLV records concatenated) is zlib-compressed as a single stream. The consumer decompresses before parsing TLVs.
+When flag bit 0 is set, the entire body (all TLV records concatenated) is compressed as a single RFC 1950 zlib stream. The consumer decompresses before parsing TLVs.
+Flag bits 1-7 are reserved and MUST be zero. Verifiers MUST reject a binary
+proof with any reserved flag bit set.
+
+**Endianness rule:** every multi-byte integer in the binary form is
+big-endian (network byte order, matching XRPL canonical serialization). The
+trie branch header (§3.7) is defined as a byte array and has no endianness.
 
 ### 3.2 TLV Framing
 
@@ -247,6 +364,9 @@ Type bytes:
 | `0x03` | Map proof (tx) | Binary trie for transaction tree |
 | `0x04` | Map proof (state) | Binary trie for account state tree |
 | `0x05` | Anchor UNL | Publisher manifest, blob signature, decomposed VL |
+
+For format version 5, all other type bytes are reserved. Verifiers MUST reject
+unknown TLV types.
 
 Length is unsigned LEB128 varint:
 
@@ -268,36 +388,25 @@ TLV ordering is significant for **progressive verification**:
 [0x05 anchor UNL]        ← LAST: only needed if verifier has no cached UNL
 ```
 
-The anchor is split into two TLV records (`0x01` core + `0x05` UNL) so the ~4KB of validation signatures arrive before the ~15KB VL blob.
+The anchor is split into two TLV records (`0x01` core + `0x05` UNL) so the ~4KB of validation signatures arrive before the ~15KB VL blob. The single logical `anchor` step (§1) is carried by the `0x01` (first) and `0x05` (last) records together; a body MUST contain exactly one of each.
+Verifiers that do not implement cached-UNL progressive verification assemble
+the logical anchor by reading both records, merging the `0x05` UNL payload into
+the `0x01` anchor core, and verifying that single logical anchor before any
+descendant step is trusted.
 
-> **Note:** Progressive verification with a cached UNL is not yet implemented in the reference verifiers — both currently require the full anchor (core + UNL) before verification can begin. The TLV split is designed to enable future progressive verification for animated QR codes, BLE/NFC scanning, and streaming use cases.
+The TLV split is designed to enable progressive verification for animated QR
+codes, BLE/NFC scanning, and streaming use cases. See Appendix A for reference
+implementation status.
 
-Canonical serialized order:
-
-1. All non-UNL steps MUST be serialized parent-before-child.
-2. The canonical traversal is depth-first pre-order over the logical proof DAG.
-3. Children of a `ledger_header` are canonically ordered as: state-tree subtree
-   first, then tx-tree subtree.
-4. A given authenticated tree root MUST appear at most once in canonical form.
-   If multiple leaves are required from that root, they MUST be merged into one
-   multi-leaf `map_proof`.
-5. If one authenticated skip list leaf supports multiple child
-   `ledger_header` steps, those child headers MUST be ordered by descending
-   `ledger_index`.
-6. Within a `map_proof`, trie branch order (`0`-`F` at every inner node)
-   defines the canonical leaf ordering.
-7. `0x05` anchor UNL remains last.
-
-Other parent-before-child orders may still be verifiable, but they are
-non-canonical and SHOULD NOT be emitted when a stable proof hash, signature, or
-cache key is required.
+Canonical binary order is the form-independent canonical order (§1.2), with
+`0x05` anchor UNL kept last.
 
 ### 3.4 Anchor Core Payload (0x01)
 
 ```
 [ledger_hash: 32 bytes]
-[ledger_index: 4 bytes, big-endian uint32]
-[publisher_key: 33 bytes, Ed25519 compressed]
+[ledger_index: 4 bytes, big-endian uint32, advisory as in §2.1]
+[publisher_key: 33 bytes, XRPL format (0xED prefix + 32-byte Ed25519 key)]
 [validation_count: LEB128]
 [common_fields_len: LEB128][common_fields: serialized STObject]
 [unique_field_count: LEB128]
@@ -321,6 +430,16 @@ The encoder:
    per-validator STObjects containing whatever subset of those unique fields
    that validator actually carries
 
+The unique field names list MUST be sorted lexicographically by XRPL field
+name. Per-validator records MUST be sorted by ascending 33-byte signing key.
+For each validator, the binary validator key MUST equal the embedded
+STValidation `SigningPubKey`; verifiers MUST reject mismatches. To reconstruct
+a full STValidation, a verifier merges the decoded common field map with the
+decoded per-validator unique field map, then serializes the merged map using
+canonical XRPL STObject field order. Producers MUST verify that this process
+round-trips to the original raw STValidation bytes before emitting decomposed
+validations.
+
 This preserves fields that appear only in some validations while still reducing
 per-validator overhead from ~200 bytes to ~80 bytes.
 
@@ -338,12 +457,55 @@ per-validator overhead from ~200 bytes to ~80 bytes.
     [manifest_len: LEB128][manifest: raw validator manifest bytes]
 ```
 
-The **shape byte** preserves JSON key ordering of the original VL blob for exact byte reconstitution (required for signature verification):
+The **shape byte** preserves JSON key ordering of the original VL blob for
+exact byte reconstitution (required for signature verification). Bits 4-7 are
+reserved and MUST be zero.
 
 | Bits | Meaning |
 |------|---------|
 | 0-2 | Top-level key permutation index (3! = 6 permutations of `{sequence, expiration, validators}`) |
 | 3 | Validator key permutation (2! = 2 permutations of `{validation_public_key, manifest}`) |
+
+Top-level permutation indexes:
+
+| Index | Key order |
+|-------|-----------|
+| 0 | `sequence`, `expiration`, `validators` |
+| 1 | `sequence`, `validators`, `expiration` |
+| 2 | `expiration`, `sequence`, `validators` |
+| 3 | `expiration`, `validators`, `sequence` |
+| 4 | `validators`, `sequence`, `expiration` |
+| 5 | `validators`, `expiration`, `sequence` |
+
+Validator permutation bit:
+
+| Bit 3 | Per-validator key order |
+|-------|-------------------------|
+| 0 | `validation_public_key`, `manifest` |
+| 1 | `manifest`, `validation_public_key` |
+
+Blob reconstitution is exact and intentionally narrow:
+
+1. Emit `{`.
+2. Emit the top-level keys in the selected order with no whitespace.
+3. For `sequence` and `expiration`, emit a JSON number in base-10 with no sign,
+   leading zero, decimal point, or exponent.
+4. For `validators`, emit an array in payload order. Each element is an object
+   whose keys are in the selected validator order, with no whitespace.
+5. `validation_public_key` is uppercase hex.
+6. `manifest` is standard RFC 4648 base64 with padding, produced from the raw
+   validator manifest bytes.
+7. Separate object members and array elements with exactly one comma and no
+   spaces.
+8. Emit `}`.
+
+The shaped encoding is valid only for a VL blob whose top-level keys are
+exactly `{sequence, expiration, validators}` and whose validator objects have
+exactly `{validation_public_key, manifest}`. Producers MUST verify the shaped
+encoding round-trips to the exact signed blob bytes before emitting binary
+form. If it does not round-trip, a v5 binary producer MUST fail rather than
+emit a non-verifiable decomposed blob; the JSON form can still carry the raw
+blob bytes in `unl.blob`.
 
 ### 3.6 Ledger Header Payload (0x02)
 
@@ -365,7 +527,13 @@ Fixed 118-byte canonical serialization:
 
 The tree type is encoded in the TLV type byte (`0x03` = tx, `0x04` = state).
 
-The binary trie uses a **2-bit-per-branch header** (uint32, little-endian) for each inner node. The 16 branches (0-F) each occupy 2 bits:
+The binary trie uses a **2-bit-per-branch header** — a 4-byte array — for
+each inner node. Header byte `k` holds branches `4k` through `4k+3`, two bits
+each, low bits first: branch `4k` occupies bits 0-1 of byte `k`, branch
+`4k+1` bits 2-3, and so on. (Equivalently: read the 4 bytes as a
+little-endian uint32 and branch `i` occupies bits `2i..2i+1`.) So the byte
+stream reads branch types in the same 0-F order as the depth-first children
+that follow. The 2-bit codes:
 
 | Bits | Node type |
 |------|-----------|
@@ -377,12 +545,45 @@ The binary trie uses a **2-bit-per-branch header** (uint32, little-endian) for e
 Serialization is depth-first, pre-order:
 
 ```
-[branch_header: 4 bytes, uint32 little-endian]
+[branch_header: 4 bytes, byte k = branches 4k..4k+3]
   for each non-empty branch (in order 0-F):
     if 01 (leaf):  [key: 32 bytes][data_len: LEB128][data: raw canonical binary]
     if 10 (inner): [branch_header: 4 bytes] ... (recurse)
     if 11 (hash):  [hash: 32 bytes]
 ```
+
+Leaf `data` is the raw leaf item bytes as hashed in §5.2 — state tree:
+canonical STObject bytes; tx tree: `VL(tx) || VL(meta)`. Note the 32-byte key
+precedes the data on the wire but is appended **after** the data in the leaf
+hash preimage.
+
+### 3.8 Binary Parsing Policy
+
+Version 5 is a closed format. A v5 verifier MUST reject:
+
+- a file header version other than `0x05`;
+- nonzero reserved flag bits;
+- unknown TLV types;
+- a TLV length that exceeds the remaining body bytes;
+- trailing bytes inside a fixed-size payload;
+- duplicate `0x01` or `0x05` records;
+- a missing `0x01` or `0x05` record;
+- any TLV record after `0x05`;
+- records after a logical verification failure;
+- an invalid shape byte (`shape & 0xF0 != 0` or top-level permutation index
+  greater than 5);
+- decompressed bodies that exceed the verifier's configured maximum size;
+- trie recursion deeper than 64 nibbles.
+
+The empty tree, lone-leaf tree root, and proofs of absence are out of scope for
+v5. A `map_proof` MUST contain at least one authenticated leaf and enough inner
+nodes or hash placeholders to recompute a non-empty SHAMap root.
+
+JSON verifiers MUST reject unknown top-level proof versions and unknown step
+types. Unknown XRPL fields inside decoded SLE, transaction, metadata,
+manifest, or validation objects are not XPRV extension points; if the
+configured XRPL codec cannot round-trip a leaf, producers MUST use the raw leaf
+form in §2.3.
 
 ## 4. LEB128 Varint Encoding
 
@@ -400,6 +601,13 @@ decode(bytes):
         if byte < 0x80: return value
         shift += 7
 ```
+
+Encoders MUST emit the minimal-length encoding (no redundant continuation
+bytes — `0x85 0x00` is an invalid encoding of `5`). Decoders MUST reject
+non-minimal encodings, varints longer than 5 bytes, and decoded values
+≥ 2^32 (all lengths and counts fit in uint32). Without this rule the same
+proof would admit multiple binary encodings, breaking stable proof hashes
+and cache keys (§3.3).
 
 ## 5. Verification Algorithm
 
@@ -430,7 +638,9 @@ function verify(chain, trusted_publisher_keys):
             //      verify LedgerHash == anchor.ledger_hash
             //      verify VAL\0 signing data signature using SigningPubKey
             //      verify SigningPubKey maps to a verified UNL validator
-            // 7. Quorum: >= 80% of UNL validators must validate
+            //      SHOULD: verify LedgerSequence == anchor.ledger_index
+            // 7. Quorum: >= ceil(0.8 × UNL size) distinct UNL validators,
+            //    each validator counted at most once (by master key)
             trusted_ledger_hashes.add(step.ledger_hash)
 
         elif step is ledger_header:
@@ -463,8 +673,8 @@ function verify(chain, trusted_publisher_keys):
             assert root_hash in expected_roots
 
             if step.tree == state:
-                for each ledger_hash in all Hashes leaves authenticated by this
-                proof:
+                for each ledger_hash produced by recognized LedgerHashes
+                leaves in this proof (§5.3):
                     trusted_ledger_hashes.add(ledger_hash)
 
     return true
@@ -478,14 +688,142 @@ function verify(chain, trusted_publisher_keys):
 | `innerNode` | `0x4D494E00` | `MIN\0` | SHAMap inner node hash |
 | `txNode` | `0x534E4400` | `SND\0` | SHAMap transaction leaf hash |
 | `leafNode` | `0x4D4C4E00` | `MLN\0` | SHAMap account state leaf hash |
+| `manifest` | `0x4D414E00` | `MAN\0` | Manifest signing data |
+| `validation` | `0x56414C00` | `VAL\0` | STValidation signing data |
 
-### 5.2 SHA512-Half
+Manifest signing data is:
+
+```
+MAN\0 || canonical_STObject(manifest without Signature and MasterSignature)
+```
+
+Verifiers MUST verify the manifest `MasterSignature` with the manifest
+`PublicKey` (master public key). If the manifest includes `Signature`, verifiers
+MUST verify it with `SigningPubKey`. A non-revocation manifest MUST include
+`SigningPubKey`.
+
+STValidation signing data is:
+
+```
+VAL\0 || canonical_STObject(STValidation without Signature)
+```
+
+Verifiers MUST verify each validation signature with the embedded
+`SigningPubKey`.
+
+Supported public-key encodings:
+
+| Key prefix | Algorithm | Verification input |
+|------------|-----------|--------------------|
+| `0xED` | Ed25519 | raw signing data, with the 32-byte Ed25519 key following the `0xED` prefix |
+| `0x02` or `0x03` | secp256k1 ECDSA | DER-encoded ECDSA signature over `SHA512-Half(signing_data)` |
+
+Verifiers MUST reject unknown public-key prefixes.
+
+### 5.2 SHAMap Node Hashing
+
+Inner node — each `child_i` is the 32-byte hash of branch `i`: a real
+child's hash, a pruned placeholder hash, or 32 zero bytes for an empty
+branch:
+
+```
+hash = SHA512-Half(MIN\0 || child_0 || child_1 || … || child_15)
+```
+
+Leaf node — the 32-byte leaf key is appended **after** the data:
+
+```
+state tree:  hash = SHA512-Half(MLN\0 || sle_bytes          || key)
+tx tree:     hash = SHA512-Half(SND\0 || VL(tx) || VL(meta) || key)
+```
+
+`sle_bytes` is the canonical STObject serialization of the ledger entry.
+`VL(x)` is the XRPL variable-length prefix encoding of `x` followed by its
+bytes.
+
+### 5.3 Skip-list Mechanics
+
+XRPL stores historical ledger hashes in `LedgerHashes` SLEs. XPRV uses those
+authenticated state leaves as positional skip lists.
+
+LedgerHashes recognition predicate:
+
+1. The leaf MUST come from an authenticated state-tree `map_proof`.
+2. The leaf key MUST be the expected LedgerHashes key for the hop being
+   verified.
+3. The decoded SLE MUST have `LedgerEntryType == LedgerHashes` (ledger-entry
+   type code `0x0068`).
+4. The SLE MUST contain a well-formed `Hashes` field (`STVector256`), with each
+   entry exactly 32 bytes.
+5. The child ledger header being trusted from the SLE MUST have a computed
+   header hash equal to one entry in `Hashes`, and its authenticated
+   `ledger_index` MUST be in the range covered by that SLE.
+
+Only leaves that satisfy this predicate produce ledger-hash capabilities.
+Verifiers MUST NOT harvest ledger hashes from arbitrary state leaves that happen
+to contain a `Hashes` field.
+
+Short/recent LedgerHashes key:
+
+```
+short_skip_key = SHA512-Half(uint16_be(0x0073))
+```
+
+This is the fixed recent-history LedgerHashes SLE. In every ledger `L > 1`, it
+contains up to the previous 256 ledger hashes. A candidate child header with
+index `T` is covered when `L - 256 <= T < L` (bounded below by genesis). The
+short list never contains ledger `L`'s own hash.
+
+Long/previous-history LedgerHashes key:
+
+```
+long_skip_key(T) = SHA512-Half(uint16_be(0x0073) || uint32_be(T >> 16))
+```
+
+This selects the 65536-ledger era containing flag ledger `T`. Long lists contain
+hashes of flag ledgers, where a flag ledger has `ledger_index % 256 == 0`.
+Every full era has up to 256 flag hashes; the earliest era is shorter because
+ledger indices start at 1. A candidate child header from a long list MUST be a
+flag ledger and MUST have the same `T >> 16` era as the long-list key.
+
+If the SLE includes `LastLedgerSequence`, verifiers SHOULD cross-check it
+against the range above. The authoritative child ledger index still comes from
+the child header preimage, not from the SLE position or from
+`LastLedgerSequence`.
+
+### 5.4 SHA512-Half
 
 `SHA512-Half(x)` = first 256 bits (32 bytes) of `SHA-512(x)`.
 
+### 5.5 What Successful Verification Means
+
+`verify()` returning true means every step is cryptographically supported by
+the anchor — nothing more. Consumers MUST still bind the authenticated
+outputs to their expectations:
+
+- A transaction proof authenticates the leaf whose key equals the
+  transaction hash. The consumer MUST check that key equals the transaction
+  it expects, and inspect `TransactionResult` in the metadata — proof of
+  inclusion is not proof of success.
+- A state proof is point-in-time: it authenticates the entry's value **at
+  the proven ledger**, not currently. Consumers making "current state"
+  claims MUST check the authenticated `close_time` for acceptable staleness.
+  `close_time` is a ledger-header field, so it is authenticated by the header
+  hash when the header is trusted.
+- Reported ledger indices MUST come from an authenticated source — a header
+  preimage, or the signed `LedgerSequence` inside the anchor validations —
+  never from the bare advisory `anchor.ledger_index` (§1.1, §2.1).
+
 ## 6. Composition Patterns
 
-### 6.1 Recent Transaction (short skip list, ≤ 256 ledgers)
+If the transaction is in the anchor ledger itself, no skip-list hop is needed:
+
+```
+anchor → ledger_header(anchor) →
+map_proof(tx, transaction_hash)
+```
+
+### 6.1 Recent Transaction (short skip list, ≤ 256 ledgers behind anchor)
 
 ```
 anchor → ledger_header →
@@ -494,7 +832,7 @@ ledger_header →
 map_proof(tx, transaction_hash)
 ```
 
-### 6.2 Historical Transaction (2-hop skip list, > 256 ledgers)
+### 6.2 Historical Transaction (long skip list / 2-hop path)
 
 ```
 anchor → ledger_header →
@@ -505,7 +843,26 @@ ledger_header(target) →
 map_proof(tx, transaction_hash)
 ```
 
-The **flag ledger** is the nearest multiple of 256 at or above the target ledger. The anchor's state tree long skip list contains hashes of flag ledgers. The flag ledger's short skip list contains hashes of the 256 ledgers before it.
+For a distant target that is itself a flag ledger (`target % 256 == 0`), the
+anchor ledger's long skip list directly contains the target hash, so the
+canonical proof omits the intermediate short-list hop:
+
+```
+anchor → ledger_header →
+map_proof(state, long_skip_list_key(target)) →
+ledger_header(target) →
+map_proof(tx, transaction_hash)
+```
+
+For a distant non-flag target, the **flag ledger** is the smallest multiple of
+256 strictly above the target ledger. The anchor's state tree long skip list
+contains hashes of flag ledgers. The flag ledger's short skip list contains
+hashes of the 256 ledgers before it, including the target.
+
+The canonical historical path uses at most one long-list hop and, for non-flag
+targets, one short-list hop. Longer skip-list chains may be independently
+verifiable if every step is authenticated, but they are non-canonical and
+SHOULD NOT be emitted.
 
 ### 6.3 Account State Proof
 
@@ -538,33 +895,126 @@ anchor → ledger_header → map_proof(state)   // multiple state leaves
 anchor → ledger_header → map_proof(tx)      // multiple tx leaves
 ```
 
-> **Reference status:** Implemented in the current C++ and Python reference
-> verifiers for parent-before-child proofs. They accept sibling fan-out and
-> multi-leaf proofs, and warn when repeated sibling roots or header orderings
-> are non-canonical.
+See Appendix A for reference implementation status.
 
-## 7. Security Considerations
+## 7. Conformance and Verifier Output
+
+A conforming proof is one that satisfies the JSON or binary syntax rules,
+contains exactly one logical anchor, and verifies every step against previously
+authenticated outputs.
+
+A conforming producer:
+
+- emits a recognized format version;
+- emits canonical proof order (§1.2) when the proof will be hashed, signed,
+  cached, compared, or deduplicated;
+- emits raw JSON leaves when decoded leaf JSON cannot be round-tripped exactly;
+- emits binary VL decomposition only when the shaped blob round-trips exactly;
+- does not emit unknown, reserved, or extension values in format v5.
+
+A conforming verifier:
+
+- rejects malformed syntax, unknown reserved values, and unsupported versions;
+- verifies every signature, hash preimage, and SHAMap root needed by the proof;
+- rejects any step whose parent capability has not already been authenticated;
+- reports whether the proof verified, and exposes the authenticated outputs
+  that consumers must inspect.
+
+At minimum, verifier output SHOULD expose:
+
+- the configured `network_id` and whether it matched the trusted publisher-key
+  configuration;
+- the trusted anchor ledger hash and the validation quorum summary;
+- each authenticated ledger header and its source (anchor, parent hash, or
+  recognized LedgerHashes leaf);
+- each authenticated state or transaction leaf key and raw hashed bytes;
+- each recognized LedgerHashes-derived ledger hash;
+- warnings for non-canonical but verifiable ordering or duplication.
+
+## 8. Security Considerations
 
 - The verifier MUST be configured with one or more trusted VL publisher keys.
 - Validation messages are ephemeral — they must be captured in real-time.
-- The 80% quorum threshold matches the XRPL consensus requirement.
+- Quorum is `ceil(0.8 × UNL size)` distinct UNL validators, each counted at
+  most once, matching the XRPL consensus requirement.
+- Verifiers MUST bind `network_id` to the trusted publisher key set: a proof
+  whose `network_id` does not match the network implied by the configured
+  publisher key MUST be rejected. `network_id` is otherwise unauthenticated
+  metadata.
 - All hashes use SHA512-Half as specified by the XRPL protocol.
 - The verifier MUST reject chains where any step fails.
+- Consumers of compressed binary proofs SHOULD enforce a decompressed-size
+  limit before parsing (zlib-bomb protection), and SHOULD bound trie
+  recursion depth (a SHAMap key is 64 nibbles, so depth cannot exceed 64).
 - Binary and JSON forms of the same proof MUST verify identically.
-- Producers SHOULD emit canonical serialized order (section 3.3) whenever
+- Producers SHOULD emit canonical serialized order (§1.2) whenever
   proofs are hashed, signed, cached, or deduplicated.
-- **TBD:** reference verifiers should support both an offline mode that trusts
-  only the embedded VL snapshot and an online mode that can refresh the latest
-  VL before assessing the included anchor validations.
+- Reference verifiers should support both an offline mode that trusts only the
+  embedded VL snapshot and an online mode that can refresh the latest VL before
+  assessing the included anchor validations.
 
-## 8. MIME Types and File Extensions
+## 9. Registries, MIME Types, and File Extensions
+
+### 9.1 Format Versions
+
+| Version | Status | Notes |
+|---------|--------|-------|
+| 5 | current draft | JSON `format_version` and binary header version are the same value |
+
+Versions other than 5 are unrecognized by this draft and MUST be rejected.
+
+### 9.2 Network IDs
+
+| `network_id` | Network |
+|--------------|---------|
+| 0 | XRPL mainnet |
+| 21337 | Xahau mainnet |
+
+Other values are reserved for future registry entries or private deployments.
+Verifiers MUST bind any accepted value to the configured trusted publisher-key
+set (§8).
+
+### 9.3 Binary Type Registries
+
+The TLV type registry is defined in §3.2. The shape-byte registry is defined in
+§3.5. All unassigned values are reserved in format v5 and MUST be rejected.
+
+### 9.4 MIME Types and File Extensions
 
 | Form | Extension | MIME type |
 |------|-----------|-----------|
 | Binary | `.xprv.bin` | `application/octet-stream` |
 | JSON | `.xprv.json` | `application/json` |
 
-## 9. Reference Implementations
+The binary MIME type is a placeholder until a dedicated media type is
+registered.
+
+## Appendix A. Reference Implementation Status
+
+The current C++ and Python reference verifiers implement capability-based
+verification of the parent-before-child DAG model. They keep authenticated
+ledger hashes and tree roots alive across sibling fan-out, and may emit warnings
+for non-canonical duplication or ordering while still accepting a valid proof.
+
+Progressive verification with a cached UNL is not yet implemented in the
+reference verifiers; both currently require the full anchor core plus anchor
+UNL before verification can begin.
+
+The reference verifiers accept sibling fan-out and multi-leaf proofs, and warn
+when repeated sibling roots or header orderings are non-canonical.
+
+## Appendix B. Test Vectors
+
+> **TODO:** Known-answer test vectors are not yet included. Once a known-good
+> proof fixture is captured, this appendix will provide a complete minimal proof
+> in both JSON and binary form together with every intermediate value — the
+> ledger header `LWR\0` preimage and resulting hash, SHAMap leaf and inner-node
+> hashes, the recomputed trie root, and the final serialized proof bytes — plus
+> negative vectors (failed quorum, non-minimal LEB128, wrong hash prefix, and
+> reserved-bit / unknown-TLV rejection). Independent implementations cannot be
+> fully cross-validated until these exist.
+
+## 10. Reference Implementations
 
 - **C++ prover + verifier**: [catalogue-tools/src/xprv](https://github.com/sublimator/catalogue-tools/tree/main/src/xprv)
 - **Python verifier**: [verify-xprv.py](https://github.com/sublimator/catalogue-tools/blob/main/scripts/verify-xprv.py)
