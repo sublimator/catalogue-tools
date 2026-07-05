@@ -442,6 +442,12 @@ SHAMapT<Traits>::set_item_at(
         {
             // Empty or placeholder — create inner, keep walking
             auto children_ptr = inner->get_children();
+            if (children_ptr->is_canonical())
+            {
+                auto writable_children = children_ptr->copy();
+                inner->set_children(writable_children);
+                children_ptr = writable_children;
+            }
             if (children_ptr->has_placeholder(branch))
                 children_ptr->clear_placeholder(branch);
 
@@ -600,6 +606,12 @@ SHAMapT<Traits>::set_placeholder(SHAMapNodeID const& pos, Hash256 const& hash)
             // summary is superseded. Clear it — the deeper entries (ours
             // and future ones) will fill in the correct branch hashes.
             auto children_ptr = inner->get_children();
+            if (children_ptr->is_canonical())
+            {
+                auto writable_children = children_ptr->copy();
+                inner->set_children(writable_children);
+                children_ptr = writable_children;
+            }
             if (children_ptr->has_placeholder(branch))
                 children_ptr->clear_placeholder(branch);
 
@@ -623,6 +635,12 @@ SHAMapT<Traits>::set_placeholder(SHAMapNodeID const& pos, Hash256 const& hash)
     // Set the placeholder hash. Overwrites any existing placeholder
     // on this branch (last write wins for same-depth placeholders).
     auto children_ptr = inner->get_children();
+    if (children_ptr->is_canonical())
+    {
+        auto writable_children = children_ptr->copy();
+        inner->set_children(writable_children);
+        children_ptr = writable_children;
+    }
     children_ptr->set_placeholder(target_branch, hash);
     inner->invalidate_hash();
 
@@ -787,14 +805,15 @@ SHAMapT<Traits>::set_new_copied_root()
     auto new_root =
         boost::intrusive_ptr(new SHAMapInnerNodeT<Traits>(root->get_depth()));
 
-    // Copy children - this creates a non-canonicalized copy that shares child
-    // pointers
     auto root_children = root->get_children();
-    new_root->set_children(root_children->copy());
-
-    // Copy hash properties
-    new_root->hash = root->hash;
-    new_root->hash_valid_ = root->hash_valid_;
+    if (root_children->is_canonical())
+    {
+        new_root->set_children(root_children);
+    }
+    else
+    {
+        new_root->set_children(root_children->copy());
+    }
     new_root->set_version(root->get_version());
     new_root->enable_cow(root->is_cow_enabled());
 

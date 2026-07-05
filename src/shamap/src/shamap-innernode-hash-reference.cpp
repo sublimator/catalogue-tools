@@ -12,7 +12,7 @@
 namespace catl::shamap {
 // TODO: restore the old update hash function
 template <typename Traits>
-void
+Hash256
 SHAMapInnerNodeT<Traits>::update_hash_reference(SHAMapOptions const& options)
 {
     auto children = this->get_children();
@@ -20,9 +20,9 @@ SHAMapInnerNodeT<Traits>::update_hash_reference(SHAMapOptions const& options)
     uint16_t placeholderMask = children->get_placeholder_mask();
     if (branchMask == 0 && placeholderMask == 0)
     {
-        this->hash = Hash256::zero();
-        this->hash_valid_ = true;
-        return;
+        Hash256 result = Hash256::zero();
+        this->set_children(children->canonicalize(result));
+        return result;
     }
 
     try
@@ -40,30 +40,26 @@ SHAMapInnerNodeT<Traits>::update_hash_reference(SHAMapOptions const& options)
         //   3. Neither → zero hash (empty branch)
         for (int i = 0; i < 16; i++)
         {
-            const uint8_t* hashData = Hash256::zero().data();
+            Hash256 child_hash = Hash256::zero();
             if (const auto child = children->get_child(i))
             {
-                hashData = child->get_hash(options).data();
+                child_hash = child->get_hash(options);
             }
             else if constexpr (has_placeholders_v<Traits>)
             {
                 if (children->has_placeholder(i))
-                    hashData = children->get_placeholder(i).data();
+                    child_hash = children->get_placeholder(i);
             }
 
-            hasher.update(hashData, Hash256::size());
+            hasher.update(child_hash.data(), Hash256::size());
         }
 
         // Finalize hash and take first 256 bits
-        this->hash = hasher.finalize();
-        this->hash_valid_ = true;
+        Hash256 result = hasher.finalize();
 
-        // Once hash is calculated, canonicalize to save memory
-        // After this, the node becomes immutable until explicitly copied
-        if (auto canonical = children->canonicalize())
-        {
-            this->set_children(canonical);
-        }
+        // Publish immutable children and hash together under set_children().
+        this->set_children(children->canonicalize(result));
+        return result;
     }
     catch (const std::exception& e)
     {
@@ -72,7 +68,7 @@ SHAMapInnerNodeT<Traits>::update_hash_reference(SHAMapOptions const& options)
     }
 }
 // Explicit template instantiation for default traits
-template void
+template Hash256
 SHAMapInnerNodeT<DefaultNodeTraits>::update_hash_reference(
     SHAMapOptions const& options);
 

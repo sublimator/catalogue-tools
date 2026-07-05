@@ -58,6 +58,7 @@ SHAMapLeafNodeT<Traits>::SHAMapLeafNodeT(
     {
         throw NullItemException();
     }
+    hash_ = compute_hash();
 }
 
 template <typename Traits>
@@ -92,8 +93,8 @@ SHAMapLeafNodeT<Traits>::is_inner() const
 }
 
 template <typename Traits>
-void
-SHAMapLeafNodeT<Traits>::update_hash(SHAMapOptions const&)
+Hash256
+SHAMapLeafNodeT<Traits>::compute_hash() const
 {
     auto prefix = get_node_prefix(type);
 
@@ -109,15 +110,34 @@ SHAMapLeafNodeT<Traits>::update_hash(SHAMapOptions const&)
             hasher.update(item->key().data(), Key::size());
         }
 
-        // Finalize hash and take first 256 bits
-        this->hash = hasher.finalize();
-        this->hash_valid_ = true;
+        return hasher.finalize();
     }
     catch (const std::exception& e)
     {
         throw HashCalculationException(
             std::string("Hash calculation failed: ") + e.what());
     }
+}
+
+template <typename Traits>
+void
+SHAMapLeafNodeT<Traits>::invalidate_hash()
+{
+    // Leaf hashes are computed eagerly from immutable item data at construction.
+}
+
+template <typename Traits>
+Hash256
+SHAMapLeafNodeT<Traits>::get_hash(SHAMapOptions const&)
+{
+    return hash_;
+}
+
+template <typename Traits>
+Hash256
+SHAMapLeafNodeT<Traits>::valid_hash_or_throw() const
+{
+    return hash_;
 }
 
 template <typename Traits>
@@ -141,8 +161,6 @@ SHAMapLeafNodeT<Traits>::copy(int newVersion, SHAMapInnerNodeT<Traits>* parent)
 {
     auto new_leaf =
         boost::intrusive_ptr(new SHAMapLeafNodeT<Traits>(item, type));
-    new_leaf->hash = this->hash;
-    new_leaf->hash_valid_ = this->hash_valid_;
     new_leaf->version = newVersion;
 
     // Invoke CoW hook if present

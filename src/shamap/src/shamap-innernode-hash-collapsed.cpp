@@ -32,7 +32,7 @@ namespace catl::shamap {
  * remains valid regardless of compiler optimization.
  */
 template <typename Traits>
-void
+Hash256
 SHAMapInnerNodeT<Traits>::update_hash_collapsed(SHAMapOptions const& options)
 {
     auto children = this->get_children();
@@ -40,10 +40,10 @@ SHAMapInnerNodeT<Traits>::update_hash_collapsed(SHAMapOptions const& options)
 
     if (branch_mask == 0)
     {
-        this->hash = Hash256::zero();
-        this->hash_valid_ = true;
+        Hash256 result = Hash256::zero();
+        this->set_children(children->canonicalize(result));
         OLOGD("Empty node (no branches), using zero hash");
-        return;
+        return result;
     }
 
     OLOGD("Calculating hash for node with branch mask ", branch_mask);
@@ -140,16 +140,13 @@ SHAMapInnerNodeT<Traits>::update_hash_collapsed(SHAMapOptions const& options)
         }
 
         // Finalize hash and take first 256 bits
-        this->hash = hasher.finalize();
-        this->hash_valid_ = true;
+        Hash256 result = hasher.finalize();
 
-        OLOGD("Hash calculation complete: ", this->hash.hex());
+        OLOGD("Hash calculation complete: ", result.hex());
 
-        // Once hash is calculated, canonicalize to save memory
-        if (auto canonical = children->canonicalize())
-        {
-            this->set_children(canonical);
-        }
+        // Publish immutable children and hash together under set_children().
+        this->set_children(children->canonicalize(result));
+        return result;
     }
     catch (const std::exception& e)
     {
@@ -261,7 +258,7 @@ SHAMapInnerNodeT<Traits>::compute_skipped_hash_recursive(
         // Process all 16 branches
         for (int i = 0; i < 16; i++)
         {
-            const uint8_t* hash_data = nullptr;
+            Hash256 branch_hash = zero_hash;
 
             if (i == selected_branch)
             {
@@ -270,34 +267,32 @@ SHAMapInnerNodeT<Traits>::compute_skipped_hash_recursive(
                 {
                     // We're at the terminal level, use the inner node's hash
                     // directly
-                    hash_data = inner->get_hash(options).data();
+                    branch_hash = inner->get_hash(options);
                     OLOGD(
                         "Terminal branch ",
                         i,
                         " using hash: ",
-                        inner->get_hash(options).hex().substr(0, 16));
+                        branch_hash.hex().substr(0, 16));
                 }
                 else
                 {
                     // We need to recurse deeper
-                    Hash256 next_hash = compute_skipped_hash_recursive(
+                    branch_hash = compute_skipped_hash_recursive(
                         options, inner, index, round + 1, skips);
-                    hash_data = next_hash.data();
                     OLOGD(
                         "Non-terminal branch ",
                         i,
                         " using recursive hash: ",
-                        next_hash.hex().substr(0, 16));
+                        branch_hash.hex().substr(0, 16));
                 }
             }
             else
             {
                 // Not on our path - use zero hash
-                hash_data = zero_hash.data();
                 OLOGD("Branch ", i, " not on path, using zero hash");
             }
 
-            hasher.update(hash_data, Hash256::size());
+            hasher.update(branch_hash.data(), Hash256::size());
         }
 
         // Finalize the hash
@@ -356,7 +351,9 @@ SHAMapInnerNodeT<Traits>::compute_skipped_hash_stack(
                     if (current_round == skips)
                     {
                         // Terminal level - use inner's hash
-                        hash_data = inner->get_hash(options).data();
+                        level_hashes[current_round - round] =
+                            inner->get_hash(options);
+                        hash_data = level_hashes[current_round - round].data();
                     }
                     else
                     {
@@ -388,7 +385,7 @@ SHAMapInnerNodeT<Traits>::compute_skipped_hash_stack(
     }
 }
 // Explicit template instantiation for default traits
-template void
+template Hash256
 SHAMapInnerNodeT<DefaultNodeTraits>::update_hash_collapsed(
     SHAMapOptions const& options);
 template boost::intrusive_ptr<SHAMapLeafNodeT<DefaultNodeTraits>>

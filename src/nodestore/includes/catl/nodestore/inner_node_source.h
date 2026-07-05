@@ -28,7 +28,7 @@ concept inner_node_source = requires(T const& node, int branch)
     {
         node.get_node_source_child_hash(branch)
     }
-    ->std::convertible_to<Hash256 const&>;
+    ->std::convertible_to<Hash256>;
 
     /**
      * Bitmask where bit N set means branch N is populated.
@@ -46,7 +46,7 @@ concept inner_node_source = requires(T const& node, int branch)
     {
         node.get_node_source_hash()
     }
-    ->std::convertible_to<Hash256 const&>;
+    ->std::convertible_to<Hash256>;
 };
 
 }  // namespace catl::nodestore

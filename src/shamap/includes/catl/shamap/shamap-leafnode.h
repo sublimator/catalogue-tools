@@ -26,6 +26,10 @@ private:
     boost::intrusive_ptr<MmapItem> item;
     SHAMapNodeType type;
     int version = 0;  // Version for CoW tracking
+    Hash256 hash_;
+
+    Hash256
+    compute_hash() const;
 
 public:
     SHAMapLeafNodeT(boost::intrusive_ptr<MmapItem> i, SHAMapNodeType t);
@@ -38,7 +42,13 @@ public:
     is_inner() const override;
 
     void
-    update_hash(SHAMapOptions const& options) override;
+    invalidate_hash() override;
+
+    Hash256
+    get_hash(SHAMapOptions const& options) override;
+
+    Hash256
+    valid_hash_or_throw() const override;
 
     boost::intrusive_ptr<MmapItem>
     get_item() const;

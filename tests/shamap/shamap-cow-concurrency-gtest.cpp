@@ -4,6 +4,7 @@
 #include <atomic>
 #include <gtest/gtest.h>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -116,6 +117,7 @@ TEST(ShaMapCoWConcurrency, PipelinePattern)
     TestMmapItems items;
 
     std::vector<std::shared_ptr<SHAMap>> snapshots;
+    std::mutex snapshots_mutex;
     std::atomic<bool> error_occurred{false};
     std::atomic<bool> builder_done{false};
     std::atomic<int> snapshots_ready{0};
@@ -138,7 +140,10 @@ TEST(ShaMapCoWConcurrency, PipelinePattern)
 
                 // Create snapshot
                 auto snapshot = state_map.snapshot();
-                snapshots.push_back(snapshot);
+                {
+                    std::lock_guard<std::mutex> lock(snapshots_mutex);
+                    snapshots.push_back(snapshot);
+                }
                 snapshots_ready.fetch_add(1);
 
                 // Immediately continue to next ledger (this is where CoW must
@@ -168,8 +173,14 @@ TEST(ShaMapCoWConcurrency, PipelinePattern)
                 int ready = snapshots_ready.load();
                 if (hashed_count < ready)
                 {
+                    std::shared_ptr<SHAMap> snapshot;
+                    {
+                        std::lock_guard<std::mutex> lock(snapshots_mutex);
+                        snapshot = snapshots[hashed_count];
+                    }
+
                     // Hash the snapshot
-                    Hash256 hash = snapshots[hashed_count]->get_hash();
+                    Hash256 hash = snapshot->get_hash();
                     EXPECT_NE(
                         hash.hex(),
                         "000000000000000000000000000000000000000000000000000000"
@@ -298,6 +309,7 @@ TEST(ShaMapCoWConcurrency, StressTest)
     TestMmapItems items;
 
     std::vector<std::shared_ptr<SHAMap>> snapshots;
+    std::mutex snapshots_mutex;
     std::atomic<bool> error_occurred{false};
     std::atomic<bool> builder_done{false};
     std::atomic<int> snapshots_ready{0};
@@ -318,7 +330,11 @@ TEST(ShaMapCoWConcurrency, StressTest)
                 // Snapshot every 10 modifications
                 if (i % 10 == 0)
                 {
-                    snapshots.push_back(state_map.snapshot());
+                    auto snapshot = state_map.snapshot();
+                    {
+                        std::lock_guard<std::mutex> lock(snapshots_mutex);
+                        snapshots.push_back(snapshot);
+                    }
                     snapshots_ready.fetch_add(1);
                 }
             }
@@ -344,8 +360,14 @@ TEST(ShaMapCoWConcurrency, StressTest)
                 int ready = snapshots_ready.load();
                 if (last_hashed < ready)
                 {
+                    std::shared_ptr<SHAMap> snapshot;
+                    {
+                        std::lock_guard<std::mutex> lock(snapshots_mutex);
+                        snapshot = snapshots[last_hashed];
+                    }
+
                     // Hash a snapshot
-                    Hash256 hash = snapshots[last_hashed]->get_hash();
+                    Hash256 hash = snapshot->get_hash();
                     EXPECT_NE(
                         hash.hex(),
                         "000000000000000000000000000000000000000000000000000000"

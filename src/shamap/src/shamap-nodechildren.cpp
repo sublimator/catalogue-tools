@@ -34,11 +34,13 @@ NodeChildrenT<Traits>::NodeChildrenT(uint8_t cap)
     : capacity_(cap)
     , canonicalized_(true)  // Always canonicalized when using this ctor
 {
-    if (cap == 0 || cap > 16)
+    if (cap > 16)
         throw std::invalid_argument("Invalid capacity for NodeChildrenT");
 
     // Allocate exact size array
-    children_ = new boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>[cap]();
+    children_ = cap == 0
+        ? nullptr
+        : new boost::intrusive_ptr<SHAMapTreeNodeT<Traits>>[cap]();
 
     // Initialize branch_to_index_ to all -1 (will be set by canonicalize())
     for (int i = 0; i < 16; i++)
@@ -110,22 +112,17 @@ NodeChildrenT<Traits>::set_child(
 
 template <typename Traits>
 boost::intrusive_ptr<NodeChildrenT<Traits>>
-NodeChildrenT<Traits>::canonicalize() const
+NodeChildrenT<Traits>::canonicalize(Hash256 const& hash) const
 {
-    if (canonicalized_ || branch_mask_ == 0)
-        return nullptr;  // Already canonical or empty
-
     int child_count = __builtin_popcount(branch_mask_);
-
-    // No need to canonicalize if nearly full
-    if (child_count >= 14)
-        return nullptr;
+    uint8_t capacity = child_count >= 14 ? 16 : child_count;
 
     // Create NEW canonicalized NodeChildrenT with exact capacity
     auto result = boost::intrusive_ptr<NodeChildrenT<Traits>>(
-        new NodeChildrenT<Traits>(child_count));  // Uses private constructor!
+        new NodeChildrenT<Traits>(capacity));  // Uses private constructor!
 
     result->branch_mask_ = branch_mask_;
+    result->hash_ = hash;
 
     // Copy only non-null children
     int new_index = 0;
@@ -133,8 +130,10 @@ NodeChildrenT<Traits>::canonicalize() const
     {
         if (branch_mask_ & (1 << i))
         {
-            result->children_[new_index] = children_[i];
-            result->branch_to_index_[i] = new_index++;
+            int source_index = canonicalized_ ? branch_to_index_[i] : i;
+            int target_index = capacity == 16 ? i : new_index++;
+            result->children_[target_index] = children_[source_index];
+            result->branch_to_index_[i] = target_index;
         }
     }
 

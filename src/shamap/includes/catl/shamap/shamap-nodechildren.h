@@ -23,6 +23,7 @@ private:
     uint8_t capacity_ = 0;              // Actual allocation size
     bool canonicalized_ = false;        // Has this been optimized?
     int8_t branch_to_index_[16] = {0};  // Maps branch to array index
+    Hash256 hash_;
 
     // Placeholder hash storage — zero bytes for DefaultNodeTraits,
     // full PlaceholderHashes for AbbreviatedTreeTraits.
@@ -227,13 +228,27 @@ public:
             return 0;
     }
 
-    // Memory optimization - returns new canonicalized object or nullptr
+    // Return an immutable canonical copy carrying the published node hash.
     boost::intrusive_ptr<NodeChildrenT<Traits>>
-    canonicalize() const;
+    canonicalize(Hash256 const& hash) const;
     bool
     is_canonical() const
     {
         return canonicalized_;
+    }
+    bool
+    has_hash() const
+    {
+        return canonicalized_;
+    }
+    Hash256
+    get_hash() const
+    {
+        if (!has_hash())
+        {
+            throw HashCalculationException("Hash not yet computed");
+        }
+        return hash_;
     }
 
     // Check if this NodeChildren is shared (ref_count > 1)

@@ -20,33 +20,21 @@ template <typename Traits>
 class SHAMapTreeNodeT : public Traits
 {
 protected:
-    Hash256 hash;
-    bool hash_valid_ = false;
     mutable std::atomic<int> ref_count_{0};
 
 public:
     virtual ~SHAMapTreeNodeT() = default;
-    void
-    invalidate_hash();
+    virtual void
+    invalidate_hash() = 0;
     virtual bool
     is_leaf() const = 0;
     virtual bool
     is_inner() const = 0;
-    virtual void
-    update_hash(
-        const SHAMapOptions& options) = 0;  // NO LOGGING INSIDE IMPLEMENTATIONS
-    const Hash256&
-    get_hash(const SHAMapOptions& options);
+    virtual Hash256
+    get_hash(const SHAMapOptions& options) = 0;
 
-    const Hash256&
-    valid_hash_or_throw() const
-    {
-        if (!hash_valid_)
-        {
-            throw HashCalculationException("Hash not yet computed");
-        }
-        return hash;
-    }
+    virtual Hash256
+    valid_hash_or_throw() const = 0;
 
     // Get the serialized size of this node
     virtual size_t

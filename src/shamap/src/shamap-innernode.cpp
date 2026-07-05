@@ -268,6 +268,17 @@ SHAMapInnerNodeT<Traits>::invalidate_hash_recursive()
 }
 
 template <typename Traits>
+void
+SHAMapInnerNodeT<Traits>::invalidate_hash()
+{
+    auto children = get_children();
+    if (children && children->is_canonical())
+    {
+        set_children(children->copy());
+    }
+}
+
+template <typename Traits>
 bool
 SHAMapInnerNodeT<Traits>::set_child(
     int branch,
@@ -339,7 +350,7 @@ SHAMapInnerNodeT<Traits>::get_branch_mask() const
 }
 
 template <typename Traits>
-Hash256 const&
+Hash256
 SHAMapInnerNodeT<Traits>::get_node_source_child_hash(int branch) const
 {
     if (branch < 0 || branch >= 16)
@@ -355,8 +366,31 @@ SHAMapInnerNodeT<Traits>::get_node_source_child_hash(int branch) const
         return child->valid_hash_or_throw();
     }
 
-    static const Hash256 zero_hash;  // All zeros
-    return zero_hash;
+    return Hash256::zero();
+}
+
+template <typename Traits>
+Hash256
+SHAMapInnerNodeT<Traits>::get_hash(const SHAMapOptions& options)
+{
+    auto children = get_children();
+    if (children && children->has_hash())
+    {
+        return children->get_hash();
+    }
+    return update_hash(options);
+}
+
+template <typename Traits>
+Hash256
+SHAMapInnerNodeT<Traits>::valid_hash_or_throw() const
+{
+    auto children = get_children();
+    if (!children || !children->has_hash())
+    {
+        throw HashCalculationException("Hash not yet computed");
+    }
+    return children->get_hash();
 }
 
 template <typename Traits>
@@ -412,13 +446,15 @@ SHAMapInnerNodeT<Traits>::copy(int newVersion, SHAMapInnerNodeT<Traits>* parent)
     auto new_node = boost::intrusive_ptr(
         new SHAMapInnerNodeT<Traits>(true, depth_, newVersion));
 
-    // Copy children - this creates a non-canonicalized copy
     auto children = get_children();
-    new_node->set_children(children->copy());
-
-    // Copy other properties
-    new_node->hash = this->hash;
-    new_node->hash_valid_ = this->hash_valid_;
+    if (children->is_canonical())
+    {
+        new_node->set_children(children);
+    }
+    else
+    {
+        new_node->set_children(children->copy());
+    }
 
     LOGD(
         "Cloned inner node from version ",
@@ -482,7 +518,7 @@ SHAMapInnerNodeT<Traits>::write_to_buffer(uint8_t* ptr) const
         if (child)
         {
             // Child exists - use its hash (must be computed already)
-            const Hash256& child_hash = child->valid_hash_or_throw();
+            Hash256 child_hash = child->valid_hash_or_throw();
             std::memcpy(ptr, child_hash.data(), 32);
         }
         else

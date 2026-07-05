@@ -161,6 +161,9 @@ public:
     void
     invalidate_hash_recursive();
 
+    void
+    invalidate_hash() override;
+
     static LogPartition&
     get_log_partition()
     {
@@ -213,7 +216,7 @@ public:
      * Returns child's hash if present, or zero hash if no child.
      * Required by inner_node_source concept.
      */
-    Hash256 const&
+    Hash256
     get_node_source_child_hash(int branch) const;
 
     /**
@@ -249,11 +252,17 @@ public:
      * Get this node's hash for use as nodestore key.
      * Required by inner_node_source concept.
      */
-    Hash256 const&
+    Hash256
     get_node_source_hash() const
     {
         return this->valid_hash_or_throw();
     }
+
+    Hash256
+    get_hash(const SHAMapOptions& options) override;
+
+    Hash256
+    valid_hash_or_throw() const override;
 
 protected:
     template <typename T>
@@ -262,25 +271,22 @@ protected:
     template <typename T>
     friend class SHAMapT;
 
-    void
+    Hash256
     update_hash_reference(const SHAMapOptions& options);
 
-    void
+    Hash256
     update_hash_collapsed(const SHAMapOptions& options);
 
-    void
-    update_hash(const SHAMapOptions& options) override
+    Hash256
+    update_hash(const SHAMapOptions& options)
     {
         if (options.tree_collapse_impl == TreeCollapseImpl::leafs_only &&
             options.reference_hash_impl !=
                 ReferenceHashImpl::use_synthetic_inners)
         {
-            update_hash_reference(options);
+            return update_hash_reference(options);
         }
-        else
-        {
-            update_hash_collapsed(options);
-        }
+        return update_hash_collapsed(options);
     }
 
     Hash256
