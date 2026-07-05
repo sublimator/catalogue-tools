@@ -849,7 +849,7 @@ def verify(
 
 # ─── Binary format (XPRV) ────────────────────────────────────────────
 #
-# File: XPRV(4) + version(1) + flags(1) [+ network_id(4 LE if v2)]
+# File: XPRV(4) + version(1) + flags(1) + network_id(4 BE)
 # Body: TLV records (type(1) + length(LEB128) + payload)
 # TLV types: 0x01=anchor, 0x02=header, 0x03=tx_map, 0x04=state_map, 0x05=unl
 
@@ -864,7 +864,8 @@ TLV_MAP_TX = 0x03
 TLV_MAP_STATE = 0x04
 TLV_UNL = 0x05
 
-# Binary trie branch types (2 bits each in a uint32 LE header)
+# Binary trie branch types (2 bits each; header byte k holds branches
+# 4k..4k+3, low bits first — equivalent to reading a uint32 LE)
 BR_EMPTY = 0
 BR_LEAF = 1
 BR_INNER = 2
@@ -878,14 +879,26 @@ PERMS_2 = [[0, 1], [1, 0]]
 
 
 def leb128_read(data: bytes, pos: int) -> tuple[int, int]:
-    """Read a LEB128 varint. Returns (value, new_pos)."""
+    """Read a LEB128 varint. Returns (value, new_pos).
+
+    Strict canonical decoding: rejects non-minimal encodings, varints
+    longer than 5 bytes, and values that exceed uint32.
+    """
     value = 0
     shift = 0
+    count = 0
     while pos < len(data):
         b = data[pos]
         pos += 1
+        count += 1
+        if count > 5:
+            raise ValueError("LEB128: varint longer than 5 bytes")
         value |= (b & 0x7F) << shift
         if (b & 0x80) == 0:
+            if count > 1 and b == 0:
+                raise ValueError("LEB128: non-minimal encoding")
+            if value > 0xFFFFFFFF:
+                raise ValueError("LEB128: value exceeds uint32")
             return value, pos
         shift += 7
     raise ValueError("LEB128: unexpected end")
@@ -915,7 +928,7 @@ def parse_binary_header(data: bytes) -> tuple[int, int, int, int]:
             f"binary proof: version {version} != expected {FORMAT_VERSION}")
     if len(data) < 10:
         raise ValueError("binary proof: header too short")
-    net = struct.unpack_from("<I", data, 6)[0]
+    net = struct.unpack_from(">I", data, 6)[0]
     return version, flags, net, 10
 
 

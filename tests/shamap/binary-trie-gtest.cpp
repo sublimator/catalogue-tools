@@ -156,7 +156,7 @@ TEST(BinaryTrie, Leb128RoundTrip)
         65535,
         100000,
         1000000,
-        SIZE_MAX / 2};
+        0xFFFFFFFFull};
 
     for (auto v : values)
     {
@@ -167,6 +167,49 @@ TEST(BinaryTrie, Leb128RoundTrip)
         auto decoded = leb128_decode(buf, pos);
         EXPECT_EQ(decoded, v) << "LEB128 round-trip failed for " << v;
         EXPECT_EQ(pos, buf.size());
+    }
+}
+
+TEST(BinaryTrie, Leb128StrictCanonical)
+{
+    // Non-minimal encoding: 0x85 0x00 decodes to 5 but has a redundant
+    // trailing continuation byte — one value, one byte sequence.
+    {
+        std::vector<uint8_t> buf = {0x85, 0x00};
+        size_t pos = 0;
+        EXPECT_THROW(leb128_decode(buf, pos), std::runtime_error);
+    }
+    // 0x80 0x00 is a non-minimal zero.
+    {
+        std::vector<uint8_t> buf = {0x80, 0x00};
+        size_t pos = 0;
+        EXPECT_THROW(leb128_decode(buf, pos), std::runtime_error);
+    }
+    // Longer than 5 bytes.
+    {
+        std::vector<uint8_t> buf = {0x80, 0x80, 0x80, 0x80, 0x80, 0x01};
+        size_t pos = 0;
+        EXPECT_THROW(leb128_decode(buf, pos), std::runtime_error);
+    }
+    // 5 bytes encoding a value >= 2^32.
+    {
+        std::vector<uint8_t> buf = {0xFF, 0xFF, 0xFF, 0xFF, 0x1F};
+        size_t pos = 0;
+        EXPECT_THROW(leb128_decode(buf, pos), std::runtime_error);
+    }
+    // Encoder refuses values that don't fit uint32.
+    {
+        std::vector<uint8_t> buf;
+        EXPECT_THROW(
+            leb128_encode(buf, 0x100000000ull), std::runtime_error);
+    }
+    // uint32 max is the largest legal value: 5 bytes, round-trips.
+    {
+        std::vector<uint8_t> buf;
+        leb128_encode(buf, 0xFFFFFFFFull);
+        EXPECT_EQ(buf.size(), 5u);
+        size_t pos = 0;
+        EXPECT_EQ(leb128_decode(buf, pos), 0xFFFFFFFFull);
     }
 }
 

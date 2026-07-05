@@ -72,8 +72,7 @@ make_zlib_proof(std::vector<char> const& compressed)
     std::vector<uint8_t> blob = {'X', 'P', 'R', 'V'};
     blob.push_back(static_cast<uint8_t>(XPRV_FORMAT_VERSION));
     blob.push_back(0x01);  // FLAG_ZLIB
-    if (XPRV_FORMAT_VERSION >= 0x02)
-        blob.insert(blob.end(), {0, 0, 0, 0});  // network_id (LE)
+    blob.insert(blob.end(), {0, 0, 0, 0});  // network_id (BE)
     blob.insert(blob.end(), compressed.begin(), compressed.end());
     return blob;
 }
@@ -179,7 +178,7 @@ TEST(ProofChainBinary, HeaderRoundTrip)
     EXPECT_EQ(binary[3], 'V');
     EXPECT_EQ(binary[4], XPRV_FORMAT_VERSION);  // version
     EXPECT_EQ(binary[5], 0x00);  // flags (uncompressed)
-    // bytes 6-9: network_id LE (0)
+    // bytes 6-9: network_id BE (0)
     EXPECT_EQ(binary[6], 0x00);
     EXPECT_EQ(binary[7], 0x00);
     EXPECT_EQ(binary[8], 0x00);
@@ -213,10 +212,10 @@ TEST(ProofChainBinary, NetworkIdRoundTrip)
 
     // Binary
     auto binary = to_binary(chain);
-    EXPECT_EQ(binary[6], 0x59);   // 21337 = 0x5359 LE
-    EXPECT_EQ(binary[7], 0x53);
-    EXPECT_EQ(binary[8], 0x00);
-    EXPECT_EQ(binary[9], 0x00);
+    EXPECT_EQ(binary[6], 0x00);   // 21337 = 0x00005359 BE
+    EXPECT_EQ(binary[7], 0x00);
+    EXPECT_EQ(binary[8], 0x53);
+    EXPECT_EQ(binary[9], 0x59);
 
     auto decoded_bin = from_binary(binary);
     EXPECT_EQ(decoded_bin.network_id, 21337u);

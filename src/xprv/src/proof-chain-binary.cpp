@@ -100,10 +100,11 @@ static std::vector<uint8_t>
 read_vl(std::span<const uint8_t> data, size_t& pos)
 {
     size_t len = leb128_decode(data, pos);
-    // Subtraction form: `pos + len` can overflow when len is attacker-
-    // controlled (leb128 returns up to ~2^63), wrapping past the check and
-    // letting the copy below walk off the buffer. pos <= data.size() is
-    // guaranteed (leb128_decode only advances within bounds).
+    // Subtraction form: `pos + len` could overflow on 32-bit size_t when
+    // len is attacker-controlled (leb128 allows up to uint32 max), wrapping
+    // past the check and letting the copy below walk off the buffer.
+    // pos <= data.size() is guaranteed (leb128_decode only advances within
+    // bounds).
     if (len > data.size() - pos)
         throw std::runtime_error(
             "binary proof: unexpected end reading VL data");
@@ -603,7 +604,7 @@ to_binary(ProofChain const& chain, BinaryOptions const& opts)
     std::vector<uint8_t> out;
     out.reserve(10 + body.size());
 
-    // File header: magic(4) + version(1) + flags(1) + network_id(4 LE)
+    // File header: magic(4) + version(1) + flags(1) + network_id(4 BE)
     write_bytes(out, MAGIC, 4);
     out.push_back(VERSION);
 
@@ -612,12 +613,8 @@ to_binary(ProofChain const& chain, BinaryOptions const& opts)
         flags |= FLAG_ZLIB;
     out.push_back(flags);
 
-    // Network ID (little-endian u32, added in v2)
-    uint32_t net = chain.network_id;
-    out.push_back(static_cast<uint8_t>(net & 0xFF));
-    out.push_back(static_cast<uint8_t>((net >> 8) & 0xFF));
-    out.push_back(static_cast<uint8_t>((net >> 16) & 0xFF));
-    out.push_back(static_cast<uint8_t>((net >> 24) & 0xFF));
+    // Network ID (big-endian u32, like every other multi-byte integer)
+    write_u32_be(out, chain.network_id);
 
     // Body
     if (opts.compress)
@@ -895,7 +892,7 @@ decode_tlv_body(std::span<const uint8_t> data)
 ProofChain
 from_binary(std::span<const uint8_t> data)
 {
-    if (data.size() < 6)
+    if (data.size() < 10)
         throw std::runtime_error("binary proof: file too short");
 
     // Check magic
@@ -909,21 +906,11 @@ from_binary(std::span<const uint8_t> data)
 
     uint8_t flags = data[5];
 
-    // v2 adds network_id (4 bytes LE) after flags
-    uint32_t network_id = 0;
-    size_t header_size = 6;
-    if (version >= 0x02)
-    {
-        if (data.size() < 10)
-            throw std::runtime_error("binary proof: v2 header too short");
-        network_id = static_cast<uint32_t>(data[6]) |
-            (static_cast<uint32_t>(data[7]) << 8) |
-            (static_cast<uint32_t>(data[8]) << 16) |
-            (static_cast<uint32_t>(data[9]) << 24);
-        header_size = 10;
-    }
+    // Network ID (big-endian u32)
+    size_t net_pos = 6;
+    uint32_t network_id = read_u32_be(data, net_pos);
 
-    auto body_span = data.subspan(header_size);
+    auto body_span = data.subspan(10);
 
     ProofChain chain;
     if (flags & FLAG_ZLIB)

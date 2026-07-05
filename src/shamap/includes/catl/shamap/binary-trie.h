@@ -37,10 +37,13 @@ enum class BranchType : uint8_t {
     hash = 3,
 };
 
-/// Encode an unsigned integer as LEB128.
+/// Encode an unsigned integer as LEB128. All lengths and counts in the
+/// XPRV format fit in uint32; larger values are a caller bug.
 inline void
 leb128_encode(std::vector<uint8_t>& out, size_t value)
 {
+    if (value > 0xFFFFFFFFull)
+        throw std::runtime_error("leb128: value exceeds uint32");
     do
     {
         uint8_t byte = static_cast<uint8_t>(value & 0x7F);
@@ -52,20 +55,32 @@ leb128_encode(std::vector<uint8_t>& out, size_t value)
 }
 
 /// Decode an unsigned LEB128 integer. Advances pos.
+///
+/// Strict canonical decoding: rejects non-minimal encodings (redundant
+/// trailing continuation bytes), varints longer than 5 bytes, and values
+/// that exceed uint32 — one value, one byte sequence, so proofs can be
+/// hashed/cached by their bytes.
 inline size_t
 leb128_decode(std::span<const uint8_t> data, size_t& pos)
 {
-    size_t value = 0;
+    uint64_t value = 0;
     int shift = 0;
+    size_t count = 0;
     while (pos < data.size())
     {
         uint8_t byte = data[pos++];
-        value |= static_cast<size_t>(byte & 0x7F) << shift;
+        if (++count > 5)
+            throw std::runtime_error("leb128: varint longer than 5 bytes");
+        value |= static_cast<uint64_t>(byte & 0x7F) << shift;
         if ((byte & 0x80) == 0)
-            return value;
+        {
+            if (count > 1 && byte == 0)
+                throw std::runtime_error("leb128: non-minimal encoding");
+            if (value > 0xFFFFFFFFull)
+                throw std::runtime_error("leb128: value exceeds uint32");
+            return static_cast<size_t>(value);
+        }
         shift += 7;
-        if (shift >= 64)
-            throw std::runtime_error("leb128: overflow");
     }
     throw std::runtime_error("leb128: unexpected end of data");
 }
