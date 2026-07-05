@@ -32,6 +32,10 @@ peermon.log
 proof.bin
 proof.json
 build-tsan/
+build-asan/
+build-san/
+__pycache__/
+*.pyc
 BUILD_ID
 
 # Operational logs / generated proofs — may contain tokens or peer data (sec #0054)

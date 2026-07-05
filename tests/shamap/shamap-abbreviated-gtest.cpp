@@ -290,7 +290,6 @@ TEST(AbbreviatedTree, FixtureOneRealLeafRestPlaceholders)
     };
     std::vector<LeafEntry> leaves;
 
-    auto leaf_prefix = catl::shamap::HashPrefix::leaf_node;
     // TX tree uses tx_node prefix (SND\0), not leaf_node (MLN\0)
     auto tx_prefix = catl::shamap::HashPrefix::tx_node;
 
