@@ -152,3 +152,14 @@ jobs:
           cd ${{ env.build_dir }}
           ctest --verbose
 
+      # Live end-to-end xprv exercise on ONE compiler only: boot `xprv serve`
+      # and prove + verify real (recently-fetched) transactions against live
+      # network peers, including a flag-ledger target (era-direct skip path) in
+      # both JSON and binary form. Non-gating (continue-on-error) because it
+      # depends on live mainnet peer availability; flip to false to require it.
+      - name: Live xprv prove/verify smoke
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Release' && matrix.generator == 'Ninja'
+        continue-on-error: true
+        run: |
+          XPRV_BIN=${{ env.build_dir }}/src/xprv/xprv bash scripts/ci-xprv-live-smoke.sh
+
