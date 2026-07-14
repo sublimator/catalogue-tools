@@ -170,6 +170,35 @@ class VerifyResult:
     warnings: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class LedgerHashesLeaf:
+    """A structurally recognized LedgerHashes state leaf."""
+
+    key_hex: str
+    hashes: tuple[str, ...]
+    last_ledger_sequence: int | None
+
+
+@dataclass(frozen=True)
+class LedgerHashesSupport:
+    """Constraints carried with one candidate child ledger hash."""
+
+    leaf_key_hex: str
+    containing_ledger_sequence: int
+    last_ledger_sequence: int | None
+    hashes_count: int
+    source: str
+
+
+@dataclass(frozen=True)
+class ResolvedLedgerHashesSupport:
+    """A candidate that is valid for a specific child header."""
+
+    list_type: Literal["recent", "flag"]
+    hashes_count: int
+    source: str
+
+
 # ─── Constants ───────────────────────────────────────────────────────
 
 ZERO_HASH: Hash256 = b"\x00" * 32
@@ -194,6 +223,57 @@ XRPL_VL_KEY = "ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F473
 def sha512half(data: bytes) -> Hash256:
     """SHA-512, truncated to first 32 bytes (256 bits)."""
     return hashlib.sha512(data).digest()[:32]
+
+
+def short_skip_key_hex() -> str:
+    """Key of the recent-history LedgerHashes entry."""
+    return sha512half(struct.pack(">H", 0x0073)).hex().upper()
+
+
+def long_skip_key_hex(ledger_sequence: int) -> str:
+    """Key of the LedgerHashes era containing ledger_sequence."""
+    return sha512half(
+        struct.pack(">HI", 0x0073, ledger_sequence >> 16)
+    ).hex().upper()
+
+
+def classify_ledger_hashes_link(
+    leaf_key_hex: str,
+    containing_ledger_sequence: int,
+    child_ledger_sequence: int,
+) -> Literal["recent", "flag"] | None:
+    """Return the list type only when key and child range are valid."""
+    if child_ledger_sequence <= 0 or child_ledger_sequence >= containing_ledger_sequence:
+        return None
+    if leaf_key_hex == short_skip_key_hex():
+        if containing_ledger_sequence - child_ledger_sequence <= 256:
+            return "recent"
+        return None
+    if (
+        child_ledger_sequence % 256 == 0
+        and leaf_key_hex == long_skip_key_hex(child_ledger_sequence)
+    ):
+        return "flag"
+    return None
+
+
+def ledger_hashes_last_sequence_consistent(
+    list_type: Literal["recent", "flag"],
+    containing_ledger_sequence: int,
+    child_ledger_sequence: int,
+    last_ledger_sequence: int | None,
+) -> bool:
+    """Cross-check LastLedgerSequence when the SLE includes it."""
+    if last_ledger_sequence is None:
+        return True
+    if list_type == "recent":
+        return last_ledger_sequence == containing_ledger_sequence - 1
+    return (
+        last_ledger_sequence < containing_ledger_sequence
+        and last_ledger_sequence % 256 == 0
+        and last_ledger_sequence >> 16 == child_ledger_sequence >> 16
+        and child_ledger_sequence <= last_ledger_sequence
+    )
 
 
 # ─── Ledger header hashing ──────────────────────────────────────────
@@ -390,19 +470,74 @@ def collect_binary_leaves(
     return leaves
 
 
-def extract_state_child_hashes(
+def is_hash_hex(value: Any) -> bool:
+    """Return whether value is exactly one 32-byte hexadecimal string."""
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(c in "0123456789abcdefABCDEF" for c in value)
+    )
+
+
+def extract_ledger_hashes_leaves(
     leaves: list[tuple[str, dict[str, Any]]],
-) -> list[str]:
-    """Extract ledger hashes from authenticated state leaves (skip lists)."""
-    hashes: list[str] = []
-    for _key_hex, leaf_data in leaves:
-        raw_hashes = leaf_data.get("Hashes")
-        if not isinstance(raw_hashes, list):
+) -> list[LedgerHashesLeaf]:
+    """Recognize well-formed LedgerHashes leaves without granting authority."""
+    result: list[LedgerHashesLeaf] = []
+    for key_hex, leaf_data in leaves:
+        if not is_hash_hex(key_hex):
             continue
-        for item in raw_hashes:
-            if isinstance(item, str):
-                hashes.append(item.upper())
-    return hashes
+        if leaf_data.get("LedgerEntryType") != "LedgerHashes":
+            continue
+        raw_hashes = leaf_data.get("Hashes")
+        if not isinstance(raw_hashes, list) or len(raw_hashes) > 256:
+            continue
+        if not all(is_hash_hex(item) for item in raw_hashes):
+            continue
+
+        last_sequence = leaf_data.get("LastLedgerSequence")
+        if last_sequence is not None and (
+            isinstance(last_sequence, bool)
+            or not isinstance(last_sequence, int)
+            or not 0 <= last_sequence <= 0xFFFFFFFF
+        ):
+            continue
+
+        result.append(
+            LedgerHashesLeaf(
+                key_hex=key_hex.upper(),
+                hashes=tuple(item.upper() for item in raw_hashes),
+                last_ledger_sequence=last_sequence,
+            )
+        )
+    return result
+
+
+def find_ledger_hashes_support(
+    candidates: dict[str, list[LedgerHashesSupport]],
+    header_hash: str,
+    header_sequence: int,
+) -> ResolvedLedgerHashesSupport | None:
+    """Find a LedgerHashes candidate whose key and range bind this header."""
+    for candidate in candidates.get(header_hash, []):
+        list_type = classify_ledger_hashes_link(
+            candidate.leaf_key_hex,
+            candidate.containing_ledger_sequence,
+            header_sequence,
+        )
+        if list_type is None or not ledger_hashes_last_sequence_consistent(
+            list_type,
+            candidate.containing_ledger_sequence,
+            header_sequence,
+            candidate.last_ledger_sequence,
+        ):
+            continue
+        return ResolvedLedgerHashesSupport(
+            list_type=list_type,
+            hashes_count=candidate.hashes_count,
+            source=candidate.source,
+        )
+    return None
 
 
 def describe_tx_leaves(leaves: list[tuple[str, dict[str, Any]]]) -> str:
@@ -649,6 +784,8 @@ def verify(
     trusted_ledger_hashes: dict[str, list[str]] = defaultdict(list)
     trusted_tx_roots: dict[str, list[str]] = defaultdict(list)
     trusted_state_roots: dict[str, list[str]] = defaultdict(list)
+    trusted_state_root_sequences: dict[str, set[int]] = defaultdict(set)
+    ledger_hashes_candidates: dict[str, list[LedgerHashesSupport]] = defaultdict(list)
     seen_header_hashes: set[str] = set()
     seen_map_roots: set[tuple[str, str]] = set()
     skip_source_last_seq: dict[str, int] = {}
@@ -704,20 +841,30 @@ def verify(
                 f"ac={hdr['account_hash'][:16]}..."
             )
 
-            source = first_source(trusted_ledger_hashes, computed_hex)
-            if source is None:
-                msg = "header hash is not supported by any earlier authenticated ancestor"
+            direct_source = first_source(trusted_ledger_hashes, computed_hex)
+            skip_support = (
+                None
+                if direct_source is not None
+                else find_ledger_hashes_support(
+                    ledger_hashes_candidates, computed_hex, int(hdr["ledger_index"])
+                )
+            )
+            if direct_source is None and skip_support is None:
+                msg = (
+                    "header hash is not supported by any earlier authenticated "
+                    "ancestor or recognized LedgerHashes leaf"
+                )
                 print(f"    [FAIL] {msg}")
                 result.ok = False
                 result.errors.append(f"step {i}: {msg}")
                 continue
 
-            if source == "anchor":
+            if direct_source == "anchor":
                 print("    [PASS] matches anchor hash")
-            elif source.startswith("skip list from step "):
-                print(f"    [PASS] found in {source}")
+            elif skip_support is not None:
+                print(f"    [PASS] found in {skip_support.source}")
             else:
-                print(f"    [PASS] supported by {source}")
+                print(f"    [PASS] supported by {direct_source}")
 
             if computed_hex in seen_header_hashes:
                 warn = f"step {i}: duplicate ledger_header {computed_hex[:16]}... is non-canonical"
@@ -725,17 +872,17 @@ def verify(
                 result.warnings.append(warn)
             seen_header_hashes.add(computed_hex)
 
-            if source.startswith("skip list from step "):
-                prev_seq = skip_source_last_seq.get(source)
+            if skip_support is not None:
+                prev_seq = skip_source_last_seq.get(skip_support.source)
                 seq = int(hdr["ledger_index"])
                 if prev_seq is not None and seq > prev_seq:
                     warn = (
-                        f"step {i}: headers from {source} are not in descending seq order "
-                        f"({seq} after {prev_seq})"
+                        f"step {i}: headers from {skip_support.source} are not in "
+                        f"descending seq order ({seq} after {prev_seq})"
                     )
                     print(f"    [WARN] {warn}")
                     result.warnings.append(warn)
-                skip_source_last_seq[source] = seq
+                skip_source_last_seq[skip_support.source] = seq
 
             parent_hash = hdr["parent_hash"].upper()
             tx_root = hdr["transaction_hash"].upper()
@@ -750,6 +897,7 @@ def verify(
             add_capability(
                 trusted_state_roots, state_root, f"header seq={hdr['ledger_index']}"
             )
+            trusted_state_root_sequences[state_root].add(int(hdr["ledger_index"]))
 
         elif step_type == "map_proof":
             tree: str = step["tree"]
@@ -813,20 +961,38 @@ def verify(
             if is_tx:
                 print(f"    {describe_tx_leaves(leaves)}")
             else:
-                child_hashes = extract_state_child_hashes(leaves)
-                if child_hashes:
-                    for child_hash in child_hashes:
-                        add_capability(
-                            trusted_ledger_hashes,
-                            child_hash,
-                            f"skip list from step {i}",
-                        )
-                    print(
-                        f"    capability: {len(child_hashes)} child ledger hashes "
-                        f"from authenticated state leaf/leaves"
+                ledger_hashes_leaves = extract_ledger_hashes_leaves(leaves)
+                if ledger_hashes_leaves:
+                    candidate_count = sum(
+                        len(leaf.hashes) for leaf in ledger_hashes_leaves
                     )
+                    print(
+                        f"    LedgerHashes: {candidate_count} candidate child hashes "
+                        f"in {len(ledger_hashes_leaves)} structurally valid leaf/leaves"
+                    )
+
+                    containing_sequences = trusted_state_root_sequences.get(root_hex)
+                    if not containing_sequences:
+                        msg = "state root has no authenticated containing ledger sequence"
+                        print(f"    [FAIL] {msg}")
+                        result.ok = False
+                        result.errors.append(f"step {i}: {msg}")
+                        continue
+
+                    for leaf in ledger_hashes_leaves:
+                        source = f"LedgerHashes leaf {leaf.key_hex[:16]}... from step {i}"
+                        for containing_sequence in containing_sequences:
+                            support = LedgerHashesSupport(
+                                leaf_key_hex=leaf.key_hex,
+                                containing_ledger_sequence=containing_sequence,
+                                last_ledger_sequence=leaf.last_ledger_sequence,
+                                hashes_count=len(leaf.hashes),
+                                source=source,
+                            )
+                            for child_hash in leaf.hashes:
+                                ledger_hashes_candidates[child_hash].append(support)
                 else:
-                    print("    state proof contains no Hashes arrays")
+                    print("    state proof contains no structurally valid LedgerHashes leaves")
 
         else:
             msg = f"unknown step type: {step_type!r}"

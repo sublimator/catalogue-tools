@@ -1,4 +1,5 @@
 #include "xprv/anchor-verifier.h"
+#include "xprv/hex-utils.h"
 #include "xprv/manifest-utils.h"
 
 #include <catl/core/base64.h>
@@ -24,15 +25,7 @@ static LogPartition log_("anchor-verify", LogLevel::INFO);
 std::vector<uint8_t>
 AnchorVerifier::from_hex(std::string_view hex)
 {
-    std::vector<uint8_t> result;
-    result.reserve(hex.size() / 2);
-    for (size_t i = 0; i + 1 < hex.size(); i += 2)
-    {
-        unsigned int byte;
-        std::sscanf(hex.data() + i, "%2x", &byte);
-        result.push_back(static_cast<uint8_t>(byte));
-    }
-    return result;
+    return xprv::from_hex(hex);
 }
 
 std::string
@@ -279,6 +272,16 @@ AnchorVerifier::verify(
         return result;
     }
 
+    if (lower(publisher_manifest.master_key_hex()) != lower(trusted_key))
+    {
+        result.error = "publisher manifest master key mismatch";
+        PLOGE(log_, "Publisher manifest is not bound to the trusted key");
+        narrative.push_back(
+            "   FAIL: publisher manifest master key does not match the "
+            "trusted publisher key.");
+        return result;
+    }
+
     // Verify publisher manifest signatures: MAN\0 + serialized fields
     // (without Signature and MasterSignature), signed by both keys.
     auto signing_data = manifest_signing_data(manifest_bytes, protocol);
@@ -375,53 +378,92 @@ AnchorVerifier::verify(
         return result;
     }
 
-    auto const& blob_obj = blob_json.as_object();
-    if (!blob_obj.contains("validators"))
+    if (!blob_json.is_object())
     {
-        result.error = "no validators in blob";
-        narrative.push_back("   FAIL: no validators array in blob.");
+        result.error = "UNL blob is not an object";
+        narrative.push_back("   FAIL: UNL blob is not a JSON object.");
+        return result;
+    }
+
+    auto const& blob_obj = blob_json.as_object();
+    if (!blob_obj.contains("validators") ||
+        !blob_obj.at("validators").is_array())
+    {
+        result.error = "no valid validators array in blob";
+        narrative.push_back("   FAIL: no valid validators array in blob.");
         return result;
     }
 
     // Build signing key → master key lookup
     std::map<std::string, std::string> signing_to_master;
+    std::set<std::string> unl_masters;
     auto const& vals_array = blob_obj.at("validators").as_array();
 
     for (auto const& v : vals_array)
     {
+        if (!v.is_object())
+        {
+            result.error = "malformed validator entry in UNL blob";
+            narrative.push_back("   FAIL: malformed validator entry in UNL.");
+            return result;
+        }
         auto const& vobj = v.as_object();
-        if (!vobj.contains("manifest"))
-            continue;
+        if (!vobj.contains("manifest") ||
+            !vobj.at("manifest").is_string() ||
+            !vobj.contains("validation_public_key") ||
+            !vobj.at("validation_public_key").is_string())
+        {
+            result.error = "validator entry missing key or manifest";
+            narrative.push_back(
+                "   FAIL: validator entry is missing its key or manifest.");
+            return result;
+        }
 
         auto m_b64 = std::string(vobj.at("manifest").as_string());
         auto m_bytes = catl::base64_decode(m_b64);
-        auto manifest = catl::vl::parse_manifest(m_bytes);
-        if (manifest.signing_public_key.empty())
-            continue;
-
-        // Verify validator manifest master signature
-        if (!manifest.master_signature.empty())
+        auto verified_manifest = parse_and_verify_manifest(m_bytes, protocol);
+        if (!verified_manifest ||
+            verified_manifest->signing_public_key.empty())
         {
-            auto val_signing_data = manifest_signing_data(m_bytes, protocol);
-            if (!catl::crypto::verify_message(
-                    manifest.master_public_key,
-                    manifest.master_signature,
-                    val_signing_data))
-            {
-                PLOGW(
-                    log_,
-                    "  Validator manifest failed: master=",
-                    manifest.master_key_hex().substr(0, 16),
-                    "...");
-                continue;
-            }
+            result.error = "invalid validator manifest";
+            narrative.push_back("   FAIL: a validator manifest is invalid.");
+            return result;
         }
 
-        signing_to_master[manifest.signing_key_hex()] =
-            manifest.master_key_hex();
+        auto const advertised_master =
+            lower(std::string(vobj.at("validation_public_key").as_string()));
+        auto const manifest_master =
+            lower(verified_manifest->master_key_hex());
+        if (advertised_master != manifest_master)
+        {
+            result.error = "validator manifest master key mismatch";
+            narrative.push_back(
+                "   FAIL: validator manifest does not match its advertised "
+                "master key.");
+            return result;
+        }
+
+        auto const signing_key =
+            lower(verified_manifest->signing_key_hex());
+        auto const [existing, inserted] =
+            signing_to_master.emplace(signing_key, manifest_master);
+        if (!inserted && existing->second != manifest_master)
+        {
+            result.error = "validator signing key maps to multiple masters";
+            narrative.push_back(
+                "   FAIL: validator signing key has ambiguous ownership.");
+            return result;
+        }
+        unl_masters.insert(manifest_master);
     }
 
-    result.unl_size = static_cast<int>(signing_to_master.size());
+    result.unl_size = static_cast<int>(unl_masters.size());
+    if (result.unl_size == 0)
+    {
+        result.error = "UNL contains no verified validators";
+        narrative.push_back("   FAIL: UNL contains no verified validators.");
+        return result;
+    }
     PLOGI(
         log_,
         "Step 4: Parsed ",
@@ -446,7 +488,7 @@ AnchorVerifier::verify(
     int total = 0;
     int verified = 0;
     int matched_unl = 0;
-    std::set<std::string> counted_keys;  // prevent double-counting
+    std::set<std::string> counted_masters;  // one vote per validator identity
 
     for (auto const& kv : validations)
     {
@@ -460,6 +502,16 @@ AnchorVerifier::verify(
         {
             PLOGD(log_, "  Validation ", total, ": parse failed");
             continue;
+        }
+
+        auto const parsed_key_hex = lower(to_hex(parsed.signing_key));
+        if (lower(signing_key_hex) != parsed_key_hex)
+        {
+            result.error = "validation map key does not match SigningPubKey";
+            narrative.push_back(
+                "   FAIL: validation map key does not match its embedded "
+                "SigningPubKey.");
+            return result;
         }
 
         // Check ledger hash matches anchor
@@ -495,11 +547,10 @@ AnchorVerifier::verify(
         verified++;
 
         // Check if signing key is in UNL
-        auto parsed_key_hex = to_hex(parsed.signing_key);
-        if (signing_to_master.count(parsed_key_hex) &&
-            !counted_keys.count(parsed_key_hex))
+        auto const member = signing_to_master.find(parsed_key_hex);
+        if (member != signing_to_master.end() &&
+            counted_masters.insert(member->second).second)
         {
-            counted_keys.insert(parsed_key_hex);
             matched_unl++;
         }
     }

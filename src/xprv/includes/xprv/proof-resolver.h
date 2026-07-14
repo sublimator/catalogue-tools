@@ -19,8 +19,8 @@
 namespace xprv {
 
 /// Resolve and verify a proof chain.
-/// If trusted_publisher_key is provided, verifies the anchor's UNL
-/// and validation signatures against it.
+/// Verifies the anchor's UNL and validation signatures against the required
+/// trusted publisher key.
 /// Protocol is needed to serialize leaf JSON back to binary for hash
 /// verification.
 /// Returns true if all verifiable steps pass.
@@ -28,6 +28,13 @@ bool
 resolve_proof_chain(
     ProofChain const& chain,
     catl::xdata::Protocol const& protocol,
-    std::string const& trusted_publisher_key = "");
+    std::string const& trusted_publisher_key);
+
+#ifdef XPRV_TESTING
+/// Test-only entry point for exercising the post-anchor capability graph.
+bool
+resolve_proof_chain_with_pretrusted_anchor_for_testing(
+    ProofChain const& chain, catl::xdata::Protocol const& protocol);
+#endif
 
 }  // namespace xprv

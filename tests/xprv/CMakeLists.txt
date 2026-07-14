@@ -31,15 +31,19 @@ target_sources(
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/node-identity-resolver.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-binary.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/peer-json.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/anchor-verifier.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/manifest-utils.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-json.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-resolver.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-steps.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-buffer.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-collector.cpp)
 
 # Share format version with the xprv target
 file(READ ${CMAKE_SOURCE_DIR}/src/xprv/VERSION XPRV_FORMAT_VERSION)
 string(STRIP "${XPRV_FORMAT_VERSION}" XPRV_FORMAT_VERSION)
-target_compile_definitions(xprv_gtest PRIVATE XPRV_FORMAT_VERSION=${XPRV_FORMAT_VERSION})
+target_compile_definitions(
+  xprv_gtest PRIVATE XPRV_FORMAT_VERSION=${XPRV_FORMAT_VERSION} XPRV_TESTING=1)
 
 include(GoogleTest)
 gtest_discover_tests(xprv_gtest DISCOVERY_TIMEOUT 30)

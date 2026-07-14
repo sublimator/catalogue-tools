@@ -1,6 +1,7 @@
 #include "xprv/proof-resolver.h"
 #include "xprv/anchor-verifier.h"
 #include "xprv/hex-utils.h"
+#include "xprv/ledger-hashes.h"
 #include "xprv/proof-chain-json.h"
 #include "xprv/proof-steps.h"
 
@@ -12,8 +13,11 @@
 #include <catl/xdata/serialize.h>
 
 #include <algorithm>
+#include <cctype>
 #include <map>
+#include <optional>
 #include <set>
+#include <string_view>
 
 namespace xprv {
 
@@ -102,38 +106,112 @@ count_trie_nodes(boost::json::value const& node, int depth, TrieStats& stats)
     }
 }
 
-/// Collect all Hashes entries from all state tree leaves.
-static void
-collect_leaf_hashes(
-    boost::json::value const& trie,
-    std::vector<std::string>& out)
+struct LedgerHashesLeaf
 {
-    if (trie.is_array())
+    Hash256 key;
+    std::vector<std::string> hashes;
+    std::optional<uint32_t> last_ledger_seq;
+};
+
+struct LedgerHashesSupport
+{
+    Hash256 leaf_key;
+    uint32_t containing_ledger_seq = 0;
+    std::optional<uint32_t> last_ledger_seq;
+    int hashes_count = 0;
+    std::string source;
+};
+
+struct ResolvedLedgerHashesSupport
+{
+    LedgerHashesListType type;
+    int hashes_count = 0;
+    std::string source;
+};
+
+static std::string
+upper_copy(std::string s);
+
+static bool
+is_hash_hex(std::string_view value)
+{
+    return value.size() == 64 &&
+        std::all_of(value.begin(), value.end(), [](unsigned char c) {
+               return std::isxdigit(c) != 0;
+           });
+}
+
+static std::optional<LedgerHashesLeaf>
+parse_ledger_hashes_leaf(
+    std::string const& key_hex,
+    boost::json::value const& leaf_data)
+{
+    if (!is_hash_hex(key_hex) || !leaf_data.is_object())
+        return std::nullopt;
+
+    auto const& sle = leaf_data.as_object();
+    auto const type = sle.find("LedgerEntryType");
+    auto const hashes = sle.find("Hashes");
+    if (type == sle.end() || !type->value().is_string() ||
+        type->value().as_string() != "LedgerHashes" || hashes == sle.end() ||
+        !hashes->value().is_array() || hashes->value().as_array().size() > 256)
+        return std::nullopt;
+
+    LedgerHashesLeaf result;
+    result.key = hash_from_hex(key_hex);
+    result.hashes.reserve(hashes->value().as_array().size());
+    for (auto const& hash : hashes->value().as_array())
     {
-        auto const& arr = trie.as_array();
-        if (arr.size() >= 2 && arr[1].is_object())
-        {
-            auto const& sle = arr[1].as_object();
-            if (sle.contains("Hashes") && sle.at("Hashes").is_array())
-            {
-                for (auto const& h : sle.at("Hashes").as_array())
-                {
-                    if (h.is_string())
-                        out.push_back(std::string(h.as_string()));
-                }
-            }
-        }
-        return;
+        if (!hash.is_string())
+            return std::nullopt;
+        auto hash_hex = std::string(hash.as_string());
+        if (!is_hash_hex(hash_hex))
+            return std::nullopt;
+        result.hashes.push_back(upper_copy(std::move(hash_hex)));
     }
-    if (trie.is_object())
+
+    if (auto const last = sle.find("LastLedgerSequence"); last != sle.end())
     {
-        for (auto const& kv : trie.as_object())
+        try
         {
-            if (kv.key() == "__depth__")
-                continue;
-            collect_leaf_hashes(kv.value(), out);
+            result.last_ledger_seq = last->value().to_number<uint32_t>();
+        }
+        catch (...)
+        {
+            return std::nullopt;
         }
     }
+
+    return result;
+}
+
+static std::optional<ResolvedLedgerHashesSupport>
+find_ledger_hashes_support(
+    std::map<std::string, std::vector<LedgerHashesSupport>> const& candidates,
+    std::string const& header_hash,
+    uint32_t header_seq)
+{
+    auto const found = candidates.find(header_hash);
+    if (found == candidates.end())
+        return std::nullopt;
+
+    for (auto const& candidate : found->second)
+    {
+        auto const type = classify_ledger_hashes_link(
+            candidate.leaf_key, candidate.containing_ledger_seq, header_seq);
+        if (!type ||
+            !ledger_hashes_last_sequence_consistent(
+                *type,
+                candidate.containing_ledger_seq,
+                header_seq,
+                candidate.last_ledger_seq))
+            continue;
+
+        return ResolvedLedgerHashesSupport{
+            *type, candidate.hashes_count, candidate.source};
+    }
+
+    return std::nullopt;
 }
 
 /// Find the first leaf (array node) in a JSON trie.
@@ -190,16 +268,26 @@ upper_copy(std::string s)
 // Main resolver
 //------------------------------------------------------------------------------
 
-bool
-resolve_proof_chain(
+static bool
+resolve_proof_chain_impl(
     ProofChain const& chain,
     catl::xdata::Protocol const& protocol,
-    std::string const& trusted_publisher_key)
+    std::string const& trusted_publisher_key,
+    bool pretrusted_anchor_for_testing)
 {
     PLOGI(verify_log, "");
     PLOGI(
         verify_log,
         "═══════════════════════════════════════════════════════════════");
+
+    if (trusted_publisher_key.empty() && !pretrusted_anchor_for_testing)
+    {
+        PLOGE(
+            verify_log,
+            "  Anchor: no trusted publisher key configured; refusing "
+            "implicit trust");
+        return false;
+    }
     PLOGI(
         verify_log,
         "  PROOF CHAIN VERIFICATION  (",
@@ -215,12 +303,13 @@ resolve_proof_chain(
     std::map<std::string, std::vector<std::string>> trusted_ledger_hashes;
     std::map<std::string, std::vector<std::string>> trusted_tx_roots;
     std::map<std::string, std::vector<std::string>> trusted_state_roots;
+    std::map<std::string, std::set<uint32_t>> trusted_state_root_sequences;
+    std::map<std::string, std::vector<LedgerHashesSupport>>
+        ledger_hashes_candidates;
     std::map<std::string, uint32_t> skip_source_last_seq;
-    std::map<std::string, int> skip_source_sizes;
     std::set<std::string> seen_header_hashes;
     std::set<std::pair<std::string, std::string>> seen_map_roots;
     bool anchor_seen = false;
-    uint32_t anchor_seq = 0;
 
     std::vector<ProofStep> proof_steps;
 
@@ -237,6 +326,8 @@ resolve_proof_chain(
                 {
                     auto ledger_hash_hex = upper_hex(data.ledger_hash);
 
+                    bool const anchor_position_valid =
+                        step_num == 1 && !anchor_seen;
                     if (step_num != 1)
                     {
                         PLOGE(verify_log, "  Anchor: must be the first step");
@@ -248,9 +339,6 @@ resolve_proof_chain(
                         all_ok = false;
                     }
                     anchor_seen = true;
-                    anchor_seq = data.ledger_index;
-                    add_capability(
-                        trusted_ledger_hashes, ledger_hash_hex, "anchor");
 
                     PLOGI(verify_log, "");
                     PLOGI(verify_log, "Step ", step_num, ": ANCHOR");
@@ -265,52 +353,74 @@ resolve_proof_chain(
                     anchor_step.ledger_index = data.ledger_index;
                     anchor_step.ledger_hash = ledger_hash_hex.substr(0, 16);
 
-                    if (!trusted_publisher_key.empty())
+                    bool anchor_verified = pretrusted_anchor_for_testing;
+                    if (!pretrusted_anchor_for_testing)
                     {
-                        // Re-serialize anchor to JSON for AnchorVerifier
-                        // (it still operates on JSON for now)
-                        auto anchor_json = to_json(ProofChain{.steps = {data}});
-                        auto const& steps = anchor_json.at("steps").as_array();
-                        std::vector<std::string> av_narrative;
-                        auto av_result = AnchorVerifier::verify(
-                            steps[0].as_object(),
-                            trusted_publisher_key,
-                            protocol,
-                            av_narrative);
-
-                        anchor_step.sub_steps = std::move(av_narrative);
-                        anchor_step.publisher_key =
-                            trusted_publisher_key.substr(0, 16);
-                        anchor_step.quorum_check =
-                            av_result.verified ? Check::pass : Check::fail;
-                        anchor_step.unl_size = av_result.unl_size;
-                        anchor_step.validations_verified =
-                            av_result.validations_verified;
-                        anchor_step.validations_matched =
-                            av_result.validations_matched_unl;
-
-                        if (av_result.verified)
+                        try
                         {
-                            PLOGI(
-                                verify_log,
-                                "  Anchor: VERIFIED (",
-                                av_result.validations_matched_unl,
-                                "/",
-                                av_result.unl_size,
-                                " UNL, ",
-                                av_result.validations_verified,
-                                " sigs verified)");
+                            // Re-serialize anchor to JSON for AnchorVerifier
+                            // (it still operates on JSON for now)
+                            auto anchor_json =
+                                to_json(ProofChain{.steps = {data}});
+                            auto const& steps =
+                                anchor_json.at("steps").as_array();
+                            std::vector<std::string> av_narrative;
+                            auto av_result = AnchorVerifier::verify(
+                                steps[0].as_object(),
+                                trusted_publisher_key,
+                                protocol,
+                                av_narrative);
+
+                            anchor_step.sub_steps = std::move(av_narrative);
+                            anchor_step.publisher_key =
+                                trusted_publisher_key.substr(0, 16);
+                            anchor_step.quorum_check = av_result.verified
+                                ? Check::pass
+                                : Check::fail;
+                            anchor_step.unl_size = av_result.unl_size;
+                            anchor_step.validations_verified =
+                                av_result.validations_verified;
+                            anchor_step.validations_matched =
+                                av_result.validations_matched_unl;
+                            anchor_verified = av_result.verified;
+
+                            if (anchor_verified)
+                            {
+                                PLOGI(
+                                    verify_log,
+                                    "  Anchor: VERIFIED (",
+                                    av_result.validations_matched_unl,
+                                    "/",
+                                    av_result.unl_size,
+                                    " UNL, ",
+                                    av_result.validations_verified,
+                                    " sigs verified)");
+                            }
+                            else
+                            {
+                                PLOGE(
+                                    verify_log,
+                                    "  Anchor: FAILED (",
+                                    av_result.error,
+                                    ")");
+                                all_ok = false;
+                            }
                         }
-                        else
+                        catch (std::exception const& e)
                         {
                             PLOGE(
                                 verify_log,
-                                "  Anchor: FAILED (",
-                                av_result.error,
+                                "  Anchor: FAILED (malformed anchor: ",
+                                e.what(),
                                 ")");
+                            anchor_step.quorum_check = Check::fail;
                             all_ok = false;
                         }
                     }
+
+                    if (anchor_verified && anchor_position_valid)
+                        add_capability(
+                            trusted_ledger_hashes, ledger_hash_hex, "anchor");
 
                     proof_steps.push_back(
                         {StepType::anchor, step_num, std::move(anchor_step)});
@@ -319,7 +429,13 @@ resolve_proof_chain(
                 else if constexpr (std::is_same_v<T, HeaderData>)
                 {
                     PLOGI(verify_log, "");
-                    PLOGI(verify_log, "Step ", step_num, ": LEDGER HEADER (seq=", data.seq, ")");
+                    PLOGI(
+                        verify_log,
+                        "Step ",
+                        step_num,
+                        ": LEDGER HEADER (seq=",
+                        data.seq,
+                        ")");
 
                     auto computed = hash_header(data);
                     auto computed_hex = upper_hex(computed);
@@ -334,47 +450,54 @@ resolve_proof_chain(
                     hdr_step.computed_hash = computed_hex.substr(0, 16);
                     hdr_step.role = HeaderRole::target;
 
-                    auto const* source =
+                    auto const* direct_source =
                         first_source(trusted_ledger_hashes, computed_hex);
-                    if (!source)
+                    auto const skip_support = direct_source
+                        ? std::optional<ResolvedLedgerHashesSupport>{}
+                        : find_ledger_hashes_support(
+                              ledger_hashes_candidates, computed_hex, data.seq);
+                    bool const header_supported = direct_source || skip_support;
+
+                    if (!header_supported)
                     {
                         PLOGE(
                             verify_log,
-                            "  Hash check:   FAIL (unsupported by prior anchor/header/skip list)");
+                            "  Hash check:   FAIL (unsupported by prior "
+                            "anchor/header/recognized LedgerHashes leaf)");
                         all_ok = false;
                         hdr_step.hash_check = Check::fail;
                     }
                     else
                     {
                         hdr_step.hash_check = Check::pass;
-                        if (*source == "anchor")
+                        if (direct_source && *direct_source == "anchor")
                         {
                             hdr_step.method = HeaderVerifyMethod::anchor_hash;
                             hdr_step.role = HeaderRole::anchor;
-                            anchor_seq = data.seq;
                             PLOGI(verify_log, "  Hash check:   PASS");
                         }
-                        else if (source->rfind("skip list from step ", 0) == 0)
+                        else if (skip_support)
                         {
                             hdr_step.method = HeaderVerifyMethod::skip_list;
                             hdr_step.role =
-                                (data.seq % 256 == 0 && data.seq != anchor_seq)
+                                skip_support->type == LedgerHashesListType::flag
                                 ? HeaderRole::flag
                                 : HeaderRole::target;
                             hdr_step.skip_list_size =
-                                skip_source_sizes[*source];
-                            hdr_step.skip_type = (data.seq % 256 == 0 &&
-                                                  data.seq != anchor_seq)
+                                skip_support->hashes_count;
+                            hdr_step.skip_type =
+                                skip_support->type == LedgerHashesListType::flag
                                 ? SkipListType::flag
                                 : SkipListType::recent;
                             PLOGI(
                                 verify_log,
-                                "  Skip list:    PASS (source ",
-                                *source,
+                                "  LedgerHashes: PASS (source ",
+                                skip_support->source,
                                 ")");
 
-                            auto [it_last, inserted] = skip_source_last_seq.emplace(
-                                *source, data.seq);
+                            auto [it_last, inserted] =
+                                skip_source_last_seq.emplace(
+                                    skip_support->source, data.seq);
                             if (!inserted && data.seq > it_last->second)
                             {
                                 PLOGW(
@@ -384,7 +507,7 @@ resolve_proof_chain(
                                     " appears after ",
                                     it_last->second,
                                     " from ",
-                                    *source);
+                                    skip_support->source);
                             }
                             it_last->second = data.seq;
                         }
@@ -395,7 +518,7 @@ resolve_proof_chain(
                             PLOGI(
                                 verify_log,
                                 "  Parent hash:  PASS (source ",
-                                *source,
+                                *direct_source,
                                 ")");
                         }
                     }
@@ -409,18 +532,25 @@ resolve_proof_chain(
                             "...");
                     }
 
-                    add_capability(
-                        trusted_ledger_hashes,
-                        upper_hex(data.parent_hash),
-                        "parent hash of header seq=" + std::to_string(data.seq));
-                    add_capability(
-                        trusted_tx_roots,
-                        upper_hex(data.tx_hash),
-                        "header seq=" + std::to_string(data.seq));
-                    add_capability(
-                        trusted_state_roots,
-                        upper_hex(data.account_hash),
-                        "header seq=" + std::to_string(data.seq));
+                    if (header_supported)
+                    {
+                        add_capability(
+                            trusted_ledger_hashes,
+                            upper_hex(data.parent_hash),
+                            "parent hash of header seq=" +
+                                std::to_string(data.seq));
+                        add_capability(
+                            trusted_tx_roots,
+                            upper_hex(data.tx_hash),
+                            "header seq=" + std::to_string(data.seq));
+                        auto const state_root = upper_hex(data.account_hash);
+                        add_capability(
+                            trusted_state_roots,
+                            state_root,
+                            "header seq=" + std::to_string(data.seq));
+                        trusted_state_root_sequences[state_root].insert(
+                            data.seq);
+                    }
 
                     PLOGI(
                         verify_log,
@@ -468,7 +598,7 @@ resolve_proof_chain(
                         catl::shamap::AbbreviatedTreeTraits>;
 
                     std::optional<AbbrevMap> reconstructed;
-                    std::vector<std::string> state_hashes;
+                    std::vector<LedgerHashesLeaf> ledger_hashes_leaves;
 
                     // --- JSON trie path ---
                     if (!data.trie_json.is_null())
@@ -507,6 +637,15 @@ resolve_proof_chain(
                                             OwnedItem::create(
                                                 key, Slice(&dummy, 0)));
                                     }
+                                    if (is_state)
+                                    {
+                                        auto candidate =
+                                            parse_ledger_hashes_leaf(
+                                                key_hex, leaf_data);
+                                        if (candidate)
+                                            ledger_hashes_leaves.push_back(
+                                                std::move(*candidate));
+                                    }
                                     auto bytes = is_state
                                         ? catl::xdata::serialize_leaf(
                                               leaf_data.as_object(), protocol)
@@ -528,16 +667,16 @@ resolve_proof_chain(
                         // Extract narrative info from JSON trie
                         if (is_state)
                         {
-                            collect_leaf_hashes(data.trie_json, state_hashes);
-                            if (!state_hashes.empty())
+                            if (!ledger_hashes_leaves.empty())
                             {
-                                map_step.hashes_count =
-                                    static_cast<int>(state_hashes.size());
-                                bool is_flag_skip =
-                                    state_hashes.size() < 256;
-                                map_step.skip_type = is_flag_skip
-                                    ? SkipListType::flag
-                                    : SkipListType::recent;
+                                for (auto const& leaf : ledger_hashes_leaves)
+                                    map_step.hashes_count +=
+                                        static_cast<int>(leaf.hashes.size());
+                                map_step.skip_type =
+                                    ledger_hashes_leaves.front().key ==
+                                        skip_list_key()
+                                    ? SkipListType::recent
+                                    : SkipListType::flag;
                             }
                         }
                         else
@@ -628,24 +767,14 @@ resolve_proof_chain(
                                             auto parsed =
                                                 catl::xdata::parse_leaf(
                                                     full, protocol, false);
-                                            if (parsed.is_object() &&
-                                                parsed.as_object().contains(
-                                                    "Hashes"))
-                                            {
-                                                for (auto const& h :
-                                                     parsed.as_object()
-                                                         .at("Hashes")
-                                                         .as_array())
-                                                {
-                                                    if (h.is_string())
-                                                    {
-                                                        state_hashes.push_back(
-                                                            upper_copy(
-                                                                std::string(
-                                                                    h.as_string())));
-                                                    }
-                                                }
-                                            }
+                                            auto candidate =
+                                                parse_ledger_hashes_leaf(
+                                                    upper_hex(
+                                                        item->key().to_hash()),
+                                                    parsed);
+                                            if (candidate)
+                                                ledger_hashes_leaves.push_back(
+                                                    std::move(*candidate));
                                         }
                                         else
                                         {
@@ -709,7 +838,8 @@ resolve_proof_chain(
                     {
                         PLOGE(
                             verify_log,
-                            "  Trie proof:   FAIL (could not reconstruct abbreviated tree)");
+                            "  Trie proof:   FAIL (could not reconstruct "
+                            "abbreviated tree)");
                         map_step.root_hash_check = Check::fail;
                         all_ok = false;
                     }
@@ -754,31 +884,73 @@ resolve_proof_chain(
 
                                 if (is_state)
                                 {
-                                    map_step.hashes_count =
-                                        static_cast<int>(state_hashes.size());
-                                    map_step.skip_type =
-                                        state_hashes.size() < 256
-                                        ? SkipListType::flag
-                                        : SkipListType::recent;
-                                    if (!state_hashes.empty())
+                                    map_step.hashes_count = 0;
+                                    for (auto const& leaf :
+                                         ledger_hashes_leaves)
+                                        map_step.hashes_count +=
+                                            static_cast<int>(
+                                                leaf.hashes.size());
+                                    if (!ledger_hashes_leaves.empty())
                                     {
+                                        map_step.skip_type =
+                                            ledger_hashes_leaves.front().key ==
+                                                skip_list_key()
+                                            ? SkipListType::recent
+                                            : SkipListType::flag;
                                         PLOGI(
                                             verify_log,
-                                            "  Skip list:    ",
-                                            state_hashes.size(),
-                                            " hashes");
+                                            "  LedgerHashes: ",
+                                            map_step.hashes_count,
+                                            " candidate hashes in ",
+                                            ledger_hashes_leaves.size(),
+                                            " structurally valid leaf/leaves");
                                     }
-                                    for (auto const& h : state_hashes)
+
+                                    auto const sequences =
+                                        trusted_state_root_sequences.find(
+                                            computed_root_hex);
+                                    if (sequences ==
+                                        trusted_state_root_sequences.end())
                                     {
-                                        auto h_upper = upper_copy(h);
-                                        skip_source_sizes["skip list from step " +
-                                                          std::to_string(step_num)] =
-                                            static_cast<int>(state_hashes.size());
-                                        add_capability(
-                                            trusted_ledger_hashes,
-                                            h_upper,
-                                            "skip list from step " +
-                                                std::to_string(step_num));
+                                        PLOGE(
+                                            verify_log,
+                                            "  LedgerHashes: FAIL (state root "
+                                            "has no authenticated containing "
+                                            "ledger sequence)");
+                                        map_step.root_hash_check = Check::fail;
+                                        all_ok = false;
+                                    }
+                                    else
+                                    {
+                                        for (auto const& leaf :
+                                             ledger_hashes_leaves)
+                                        {
+                                            auto const source =
+                                                "LedgerHashes leaf " +
+                                                upper_hex(leaf.key).substr(
+                                                    0, 16) +
+                                                "... from step " +
+                                                std::to_string(step_num);
+                                            for (auto const containing_seq :
+                                                 sequences->second)
+                                            {
+                                                for (auto const& hash :
+                                                     leaf.hashes)
+                                                {
+                                                    ledger_hashes_candidates[hash]
+                                                        .push_back(
+                                                            LedgerHashesSupport{
+                                                                leaf.key,
+                                                                containing_seq,
+                                                                leaf.last_ledger_seq,
+                                                                static_cast<
+                                                                    int>(
+                                                                    leaf.hashes
+                                                                        .size()),
+                                                                source});
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -786,17 +958,20 @@ resolve_proof_chain(
                             {
                                 PLOGE(
                                     verify_log,
-                                    "  Trie root:    FAIL (unsupported by prior header)");
+                                    "  Trie root:    FAIL (unsupported by "
+                                    "prior header)");
                                 map_step.root_hash_check = Check::fail;
                                 all_ok = false;
                             }
                         }
                         catch (std::exception const& e)
                         {
-                            PLOGW(
+                            PLOGE(
                                 verify_log,
                                 "  Trie hash verification failed: ",
                                 e.what());
+                            map_step.root_hash_check = Check::fail;
+                            all_ok = false;
                         }
                     }
 
@@ -807,6 +982,12 @@ resolve_proof_chain(
                 }
             },
             step);
+    }
+
+    if (!anchor_seen)
+    {
+        PLOGE(verify_log, "  Anchor: missing required anchor step");
+        all_ok = false;
     }
 
     // Results
@@ -848,5 +1029,24 @@ resolve_proof_chain(
 
     return all_ok;
 }
+
+bool
+resolve_proof_chain(
+    ProofChain const& chain,
+    catl::xdata::Protocol const& protocol,
+    std::string const& trusted_publisher_key)
+{
+    return resolve_proof_chain_impl(
+        chain, protocol, trusted_publisher_key, false);
+}
+
+#ifdef XPRV_TESTING
+bool
+resolve_proof_chain_with_pretrusted_anchor_for_testing(
+    ProofChain const& chain, catl::xdata::Protocol const& protocol)
+{
+    return resolve_proof_chain_impl(chain, protocol, "", true);
+}
+#endif
 
 }  // namespace xprv

@@ -592,6 +592,8 @@ public:
         uint8_t root_path[32] = {};
         Walker walker{map, data, 0};
         walker.walk(0, root_path);
+        if (walker.pos != data.size())
+            throw std::runtime_error("binary trie: trailing bytes");
 
         return map;
     }

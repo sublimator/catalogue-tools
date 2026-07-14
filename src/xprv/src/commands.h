@@ -41,6 +41,7 @@ int
 cmd_verify(
     std::string const& proof_path,
     std::string const& trusted_key,
+    uint32_t trusted_network_id,
     catl::xdata::Protocol const& protocol);
 
 // cmd_serve takes Config directly — no intermediate ServeOptions.

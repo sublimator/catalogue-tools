@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
+#include <xprv/ledger-hashes.h>
 #include <xprv/skip-list.h>
 
+using xprv::classify_ledger_hashes_link;
 using xprv::flag_ledger_for;
+using xprv::ledger_hashes_last_sequence_consistent;
+using xprv::LedgerHashesListType;
 using xprv::skip_list_key;
 
 // ─── flag_ledger_for ────────────────────────────────────────────────
@@ -97,9 +101,9 @@ TEST(SkipListKey, LongKeyDeterministic)
 TEST(SkipListKey, DifferentGroupsDifferentKeys)
 {
     // Different flag ledgers in different groups → different keys
-    auto k1 = skip_list_key(256);       // group 0
-    auto k2 = skip_list_key(65536);     // group 1
-    auto k3 = skip_list_key(7123456);   // group 108
+    auto k1 = skip_list_key(256);      // group 0
+    auto k2 = skip_list_key(65536);    // group 1
+    auto k3 = skip_list_key(7123456);  // group 108
     EXPECT_NE(k1, k2);
     EXPECT_NE(k1, k3);
     EXPECT_NE(k2, k3);
@@ -121,4 +125,60 @@ TEST(SkipListKey, ShortAndLongDiffer)
     auto short_key = skip_list_key();
     auto long_key = skip_list_key(256);
     EXPECT_NE(short_key, long_key);
+}
+
+// ─── LedgerHashes recognition ──────────────────────────────────────
+
+TEST(LedgerHashesLink, AcceptsRecentBoundary)
+{
+    auto type = classify_ledger_hashes_link(skip_list_key(), 1000, 744);
+    ASSERT_TRUE(type);
+    EXPECT_EQ(*type, LedgerHashesListType::recent);
+}
+
+TEST(LedgerHashesLink, RejectsRecentOutsideRange)
+{
+    EXPECT_FALSE(classify_ledger_hashes_link(skip_list_key(), 1000, 743));
+    EXPECT_FALSE(classify_ledger_hashes_link(skip_list_key(), 1000, 1000));
+    EXPECT_FALSE(classify_ledger_hashes_link(skip_list_key(), 1000, 1001));
+}
+
+TEST(LedgerHashesLink, AcceptsFlagInMatchingEra)
+{
+    constexpr uint32_t child = 131072;
+    auto type =
+        classify_ledger_hashes_link(skip_list_key(child), 200000, child);
+    ASSERT_TRUE(type);
+    EXPECT_EQ(*type, LedgerHashesListType::flag);
+}
+
+TEST(LedgerHashesLink, RejectsNonFlagAndWrongEra)
+{
+    EXPECT_FALSE(
+        classify_ledger_hashes_link(skip_list_key(131072), 200000, 131073));
+    EXPECT_FALSE(
+        classify_ledger_hashes_link(skip_list_key(65536), 200000, 131072));
+    EXPECT_FALSE(
+        classify_ledger_hashes_link(skip_list_key(196608), 196608, 196608));
+}
+
+TEST(LedgerHashesLink, CrossChecksRecentLastSequence)
+{
+    EXPECT_TRUE(ledger_hashes_last_sequence_consistent(
+        LedgerHashesListType::recent, 1000, 900, 999));
+    EXPECT_FALSE(ledger_hashes_last_sequence_consistent(
+        LedgerHashesListType::recent, 1000, 900, 998));
+}
+
+TEST(LedgerHashesLink, CrossChecksFlagLastSequence)
+{
+    constexpr uint32_t child = 131072;
+    EXPECT_TRUE(ledger_hashes_last_sequence_consistent(
+        LedgerHashesListType::flag, 200000, child, 196352));
+    EXPECT_FALSE(ledger_hashes_last_sequence_consistent(
+        LedgerHashesListType::flag, 200000, child, 196353));
+    EXPECT_FALSE(ledger_hashes_last_sequence_consistent(
+        LedgerHashesListType::flag, 200000, child, 65536));
+    EXPECT_FALSE(ledger_hashes_last_sequence_consistent(
+        LedgerHashesListType::flag, 200000, child, 131071));
 }

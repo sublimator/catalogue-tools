@@ -652,6 +652,9 @@ decode_anchor_core(std::span<const uint8_t> payload)
     size_t val_count = leb128_decode(payload, pos);
     if (val_count == 0)
     {
+        if (pos != payload.size())
+            throw std::runtime_error(
+                "binary proof: trailing bytes in anchor core payload");
         return a;
     }
 
@@ -708,6 +711,10 @@ decode_anchor_core(std::span<const uint8_t> payload)
         a.validations[key_hex] = std::move(full_bytes);
     }
 
+    if (pos != payload.size())
+        throw std::runtime_error(
+            "binary proof: trailing bytes in anchor core payload");
+
     return a;
 }
 
@@ -722,11 +729,13 @@ decode_anchor_unl(std::span<const uint8_t> payload, AnchorData& a)
     a.blob_signature = read_vl(payload, pos);
 
     if (pos >= payload.size())
-        return;
+        throw std::runtime_error("binary proof: missing anchor UNL shape");
 
     uint8_t shape = payload[pos++];
     uint8_t top_perm = shape & 0x07;
     uint8_t val_perm = (shape >> 3) & 0x01;
+    if ((shape & 0xF0) != 0 || top_perm > 5)
+        throw std::runtime_error("binary proof: invalid anchor UNL shape");
 
     auto top_order = get_key_permutation(3, top_perm);
     auto val_order = get_key_permutation(2, val_perm);
@@ -751,6 +760,10 @@ decode_anchor_unl(std::span<const uint8_t> payload, AnchorData& a)
         ve.manifest_b64 = catl::base64_encode(m_bytes);
         vals.push_back(std::move(ve));
     }
+
+    if (pos != payload.size())
+        throw std::runtime_error(
+            "binary proof: trailing bytes in anchor UNL payload");
 
     std::string blob_json = "{";
     for (int k = 0; k < 3; k++)
@@ -802,6 +815,10 @@ decode_anchor_unl(std::span<const uint8_t> payload, AnchorData& a)
 static HeaderData
 decode_header(std::span<const uint8_t> payload)
 {
+    if (payload.size() != 118)
+        throw std::runtime_error(
+            "binary proof: ledger header payload must be exactly 118 bytes");
+
     HeaderData h;
     size_t pos = 0;
 
@@ -813,10 +830,8 @@ decode_header(std::span<const uint8_t> payload)
     h.parent_close_time = read_u32_be(payload, pos);
     h.close_time = read_u32_be(payload, pos);
 
-    if (pos < payload.size())
-        h.close_time_resolution = payload[pos++];
-    if (pos < payload.size())
-        h.close_flags = payload[pos++];
+    h.close_time_resolution = payload[pos++];
+    h.close_flags = payload[pos++];
 
     return h;
 }
@@ -832,9 +847,15 @@ decode_tlv_body(std::span<const uint8_t> data)
 
     // Track the anchor index so we can merge UNL into it later
     int anchor_step_idx = -1;
+    bool seen_anchor = false;
+    bool seen_anchor_unl = false;
 
     while (pos < data.size())
     {
+        if (seen_anchor_unl)
+            throw std::runtime_error(
+                "binary proof: record found after anchor UNL");
+
         uint8_t type = data[pos++];
         size_t length = leb128_decode(data, pos);
 
@@ -847,18 +868,26 @@ decode_tlv_body(std::span<const uint8_t> data)
         switch (type)
         {
             case TLV_ANCHOR:
+                if (seen_anchor)
+                    throw std::runtime_error(
+                        "binary proof: duplicate anchor core");
+                seen_anchor = true;
                 anchor_step_idx = static_cast<int>(chain.steps.size());
                 chain.steps.push_back(decode_anchor_core(payload));
                 break;
 
             case TLV_ANCHOR_UNL:
                 // Merge into the existing anchor step
-                if (anchor_step_idx >= 0)
-                {
-                    auto& anchor = std::get<AnchorData>(
-                        chain.steps[anchor_step_idx]);
-                    decode_anchor_unl(payload, anchor);
-                }
+                if (!seen_anchor || anchor_step_idx < 0)
+                    throw std::runtime_error(
+                        "binary proof: anchor UNL precedes anchor core");
+                if (seen_anchor_unl)
+                    throw std::runtime_error(
+                        "binary proof: duplicate anchor UNL");
+                seen_anchor_unl = true;
+                decode_anchor_unl(
+                    payload,
+                    std::get<AnchorData>(chain.steps[anchor_step_idx]));
                 break;
 
             case TLV_LEDGER_HEADER:
@@ -878,7 +907,9 @@ decode_tlv_body(std::span<const uint8_t> data)
             }
 
             default:
-                break;
+                throw std::runtime_error(
+                    "binary proof: unknown TLV type " +
+                    std::to_string(type));
         }
     }
 
@@ -905,6 +936,8 @@ from_binary(std::span<const uint8_t> data)
             "binary proof: unsupported version " + std::to_string(version));
 
     uint8_t flags = data[5];
+    if ((flags & static_cast<uint8_t>(~FLAG_ZLIB)) != 0)
+        throw std::runtime_error("binary proof: reserved flag bits are set");
 
     // Network ID (big-endian u32)
     size_t net_pos = 6;

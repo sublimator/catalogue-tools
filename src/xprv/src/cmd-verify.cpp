@@ -1,6 +1,5 @@
 #include "commands.h"
 
-#include "xprv/network-config.h"
 #include "xprv/proof-chain-binary.h"
 #include "xprv/proof-chain-json.h"
 #include "xprv/proof-resolver.h"
@@ -18,6 +17,7 @@ int
 cmd_verify(
     std::string const& proof_path,
     std::string const& trusted_key,
+    uint32_t trusted_network_id,
     catl::xdata::Protocol const& protocol)
 {
     std::ifstream in(proof_path, std::ios::binary);
@@ -79,22 +79,19 @@ cmd_verify(
         }
     }
 
-    // Use the proof's embedded network_id for protocol and publisher key,
-    // unless the caller explicitly provided them via --network or positional arg.
-    auto effective_key = trusted_key;
-    auto effective_protocol = protocol;
-
-    if (proof.network_id != 0 || trusted_key.empty())
+    if (trusted_key.empty())
     {
-        auto proof_config =
-            xprv::NetworkConfig::for_network(proof.network_id);
-        if (trusted_key.empty())
-        {
-            effective_key = proof_config.publisher_key;
-        }
-        // Always use the proof's network for protocol — the proof knows
-        // which chain it came from.
-        effective_protocol = proof_config.load_protocol();
+        std::cerr << "No trusted publisher key configured for network "
+                  << trusted_network_id << "\n";
+        return 1;
+    }
+
+    if (proof.network_id != trusted_network_id)
+    {
+        std::cerr << "Proof network_id " << proof.network_id
+                  << " does not match configured network "
+                  << trusted_network_id << "\n";
+        return 1;
     }
 
     PLOGI(
@@ -102,10 +99,9 @@ cmd_verify(
         "Verifying (network_id=",
         proof.network_id,
         ", publisher=",
-        effective_key.substr(0, 16),
+        trusted_key.substr(0, 16),
         "...)");
 
-    bool ok =
-        xprv::resolve_proof_chain(proof, effective_protocol, effective_key);
+    bool ok = xprv::resolve_proof_chain(proof, protocol, trusted_key);
     return ok ? 0 : 1;
 }

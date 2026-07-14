@@ -485,7 +485,8 @@ main(int argc, char* argv[])
         auto net_config =
             xprv::NetworkConfig::for_network(verify_network_id);
         auto protocol = net_config.load_protocol();
-        return cmd_verify(proof_path, trusted_key, protocol);
+        return cmd_verify(
+            proof_path, trusted_key, verify_network_id, protocol);
     }
 
     if (command == "serve")

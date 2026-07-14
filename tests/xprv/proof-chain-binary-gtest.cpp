@@ -150,6 +150,45 @@ TEST(ProofChainBinary, AcceptsSmallZlibBodyPastDecompression)
     }
 }
 
+TEST(ProofChainBinary, RejectsReservedFlagsAndUnknownTypes)
+{
+    ProofChain chain;
+    chain.steps.emplace_back(HeaderData{});
+    auto binary = to_binary(chain);
+
+    auto reserved_flags = binary;
+    reserved_flags[5] |= 0x02;
+    EXPECT_THROW(from_binary(reserved_flags), std::runtime_error);
+
+    auto unknown_type = binary;
+    unknown_type[10] = 0x7F;
+    EXPECT_THROW(from_binary(unknown_type), std::runtime_error);
+}
+
+TEST(ProofChainBinary, RejectsNonExactHeaderPayload)
+{
+    ProofChain chain;
+    chain.steps.emplace_back(HeaderData{});
+    auto binary = to_binary(chain);
+    ASSERT_EQ(binary[11], 118);
+    binary[11] = 119;
+    binary.push_back(0);
+    EXPECT_THROW(from_binary(binary), std::runtime_error);
+}
+
+TEST(ProofChainBinary, RejectsDuplicateAnchorCore)
+{
+    ProofChain chain;
+    AnchorData anchor;
+    anchor.publisher_key_hex = "ED" + std::string(64, 'A');
+    anchor.publisher_manifest = make_bytes(8, 1);
+    anchor.blob = make_blob(1);
+    anchor.blob_signature = make_bytes(64, 2);
+    chain.steps.emplace_back(anchor);
+    chain.steps.emplace_back(anchor);
+    EXPECT_THROW(from_binary(to_binary(chain)), std::runtime_error);
+}
+
 // ─── Header round-trip ──────────────────────────────────────────
 
 TEST(ProofChainBinary, HeaderRoundTrip)

@@ -1,6 +1,9 @@
 #include "xprv/proof-chain-json.h"
 #include "xprv/hex-utils.h"
 
+#include <algorithm>
+#include <cctype>
+
 namespace xprv {
 
 //------------------------------------------------------------------------------
@@ -132,45 +135,28 @@ anchor_from_json(boost::json::object const& obj)
     AnchorData a;
     a.ledger_hash =
         hash_from_hex(std::string(obj.at("ledger_hash").as_string()));
-    if (obj.contains("ledger_index"))
-    {
-        a.ledger_index = obj.at("ledger_index").to_number<uint32_t>();
-    }
+    a.ledger_index = obj.at("ledger_index").to_number<uint32_t>();
 
-    if (obj.contains("unl"))
-    {
-        auto const& unl = obj.at("unl").as_object();
-        if (unl.contains("public_key"))
-        {
-            a.publisher_key_hex =
-                std::string(unl.at("public_key").as_string());
-        }
-        if (unl.contains("manifest"))
-        {
-            a.publisher_manifest =
-                from_hex(std::string(unl.at("manifest").as_string()));
-        }
-        if (unl.contains("blob"))
-        {
-            a.blob = from_hex(std::string(unl.at("blob").as_string()));
-        }
-        if (unl.contains("signature"))
-        {
-            a.blob_signature =
-                from_hex(std::string(unl.at("signature").as_string()));
-        }
-    }
+    auto const& unl = obj.at("unl").as_object();
+    a.publisher_key_hex = std::string(unl.at("public_key").as_string());
+    if (from_hex(a.publisher_key_hex).size() != 33)
+        throw std::runtime_error(
+            "proof JSON: publisher key must be exactly 33 bytes");
+    a.publisher_manifest =
+        from_hex(std::string(unl.at("manifest").as_string()));
+    a.blob = from_hex(std::string(unl.at("blob").as_string()));
+    a.blob_signature =
+        from_hex(std::string(unl.at("signature").as_string()));
 
-    if (obj.contains("validations") && obj.at("validations").is_object())
+    auto const& validations = obj.at("validations").as_object();
+    for (auto const& kv : validations)
     {
-        for (auto const& kv : obj.at("validations").as_object())
-        {
-            if (kv.value().is_string())
-            {
-                a.validations[std::string(kv.key())] =
-                    from_hex(std::string(kv.value().as_string()));
-            }
-        }
+        auto const key = std::string(kv.key());
+        if (from_hex(key).size() != 33 || !kv.value().is_string())
+            throw std::runtime_error(
+                "proof JSON: malformed validation key or value");
+        a.validations[key] =
+            from_hex(std::string(kv.value().as_string()));
     }
 
     return a;
@@ -182,7 +168,16 @@ header_from_json(boost::json::object const& obj)
     HeaderData h;
     auto const& hdr = obj.at("header").as_object();
     h.seq = hdr.at("ledger_index").to_number<uint32_t>();
-    h.drops = std::stoull(std::string(hdr.at("total_coins").as_string()));
+    auto const total_coins =
+        std::string(hdr.at("total_coins").as_string());
+    if (total_coins.empty() ||
+        !std::all_of(
+            total_coins.begin(), total_coins.end(), [](unsigned char c) {
+                return std::isdigit(c) != 0;
+            }))
+        throw std::runtime_error(
+            "proof JSON: total_coins must be unsigned decimal digits");
+    h.drops = std::stoull(total_coins);
     h.parent_hash =
         hash_from_hex(std::string(hdr.at("parent_hash").as_string()));
     h.tx_hash = hash_from_hex(std::string(hdr.at("transaction_hash").as_string()));
@@ -191,11 +186,14 @@ header_from_json(boost::json::object const& obj)
     h.parent_close_time =
         hdr.at("parent_close_time").to_number<uint32_t>();
     h.close_time = hdr.at("close_time").to_number<uint32_t>();
-    h.close_time_resolution =
-        static_cast<uint8_t>(
-            hdr.at("close_time_resolution").to_number<int>());
-    h.close_flags =
-        static_cast<uint8_t>(hdr.at("close_flags").to_number<int>());
+    auto const resolution =
+        hdr.at("close_time_resolution").to_number<uint32_t>();
+    auto const flags = hdr.at("close_flags").to_number<uint32_t>();
+    if (resolution > 255 || flags > 255)
+        throw std::runtime_error(
+            "proof JSON: uint8 ledger header field out of range");
+    h.close_time_resolution = static_cast<uint8_t>(resolution);
+    h.close_flags = static_cast<uint8_t>(flags);
     return h;
 }
 
@@ -204,12 +202,13 @@ trie_from_json(boost::json::object const& obj)
 {
     TrieData t;
     auto tree_str = std::string(obj.at("tree").as_string());
-    t.tree = (tree_str == "state") ? TrieData::TreeType::state
-                                   : TrieData::TreeType::tx;
-    if (obj.contains("trie"))
-    {
-        t.trie_json = obj.at("trie");
-    }
+    if (tree_str == "state")
+        t.tree = TrieData::TreeType::state;
+    else if (tree_str == "tx")
+        t.tree = TrieData::TreeType::tx;
+    else
+        throw std::runtime_error("proof JSON: unknown map tree type");
+    t.trie_json = obj.at("trie");
     return t;
 }
 
@@ -220,10 +219,10 @@ parse_steps_array(boost::json::array const& arr)
     for (auto const& step_val : arr)
     {
         if (!step_val.is_object())
-            continue;
+            throw std::runtime_error("proof JSON: step must be an object");
         auto const& obj = step_val.as_object();
-        if (!obj.contains("type"))
-            continue;
+        if (!obj.contains("type") || !obj.at("type").is_string())
+            throw std::runtime_error("proof JSON: step has no string type");
 
         auto type = std::string(obj.at("type").as_string());
         if (type == "anchor")
@@ -238,6 +237,11 @@ parse_steps_array(boost::json::array const& arr)
         {
             chain.steps.push_back(trie_from_json(obj));
         }
+        else
+        {
+            throw std::runtime_error(
+                "proof JSON: unknown step type " + type);
+        }
     }
     return chain;
 }
@@ -250,20 +254,14 @@ from_json(boost::json::value const& json)
     {
         auto const& obj = json.as_object();
 
-        if (obj.contains("format_version"))
-        {
-            auto v = obj.at("format_version").to_number<uint32_t>();
-            if (v != XPRV_FORMAT_VERSION)
-                throw std::runtime_error(
-                    "proof JSON: format_version " + std::to_string(v) +
-                    " != expected " + std::to_string(XPRV_FORMAT_VERSION));
-        }
+        auto const v = obj.at("format_version").to_number<uint32_t>();
+        if (v != XPRV_FORMAT_VERSION)
+            throw std::runtime_error(
+                "proof JSON: format_version " + std::to_string(v) +
+                " != expected " + std::to_string(XPRV_FORMAT_VERSION));
 
         auto chain = parse_steps_array(obj.at("steps").as_array());
-        if (obj.contains("network_id"))
-        {
-            chain.network_id = obj.at("network_id").to_number<uint32_t>();
-        }
+        chain.network_id = obj.at("network_id").to_number<uint32_t>();
         return chain;
     }
 
