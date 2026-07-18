@@ -155,10 +155,16 @@ private:
         boost::system::error_code ec,
         std::size_t bytes_transferred);
 
+    // Start the payload operation after the complete frame header has been
+    // parsed. Both compressed and uncompressed headers use this path so payload
+    // admission and draining policy cannot diverge between framing variants.
+    void
+    read_or_drain_payload();
+
     // Read and discard `remaining` payload bytes in small chunks (reusing the
     // read buffer at a bounded size), then resume the header loop. Used to
     // consume a frame we don't want to keep (e.g. an oversized manifest dump)
-    // without allocating it or dropping the peer.
+    // without allocating the full payload or dropping the peer.
     void
     drain_payload(std::size_t remaining);
 

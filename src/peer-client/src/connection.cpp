@@ -771,7 +771,7 @@ peer_connection::async_read_header()
 void
 peer_connection::handle_read_header(
     boost::system::error_code ec,
-    std::size_t bytes_transferred)
+    std::size_t /*bytes_transferred*/)
 {
     if (ec)
     {
@@ -871,7 +871,7 @@ peer_connection::handle_read_header(
     }
     inbound_charge_.store(payload_size, std::memory_order_relaxed);
 
-    if (current_header_.compressed && bytes_transferred < 10)
+    if (current_header_.compressed)
     {
         // Need to read the additional 4 bytes for uncompressed size
         asio::async_read(
@@ -923,58 +923,24 @@ peer_connection::handle_read_header(
                     return;
                 }
                 self->current_header_.payload_size = payload_size;
-
-                // Now read the payload
-                self->payload_buffer_.resize(payload_size);
-                asio::async_read(
-                    *self->socket_,
-                    asio::buffer(self->payload_buffer_),
-                    [self](
-                        boost::system::error_code ec,
-                        std::size_t bytes_transferred) {
-                        self->handle_read_payload(ec, bytes_transferred);
-                    });
+                self->read_or_drain_payload();
             });
         return;
     }
-    else if (current_header_.compressed && bytes_transferred >= 10)
-    {
-        current_header_.uncompressed_size =
-            (static_cast<std::uint32_t>(header_buffer_[6]) << 24) |
-            (static_cast<std::uint32_t>(header_buffer_[7]) << 16) |
-            (static_cast<std::uint32_t>(header_buffer_[8]) << 8) |
-            static_cast<std::uint32_t>(header_buffer_[9]);
-        // Same post-inflate cap as the async-extension path above (sec #0058).
-        if (current_header_.uncompressed_size > kMaxFramePayloadSize)
-        {
-            PLOGW(
-                log_,
-                remote_endpoint(),
-                " rejecting frame: uncompressed_size=",
-                current_header_.uncompressed_size,
-                " > max=",
-                kMaxFramePayloadSize);
-            note_connect_failure(
-                "oversized uncompressed frame", asio::error::message_size);
-            fail_and_close(asio::error::message_size);
-            return;
-        }
-    }
-    else
-    {
-        current_header_.uncompressed_size = payload_size;
-    }
 
-    // Some networks send an enormous validator-manifest dump to every peer on
-    // connect (~60 MiB on XRPL mainnet). We get the manifests we trust from the
-    // VL, so rather than buffer the whole thing per peer — the read buffer never
-    // shrinks, so it would pin tens of MiB on EVERY connection — drain it in
-    // small chunks and keep the peer for validations. Bounds memory at the
-    // actual scarce resource without dropping the peer (unlike a hard frame
-    // cap, which would fail_and_close right after handshake).
-    if (current_header_.type ==
-            static_cast<std::uint16_t>(packet_type::manifests) &&
-        payload_size > kMaxBufferedManifestBytes)
+    current_header_.uncompressed_size = payload_size;
+    read_or_drain_payload();
+}
+
+void
+peer_connection::read_or_drain_payload()
+{
+    auto const payload_size = current_header_.payload_size;
+
+    // Manifest history snapshots are optional for this client. Consume large
+    // snapshots incrementally instead of growing the reusable connection buffer
+    // to a peer-selected size, then continue reading subsequent peer traffic.
+    if (should_drain_manifest_payload(current_header_))
     {
         release_inbound_charge();  // not buffering — return the reservation
         drain_payload(payload_size);

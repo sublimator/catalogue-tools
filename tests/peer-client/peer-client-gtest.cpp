@@ -1,6 +1,7 @@
 #include <catl/peer-client/peer-client.h>
 #include <catl/peer-client/peer-client-coro.h>
 #include <catl/peer-client/peer-crawl-client.h>
+#include <catl/peer-client/connection-types.h>
 #include <catl/peer-client/endpoint-tracker.h>
 #include <catl/peer-client/types.h>
 #include <gtest/gtest.h>
@@ -18,6 +19,28 @@ TEST(PeerClientTypes, DefaultRequestOptions)
 {
     RequestOptions opts;
     EXPECT_EQ(opts.timeout, std::chrono::seconds{5});
+}
+
+TEST(PeerConnectionFrames, ManifestDrainPolicyIsCompressionIndependent)
+{
+    packet_header header{
+        .payload_size = kMaxBufferedManifestBytes + 1,
+        .type = static_cast<std::uint16_t>(packet_type::manifests),
+        .compressed = false,
+        .uncompressed_size = kMaxBufferedManifestBytes + 1,
+    };
+
+    EXPECT_TRUE(should_drain_manifest_payload(header));
+
+    header.compressed = true;
+    EXPECT_TRUE(should_drain_manifest_payload(header));
+
+    header.payload_size = kMaxBufferedManifestBytes;
+    EXPECT_FALSE(should_drain_manifest_payload(header));
+
+    header.payload_size = kMaxBufferedManifestBytes + 1;
+    header.type = static_cast<std::uint16_t>(packet_type::validation);
+    EXPECT_FALSE(should_drain_manifest_payload(header));
 }
 
 TEST(PeerClientTypes, PeerClientExceptionIncludesDetail)

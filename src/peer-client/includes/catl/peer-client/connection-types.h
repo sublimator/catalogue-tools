@@ -17,21 +17,8 @@
 
 namespace catl::peer_client {
 
-// Maximum accepted wire-frame payload size. The on-wire length field is
-// 28 bits (max ~256 MiB); an untrusted peer could set it arbitrarily and
-// force a quarter-gigabyte allocation per frame.
-//
-// 64 MiB. An earlier 16 MiB value (c4cd8bd) broke peering: real rippled hubs
-// send ~60 MiB frames shortly after handshake (observed e.g.
-// payload_size=60426989), so 16 MiB rejected legitimate peers right after a
-// successful handshake — with a cold peer cache this dropped the DNS bootstrap
-// seeds and left the client with zero peers. The original 8 MiB "largest
-// message" estimate was simply wrong for hub traffic. 64 MiB is the
-// proven-good value (what rippled is known not to exceed for these frames).
-// AGGREGATE memory across many peers is bounded independently and completely by
-// the process-wide InboundBudget (kAggregateInboundBudget, security #0055), so
-// the per-frame cap no longer has to carry the aggregate concern — its only job
-// is to bound a single allocation against a hostile 256 MiB-wide length field.
+// Protocol-compatible upper bound for one wire-frame allocation. Aggregate
+// memory across concurrent peers is bounded independently by InboundBudget.
 inline constexpr std::uint32_t kMaxFramePayloadSize = 64u * 1024 * 1024;
 
 // Maximum node entries accepted in a single TMLedgerData response. The frame
@@ -43,14 +30,10 @@ inline constexpr std::uint32_t kMaxFramePayloadSize = 64u * 1024 * 1024;
 // far above any legitimate reply (generous vs rippled's reply-node limit).
 inline constexpr int kMaxLedgerReplyNodes = 8192;
 
-// Largest validator-manifest frame (TMManifests) we will buffer and process.
-// A peer sends its ENTIRE manifest cache to every peer on connect; on XRPL
-// mainnet that is ~60 MiB of mostly-untrusted keys. We only need the manifests
-// of validators we trust, which also arrive via the VL — so a manifest frame
-// larger than this is drained off the wire in small chunks rather than buffered
-// (buffering it would otherwise pin tens of MiB on EVERY connection, since the
-// per-connection read buffer never shrinks). Small-network dumps stay under
-// this and are processed normally.
+// Largest validator-manifest frame buffered for dispatch. Manifest history is
+// optional for this client and can be substantially larger than incremental
+// updates. Consume larger snapshots incrementally so peer-controlled history
+// size does not determine retained per-connection buffer capacity.
 inline constexpr std::uint32_t kMaxBufferedManifestBytes = 4u * 1024 * 1024;
 
 // Process-wide ceiling on the SUM of in-flight inbound frame buffers across
@@ -212,5 +195,12 @@ struct packet_header
     bool compressed;
     std::uint32_t uncompressed_size;
 };
+
+inline bool
+should_drain_manifest_payload(packet_header const& header)
+{
+    return header.type == static_cast<std::uint16_t>(packet_type::manifests) &&
+        header.payload_size > kMaxBufferedManifestBytes;
+}
 
 }  // namespace catl::peer_client
