@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace catl::vl {
@@ -31,6 +32,7 @@ struct Manifest
     std::vector<uint8_t> master_public_key;   // 33 bytes
     std::vector<uint8_t> signing_public_key;  // 33 bytes (empty in revocations)
     uint32_t sequence = 0;
+    bool has_sequence = false;
     std::vector<uint8_t> master_signature;
     std::vector<uint8_t> signing_signature;  // present if signing key present
     std::vector<uint8_t> domain;             // optional
@@ -47,9 +49,13 @@ struct Manifest
     bool
     is_revocation() const
     {
-        return sequence == 0xFFFFFFFF || signing_public_key.empty();
+        return sequence == 0xFFFFFFFF;
     }
 };
+
+/// Decode an even-length hexadecimal string. Throws on malformed input.
+std::vector<uint8_t>
+decode_hex(std::string_view hex);
 
 /// Parse a raw manifest (XRPL STObject binary) into a Manifest struct.
 /// The protocol is needed for field lookups.
@@ -72,6 +78,7 @@ struct ValidatorList
     std::string publisher_key_hex;        // from JSON response
     std::string site;                     // which VL site
     uint32_t sequence = 0;
+    uint32_t effective = 0;
     uint32_t expiration = 0;
 };
 

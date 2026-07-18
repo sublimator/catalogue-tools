@@ -7,6 +7,8 @@
 #include <catl/xdata/parser.h>
 
 #include <cctype>
+#include <limits>
+#include <set>
 #include <string>
 
 namespace xprv {
@@ -40,7 +42,8 @@ verify_manifest(
     catl::vl::Manifest const& manifest,
     catl::xdata::Protocol const& protocol)
 {
-    if (manifest.master_public_key.empty() || manifest.master_signature.empty())
+    if (!manifest.has_sequence || manifest.master_public_key.empty() ||
+        manifest.master_signature.empty())
         return false;
 
     auto signing_data = manifest_signing_data(manifest.raw, protocol);
@@ -52,14 +55,32 @@ verify_manifest(
         return false;
     }
 
-    if (!manifest.signing_public_key.empty() &&
-        !manifest.signing_signature.empty() &&
-        !catl::crypto::verify_message(
-            manifest.signing_public_key,
-            manifest.signing_signature,
-            signing_data))
+    bool const revoked =
+        manifest.sequence == std::numeric_limits<std::uint32_t>::max();
+    if (revoked)
     {
-        return false;
+        if (!manifest.signing_public_key.empty() ||
+            !manifest.signing_signature.empty())
+        {
+            return false;
+        }
+    }
+    else
+    {
+        if (manifest.signing_public_key.empty() ||
+            manifest.signing_signature.empty())
+        {
+            return false;
+        }
+        if (manifest.signing_public_key == manifest.master_public_key)
+            return false;
+        if (!catl::crypto::verify_message(
+                manifest.signing_public_key,
+                manifest.signing_signature,
+                signing_data))
+        {
+            return false;
+        }
     }
 
     return true;
@@ -76,6 +97,69 @@ parse_and_verify_manifest(
     return manifest;
 }
 
+VlFreshnessDisposition
+assess_vl_freshness(
+    catl::vl::ValidatorList const& candidate,
+    catl::vl::ValidatorList const* current,
+    std::uint32_t now,
+    std::string& error)
+{
+    error.clear();
+
+    if (candidate.expiration <= candidate.effective)
+    {
+        error = "validator list validity interval is invalid";
+        return VlFreshnessDisposition::reject;
+    }
+    if (candidate.expiration <= now)
+    {
+        error = "validator list is expired";
+        return VlFreshnessDisposition::reject;
+    }
+    if (candidate.effective > now)
+    {
+        error = "validator list is not yet effective";
+        return VlFreshnessDisposition::reject;
+    }
+    if (!current)
+        return VlFreshnessDisposition::accept;
+
+    if (candidate.sequence < current->sequence)
+    {
+        error = "validator list sequence moved backwards";
+        return VlFreshnessDisposition::reject;
+    }
+    if (candidate.publisher_manifest.sequence <
+        current->publisher_manifest.sequence)
+    {
+        error = "publisher manifest sequence moved backwards";
+        return VlFreshnessDisposition::reject;
+    }
+
+    if (candidate.sequence == current->sequence &&
+        candidate.blob_bytes != current->blob_bytes)
+    {
+        error = "validator list changed without a sequence increase";
+        return VlFreshnessDisposition::reject;
+    }
+    if (candidate.publisher_manifest.sequence ==
+            current->publisher_manifest.sequence &&
+        candidate.publisher_manifest.raw != current->publisher_manifest.raw)
+    {
+        error = "publisher manifest changed without a sequence increase";
+        return VlFreshnessDisposition::reject;
+    }
+
+    if (candidate.sequence == current->sequence &&
+        candidate.publisher_manifest.sequence ==
+            current->publisher_manifest.sequence)
+    {
+        return VlFreshnessDisposition::unchanged;
+    }
+
+    return VlFreshnessDisposition::accept;
+}
+
 bool
 verify_fetched_vl(
     catl::vl::ValidatorList const& vl,
@@ -83,6 +167,8 @@ verify_fetched_vl(
     catl::xdata::Protocol const& protocol,
     std::string& error)
 {
+    error.clear();
+
     auto lower = [](std::string s) {
         for (auto& c : s)
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -103,7 +189,12 @@ verify_fetched_vl(
         error = "publisher manifest master key does not match trusted key";
         return false;
     }
-    if (!vl.publisher_key_hex.empty() && lower(vl.publisher_key_hex) != trusted)
+    if (vl.publisher_key_hex.empty())
+    {
+        error = "response does not advertise a publisher key";
+        return false;
+    }
+    if (lower(vl.publisher_key_hex) != trusted)
     {
         error = "advertised publisher key does not match trusted key";
         return false;
@@ -131,6 +222,45 @@ verify_fetched_vl(
     {
         error = "blob signature verification failed";
         return false;
+    }
+
+    if (vl.validators.empty())
+    {
+        error = "validator list contains no validators";
+        return false;
+    }
+
+    std::set<std::string> master_keys;
+    std::set<std::string> signing_keys;
+    for (auto const& validator : vl.validators)
+    {
+        if (validator.is_revocation() || !verify_manifest(validator, protocol))
+        {
+            error = "validator list contains an invalid validator manifest";
+            return false;
+        }
+
+        auto const master = lower(validator.master_key_hex());
+        auto const signing = lower(validator.signing_key_hex());
+        if (!master_keys.insert(master).second)
+        {
+            error = "validator list contains a duplicate master key";
+            return false;
+        }
+        if (!signing_keys.insert(signing).second)
+        {
+            error = "validator list contains a duplicate signing key";
+            return false;
+        }
+    }
+
+    for (auto const& master : master_keys)
+    {
+        if (signing_keys.find(master) != signing_keys.end())
+        {
+            error = "validator list reuses a key across validator roles";
+            return false;
+        }
     }
 
     return true;

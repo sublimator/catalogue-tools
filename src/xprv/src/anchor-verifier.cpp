@@ -282,41 +282,11 @@ AnchorVerifier::verify(
         return result;
     }
 
-    // Verify publisher manifest signatures: MAN\0 + serialized fields
-    // (without Signature and MasterSignature), signed by both keys.
-    auto signing_data = manifest_signing_data(manifest_bytes, protocol);
-
-    // Verify master signature (proves master key authorized this binding)
-    if (publisher_manifest.master_signature.empty())
+    if (!verify_manifest(publisher_manifest, protocol))
     {
-        result.error = "publisher manifest has no master signature";
-        narrative.push_back(
-            "   FAIL: publisher manifest has no master signature.");
-        return result;
-    }
-    if (!catl::crypto::verify_message(
-            publisher_manifest.master_public_key,
-            publisher_manifest.master_signature,
-            signing_data))
-    {
-        result.error = "publisher manifest master signature FAILED";
-        PLOGE(log_, "Step 2: Publisher manifest master signature FAILED");
-        narrative.push_back(
-            "   FAIL: publisher manifest master signature invalid.");
-        return result;
-    }
-
-    // Verify signing key signature (proves signing key consented)
-    if (!publisher_manifest.signing_signature.empty() &&
-        !catl::crypto::verify_message(
-            publisher_manifest.signing_public_key,
-            publisher_manifest.signing_signature,
-            signing_data))
-    {
-        result.error = "publisher manifest signing signature FAILED";
-        PLOGE(log_, "Step 2: Publisher manifest signing signature FAILED");
-        narrative.push_back(
-            "   FAIL: publisher manifest signing key signature invalid.");
+        result.error = "publisher manifest signature verification failed";
+        PLOGE(log_, "Step 2: Publisher manifest signature verification failed");
+        narrative.push_back("   FAIL: publisher manifest is invalid.");
         return result;
     }
 
@@ -326,7 +296,8 @@ AnchorVerifier::verify(
         publisher_manifest.signing_key_hex().substr(0, 16),
         "...");
     narrative.push_back(
-        "   Step A2: Publisher manifest verified (master + signing signatures). "
+        "   Step A2: Publisher manifest verified (master + signing "
+        "signatures). "
         "Signing key " +
         publisher_manifest.signing_key_hex().substr(0, 16) + "...");
 
@@ -408,8 +379,7 @@ AnchorVerifier::verify(
             return result;
         }
         auto const& vobj = v.as_object();
-        if (!vobj.contains("manifest") ||
-            !vobj.at("manifest").is_string() ||
+        if (!vobj.contains("manifest") || !vobj.at("manifest").is_string() ||
             !vobj.contains("validation_public_key") ||
             !vobj.at("validation_public_key").is_string())
         {
@@ -422,8 +392,7 @@ AnchorVerifier::verify(
         auto m_b64 = std::string(vobj.at("manifest").as_string());
         auto m_bytes = catl::base64_decode(m_b64);
         auto verified_manifest = parse_and_verify_manifest(m_bytes, protocol);
-        if (!verified_manifest ||
-            verified_manifest->signing_public_key.empty())
+        if (!verified_manifest || verified_manifest->signing_public_key.empty())
         {
             result.error = "invalid validator manifest";
             narrative.push_back("   FAIL: a validator manifest is invalid.");
@@ -432,8 +401,7 @@ AnchorVerifier::verify(
 
         auto const advertised_master =
             lower(std::string(vobj.at("validation_public_key").as_string()));
-        auto const manifest_master =
-            lower(verified_manifest->master_key_hex());
+        auto const manifest_master = lower(verified_manifest->master_key_hex());
         if (advertised_master != manifest_master)
         {
             result.error = "validator manifest master key mismatch";
@@ -443,8 +411,7 @@ AnchorVerifier::verify(
             return result;
         }
 
-        auto const signing_key =
-            lower(verified_manifest->signing_key_hex());
+        auto const signing_key = lower(verified_manifest->signing_key_hex());
         auto const [existing, inserted] =
             signing_to_master.emplace(signing_key, manifest_master);
         if (!inserted && existing->second != manifest_master)

@@ -3,8 +3,10 @@
 #include <catl/vl-client/vl-client.h>
 #include <catl/xdata/protocol.h>
 
+#include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace xprv {
@@ -24,12 +26,20 @@ parse_and_verify_manifest(
     std::span<const uint8_t> raw,
     catl::xdata::Protocol const& protocol);
 
-/// Verify a fetched Validator List against the trusted (pinned) publisher key.
-/// Checks that (1) the publisher manifest is bound to the trusted master key
-/// (and the response's advertised key matches), (2) the manifest's master and
-/// signing signatures are valid, and (3) the blob is signed by the manifest's
-/// signing key. Returns true iff all hold; otherwise sets `error`. Expiration
-/// is intentionally not checked here (the caller may handle freshness).
+enum class VlFreshnessDisposition { accept, unchanged, reject };
+
+/// Apply online cache policy after content authentication. `current` may be
+/// null on first load. `now` uses Ripple-epoch seconds.
+VlFreshnessDisposition
+assess_vl_freshness(
+    catl::vl::ValidatorList const& candidate,
+    catl::vl::ValidatorList const* current,
+    std::uint32_t now,
+    std::string& error);
+
+/// Authenticate fetched Validator List content against the configured publisher
+/// master key. This verifies cryptographic provenance only; list and publisher-
+/// manifest freshness policy must be enforced separately.
 bool
 verify_fetched_vl(
     catl::vl::ValidatorList const& vl,

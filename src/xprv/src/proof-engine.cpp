@@ -68,9 +68,8 @@ ProofEngine::start()
 {
     // VL cache
     vl_cache_ = VlCache::create(io_, config_.vl_host, config_.vl_port);
-    // Verify every fetched VL against the pinned publisher key before trusting
-    // it — the fetch itself is unauthenticated (verify_none TLS), so this is
-    // the defense-in-depth check that the server builds proofs on the real UNL.
+    // Authenticate list contents against the pinned publisher key independently
+    // of transport authentication.
     // weak_ptr capture: no dangling if the engine outlives an in-flight fetch,
     // and no engine<->cache reference cycle.
     vl_cache_->set_verifier(

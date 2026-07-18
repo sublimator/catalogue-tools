@@ -1,4 +1,7 @@
 #include "xprv/vl-cache.h"
+#include "xprv/manifest-utils.h"
+
+#include <catl/common/utils.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -12,6 +15,19 @@
 namespace xprv {
 
 namespace asio = boost::asio;
+
+namespace {
+
+bool
+is_active(catl::vl::ValidatorList const& vl)
+{
+    std::string error;
+    return assess_vl_freshness(
+               vl, nullptr, catl::common::current_ripple_time(), error) !=
+        VlFreshnessDisposition::reject;
+}
+
+}  // namespace
 
 LogPartition VlCache::log_("vl-cache", LogLevel::INHERIT);
 
@@ -49,18 +65,54 @@ VlCache::do_fetch()
             self->fetch_in_progress_ = false;
             self->fetch_generation_++;
 
-            // Verify the fetched VL against the pinned publisher key before we
-            // trust it — the fetch itself is unauthenticated. A VL that fails
-            // verification is treated exactly like a failed fetch, so the
-            // last-known-good list is kept.
+            // Verify fetched content against the pinned publisher key before
+            // storing it. Treat rejection like a failed fetch so the previous
+            // list remains available.
             if (result.success && self->verify_)
             {
                 std::string verr;
-                if (!self->verify_(result.vl, verr))
+                try
+                {
+                    if (!self->verify_(result.vl, verr))
+                    {
+                        result.success = false;
+                        result.error = "VL verification failed: " + verr;
+                    }
+                }
+                catch (std::exception const& e)
                 {
                     result.success = false;
-                    result.error = "VL verification failed: " + verr;
+                    result.error =
+                        std::string("VL verification failed: ") + e.what();
                 }
+            }
+
+            auto freshness = VlFreshnessDisposition::accept;
+            if (result.success)
+            {
+                std::string freshness_error;
+                freshness = assess_vl_freshness(
+                    result.vl,
+                    self->vl_ ? &*self->vl_ : nullptr,
+                    catl::common::current_ripple_time(),
+                    freshness_error);
+                if (freshness == VlFreshnessDisposition::reject)
+                {
+                    result.success = false;
+                    result.error =
+                        "VL freshness check failed: " + freshness_error;
+                }
+            }
+
+            if (result.success &&
+                freshness == VlFreshnessDisposition::unchanged)
+            {
+                self->last_fetch_ok_ = true;
+                self->last_fetch_error_.clear();
+                self->initial_retry_ = std::chrono::seconds(2);
+                self->wake_waiters();
+                self->schedule_refresh();
+                return;
             }
 
             if (result.success)
@@ -69,7 +121,8 @@ VlCache::do_fetch()
                 self->vl_ = std::move(result.vl);
                 self->last_fetch_ok_ = true;
                 self->last_fetch_error_.clear();
-                self->initial_retry_ = std::chrono::seconds(2);  // reset for next cold start
+                self->initial_retry_ =
+                    std::chrono::seconds(2);  // reset for next cold start
                 PLOGI(
                     VlCache::log_,
                     "VL loaded: ",
@@ -94,23 +147,24 @@ VlCache::do_fetch()
                 PLOGE(VlCache::log_, "VL fetch failed: ", result.error);
                 self->wake_waiters();
 
-                if (!self->vl_.has_value())
+                if (!self->vl_.has_value() || !is_active(*self->vl_))
                 {
                     // Never loaded — retry aggressively
                     auto delay = self->initial_retry_;
                     PLOGW(
                         VlCache::log_,
                         "VL not yet loaded, retrying in ",
-                        delay.count(), "s");
+                        delay.count(),
+                        "s");
                     self->schedule_retry(delay);
                     // Exponential backoff: 2s, 4s, 8s, 16s, 32s, 60s cap
                     self->initial_retry_ = std::min(
-                        self->initial_retry_ * 2,
-                        self->initial_retry_cap_);
+                        self->initial_retry_ * 2, self->initial_retry_cap_);
                 }
                 else
                 {
-                    // Already loaded — stale data is fine, normal refresh
+                    // An active cached list remains usable; retry on the normal
+                    // refresh cadence.
                     self->schedule_refresh();
                 }
             }
@@ -167,7 +221,7 @@ VlCache::co_get()
     auto self = shared_from_this();
     co_await asio::post(strand_, asio::use_awaitable);
 
-    if (vl_)
+    if (vl_ && is_active(*vl_))
     {
         co_return *vl_;
     }
@@ -204,7 +258,8 @@ VlCache::co_get()
             {
                 asio::post(
                     strand,
-                    [self = std::move(self), signal = std::move(signal)]() mutable {
+                    [self = std::move(self),
+                     signal = std::move(signal)]() mutable {
                         if (auto locked = self.lock())
                             std::erase(locked->waiters_, signal);
                     });
@@ -222,8 +277,7 @@ VlCache::co_get()
         co_await signal->async_wait(
             asio::redirect_error(asio::use_awaitable, ec));
 
-        auto const cancel_state =
-            co_await asio::this_coro::cancellation_state;
+        auto const cancel_state = co_await asio::this_coro::cancellation_state;
         if (cancel_state.cancelled() != asio::cancellation_type::none)
             throw boost::system::system_error(asio::error::operation_aborted);
 
@@ -234,7 +288,7 @@ VlCache::co_get()
 
         cleanup.clean_now();
 
-        if (!vl_)
+        if (!vl_ || !is_active(*vl_))
         {
             throw std::runtime_error(
                 "VL fetch failed: " +
@@ -285,7 +339,8 @@ VlCache::co_refresh()
             {
                 asio::post(
                     strand,
-                    [self = std::move(self), signal = std::move(signal)]() mutable {
+                    [self = std::move(self),
+                     signal = std::move(signal)]() mutable {
                         if (auto locked = self.lock())
                             std::erase(locked->waiters_, signal);
                     });
@@ -303,8 +358,7 @@ VlCache::co_refresh()
         co_await signal->async_wait(
             asio::redirect_error(asio::use_awaitable, ec));
 
-        auto const cancel_state =
-            co_await asio::this_coro::cancellation_state;
+        auto const cancel_state = co_await asio::this_coro::cancellation_state;
         if (cancel_state.cancelled() != asio::cancellation_type::none)
             throw boost::system::system_error(asio::error::operation_aborted);
 
@@ -315,7 +369,7 @@ VlCache::co_refresh()
 
         cleanup.clean_now();
 
-        if (!last_fetch_ok_ || !vl_)
+        if (!last_fetch_ok_ || !vl_ || !is_active(*vl_))
         {
             throw std::runtime_error(
                 "VL refresh failed: " +
@@ -331,7 +385,7 @@ asio::awaitable<bool>
 VlCache::co_is_loaded()
 {
     co_await asio::post(strand_, asio::use_awaitable);
-    co_return vl_.has_value();
+    co_return vl_.has_value() && is_active(*vl_);
 }
 
 }  // namespace xprv

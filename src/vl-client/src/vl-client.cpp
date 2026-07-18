@@ -18,6 +18,7 @@
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
 
+#include <cctype>
 #include <cstdlib>
 #include <iomanip>
 #include <sstream>
@@ -46,17 +47,36 @@ to_hex(std::span<const uint8_t> data)
     return oss.str();
 }
 
-/// Decode a hex string to bytes.
-static std::vector<uint8_t>
-from_hex(std::string_view hex)
+static std::string
+lower_ascii(std::string value)
 {
+    for (auto& c : value)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return value;
+}
+
+std::vector<uint8_t>
+decode_hex(std::string_view hex)
+{
+    if (hex.size() % 2 != 0)
+        throw std::runtime_error("hex input has an odd number of digits");
+
+    auto const nibble = [](char c) -> uint8_t {
+        if (c >= '0' && c <= '9')
+            return static_cast<uint8_t>(c - '0');
+        if (c >= 'a' && c <= 'f')
+            return static_cast<uint8_t>(c - 'a' + 10);
+        if (c >= 'A' && c <= 'F')
+            return static_cast<uint8_t>(c - 'A' + 10);
+        throw std::runtime_error("invalid hexadecimal digit");
+    };
+
     std::vector<uint8_t> result;
     result.reserve(hex.size() / 2);
-    for (size_t i = 0; i + 1 < hex.size(); i += 2)
+    for (size_t i = 0; i < hex.size(); i += 2)
     {
-        unsigned int byte;
-        std::sscanf(hex.data() + i, "%2x", &byte);
-        result.push_back(static_cast<uint8_t>(byte));
+        result.push_back(
+            static_cast<uint8_t>((nibble(hex[i]) << 4) | nibble(hex[i + 1])));
     }
     return result;
 }
@@ -97,12 +117,13 @@ struct ManifestVisitor
         }
         else if (code == sf::Sequence)
         {
-            if (data.size() >= 4)
+            if (data.size() == 4)
             {
                 out.sequence = (static_cast<uint32_t>(data.data()[0]) << 24) |
                     (static_cast<uint32_t>(data.data()[1]) << 16) |
                     (static_cast<uint32_t>(data.data()[2]) << 8) |
                     static_cast<uint32_t>(data.data()[3]);
+                out.has_sequence = true;
             }
         }
         else if (code == sf::MasterSignature)
@@ -210,17 +231,12 @@ VlClient::fetch(VlCallback callback)
             {
                 auto executor = co_await asio::this_coro::executor;
 
-                // Authenticate the VL site's TLS certificate + hostname. The
-                // VL signature (checked by the caller against the pinned
-                // publisher key) is the real trust root, but verifying the
-                // certificate chain stops us from even exchanging data with an
-                // impostor or a passive MitM.
+                // Authenticate the server certificate and hostname. The caller
+                // independently authenticates the response content against the
+                // configured publisher key.
                 //
-                // Load an explicit CA bundle: the OpenSSL we link has a
-                // compiled-in default path (a build directory) with no certs,
-                // so set_default_verify_paths() alone loads nothing. Try the
-                // well-known locations — the deploy image is Ubuntu +
-                // ca-certificates — and fall back to the library default.
+                // Prefer an explicit CA bundle when available, then fall back
+                // to the TLS library's configured trust paths.
                 ssl::context ctx(ssl::context::tlsv12_client);
                 ctx.set_verify_mode(ssl::verify_peer);
                 {
@@ -228,8 +244,8 @@ VlClient::fetch(VlCallback callback)
                     char const* const ca_candidates[] = {
                         std::getenv("SSL_CERT_FILE"),
                         "/etc/ssl/certs/ca-certificates.crt",  // Debian/Ubuntu
-                        "/etc/ssl/cert.pem",                    // macOS / BSD
-                        "/etc/pki/tls/certs/ca-bundle.crt",     // RHEL
+                        "/etc/ssl/cert.pem",                   // macOS / BSD
+                        "/etc/pki/tls/certs/ca-bundle.crt",    // RHEL
                     };
                     bool ca_loaded = false;
                     for (auto const* path : ca_candidates)
@@ -264,8 +280,7 @@ VlClient::fetch(VlCallback callback)
                 }
 
                 // Reject a certificate that is not valid for `host`.
-                stream.set_verify_callback(
-                    ssl::host_name_verification(host));
+                stream.set_verify_callback(ssl::host_name_verification(host));
 
                 auto& tcp_stream = beast::get_lowest_layer(stream);
                 tcp_stream.expires_after(std::chrono::seconds(10));
@@ -336,8 +351,8 @@ VlClient::fetch(VlCallback callback)
                 // Blob signature (hex)
                 if (obj.contains("signature"))
                 {
-                    vl.blob_signature =
-                        from_hex(std::string(obj.at("signature").as_string()));
+                    vl.blob_signature = decode_hex(
+                        std::string(obj.at("signature").as_string()));
                 }
 
                 // Blob (base64 → binary → parse inner JSON)
@@ -363,6 +378,11 @@ VlClient::fetch(VlCallback callback)
                         vl.expiration =
                             blob_obj.at("expiration").to_number<uint32_t>();
                     }
+                    if (blob_obj.contains("effective"))
+                    {
+                        vl.effective =
+                            blob_obj.at("effective").to_number<uint32_t>();
+                    }
 
                     // Parse each validator manifest
                     if (blob_obj.contains("validators"))
@@ -370,14 +390,33 @@ VlClient::fetch(VlCallback callback)
                         auto const& vals = blob_obj.at("validators").as_array();
                         for (auto const& v : vals)
                         {
+                            if (!v.is_object())
+                                throw std::runtime_error(
+                                    "validator list entry is not an object");
                             auto const& vobj = v.as_object();
-                            if (!vobj.contains("manifest"))
-                                continue;
+                            if (!vobj.contains("manifest") ||
+                                !vobj.at("manifest").is_string() ||
+                                !vobj.contains("validation_public_key") ||
+                                !vobj.at("validation_public_key").is_string())
+                            {
+                                throw std::runtime_error(
+                                    "validator entry is missing a key or "
+                                    "manifest");
+                            }
 
                             auto m_b64 =
                                 std::string(vobj.at("manifest").as_string());
                             auto m_bytes = base64_decode(m_b64);
                             auto manifest = parse_manifest(m_bytes);
+                            auto const advertised = lower_ascii(std::string(
+                                vobj.at("validation_public_key").as_string()));
+                            if (advertised !=
+                                lower_ascii(manifest.master_key_hex()))
+                            {
+                                throw std::runtime_error(
+                                    "validator manifest does not match its "
+                                    "advertised master key");
+                            }
                             vl.validators.push_back(std::move(manifest));
                         }
                     }
