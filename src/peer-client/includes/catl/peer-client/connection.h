@@ -155,6 +155,13 @@ private:
         boost::system::error_code ec,
         std::size_t bytes_transferred);
 
+    // Read and discard `remaining` payload bytes in small chunks (reusing the
+    // read buffer at a bounded size), then resume the header loop. Used to
+    // consume a frame we don't want to keep (e.g. an oversized manifest dump)
+    // without allocating it or dropping the peer.
+    void
+    drain_payload(std::size_t remaining);
+
     void
     perform_http_upgrade(const connection_handler& handler);
 

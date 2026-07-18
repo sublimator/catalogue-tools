@@ -965,6 +965,22 @@ peer_connection::handle_read_header(
         current_header_.uncompressed_size = payload_size;
     }
 
+    // Some networks send an enormous validator-manifest dump to every peer on
+    // connect (~60 MiB on XRPL mainnet). We get the manifests we trust from the
+    // VL, so rather than buffer the whole thing per peer — the read buffer never
+    // shrinks, so it would pin tens of MiB on EVERY connection — drain it in
+    // small chunks and keep the peer for validations. Bounds memory at the
+    // actual scarce resource without dropping the peer (unlike a hard frame
+    // cap, which would fail_and_close right after handshake).
+    if (current_header_.type ==
+            static_cast<std::uint16_t>(packet_type::manifests) &&
+        payload_size > kMaxBufferedManifestBytes)
+    {
+        release_inbound_charge();  // not buffering — return the reservation
+        drain_payload(payload_size);
+        return;
+    }
+
     // Read payload
     payload_buffer_.resize(payload_size);
     asio::async_read(
@@ -1034,6 +1050,39 @@ peer_connection::handle_read_payload(
 
     // Continue reading
     async_read_header();
+}
+
+void
+peer_connection::drain_payload(std::size_t remaining)
+{
+    if (remaining == 0)
+    {
+        // Whole frame consumed and discarded — resume the header loop.
+        async_read_header();
+        return;
+    }
+
+    // Reuse the read buffer at a bounded chunk size — this is what stops a
+    // drained frame from ever allocating (or retaining) its full size.
+    constexpr std::size_t kDrainChunk = 64u * 1024;
+    std::size_t const chunk = remaining < kDrainChunk ? remaining : kDrainChunk;
+    payload_buffer_.resize(chunk);
+    asio::async_read(
+        *socket_,
+        asio::buffer(payload_buffer_.data(), chunk),
+        [self = shared_from_this(), remaining](
+            boost::system::error_code ec, std::size_t n) {
+            if (ec)
+            {
+                if (ec != asio::error::operation_aborted)
+                {
+                    self->note_connect_failure("manifest drain", ec);
+                    self->fail_and_close(ec);
+                }
+                return;
+            }
+            self->drain_payload(remaining - n);
+        });
 }
 
 void

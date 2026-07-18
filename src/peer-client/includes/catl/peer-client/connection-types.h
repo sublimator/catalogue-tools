@@ -43,6 +43,16 @@ inline constexpr std::uint32_t kMaxFramePayloadSize = 64u * 1024 * 1024;
 // far above any legitimate reply (generous vs rippled's reply-node limit).
 inline constexpr int kMaxLedgerReplyNodes = 8192;
 
+// Largest validator-manifest frame (TMManifests) we will buffer and process.
+// A peer sends its ENTIRE manifest cache to every peer on connect; on XRPL
+// mainnet that is ~60 MiB of mostly-untrusted keys. We only need the manifests
+// of validators we trust, which also arrive via the VL — so a manifest frame
+// larger than this is drained off the wire in small chunks rather than buffered
+// (buffering it would otherwise pin tens of MiB on EVERY connection, since the
+// per-connection read buffer never shrinks). Small-network dumps stay under
+// this and are processed normally.
+inline constexpr std::uint32_t kMaxBufferedManifestBytes = 4u * 1024 * 1024;
+
 // Process-wide ceiling on the SUM of in-flight inbound frame buffers across
 // ALL peer connections (security issue #0055). The per-connection 64 MiB
 // kMaxFramePayloadSize bounds a single frame, but a coordinated fill across
