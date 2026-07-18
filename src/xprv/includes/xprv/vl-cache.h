@@ -78,6 +78,18 @@ public:
         on_refresh_ = std::move(cb);
     }
 
+    /// Optional verifier run on every fetched VL BEFORE it is trusted/stored.
+    /// Returning false makes the fetch behave exactly like a failed fetch (the
+    /// last-known-good VL is kept). This lets the caller enforce the pinned
+    /// publisher key + signatures without VlCache depending on crypto/config.
+    using VerifyCallback =
+        std::function<bool(catl::vl::ValidatorList const&, std::string&)>;
+    void
+    set_verifier(VerifyCallback cb)
+    {
+        verify_ = std::move(cb);
+    }
+
 private:
     VlCache(boost::asio::io_context& io, std::string vl_host, uint16_t vl_port);
 
@@ -110,6 +122,7 @@ private:
     bool last_fetch_ok_ = false;
     std::string last_fetch_error_;
     RefreshCallback on_refresh_;
+    VerifyCallback verify_;
 
     static LogPartition log_;
 };

@@ -1,5 +1,6 @@
 #include "xprv/proof-engine.h"
 #include "xprv/hex-utils.h"
+#include "xprv/manifest-utils.h"
 #include "xprv/proof-builder.h"
 #include "xprv/proof-chain-binary.h"
 #include "xprv/proof-chain-json.h"
@@ -67,6 +68,23 @@ ProofEngine::start()
 {
     // VL cache
     vl_cache_ = VlCache::create(io_, config_.vl_host, config_.vl_port);
+    // Verify every fetched VL against the pinned publisher key before trusting
+    // it — the fetch itself is unauthenticated (verify_none TLS), so this is
+    // the defense-in-depth check that the server builds proofs on the real UNL.
+    // weak_ptr capture: no dangling if the engine outlives an in-flight fetch,
+    // and no engine<->cache reference cycle.
+    vl_cache_->set_verifier(
+        [weak = std::weak_ptr<ProofEngine>(shared_from_this())](
+            catl::vl::ValidatorList const& vl, std::string& err) -> bool {
+            auto self = weak.lock();
+            if (!self)
+            {
+                err = "engine gone";
+                return false;
+            }
+            return verify_fetched_vl(
+                vl, self->config_.publisher_key, self->protocol_, err);
+        });
     vl_cache_->start();
 
     // Validation buffer

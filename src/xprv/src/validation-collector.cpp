@@ -596,23 +596,115 @@ ValidationCollector::select_quorum_hash(int percent, QuorumMode mode) const
 void
 ValidationCollector::handle_manifests_packet(std::vector<uint8_t> const& data)
 {
-    protocol::TMManifests manifests;
-    if (!manifests.ParseFromArray(data.data(), static_cast<int>(data.size())))
-        return;
-
+    // A peer sends its whole validator-manifest set on connect, which on some
+    // networks is a very large message — yet we only need the manifests of the
+    // validators we actually trust (the ~35 master keys from the list
+    // publisher, in unl_master_keys_). We consume manifests solely to map a
+    // validator's rotating ephemeral signing key back to its stable master key.
+    //
+    // Walk the TMManifests protobuf wire form directly (field 1 `list` is a
+    // repeated length-delimited TMManifest; field 2 `history` is a deprecated
+    // bool we skip) using the bounds/overflow-safe leb128_decode — exactly as
+    // extract_stvalidation does (sec #0060) — so we never materialize the whole
+    // set. For each entry we extract only the master key first and skip
+    // anything not in our trusted set BEFORE paying for a full parse +
+    // signature verification. Cost scales with the trusted set, not the frame.
+    // Filtering by MASTER key still catches ephemeral-key rotations: the master
+    // key is stable across rotation and stays in unl_master_keys_.
+    std::span<const uint8_t> const ds(data.data(), data.size());
+    int total = 0;
+    int trusted = 0;
+    int verified = 0;
     bool updated = false;
-    for (int i = 0; i < manifests.list_size(); ++i)
+
+    try
     {
-        auto const& sto = manifests.list(i).stobject();
-        auto manifest = parse_and_verify_manifest(
-            std::span<const uint8_t>(
-                reinterpret_cast<uint8_t const*>(sto.data()),
-                sto.size()),
-            protocol_);
-        if (!manifest)
-            continue;
-        updated = apply_manifest(*manifest, false) || updated;
+        size_t pos = 0;
+        while (pos < ds.size())
+        {
+            size_t const tag = catl::shamap::leb128_decode(ds, pos);
+            uint32_t const wire = static_cast<uint32_t>(tag & 0x7u);
+            bool const is_list = (tag >> 3) == 1 && wire == 2;
+
+            if (!is_list)
+            {
+                // Skip any other field (e.g. the deprecated `history` bool).
+                if (wire == 0)
+                    (void)catl::shamap::leb128_decode(ds, pos);
+                else if (wire == 2)
+                {
+                    size_t const len = catl::shamap::leb128_decode(ds, pos);
+                    if (len > ds.size() - pos)
+                        break;
+                    pos += len;
+                }
+                else if (wire == 5 && pos + 4 <= ds.size())
+                    pos += 4;
+                else if (wire == 1 && pos + 8 <= ds.size())
+                    pos += 8;
+                else
+                    break;  // groups / truncated / unknown — stop
+                continue;
+            }
+
+            // A TMManifest list entry.
+            size_t const entry_len = catl::shamap::leb128_decode(ds, pos);
+            if (entry_len > ds.size() - pos)
+                break;
+            std::span<const uint8_t> const entry(ds.data() + pos, entry_len);
+            pos += entry_len;
+
+            // TMManifest: field 1 `stobject`, wire type 2 (0x0A).
+            size_t epos = 0;
+            if (entry.empty())
+                continue;
+            size_t const etag = catl::shamap::leb128_decode(entry, epos);
+            if ((etag >> 3) != 1 || (etag & 0x7u) != 2)
+                continue;
+            size_t const sto_len = catl::shamap::leb128_decode(entry, epos);
+            if (sto_len > entry.size() - epos)
+                break;
+            std::span<const uint8_t> const sto(entry.data() + epos, sto_len);
+            ++total;
+
+            // Cheap: master key only — no raw copy, no verification.
+            auto const master_key_hex =
+                catl::vl::parse_manifest_master_key_hex(sto);
+            if (master_key_hex.empty())
+                continue;
+            if (unl_master_keys_.empty() ||
+                !unl_master_keys_.count(master_key_hex))
+                continue;
+            ++trusted;
+
+            // A validator we trust — now pay for the full parse + verify.
+            auto manifest = catl::vl::parse_manifest(sto);
+            if (!verify_manifest(manifest, protocol_))
+                continue;
+            ++verified;
+            updated = apply_manifest(manifest, false) || updated;
+        }
     }
+    catch (std::exception const&)
+    {
+        // Malformed length varint — stop walking. The trusted manifests we
+        // need also arrive via the VL, so a truncated/hostile manifests frame
+        // is not fatal.
+    }
+
+    PLOGD(
+        log_,
+        "[",
+        net_label_,
+        "] manifests: ",
+        total,
+        " entries (",
+        data.size(),
+        " bytes) -> ",
+        trusted,
+        " trusted, ",
+        verified,
+        " verified");
 
     if (updated)
     {

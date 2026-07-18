@@ -49,6 +49,20 @@ VlCache::do_fetch()
             self->fetch_in_progress_ = false;
             self->fetch_generation_++;
 
+            // Verify the fetched VL against the pinned publisher key before we
+            // trust it — the fetch itself is unauthenticated. A VL that fails
+            // verification is treated exactly like a failed fetch, so the
+            // last-known-good list is kept.
+            if (result.success && self->verify_)
+            {
+                std::string verr;
+                if (!self->verify_(result.vl, verr))
+                {
+                    result.success = false;
+                    result.error = "VL verification failed: " + verr;
+                }
+            }
+
             if (result.success)
             {
                 bool first_load = !self->vl_.has_value();

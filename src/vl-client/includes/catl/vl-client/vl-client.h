@@ -56,6 +56,12 @@ struct Manifest
 Manifest
 parse_manifest(std::span<const uint8_t> data);
 
+/// Extract only the master public key (as hex) from a raw manifest — no raw
+/// copy, no other fields, no signature check. Cheap fast-path for filtering a
+/// large manifest set down to trusted keys before a full parse + verify.
+std::string
+parse_manifest_master_key_hex(std::span<const uint8_t> data);
+
 /// Complete parsed VL response.
 struct ValidatorList
 {

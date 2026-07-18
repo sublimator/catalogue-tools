@@ -18,6 +18,7 @@
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
 
+#include <cstdlib>
 #include <iomanip>
 #include <sstream>
 
@@ -139,6 +140,37 @@ parse_manifest(std::span<const uint8_t> data)
 }
 
 std::string
+parse_manifest_master_key_hex(std::span<const uint8_t> data)
+{
+    static auto protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+
+    // Grab only sfPublicKey (the master key) — the parser still walks the
+    // (few, flat) fields, but we copy nothing and skip signatures entirely.
+    std::span<const uint8_t> master;
+    struct MasterKeyVisitor
+    {
+        std::span<const uint8_t>& out;
+        void
+        visit_field(
+            catl::xdata::FieldPath const& path,
+            catl::xdata::FieldSlice const& fs)
+        {
+            if (path.size() == 1 && fs.field->code == sf::PublicKey)
+                out = std::span<const uint8_t>(fs.data.data(), fs.data.size());
+        }
+    } visitor{master};
+
+    Slice slice(data.data(), data.size());
+    catl::xdata::SliceCursor cursor{slice, 0};
+    catl::xdata::ParserContext ctx{cursor};
+    catl::xdata::parse_with_visitor(ctx, protocol, visitor);
+
+    if (master.empty())
+        return {};
+    return to_hex(master);
+}
+
+std::string
 Manifest::master_key_hex() const
 {
     return to_hex(master_public_key);
@@ -178,9 +210,43 @@ VlClient::fetch(VlCallback callback)
             {
                 auto executor = co_await asio::this_coro::executor;
 
-                // SSL with SNI
+                // Authenticate the VL site's TLS certificate + hostname. The
+                // VL signature (checked by the caller against the pinned
+                // publisher key) is the real trust root, but verifying the
+                // certificate chain stops us from even exchanging data with an
+                // impostor or a passive MitM.
+                //
+                // Load an explicit CA bundle: the OpenSSL we link has a
+                // compiled-in default path (a build directory) with no certs,
+                // so set_default_verify_paths() alone loads nothing. Try the
+                // well-known locations — the deploy image is Ubuntu +
+                // ca-certificates — and fall back to the library default.
                 ssl::context ctx(ssl::context::tlsv12_client);
-                ctx.set_verify_mode(ssl::verify_none);
+                ctx.set_verify_mode(ssl::verify_peer);
+                {
+                    boost::system::error_code ca_ec;
+                    char const* const ca_candidates[] = {
+                        std::getenv("SSL_CERT_FILE"),
+                        "/etc/ssl/certs/ca-certificates.crt",  // Debian/Ubuntu
+                        "/etc/ssl/cert.pem",                    // macOS / BSD
+                        "/etc/pki/tls/certs/ca-bundle.crt",     // RHEL
+                    };
+                    bool ca_loaded = false;
+                    for (auto const* path : ca_candidates)
+                    {
+                        if (path && *path)
+                        {
+                            ctx.load_verify_file(path, ca_ec);
+                            if (!ca_ec)
+                            {
+                                ca_loaded = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!ca_loaded)
+                        ctx.set_default_verify_paths(ca_ec);
+                }
 
                 // Resolve
                 tcp::resolver resolver(executor);
@@ -196,6 +262,10 @@ VlClient::fetch(VlCallback callback)
                 {
                     throw std::runtime_error("Failed to set SNI hostname");
                 }
+
+                // Reject a certificate that is not valid for `host`.
+                stream.set_verify_callback(
+                    ssl::host_name_verification(host));
 
                 auto& tcp_stream = beast::get_lowest_layer(stream);
                 tcp_stream.expires_after(std::chrono::seconds(10));
