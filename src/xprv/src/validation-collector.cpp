@@ -14,6 +14,7 @@
 #include "ripple.pb.h"
 
 #include <iomanip>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <unordered_set>
@@ -41,8 +42,7 @@ lower_hex(std::span<const uint8_t> data)
 ValidationCollector::ValidationCollector(
     catl::xdata::Protocol const& protocol,
     uint32_t network_id)
-    : protocol_(protocol)
-    , net_label_(network_label(network_id))
+    : protocol_(protocol), net_label_(network_label(network_id))
 {
 }
 
@@ -58,13 +58,14 @@ ValidationCollector::set_unl(std::vector<catl::vl::Manifest> const& validators)
     vl_manifest_sequence_by_master_.clear();
     manifest_sequence_by_master_.clear();
     stale_vl_masters_.clear();
-    unl_size = static_cast<int>(validators.size());
     for (auto const& v : validators)
     {
         auto const master_key_hex = v.master_key_hex();
         if (!master_key_hex.empty())
             unl_master_keys_.insert(master_key_hex);
     }
+    unl_size = static_cast<int>(unl_master_keys_.size());
+
     for (auto const& v : validators)
     {
         (void)apply_manifest(v, true);
@@ -76,7 +77,9 @@ ValidationCollector::set_unl(std::vector<catl::vl::Manifest> const& validators)
     }
     PLOGI(
         log_,
-        "[", net_label_, "] UNL loaded: ",
+        "[",
+        net_label_,
+        "] UNL loaded: ",
         unl_signing_keys.size(),
         " signing keys from ",
         unl_size,
@@ -224,8 +227,7 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     }
 
     if (type != validation_type ||
-        (!continuous && quorum_reached &&
-         has_quorum(90, QuorumMode::proof)))
+        (!continuous && quorum_reached && has_quorum(90, QuorumMode::proof)))
         return;
 
     auto val_bytes = extract_stvalidation(data);
@@ -247,24 +249,31 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     }
 
     // Diagnostic: log full hex of first validation per network
+    bool log_first_validation = false;
     {
         static std::set<std::string> logged_networks;
-        if (logged_networks.find(net_label_) == logged_networks.end())
+        static std::mutex logged_networks_mutex;
+        std::lock_guard lock(logged_networks_mutex);
+        log_first_validation = logged_networks.insert(net_label_).second;
+    }
+    if (log_first_validation)
+    {
+        std::string hex;
+        hex.reserve(val_bytes.size() * 2);
+        for (auto b : val_bytes)
         {
-            logged_networks.insert(net_label_);
-            std::string hex;
-            hex.reserve(val_bytes.size() * 2);
-            for (auto b : val_bytes)
-            {
-                char buf[3];
-                std::snprintf(buf, sizeof(buf), "%02X", b);
-                hex += buf;
-            }
-            PLOGD(
-                log_,
-                "[", net_label_, "] FIRST validation hex (",
-                val_bytes.size(), "B): ", hex);
+            char buf[3];
+            std::snprintf(buf, sizeof(buf), "%02X", b);
+            hex += buf;
         }
+        PLOGD(
+            log_,
+            "[",
+            net_label_,
+            "] FIRST validation hex (",
+            val_bytes.size(),
+            "B): ",
+            hex);
     }
 
     Entry entry;
@@ -295,7 +304,8 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
                 e.signature.assign(
                     fs.data.data(), fs.data.data() + fs.data.size());
             }
-            else if (fs.field->code == sf::LedgerSequence && fs.data.size() >= 4)
+            else if (
+                fs.field->code == sf::LedgerSequence && fs.data.size() >= 4)
             {
                 e.ledger_seq =
                     (static_cast<uint32_t>(fs.data.data()[0]) << 24) |
@@ -333,7 +343,9 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     auto count = by_ledger[hash].size();
     PLOGD(
         log_,
-        "[", net_label_, "] validation seq=",
+        "[",
+        net_label_,
+        "] validation seq=",
         seq,
         " hash=",
         hash.hex().substr(0, 16),
@@ -409,12 +421,16 @@ ValidationCollector::filter_buffer_to_unl()
 
         for (auto const& entry : it->second)
         {
-            auto const key_hex = entry_key_hex(entry, QuorumMode::live);
-            if (key_hex.empty() || !unl_master_keys_.count(key_hex))
+            auto const live_key = entry_key_hex(entry, QuorumMode::live);
+            auto const proof_key = entry_key_hex(entry, QuorumMode::proof);
+            bool const recognized =
+                (!live_key.empty() && unl_master_keys_.count(live_key)) ||
+                (!proof_key.empty() && unl_master_keys_.count(proof_key));
+            if (!recognized)
             {
                 continue;
             }
-            if (!seen.insert(key_hex).second)
+            if (!seen.insert(entry.signing_key_hex).second)
             {
                 continue;
             }
@@ -457,14 +473,17 @@ ValidationCollector::recompute_quorum_state(int percent)
 
     quorum_reached = true;
     quorum_hash = *best_hash;
-    quorum_count = static_cast<int>(get_quorum(percent, QuorumMode::live).size());
+    quorum_count =
+        static_cast<int>(get_quorum(percent, QuorumMode::live).size());
 
     if (!previous_reached || previous_hash != quorum_hash)
     {
         auto const seq = it->second.front().ledger_seq;
         PLOGD(
             log_,
-            "[", net_label_, "] QUORUM threshold reached for seq=",
+            "[",
+            net_label_,
+            "] QUORUM threshold reached for seq=",
             seq,
             " hash=",
             quorum_hash.hex().substr(0, 16),
@@ -479,7 +498,9 @@ ValidationCollector::recompute_quorum_state(int percent)
         auto const seq = it->second.front().ledger_seq;
         PLOGD(
             log_,
-            "[", net_label_, "] QUORUM grew for seq=",
+            "[",
+            net_label_,
+            "] QUORUM grew for seq=",
             seq,
             " hash=",
             quorum_hash.hex().substr(0, 16),
@@ -496,13 +517,16 @@ ValidationCollector::recompute_quorum_state(int percent)
 bool
 ValidationCollector::insert_entry(Entry entry)
 {
-    auto const key_hex = entry_key_hex(entry, QuorumMode::live);
-    if (key_hex.empty())
+    auto const live_key = entry_key_hex(entry, QuorumMode::live);
+    auto const proof_key = entry_key_hex(entry, QuorumMode::proof);
+    if (live_key.empty() && proof_key.empty())
     {
         return false;
     }
 
-    if (!unl_master_keys_.empty() && !unl_master_keys_.count(key_hex))
+    if (!unl_master_keys_.empty() &&
+        (live_key.empty() || !unl_master_keys_.count(live_key)) &&
+        (proof_key.empty() || !unl_master_keys_.count(proof_key)))
     {
         return false;
     }
@@ -510,7 +534,7 @@ ValidationCollector::insert_entry(Entry entry)
     auto& entries = by_ledger[entry.ledger_hash];
     for (auto const& existing : entries)
     {
-        if (entry_key_hex(existing, QuorumMode::live) == key_hex)
+        if (existing.signing_key_hex == entry.signing_key_hex)
         {
             return false;
         }
@@ -593,124 +617,209 @@ ValidationCollector::select_quorum_hash(int percent, QuorumMode mode) const
     return best_hash;
 }
 
-void
-ValidationCollector::handle_manifests_packet(std::vector<uint8_t> const& data)
+ValidationCollector::ManifestPacketResult
+ValidationCollector::parse_trusted_manifests_packet(
+    std::vector<uint8_t> const& data,
+    std::set<std::string> const& trusted_master_keys,
+    catl::xdata::Protocol const& protocol)
 {
-    // A peer sends its whole validator-manifest set on connect, which on some
-    // networks is a very large message — yet we only need the manifests of the
-    // validators we actually trust (the ~35 master keys from the list
-    // publisher, in unl_master_keys_). We consume manifests solely to map a
-    // validator's rotating ephemeral signing key back to its stable master key.
-    //
-    // Walk the TMManifests protobuf wire form directly (field 1 `list` is a
-    // repeated length-delimited TMManifest; field 2 `history` is a deprecated
-    // bool we skip) using the bounds/overflow-safe leb128_decode — exactly as
-    // extract_stvalidation does (sec #0060) — so we never materialize the whole
-    // set. For each entry we extract only the master key first and skip
-    // anything not in our trusted set BEFORE paying for a full parse +
-    // signature verification. Cost scales with the trusted set, not the frame.
-    // Filtering by MASTER key still catches ephemeral-key rotations: the master
-    // key is stable across rotation and stays in unl_master_keys_.
-    std::span<const uint8_t> const ds(data.data(), data.size());
-    int total = 0;
-    int trusted = 0;
-    int verified = 0;
-    bool updated = false;
+    ManifestPacketResult result;
+    if (trusted_master_keys.empty())
+        return result;
+
+    struct Candidate
+    {
+        std::uint32_t sequence = 0;
+        std::span<const std::uint8_t> raw;
+        bool ambiguous = false;
+    };
+    std::map<std::string, Candidate> candidates;
+    std::span<const std::uint8_t> const packet(data.data(), data.size());
 
     try
     {
-        size_t pos = 0;
-        while (pos < ds.size())
+        std::size_t pos = 0;
+        while (pos < packet.size())
         {
-            size_t const tag = catl::shamap::leb128_decode(ds, pos);
-            uint32_t const wire = static_cast<uint32_t>(tag & 0x7u);
+            auto const tag = catl::shamap::leb128_decode(packet, pos);
+            auto const wire = static_cast<std::uint32_t>(tag & 0x7u);
             bool const is_list = (tag >> 3) == 1 && wire == 2;
 
             if (!is_list)
             {
-                // Skip any other field (e.g. the deprecated `history` bool).
                 if (wire == 0)
-                    (void)catl::shamap::leb128_decode(ds, pos);
+                    (void)catl::shamap::leb128_decode(packet, pos);
                 else if (wire == 2)
                 {
-                    size_t const len = catl::shamap::leb128_decode(ds, pos);
-                    if (len > ds.size() - pos)
+                    auto const len = catl::shamap::leb128_decode(packet, pos);
+                    if (len > packet.size() - pos)
                         break;
                     pos += len;
                 }
-                else if (wire == 5 && pos + 4 <= ds.size())
+                else if (wire == 5 && packet.size() - pos >= 4)
                     pos += 4;
-                else if (wire == 1 && pos + 8 <= ds.size())
+                else if (wire == 1 && packet.size() - pos >= 8)
                     pos += 8;
                 else
-                    break;  // groups / truncated / unknown — stop
+                    break;
                 continue;
             }
 
-            // A TMManifest list entry.
-            size_t const entry_len = catl::shamap::leb128_decode(ds, pos);
-            if (entry_len > ds.size() - pos)
+            auto const entry_len = catl::shamap::leb128_decode(packet, pos);
+            if (entry_len > packet.size() - pos)
                 break;
-            std::span<const uint8_t> const entry(ds.data() + pos, entry_len);
+            std::span<const std::uint8_t> const entry(
+                packet.data() + pos, entry_len);
             pos += entry_len;
 
-            // TMManifest: field 1 `stobject`, wire type 2 (0x0A).
-            size_t epos = 0;
+            std::size_t entry_pos = 0;
             if (entry.empty())
                 continue;
-            size_t const etag = catl::shamap::leb128_decode(entry, epos);
-            if ((etag >> 3) != 1 || (etag & 0x7u) != 2)
+            auto const entry_tag =
+                catl::shamap::leb128_decode(entry, entry_pos);
+            if ((entry_tag >> 3) != 1 || (entry_tag & 0x7u) != 2)
                 continue;
-            size_t const sto_len = catl::shamap::leb128_decode(entry, epos);
-            if (sto_len > entry.size() - epos)
-                break;
-            std::span<const uint8_t> const sto(entry.data() + epos, sto_len);
-            ++total;
+            auto const object_len =
+                catl::shamap::leb128_decode(entry, entry_pos);
+            if (object_len > entry.size() - entry_pos)
+                continue;
+            std::span<const std::uint8_t> const object(
+                entry.data() + entry_pos, object_len);
+            ++result.total_entries;
 
-            // Cheap: master key only — no raw copy, no verification.
-            auto const master_key_hex =
-                catl::vl::parse_manifest_master_key_hex(sto);
-            if (master_key_hex.empty())
-                continue;
-            if (unl_master_keys_.empty() ||
-                !unl_master_keys_.count(master_key_hex))
-                continue;
-            ++trusted;
+            struct IdentityVisitor
+            {
+                std::span<const std::uint8_t> master;
+                std::uint32_t sequence = 0;
+                bool has_sequence = false;
 
-            // A validator we trust — now pay for the full parse + verify.
-            auto manifest = catl::vl::parse_manifest(sto);
-            if (!verify_manifest(manifest, protocol_))
+                void
+                visit_field(
+                    catl::xdata::FieldPath const& path,
+                    catl::xdata::FieldSlice const& field)
+                {
+                    if (path.size() != 1)
+                        return;
+                    if (field.field->code == sf::PublicKey)
+                    {
+                        master = std::span<const std::uint8_t>(
+                            field.data.data(), field.data.size());
+                    }
+                    else if (
+                        field.field->code == sf::Sequence &&
+                        field.data.size() == 4)
+                    {
+                        sequence =
+                            (static_cast<std::uint32_t>(field.data.data()[0])
+                             << 24) |
+                            (static_cast<std::uint32_t>(field.data.data()[1])
+                             << 16) |
+                            (static_cast<std::uint32_t>(field.data.data()[2])
+                             << 8) |
+                            static_cast<std::uint32_t>(field.data.data()[3]);
+                        has_sequence = true;
+                    }
+                }
+            } identity;
+
+            try
+            {
+                Slice slice(object.data(), object.size());
+                catl::xdata::SliceCursor cursor{slice, 0};
+                catl::xdata::ParserContext context{cursor};
+                catl::xdata::parse_with_visitor(context, protocol, identity);
+            }
+            catch (std::exception const&)
+            {
                 continue;
-            ++verified;
-            updated = apply_manifest(manifest, false) || updated;
+            }
+
+            if (identity.master.size() != 33 || !identity.has_sequence)
+                continue;
+            auto const master = lower_hex(identity.master);
+            if (!trusted_master_keys.count(master))
+                continue;
+            ++result.trusted_entries;
+
+            auto [it, inserted] = candidates.try_emplace(
+                master, Candidate{identity.sequence, object, false});
+            if (inserted || identity.sequence < it->second.sequence)
+                continue;
+            if (identity.sequence > it->second.sequence)
+            {
+                it->second = Candidate{identity.sequence, object, false};
+                continue;
+            }
+
+            bool const same =
+                object.size() == it->second.raw.size() &&
+                std::equal(
+                    object.begin(), object.end(), it->second.raw.begin());
+            if (!same)
+                it->second.ambiguous = true;
         }
     }
     catch (std::exception const&)
     {
-        // Malformed length varint — stop walking. The trusted manifests we
-        // need also arrive via the VL, so a truncated/hostile manifests frame
-        // is not fatal.
+        // Keep any complete candidates found before malformed framing.
     }
 
-    PLOGD(
-        log_,
-        "[",
-        net_label_,
-        "] manifests: ",
-        total,
-        " entries (",
-        data.size(),
-        " bytes) -> ",
-        trusted,
-        " trusted, ",
-        verified,
-        " verified");
+    result.manifests.reserve(candidates.size());
+    for (auto const& [master, candidate] : candidates)
+    {
+        if (candidate.ambiguous)
+            continue;
+        try
+        {
+            auto manifest = catl::vl::parse_manifest(candidate.raw);
+            if (manifest.sequence != candidate.sequence ||
+                manifest.master_key_hex() != master ||
+                !verify_manifest(manifest, protocol))
+            {
+                continue;
+            }
+            result.manifests.push_back(std::move(manifest));
+        }
+        catch (std::exception const&)
+        {
+        }
+    }
+
+    return result;
+}
+
+void
+ValidationCollector::apply_peer_manifests(
+    std::vector<catl::vl::Manifest> manifests)
+{
+    bool updated = false;
+    for (auto const& manifest : manifests)
+        updated = apply_manifest(manifest, false) || updated;
 
     if (updated)
     {
         filter_buffer_to_unl();
         recompute_quorum_state();
     }
+}
+
+void
+ValidationCollector::handle_manifests_packet(std::vector<uint8_t> const& data)
+{
+    auto parsed =
+        parse_trusted_manifests_packet(data, unl_master_keys_, protocol_);
+    PLOGD(
+        log_,
+        "[",
+        net_label_,
+        "] manifests: ",
+        parsed.total_entries,
+        " entries -> ",
+        parsed.trusted_entries,
+        " trusted, ",
+        parsed.manifests.size(),
+        " verified");
+    apply_peer_manifests(std::move(parsed.manifests));
 }
 
 bool
@@ -731,12 +840,15 @@ ValidationCollector::apply_manifest(
     if (!from_vl)
     {
         auto const stored = peer_manifests_by_master_.find(master_key_hex);
-        if (stored != peer_manifests_by_master_.end() &&
-            manifest.sequence <= stored->second.sequence)
+        if (stored != peer_manifests_by_master_.end())
         {
-            return false;
+            if (manifest.sequence < stored->second.sequence ||
+                (manifest.sequence == stored->second.sequence &&
+                 manifest.raw != stored->second.raw))
+            {
+                return false;
+            }
         }
-        peer_manifests_by_master_[master_key_hex] = manifest;
     }
 
     auto const current_seq = manifest_sequence_by_master_.find(master_key_hex);
@@ -744,6 +856,35 @@ ValidationCollector::apply_manifest(
         manifest.sequence <= current_seq->second)
     {
         return false;
+    }
+
+    // Match the reference manifest cache's key-separation rules. A trusted
+    // master may rotate its own signing key, but it may not claim another
+    // validator's master or currently active signing key. Check before
+    // retaining the peer manifest so a rejected collision cannot poison the
+    // sequence history and block a valid manifest at the same sequence.
+    if (!from_vl)
+    {
+        if (live_signing_to_master_.count(master_key_hex))
+            return false;
+
+        if (!manifest.is_revocation())
+        {
+            auto const signing_key_hex = manifest.signing_key_hex();
+            if (signing_key_hex.empty() ||
+                unl_master_keys_.count(signing_key_hex) ||
+                live_signing_to_master_.count(signing_key_hex))
+            {
+                return false;
+            }
+        }
+
+        auto const stored = peer_manifests_by_master_.find(master_key_hex);
+        if (stored == peer_manifests_by_master_.end() ||
+            manifest.sequence > stored->second.sequence)
+        {
+            peer_manifests_by_master_[master_key_hex] = manifest;
+        }
     }
 
     auto erase_master_mapping =
@@ -780,9 +921,9 @@ ValidationCollector::apply_manifest(
     }
 
     auto const vl_seq_it = vl_manifest_sequence_by_master_.find(master_key_hex);
-    auto const vl_seq =
-        (vl_seq_it == vl_manifest_sequence_by_master_.end()) ? 0
-                                                             : vl_seq_it->second;
+    auto const vl_seq = (vl_seq_it == vl_manifest_sequence_by_master_.end())
+        ? 0
+        : vl_seq_it->second;
     if (!from_vl && manifest.sequence > vl_seq)
     {
         auto const inserted = stale_vl_masters_.insert(master_key_hex).second;
@@ -790,7 +931,9 @@ ValidationCollector::apply_manifest(
         {
             PLOGW(
                 log_,
-                "[", net_label_, "] Peer manifest is newer than VL for ",
+                "[",
+                net_label_,
+                "] Peer manifest is newer than VL for ",
                 master_key_hex.substr(0, 16),
                 "... (peer seq=",
                 manifest.sequence,
@@ -812,16 +955,10 @@ ValidationCollector::entry_key_hex(Entry const& entry, QuorumMode mode) const
     if (unl_master_keys_.empty())
         return entry.signing_key_hex;
 
-    // Always use live mapping for now — all validators visible regardless
-    // of VL manifest freshness. The proof verifier checks signatures.
-    // TODO: re-enable proof mode filtering once manifest processing runs
-    // off the validation strand and vl_signing_to_master_ is reliably
-    // populated. The current proof mode caused hangs because
-    // vl_signing_to_master_ was incomplete when validators rotated keys.
-    // The proof/live mode distinction caused 30-60s hangs when
-    // validators had rotated keys since the last VL publish.
-    auto it = live_signing_to_master_.find(entry.signing_key_hex);
-    if (it == live_signing_to_master_.end())
+    auto const& mapping = mode == QuorumMode::proof ? vl_signing_to_master_
+                                                    : live_signing_to_master_;
+    auto it = mapping.find(entry.signing_key_hex);
+    if (it == mapping.end())
         return {};
     return it->second;
 }

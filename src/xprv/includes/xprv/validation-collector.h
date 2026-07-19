@@ -14,6 +14,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -50,9 +51,7 @@ public:
     /// Get all distinct validations currently available for the selected
     /// quorum ledger under the requested mode.
     std::vector<Entry>
-    get_quorum(
-        int percent = 90,
-        QuorumMode mode = QuorumMode::live) const;
+    get_quorum(int percent = 90, QuorumMode mode = QuorumMode::live) const;
 
     /// Get all distinct validations currently available for a specific ledger
     /// hash under the requested mode.
@@ -62,9 +61,7 @@ public:
         QuorumMode mode = QuorumMode::live) const;
 
     bool
-    has_quorum(
-        int percent = 90,
-        QuorumMode mode = QuorumMode::live) const;
+    has_quorum(int percent = 90, QuorumMode mode = QuorumMode::live) const;
 
     bool
     has_stale_vl_manifests() const
@@ -87,6 +84,31 @@ public:
         std::vector<uint8_t> const& stvalidation,
         catl::xdata::Protocol const& protocol);
 
+    struct ManifestPacketResult
+    {
+        std::size_t total_entries = 0;
+        std::size_t trusted_entries = 0;
+        std::vector<catl::vl::Manifest> manifests;
+    };
+
+    /// Parse a manifests packet and authenticate at most one candidate per
+    /// trusted master key. The result is safe to apply on the collector's
+    /// owning strand.
+    static ManifestPacketResult
+    parse_trusted_manifests_packet(
+        std::vector<uint8_t> const& data,
+        std::set<std::string> const& trusted_master_keys,
+        catl::xdata::Protocol const& protocol);
+
+    std::set<std::string>
+    trusted_master_keys() const
+    {
+        return unl_master_keys_;
+    }
+
+    void
+    apply_peer_manifests(std::vector<catl::vl::Manifest> manifests);
+
     // Public state
     std::map<Hash256, std::vector<Entry>> by_ledger;
     std::set<std::string> unl_signing_keys;
@@ -103,13 +125,6 @@ private:
     catl::xdata::Protocol const& protocol_;
     std::string net_label_;
     std::set<std::string> unl_master_keys_;
-    // TODO: these manifest maps are populated but mostly unused since
-    // entry_key_hex was changed to always use live_signing_to_master_.
-    // vl_signing_to_master_, vl_manifest_sequence_by_master_, and
-    // stale_vl_masters_ are dead weight. peer_manifests_by_master_ and
-    // manifest_sequence_by_master_ feed live_signing_to_master_ via
-    // apply_manifest. Clean up: remove dead maps, or re-enable proof
-    // mode properly with manifest processing off the validation strand.
     std::map<std::string, catl::vl::Manifest> peer_manifests_by_master_;
     std::map<std::string, std::string> vl_signing_to_master_;
     std::map<std::string, std::string> live_signing_to_master_;

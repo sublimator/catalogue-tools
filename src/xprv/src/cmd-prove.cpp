@@ -90,6 +90,13 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
             auto prove_result = co_await engine->prove(opts.tx_hash);
             auto& chain = prove_result.chain;
 
+            if (!xprv::resolve_proof_chain(
+                    chain, protocol, prove_result.publisher_key_hex))
+            {
+                throw std::runtime_error(
+                    "generated proof failed self-verification");
+            }
+
             auto const output_stem = default_output_stem(
                 prove_result.tx_ledger_seq, opts.tx_hash, opts.output);
 
@@ -120,10 +127,6 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
                 write_file(bin_path, compressed);
                 bin_size = compressed.size();
             }
-
-            // Verify using the actual publisher key from the VL fetch
-            xprv::resolve_proof_chain(
-                chain, protocol, prove_result.publisher_key_hex);
 
             // Summary
             PLOGI(log_, "");
@@ -159,6 +162,7 @@ cmd_prove(ProveOptions const& opts, catl::xdata::Protocol const& protocol)
                     PLOGE(log_, "Fatal: ", e.what());
                 }
             }
+            engine->stop();
             io.stop();
         });
 

@@ -95,13 +95,20 @@ VlCache::do_fetch()
                     result.vl,
                     self->vl_ ? &*self->vl_ : nullptr,
                     catl::common::current_ripple_time(),
-                    freshness_error);
+                    freshness_error,
+                    &self->validator_manifest_history_);
                 if (freshness == VlFreshnessDisposition::reject)
                 {
                     result.success = false;
                     result.error =
                         "VL freshness check failed: " + freshness_error;
                 }
+            }
+
+            if (result.success)
+            {
+                remember_validator_manifests(
+                    result.vl, self->validator_manifest_history_);
             }
 
             if (result.success &&

@@ -1,4 +1,5 @@
 #include "xprv/proof-engine.h"
+#include "xprv/anchor-verifier.h"
 #include "xprv/hex-utils.h"
 #include "xprv/manifest-utils.h"
 #include "xprv/proof-builder.h"
@@ -24,25 +25,6 @@ namespace asio = boost::asio;
 using namespace catl::peer_client;
 
 static LogPartition log_("engine", LogLevel::INFO);
-
-namespace {
-
-char const*
-to_string(QuorumCollectStopReason reason)
-{
-    switch (reason)
-    {
-        case QuorumCollectStopReason::full:
-            return "full";
-        case QuorumCollectStopReason::next_ledger:
-            return "next-ledger";
-        case QuorumCollectStopReason::timeout:
-            return "timed-out";
-    }
-    return "unknown";
-}
-
-}  // namespace
 
 // ═══════════════════════════════════════════════════════════════════════
 // Lifecycle
@@ -148,7 +130,7 @@ ProofEngine::start()
     // set_unl() clears the quorum cache, so this must only fire on actual
     // VL changes — not per-request.
     vl_cache_->set_on_refresh([vbuf](catl::vl::ValidatorList const& vl) {
-        vbuf->set_unl(vl.validators);
+        vbuf->set_unl(vl.validators, vl.sequence);
     });
 
     // Try the configured initial peer
@@ -245,9 +227,12 @@ ProofEngine::stop()
     {
         vl_cache_->stop();
     }
-    // PeerSet and ValidationBuffer stop naturally when io_context stops —
-    // they hold no timers that keep the io_context alive on their own.
-    // The VL refresh timer is the main thing that prevents exit.
+    if (val_buffer_)
+    {
+        val_buffer_->stop();
+    }
+    // The validator worker is joined above. Peer and heartbeat operations are
+    // quiesced when the owning command stops the io_context.
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -289,10 +274,20 @@ ProofEngine::prove(
         }
     }
 
-    // Step 1: Ensure VL is loaded (UNL push happens once in start(),
-    // not per-request — set_unl clears the quorum cache)
-    auto vl =
-        std::make_shared<catl::vl::ValidatorList>(co_await vl_cache_->co_get());
+    // Step 1: Take an authenticated list snapshot and order its UNL update
+    // before any proof-quorum read. A concurrent refresh may make the first
+    // snapshot obsolete, in which case retry with the cache's current list.
+    std::shared_ptr<catl::vl::ValidatorList> vl;
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        vl = std::make_shared<catl::vl::ValidatorList>(
+            co_await vl_cache_->co_get());
+        if (co_await val_buffer_->co_sync_unl(vl->validators, vl->sequence))
+            break;
+        vl.reset();
+    }
+    if (!vl)
+        throw std::runtime_error("validator list changed while starting proof");
 
     // Check tx→ledger_seq cache (avoids RPC lookup on repeated requests)
     auto cached_seq = tx_ledger_get(tx_hash);
@@ -582,6 +577,9 @@ ProofEngine::get_or_reuse_anchor(
     std::shared_ptr<catl::vl::ValidatorList> const& vl,
     uint32_t max_age_secs)
 {
+    if (!vl)
+        throw std::runtime_error("validator list snapshot is missing");
+
     PLOGI(
         log_,
         "[",
@@ -602,10 +600,11 @@ ProofEngine::get_or_reuse_anchor(
     //
     // When max_age_secs > 0, reuse the current anchor if fresh enough.
     // When 0 (default), always wait for the latest quorum.
+    std::optional<AnchorBundle> reusable;
     if (max_age_secs > 0)
     {
         std::lock_guard lock(cache_mutex_);
-        if (current_anchor_ &&
+        if (current_anchor_ && current_anchor_->vl_sequence == vl->sequence &&
             (std::chrono::steady_clock::now() - current_anchor_->built_at) <
                 std::chrono::seconds(max_age_secs))
         {
@@ -627,14 +626,42 @@ ProofEngine::get_or_reuse_anchor(
             catl::core::emit_status(
                 "anchor: reusing seq=" + std::to_string(current_anchor_->seq) +
                 " (age=" + std::to_string(age_s) + "s)");
-            co_return *current_anchor_;
+            reusable = *current_anchor_;
         }
+    }
+
+    if (reusable)
+    {
+        if (!validator_list_active_at(
+                vl->effective,
+                vl->expiration,
+                reusable->header_result.header().close_time()))
+        {
+            std::lock_guard lock(cache_mutex_);
+            if (current_anchor_ &&
+                current_anchor_->anchor_hash == reusable->anchor_hash &&
+                current_anchor_->vl_sequence == reusable->vl_sequence)
+            {
+                current_anchor_.reset();
+            }
+            reusable.reset();
+        }
+    }
+    if (reusable)
+    {
+        if (!co_await val_buffer_->co_sync_unl(vl->validators, vl->sequence))
+        {
+            throw std::runtime_error(
+                "validator list changed while reusing proof anchor");
+        }
+        co_return *reusable;
     }
 
     // Use the last full quorum if available — no waiting needed.
     // Fall back to co_wait_best_quorum only on cold start.
     auto full = co_await val_buffer_->co_last_full_quorum(
-        std::chrono::seconds(max_age_secs > 0 ? max_age_secs : 10));
+        std::chrono::seconds(max_age_secs > 0 ? max_age_secs : 10),
+        vl->sequence);
     if (full)
     {
         PLOGI(
@@ -659,11 +686,28 @@ ProofEngine::get_or_reuse_anchor(
             "[",
             net_label_,
             "] get_or_reuse_anchor: no full quorum yet, waiting...");
-        auto collected =
-            co_await val_buffer_->co_wait_best_quorum(std::chrono::seconds(30));
+        auto collected = co_await val_buffer_->co_wait_best_quorum(
+            std::chrono::seconds(30), vl->sequence);
+        if (collected.stop_reason ==
+            QuorumCollectStopReason::validator_list_changed)
+        {
+            throw std::runtime_error(
+                "validator list changed while collecting proof quorum");
+        }
         full = std::move(collected.quorum);
     }
     auto quorum = std::move(*full);
+
+    if (quorum.ledger_seq == 0 || quorum.ledger_hash == Hash256() ||
+        quorum.validations.empty())
+    {
+        throw std::runtime_error("timed out before collecting a proof quorum");
+    }
+    if (quorum.vl_sequence != vl->sequence)
+    {
+        throw std::runtime_error(
+            "proof quorum does not match validator list snapshot");
+    }
 
     PLOGI(
         log_,
@@ -684,7 +728,26 @@ ProofEngine::get_or_reuse_anchor(
         std::to_string(vl ? vl->validators.size() : 0) + " validators)");
 
     auto anchor = co_await get_anchor_bundle(
-        quorum.ledger_seq, quorum.ledger_hash, quorum.validations);
+        quorum.ledger_seq,
+        quorum.ledger_hash,
+        quorum.vl_sequence,
+        vl->effective,
+        vl->expiration,
+        quorum.validations);
+
+    if (!validator_list_active_at(
+            vl->effective,
+            vl->expiration,
+            anchor.header_result.header().close_time()))
+    {
+        throw std::runtime_error(
+            "anchor is outside validator list validity interval");
+    }
+    if (!co_await val_buffer_->co_sync_unl(vl->validators, vl->sequence))
+    {
+        throw std::runtime_error(
+            "validator list changed while building proof anchor");
+    }
 
     co_return anchor;
 }
@@ -712,16 +775,20 @@ asio::awaitable<ProofEngine::AnchorBundle>
 ProofEngine::get_anchor_bundle(
     uint32_t anchor_seq,
     Hash256 anchor_hash,
+    uint32_t vl_sequence,
+    uint32_t vl_effective,
+    uint32_t vl_expiration,
     std::vector<ValidationCollector::Entry> validations)
 {
     enum class Action { hit, wait, fetch };
     Action action;
     std::shared_ptr<asio::steady_timer> signal;
     AnchorBundle hit_bundle;
+    AnchorCacheKey const cache_key{vl_sequence, anchor_seq, anchor_hash};
 
     {
         std::lock_guard lock(cache_mutex_);
-        auto [it, inserted] = anchor_cache_.try_emplace(anchor_seq);
+        auto [it, inserted] = anchor_cache_.try_emplace(cache_key);
 
         if (!inserted && it->second.present)
         {
@@ -776,7 +843,7 @@ ProofEngine::get_anchor_bundle(
             asio::redirect_error(asio::use_awaitable, ec));
 
         std::lock_guard lock(cache_mutex_);
-        auto it = anchor_cache_.find(anchor_seq);
+        auto it = anchor_cache_.find(cache_key);
         if (it != anchor_cache_.end() && it->second.present)
         {
             catl::core::emit_status(
@@ -823,12 +890,24 @@ ProofEngine::get_anchor_bundle(
             "anchor header: fetching from peer seq=" +
             std::to_string(anchor_seq));
         auto hdr = co_await node_cache_->get_header(anchor_seq, peers_);
+        if (hdr.seq() != anchor_seq || hdr.ledger_hash256() != anchor_hash)
+        {
+            throw std::runtime_error(
+                "fetched anchor header does not match validation quorum");
+        }
+        if (!validator_list_active_at(
+                vl_effective, vl_expiration, hdr.header().close_time()))
+        {
+            throw std::runtime_error(
+                "anchor is outside validator list validity interval");
+        }
 
         AnchorBundle bundle;
         bundle.header_result = hdr;
         bundle.anchor_hash = anchor_hash;
         bundle.account_hash = hdr.header().account_hash();
         bundle.seq = anchor_seq;
+        bundle.vl_sequence = vl_sequence;
         bundle.validations = std::move(validations);
         bundle.built_at = std::chrono::steady_clock::now();
 
@@ -836,7 +915,7 @@ ProofEngine::get_anchor_bundle(
         std::shared_ptr<asio::steady_timer> sig;
         {
             std::lock_guard lock(cache_mutex_);
-            auto& entry = anchor_cache_[anchor_seq];
+            auto& entry = anchor_cache_[cache_key];
             sig = entry.signal;
             entry.bundle = bundle;
             entry.present = true;
@@ -849,7 +928,7 @@ ProofEngine::get_anchor_bundle(
             static constexpr size_t kMaxAnchorCache = 10;
             while (anchor_cache_.size() > kMaxAnchorCache)
             {
-                // std::map is ordered by seq — erase smallest (oldest)
+                // The map is ordered by list and ledger sequence.
                 auto oldest = anchor_cache_.begin();
                 // Don't evict entries with in-flight waiters
                 if (oldest->second.signal)
@@ -876,7 +955,7 @@ ProofEngine::get_anchor_bundle(
         std::shared_ptr<asio::steady_timer> sig;
         {
             std::lock_guard lock(cache_mutex_);
-            auto it = anchor_cache_.find(anchor_seq);
+            auto it = anchor_cache_.find(cache_key);
             if (it != anchor_cache_.end())
             {
                 sig = it->second.signal;

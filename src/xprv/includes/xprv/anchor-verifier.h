@@ -22,6 +22,12 @@
 
 namespace xprv {
 
+bool
+validator_list_active_at(
+    uint32_t effective,
+    uint32_t expiration,
+    uint32_t ledger_close_time);
+
 struct AnchorVerifyResult
 {
     bool verified = false;
@@ -29,6 +35,9 @@ struct AnchorVerifyResult
     int validations_total = 0;
     int validations_verified = 0;
     int validations_matched_unl = 0;
+    uint32_t vl_sequence = 0;
+    uint32_t vl_effective = 0;
+    uint32_t vl_expiration = 0;
     std::string error;
 };
 

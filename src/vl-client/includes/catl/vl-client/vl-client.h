@@ -31,12 +31,15 @@ struct Manifest
 {
     std::vector<uint8_t> master_public_key;   // 33 bytes
     std::vector<uint8_t> signing_public_key;  // 33 bytes (empty in revocations)
+    uint16_t version = 0;
+    bool has_version = false;
     uint32_t sequence = 0;
     bool has_sequence = false;
     std::vector<uint8_t> master_signature;
     std::vector<uint8_t> signing_signature;  // present if signing key present
     std::vector<uint8_t> domain;             // optional
     std::vector<uint8_t> raw;  // full raw bytes for re-verification
+    bool canonical = false;
 
     /// Hex string of the master public key.
     std::string
@@ -77,9 +80,14 @@ struct ValidatorList
     std::vector<uint8_t> blob_signature;  // publisher signs blob
     std::string publisher_key_hex;        // from JSON response
     std::string site;                     // which VL site
+    uint32_t version = 0;
+    bool has_version = false;
     uint32_t sequence = 0;
+    bool has_sequence = false;
     uint32_t effective = 0;
     uint32_t expiration = 0;
+    bool has_expiration = false;
+    bool has_validators = false;
 };
 
 struct VlResult

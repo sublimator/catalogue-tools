@@ -6,10 +6,69 @@
 #include <iostream>  // for logging
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace json = boost::json;
 
 namespace catl::xdata {
+
+Protocol::Protocol(Protocol const& other)
+{
+    *this = other;
+}
+
+Protocol&
+Protocol::operator=(Protocol const& other)
+{
+    if (this == &other)
+        return *this;
+
+    expand_xaddresses_ = other.expand_xaddresses_;
+    network_id_ = other.network_id_;
+    fields_ = other.fields_;
+    inferred_vl_types_ = other.inferred_vl_types_;
+    types_ = other.types_;
+    typeCodeToName_ = other.typeCodeToName_;
+    ledgerEntryTypes_ = other.ledgerEntryTypes_;
+    transactionTypes_ = other.transactionTypes_;
+    transactionResults_ = other.transactionResults_;
+    permissions_ = other.permissions_;
+    fieldNameIndex_ = other.fieldNameIndex_;
+    fieldCodeIndex_ = other.fieldCodeIndex_;
+    build_fast_lookup();
+    return *this;
+}
+
+Protocol::Protocol(Protocol&& other)
+{
+    *this = std::move(other);
+}
+
+Protocol&
+Protocol::operator=(Protocol&& other)
+{
+    if (this == &other)
+        return *this;
+
+    expand_xaddresses_ = other.expand_xaddresses_;
+    network_id_ = std::move(other.network_id_);
+    fields_ = std::move(other.fields_);
+    inferred_vl_types_ = std::move(other.inferred_vl_types_);
+    types_ = std::move(other.types_);
+    typeCodeToName_ = std::move(other.typeCodeToName_);
+    ledgerEntryTypes_ = std::move(other.ledgerEntryTypes_);
+    transactionTypes_ = std::move(other.transactionTypes_);
+    transactionResults_ = std::move(other.transactionResults_);
+    permissions_ = std::move(other.permissions_);
+    fieldNameIndex_ = std::move(other.fieldNameIndex_);
+    fieldCodeIndex_ = std::move(other.fieldCodeIndex_);
+    build_fast_lookup();
+    other.fields_.clear();
+    other.fieldNameIndex_.clear();
+    other.fieldCodeIndex_.clear();
+    other.build_fast_lookup();
+    return *this;
+}
 
 Protocol
 Protocol::load_from_file(const std::string& path, const ProtocolOptions& opts)

@@ -47,6 +47,33 @@ TEST(KnownFields, MatchBothLoadedProtocols)
     }
 }
 
+TEST(KnownFields, ProtocolCopiesOwnTheirFastLookupPointers)
+{
+    auto original = load("src/x-data/definitions/xrpl_definitions.json");
+    auto copy = original;
+
+    auto const* original_sequence =
+        original.get_field_by_code(catl::xdata::sf::Sequence);
+    auto const* copied_sequence =
+        copy.get_field_by_code(catl::xdata::sf::Sequence);
+    ASSERT_NE(original_sequence, nullptr);
+    ASSERT_NE(copied_sequence, nullptr);
+    EXPECT_EQ(copied_sequence->name, original_sequence->name);
+    EXPECT_NE(copied_sequence, original_sequence);
+
+    original = catl::xdata::Protocol{};
+    copied_sequence = copy.get_field_by_code(catl::xdata::sf::Sequence);
+    ASSERT_NE(copied_sequence, nullptr);
+    EXPECT_EQ(copied_sequence->name, "Sequence");
+
+    auto moved = std::move(copy);
+    copy = catl::xdata::Protocol{};
+    auto const* moved_sequence =
+        moved.get_field_by_code(catl::xdata::sf::Sequence);
+    ASSERT_NE(moved_sequence, nullptr);
+    EXPECT_EQ(moved_sequence->name, "Sequence");
+}
+
 // Spot-check a few well-known codes directly (independent of the loader), so a
 // broken generator can't pass just because the loader agrees with it.
 TEST(KnownFields, WellKnownCodes)

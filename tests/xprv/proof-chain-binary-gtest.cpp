@@ -307,6 +307,21 @@ TEST(ProofChainBinary, AnchorRoundTrip)
     }
 }
 
+TEST(ProofChainBinary, RejectsValidatorListBlobThatCannotRoundTripExactly)
+{
+    ProofChain chain;
+    AnchorData anchor;
+    anchor.publisher_key_hex = "ED" + std::string(64, 'A');
+    anchor.publisher_manifest = make_bytes(8, 1);
+    anchor.blob_signature = make_bytes(64, 2);
+    std::string const blob =
+        R"({"sequence":1,"effective":2,"expiration":3,"validators":[]})";
+    anchor.blob.assign(blob.begin(), blob.end());
+    chain.steps.emplace_back(std::move(anchor));
+
+    EXPECT_THROW(to_binary(chain), std::runtime_error);
+}
+
 // ─── TrieData round-trip ────────────────────────────────────────
 
 TEST(ProofChainBinary, TrieRoundTrip)
@@ -547,7 +562,7 @@ TEST(ProofChainBinary, RealProofRoundTrip)
     EXPECT_EQ(dec_anchor.ledger_hash, orig_anchor.ledger_hash);
     EXPECT_EQ(dec_anchor.ledger_index, orig_anchor.ledger_index);
     EXPECT_EQ(dec_anchor.publisher_key_hex, orig_anchor.publisher_key_hex);
-    EXPECT_EQ(dec_anchor.blob.size(), orig_anchor.blob.size());
+    EXPECT_EQ(dec_anchor.blob, orig_anchor.blob);
     EXPECT_EQ(dec_anchor.validations.size(), orig_anchor.validations.size());
 
     // Verify headers

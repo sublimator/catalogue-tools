@@ -1,9 +1,12 @@
+#include "xprv/proof-chain-json.h"
 #include "xprv/validation-buffer.h"
 #include "xprv/validation-collector.h"
-#include "xprv/proof-chain-json.h"
 
+#include <catl/core/base64.h>
 #include <catl/peer-client/connection-types.h>
 #include <catl/xdata/protocol.h>
+
+#include "ripple.pb.h"
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -16,8 +19,11 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -31,6 +37,14 @@ test_protocol()
     return catl::xdata::Protocol::load_embedded_xrpl_protocol();
 }
 
+std::string
+lower_ascii(std::string value)
+{
+    for (auto& ch : value)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return value;
+}
+
 std::vector<uint8_t>
 wrap_validation(std::vector<uint8_t> const& stvalidation)
 {
@@ -40,8 +54,7 @@ wrap_validation(std::vector<uint8_t> const& stvalidation)
     std::size_t length = stvalidation.size();
     while (length >= 0x80)
     {
-        packet.push_back(
-            static_cast<uint8_t>((length & 0x7F) | 0x80));
+        packet.push_back(static_cast<uint8_t>((length & 0x7F) | 0x80));
         length >>= 7;
     }
     packet.push_back(static_cast<uint8_t>(length));
@@ -148,8 +161,8 @@ TEST(ValidationBuffer, BestQuorumTimesOutWithNoValidations)
     asio::co_spawn(
         io,
         [&, buffer]() -> asio::awaitable<void> {
-            auto result = co_await buffer->co_wait_best_quorum(
-                std::chrono::seconds(0));
+            auto result =
+                co_await buffer->co_wait_best_quorum(std::chrono::seconds(0));
             stop_reason = result.stop_reason;
 
             auto stats = co_await buffer->co_stats();
@@ -181,14 +194,14 @@ TEST(ValidationBuffer, BestQuorumCancelledWaiterIsRemoved)
                 co_await asio::experimental::make_parallel_group(
                     asio::co_spawn(
                         ex,
-                        buffer->co_wait_best_quorum(
-                            std::chrono::seconds(30)),
+                        buffer->co_wait_best_quorum(std::chrono::seconds(30)),
                         asio::deferred),
                     asio::co_spawn(
                         ex,
                         []() -> asio::awaitable<void> {
                             auto ex = co_await asio::this_coro::executor;
-                            asio::steady_timer timer(ex, std::chrono::milliseconds(10));
+                            asio::steady_timer timer(
+                                ex, std::chrono::milliseconds(10));
                             boost::system::error_code ec;
                             co_await timer.async_wait(
                                 asio::redirect_error(asio::use_awaitable, ec));
@@ -218,6 +231,46 @@ TEST(ValidationBuffer, BestQuorumCancelledWaiterIsRemoved)
     EXPECT_EQ(stats.pending_callbacks, 0u);
 }
 
+TEST(ValidationBuffer, ListChangeCancelsMismatchedProofWaiter)
+{
+    asio::io_context io;
+    auto const protocol = test_protocol();
+    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    buffer->set_unl({}, 1);
+    io.run();
+    io.restart();
+
+    bool done = false;
+    xprv::QuorumCollectStopReason stop_reason =
+        xprv::QuorumCollectStopReason::timeout;
+
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            auto result = co_await buffer->co_wait_best_quorum(
+                std::chrono::seconds(30), 1);
+            stop_reason = result.stop_reason;
+            done = true;
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        io,
+        [buffer]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            while ((co_await buffer->co_stats()).pending_callbacks == 0)
+                co_await asio::post(ex, asio::use_awaitable);
+            buffer->set_unl({}, 2);
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(done);
+    EXPECT_EQ(
+        stop_reason, xprv::QuorumCollectStopReason::validator_list_changed);
+}
+
 TEST(ValidationBuffer, BestQuorumCollectsAndFinalizesAtFullQuorum)
 {
     asio::io_context io;
@@ -226,14 +279,13 @@ TEST(ValidationBuffer, BestQuorumCollectsAndFinalizesAtFullQuorum)
     auto const anchor = load_anchor_fixture();
     ASSERT_FALSE(anchor.validations.empty());
 
-    auto const fixture =
-        prepare_quorum_fixture(protocol, anchor.validations);
+    auto const fixture = prepare_quorum_fixture(protocol, anchor.validations);
     ASSERT_FALSE(fixture.manifests.empty())
         << "fixture must contain at least one ledger with validations";
     ASSERT_GE(fixture.quorum_packets.size(), fixture.threshold)
         << "fixture must provide a threshold quorum for one ledger";
 
-    buffer->set_unl(fixture.manifests);
+    buffer->set_unl(fixture.manifests, 1);
     io.run();
     io.restart();
 
@@ -246,8 +298,8 @@ TEST(ValidationBuffer, BestQuorumCollectsAndFinalizesAtFullQuorum)
     asio::co_spawn(
         io,
         [&, buffer]() -> asio::awaitable<void> {
-            auto result = co_await buffer->co_wait_best_quorum(
-                std::chrono::seconds(5));
+            auto result =
+                co_await buffer->co_wait_best_quorum(std::chrono::seconds(5));
             collected_count = result.quorum.validations.size();
             collected_seq = result.quorum.ledger_seq;
             stop_reason = result.stop_reason;
@@ -282,4 +334,94 @@ TEST(ValidationBuffer, BestQuorumCollectsAndFinalizesAtFullQuorum)
     EXPECT_EQ(collected_count, fixture.quorum_packets.size());
     EXPECT_EQ(collected_seq, fixture.quorum_seq);
     EXPECT_EQ(stop_reason, xprv::QuorumCollectStopReason::full);
+}
+
+TEST(ValidationBuffer, ManifestWorkerReplaysRotationAcrossListRefresh)
+{
+    asio::io_context io;
+    auto const xrpl_protocol = test_protocol();
+    auto buffer = xprv::ValidationBuffer::create(io, xrpl_protocol, 0);
+    auto const anchor = load_anchor_fixture();
+
+    std::string const blob_text(anchor.blob.begin(), anchor.blob.end());
+    auto const blob = boost::json::parse(blob_text).as_object();
+
+    std::optional<catl::vl::Manifest> live;
+    std::vector<uint8_t> validation;
+    for (auto const& entry : blob.at("validators").as_array())
+    {
+        auto const raw = catl::base64_decode(
+            std::string(entry.as_object().at("manifest").as_string()));
+        auto manifest = catl::vl::parse_manifest(raw);
+        auto const found =
+            anchor.validations.find(lower_ascii(manifest.signing_key_hex()));
+        auto validation_it = found;
+        if (validation_it == anchor.validations.end())
+        {
+            validation_it = std::find_if(
+                anchor.validations.begin(),
+                anchor.validations.end(),
+                [&manifest](auto const& item) {
+                    return lower_ascii(item.first) ==
+                        lower_ascii(manifest.signing_key_hex());
+                });
+        }
+        if (manifest.sequence > 0 && validation_it != anchor.validations.end())
+        {
+            live = std::move(manifest);
+            validation = validation_it->second;
+            break;
+        }
+    }
+    ASSERT_TRUE(live.has_value());
+    ASSERT_FALSE(validation.empty());
+
+    auto stale = *live;
+    stale.signing_public_key.clear();
+    --stale.sequence;
+    buffer->set_unl({stale}, 1);
+    io.run();
+    io.restart();
+
+    protocol::TMManifests manifests;
+    manifests.add_list()->set_stobject(
+        std::string(live->raw.begin(), live->raw.end()));
+    std::string manifest_bytes;
+    ASSERT_TRUE(manifests.SerializeToString(&manifest_bytes));
+
+    buffer->on_packet(
+        static_cast<uint16_t>(catl::peer_client::packet_type::manifests),
+        std::vector<uint8_t>(manifest_bytes.begin(), manifest_bytes.end()));
+    // Queue a newer list snapshot behind manifest admission but ahead of the
+    // worker completion. The verified rotation must be applied against the
+    // current trust set rather than discarded merely because the list changed.
+    buffer->set_unl({stale}, 2);
+    buffer->on_packet(
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation),
+        wrap_validation(validation));
+
+    bool observed = false;
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            auto const deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                if (co_await buffer->co_has_live_only_quorum())
+                {
+                    observed = true;
+                    break;
+                }
+                asio::steady_timer timer(ex, std::chrono::milliseconds(1));
+                co_await timer.async_wait(asio::use_awaitable);
+            }
+            buffer->stop();
+            io.stop();
+        },
+        asio::detached);
+
+    io.run();
+    EXPECT_TRUE(observed);
 }

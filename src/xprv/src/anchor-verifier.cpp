@@ -18,6 +18,16 @@ namespace xprv {
 
 static LogPartition log_("anchor-verify", LogLevel::INFO);
 
+bool
+validator_list_active_at(
+    uint32_t effective,
+    uint32_t expiration,
+    uint32_t ledger_close_time)
+{
+    return expiration > effective && ledger_close_time >= effective &&
+        ledger_close_time < expiration;
+}
+
 //------------------------------------------------------------------------------
 // Helpers
 //------------------------------------------------------------------------------
@@ -228,7 +238,7 @@ AnchorVerifier::verify(
     // Case-insensitive compare
     auto lower = [](std::string s) {
         for (auto& c : s)
-            c = static_cast<char>(std::tolower(c));
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         return s;
     };
 
@@ -357,17 +367,43 @@ AnchorVerifier::verify(
     }
 
     auto const& blob_obj = blob_json.as_object();
-    if (!blob_obj.contains("validators") ||
+    if (!blob_obj.contains("sequence") || !blob_obj.contains("expiration") ||
+        !blob_obj.contains("validators") ||
         !blob_obj.at("validators").is_array())
     {
-        result.error = "no valid validators array in blob";
-        narrative.push_back("   FAIL: no valid validators array in blob.");
+        result.error = "UNL blob is missing required fields";
+        narrative.push_back("   FAIL: UNL blob is missing required fields.");
+        return result;
+    }
+
+    try
+    {
+        result.vl_sequence = blob_obj.at("sequence").to_number<std::uint32_t>();
+        result.vl_expiration =
+            blob_obj.at("expiration").to_number<std::uint32_t>();
+        if (blob_obj.contains("effective"))
+        {
+            result.vl_effective =
+                blob_obj.at("effective").to_number<std::uint32_t>();
+        }
+    }
+    catch (std::exception const&)
+    {
+        result.error = "UNL blob validity fields are malformed";
+        narrative.push_back("   FAIL: UNL blob validity fields are malformed.");
+        return result;
+    }
+    if (result.vl_expiration <= result.vl_effective)
+    {
+        result.error = "UNL blob validity interval is invalid";
+        narrative.push_back("   FAIL: UNL blob validity interval is invalid.");
         return result;
     }
 
     // Build signing key → master key lookup
     std::map<std::string, std::string> signing_to_master;
     std::set<std::string> unl_masters;
+    std::set<std::string> unl_signing_keys;
     auto const& vals_array = blob_obj.at("validators").as_array();
 
     for (auto const& v : vals_array)
@@ -412,16 +448,32 @@ AnchorVerifier::verify(
         }
 
         auto const signing_key = lower(verified_manifest->signing_key_hex());
-        auto const [existing, inserted] =
-            signing_to_master.emplace(signing_key, manifest_master);
-        if (!inserted && existing->second != manifest_master)
+        if (!unl_masters.insert(manifest_master).second)
         {
-            result.error = "validator signing key maps to multiple masters";
+            result.error = "duplicate validator master key";
             narrative.push_back(
-                "   FAIL: validator signing key has ambiguous ownership.");
+                "   FAIL: UNL contains a duplicate validator master key.");
             return result;
         }
-        unl_masters.insert(manifest_master);
+        if (!unl_signing_keys.insert(signing_key).second)
+        {
+            result.error = "duplicate validator signing key";
+            narrative.push_back(
+                "   FAIL: UNL contains a duplicate validator signing key.");
+            return result;
+        }
+        signing_to_master.emplace(signing_key, manifest_master);
+    }
+
+    for (auto const& master : unl_masters)
+    {
+        if (unl_signing_keys.count(master))
+        {
+            result.error = "validator key reused across roles";
+            narrative.push_back(
+                "   FAIL: UNL reuses a key across validator roles.");
+            return result;
+        }
     }
 
     result.unl_size = static_cast<int>(unl_masters.size());

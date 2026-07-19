@@ -23,6 +23,14 @@ struct ProtocolOptions
 class Protocol
 {
 public:
+    Protocol() = default;
+    Protocol(Protocol const& other);
+    Protocol&
+    operator=(Protocol const& other);
+    Protocol(Protocol&& other);
+    Protocol&
+    operator=(Protocol&& other);
+
     // Load definitions from JSON file with options
     static Protocol
     load_from_file(const std::string& path, const ProtocolOptions& opts = {});

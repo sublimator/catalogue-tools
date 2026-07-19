@@ -441,6 +441,9 @@ encode_anchor_core(AnchorData const& a)
     return payload;
 }
 
+static void
+decode_anchor_unl(std::span<const uint8_t> payload, AnchorData& a);
+
 /// Encode anchor UNL: publisher manifest + blob signature + decomposed VL blob.
 /// This goes at the end — only needed if the verifier doesn't have a cached UNL.
 static std::vector<uint8_t>
@@ -495,6 +498,14 @@ encode_anchor_unl(AnchorData const& a)
             auto m_bytes = catl::base64_decode(m_b64);
             write_vl(payload, m_bytes);
         }
+    }
+
+    AnchorData decoded;
+    decode_anchor_unl(payload, decoded);
+    if (decoded.blob != a.blob)
+    {
+        throw std::runtime_error(
+            "binary proof: validator list blob cannot be encoded exactly");
     }
 
     return payload;

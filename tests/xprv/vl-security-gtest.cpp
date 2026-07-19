@@ -2,6 +2,7 @@
 #include "xprv/proof-chain-json.h"
 
 #include <catl/core/base64.h>
+#include <catl/crypto/sig-verify.h>
 #include <catl/vl-client/vl-client.h>
 #include <catl/xdata/protocol.h>
 
@@ -42,6 +43,8 @@ load_vl_fixture()
 
     auto const& anchor = std::get<xprv::AnchorData>(chain.steps.front());
     catl::vl::ValidatorList vl;
+    vl.version = 1;
+    vl.has_version = true;
     vl.publisher_key_hex = anchor.publisher_key_hex;
     vl.publisher_manifest = catl::vl::parse_manifest(anchor.publisher_manifest);
     vl.blob_bytes = anchor.blob;
@@ -51,7 +54,9 @@ load_vl_fixture()
     auto blob_json = boost::json::parse(blob_text);
     auto const& blob = blob_json.as_object();
     vl.sequence = blob.at("sequence").to_number<std::uint32_t>();
+    vl.has_sequence = true;
     vl.expiration = blob.at("expiration").to_number<std::uint32_t>();
+    vl.has_expiration = true;
     if (blob.contains("effective"))
         vl.effective = blob.at("effective").to_number<std::uint32_t>();
 
@@ -62,6 +67,7 @@ load_vl_fixture()
         auto const raw = catl::base64_decode(encoded);
         vl.validators.push_back(catl::vl::parse_manifest(raw));
     }
+    vl.has_validators = true;
     return vl;
 }
 
@@ -73,9 +79,14 @@ make_freshness_candidate(
     std::vector<std::uint8_t> manifest = {0x02})
 {
     catl::vl::ValidatorList vl;
+    vl.version = 1;
+    vl.has_version = true;
     vl.sequence = list_sequence;
+    vl.has_sequence = true;
     vl.effective = 50;
     vl.expiration = 200;
+    vl.has_expiration = true;
+    vl.has_validators = true;
     vl.blob_bytes = std::move(blob);
     vl.publisher_manifest.sequence = manifest_sequence;
     vl.publisher_manifest.raw = std::move(manifest);
@@ -115,6 +126,55 @@ TEST(VlSecurity, RegularManifestRequiresCanonicalDelegation)
     malformed_revocation.sequence = std::numeric_limits<std::uint32_t>::max();
     EXPECT_TRUE(malformed_revocation.is_revocation());
     EXPECT_FALSE(xprv::verify_manifest(malformed_revocation, protocol));
+
+    auto short_master_key = vl.publisher_manifest;
+    short_master_key.master_public_key = {0xED};
+    EXPECT_FALSE(xprv::verify_manifest(short_master_key, protocol));
+
+    auto short_signing_key = vl.publisher_manifest;
+    short_signing_key.signing_public_key = {0xED};
+    EXPECT_FALSE(xprv::verify_manifest(short_signing_key, protocol));
+
+    EXPECT_FALSE(catl::crypto::verify_message(
+        std::vector<std::uint8_t>{0xED},
+        std::vector<std::uint8_t>(64),
+        std::vector<std::uint8_t>{0x01}));
+
+    auto unsupported_version = vl.publisher_manifest.raw;
+    unsupported_version.insert(
+        unsupported_version.begin(), {0x10, 0x10, 0x00, 0x01});
+    EXPECT_THROW(
+        catl::vl::parse_manifest(unsupported_version), std::runtime_error);
+
+    auto explicit_version_zero = vl.publisher_manifest.raw;
+    explicit_version_zero.insert(
+        explicit_version_zero.begin(), {0x10, 0x10, 0x00, 0x00});
+    auto const parsed_version_zero =
+        catl::vl::parse_manifest(explicit_version_zero);
+    EXPECT_TRUE(parsed_version_zero.has_version);
+    EXPECT_EQ(parsed_version_zero.version, 0u);
+
+    auto unexpected_field = vl.publisher_manifest.raw;
+    unexpected_field.insert(
+        unexpected_field.begin(), {0x22, 0x00, 0x00, 0x00, 0x00});
+    EXPECT_THROW(
+        catl::vl::parse_manifest(unexpected_field), std::runtime_error);
+
+    auto duplicate_sequence = vl.publisher_manifest.raw;
+    duplicate_sequence.insert(
+        duplicate_sequence.begin(),
+        {0x24,
+         static_cast<std::uint8_t>(vl.publisher_manifest.sequence >> 24),
+         static_cast<std::uint8_t>(vl.publisher_manifest.sequence >> 16),
+         static_cast<std::uint8_t>(vl.publisher_manifest.sequence >> 8),
+         static_cast<std::uint8_t>(vl.publisher_manifest.sequence)});
+    EXPECT_THROW(
+        catl::vl::parse_manifest(duplicate_sequence), std::runtime_error);
+
+    auto trailing_object_end = vl.publisher_manifest.raw;
+    trailing_object_end.push_back(0xE1);
+    EXPECT_THROW(
+        catl::vl::parse_manifest(trailing_object_end), std::runtime_error);
 }
 
 TEST(VlSecurity, FetchedListRequiresCompleteVerifiedContents)
@@ -129,6 +189,16 @@ TEST(VlSecurity, FetchedListRequiresCompleteVerifiedContents)
     missing_key.publisher_key_hex.clear();
     EXPECT_FALSE(xprv::verify_fetched_vl(
         missing_key, vl.publisher_key_hex, protocol, error));
+
+    auto unsupported_version = vl;
+    unsupported_version.version = 2;
+    EXPECT_FALSE(xprv::verify_fetched_vl(
+        unsupported_version, vl.publisher_key_hex, protocol, error));
+
+    auto missing_sequence = vl;
+    missing_sequence.has_sequence = false;
+    EXPECT_FALSE(xprv::verify_fetched_vl(
+        missing_sequence, vl.publisher_key_hex, protocol, error));
 
     auto empty = vl;
     empty.validators.clear();
@@ -206,4 +276,45 @@ TEST(VlSecurity, FreshnessRequiresSequenceForContentChanges)
     EXPECT_EQ(
         xprv::assess_vl_freshness(candidate, &current, 100, error),
         xprv::VlFreshnessDisposition::accept);
+
+    auto current_with_validator = current;
+    catl::vl::Manifest validator;
+    validator.master_public_key = {0x01};
+    validator.sequence = 7;
+    validator.raw = {0x10};
+    current_with_validator.validators.push_back(validator);
+
+    candidate = make_freshness_candidate(11, 5, {0x03}, {0x02});
+    validator.sequence = 6;
+    candidate.validators.push_back(validator);
+    EXPECT_EQ(
+        xprv::assess_vl_freshness(
+            candidate, &current_with_validator, 100, error),
+        xprv::VlFreshnessDisposition::reject);
+
+    validator.sequence = 7;
+    validator.raw = {0x11};
+    candidate.validators.front() = validator;
+    EXPECT_EQ(
+        xprv::assess_vl_freshness(
+            candidate, &current_with_validator, 100, error),
+        xprv::VlFreshnessDisposition::reject);
+
+    xprv::ValidatorManifestHistory history;
+    xprv::remember_validator_manifests(current_with_validator, history);
+
+    auto removed = make_freshness_candidate(11, 5, {0x03}, {0x02});
+    EXPECT_EQ(
+        xprv::assess_vl_freshness(
+            removed, &current_with_validator, 100, error, &history),
+        xprv::VlFreshnessDisposition::accept);
+    xprv::remember_validator_manifests(removed, history);
+
+    auto readded = make_freshness_candidate(12, 5, {0x04}, {0x02});
+    validator.sequence = 6;
+    validator.raw = {0x09};
+    readded.validators.push_back(validator);
+    EXPECT_EQ(
+        xprv::assess_vl_freshness(readded, &removed, 100, error, &history),
+        xprv::VlFreshnessDisposition::reject);
 }

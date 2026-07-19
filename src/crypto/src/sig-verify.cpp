@@ -84,6 +84,9 @@ verify_message(
     std::span<const uint8_t> signature,
     std::span<const uint8_t> message)
 {
+    if (public_key_33.size() != 33)
+        return false;
+
     auto type = detect_key_type(public_key_33);
     switch (type)
     {

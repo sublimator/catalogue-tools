@@ -10,6 +10,8 @@
 //   cache->start();
 //   auto vl = co_await cache->co_get();  // blocks until first fetch
 
+#include "xprv/manifest-utils.h"
+
 #include <catl/core/logger.h>
 #include <catl/vl-client/vl-client.h>
 
@@ -70,8 +72,7 @@ public:
     }
 
     /// Called on every successful VL fetch (initial + refresh).
-    using RefreshCallback =
-        std::function<void(catl::vl::ValidatorList const&)>;
+    using RefreshCallback = std::function<void(catl::vl::ValidatorList const&)>;
     void
     set_on_refresh(RefreshCallback cb)
     {
@@ -112,15 +113,17 @@ private:
 
     // Strand-owned state:
     std::optional<catl::vl::ValidatorList> vl_;
-    boost::asio::steady_timer refresh_;           // periodic refresh
+    boost::asio::steady_timer refresh_;  // periodic refresh
     std::vector<std::shared_ptr<boost::asio::steady_timer>> waiters_;
     std::chrono::seconds refresh_interval_{900};  // 15 minutes
     std::chrono::seconds initial_retry_{2};       // first retry delay
-    std::chrono::seconds initial_retry_cap_{60};  // max retry delay before first success
+    std::chrono::seconds initial_retry_cap_{
+        60};  // max retry delay before first success
     bool fetch_in_progress_ = false;
     uint64_t fetch_generation_ = 0;
     bool last_fetch_ok_ = false;
     std::string last_fetch_error_;
+    ValidatorManifestHistory validator_manifest_history_;
     RefreshCallback on_refresh_;
     VerifyCallback verify_;
 

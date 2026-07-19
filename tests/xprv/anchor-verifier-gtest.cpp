@@ -81,3 +81,15 @@ TEST(AnchorVerifier, RejectsValidationMapKeyMismatch)
     EXPECT_FALSE(result.verified);
     EXPECT_EQ(result.error, "validation map key does not match SigningPubKey");
 }
+
+TEST(AnchorVerifier, RejectsListExpiredAtAnchorCloseTime)
+{
+    EXPECT_TRUE(xprv::validator_list_active_at(50, 100, 99));
+    EXPECT_FALSE(xprv::validator_list_active_at(50, 100, 100));
+}
+
+TEST(AnchorVerifier, RejectsListNotYetEffectiveAtAnchorCloseTime)
+{
+    EXPECT_FALSE(xprv::validator_list_active_at(101, 200, 100));
+    EXPECT_TRUE(xprv::validator_list_active_at(100, 200, 100));
+}

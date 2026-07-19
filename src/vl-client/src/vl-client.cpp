@@ -1,6 +1,8 @@
 #include <catl/vl-client/vl-client.h>
 
 #include <catl/core/base64.h>
+#include <catl/xdata/codecs/codecs.h>
+#include <catl/xdata/json-visitor.h>
 #include <catl/xdata/known-fields.h>
 #include <catl/xdata/parser-context.h>
 #include <catl/xdata/parser.h>
@@ -18,9 +20,12 @@
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <iomanip>
+#include <limits>
+#include <set>
 #include <sstream>
 
 namespace catl::vl {
@@ -88,11 +93,74 @@ using catl::base64_decode;
 // Manifest parsing
 //------------------------------------------------------------------------------
 
-/// Visitor that extracts specific fields from a manifest STObject. A manifest
-/// is flat, so only visit_field is needed (the parser descends by default).
+bool
+is_properly_formed_toml_domain(std::span<const uint8_t> domain)
+{
+    if (domain.size() < 4 || domain.size() > 128)
+        return false;
+
+    std::size_t label_start = 0;
+    bool saw_dot = false;
+    while (label_start < domain.size())
+    {
+        auto label_end = label_start;
+        while (label_end < domain.size() && domain[label_end] != '.')
+            ++label_end;
+        auto const label_size = label_end - label_start;
+        if (label_size == 0 || label_size > 63 || domain[label_start] == '-' ||
+            domain[label_end - 1] == '-')
+        {
+            return false;
+        }
+
+        bool const is_tld = label_end == domain.size();
+        for (auto i = label_start; i < label_end; ++i)
+        {
+            auto const c = static_cast<unsigned char>(domain[i]);
+            if (is_tld ? !std::isalpha(c) : !(std::isalnum(c) || c == '-'))
+            {
+                return false;
+            }
+        }
+
+        if (is_tld)
+            return saw_dot && label_size >= 2;
+        saw_dot = true;
+        label_start = label_end + 1;
+    }
+    return false;
+}
+
+/// Visitor that enforces the version-zero manifest field template while
+/// extracting its values.
 struct ManifestVisitor
 {
     Manifest& out;
+    std::set<std::uint32_t> seen;
+    std::uint32_t last_code = 0;
+    bool valid = true;
+
+    explicit ManifestVisitor(Manifest& manifest) : out(manifest)
+    {
+    }
+
+    bool
+    visit_object_start(
+        catl::xdata::FieldPath const&,
+        catl::xdata::FieldSlice const&)
+    {
+        valid = false;
+        return false;
+    }
+
+    bool
+    visit_array_start(
+        catl::xdata::FieldPath const&,
+        catl::xdata::FieldSlice const&)
+    {
+        valid = false;
+        return false;
+    }
 
     void
     visit_field(
@@ -100,12 +168,37 @@ struct ManifestVisitor
         catl::xdata::FieldSlice const& fs)
     {
         if (path.size() != 1)
+        {
+            valid = false;
             return;
+        }
 
         auto const code = fs.field->code;
         auto data = fs.data;
 
-        if (code == sf::PublicKey)
+        bool const allowed = code == sf::Version || code == sf::Sequence ||
+            code == sf::PublicKey || code == sf::SigningPubKey ||
+            code == sf::Signature || code == sf::Domain ||
+            code == sf::MasterSignature;
+        if (!allowed || code <= last_code || !seen.insert(code).second)
+        {
+            valid = false;
+            return;
+        }
+        last_code = code;
+
+        if (code == sf::Version)
+        {
+            if (data.size() != 2)
+            {
+                valid = false;
+                return;
+            }
+            out.version = (static_cast<uint16_t>(data.data()[0]) << 8) |
+                static_cast<uint16_t>(data.data()[1]);
+            out.has_version = true;
+        }
+        else if (code == sf::PublicKey)
         {
             out.master_public_key.assign(
                 data.data(), data.data() + data.size());
@@ -117,14 +210,16 @@ struct ManifestVisitor
         }
         else if (code == sf::Sequence)
         {
-            if (data.size() == 4)
+            if (data.size() != 4)
             {
-                out.sequence = (static_cast<uint32_t>(data.data()[0]) << 24) |
-                    (static_cast<uint32_t>(data.data()[1]) << 16) |
-                    (static_cast<uint32_t>(data.data()[2]) << 8) |
-                    static_cast<uint32_t>(data.data()[3]);
-                out.has_sequence = true;
+                valid = false;
+                return;
             }
+            out.sequence = (static_cast<uint32_t>(data.data()[0]) << 24) |
+                (static_cast<uint32_t>(data.data()[1]) << 16) |
+                (static_cast<uint32_t>(data.data()[2]) << 8) |
+                static_cast<uint32_t>(data.data()[3]);
+            out.has_sequence = true;
         }
         else if (code == sf::MasterSignature)
         {
@@ -157,6 +252,45 @@ parse_manifest(std::span<const uint8_t> data)
     ManifestVisitor visitor{result};
     catl::xdata::parse_with_visitor(ctx, protocol, visitor);
 
+    bool const revoked =
+        result.sequence == std::numeric_limits<std::uint32_t>::max();
+    bool const has_master = visitor.seen.count(sf::PublicKey) != 0;
+    bool const has_master_signature =
+        visitor.seen.count(sf::MasterSignature) != 0;
+    bool const has_signing_key = visitor.seen.count(sf::SigningPubKey) != 0;
+    bool const has_signing_signature = visitor.seen.count(sf::Signature) != 0;
+
+    if (!visitor.valid || !ctx.cursor.empty() || !has_master ||
+        result.master_public_key.size() != 33 || !has_master_signature ||
+        !result.has_sequence || (result.has_version && result.version != 0) ||
+        (visitor.seen.count(sf::Domain) != 0 &&
+         !is_properly_formed_toml_domain(result.domain)) ||
+        (revoked && (has_signing_key || has_signing_signature)) ||
+        (!revoked &&
+         (!has_signing_key || result.signing_public_key.size() != 33 ||
+          !has_signing_signature)))
+    {
+        throw std::runtime_error(
+            "manifest does not match the version-zero template");
+    }
+
+    // The generic STObject parser tolerates a root end marker. Re-encoding the
+    // parsed object makes the accepted representation unique and rejects such
+    // trailing markers or any other non-canonical wire spelling.
+    catl::xdata::JsonVisitor canonical_visitor(protocol);
+    catl::xdata::ParserContext canonical_context(slice);
+    catl::xdata::parse_with_visitor(
+        canonical_context, protocol, canonical_visitor);
+    auto const canonical = catl::xdata::codecs::serialize_object(
+        canonical_visitor.get_result().as_object(), protocol);
+    if (!std::equal(
+            canonical.begin(), canonical.end(), data.begin(), data.end()))
+    {
+        throw std::runtime_error("manifest encoding is not canonical");
+    }
+
+    result.canonical = true;
+
     return result;
 }
 
@@ -186,7 +320,9 @@ parse_manifest_master_key_hex(std::span<const uint8_t> data)
     catl::xdata::ParserContext ctx{cursor};
     catl::xdata::parse_with_visitor(ctx, protocol, visitor);
 
-    if (master.empty())
+    if (master.size() != 33 ||
+        (master.front() != 0xED && master.front() != 0x02 &&
+         master.front() != 0x03))
         return {};
     return to_hex(master);
 }
@@ -323,6 +459,15 @@ VlClient::fetch(VlCallback callback)
                 auto& vl = vl_result.vl;
                 vl.site = host;
 
+                if (!obj.contains("version"))
+                    throw std::runtime_error(
+                        "validator list response has no version");
+                vl.version = obj.at("version").to_number<uint32_t>();
+                vl.has_version = true;
+                if (vl.version != 1)
+                    throw std::runtime_error(
+                        "unsupported validator list response version");
+
                 // Publisher public key (hex)
                 if (obj.contains("public_key"))
                 {
@@ -372,11 +517,13 @@ VlClient::fetch(VlCallback callback)
                     {
                         vl.sequence =
                             blob_obj.at("sequence").to_number<uint32_t>();
+                        vl.has_sequence = true;
                     }
                     if (blob_obj.contains("expiration"))
                     {
                         vl.expiration =
                             blob_obj.at("expiration").to_number<uint32_t>();
+                        vl.has_expiration = true;
                     }
                     if (blob_obj.contains("effective"))
                     {
@@ -387,6 +534,7 @@ VlClient::fetch(VlCallback callback)
                     // Parse each validator manifest
                     if (blob_obj.contains("validators"))
                     {
+                        vl.has_validators = true;
                         auto const& vals = blob_obj.at("validators").as_array();
                         for (auto const& v : vals)
                         {
@@ -419,6 +567,13 @@ VlClient::fetch(VlCallback callback)
                             }
                             vl.validators.push_back(std::move(manifest));
                         }
+                    }
+
+                    if (!vl.has_sequence || !vl.has_expiration ||
+                        !vl.has_validators)
+                    {
+                        throw std::runtime_error(
+                            "validator list blob is missing required fields");
                     }
 
                     PLOGI(

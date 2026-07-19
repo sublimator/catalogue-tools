@@ -4,6 +4,7 @@
 #include <catl/xdata/protocol.h>
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -28,6 +29,14 @@ parse_and_verify_manifest(
 
 enum class VlFreshnessDisposition { accept, unchanged, reject };
 
+struct ValidatorManifestVersion
+{
+    std::uint32_t sequence = 0;
+    std::vector<std::uint8_t> raw;
+};
+using ValidatorManifestHistory =
+    std::map<std::string, ValidatorManifestVersion>;
+
 /// Apply online cache policy after content authentication. `current` may be
 /// null on first load. `now` uses Ripple-epoch seconds.
 VlFreshnessDisposition
@@ -35,7 +44,13 @@ assess_vl_freshness(
     catl::vl::ValidatorList const& candidate,
     catl::vl::ValidatorList const* current,
     std::uint32_t now,
-    std::string& error);
+    std::string& error,
+    ValidatorManifestHistory const* manifest_history = nullptr);
+
+void
+remember_validator_manifests(
+    catl::vl::ValidatorList const& vl,
+    ValidatorManifestHistory& manifest_history);
 
 /// Authenticate fetched Validator List content against the configured publisher
 /// master key. This verifies cryptographic provenance only; list and publisher-

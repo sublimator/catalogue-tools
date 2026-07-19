@@ -10,6 +10,7 @@
 #include <boost/json.hpp>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cctype>
 #include <fstream>
 #include <iterator>
@@ -33,8 +34,7 @@ wrap_validation(std::vector<uint8_t> const& stvalidation)
     std::size_t length = stvalidation.size();
     while (length >= 0x80)
     {
-        packet.push_back(
-            static_cast<uint8_t>((length & 0x7F) | 0x80));
+        packet.push_back(static_cast<uint8_t>((length & 0x7F) | 0x80));
         length >>= 7;
     }
     packet.push_back(static_cast<uint8_t>(length));
@@ -93,8 +93,8 @@ TEST(ValidationCollector, PeerManifestsCanExplainLiveQuorumWithoutProofQuorum)
     for (auto const& entry : validators_json)
     {
         auto const& obj = entry.as_object();
-        auto manifest_bytes = catl::base64_decode(
-            std::string(obj.at("manifest").as_string()));
+        auto manifest_bytes =
+            catl::base64_decode(std::string(obj.at("manifest").as_string()));
         auto manifest = catl::vl::parse_manifest(manifest_bytes);
         if (!manifest.signing_public_key.empty())
             live_manifests.push_back(std::move(manifest));
@@ -147,6 +147,10 @@ TEST(ValidationCollector, PeerManifestsCanExplainLiveQuorumWithoutProofQuorum)
         static_cast<uint16_t>(catl::peer_client::packet_type::manifests),
         std::vector<uint8_t>(manifests_bytes.begin(), manifests_bytes.end()));
 
+    // A later list publication can carry the same validator manifests. The
+    // newer peer rotations must survive rebuilding the list-derived maps.
+    collector.set_unl(stale_vl_manifests);
+
     for (auto const& [_, raw_validation] : anchor.validations)
     {
         auto packet = wrap_validation(raw_validation);
@@ -158,10 +162,95 @@ TEST(ValidationCollector, PeerManifestsCanExplainLiveQuorumWithoutProofQuorum)
     EXPECT_TRUE(collector.has_stale_vl_manifests());
     EXPECT_TRUE(
         collector.has_quorum(90, xprv::ValidationCollector::QuorumMode::live));
-    // Since entry_key_hex now always uses live_signing_to_master_ regardless
-    // of mode, proof mode also reaches quorum when peer manifests are present.
-    EXPECT_TRUE(
+    // The peer update explains live traffic, but it is not part of the signed
+    // list embedded in a portable proof.
+    EXPECT_FALSE(
         collector.has_quorum(90, xprv::ValidationCollector::QuorumMode::proof));
+}
+
+TEST(ValidationCollector, ManifestPacketVerifiesOneCandidatePerTrustedMaster)
+{
+    auto const xrpl_protocol = test_protocol();
+    auto const anchor = load_anchor_fixture();
+    std::string const blob_text(anchor.blob.begin(), anchor.blob.end());
+    auto const blob = boost::json::parse(blob_text).as_object();
+    auto const& first = blob.at("validators").as_array().front().as_object();
+    auto const raw =
+        catl::base64_decode(std::string(first.at("manifest").as_string()));
+    auto const manifest = catl::vl::parse_manifest(raw);
+
+    protocol::TMManifests packet;
+    constexpr std::size_t repetitions = 64;
+    for (std::size_t i = 0; i < repetitions; ++i)
+    {
+        packet.add_list()->set_stobject(std::string(raw.begin(), raw.end()));
+    }
+    std::string bytes;
+    ASSERT_TRUE(packet.SerializeToString(&bytes));
+
+    auto const parsed =
+        xprv::ValidationCollector::parse_trusted_manifests_packet(
+            std::vector<std::uint8_t>(bytes.begin(), bytes.end()),
+            {manifest.master_key_hex()},
+            xrpl_protocol);
+
+    EXPECT_EQ(parsed.total_entries, repetitions);
+    EXPECT_EQ(parsed.trusted_entries, repetitions);
+    ASSERT_EQ(parsed.manifests.size(), 1u);
+    EXPECT_EQ(
+        parsed.manifests.front().master_key_hex(), manifest.master_key_hex());
+}
+
+TEST(ValidationCollector, PeerManifestRejectsCrossValidatorKeyReuse)
+{
+    auto const xrpl_protocol = test_protocol();
+    auto const anchor = load_anchor_fixture();
+    std::string const blob_text(anchor.blob.begin(), anchor.blob.end());
+    auto const blob = boost::json::parse(blob_text).as_object();
+
+    std::vector<catl::vl::Manifest> manifests;
+    for (auto const& entry : blob.at("validators").as_array())
+    {
+        auto const raw = catl::base64_decode(
+            std::string(entry.as_object().at("manifest").as_string()));
+        auto manifest = catl::vl::parse_manifest(raw);
+        if (!manifest.is_revocation())
+            manifests.push_back(std::move(manifest));
+    }
+    ASSERT_GE(manifests.size(), 2u);
+
+    auto const live_it = std::find_if(
+        manifests.begin(), manifests.end(), [](auto const& manifest) {
+            return manifest.sequence > 0;
+        });
+    ASSERT_NE(live_it, manifests.end());
+    std::iter_swap(manifests.begin(), live_it);
+
+    auto live = manifests.front();
+    auto stale = live;
+    --stale.sequence;
+    stale.signing_public_key.clear();
+    manifests.front() = stale;
+
+    xprv::ValidationCollector collector(xrpl_protocol, 0);
+    collector.set_unl(manifests);
+
+    auto signing_collision = live;
+    signing_collision.signing_public_key = manifests[1].signing_public_key;
+    signing_collision.raw.push_back(0x01);
+    collector.apply_peer_manifests({signing_collision});
+    EXPECT_FALSE(collector.has_stale_vl_manifests());
+
+    auto master_collision = live;
+    master_collision.signing_public_key = manifests[1].master_public_key;
+    master_collision.raw.push_back(0x02);
+    collector.apply_peer_manifests({master_collision});
+    EXPECT_FALSE(collector.has_stale_vl_manifests());
+
+    // Neither rejected candidate may occupy the sequence slot. The genuine
+    // manifest at that same sequence must still apply.
+    collector.apply_peer_manifests({live});
+    EXPECT_TRUE(collector.has_stale_vl_manifests());
 }
 
 TEST(ValidationCollector, QuorumReturnsAllAvailableValidationsForLedger)
@@ -177,8 +266,8 @@ TEST(ValidationCollector, QuorumReturnsAllAvailableValidationsForLedger)
     for (auto const& entry : validators_json)
     {
         auto const& obj = entry.as_object();
-        auto manifest_bytes = catl::base64_decode(
-            std::string(obj.at("manifest").as_string()));
+        auto manifest_bytes =
+            catl::base64_decode(std::string(obj.at("manifest").as_string()));
         auto manifest = catl::vl::parse_manifest(manifest_bytes);
         if (!manifest.signing_public_key.empty())
             manifests.push_back(std::move(manifest));
@@ -189,8 +278,7 @@ TEST(ValidationCollector, QuorumReturnsAllAvailableValidationsForLedger)
     xprv::ValidationCollector collector(xrpl_protocol, 0);
     collector.set_unl(manifests);
 
-    auto const threshold =
-        (static_cast<int>(manifests.size()) * 90 + 99) / 100;
+    auto const threshold = (static_cast<int>(manifests.size()) * 90 + 99) / 100;
     auto const selected_count =
         std::min<int>(static_cast<int>(manifests.size()), threshold + 2);
 
@@ -207,8 +295,8 @@ TEST(ValidationCollector, QuorumReturnsAllAvailableValidationsForLedger)
         entries.push_back(std::move(entry));
     }
 
-    auto const quorum = collector.get_quorum(
-        90, xprv::ValidationCollector::QuorumMode::proof);
+    auto const quorum =
+        collector.get_quorum(90, xprv::ValidationCollector::QuorumMode::proof);
 
     EXPECT_EQ(quorum.size(), static_cast<size_t>(selected_count));
 }

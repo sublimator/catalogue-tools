@@ -309,6 +309,7 @@ resolve_proof_chain_impl(
     std::map<std::string, uint32_t> skip_source_last_seq;
     std::set<std::string> seen_header_hashes;
     std::set<std::pair<std::string, std::string>> seen_map_roots;
+    std::optional<std::pair<uint32_t, uint32_t>> anchor_vl_window;
     bool anchor_seen = false;
 
     std::vector<ProofStep> proof_steps;
@@ -374,9 +375,8 @@ resolve_proof_chain_impl(
                             anchor_step.sub_steps = std::move(av_narrative);
                             anchor_step.publisher_key =
                                 trusted_publisher_key.substr(0, 16);
-                            anchor_step.quorum_check = av_result.verified
-                                ? Check::pass
-                                : Check::fail;
+                            anchor_step.quorum_check =
+                                av_result.verified ? Check::pass : Check::fail;
                             anchor_step.unl_size = av_result.unl_size;
                             anchor_step.validations_verified =
                                 av_result.validations_verified;
@@ -386,6 +386,9 @@ resolve_proof_chain_impl(
 
                             if (anchor_verified)
                             {
+                                anchor_vl_window = std::pair{
+                                    av_result.vl_effective,
+                                    av_result.vl_expiration};
                                 PLOGI(
                                     verify_log,
                                     "  Anchor: VERIFIED (",
@@ -457,13 +460,32 @@ resolve_proof_chain_impl(
                         : find_ledger_hashes_support(
                               ledger_hashes_candidates, computed_hex, data.seq);
                     bool const header_supported = direct_source || skip_support;
-
-                    if (!header_supported)
+                    bool anchor_vl_time_valid = true;
+                    if (direct_source && *direct_source == "anchor" &&
+                        anchor_vl_window)
                     {
-                        PLOGE(
-                            verify_log,
-                            "  Hash check:   FAIL (unsupported by prior "
-                            "anchor/header/recognized LedgerHashes leaf)");
+                        anchor_vl_time_valid = validator_list_active_at(
+                            anchor_vl_window->first,
+                            anchor_vl_window->second,
+                            data.close_time);
+                    }
+
+                    if (!header_supported || !anchor_vl_time_valid)
+                    {
+                        if (!anchor_vl_time_valid)
+                        {
+                            PLOGE(
+                                verify_log,
+                                "  VL validity:  FAIL (anchor close time is "
+                                "outside the signed list interval)");
+                        }
+                        else
+                        {
+                            PLOGE(
+                                verify_log,
+                                "  Hash check:   FAIL (unsupported by prior "
+                                "anchor/header/recognized LedgerHashes leaf)");
+                        }
                         all_ok = false;
                         hdr_step.hash_check = Check::fail;
                     }
@@ -532,7 +554,7 @@ resolve_proof_chain_impl(
                             "...");
                     }
 
-                    if (header_supported)
+                    if (header_supported && anchor_vl_time_valid)
                     {
                         add_capability(
                             trusted_ledger_hashes,
@@ -1043,7 +1065,8 @@ resolve_proof_chain(
 #ifdef XPRV_TESTING
 bool
 resolve_proof_chain_with_pretrusted_anchor_for_testing(
-    ProofChain const& chain, catl::xdata::Protocol const& protocol)
+    ProofChain const& chain,
+    catl::xdata::Protocol const& protocol)
 {
     return resolve_proof_chain_impl(chain, protocol, "", true);
 }

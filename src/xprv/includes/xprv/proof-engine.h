@@ -32,6 +32,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 
 namespace xprv {
@@ -265,6 +266,7 @@ private:
         Hash256 anchor_hash;
         Hash256 account_hash;  // header.account_hash() for state walks
         uint32_t seq = 0;
+        uint32_t vl_sequence = 0;
         std::vector<ValidationCollector::Entry> validations;
         std::chrono::steady_clock::time_point built_at;
     };
@@ -276,7 +278,8 @@ private:
         bool present = false;
     };
 
-    std::map<uint32_t, AnchorEntry> anchor_cache_;
+    using AnchorCacheKey = std::tuple<uint32_t, uint32_t, Hash256>;
+    std::map<AnchorCacheKey, AnchorEntry> anchor_cache_;
     // Uses cache_mutex_ (same lock as proof cache)
 
     // The most recently built anchor — reused when fresh enough.
@@ -288,6 +291,9 @@ private:
     get_anchor_bundle(
         uint32_t anchor_seq,
         Hash256 anchor_hash,
+        uint32_t vl_sequence,
+        uint32_t vl_effective,
+        uint32_t vl_expiration,
         std::vector<ValidationCollector::Entry> validations);
 
     /// Reuse the current anchor if recent enough, otherwise wait for

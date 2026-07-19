@@ -8,10 +8,23 @@
 
 #include <cctype>
 #include <limits>
+#include <map>
 #include <set>
 #include <string>
 
 namespace xprv {
+
+namespace {
+
+std::string
+lower(std::string value)
+{
+    for (auto& c : value)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return value;
+}
+
+}  // namespace
 
 std::vector<uint8_t>
 manifest_signing_data(
@@ -42,7 +55,9 @@ verify_manifest(
     catl::vl::Manifest const& manifest,
     catl::xdata::Protocol const& protocol)
 {
-    if (!manifest.has_sequence || manifest.master_public_key.empty() ||
+    if (!manifest.canonical || !manifest.has_sequence ||
+        (manifest.has_version && manifest.version != 0) ||
+        manifest.master_public_key.size() != 33 ||
         manifest.master_signature.empty())
         return false;
 
@@ -67,7 +82,7 @@ verify_manifest(
     }
     else
     {
-        if (manifest.signing_public_key.empty() ||
+        if (manifest.signing_public_key.size() != 33 ||
             manifest.signing_signature.empty())
         {
             return false;
@@ -102,10 +117,17 @@ assess_vl_freshness(
     catl::vl::ValidatorList const& candidate,
     catl::vl::ValidatorList const* current,
     std::uint32_t now,
-    std::string& error)
+    std::string& error,
+    ValidatorManifestHistory const* manifest_history)
 {
     error.clear();
 
+    if (!candidate.has_sequence || !candidate.has_expiration ||
+        !candidate.has_validators)
+    {
+        error = "validator list blob is missing required fields";
+        return VlFreshnessDisposition::reject;
+    }
     if (candidate.expiration <= candidate.effective)
     {
         error = "validator list validity interval is invalid";
@@ -121,6 +143,40 @@ assess_vl_freshness(
         error = "validator list is not yet effective";
         return VlFreshnessDisposition::reject;
     }
+    auto const check_validator_version =
+        [&](catl::vl::Manifest const& validator,
+            std::uint32_t prior_sequence,
+            std::vector<std::uint8_t> const& prior_raw) {
+            if (validator.sequence < prior_sequence)
+            {
+                error = "validator manifest sequence moved backwards";
+                return false;
+            }
+            if (validator.sequence == prior_sequence &&
+                validator.raw != prior_raw)
+            {
+                error =
+                    "validator manifest changed without a sequence increase";
+                return false;
+            }
+            return true;
+        };
+
+    if (manifest_history)
+    {
+        for (auto const& validator : candidate.validators)
+        {
+            auto const existing =
+                manifest_history->find(lower(validator.master_key_hex()));
+            if (existing != manifest_history->end() &&
+                !check_validator_version(
+                    validator, existing->second.sequence, existing->second.raw))
+            {
+                return VlFreshnessDisposition::reject;
+            }
+        }
+    }
+
     if (!current)
         return VlFreshnessDisposition::accept;
 
@@ -134,6 +190,23 @@ assess_vl_freshness(
     {
         error = "publisher manifest sequence moved backwards";
         return VlFreshnessDisposition::reject;
+    }
+
+    std::map<std::string, catl::vl::Manifest const*> current_validators;
+    for (auto const& validator : current->validators)
+        current_validators.emplace(
+            lower(validator.master_key_hex()), &validator);
+    for (auto const& validator : candidate.validators)
+    {
+        auto const existing =
+            current_validators.find(lower(validator.master_key_hex()));
+        if (existing == current_validators.end())
+            continue;
+        if (!check_validator_version(
+                validator, existing->second->sequence, existing->second->raw))
+        {
+            return VlFreshnessDisposition::reject;
+        }
     }
 
     if (candidate.sequence == current->sequence &&
@@ -160,6 +233,25 @@ assess_vl_freshness(
     return VlFreshnessDisposition::accept;
 }
 
+void
+remember_validator_manifests(
+    catl::vl::ValidatorList const& vl,
+    ValidatorManifestHistory& manifest_history)
+{
+    for (auto const& validator : vl.validators)
+    {
+        auto const master = lower(validator.master_key_hex());
+        auto [it, inserted] = manifest_history.try_emplace(
+            master,
+            ValidatorManifestVersion{validator.sequence, validator.raw});
+        if (!inserted && validator.sequence > it->second.sequence)
+        {
+            it->second =
+                ValidatorManifestVersion{validator.sequence, validator.raw};
+        }
+    }
+}
+
 bool
 verify_fetched_vl(
     catl::vl::ValidatorList const& vl,
@@ -169,16 +261,20 @@ verify_fetched_vl(
 {
     error.clear();
 
-    auto lower = [](std::string s) {
-        for (auto& c : s)
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return s;
-    };
-
     auto const trusted = lower(trusted_key_hex);
     if (trusted.empty())
     {
         error = "no trusted publisher key configured";
+        return false;
+    }
+    if (!vl.has_version || vl.version != 1)
+    {
+        error = "unsupported or missing validator list response version";
+        return false;
+    }
+    if (!vl.has_sequence || !vl.has_expiration || !vl.has_validators)
+    {
+        error = "validator list blob is missing required fields";
         return false;
     }
 
