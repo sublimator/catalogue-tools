@@ -20,12 +20,15 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <fstream>
+#include <future>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 
 namespace asio = boost::asio;
 
@@ -145,6 +148,46 @@ prepare_quorum_fixture(
         (static_cast<int>(fixture.manifests.size()) * 90 + 99) / 100;
 
     return fixture;
+}
+
+xprv::ValidationBuffer::Stats
+drain_validation_ingress(
+    asio::io_context& io,
+    std::shared_ptr<xprv::ValidationBuffer> const& buffer,
+    std::size_t expected_packets)
+{
+    xprv::ValidationBuffer::Stats final_stats;
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            auto const deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            do
+            {
+                final_stats = co_await buffer->co_stats();
+                auto const accounted =
+                    final_stats.validation_packets_processed +
+                    final_stats.validation_packets_deduplicated +
+                    final_stats.validation_packets_dropped;
+                if (final_stats.validation_packets_received ==
+                        expected_packets &&
+                    accounted == expected_packets &&
+                    final_stats.queued_validations == 0)
+                {
+                    break;
+                }
+
+                asio::steady_timer timer(ex, std::chrono::milliseconds(1));
+                co_await timer.async_wait(asio::use_awaitable);
+            } while (std::chrono::steady_clock::now() < deadline);
+
+            buffer->stop();
+            io.stop();
+        },
+        asio::detached);
+    io.run();
+    return final_stats;
 }
 
 }  // namespace
@@ -424,4 +467,379 @@ TEST(ValidationBuffer, ManifestWorkerReplaysRotationAcrossListRefresh)
 
     io.run();
     EXPECT_TRUE(observed);
+}
+
+TEST(ValidationBuffer, ConcurrentDuplicateIngressIsCoalesced)
+{
+    asio::io_context io;
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto const packet_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
+    std::vector<uint8_t> const packet(52, 0);
+
+    constexpr std::size_t kProducerCount = 8;
+    constexpr std::size_t kPacketsPerProducer = 256;
+    std::vector<std::thread> producers;
+    producers.reserve(kProducerCount);
+    for (std::size_t producer = 0; producer < kProducerCount; ++producer)
+    {
+        producers.emplace_back([buffer, &packet]() {
+            for (std::size_t i = 0; i < kPacketsPerProducer; ++i)
+                buffer->on_packet(packet_type, packet);
+        });
+    }
+    for (auto& producer : producers)
+        producer.join();
+
+    constexpr auto kTotalPackets = kProducerCount * kPacketsPerProducer;
+    auto const stats = drain_validation_ingress(io, buffer, kTotalPackets);
+    EXPECT_EQ(stats.validation_packets_received, kTotalPackets);
+    EXPECT_EQ(stats.validation_packets_processed, 1u);
+    EXPECT_EQ(stats.validation_packets_deduplicated, kTotalPackets - 1);
+    EXPECT_EQ(stats.validation_packets_dropped, 0u);
+    EXPECT_EQ(stats.queued_validations, 0u);
+    EXPECT_EQ(stats.queued_validation_bytes, 0u);
+}
+
+TEST(ValidationBuffer, ManifestAdmissionPrecedesQuorumPublication)
+{
+    asio::io_context io;
+    auto const protocol = test_protocol();
+    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto const anchor = load_anchor_fixture();
+    auto const fixture = prepare_quorum_fixture(protocol, anchor.validations);
+    ASSERT_FALSE(fixture.manifests.empty());
+    ASSERT_FALSE(fixture.quorum_packets.empty());
+
+    buffer->set_unl({fixture.manifests.front()}, 1);
+    io.run();
+    io.restart();
+
+    std::promise<void> validation_entered_promise;
+    auto validation_entered = validation_entered_promise.get_future();
+    std::promise<void> validation_release_promise;
+    auto validation_release = validation_release_promise.get_future().share();
+    std::atomic_bool validation_hook_seen = false;
+    buffer->set_validation_commit_hook_for_test([&]() {
+        if (!validation_hook_seen.exchange(true))
+        {
+            validation_entered_promise.set_value();
+            validation_release.wait();
+        }
+    });
+
+    std::promise<void> manifest_entered_promise;
+    auto manifest_entered = manifest_entered_promise.get_future();
+    std::promise<void> manifest_release_promise;
+    auto manifest_release = manifest_release_promise.get_future().share();
+    std::atomic_bool manifest_hook_seen = false;
+    buffer->set_manifest_apply_hook_for_test([&]() {
+        if (!manifest_hook_seen.exchange(true))
+        {
+            manifest_entered_promise.set_value();
+            manifest_release.wait();
+        }
+    });
+
+    std::promise<void> waiter_ready_promise;
+    auto waiter_ready = waiter_ready_promise.get_future();
+    std::promise<xprv::QuorumCollectResult> result_promise;
+    auto result = result_promise.get_future();
+    std::atomic_bool waiter_resolved = false;
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            auto collected = co_await buffer->co_wait_best_quorum(
+                std::chrono::seconds(5), 1);
+            waiter_resolved.store(true);
+            result_promise.set_value(std::move(collected));
+        },
+        asio::detached);
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            while ((co_await buffer->co_stats()).pending_callbacks == 0)
+                co_await asio::post(ex, asio::use_awaitable);
+            waiter_ready_promise.set_value();
+        },
+        asio::detached);
+
+    auto work = asio::make_work_guard(io);
+    std::thread io_thread([&]() { io.run(); });
+    auto const timeout = std::chrono::seconds(5);
+
+    bool const waiter_was_ready =
+        waiter_ready.wait_for(timeout) == std::future_status::ready;
+    if (waiter_was_ready)
+    {
+        buffer->on_packet(
+            static_cast<uint16_t>(catl::peer_client::packet_type::validation),
+            fixture.quorum_packets.front());
+    }
+
+    bool const validation_was_active = waiter_was_ready &&
+        validation_entered.wait_for(timeout) == std::future_status::ready;
+    if (validation_was_active)
+    {
+        buffer->on_packet(
+            static_cast<uint16_t>(catl::peer_client::packet_type::manifests),
+            {});
+    }
+    validation_release_promise.set_value();
+
+    bool const manifest_reached_apply = validation_was_active &&
+        manifest_entered.wait_for(timeout) == std::future_status::ready;
+    bool const resolved_before_manifest_apply = waiter_resolved.load();
+    manifest_release_promise.set_value();
+
+    bool const result_was_ready = manifest_reached_apply &&
+        result.wait_for(timeout) == std::future_status::ready;
+    std::optional<xprv::QuorumCollectResult> collected;
+    if (result_was_ready)
+        collected = result.get();
+
+    buffer->stop();
+    work.reset();
+    io.stop();
+    io_thread.join();
+
+    EXPECT_TRUE(waiter_was_ready);
+    EXPECT_TRUE(validation_was_active);
+    EXPECT_TRUE(manifest_reached_apply);
+    EXPECT_FALSE(resolved_before_manifest_apply);
+    ASSERT_TRUE(collected.has_value());
+    EXPECT_EQ(collected->stop_reason, xprv::QuorumCollectStopReason::full);
+}
+
+TEST(ValidationBuffer, ValidationIngressEvictsAndReadmitsAtCountLimit)
+{
+    asio::io_context io;
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto const packet_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
+
+    constexpr std::size_t kQueueLimit = 1024;
+    constexpr std::size_t kTotalPackets = kQueueLimit + 176;
+    auto make_packet = [](std::size_t i) {
+        std::vector<uint8_t> packet(52, 0);
+        packet[48] = static_cast<uint8_t>(i >> 24);
+        packet[49] = static_cast<uint8_t>(i >> 16);
+        packet[50] = static_cast<uint8_t>(i >> 8);
+        packet[51] = static_cast<uint8_t>(i);
+        return packet;
+    };
+    for (std::size_t i = 0; i < kTotalPackets; ++i)
+        buffer->on_packet(packet_type, make_packet(i));
+
+    // The first packet was evicted and must no longer poison the dedupe index.
+    buffer->on_packet(packet_type, make_packet(0));
+
+    constexpr auto kSubmittedPackets = kTotalPackets + 1;
+    auto const stats = drain_validation_ingress(io, buffer, kSubmittedPackets);
+    EXPECT_EQ(stats.validation_packets_received, kSubmittedPackets);
+    EXPECT_EQ(stats.validation_packets_processed, kQueueLimit);
+    EXPECT_EQ(stats.validation_packets_deduplicated, 0u);
+    EXPECT_EQ(
+        stats.validation_packets_dropped, kSubmittedPackets - kQueueLimit);
+    EXPECT_EQ(stats.queued_validations, 0u);
+    EXPECT_EQ(stats.queued_validation_bytes, 0u);
+}
+
+TEST(ValidationBuffer, ValidationIngressEvictsOldestAtByteLimit)
+{
+    asio::io_context io;
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto const packet_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
+
+    constexpr std::size_t kPacketCount = 3;
+    for (std::size_t i = 0; i < kPacketCount; ++i)
+    {
+        std::vector<uint8_t> packet(600 * 1024, 0);
+        packet.back() = static_cast<uint8_t>(i);
+        buffer->on_packet(packet_type, packet);
+    }
+
+    auto const stats = drain_validation_ingress(io, buffer, kPacketCount);
+    EXPECT_EQ(stats.validation_packets_received, kPacketCount);
+    EXPECT_EQ(stats.validation_packets_processed, 1u);
+    EXPECT_EQ(stats.validation_packets_deduplicated, 0u);
+    EXPECT_EQ(stats.validation_packets_dropped, kPacketCount - 1);
+    EXPECT_EQ(stats.queued_validations, 0u);
+    EXPECT_EQ(stats.queued_validation_bytes, 0u);
+}
+
+TEST(ValidationBuffer, ManifestAdmissionIsBoundedAndResumesValidations)
+{
+    asio::io_context io;
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto const manifest_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::manifests);
+    auto const validation_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
+
+    std::vector<uint8_t> const empty_manifest;
+    buffer->on_packet(manifest_type, empty_manifest);
+    buffer->on_packet(manifest_type, empty_manifest);
+    buffer->on_packet(manifest_type, empty_manifest);
+    buffer->on_packet(validation_type, std::vector<uint8_t>(52, 0));
+
+    auto const stats = drain_validation_ingress(io, buffer, 1);
+    EXPECT_EQ(stats.manifest_packets_received, 3u);
+    EXPECT_EQ(stats.manifest_packets_admitted, 2u);
+    EXPECT_EQ(stats.manifest_packets_processed, 2u);
+    EXPECT_EQ(stats.manifest_packets_dropped, 1u);
+    EXPECT_FALSE(stats.manifest_in_flight);
+    EXPECT_FALSE(stats.manifest_pending);
+    EXPECT_EQ(stats.validation_packets_processed, 1u);
+}
+
+TEST(ValidationBuffer, StopCancelsHeartbeatWork)
+{
+    asio::io_context io;
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto const validation_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
+    buffer->on_packet(validation_type, std::vector<uint8_t>(52, 0));
+
+    bool stopped = false;
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            while ((co_await buffer->co_stats()).validation_packets_processed ==
+                   0)
+            {
+                asio::steady_timer timer(ex, std::chrono::milliseconds(1));
+                co_await timer.async_wait(asio::use_awaitable);
+            }
+            buffer->stop();
+            stopped = true;
+        },
+        asio::detached);
+
+    io.run_for(std::chrono::milliseconds(100));
+    EXPECT_TRUE(stopped);
+    EXPECT_TRUE(io.stopped());
+    io.stop();
+}
+
+TEST(ValidationBuffer, StopAccountsQueuedValidationsAsDropped)
+{
+    asio::io_context io;
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto const validation_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
+
+    constexpr std::size_t kPacketCount = 32;
+    for (std::size_t i = 0; i < kPacketCount; ++i)
+    {
+        std::vector<uint8_t> packet(52, 0);
+        packet.back() = static_cast<uint8_t>(i);
+        buffer->on_packet(validation_type, packet);
+    }
+    buffer->stop();
+
+    xprv::ValidationBuffer::Stats stats;
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            stats = co_await buffer->co_stats();
+            io.stop();
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_EQ(stats.validation_packets_received, kPacketCount);
+    EXPECT_EQ(stats.validation_packets_processed, 0u);
+    EXPECT_EQ(stats.validation_packets_deduplicated, 0u);
+    EXPECT_EQ(stats.validation_packets_dropped, kPacketCount);
+    EXPECT_EQ(stats.queued_validations, 0u);
+    EXPECT_EQ(stats.queued_validation_bytes, 0u);
+}
+
+TEST(ValidationBuffer, StopDuringActiveValidationCleansAdmissionState)
+{
+    asio::io_context io;
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto const validation_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
+
+    std::promise<void> entered_promise;
+    auto entered = entered_promise.get_future();
+    std::promise<void> release_promise;
+    auto release = release_promise.get_future().share();
+    buffer->set_validation_commit_hook_for_test([&]() {
+        entered_promise.set_value();
+        release.wait();
+    });
+
+    auto work = asio::make_work_guard(io);
+    std::thread io_thread([&]() { io.run(); });
+    buffer->on_packet(validation_type, std::vector<uint8_t>(52, 0));
+
+    bool const became_active =
+        entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    buffer->stop();
+
+    std::promise<xprv::ValidationBuffer::Stats> stats_promise;
+    auto stats = stats_promise.get_future();
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            stats_promise.set_value(co_await buffer->co_stats());
+        },
+        asio::detached);
+    release_promise.set_value();
+
+    bool const stats_ready =
+        stats.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    std::optional<xprv::ValidationBuffer::Stats> final_stats;
+    if (stats_ready)
+        final_stats = stats.get();
+
+    work.reset();
+    io.stop();
+    io_thread.join();
+
+    EXPECT_TRUE(became_active);
+    ASSERT_TRUE(final_stats.has_value());
+    EXPECT_EQ(final_stats->validation_packets_received, 1u);
+    EXPECT_EQ(final_stats->validation_packets_processed, 1u);
+    EXPECT_EQ(final_stats->validation_packets_deduplicated, 0u);
+    EXPECT_EQ(final_stats->validation_packets_dropped, 0u);
+    EXPECT_EQ(final_stats->queued_validations, 0u);
+    EXPECT_EQ(final_stats->queued_validation_bytes, 0u);
+}
+
+TEST(ValidationBuffer, StopAccountsAdmittedManifestsAsAbandoned)
+{
+    asio::io_context io;
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    auto const manifest_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::manifests);
+
+    constexpr std::size_t kPacketCount = 3;
+    for (std::size_t i = 0; i < kPacketCount; ++i)
+        buffer->on_packet(manifest_type, {});
+    buffer->stop();
+
+    xprv::ValidationBuffer::Stats stats;
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            stats = co_await buffer->co_stats();
+            io.stop();
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_EQ(stats.manifest_packets_received, kPacketCount);
+    EXPECT_EQ(stats.manifest_packets_admitted, 2u);
+    EXPECT_EQ(stats.manifest_packets_processed, 0u);
+    EXPECT_EQ(stats.manifest_packets_dropped, 1u);
+    EXPECT_EQ(stats.manifest_packets_abandoned, 2u);
+    EXPECT_FALSE(stats.manifest_in_flight);
+    EXPECT_FALSE(stats.manifest_pending);
 }

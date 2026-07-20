@@ -1,6 +1,7 @@
 #include "xprv/validation-buffer.h"
 #include "xprv/network-config.h"
 
+#include <catl/crypto/sha512-half-hasher.h>
 #include <catl/peer-client/connection-types.h>
 
 #include <boost/asio/post.hpp>
@@ -115,13 +116,19 @@ void
 ValidationBuffer::stop()
 {
     {
-        std::lock_guard lock(manifest_mutex_);
+        std::lock_guard lock(admission_mutex_);
         stopped_ = true;
-        manifest_in_flight_ = false;
-        manifest_pending_admitted_ = false;
-        pending_manifest_.reset();
-        deferred_validations_.clear();
-        deferred_validation_bytes_ = 0;
+        abandon_manifest_packets_locked();
+        validation_drain_scheduled_ = false;
+        validation_drain_priority_ = false;
+        clear_validation_queue_locked(true);
+        try
+        {
+            (void)heartbeat_timer_.cancel();
+        }
+        catch (...)
+        {
+        }
     }
     if (manifest_worker_)
         manifest_worker_->stop();
@@ -130,16 +137,6 @@ ValidationBuffer::stop()
 void
 ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
 {
-    // TODO: when CPU is throttled (e.g. Cloud Run between requests),
-    // peer packets buffer in the kernel. On wake, hundreds of stale
-    // validations flood the strand. Consider:
-    //   - Track last-processed timestamp; discard validations older than
-    //     ~10 seconds (they're for ledgers we've already moved past)
-    //   - Or: count pending strand posts; if backlog > N, skip until
-    //     caught up
-    //   - Or: timestamp each post; on processing, skip if too old
-    // This would make the server resilient to CPU throttling without
-    // requiring --no-cpu-throttling (which costs more).
     auto const kManifestType =
         static_cast<uint16_t>(catl::peer_client::packet_type::manifests);
     auto const kValidationType =
@@ -149,16 +146,31 @@ ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
     {
         if (data.size() > catl::peer_client::kMaxBufferedManifestBytes)
         {
+            std::lock_guard lock(admission_mutex_);
+            if (!stopped_)
+            {
+                ++manifest_packets_received_;
+                ++manifest_packets_dropped_;
+            }
             return;
         }
         std::shared_ptr<std::vector<uint8_t>> owned;
         {
-            std::lock_guard lock(manifest_mutex_);
+            std::lock_guard lock(admission_mutex_);
             if (stopped_)
                 return;
+            ++manifest_packets_received_;
+            if (validation_drain_priority_)
+            {
+                ++manifest_packets_dropped_;
+                return;
+            }
             if (manifest_in_flight_ &&
                 (pending_manifest_ || manifest_pending_admitted_))
+            {
+                ++manifest_packets_dropped_;
                 return;
+            }
 
             try
             {
@@ -166,17 +178,21 @@ ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
             }
             catch (...)
             {
+                ++manifest_packets_dropped_;
                 return;
             }
 
+            ++manifest_packets_admitted_;
             if (manifest_in_flight_)
             {
                 pending_manifest_ = std::move(owned);
                 manifest_pending_admitted_ = true;
+                ++manifest_admission_generation_;
                 return;
             }
             manifest_in_flight_ = true;
             manifest_pending_admitted_ = false;
+            ++manifest_admission_generation_;
         }
 
         start_manifest_packet(std::move(owned));
@@ -185,53 +201,274 @@ ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
 
     if (type != kValidationType)
         return;
-    if (data.size() < 52 || data.size() > kMaxDeferredValidationBytes)
+    if (data.size() < 52 || data.size() > kMaxPendingValidationBytes)
         return;
 
-    std::shared_ptr<std::vector<uint8_t>> owned;
+    Hash256 digest;
+    try
     {
-        std::lock_guard lock(manifest_mutex_);
+        catl::crypto::Sha512HalfHasher hasher;
+        hasher.update(data.data(), data.size());
+        digest = hasher.finalize();
+    }
+    catch (...)
+    {
+        return;
+    }
+
+    bool schedule_drain = false;
+    {
+        std::lock_guard lock(admission_mutex_);
         if (stopped_)
             return;
-        if (manifest_in_flight_)
-        {
-            while (!deferred_validations_.empty() &&
-                   (deferred_validations_.size() >= kMaxDeferredValidations ||
-                    deferred_validation_bytes_ + data.size() >
-                        kMaxDeferredValidationBytes))
-            {
-                deferred_validation_bytes_ -=
-                    deferred_validations_.front()->size();
-                deferred_validations_.pop_front();
-            }
 
-            try
-            {
-                owned = std::make_shared<std::vector<uint8_t>>(data);
-            }
-            catch (...)
-            {
-                return;
-            }
-            deferred_validation_bytes_ += owned->size();
-            deferred_validations_.push_back(std::move(owned));
+        ++validation_packets_received_;
+        QueuedValidation::Key const key{digest, manifest_admission_generation_};
+        auto const matches = pending_validation_index_.equal_range(key);
+        if (std::any_of(matches.first, matches.second, [&](auto const& entry) {
+                return *entry.second == data;
+            }))
+        {
+            ++validation_packets_deduplicated_;
             return;
+        }
+
+        while (!pending_validations_.empty() &&
+               (pending_validations_.size() + active_validations_ >=
+                    kMaxPendingValidations ||
+                pending_validation_bytes_ + active_validation_bytes_ +
+                        data.size() >
+                    kMaxPendingValidationBytes))
+        {
+            auto const& oldest = pending_validations_.front();
+            pending_validation_bytes_ -= oldest.packet->size();
+            erase_validation_index_locked(
+                oldest.key.digest,
+                oldest.key.manifest_generation,
+                oldest.packet);
+            pending_validations_.pop_front();
+            ++validation_packets_dropped_;
+        }
+
+        if (pending_validations_.size() + active_validations_ >=
+                kMaxPendingValidations ||
+            pending_validation_bytes_ + active_validation_bytes_ + data.size() >
+                kMaxPendingValidationBytes)
+        {
+            ++validation_packets_dropped_;
+            return;
+        }
+
+        std::shared_ptr<std::vector<uint8_t>> owned;
+        try
+        {
+            owned = std::make_shared<std::vector<uint8_t>>(data);
+            pending_validation_index_.emplace(key, owned);
+            pending_validations_.push_back({owned, key});
+        }
+        catch (...)
+        {
+            erase_validation_index_locked(
+                key.digest, key.manifest_generation, owned);
+            ++validation_packets_dropped_;
+            return;
+        }
+        pending_validation_bytes_ += pending_validations_.back().packet->size();
+
+        if (!manifest_in_flight_ && !validation_drain_scheduled_)
+        {
+            validation_drain_scheduled_ = true;
+            schedule_drain = true;
         }
     }
 
-    owned = std::make_shared<std::vector<uint8_t>>(data);
-    auto self = shared_from_this();
+    if (schedule_drain)
+        schedule_validation_drain();
+}
 
-    asio::post(strand_, [self, owned]() {
-        if (!self->heartbeat_started_)
+void
+ValidationBuffer::schedule_validation_drain()
+{
+    auto self = shared_from_this();
+    try
+    {
+        asio::post(strand_, [self]() { self->drain_validation_queue(); });
+    }
+    catch (...)
+    {
+        std::lock_guard lock(admission_mutex_);
+        validation_drain_scheduled_ = false;
+        clear_validation_queue_locked(true);
+    }
+}
+
+void
+ValidationBuffer::drain_validation_queue()
+{
+    auto const validation_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
+    std::size_t processed = 0;
+    auto const drain_started = std::chrono::steady_clock::now();
+
+    if (!heartbeat_started_)
+    {
+        heartbeat_started_ = true;
+        start_heartbeat();
+    }
+
+    while (processed < kValidationDrainBatch)
+    {
+        QueuedValidation next;
         {
-            self->heartbeat_started_ = true;
-            self->start_heartbeat();
+            std::lock_guard lock(admission_mutex_);
+            if (stopped_)
+            {
+                validation_drain_scheduled_ = false;
+                clear_validation_queue_locked(true);
+                return;
+            }
+            if (manifest_in_flight_ || pending_validations_.empty())
+                break;
+
+            next = std::move(pending_validations_.front());
+            pending_validation_bytes_ -= next.packet->size();
+            pending_validations_.pop_front();
+            active_validation_bytes_ += next.packet->size();
+            ++active_validations_;
         }
-        self->collector_.on_packet(kValidationType, *owned);
-        self->check_for_new_quorum();
-        self->prune_old_entries();
-    });
+
+        bool collector_completed = false;
+        try
+        {
+            collector_.on_packet(validation_type, *next.packet);
+            collector_completed = true;
+        }
+        catch (...)
+        {
+            // Peer input must not terminate an I/O worker.
+        }
+
+#ifdef XPRV_TESTING
+        if (validation_commit_hook_for_test_)
+            validation_commit_hook_for_test_();
+#endif
+
+        bool yield_to_manifest = false;
+        bool publish_quorum = false;
+        {
+            std::lock_guard lock(admission_mutex_);
+            active_validation_bytes_ -= next.packet->size();
+            --active_validations_;
+
+            yield_to_manifest = !stopped_ &&
+                next.key.manifest_generation != manifest_admission_generation_;
+            bool terminal = true;
+            if (yield_to_manifest)
+            {
+                QueuedValidation::Key const retry_key{
+                    next.key.digest, manifest_admission_generation_};
+                auto const matches =
+                    pending_validation_index_.equal_range(retry_key);
+                bool const retry_already_queued = std::any_of(
+                    matches.first, matches.second, [&](auto const& entry) {
+                        return *entry.second == *next.packet;
+                    });
+                if (!retry_already_queued)
+                {
+                    terminal = false;
+                    try
+                    {
+                        pending_validation_index_.emplace(
+                            retry_key, next.packet);
+                        pending_validations_.push_back(
+                            {next.packet, retry_key});
+                        pending_validation_bytes_ += next.packet->size();
+                    }
+                    catch (...)
+                    {
+                        erase_validation_index_locked(
+                            retry_key.digest,
+                            retry_key.manifest_generation,
+                            next.packet);
+                        ++validation_packets_dropped_;
+                    }
+                }
+            }
+
+            erase_validation_index_locked(
+                next.key.digest, next.key.manifest_generation, next.packet);
+            if (terminal)
+                ++validation_packets_processed_;
+            publish_quorum =
+                collector_completed && !yield_to_manifest && !stopped_;
+        }
+        if (publish_quorum)
+            check_for_new_quorum();
+        ++processed;
+        if (yield_to_manifest)
+            break;
+        if (std::chrono::steady_clock::now() - drain_started >=
+            kValidationDrainSlice)
+        {
+            break;
+        }
+    }
+
+    bool repost = false;
+    if (processed != 0)
+        prune_old_entries();
+
+    {
+        std::lock_guard lock(admission_mutex_);
+        if (processed != 0 || pending_validations_.empty())
+            validation_drain_priority_ = false;
+        if (stopped_)
+        {
+            validation_drain_scheduled_ = false;
+            clear_validation_queue_locked(true);
+            return;
+        }
+        if (manifest_in_flight_ || pending_validations_.empty())
+        {
+            validation_drain_scheduled_ = false;
+        }
+        else
+        {
+            repost = true;
+        }
+    }
+
+    if (repost)
+        schedule_validation_drain();
+}
+
+void
+ValidationBuffer::clear_validation_queue_locked(bool count_as_dropped)
+{
+    if (count_as_dropped)
+        validation_packets_dropped_ += pending_validations_.size();
+    pending_validations_.clear();
+    pending_validation_index_.clear();
+    pending_validation_bytes_ = 0;
+    validation_drain_priority_ = false;
+}
+
+void
+ValidationBuffer::erase_validation_index_locked(
+    Hash256 const& digest,
+    uint64_t manifest_generation,
+    std::shared_ptr<std::vector<uint8_t>> const& packet)
+{
+    QueuedValidation::Key const key{digest, manifest_generation};
+    auto const matches = pending_validation_index_.equal_range(key);
+    for (auto it = matches.first; it != matches.second; ++it)
+    {
+        if (it->second == packet)
+        {
+            pending_validation_index_.erase(it);
+            return;
+        }
+    }
 }
 
 void
@@ -243,7 +480,7 @@ ValidationBuffer::start_manifest_packet(
     {
         asio::post(strand_, [self, owned = std::move(owned)]() mutable {
             {
-                std::lock_guard lock(self->manifest_mutex_);
+                std::lock_guard lock(self->admission_mutex_);
                 if (self->stopped_)
                     return;
             }
@@ -282,28 +519,41 @@ ValidationBuffer::start_manifest_packet(
                             asio::post(
                                 self->strand_,
                                 [self, parsed = std::move(parsed)]() mutable {
-                                    bool stopped;
+                                    bool apply = false;
                                     {
                                         std::lock_guard lock(
-                                            self->manifest_mutex_);
-                                        stopped = self->stopped_;
+                                            self->admission_mutex_);
+                                        apply = !self->stopped_;
                                     }
-                                    if (!stopped)
+                                    try
                                     {
-                                        PLOGD(
-                                            ValidationBuffer::log_,
-                                            "[",
-                                            self->net_label_,
-                                            "] manifests: ",
-                                            parsed.total_entries,
-                                            " entries -> ",
-                                            parsed.trusted_entries,
-                                            " trusted, ",
-                                            parsed.manifests.size(),
-                                            " verified");
-                                        self->collector_.apply_peer_manifests(
-                                            std::move(parsed.manifests));
-                                        self->check_for_new_quorum();
+                                        if (apply)
+                                        {
+#ifdef XPRV_TESTING
+                                            auto& hook =
+                                                self->manifest_apply_hook_for_test_;
+                                            if (hook)
+                                                hook();
+#endif
+                                            PLOGD(
+                                                ValidationBuffer::log_,
+                                                "[",
+                                                self->net_label_,
+                                                "] manifests: ",
+                                                parsed.total_entries,
+                                                " entries -> ",
+                                                parsed.trusted_entries,
+                                                " trusted, ",
+                                                parsed.manifests.size(),
+                                                " verified");
+                                            self->collector_
+                                                .apply_peer_manifests(std::move(
+                                                    parsed.manifests));
+                                            self->check_for_new_quorum();
+                                        }
+                                    }
+                                    catch (...)
+                                    {
                                     }
                                     self->finish_manifest_packet();
                                 });
@@ -341,36 +591,40 @@ ValidationBuffer::finish_manifest_packet()
         }
         catch (...)
         {
-            std::lock_guard lock(manifest_mutex_);
-            manifest_in_flight_ = false;
-            manifest_pending_admitted_ = false;
-            pending_manifest_.reset();
-            deferred_validations_.clear();
-            deferred_validation_bytes_ = 0;
+            std::lock_guard lock(admission_mutex_);
+            abandon_manifest_packets_locked();
+            validation_drain_scheduled_ = false;
+            clear_validation_queue_locked(true);
         }
         return;
     }
 
     std::shared_ptr<std::vector<uint8_t>> next;
-    std::deque<std::shared_ptr<std::vector<uint8_t>>> deferred;
+    bool schedule_drain = false;
     {
-        std::lock_guard lock(manifest_mutex_);
+        std::lock_guard lock(admission_mutex_);
         if (stopped_)
         {
-            manifest_in_flight_ = false;
-            manifest_pending_admitted_ = false;
-            pending_manifest_.reset();
-            deferred_validations_.clear();
-            deferred_validation_bytes_ = 0;
+            abandon_manifest_packets_locked();
+            validation_drain_scheduled_ = false;
+            clear_validation_queue_locked(true);
             return;
         }
+        ++manifest_packets_processed_;
         next = std::move(pending_manifest_);
         if (!next)
         {
             manifest_in_flight_ = false;
             manifest_pending_admitted_ = false;
-            deferred = std::move(deferred_validations_);
-            deferred_validation_bytes_ = 0;
+            if (!pending_validations_.empty())
+            {
+                validation_drain_priority_ = true;
+                if (!validation_drain_scheduled_)
+                {
+                    validation_drain_scheduled_ = true;
+                    schedule_drain = true;
+                }
+            }
         }
     }
 
@@ -379,21 +633,22 @@ ValidationBuffer::finish_manifest_packet()
         start_manifest_packet(std::move(next));
         return;
     }
+    if (schedule_drain)
+        schedule_validation_drain();
+}
 
-    auto const validation_type =
-        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
-    if (!deferred.empty() && !heartbeat_started_)
+void
+ValidationBuffer::abandon_manifest_packets_locked()
+{
+    if (manifest_in_flight_)
     {
-        heartbeat_started_ = true;
-        start_heartbeat();
+        ++manifest_packets_abandoned_;
+        if (pending_manifest_)
+            ++manifest_packets_abandoned_;
     }
-    for (auto const& packet : deferred)
-        collector_.on_packet(validation_type, *packet);
-    if (!deferred.empty())
-    {
-        check_for_new_quorum();
-        prune_old_entries();
-    }
+    manifest_in_flight_ = false;
+    manifest_pending_admitted_ = false;
+    pending_manifest_.reset();
 }
 
 void
@@ -1041,24 +1296,63 @@ ValidationBuffer::co_stats()
     for (auto const& [_, entries] : collector_.by_ledger)
         collector_validations += entries.size();
 
-    co_return Stats{
+    Stats stats{
         .recent_quorums = recent_quorums_.size(),
         .collector_ledgers = collector_.by_ledger.size(),
         .collector_validations = collector_validations,
         .pending_callbacks = pending_.size(),
     };
+    {
+        std::lock_guard lock(admission_mutex_);
+        stats.queued_validations =
+            pending_validations_.size() + active_validations_;
+        stats.queued_validation_bytes =
+            pending_validation_bytes_ + active_validation_bytes_;
+        stats.validation_packets_received = validation_packets_received_;
+        stats.validation_packets_processed = validation_packets_processed_;
+        stats.validation_packets_deduplicated =
+            validation_packets_deduplicated_;
+        stats.validation_packets_dropped = validation_packets_dropped_;
+        stats.manifest_packets_received = manifest_packets_received_;
+        stats.manifest_packets_admitted = manifest_packets_admitted_;
+        stats.manifest_packets_processed = manifest_packets_processed_;
+        stats.manifest_packets_dropped = manifest_packets_dropped_;
+        stats.manifest_packets_abandoned = manifest_packets_abandoned_;
+        stats.manifest_in_flight = manifest_in_flight_;
+        stats.manifest_pending = pending_manifest_ != nullptr;
+    }
+    co_return stats;
 }
 
 void
 ValidationBuffer::start_heartbeat()
 {
-    auto self = shared_from_this();
+    auto weak = weak_from_this();
+    std::lock_guard lock(admission_mutex_);
+    if (stopped_)
+        return;
     heartbeat_timer_.expires_after(kHeartbeatInterval);
-    heartbeat_timer_.async_wait([self](boost::system::error_code ec) {
+    heartbeat_timer_.async_wait([weak](boost::system::error_code ec) {
         if (ec)
             return;
+        auto self = weak.lock();
+        if (!self)
+            return;
+        {
+            std::lock_guard lock(self->admission_mutex_);
+            if (self->stopped_)
+                return;
+        }
 
-        asio::post(self->strand_, [self]() {
+        asio::post(self->strand_, [weak]() {
+            auto self = weak.lock();
+            if (!self)
+                return;
+            {
+                std::lock_guard lock(self->admission_mutex_);
+                if (self->stopped_)
+                    return;
+            }
             auto now = std::chrono::steady_clock::now();
             auto since_quorum =
                 std::chrono::duration_cast<std::chrono::seconds>(

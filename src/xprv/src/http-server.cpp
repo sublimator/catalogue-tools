@@ -64,6 +64,33 @@ generate_request_id()
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════
 
+static boost::json::object
+validation_buffer_json(ValidationBuffer::Stats const& stats)
+{
+    boost::json::object result;
+    result["recent_quorums"] = stats.recent_quorums;
+    result["collector_ledgers"] = stats.collector_ledgers;
+    result["collector_validations"] = stats.collector_validations;
+    result["waiters"] = stats.pending_callbacks;
+    result["queued_validations"] = stats.queued_validations;
+    result["queued_validation_bytes"] = stats.queued_validation_bytes;
+    result["validation_packets_received"] =
+        stats.validation_packets_received;
+    result["validation_packets_processed"] =
+        stats.validation_packets_processed;
+    result["validation_packets_deduplicated"] =
+        stats.validation_packets_deduplicated;
+    result["validation_packets_dropped"] = stats.validation_packets_dropped;
+    result["manifest_packets_received"] = stats.manifest_packets_received;
+    result["manifest_packets_admitted"] = stats.manifest_packets_admitted;
+    result["manifest_packets_processed"] = stats.manifest_packets_processed;
+    result["manifest_packets_dropped"] = stats.manifest_packets_dropped;
+    result["manifest_packets_abandoned"] = stats.manifest_packets_abandoned;
+    result["manifest_in_flight"] = stats.manifest_in_flight;
+    result["manifest_pending"] = stats.manifest_pending;
+    return result;
+}
+
 static std::pair<std::string, std::string>
 split_target(std::string_view target)
 {
@@ -725,15 +752,8 @@ HttpServer::handle_session(
                     body["vl_loaded"] = status.vl_loaded;
                     if (status.latest_quorum_seq)
                         body["latest_quorum_seq"] = *status.latest_quorum_seq;
-                    boost::json::object vb;
-                    vb["recent_quorums"] =
-                        status.validation_buffer.recent_quorums;
-                    vb["collector_ledgers"] =
-                        status.validation_buffer.collector_ledgers;
-                    vb["collector_validations"] =
-                        status.validation_buffer.collector_validations;
-                    vb["waiters"] = status.validation_buffer.pending_callbacks;
-                    body["validation_buffer"] = std::move(vb);
+                    body["validation_buffer"] =
+                        validation_buffer_json(status.validation_buffer);
 
                     boost::json::object cache;
                     cache["entries"] = cs.entries;
@@ -782,16 +802,8 @@ HttpServer::handle_session(
                         if (status.latest_quorum_seq)
                             net_body["latest_quorum_seq"] =
                                 *status.latest_quorum_seq;
-                        boost::json::object vb;
-                        vb["recent_quorums"] =
-                            status.validation_buffer.recent_quorums;
-                        vb["collector_ledgers"] =
-                            status.validation_buffer.collector_ledgers;
-                        vb["collector_validations"] =
-                            status.validation_buffer.collector_validations;
-                        vb["waiters"] =
-                            status.validation_buffer.pending_callbacks;
-                        net_body["validation_buffer"] = std::move(vb);
+                        net_body["validation_buffer"] =
+                            validation_buffer_json(status.validation_buffer);
 
                         boost::json::object cache;
                         cache["entries"] = cs.entries;
@@ -857,16 +869,8 @@ HttpServer::handle_session(
                         if (status.latest_quorum_seq)
                             body["latest_quorum_seq"] =
                                 *status.latest_quorum_seq;
-                        boost::json::object vb;
-                        vb["recent_quorums"] =
-                            status.validation_buffer.recent_quorums;
-                        vb["collector_ledgers"] =
-                            status.validation_buffer.collector_ledgers;
-                        vb["collector_validations"] =
-                            status.validation_buffer.collector_validations;
-                        vb["waiters"] =
-                            status.validation_buffer.pending_callbacks;
-                        body["validation_buffer"] = std::move(vb);
+                        body["validation_buffer"] =
+                            validation_buffer_json(status.validation_buffer);
 
                         boost::json::object cache;
                         cache["entries"] = cs.entries;

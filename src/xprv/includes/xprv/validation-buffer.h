@@ -5,9 +5,10 @@
 // Collects STValidation messages from the peer network, maintains a ring
 // buffer of recent quorum entries, and services proof requests.
 //
-// All mutation happens on the strand. Coroutine callers suspend via a
-// completion callback invoked directly from check_for_new_quorum() —
-// no timer signals, no async races.
+// Collector and quorum mutation happens on the strand. Packet admission is
+// bounded under a separate mutex before work reaches that strand. Coroutine
+// callers suspend via a completion callback invoked directly from
+// check_for_new_quorum() — no timer signals, no async races.
 
 #include "validation-collector.h"
 
@@ -22,6 +23,7 @@
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -72,7 +74,8 @@ public:
     void
     on_packet(uint16_t type, std::vector<uint8_t> const& data);
 
-    /// Stop and join background manifest verification.
+    /// Stop admission and join background manifest verification. One collector
+    /// operation already running on the validation strand may finish.
     void
     stop();
 
@@ -125,10 +128,37 @@ public:
         size_t collector_ledgers = 0;
         size_t collector_validations = 0;
         size_t pending_callbacks = 0;
+        size_t queued_validations = 0;
+        size_t queued_validation_bytes = 0;
+        size_t validation_packets_received = 0;
+        size_t validation_packets_processed = 0;
+        size_t validation_packets_deduplicated = 0;
+        size_t validation_packets_dropped = 0;
+        size_t manifest_packets_received = 0;
+        size_t manifest_packets_admitted = 0;
+        size_t manifest_packets_processed = 0;
+        size_t manifest_packets_dropped = 0;
+        size_t manifest_packets_abandoned = 0;
+        bool manifest_in_flight = false;
+        bool manifest_pending = false;
     };
 
     boost::asio::awaitable<Stats>
     co_stats();
+
+#ifdef XPRV_TESTING
+    void
+    set_validation_commit_hook_for_test(std::function<void()> hook)
+    {
+        validation_commit_hook_for_test_ = std::move(hook);
+    }
+
+    void
+    set_manifest_apply_hook_for_test(std::function<void()> hook)
+    {
+        manifest_apply_hook_for_test_ = std::move(hook);
+    }
+#endif
 
 private:
     ValidationBuffer(
@@ -148,6 +178,24 @@ private:
 
     void
     finish_manifest_packet();
+
+    void
+    abandon_manifest_packets_locked();
+
+    void
+    schedule_validation_drain();
+
+    void
+    drain_validation_queue();
+
+    void
+    clear_validation_queue_locked(bool count_as_dropped);
+
+    void
+    erase_validation_index_locked(
+        Hash256 const& digest,
+        uint64_t manifest_generation,
+        std::shared_ptr<std::vector<uint8_t>> const& packet);
 
     void
     check_for_new_quorum();
@@ -174,16 +222,56 @@ private:
     ValidationCollector collector_;
     std::unique_ptr<ManifestWorker> manifest_worker_;
 
-    // Manifest admission is callable from any peer thread. Keep at most one
-    // packet running and one waiting so work and retained frame memory remain
-    // bounded without discarding every concurrent update.
-    std::mutex manifest_mutex_;
+    // Packet admission is callable from any peer thread. Manifest work and
+    // validation ingress are both bounded before they reach the strand. A
+    // manifest burst admits one running packet and one successor.
+    std::mutex admission_mutex_;
     bool manifest_in_flight_ = false;
     bool manifest_pending_admitted_ = false;
     bool stopped_ = false;
     std::shared_ptr<std::vector<uint8_t>> pending_manifest_;
-    std::deque<std::shared_ptr<std::vector<uint8_t>>> deferred_validations_;
-    std::size_t deferred_validation_bytes_ = 0;
+
+    struct QueuedValidation
+    {
+        std::shared_ptr<std::vector<uint8_t>> packet;
+        struct Key
+        {
+            Hash256 digest;
+            uint64_t manifest_generation = 0;
+
+            bool
+            operator<(Key const& other) const
+            {
+                if (manifest_generation != other.manifest_generation)
+                    return manifest_generation < other.manifest_generation;
+                return digest < other.digest;
+            }
+        } key;
+    };
+    std::deque<QueuedValidation> pending_validations_;
+    std::multimap<QueuedValidation::Key, std::shared_ptr<std::vector<uint8_t>>>
+        pending_validation_index_;
+    std::size_t pending_validation_bytes_ = 0;
+    std::size_t active_validation_bytes_ = 0;
+    std::size_t active_validations_ = 0;
+    bool validation_drain_scheduled_ = false;
+    // Gives one validation batch priority after a manifest burst.
+    bool validation_drain_priority_ = false;
+    uint64_t manifest_admission_generation_ = 0;
+    std::size_t validation_packets_received_ = 0;
+    std::size_t validation_packets_processed_ = 0;
+    std::size_t validation_packets_deduplicated_ = 0;
+    std::size_t validation_packets_dropped_ = 0;
+    std::size_t manifest_packets_received_ = 0;
+    std::size_t manifest_packets_admitted_ = 0;
+    std::size_t manifest_packets_processed_ = 0;
+    std::size_t manifest_packets_dropped_ = 0;
+    std::size_t manifest_packets_abandoned_ = 0;
+
+#ifdef XPRV_TESTING
+    std::function<void()> validation_commit_hook_for_test_;
+    std::function<void()> manifest_apply_hook_for_test_;
+#endif
 
     std::deque<QuorumEntry> recent_quorums_;
     Hash256 last_quorum_hash_;
@@ -213,8 +301,10 @@ private:
 
     static constexpr size_t kMaxQuorumEntries = 30;
     static constexpr size_t kMaxCollectorLedgers = 64;
-    static constexpr size_t kMaxDeferredValidationBytes = 1024 * 1024;
-    static constexpr size_t kMaxDeferredValidations = 1024;
+    static constexpr size_t kMaxPendingValidationBytes = 1024 * 1024;
+    static constexpr size_t kMaxPendingValidations = 1024;
+    static constexpr size_t kValidationDrainBatch = 16;
+    static constexpr auto kValidationDrainSlice = std::chrono::milliseconds(2);
     static constexpr auto kMaxQuorumAge = std::chrono::seconds(120);
     static constexpr auto kHeartbeatInterval = std::chrono::seconds(10);
 

@@ -68,6 +68,9 @@ struct LoggedNetworkStatus
     std::size_t recent_quorums = 0;
     std::size_t collector_ledgers = 0;
     std::size_t collector_validations = 0;
+    std::size_t queued_validations = 0;
+    std::size_t validation_packets_deduplicated = 0;
+    std::size_t validation_packets_dropped = 0;
     std::size_t proof_cache_entries = 0;
     std::size_t node_cache_entries = 0;
     std::size_t node_cache_resident_entries = 0;
@@ -95,6 +98,9 @@ struct LoggedNetworkTrigger
     std::size_t recent_quorums = 0;
     std::size_t collector_ledgers_bucket = 0;
     std::size_t collector_validations_bucket = 0;
+    std::size_t queued_validations_bucket = 0;
+    std::size_t validation_packets_deduplicated_bucket = 0;
+    std::size_t validation_packets_dropped_bucket = 0;
     std::size_t proof_cache_entries_bucket = 0;
     std::size_t node_cache_entries_bucket = 0;
     std::size_t node_cache_resident_entries_bucket = 0;
@@ -131,6 +137,11 @@ same_trigger(
         lhs.collector_ledgers_bucket == rhs.collector_ledgers_bucket &&
         lhs.collector_validations_bucket ==
             rhs.collector_validations_bucket &&
+        lhs.queued_validations_bucket == rhs.queued_validations_bucket &&
+        lhs.validation_packets_deduplicated_bucket ==
+            rhs.validation_packets_deduplicated_bucket &&
+        lhs.validation_packets_dropped_bucket ==
+            rhs.validation_packets_dropped_bucket &&
         lhs.proof_cache_entries_bucket == rhs.proof_cache_entries_bucket &&
         lhs.node_cache_entries_bucket == rhs.node_cache_entries_bucket &&
         lhs.node_cache_resident_entries_bucket ==
@@ -192,7 +203,10 @@ format_network_status(LoggedNetworkStatus const& status)
     out << " vl=" << (status.vl_loaded ? "loaded" : "empty")
         << " valbuf=w" << status.validation_waiters << "/q"
         << status.recent_quorums << "/l" << status.collector_ledgers
-        << "/v" << status.collector_validations
+        << "/v" << status.collector_validations << "/in"
+        << status.queued_validations << "/dup"
+        << status.validation_packets_deduplicated << "/drop"
+        << status.validation_packets_dropped
         << " proofs=" << status.proof_cache_entries << " node_cache=e"
         << status.node_cache_entries << "/r"
         << status.node_cache_resident_entries << "/h"
@@ -245,6 +259,12 @@ log_status_if_changed(
                     bucketize(status.collector_ledgers, 8),
                 .collector_validations_bucket =
                     bucketize(status.collector_validations, 32),
+                .queued_validations_bucket =
+                    bucketize(status.queued_validations, 32),
+                .validation_packets_deduplicated_bucket = bucketize(
+                    status.validation_packets_deduplicated, 128),
+                .validation_packets_dropped_bucket =
+                    bucketize(status.validation_packets_dropped, 32),
                 .proof_cache_entries_bucket =
                     bucketize(status.proof_cache_entries, 8),
                 .node_cache_entries_bucket =
@@ -525,6 +545,16 @@ cmd_serve()
                                             status.collector_validations =
                                                 health.validation_buffer
                                                     .collector_validations;
+                                            status.queued_validations =
+                                                health.validation_buffer
+                                                    .queued_validations;
+                                            status
+                                                .validation_packets_deduplicated =
+                                                health.validation_buffer
+                                                    .validation_packets_deduplicated;
+                                            status.validation_packets_dropped =
+                                                health.validation_buffer
+                                                    .validation_packets_dropped;
                                             status.proof_cache_entries =
                                                 proof_cache.entries;
                                             status.node_cache_entries =

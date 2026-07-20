@@ -14,7 +14,6 @@
 #include "ripple.pb.h"
 
 #include <iomanip>
-#include <mutex>
 #include <optional>
 #include <sstream>
 #include <unordered_set>
@@ -246,34 +245,6 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
             net_label_,
             "] dropping validation with invalid signature");
         return;
-    }
-
-    // Diagnostic: log full hex of first validation per network
-    bool log_first_validation = false;
-    {
-        static std::set<std::string> logged_networks;
-        static std::mutex logged_networks_mutex;
-        std::lock_guard lock(logged_networks_mutex);
-        log_first_validation = logged_networks.insert(net_label_).second;
-    }
-    if (log_first_validation)
-    {
-        std::string hex;
-        hex.reserve(val_bytes.size() * 2);
-        for (auto b : val_bytes)
-        {
-            char buf[3];
-            std::snprintf(buf, sizeof(buf), "%02X", b);
-            hex += buf;
-        }
-        PLOGD(
-            log_,
-            "[",
-            net_label_,
-            "] FIRST validation hex (",
-            val_bytes.size(),
-            "B): ",
-            hex);
     }
 
     Entry entry;
