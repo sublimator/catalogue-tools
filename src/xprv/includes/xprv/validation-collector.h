@@ -16,6 +16,7 @@
 #include <set>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace xprv {
@@ -59,6 +60,35 @@ public:
     get_ledger_validations(
         Hash256 const& ledger_hash,
         QuorumMode mode = QuorumMode::live) const;
+
+    /// Get distinct validations for one exact ledger identity. A signed
+    /// sequence claim is part of that identity; callers must not combine
+    /// contradictory sequence claims for the same hash into one quorum.
+    std::vector<Entry>
+    get_ledger_validations(
+        Hash256 const& ledger_hash,
+        uint32_t ledger_sequence,
+        QuorumMode mode) const;
+
+    /// Return the greatest sequence claimed by a validation that is usable
+    /// under the requested quorum mode, without copying retained entries.
+    std::optional<uint32_t>
+    latest_ledger_sequence(
+        Hash256 const& ledger_hash,
+        QuorumMode mode = QuorumMode::live) const;
+
+    /// Prune retained hashes to a bounded capacity derived from the fixed
+    /// floor and the number of trusted identities.
+    void
+    prune_ledgers(std::size_t max_ledgers);
+
+#ifdef XPRV_TESTING
+    bool
+    insert_entry_for_test(Entry entry)
+    {
+        return insert_entry(std::move(entry));
+    }
+#endif
 
     bool
     has_quorum(int percent = 90, QuorumMode mode = QuorumMode::live) const;
@@ -153,8 +183,17 @@ private:
     int
     threshold_for(int percent) const;
 
-    std::optional<Hash256>
-    select_quorum_hash(int percent, QuorumMode mode) const;
+    struct QuorumCandidate
+    {
+        Hash256 ledger_hash;
+        uint32_t ledger_sequence = 0;
+        int count = 0;
+    };
+
+    std::optional<QuorumCandidate>
+    select_quorum_candidate(int percent, QuorumMode mode) const;
+
+    static constexpr std::size_t kMaxRetainedVotesPerValidator = 4;
 };
 
 }  // namespace xprv

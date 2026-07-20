@@ -579,6 +579,10 @@ ProofEngine::get_or_reuse_anchor(
 {
     if (!vl)
         throw std::runtime_error("validator list snapshot is missing");
+    auto const quorum_threshold =
+        ValidationBuffer::proof_quorum_threshold(vl->validators.size());
+    if (quorum_threshold == 0)
+        throw std::runtime_error("validator list contains no validators");
 
     PLOGI(
         log_,
@@ -605,6 +609,7 @@ ProofEngine::get_or_reuse_anchor(
     {
         std::lock_guard lock(cache_mutex_);
         if (current_anchor_ && current_anchor_->vl_sequence == vl->sequence &&
+            current_anchor_->validations.size() >= quorum_threshold &&
             (std::chrono::steady_clock::now() - current_anchor_->built_at) <
                 std::chrono::seconds(max_age_secs))
         {
@@ -699,7 +704,7 @@ ProofEngine::get_or_reuse_anchor(
     auto quorum = std::move(*full);
 
     if (quorum.ledger_seq == 0 || quorum.ledger_hash == Hash256() ||
-        quorum.validations.empty())
+        quorum.validations.size() < quorum_threshold)
     {
         throw std::runtime_error("timed out before collecting a proof quorum");
     }

@@ -58,6 +58,14 @@ struct QuorumCollectResult
 class ValidationBuffer : public std::enable_shared_from_this<ValidationBuffer>
 {
 public:
+    static constexpr int kQuorumPercent = 90;
+
+    static constexpr std::size_t
+    proof_quorum_threshold(std::size_t validator_count) noexcept
+    {
+        return (validator_count * kQuorumPercent + 99) / 100;
+    }
+
     ~ValidationBuffer();
 
     static std::shared_ptr<ValidationBuffer>
@@ -147,6 +155,9 @@ public:
     co_stats();
 
 #ifdef XPRV_TESTING
+    boost::asio::awaitable<bool>
+    co_insert_validation_for_test(ValidationCollector::Entry entry);
+
     void
     set_validation_commit_hook_for_test(std::function<void()> hook)
     {
@@ -158,6 +169,39 @@ public:
     {
         manifest_apply_hook_for_test_ = std::move(hook);
     }
+
+    void
+    set_manifest_parse_hook_for_test(std::function<void()> hook)
+    {
+        manifest_parse_hook_for_test_ = std::move(hook);
+    }
+
+    void
+    set_validation_publish_hook_for_test(std::function<void()> hook)
+    {
+        validation_publish_hook_for_test_ = std::move(hook);
+    }
+
+    void
+    set_unl_admission_hook_for_test(std::function<void()> hook)
+    {
+        unl_admission_hook_for_test_ = std::move(hook);
+    }
+
+    void
+    set_deadline_publish_hook_for_test(std::function<void()> hook)
+    {
+        deadline_publish_hook_for_test_ = std::move(hook);
+    }
+
+    bool
+    publication_gate_available_for_test()
+    {
+        if (!publication_mutex_.try_lock())
+            return false;
+        publication_mutex_.unlock();
+        return true;
+    }
 #endif
 
 private:
@@ -166,18 +210,23 @@ private:
         catl::xdata::Protocol const& protocol,
         uint32_t network_id);
 
-    static constexpr int kQuorumPercent = 90;
-
-    void
+    bool
     apply_unl_locked(
         std::vector<catl::vl::Manifest> const& validators,
-        uint32_t vl_sequence);
+        uint32_t vl_sequence,
+        bool publish);
+
+    void
+    publish_trust_state_locked();
 
     void
     start_manifest_packet(std::shared_ptr<std::vector<uint8_t>> data);
 
     void
     finish_manifest_packet();
+
+    std::shared_ptr<std::vector<uint8_t>>
+    finish_manifest_packet_locked(bool& schedule_validation_drain);
 
     void
     abandon_manifest_packets_locked();
@@ -194,7 +243,7 @@ private:
     void
     erase_validation_index_locked(
         Hash256 const& digest,
-        uint64_t manifest_generation,
+        uint64_t trust_generation,
         std::shared_ptr<std::vector<uint8_t>> const& packet);
 
     void
@@ -208,11 +257,17 @@ private:
     void
     resolve_pending();
 
+    void
+    cancel_pending_locked(QuorumCollectStopReason reason);
+
     std::optional<QuorumEntry>
     latest_quorum_locked(ValidationCollector::QuorumMode mode) const;
 
     bool
-    has_newer_ledger_locked(uint32_t ledger_seq) const;
+    has_newer_ledger_locked(
+        Hash256 const& ledger_hash,
+        uint32_t ledger_seq,
+        ValidationCollector::QuorumMode mode) const;
 
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
 
@@ -222,10 +277,16 @@ private:
     ValidationCollector collector_;
     std::unique_ptr<ManifestWorker> manifest_worker_;
 
+    // Trust admission and quorum publication share an ordering gate. When both
+    // locks are needed, publication_mutex_ must be acquired first. Validation
+    // enqueue only needs admission_mutex_, so signature/quorum work never
+    // blocks ordinary peer ingress.
+    std::mutex publication_mutex_;
+    std::mutex admission_mutex_;
+
     // Packet admission is callable from any peer thread. Manifest work and
     // validation ingress are both bounded before they reach the strand. A
     // manifest burst admits one running packet and one successor.
-    std::mutex admission_mutex_;
     bool manifest_in_flight_ = false;
     bool manifest_pending_admitted_ = false;
     bool stopped_ = false;
@@ -237,13 +298,13 @@ private:
         struct Key
         {
             Hash256 digest;
-            uint64_t manifest_generation = 0;
+            uint64_t trust_generation = 0;
 
             bool
             operator<(Key const& other) const
             {
-                if (manifest_generation != other.manifest_generation)
-                    return manifest_generation < other.manifest_generation;
+                if (trust_generation != other.trust_generation)
+                    return trust_generation < other.trust_generation;
                 return digest < other.digest;
             }
         } key;
@@ -257,7 +318,8 @@ private:
     bool validation_drain_scheduled_ = false;
     // Gives one validation batch priority after a manifest burst.
     bool validation_drain_priority_ = false;
-    uint64_t manifest_admission_generation_ = 0;
+    std::size_t pending_unl_updates_ = 0;
+    uint64_t trust_admission_generation_ = 0;
     std::size_t validation_packets_received_ = 0;
     std::size_t validation_packets_processed_ = 0;
     std::size_t validation_packets_deduplicated_ = 0;
@@ -271,6 +333,10 @@ private:
 #ifdef XPRV_TESTING
     std::function<void()> validation_commit_hook_for_test_;
     std::function<void()> manifest_apply_hook_for_test_;
+    std::function<void()> manifest_parse_hook_for_test_;
+    std::function<void()> validation_publish_hook_for_test_;
+    std::function<void()> unl_admission_hook_for_test_;
+    std::function<void()> deadline_publish_hook_for_test_;
 #endif
 
     std::deque<QuorumEntry> recent_quorums_;
@@ -278,6 +344,7 @@ private:
     std::optional<QuorumEntry> active_live_quorum_log_;
     std::optional<QuorumEntry> last_full_quorum_;
     std::optional<uint32_t> vl_sequence_;
+    bool unpublished_vl_change_ = false;
 
     // Pending proof callbacks — resolved by check_for_new_quorum on strand.
     struct PendingQuorum
@@ -285,7 +352,12 @@ private:
         uint64_t id = 0;          // unique ID for cleanup on cancel
         uint32_t ledger_seq = 0;  // 0 = waiting for ANY quorum
         Hash256 ledger_hash;      // set after initial quorum
+        // Preserve the threshold-backed snapshot selected for this waiter.
+        // Collector retention may discard old votes while the waiter remains
+        // open, but must not weaken a quorum that was already established.
+        std::vector<ValidationCollector::Entry> validations;
         std::optional<uint32_t> vl_sequence;
+        std::optional<uint32_t> observed_vl_sequence;
         std::chrono::steady_clock::time_point deadline;
         std::function<void(QuorumCollectResult)> callback;
     };

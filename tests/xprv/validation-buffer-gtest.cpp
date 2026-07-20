@@ -20,6 +20,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -379,6 +380,111 @@ TEST(ValidationBuffer, BestQuorumCollectsAndFinalizesAtFullQuorum)
     EXPECT_EQ(stop_reason, xprv::QuorumCollectStopReason::full);
 }
 
+TEST(ValidationBuffer, LockedQuorumSurvivesVoteRetention)
+{
+    asio::io_context io;
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+
+    auto make_key = [](uint8_t marker) {
+        std::vector<uint8_t> key(33, 0);
+        key.front() = 0x02;
+        key.back() = marker;
+        return key;
+    };
+    std::vector<catl::vl::Manifest> manifests;
+    for (uint8_t marker = 1; marker <= 10; ++marker)
+    {
+        catl::vl::Manifest manifest;
+        manifest.master_public_key = make_key(marker);
+        manifest.signing_public_key = make_key(marker);
+        manifests.push_back(std::move(manifest));
+    }
+    buffer->set_unl(manifests, 1);
+    io.run();
+    io.restart();
+
+    auto make_hash = [](uint8_t marker) {
+        std::array<uint8_t, 32> bytes{};
+        bytes.back() = marker;
+        return Hash256(bytes);
+    };
+    auto make_entry = [&](Hash256 const& hash,
+                          uint32_t sequence,
+                          catl::vl::Manifest const& manifest) {
+        xprv::ValidationCollector::Entry entry;
+        entry.ledger_hash = hash;
+        entry.ledger_seq = sequence;
+        entry.signing_key_hex = lower_ascii(manifest.signing_key_hex());
+        return entry;
+    };
+
+    auto const quorum_hash = make_hash(1);
+    bool done = false;
+    bool all_inserted = true;
+    xprv::QuorumCollectResult collected;
+
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            collected = co_await buffer->co_wait_best_quorum(
+                std::chrono::seconds(5), 1);
+            done = true;
+            buffer->stop();
+            io.stop();
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            while ((co_await buffer->co_stats()).pending_callbacks == 0)
+                co_await asio::post(ex, asio::use_awaitable);
+
+            // Fill one validator's retention allowance, then let its vote
+            // establish the threshold quorum selected by the waiter.
+            for (uint8_t marker = 10; marker <= 12; ++marker)
+            {
+                auto const inserted =
+                    co_await buffer->co_insert_validation_for_test(make_entry(
+                        make_hash(marker), 100, manifests.back()));
+                all_inserted = inserted && all_inserted;
+            }
+            for (std::size_t i = 0; i < 8; ++i)
+            {
+                auto const inserted =
+                    co_await buffer->co_insert_validation_for_test(
+                        make_entry(quorum_hash, 100, manifests[i]));
+                all_inserted = inserted && all_inserted;
+            }
+            auto inserted = co_await buffer->co_insert_validation_for_test(
+                make_entry(quorum_hash, 100, manifests.back()));
+            all_inserted = inserted && all_inserted;
+
+            // This newer vote evicts the validator's retained quorum vote.
+            // The waiter must still return the threshold-backed snapshot it
+            // already locked, not the collector's reduced live view.
+            inserted = co_await buffer->co_insert_validation_for_test(
+                make_entry(make_hash(2), 101, manifests.back()));
+            all_inserted = inserted && all_inserted;
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(done);
+    EXPECT_TRUE(all_inserted);
+    EXPECT_EQ(
+        collected.stop_reason, xprv::QuorumCollectStopReason::next_ledger);
+    ASSERT_EQ(collected.quorum.validations.size(), 9u);
+    EXPECT_TRUE(std::all_of(
+        collected.quorum.validations.begin(),
+        collected.quorum.validations.end(),
+        [&](auto const& entry) {
+            return entry.ledger_hash == quorum_hash && entry.ledger_seq == 100;
+        }));
+}
+
 TEST(ValidationBuffer, ManifestWorkerReplaysRotationAcrossListRefresh)
 {
     asio::io_context io;
@@ -612,6 +718,552 @@ TEST(ValidationBuffer, ManifestAdmissionPrecedesQuorumPublication)
     EXPECT_EQ(collected->stop_reason, xprv::QuorumCollectStopReason::full);
 }
 
+TEST(ValidationBuffer, FailedManifestFlushPreservesActiveListWaiter)
+{
+    asio::io_context io;
+    auto const protocol = test_protocol();
+    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto const fixture =
+        prepare_quorum_fixture(protocol, load_anchor_fixture().validations);
+    ASSERT_GE(fixture.manifests.size(), 2u);
+    ASSERT_FALSE(fixture.quorum_packets.empty());
+
+    buffer->set_unl({fixture.manifests[1]}, 1);
+    io.run();
+    io.restart();
+
+    std::promise<void> validation_entered_promise;
+    auto validation_entered = validation_entered_promise.get_future();
+    std::promise<void> validation_release_promise;
+    auto validation_release = validation_release_promise.get_future().share();
+    std::atomic_bool validation_hook_seen = false;
+    buffer->set_validation_commit_hook_for_test([&]() {
+        if (!validation_hook_seen.exchange(true))
+        {
+            validation_entered_promise.set_value();
+            validation_release.wait();
+        }
+    });
+
+    std::promise<void> parse_entered_promise;
+    auto parse_entered = parse_entered_promise.get_future();
+    std::promise<void> parse_release_promise;
+    auto parse_release = parse_release_promise.get_future().share();
+    std::atomic_bool parse_hook_seen = false;
+    buffer->set_manifest_parse_hook_for_test([&]() {
+        if (!parse_hook_seen.exchange(true))
+        {
+            parse_entered_promise.set_value();
+            parse_release.wait();
+        }
+        throw std::runtime_error("injected manifest parse failure");
+    });
+
+    auto const validation_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
+    auto const manifest_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::manifests);
+    auto work = asio::make_work_guard(io);
+    std::thread io_thread([&]() { io.run(); });
+    buffer->on_packet(validation_type, fixture.quorum_packets.front());
+
+    auto const timeout = std::chrono::seconds(5);
+    bool const validation_was_active =
+        validation_entered.wait_for(timeout) == std::future_status::ready;
+    if (validation_was_active)
+    {
+        buffer->set_unl({fixture.manifests.front()}, 2);
+        buffer->on_packet(manifest_type, {});
+    }
+    validation_release_promise.set_value();
+
+    bool const parse_was_active = validation_was_active &&
+        parse_entered.wait_for(timeout) == std::future_status::ready;
+
+    std::promise<void> waiter_ready_promise;
+    auto waiter_ready = waiter_ready_promise.get_future();
+    std::promise<xprv::QuorumCollectResult> result_promise;
+    auto result = result_promise.get_future();
+    std::promise<xprv::QuorumCollectResult> unbound_result_promise;
+    auto unbound_result = unbound_result_promise.get_future();
+    std::atomic_uint waiters_resolved = 0;
+    if (parse_was_active)
+    {
+        asio::co_spawn(
+            io,
+            [&, buffer]() -> asio::awaitable<void> {
+                auto collected = co_await buffer->co_wait_best_quorum(
+                    std::chrono::seconds(5), 2);
+                ++waiters_resolved;
+                result_promise.set_value(std::move(collected));
+            },
+            asio::detached);
+        asio::co_spawn(
+            io,
+            [&, buffer]() -> asio::awaitable<void> {
+                auto collected = co_await buffer->co_wait_best_quorum(
+                    std::chrono::seconds(5));
+                ++waiters_resolved;
+                unbound_result_promise.set_value(std::move(collected));
+            },
+            asio::detached);
+        asio::co_spawn(
+            io,
+            [&, buffer]() -> asio::awaitable<void> {
+                auto ex = co_await asio::this_coro::executor;
+                while ((co_await buffer->co_stats()).pending_callbacks < 2)
+                    co_await asio::post(ex, asio::use_awaitable);
+                waiter_ready_promise.set_value();
+            },
+            asio::detached);
+    }
+
+    bool const waiter_was_ready = parse_was_active &&
+        waiter_ready.wait_for(timeout) == std::future_status::ready;
+    if (waiter_was_ready)
+        buffer->on_packet(validation_type, fixture.quorum_packets.front());
+    auto const resolved_before_manifest_completion = waiters_resolved.load();
+    parse_release_promise.set_value();
+
+    bool const result_was_ready = waiter_was_ready &&
+        result.wait_for(timeout) == std::future_status::ready;
+    bool const unbound_result_was_ready = waiter_was_ready &&
+        unbound_result.wait_for(timeout) == std::future_status::ready;
+    std::optional<xprv::QuorumCollectResult> collected;
+    std::optional<xprv::QuorumCollectResult> unbound_collected;
+    if (result_was_ready)
+        collected = result.get();
+    if (unbound_result_was_ready)
+        unbound_collected = unbound_result.get();
+
+    buffer->stop();
+    work.reset();
+    io.stop();
+    io_thread.join();
+
+    EXPECT_TRUE(validation_was_active);
+    EXPECT_TRUE(parse_was_active);
+    EXPECT_TRUE(waiter_was_ready);
+    EXPECT_EQ(resolved_before_manifest_completion, 0u);
+    ASSERT_TRUE(collected.has_value());
+    EXPECT_EQ(collected->stop_reason, xprv::QuorumCollectStopReason::full);
+    EXPECT_EQ(collected->quorum.vl_sequence, 2u);
+    EXPECT_EQ(collected->quorum.validations.size(), 1u);
+    ASSERT_TRUE(unbound_collected.has_value());
+    EXPECT_EQ(
+        unbound_collected->stop_reason, xprv::QuorumCollectStopReason::full);
+    EXPECT_EQ(unbound_collected->quorum.vl_sequence, 2u);
+    EXPECT_EQ(unbound_collected->quorum.validations.size(), 1u);
+}
+
+TEST(ValidationBuffer, PublicationGateExcludesLateManifestAdmission)
+{
+    asio::io_context io;
+    auto const protocol = test_protocol();
+    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto const fixture =
+        prepare_quorum_fixture(protocol, load_anchor_fixture().validations);
+    ASSERT_FALSE(fixture.manifests.empty());
+    ASSERT_FALSE(fixture.quorum_packets.empty());
+
+    buffer->set_unl({fixture.manifests.front()}, 1);
+    io.run();
+    io.restart();
+
+    std::promise<void> publish_entered_promise;
+    auto publish_entered = publish_entered_promise.get_future();
+    std::promise<void> publish_release_promise;
+    auto publish_release = publish_release_promise.get_future().share();
+    buffer->set_validation_publish_hook_for_test([&]() {
+        publish_entered_promise.set_value();
+        publish_release.wait();
+    });
+
+    auto work = asio::make_work_guard(io);
+    std::thread io_thread([&]() { io.run(); });
+    buffer->on_packet(
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation),
+        fixture.quorum_packets.front());
+
+    auto const timeout = std::chrono::seconds(5);
+    bool const reached_publish_boundary =
+        publish_entered.wait_for(timeout) == std::future_status::ready;
+    bool const gate_was_held = reached_publish_boundary &&
+        !buffer->publication_gate_available_for_test();
+
+    std::promise<void> manifest_started_promise;
+    auto manifest_started = manifest_started_promise.get_future();
+    std::atomic_bool manifest_returned = false;
+    std::thread manifest_thread;
+    if (reached_publish_boundary)
+    {
+        manifest_thread = std::thread([&]() {
+            manifest_started_promise.set_value();
+            buffer->on_packet(
+                static_cast<uint16_t>(
+                    catl::peer_client::packet_type::manifests),
+                {});
+            manifest_returned.store(true);
+        });
+    }
+    bool const manifest_call_started = reached_publish_boundary &&
+        manifest_started.wait_for(timeout) == std::future_status::ready;
+    bool const manifest_returned_before_release = manifest_returned.load();
+
+    publish_release_promise.set_value();
+    if (manifest_thread.joinable())
+        manifest_thread.join();
+    bool const manifest_returned_after_release = manifest_returned.load();
+
+    buffer->stop();
+    work.reset();
+    io.stop();
+    io_thread.join();
+
+    EXPECT_TRUE(reached_publish_boundary);
+    EXPECT_TRUE(gate_was_held);
+    EXPECT_TRUE(manifest_call_started);
+    EXPECT_FALSE(manifest_returned_before_release);
+    EXPECT_TRUE(manifest_returned_after_release);
+}
+
+TEST(ValidationBuffer, PublicationGateExcludesLateStop)
+{
+    asio::io_context io;
+    auto const protocol = test_protocol();
+    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto const fixture =
+        prepare_quorum_fixture(protocol, load_anchor_fixture().validations);
+    ASSERT_FALSE(fixture.manifests.empty());
+    ASSERT_FALSE(fixture.quorum_packets.empty());
+
+    buffer->set_unl({fixture.manifests.front()}, 1);
+    io.run();
+    io.restart();
+
+    std::promise<void> publish_entered_promise;
+    auto publish_entered = publish_entered_promise.get_future();
+    std::promise<void> publish_release_promise;
+    auto publish_release = publish_release_promise.get_future().share();
+    buffer->set_validation_publish_hook_for_test([&]() {
+        publish_entered_promise.set_value();
+        publish_release.wait();
+    });
+
+    auto work = asio::make_work_guard(io);
+    std::thread io_thread([&]() { io.run(); });
+    buffer->on_packet(
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation),
+        fixture.quorum_packets.front());
+
+    auto const timeout = std::chrono::seconds(5);
+    bool const reached_publish_boundary =
+        publish_entered.wait_for(timeout) == std::future_status::ready;
+    bool const gate_was_held = reached_publish_boundary &&
+        !buffer->publication_gate_available_for_test();
+
+    std::promise<void> stop_started_promise;
+    auto stop_started = stop_started_promise.get_future();
+    std::atomic_bool stop_returned = false;
+    std::thread stop_thread;
+    if (reached_publish_boundary)
+    {
+        stop_thread = std::thread([&]() {
+            stop_started_promise.set_value();
+            buffer->stop();
+            stop_returned.store(true);
+        });
+    }
+    bool const stop_call_started = reached_publish_boundary &&
+        stop_started.wait_for(timeout) == std::future_status::ready;
+    bool const stop_returned_before_release = stop_returned.load();
+
+    publish_release_promise.set_value();
+    if (stop_thread.joinable())
+        stop_thread.join();
+    else
+        buffer->stop();
+    bool const stop_returned_after_release = stop_returned.load();
+
+    work.reset();
+    io.stop();
+    io_thread.join();
+
+    EXPECT_TRUE(reached_publish_boundary);
+    EXPECT_TRUE(gate_was_held);
+    EXPECT_TRUE(stop_call_started);
+    EXPECT_FALSE(stop_returned_before_release);
+    EXPECT_TRUE(stop_returned_after_release);
+}
+
+TEST(ValidationBuffer, DeadlinePublicationGateExcludesLateStop)
+{
+    asio::io_context io;
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+
+    std::promise<void> publish_entered_promise;
+    auto publish_entered = publish_entered_promise.get_future();
+    std::promise<void> publish_release_promise;
+    auto publish_release = publish_release_promise.get_future().share();
+    buffer->set_deadline_publish_hook_for_test([&]() {
+        publish_entered_promise.set_value();
+        publish_release.wait();
+    });
+
+    std::promise<xprv::QuorumCollectResult> result_promise;
+    auto result = result_promise.get_future();
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            result_promise.set_value(
+                co_await buffer->co_wait_best_quorum(std::chrono::seconds(0)));
+        },
+        asio::detached);
+
+    auto work = asio::make_work_guard(io);
+    std::thread io_thread([&]() { io.run(); });
+    auto const timeout = std::chrono::seconds(5);
+    bool const reached_publish_boundary =
+        publish_entered.wait_for(timeout) == std::future_status::ready;
+
+    std::promise<void> stop_started_promise;
+    auto stop_started = stop_started_promise.get_future();
+    std::atomic_bool stop_returned = false;
+    std::thread stop_thread;
+    if (reached_publish_boundary)
+    {
+        stop_thread = std::thread([&]() {
+            stop_started_promise.set_value();
+            buffer->stop();
+            stop_returned.store(true);
+        });
+    }
+    bool const stop_call_started = reached_publish_boundary &&
+        stop_started.wait_for(timeout) == std::future_status::ready;
+    bool const stop_returned_before_release = stop_returned.load();
+
+    publish_release_promise.set_value();
+    if (stop_thread.joinable())
+        stop_thread.join();
+    else
+        buffer->stop();
+    bool const result_was_ready =
+        result.wait_for(timeout) == std::future_status::ready;
+    std::optional<xprv::QuorumCollectResult> collected;
+    if (result_was_ready)
+        collected = result.get();
+
+    work.reset();
+    io.stop();
+    io_thread.join();
+
+    EXPECT_TRUE(reached_publish_boundary);
+    EXPECT_TRUE(stop_call_started);
+    EXPECT_FALSE(stop_returned_before_release);
+    EXPECT_TRUE(stop_returned.load());
+    ASSERT_TRUE(collected.has_value());
+    EXPECT_EQ(collected->stop_reason, xprv::QuorumCollectStopReason::timeout);
+}
+
+TEST(ValidationBuffer, ValidatorListAdmissionAdvancesValidationEpoch)
+{
+    asio::io_context io;
+    auto const protocol = test_protocol();
+    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto const fixture =
+        prepare_quorum_fixture(protocol, load_anchor_fixture().validations);
+    ASSERT_GE(fixture.manifests.size(), 2u);
+    ASSERT_GE(fixture.quorum_packets.size(), 2u);
+
+    buffer->set_unl({fixture.manifests[1]}, 1);
+    io.run();
+    io.restart();
+
+    std::promise<void> validation_entered_promise;
+    auto validation_entered = validation_entered_promise.get_future();
+    std::promise<void> validation_release_promise;
+    auto validation_release = validation_release_promise.get_future().share();
+    std::atomic_bool validation_hook_seen = false;
+    buffer->set_validation_commit_hook_for_test([&]() {
+        if (!validation_hook_seen.exchange(true))
+        {
+            validation_entered_promise.set_value();
+            validation_release.wait();
+        }
+    });
+
+    auto const validation_type =
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation);
+    auto work = asio::make_work_guard(io);
+    std::thread io_thread([&]() { io.run(); });
+    buffer->on_packet(validation_type, fixture.quorum_packets.front());
+
+    auto const timeout = std::chrono::seconds(5);
+    bool const validation_was_active =
+        validation_entered.wait_for(timeout) == std::future_status::ready;
+    if (validation_was_active)
+    {
+        buffer->set_unl({fixture.manifests.front()}, 2);
+        buffer->on_packet(validation_type, fixture.quorum_packets.front());
+    }
+    validation_release_promise.set_value();
+
+    xprv::ValidationBuffer::Stats stats;
+    std::optional<xprv::QuorumEntry> quorum;
+    std::promise<void> observed_promise;
+    auto observed = observed_promise.get_future();
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            auto const deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            do
+            {
+                stats = co_await buffer->co_stats();
+                quorum = co_await buffer->co_latest_quorum();
+                if (stats.validation_packets_processed == 2 && quorum)
+                    break;
+                asio::steady_timer timer(ex, std::chrono::milliseconds(1));
+                co_await timer.async_wait(asio::use_awaitable);
+            } while (std::chrono::steady_clock::now() < deadline);
+            observed_promise.set_value();
+        },
+        asio::detached);
+    bool const observation_completed =
+        observed.wait_for(timeout + std::chrono::seconds(1)) ==
+        std::future_status::ready;
+
+    buffer->stop();
+    work.reset();
+    io.stop();
+    io_thread.join();
+
+    EXPECT_TRUE(validation_was_active);
+    EXPECT_TRUE(observation_completed);
+    EXPECT_EQ(stats.validation_packets_received, 2u);
+    EXPECT_EQ(stats.validation_packets_processed, 2u);
+    EXPECT_EQ(stats.validation_packets_deduplicated, 0u);
+    EXPECT_EQ(stats.validation_packets_dropped, 0u);
+    ASSERT_TRUE(quorum.has_value());
+    EXPECT_EQ(quorum->ledger_seq, fixture.quorum_seq);
+}
+
+TEST(ValidationBuffer, ValidatorListAdmissionBlocksNewEpochDrain)
+{
+    asio::io_context io;
+    auto const protocol = test_protocol();
+    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto const fixture =
+        prepare_quorum_fixture(protocol, load_anchor_fixture().validations);
+    ASSERT_GE(fixture.manifests.size(), 2u);
+    ASSERT_FALSE(fixture.quorum_packets.empty());
+
+    buffer->set_unl({fixture.manifests[1]}, 1);
+    io.run();
+    io.restart();
+
+    std::promise<void> admission_entered_promise;
+    auto admission_entered = admission_entered_promise.get_future();
+    std::promise<void> admission_release_promise;
+    auto admission_release = admission_release_promise.get_future().share();
+    buffer->set_unl_admission_hook_for_test([&]() {
+        admission_entered_promise.set_value();
+        admission_release.wait();
+    });
+
+    std::promise<void> validation_entered_promise;
+    auto validation_entered = validation_entered_promise.get_future();
+    std::atomic_bool validation_hook_seen = false;
+    buffer->set_validation_commit_hook_for_test([&]() {
+        if (!validation_hook_seen.exchange(true))
+            validation_entered_promise.set_value();
+    });
+
+    auto work = asio::make_work_guard(io);
+    std::thread io_thread([&]() { io.run(); });
+    std::thread update_thread(
+        [&]() { buffer->set_unl({fixture.manifests.front()}, 2); });
+
+    auto const timeout = std::chrono::seconds(5);
+    bool const update_was_admitted =
+        admission_entered.wait_for(timeout) == std::future_status::ready;
+    if (update_was_admitted)
+    {
+        buffer->on_packet(
+            static_cast<uint16_t>(catl::peer_client::packet_type::validation),
+            fixture.quorum_packets.front());
+    }
+    bool const drained_before_apply =
+        validation_entered.wait_for(std::chrono::milliseconds(100)) ==
+        std::future_status::ready;
+
+    admission_release_promise.set_value();
+    update_thread.join();
+    bool const drained_after_apply =
+        validation_entered.wait_for(timeout) == std::future_status::ready;
+
+    xprv::ValidationBuffer::Stats stats;
+    std::optional<xprv::QuorumEntry> quorum;
+    std::promise<void> observed_promise;
+    auto observed = observed_promise.get_future();
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            auto const deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            do
+            {
+                stats = co_await buffer->co_stats();
+                quorum = co_await buffer->co_latest_quorum();
+                if (stats.validation_packets_processed == 1 && quorum)
+                    break;
+                asio::steady_timer timer(ex, std::chrono::milliseconds(1));
+                co_await timer.async_wait(asio::use_awaitable);
+            } while (std::chrono::steady_clock::now() < deadline);
+            observed_promise.set_value();
+        },
+        asio::detached);
+    bool const observation_completed =
+        observed.wait_for(timeout + std::chrono::seconds(1)) ==
+        std::future_status::ready;
+
+    buffer->stop();
+    work.reset();
+    io.stop();
+    io_thread.join();
+
+    EXPECT_TRUE(update_was_admitted);
+    EXPECT_FALSE(drained_before_apply);
+    EXPECT_TRUE(drained_after_apply);
+    EXPECT_TRUE(observation_completed);
+    EXPECT_EQ(stats.validation_packets_received, 1u);
+    EXPECT_EQ(stats.validation_packets_processed, 1u);
+    ASSERT_TRUE(quorum.has_value());
+    EXPECT_EQ(quorum->ledger_seq, fixture.quorum_seq);
+    EXPECT_EQ(quorum->vl_sequence, 2u);
+}
+
+TEST(ValidationBuffer, ValidationBeforeListIsNotRetained)
+{
+    asio::io_context io;
+    auto const protocol = test_protocol();
+    auto buffer = xprv::ValidationBuffer::create(io, protocol, 0);
+    auto const fixture =
+        prepare_quorum_fixture(protocol, load_anchor_fixture().validations);
+    ASSERT_FALSE(fixture.quorum_packets.empty());
+
+    buffer->on_packet(
+        static_cast<uint16_t>(catl::peer_client::packet_type::validation),
+        fixture.quorum_packets.front());
+    auto const stats = drain_validation_ingress(io, buffer, 1);
+
+    EXPECT_EQ(stats.validation_packets_processed, 1u);
+    EXPECT_EQ(stats.collector_validations, 0u);
+    EXPECT_EQ(stats.recent_quorums, 0u);
+}
+
 TEST(ValidationBuffer, ValidationIngressEvictsAndReadmitsAtCountLimit)
 {
     asio::io_context io;
@@ -723,6 +1375,64 @@ TEST(ValidationBuffer, StopCancelsHeartbeatWork)
     EXPECT_TRUE(stopped);
     EXPECT_TRUE(io.stopped());
     io.stop();
+}
+
+TEST(ValidationBuffer, StopResolvesPendingWaiter)
+{
+    asio::io_context io;
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+
+    bool done = false;
+    xprv::QuorumCollectStopReason stop_reason =
+        xprv::QuorumCollectStopReason::full;
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            auto result =
+                co_await buffer->co_wait_best_quorum(std::chrono::seconds(30));
+            stop_reason = result.stop_reason;
+            done = true;
+        },
+        asio::detached);
+    asio::co_spawn(
+        io,
+        [buffer]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            while ((co_await buffer->co_stats()).pending_callbacks == 0)
+                co_await asio::post(ex, asio::use_awaitable);
+            buffer->stop();
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(done);
+    EXPECT_EQ(stop_reason, xprv::QuorumCollectStopReason::timeout);
+}
+
+TEST(ValidationBuffer, WaitAfterStopReturnsImmediately)
+{
+    asio::io_context io;
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    buffer->stop();
+
+    bool done = false;
+    xprv::QuorumCollectStopReason stop_reason =
+        xprv::QuorumCollectStopReason::full;
+    asio::co_spawn(
+        io,
+        [&, buffer]() -> asio::awaitable<void> {
+            auto result =
+                co_await buffer->co_wait_best_quorum(std::chrono::seconds(30));
+            stop_reason = result.stop_reason;
+            done = true;
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(done);
+    EXPECT_EQ(stop_reason, xprv::QuorumCollectStopReason::timeout);
 }
 
 TEST(ValidationBuffer, StopAccountsQueuedValidationsAsDropped)

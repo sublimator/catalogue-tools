@@ -13,6 +13,7 @@
 
 #include "ripple.pb.h"
 
+#include <algorithm>
 #include <iomanip>
 #include <optional>
 #include <sstream>
@@ -335,13 +336,14 @@ ValidationCollector::on_packet(uint16_t type, std::vector<uint8_t> const& data)
 std::vector<ValidationCollector::Entry>
 ValidationCollector::get_quorum(int percent, QuorumMode mode) const
 {
-    auto hash = select_quorum_hash(percent, mode);
-    if (!hash)
+    auto candidate = select_quorum_candidate(percent, mode);
+    if (!candidate)
     {
         return {};
     }
 
-    return get_ledger_validations(*hash, mode);
+    return get_ledger_validations(
+        candidate->ledger_hash, candidate->ledger_sequence, mode);
 }
 
 std::vector<ValidationCollector::Entry>
@@ -370,10 +372,96 @@ ValidationCollector::get_ledger_validations(
     return result;
 }
 
+std::vector<ValidationCollector::Entry>
+ValidationCollector::get_ledger_validations(
+    Hash256 const& ledger_hash,
+    uint32_t ledger_sequence,
+    QuorumMode mode) const
+{
+    auto it = by_ledger.find(ledger_hash);
+    if (it == by_ledger.end())
+        return {};
+
+    std::vector<Entry> result;
+    result.reserve(it->second.size());
+
+    std::unordered_set<std::string> seen;
+    for (auto const& entry : it->second)
+    {
+        if (entry.ledger_seq != ledger_sequence)
+            continue;
+        auto const key_hex = entry_key_hex(entry, mode);
+        if (key_hex.empty() || !seen.insert(key_hex).second)
+            continue;
+        result.push_back(entry);
+    }
+
+    return result;
+}
+
+std::optional<uint32_t>
+ValidationCollector::latest_ledger_sequence(
+    Hash256 const& ledger_hash,
+    QuorumMode mode) const
+{
+    auto const it = by_ledger.find(ledger_hash);
+    if (it == by_ledger.end())
+        return std::nullopt;
+
+    std::optional<uint32_t> sequence;
+    for (auto const& entry : it->second)
+    {
+        if (entry_key_hex(entry, mode).empty())
+            continue;
+        if (!sequence || entry.ledger_seq > *sequence)
+            sequence = entry.ledger_seq;
+    }
+    return sequence;
+}
+
+void
+ValidationCollector::prune_ledgers(std::size_t max_ledgers)
+{
+    // Packet retention is bounded per trust identity. Scale the hash capacity
+    // so those independent identity budgets remain usable.
+    auto const bounded_vote_capacity =
+        unl_master_keys_.size() * kMaxRetainedVotesPerValidator;
+    auto const effective_max = std::max(max_ledgers, bounded_vote_capacity);
+
+    while (by_ledger.size() > effective_max)
+    {
+        auto victim = by_ledger.end();
+        bool victim_has_proof = false;
+        uint32_t victim_sequence = 0;
+
+        for (auto it = by_ledger.begin(); it != by_ledger.end(); ++it)
+        {
+            auto const proof_sequence =
+                latest_ledger_sequence(it->first, QuorumMode::proof);
+            bool const has_proof = proof_sequence.has_value();
+            auto const sequence = proof_sequence.value_or(
+                latest_ledger_sequence(it->first, QuorumMode::live)
+                    .value_or(0));
+
+            if (victim == by_ledger.end() || has_proof < victim_has_proof ||
+                (has_proof == victim_has_proof && sequence < victim_sequence))
+            {
+                victim = it;
+                victim_has_proof = has_proof;
+                victim_sequence = sequence;
+            }
+        }
+
+        if (victim == by_ledger.end())
+            return;
+        by_ledger.erase(victim);
+    }
+}
+
 bool
 ValidationCollector::has_quorum(int percent, QuorumMode mode) const
 {
-    return select_quorum_hash(percent, mode).has_value();
+    return select_quorum_candidate(percent, mode).has_value();
 }
 
 void
@@ -430,32 +518,30 @@ ValidationCollector::recompute_quorum_state(int percent)
     quorum_hash = Hash256();
     quorum_count = 0;
 
-    auto best_hash = select_quorum_hash(percent, QuorumMode::live);
-    if (!best_hash)
+    auto best = select_quorum_candidate(percent, QuorumMode::live);
+    if (!best)
     {
         return;
     }
 
-    auto it = by_ledger.find(*best_hash);
+    auto it = by_ledger.find(best->ledger_hash);
     if (it == by_ledger.end() || it->second.empty())
     {
         return;
     }
 
     quorum_reached = true;
-    quorum_hash = *best_hash;
-    quorum_count =
-        static_cast<int>(get_quorum(percent, QuorumMode::live).size());
+    quorum_hash = best->ledger_hash;
+    quorum_count = best->count;
 
     if (!previous_reached || previous_hash != quorum_hash)
     {
-        auto const seq = it->second.front().ledger_seq;
         PLOGD(
             log_,
             "[",
             net_label_,
             "] QUORUM threshold reached for seq=",
-            seq,
+            best->ledger_sequence,
             " hash=",
             quorum_hash.hex().substr(0, 16),
             "... (",
@@ -466,13 +552,12 @@ ValidationCollector::recompute_quorum_state(int percent)
     }
     else if (quorum_count > previous_count)
     {
-        auto const seq = it->second.front().ledger_seq;
         PLOGD(
             log_,
             "[",
             net_label_,
             "] QUORUM grew for seq=",
-            seq,
+            best->ledger_sequence,
             " hash=",
             quorum_hash.hex().substr(0, 16),
             "... (",
@@ -502,16 +587,66 @@ ValidationCollector::insert_entry(Entry entry)
         return false;
     }
 
-    auto& entries = by_ledger[entry.ledger_hash];
-    for (auto const& existing : entries)
+    auto const target = by_ledger.find(entry.ledger_hash);
+    if (target != by_ledger.end())
     {
-        if (existing.signing_key_hex == entry.signing_key_hex)
+        for (auto const& existing : target->second)
         {
-            return false;
+            if (existing.signing_key_hex == entry.signing_key_hex)
+                return false;
         }
     }
 
-    entries.push_back(std::move(entry));
+    auto const retention_identity = proof_key.empty() ? live_key : proof_key;
+    while (true)
+    {
+        std::size_t retained = 0;
+        auto victim_ledger = by_ledger.end();
+        std::size_t victim_index = 0;
+        uint32_t victim_sequence = 0;
+
+        for (auto ledger = by_ledger.begin(); ledger != by_ledger.end();
+             ++ledger)
+        {
+            for (std::size_t i = 0; i < ledger->second.size(); ++i)
+            {
+                auto const& existing = ledger->second[i];
+                auto const existing_proof_key =
+                    entry_key_hex(existing, QuorumMode::proof);
+                auto const existing_live_key =
+                    entry_key_hex(existing, QuorumMode::live);
+                auto const& existing_identity = existing_proof_key.empty()
+                    ? existing_live_key
+                    : existing_proof_key;
+                if (existing_identity != retention_identity)
+                    continue;
+
+                ++retained;
+                if (victim_ledger == by_ledger.end() ||
+                    existing.ledger_seq < victim_sequence)
+                {
+                    victim_ledger = ledger;
+                    victim_index = i;
+                    victim_sequence = existing.ledger_seq;
+                }
+            }
+        }
+
+        if (retained < kMaxRetainedVotesPerValidator)
+            break;
+        if (victim_ledger == by_ledger.end() ||
+            entry.ledger_seq <= victim_sequence)
+        {
+            return false;
+        }
+
+        victim_ledger->second.erase(
+            victim_ledger->second.begin() + victim_index);
+        if (victim_ledger->second.empty())
+            by_ledger.erase(victim_ledger);
+    }
+
+    by_ledger[entry.ledger_hash].push_back(std::move(entry));
     return true;
 }
 
@@ -535,8 +670,8 @@ ValidationCollector::threshold_for(int percent) const
     return (unl_size * percent + 99) / 100;
 }
 
-std::optional<Hash256>
-ValidationCollector::select_quorum_hash(int percent, QuorumMode mode) const
+std::optional<ValidationCollector::QuorumCandidate>
+ValidationCollector::select_quorum_candidate(int percent, QuorumMode mode) const
 {
     if (mode == QuorumMode::proof && unl_signing_keys.empty())
     {
@@ -550,9 +685,7 @@ ValidationCollector::select_quorum_hash(int percent, QuorumMode mode) const
     }
 
     auto const threshold = threshold_for(percent);
-    std::optional<Hash256> best_hash;
-    uint32_t best_seq = 0;
-    int best_count = 0;
+    std::optional<QuorumCandidate> best;
 
     for (auto const& [hash, entries] : by_ledger)
     {
@@ -561,31 +694,30 @@ ValidationCollector::select_quorum_hash(int percent, QuorumMode mode) const
             continue;
         }
 
-        std::unordered_set<std::string> seen;
+        std::map<uint32_t, std::unordered_set<std::string>> voters_by_sequence;
         for (auto const& entry : entries)
         {
             auto const key_hex = entry_key_hex(entry, mode);
-            if (!key_hex.empty())
-                seen.insert(key_hex);
+            if (key_hex.empty())
+                continue;
+            voters_by_sequence[entry.ledger_seq].insert(key_hex);
         }
 
-        auto const matched = static_cast<int>(seen.size());
-        if (matched < threshold)
+        for (auto const& [sequence, voters] : voters_by_sequence)
         {
-            continue;
-        }
+            auto const matched = static_cast<int>(voters.size());
+            if (matched < threshold)
+                continue;
 
-        auto const seq = entries.front().ledger_seq;
-        if (!best_hash || seq > best_seq ||
-            (seq == best_seq && matched > best_count))
-        {
-            best_hash = hash;
-            best_seq = seq;
-            best_count = matched;
+            if (!best || sequence > best->ledger_sequence ||
+                (sequence == best->ledger_sequence && matched > best->count))
+            {
+                best = QuorumCandidate{hash, sequence, matched};
+            }
         }
     }
 
-    return best_hash;
+    return best;
 }
 
 ValidationCollector::ManifestPacketResult

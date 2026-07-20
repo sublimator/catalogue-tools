@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <fstream>
 #include <iterator>
@@ -299,4 +300,279 @@ TEST(ValidationCollector, QuorumReturnsAllAvailableValidationsForLedger)
         collector.get_quorum(90, xprv::ValidationCollector::QuorumMode::proof);
 
     EXPECT_EQ(quorum.size(), static_cast<size_t>(selected_count));
+}
+
+TEST(ValidationCollector, ProofSelectionUsesProofEligibleSequence)
+{
+    auto const protocol = test_protocol();
+    xprv::ValidationCollector collector(protocol, 0);
+
+    auto make_key = [](uint8_t marker) {
+        std::vector<uint8_t> key(33, 0);
+        key.front() = marker;
+        return key;
+    };
+    catl::vl::Manifest listed;
+    listed.master_public_key = make_key(0x02);
+    listed.signing_public_key = make_key(0x03);
+    listed.sequence = 0;
+    collector.set_unl({listed});
+
+    auto peer = listed;
+    peer.signing_public_key = make_key(0xED);
+    peer.sequence = 1;
+    peer.raw = {0x01};
+    collector.apply_peer_manifests({peer});
+    ASSERT_TRUE(collector.has_stale_vl_manifests());
+
+    std::array<uint8_t, 32> current_bytes{};
+    current_bytes.back() = 1;
+    Hash256 const current_hash(current_bytes);
+    std::array<uint8_t, 32> newer_bytes{};
+    newer_bytes.back() = 2;
+    Hash256 const newer_hash(newer_bytes);
+
+    xprv::ValidationCollector::Entry live_only;
+    live_only.ledger_hash = current_hash;
+    live_only.ledger_seq = 900;
+    live_only.signing_key_hex = lower_ascii(peer.signing_key_hex());
+
+    xprv::ValidationCollector::Entry listed_entry;
+    listed_entry.ledger_hash = current_hash;
+    listed_entry.ledger_seq = 100;
+    listed_entry.signing_key_hex = lower_ascii(listed.signing_key_hex());
+    collector.by_ledger[current_hash] = {live_only, listed_entry};
+
+    auto newer_entry = listed_entry;
+    newer_entry.ledger_hash = newer_hash;
+    newer_entry.ledger_seq = 101;
+    collector.by_ledger[newer_hash] = {newer_entry};
+
+    EXPECT_EQ(
+        collector.latest_ledger_sequence(
+            current_hash, xprv::ValidationCollector::QuorumMode::live),
+        900u);
+    EXPECT_EQ(
+        collector.latest_ledger_sequence(
+            current_hash, xprv::ValidationCollector::QuorumMode::proof),
+        100u);
+
+    auto const proof =
+        collector.get_quorum(1, xprv::ValidationCollector::QuorumMode::proof);
+    ASSERT_EQ(proof.size(), 1u);
+    EXPECT_EQ(proof.front().ledger_hash, newer_hash);
+    EXPECT_EQ(proof.front().ledger_seq, 101u);
+}
+
+TEST(ValidationCollector, PruningPreservesProofEligibleLedgers)
+{
+    auto const protocol = test_protocol();
+    xprv::ValidationCollector collector(protocol, 0);
+
+    auto make_key = [](uint8_t marker) {
+        std::vector<uint8_t> key(33, 0);
+        key.front() = marker;
+        return key;
+    };
+    catl::vl::Manifest listed;
+    listed.master_public_key = make_key(0x02);
+    listed.signing_public_key = make_key(0x03);
+    collector.set_unl({listed});
+
+    auto peer = listed;
+    peer.signing_public_key = make_key(0xED);
+    peer.sequence = 1;
+    peer.raw = {0x01};
+    collector.apply_peer_manifests({peer});
+    ASSERT_TRUE(collector.has_stale_vl_manifests());
+
+    auto make_hash = [](uint32_t marker) {
+        std::array<uint8_t, 32> bytes{};
+        bytes[28] = static_cast<uint8_t>(marker >> 24);
+        bytes[29] = static_cast<uint8_t>(marker >> 16);
+        bytes[30] = static_cast<uint8_t>(marker >> 8);
+        bytes[31] = static_cast<uint8_t>(marker);
+        return Hash256(bytes);
+    };
+    auto make_entry = [](Hash256 const& hash,
+                         uint32_t sequence,
+                         catl::vl::Manifest const& manifest) {
+        xprv::ValidationCollector::Entry entry;
+        entry.ledger_hash = hash;
+        entry.ledger_seq = sequence;
+        entry.signing_key_hex = lower_ascii(manifest.signing_key_hex());
+        return entry;
+    };
+
+    auto const mixed_hash = make_hash(1);
+    collector.by_ledger[mixed_hash] = {
+        make_entry(mixed_hash, 900, peer), make_entry(mixed_hash, 100, listed)};
+
+    auto const newer_proof_hash = make_hash(2);
+    collector.by_ledger[newer_proof_hash] = {
+        make_entry(newer_proof_hash, 101, listed)};
+
+    for (uint32_t marker = 3; marker <= 65; ++marker)
+    {
+        auto const hash = make_hash(marker);
+        collector.by_ledger[hash] = {make_entry(hash, 1000 + marker, peer)};
+    }
+    ASSERT_EQ(collector.by_ledger.size(), 65u);
+
+    collector.prune_ledgers(64);
+
+    EXPECT_EQ(collector.by_ledger.size(), 64u);
+    EXPECT_TRUE(collector.by_ledger.contains(mixed_hash));
+    EXPECT_TRUE(collector.by_ledger.contains(newer_proof_hash));
+}
+
+TEST(ValidationCollector, QuorumRequiresSequenceAgreement)
+{
+    auto const protocol = test_protocol();
+    xprv::ValidationCollector collector(protocol, 0);
+
+    auto make_key = [](uint8_t marker) {
+        std::vector<uint8_t> key(33, 0);
+        key.front() = 0x02;
+        key.back() = marker;
+        return key;
+    };
+
+    std::vector<catl::vl::Manifest> manifests;
+    for (uint8_t marker = 1; marker <= 10; ++marker)
+    {
+        catl::vl::Manifest manifest;
+        manifest.master_public_key = make_key(marker);
+        manifest.signing_public_key = make_key(marker);
+        manifests.push_back(std::move(manifest));
+    }
+    collector.set_unl(manifests);
+
+    auto make_hash = [](uint8_t marker) {
+        std::array<uint8_t, 32> bytes{};
+        bytes.back() = marker;
+        return Hash256(bytes);
+    };
+    auto make_entry = [](Hash256 const& hash,
+                         uint32_t sequence,
+                         catl::vl::Manifest const& manifest) {
+        xprv::ValidationCollector::Entry entry;
+        entry.ledger_hash = hash;
+        entry.ledger_seq = sequence;
+        entry.signing_key_hex = lower_ascii(manifest.signing_key_hex());
+        return entry;
+    };
+
+    auto const first_hash = make_hash(1);
+    for (std::size_t i = 0; i < 8; ++i)
+    {
+        collector.by_ledger[first_hash].push_back(
+            make_entry(first_hash, 100, manifests[i]));
+    }
+    collector.by_ledger[first_hash].push_back(
+        make_entry(first_hash, 900, manifests.back()));
+
+    auto quorum =
+        collector.get_quorum(90, xprv::ValidationCollector::QuorumMode::proof);
+    EXPECT_TRUE(quorum.empty());
+
+    collector.by_ledger[first_hash].push_back(
+        make_entry(first_hash, 100, manifests[8]));
+    quorum =
+        collector.get_quorum(90, xprv::ValidationCollector::QuorumMode::proof);
+    ASSERT_EQ(quorum.size(), 9u);
+    EXPECT_TRUE(
+        std::all_of(quorum.begin(), quorum.end(), [](auto const& entry) {
+            return entry.ledger_seq == 100;
+        }));
+
+    auto const newer_hash = make_hash(2);
+    for (std::size_t i = 0; i < 9; ++i)
+    {
+        collector.by_ledger[newer_hash].push_back(
+            make_entry(newer_hash, 101, manifests[i]));
+    }
+
+    quorum =
+        collector.get_quorum(90, xprv::ValidationCollector::QuorumMode::proof);
+    ASSERT_EQ(quorum.size(), 9u);
+    EXPECT_TRUE(
+        std::all_of(quorum.begin(), quorum.end(), [&](auto const& entry) {
+            return entry.ledger_hash == newer_hash && entry.ledger_seq == 101;
+        }));
+}
+
+TEST(ValidationCollector, OneValidatorCannotFillLedgerRetention)
+{
+    auto const protocol = test_protocol();
+    xprv::ValidationCollector collector(protocol, 0);
+
+    auto make_key = [](uint8_t marker) {
+        std::vector<uint8_t> key(33, 0);
+        key.front() = 0x02;
+        key.back() = marker;
+        return key;
+    };
+    std::vector<catl::vl::Manifest> manifests;
+    for (uint8_t marker = 1; marker <= 10; ++marker)
+    {
+        catl::vl::Manifest manifest;
+        manifest.master_public_key = make_key(marker);
+        manifest.signing_public_key = make_key(marker);
+        manifests.push_back(std::move(manifest));
+    }
+    collector.set_unl(manifests);
+
+    auto make_hash = [](uint32_t marker) {
+        std::array<uint8_t, 32> bytes{};
+        bytes[28] = static_cast<uint8_t>(marker >> 24);
+        bytes[29] = static_cast<uint8_t>(marker >> 16);
+        bytes[30] = static_cast<uint8_t>(marker >> 8);
+        bytes[31] = static_cast<uint8_t>(marker);
+        return Hash256(bytes);
+    };
+    auto make_entry = [&](uint32_t hash_marker,
+                          uint32_t sequence,
+                          catl::vl::Manifest const& manifest) {
+        xprv::ValidationCollector::Entry entry;
+        entry.ledger_hash = make_hash(hash_marker);
+        entry.ledger_seq = sequence;
+        entry.signing_key_hex = lower_ascii(manifest.signing_key_hex());
+        return entry;
+    };
+
+    for (uint32_t marker = 1; marker <= 100; ++marker)
+    {
+        EXPECT_TRUE(collector.insert_entry_for_test(
+            make_entry(marker, 1000 + marker, manifests.front())));
+    }
+
+    auto const attacker_key = lower_ascii(manifests.front().signing_key_hex());
+    std::size_t attacker_votes = 0;
+    for (auto const& [_, entries] : collector.by_ledger)
+    {
+        attacker_votes += static_cast<std::size_t>(std::count_if(
+            entries.begin(), entries.end(), [&](auto const& entry) {
+                return entry.signing_key_hex == attacker_key;
+            }));
+    }
+    EXPECT_EQ(attacker_votes, 4u);
+    EXPECT_EQ(collector.by_ledger.size(), 4u);
+
+    constexpr auto honest_hash_marker = 500u;
+    for (std::size_t i = 1; i < manifests.size(); ++i)
+    {
+        EXPECT_TRUE(collector.insert_entry_for_test(
+            make_entry(honest_hash_marker, 100, manifests[i])));
+    }
+    collector.prune_ledgers(64);
+
+    auto const quorum =
+        collector.get_quorum(90, xprv::ValidationCollector::QuorumMode::proof);
+    ASSERT_EQ(quorum.size(), 9u);
+    EXPECT_TRUE(
+        std::all_of(quorum.begin(), quorum.end(), [&](auto const& entry) {
+            return entry.ledger_hash == make_hash(honest_hash_marker) &&
+                entry.ledger_seq == 100;
+        }));
 }

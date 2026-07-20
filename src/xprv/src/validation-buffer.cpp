@@ -115,9 +115,12 @@ ValidationBuffer::~ValidationBuffer()
 void
 ValidationBuffer::stop()
 {
+    auto const weak = weak_from_this();
     {
-        std::lock_guard lock(admission_mutex_);
+        std::lock_guard publication_lock(publication_mutex_);
+        std::lock_guard admission_lock(admission_mutex_);
         stopped_ = true;
+        pending_unl_updates_ = 0;
         abandon_manifest_packets_locked();
         validation_drain_scheduled_ = false;
         validation_drain_priority_ = false;
@@ -129,6 +132,19 @@ ValidationBuffer::stop()
         catch (...)
         {
         }
+    }
+    try
+    {
+        asio::post(strand_, [weak]() {
+            if (auto self = weak.lock())
+            {
+                std::lock_guard publication_lock(self->publication_mutex_);
+                self->cancel_pending_locked(QuorumCollectStopReason::timeout);
+            }
+        });
+    }
+    catch (...)
+    {
     }
     if (manifest_worker_)
         manifest_worker_->stop();
@@ -156,7 +172,8 @@ ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
         }
         std::shared_ptr<std::vector<uint8_t>> owned;
         {
-            std::lock_guard lock(admission_mutex_);
+            std::lock_guard publication_lock(publication_mutex_);
+            std::lock_guard admission_lock(admission_mutex_);
             if (stopped_)
                 return;
             ++manifest_packets_received_;
@@ -187,12 +204,12 @@ ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
             {
                 pending_manifest_ = std::move(owned);
                 manifest_pending_admitted_ = true;
-                ++manifest_admission_generation_;
+                ++trust_admission_generation_;
                 return;
             }
             manifest_in_flight_ = true;
             manifest_pending_admitted_ = false;
-            ++manifest_admission_generation_;
+            ++trust_admission_generation_;
         }
 
         start_manifest_packet(std::move(owned));
@@ -223,7 +240,7 @@ ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
             return;
 
         ++validation_packets_received_;
-        QueuedValidation::Key const key{digest, manifest_admission_generation_};
+        QueuedValidation::Key const key{digest, trust_admission_generation_};
         auto const matches = pending_validation_index_.equal_range(key);
         if (std::any_of(matches.first, matches.second, [&](auto const& entry) {
                 return *entry.second == data;
@@ -243,9 +260,7 @@ ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
             auto const& oldest = pending_validations_.front();
             pending_validation_bytes_ -= oldest.packet->size();
             erase_validation_index_locked(
-                oldest.key.digest,
-                oldest.key.manifest_generation,
-                oldest.packet);
+                oldest.key.digest, oldest.key.trust_generation, oldest.packet);
             pending_validations_.pop_front();
             ++validation_packets_dropped_;
         }
@@ -269,13 +284,14 @@ ValidationBuffer::on_packet(uint16_t type, std::vector<uint8_t> const& data)
         catch (...)
         {
             erase_validation_index_locked(
-                key.digest, key.manifest_generation, owned);
+                key.digest, key.trust_generation, owned);
             ++validation_packets_dropped_;
             return;
         }
         pending_validation_bytes_ += pending_validations_.back().packet->size();
 
-        if (!manifest_in_flight_ && !validation_drain_scheduled_)
+        if (!manifest_in_flight_ && pending_unl_updates_ == 0 &&
+            !validation_drain_scheduled_)
         {
             validation_drain_scheduled_ = true;
             schedule_drain = true;
@@ -327,7 +343,8 @@ ValidationBuffer::drain_validation_queue()
                 clear_validation_queue_locked(true);
                 return;
             }
-            if (manifest_in_flight_ || pending_validations_.empty())
+            if (manifest_in_flight_ || pending_unl_updates_ != 0 ||
+                pending_validations_.empty())
                 break;
 
             next = std::move(pending_validations_.front());
@@ -338,14 +355,17 @@ ValidationBuffer::drain_validation_queue()
         }
 
         bool collector_completed = false;
-        try
+        if (vl_sequence_ && collector_.unl_size > 0)
         {
-            collector_.on_packet(validation_type, *next.packet);
-            collector_completed = true;
-        }
-        catch (...)
-        {
-            // Peer input must not terminate an I/O worker.
+            try
+            {
+                collector_.on_packet(validation_type, *next.packet);
+                collector_completed = true;
+            }
+            catch (...)
+            {
+                // Peer input must not terminate an I/O worker.
+            }
         }
 
 #ifdef XPRV_TESTING
@@ -353,59 +373,78 @@ ValidationBuffer::drain_validation_queue()
             validation_commit_hook_for_test_();
 #endif
 
-        bool yield_to_manifest = false;
+        bool yield_to_trust = false;
         bool publish_quorum = false;
         {
-            std::lock_guard lock(admission_mutex_);
-            active_validation_bytes_ -= next.packet->size();
-            --active_validations_;
-
-            yield_to_manifest = !stopped_ &&
-                next.key.manifest_generation != manifest_admission_generation_;
-            bool terminal = true;
-            if (yield_to_manifest)
+            std::lock_guard publication_lock(publication_mutex_);
             {
-                QueuedValidation::Key const retry_key{
-                    next.key.digest, manifest_admission_generation_};
-                auto const matches =
-                    pending_validation_index_.equal_range(retry_key);
-                bool const retry_already_queued = std::any_of(
-                    matches.first, matches.second, [&](auto const& entry) {
-                        return *entry.second == *next.packet;
-                    });
-                if (!retry_already_queued)
+                std::lock_guard admission_lock(admission_mutex_);
+                active_validation_bytes_ -= next.packet->size();
+                --active_validations_;
+
+                yield_to_trust = !stopped_ &&
+                    next.key.trust_generation != trust_admission_generation_;
+                bool terminal = true;
+                if (yield_to_trust)
                 {
-                    terminal = false;
-                    try
+                    QueuedValidation::Key const retry_key{
+                        next.key.digest, trust_admission_generation_};
+                    auto const matches =
+                        pending_validation_index_.equal_range(retry_key);
+                    bool const retry_already_queued = std::any_of(
+                        matches.first, matches.second, [&](auto const& entry) {
+                            return *entry.second == *next.packet;
+                        });
+                    if (!retry_already_queued)
                     {
-                        pending_validation_index_.emplace(
-                            retry_key, next.packet);
-                        pending_validations_.push_back(
-                            {next.packet, retry_key});
-                        pending_validation_bytes_ += next.packet->size();
-                    }
-                    catch (...)
-                    {
-                        erase_validation_index_locked(
-                            retry_key.digest,
-                            retry_key.manifest_generation,
-                            next.packet);
-                        ++validation_packets_dropped_;
+                        terminal = false;
+                        try
+                        {
+                            pending_validation_index_.emplace(
+                                retry_key, next.packet);
+                            pending_validations_.push_back(
+                                {next.packet, retry_key});
+                            pending_validation_bytes_ += next.packet->size();
+                        }
+                        catch (...)
+                        {
+                            erase_validation_index_locked(
+                                retry_key.digest,
+                                retry_key.trust_generation,
+                                next.packet);
+                            ++validation_packets_dropped_;
+                        }
                     }
                 }
+
+                erase_validation_index_locked(
+                    next.key.digest, next.key.trust_generation, next.packet);
+                if (terminal)
+                    ++validation_packets_processed_;
+                publish_quorum =
+                    collector_completed && !yield_to_trust && !stopped_;
+                next.packet.reset();
             }
 
-            erase_validation_index_locked(
-                next.key.digest, next.key.manifest_generation, next.packet);
-            if (terminal)
-                ++validation_packets_processed_;
-            publish_quorum =
-                collector_completed && !yield_to_manifest && !stopped_;
+#ifdef XPRV_TESTING
+            if (publish_quorum && validation_publish_hook_for_test_)
+                validation_publish_hook_for_test_();
+#endif
+
+            if (publish_quorum)
+            {
+                try
+                {
+                    check_for_new_quorum();
+                }
+                catch (...)
+                {
+                    // Keep peer input failures off the I/O worker.
+                }
+            }
         }
-        if (publish_quorum)
-            check_for_new_quorum();
         ++processed;
-        if (yield_to_manifest)
+        if (yield_to_trust)
             break;
         if (std::chrono::steady_clock::now() - drain_started >=
             kValidationDrainSlice)
@@ -428,7 +467,8 @@ ValidationBuffer::drain_validation_queue()
             clear_validation_queue_locked(true);
             return;
         }
-        if (manifest_in_flight_ || pending_validations_.empty())
+        if (manifest_in_flight_ || pending_unl_updates_ != 0 ||
+            pending_validations_.empty())
         {
             validation_drain_scheduled_ = false;
         }
@@ -456,10 +496,10 @@ ValidationBuffer::clear_validation_queue_locked(bool count_as_dropped)
 void
 ValidationBuffer::erase_validation_index_locked(
     Hash256 const& digest,
-    uint64_t manifest_generation,
+    uint64_t trust_generation,
     std::shared_ptr<std::vector<uint8_t>> const& packet)
 {
-    QueuedValidation::Key const key{digest, manifest_generation};
+    QueuedValidation::Key const key{digest, trust_generation};
     auto const matches = pending_validation_index_.equal_range(key);
     for (auto it = matches.first; it != matches.second; ++it)
     {
@@ -489,6 +529,9 @@ ValidationBuffer::start_manifest_packet(
             auto const weak = self->weak_from_this();
             auto service_work =
                 asio::make_work_guard(self->strand_.get_inner_executor());
+#ifdef XPRV_TESTING
+            auto manifest_parse_hook = self->manifest_parse_hook_for_test_;
+#endif
 
             try
             {
@@ -499,10 +542,19 @@ ValidationBuffer::start_manifest_packet(
                      protocol,
                      owned = std::move(owned),
                      trusted = std::move(trusted),
-                     service_work = std::move(service_work)]() mutable {
+                     service_work = std::move(service_work)
+#ifdef XPRV_TESTING
+                         ,
+                     manifest_parse_hook = std::move(manifest_parse_hook)
+#endif
+                ]() mutable {
                         ValidationCollector::ManifestPacketResult parsed;
                         try
                         {
+#ifdef XPRV_TESTING
+                            if (manifest_parse_hook)
+                                manifest_parse_hook();
+#endif
                             parsed = ValidationCollector::
                                 parse_trusted_manifests_packet(
                                     *owned, trusted, *protocol);
@@ -519,43 +571,56 @@ ValidationBuffer::start_manifest_packet(
                             asio::post(
                                 self->strand_,
                                 [self, parsed = std::move(parsed)]() mutable {
-                                    bool apply = false;
+                                    std::shared_ptr<std::vector<uint8_t>> next;
+                                    bool schedule_drain = false;
                                     {
-                                        std::lock_guard lock(
-                                            self->admission_mutex_);
-                                        apply = !self->stopped_;
-                                    }
-                                    try
-                                    {
-                                        if (apply)
+                                        std::lock_guard publication_lock(
+                                            self->publication_mutex_);
+                                        bool apply = false;
                                         {
-#ifdef XPRV_TESTING
-                                            auto& hook =
-                                                self->manifest_apply_hook_for_test_;
-                                            if (hook)
-                                                hook();
-#endif
-                                            PLOGD(
-                                                ValidationBuffer::log_,
-                                                "[",
-                                                self->net_label_,
-                                                "] manifests: ",
-                                                parsed.total_entries,
-                                                " entries -> ",
-                                                parsed.trusted_entries,
-                                                " trusted, ",
-                                                parsed.manifests.size(),
-                                                " verified");
-                                            self->collector_
-                                                .apply_peer_manifests(std::move(
-                                                    parsed.manifests));
-                                            self->check_for_new_quorum();
+                                            std::lock_guard admission_lock(
+                                                self->admission_mutex_);
+                                            apply = !self->stopped_;
                                         }
+                                        try
+                                        {
+                                            if (apply)
+                                            {
+#ifdef XPRV_TESTING
+                                                auto& hook =
+                                                    self->manifest_apply_hook_for_test_;
+                                                if (hook)
+                                                    hook();
+#endif
+                                                PLOGD(
+                                                    ValidationBuffer::log_,
+                                                    "[",
+                                                    self->net_label_,
+                                                    "] manifests: ",
+                                                    parsed.total_entries,
+                                                    " entries -> ",
+                                                    parsed.trusted_entries,
+                                                    " trusted, ",
+                                                    parsed.manifests.size(),
+                                                    " verified");
+                                                self->collector_
+                                                    .apply_peer_manifests(
+                                                        std::move(
+                                                            parsed.manifests));
+                                            }
+                                        }
+                                        catch (...)
+                                        {
+                                        }
+                                        next =
+                                            self->finish_manifest_packet_locked(
+                                                schedule_drain);
                                     }
-                                    catch (...)
-                                    {
-                                    }
-                                    self->finish_manifest_packet();
+                                    if (next)
+                                        self->start_manifest_packet(
+                                            std::move(next));
+                                    else if (schedule_drain)
+                                        self->schedule_validation_drain();
                                 });
                         }
                         catch (...)
@@ -602,13 +667,29 @@ ValidationBuffer::finish_manifest_packet()
     std::shared_ptr<std::vector<uint8_t>> next;
     bool schedule_drain = false;
     {
-        std::lock_guard lock(admission_mutex_);
+        std::lock_guard publication_lock(publication_mutex_);
+        next = finish_manifest_packet_locked(schedule_drain);
+    }
+    if (next)
+        start_manifest_packet(std::move(next));
+    else if (schedule_drain)
+        schedule_validation_drain();
+}
+
+std::shared_ptr<std::vector<uint8_t>>
+ValidationBuffer::finish_manifest_packet_locked(bool& schedule_drain)
+{
+    std::shared_ptr<std::vector<uint8_t>> next;
+    bool publish_trust = false;
+    schedule_drain = false;
+    {
+        std::lock_guard admission_lock(admission_mutex_);
         if (stopped_)
         {
             abandon_manifest_packets_locked();
             validation_drain_scheduled_ = false;
             clear_validation_queue_locked(true);
-            return;
+            return {};
         }
         ++manifest_packets_processed_;
         next = std::move(pending_manifest_);
@@ -616,7 +697,8 @@ ValidationBuffer::finish_manifest_packet()
         {
             manifest_in_flight_ = false;
             manifest_pending_admitted_ = false;
-            if (!pending_validations_.empty())
+            publish_trust = pending_unl_updates_ == 0;
+            if (publish_trust && !pending_validations_.empty())
             {
                 validation_drain_priority_ = true;
                 if (!validation_drain_scheduled_)
@@ -629,12 +711,18 @@ ValidationBuffer::finish_manifest_packet()
     }
 
     if (next)
+        return next;
+    if (publish_trust)
     {
-        start_manifest_packet(std::move(next));
-        return;
+        try
+        {
+            publish_trust_state_locked();
+        }
+        catch (...)
+        {
+        }
     }
-    if (schedule_drain)
-        schedule_validation_drain();
+    return {};
 }
 
 void
@@ -659,9 +747,84 @@ ValidationBuffer::set_unl(
     auto owned = std::make_shared<std::vector<catl::vl::Manifest>>(validators);
     auto self = shared_from_this();
 
-    asio::post(strand_, [self, owned, vl_sequence]() {
-        self->apply_unl_locked(*owned, vl_sequence);
-    });
+    bool schedule_drain = false;
+    {
+        std::lock_guard publication_lock(publication_mutex_);
+        uint64_t generation = 0;
+        {
+            std::lock_guard admission_lock(admission_mutex_);
+            if (stopped_)
+                return;
+            generation = ++trust_admission_generation_;
+            ++pending_unl_updates_;
+        }
+
+        try
+        {
+#ifdef XPRV_TESTING
+            if (unl_admission_hook_for_test_)
+                unl_admission_hook_for_test_();
+#endif
+            asio::post(strand_, [self, owned, vl_sequence, generation]() {
+                bool apply = false;
+                bool publish = false;
+                bool schedule_drain = false;
+                {
+                    std::lock_guard publication_lock(self->publication_mutex_);
+                    {
+                        std::lock_guard admission_lock(self->admission_mutex_);
+                        if (self->pending_unl_updates_ != 0)
+                            --self->pending_unl_updates_;
+                        apply = !self->stopped_;
+                        publish = apply &&
+                            generation == self->trust_admission_generation_ &&
+                            self->pending_unl_updates_ == 0;
+                        if (apply && !self->manifest_in_flight_ &&
+                            self->pending_unl_updates_ == 0 &&
+                            !self->pending_validations_.empty() &&
+                            !self->validation_drain_scheduled_)
+                        {
+                            self->validation_drain_scheduled_ = true;
+                            schedule_drain = true;
+                        }
+                    }
+
+                    if (apply)
+                    {
+                        try
+                        {
+                            self->apply_unl_locked(
+                                *owned, vl_sequence, publish);
+                        }
+                        catch (...)
+                        {
+                            if (publish)
+                                self->publish_trust_state_locked();
+                        }
+                    }
+                }
+                if (schedule_drain)
+                    self->schedule_validation_drain();
+            });
+        }
+        catch (...)
+        {
+            std::lock_guard admission_lock(admission_mutex_);
+            if (pending_unl_updates_ != 0)
+                --pending_unl_updates_;
+            if (trust_admission_generation_ == generation)
+                --trust_admission_generation_;
+            if (!stopped_ && !manifest_in_flight_ &&
+                pending_unl_updates_ == 0 && !pending_validations_.empty() &&
+                !validation_drain_scheduled_)
+            {
+                validation_drain_scheduled_ = true;
+                schedule_drain = true;
+            }
+        }
+    }
+    if (schedule_drain)
+        schedule_validation_drain();
 }
 
 asio::awaitable<bool>
@@ -672,20 +835,37 @@ ValidationBuffer::co_sync_unl(
     auto owned = std::make_shared<std::vector<catl::vl::Manifest>>(validators);
     co_await asio::post(strand_, asio::use_awaitable);
 
+    std::lock_guard publication_lock(publication_mutex_);
+    {
+        std::lock_guard admission_lock(admission_mutex_);
+        if (stopped_ || pending_unl_updates_ != 0)
+            co_return false;
+    }
     if (vl_sequence_ && *vl_sequence_ > vl_sequence)
         co_return false;
     if (!vl_sequence_ || *vl_sequence_ < vl_sequence)
-        apply_unl_locked(*owned, vl_sequence);
+    {
+        {
+            std::lock_guard admission_lock(admission_mutex_);
+            ++trust_admission_generation_;
+        }
+        apply_unl_locked(*owned, vl_sequence, true);
+    }
     co_return true;
 }
 
-void
+bool
 ValidationBuffer::apply_unl_locked(
     std::vector<catl::vl::Manifest> const& validators,
-    uint32_t vl_sequence)
+    uint32_t vl_sequence,
+    bool publish)
 {
     if (vl_sequence_ && vl_sequence <= *vl_sequence_)
-        return;
+    {
+        if (publish)
+            publish_trust_state_locked();
+        return false;
+    }
 
     auto const old_keys = collector_.unl_signing_keys;
     auto const old_size = collector_.unl_size;
@@ -709,19 +889,46 @@ ValidationBuffer::apply_unl_locked(
     active_live_quorum_log_.reset();
     recent_quorums_.clear();
     last_full_quorum_.reset();
+    unpublished_vl_change_ = true;
 
-    auto pending = std::move(pending_);
-    pending_.clear();
-    for (auto& waiter : pending)
+    if (publish)
+        publish_trust_state_locked();
+    return true;
+}
+
+void
+ValidationBuffer::publish_trust_state_locked()
+{
+    if (unpublished_vl_change_)
     {
-        if (waiter.callback)
+        auto const active_sequence = vl_sequence_.value_or(0);
+        for (auto it = pending_.begin(); it != pending_.end();)
         {
+            // A waiter can be registered after the list was applied but while
+            // its publication was deferred behind newer trust work. It is
+            // already bound to the active list and must survive that flush.
+            bool const matches_active = it->vl_sequence
+                ? *it->vl_sequence == active_sequence
+                : !it->observed_vl_sequence ||
+                    *it->observed_vl_sequence == active_sequence;
+            if (matches_active)
+            {
+                it->observed_vl_sequence = active_sequence;
+                ++it;
+                continue;
+            }
+
+            auto callback = std::move(it->callback);
+            it = pending_.erase(it);
+            if (!callback)
+                continue;
             QuorumEntry quorum;
-            quorum.vl_sequence = vl_sequence;
-            waiter.callback(
+            quorum.vl_sequence = active_sequence;
+            callback(
                 {std::move(quorum),
                  QuorumCollectStopReason::validator_list_changed});
         }
+        unpublished_vl_change_ = false;
     }
 
     check_for_new_quorum();
@@ -733,7 +940,10 @@ ValidationBuffer::check_for_new_quorum()
     // Already on strand_
 
     if (collector_.unl_signing_keys.empty())
+    {
+        resolve_pending();
         return;
+    }
 
     auto const now = std::chrono::steady_clock::now();
 
@@ -760,6 +970,7 @@ ValidationBuffer::check_for_new_quorum()
     {
         auto updated = collector_.get_ledger_validations(
             active_live_quorum_log_->ledger_hash,
+            active_live_quorum_log_->ledger_seq,
             ValidationCollector::QuorumMode::live);
 
         if (updated.empty())
@@ -778,7 +989,9 @@ ValidationBuffer::check_for_new_quorum()
                 active_live_quorum_log_.reset();
             }
             else if (has_newer_ledger_locked(
-                         active_live_quorum_log_->ledger_seq))
+                         active_live_quorum_log_->ledger_hash,
+                         active_live_quorum_log_->ledger_seq,
+                         ValidationCollector::QuorumMode::live))
             {
                 log_finalized(*active_live_quorum_log_, "next-ledger");
                 active_live_quorum_log_.reset();
@@ -848,16 +1061,23 @@ ValidationBuffer::resolve_pending()
     for (auto it = pending_.begin(); it != pending_.end();)
     {
         auto& p = *it;
+        auto const active_vl_sequence = vl_sequence_.value_or(0);
 
-        if (p.vl_sequence && (!vl_sequence_ || *vl_sequence_ != *p.vl_sequence))
+        bool const list_changed = p.vl_sequence
+            ? *p.vl_sequence != active_vl_sequence
+            : p.observed_vl_sequence &&
+                *p.observed_vl_sequence != active_vl_sequence;
+        if (list_changed)
         {
             QuorumEntry q;
-            q.vl_sequence = vl_sequence_.value_or(0);
+            q.vl_sequence = active_vl_sequence;
             auto cb = std::move(p.callback);
             it = pending_.erase(it);
             cb({std::move(q), QuorumCollectStopReason::validator_list_changed});
             continue;
         }
+        if (!p.observed_vl_sequence)
+            p.observed_vl_sequence = active_vl_sequence;
 
         // Stage 1: waiting for initial quorum (ledger_seq == 0)
         if (p.ledger_seq == 0)
@@ -869,6 +1089,7 @@ ValidationBuffer::resolve_pending()
                 // Got initial quorum — lock in this ledger
                 p.ledger_seq = proof->ledger_seq;
                 p.ledger_hash = proof->ledger_hash;
+                p.validations = std::move(proof->validations);
                 PLOGI(
                     log_,
                     "[",
@@ -876,23 +1097,22 @@ ValidationBuffer::resolve_pending()
                     "] co_wait_best_quorum: got proof quorum seq=",
                     p.ledger_seq,
                     " (",
-                    proof->validations.size(),
+                    p.validations.size(),
                     "/",
                     collector_.unl_size,
                     ")");
 
                 // Maybe already full?
-                auto validations = collector_.get_ledger_validations(
-                    p.ledger_hash, ValidationCollector::QuorumMode::proof);
-                if (!validations.empty() && collector_.unl_size > 0 &&
-                    static_cast<int>(validations.size()) >= collector_.unl_size)
+                if (collector_.unl_size > 0 &&
+                    static_cast<int>(p.validations.size()) >=
+                        collector_.unl_size)
                 {
                     QuorumEntry q{
                         p.ledger_hash,
                         p.ledger_seq,
-                        std::move(validations),
+                        std::move(p.validations),
                         now};
-                    q.vl_sequence = p.vl_sequence.value_or(0);
+                    q.vl_sequence = vl_sequence_.value_or(0);
                     auto cb = std::move(p.callback);
                     it = pending_.erase(it);
                     cb({std::move(q), QuorumCollectStopReason::full});
@@ -900,16 +1120,17 @@ ValidationBuffer::resolve_pending()
                 }
 
                 // Maybe next ledger already exists?
-                if (has_newer_ledger_locked(p.ledger_seq))
+                if (has_newer_ledger_locked(
+                        p.ledger_hash,
+                        p.ledger_seq,
+                        ValidationCollector::QuorumMode::proof))
                 {
-                    if (validations.empty())
-                        validations = std::move(proof->validations);
                     QuorumEntry q{
                         p.ledger_hash,
                         p.ledger_seq,
-                        std::move(validations),
+                        std::move(p.validations),
                         now};
-                    q.vl_sequence = p.vl_sequence.value_or(0);
+                    q.vl_sequence = vl_sequence_.value_or(0);
                     auto cb = std::move(p.callback);
                     it = pending_.erase(it);
                     cb({std::move(q), QuorumCollectStopReason::next_ledger});
@@ -921,7 +1142,7 @@ ValidationBuffer::resolve_pending()
             if (now >= p.deadline)
             {
                 QuorumEntry q;
-                q.vl_sequence = p.vl_sequence.value_or(0);
+                q.vl_sequence = vl_sequence_.value_or(0);
                 auto cb = std::move(p.callback);
                 it = pending_.erase(it);
                 cb({std::move(q), QuorumCollectStopReason::timeout});
@@ -934,15 +1155,19 @@ ValidationBuffer::resolve_pending()
 
         // Stage 2: have a ledger, waiting for full or next-ledger
         auto validations = collector_.get_ledger_validations(
-            p.ledger_hash, ValidationCollector::QuorumMode::proof);
+            p.ledger_hash,
+            p.ledger_seq,
+            ValidationCollector::QuorumMode::proof);
+        if (validations.size() > p.validations.size())
+            p.validations = std::move(validations);
 
         // Full?
-        if (!validations.empty() && collector_.unl_size > 0 &&
-            static_cast<int>(validations.size()) >= collector_.unl_size)
+        if (collector_.unl_size > 0 &&
+            static_cast<int>(p.validations.size()) >= collector_.unl_size)
         {
             QuorumEntry q{
-                p.ledger_hash, p.ledger_seq, std::move(validations), now};
-            q.vl_sequence = p.vl_sequence.value_or(0);
+                p.ledger_hash, p.ledger_seq, std::move(p.validations), now};
+            q.vl_sequence = vl_sequence_.value_or(0);
             auto cb = std::move(p.callback);
             it = pending_.erase(it);
             cb({std::move(q), QuorumCollectStopReason::full});
@@ -950,11 +1175,14 @@ ValidationBuffer::resolve_pending()
         }
 
         // Next ledger?
-        if (has_newer_ledger_locked(p.ledger_seq))
+        if (has_newer_ledger_locked(
+                p.ledger_hash,
+                p.ledger_seq,
+                ValidationCollector::QuorumMode::proof))
         {
             QuorumEntry q{
-                p.ledger_hash, p.ledger_seq, std::move(validations), now};
-            q.vl_sequence = p.vl_sequence.value_or(0);
+                p.ledger_hash, p.ledger_seq, std::move(p.validations), now};
+            q.vl_sequence = vl_sequence_.value_or(0);
             auto cb = std::move(p.callback);
             it = pending_.erase(it);
             cb({std::move(q), QuorumCollectStopReason::next_ledger});
@@ -965,8 +1193,8 @@ ValidationBuffer::resolve_pending()
         if (now >= p.deadline)
         {
             QuorumEntry q{
-                p.ledger_hash, p.ledger_seq, std::move(validations), now};
-            q.vl_sequence = p.vl_sequence.value_or(0);
+                p.ledger_hash, p.ledger_seq, std::move(p.validations), now};
+            q.vl_sequence = vl_sequence_.value_or(0);
             auto cb = std::move(p.callback);
             it = pending_.erase(it);
             cb({std::move(q), QuorumCollectStopReason::timeout});
@@ -974,6 +1202,22 @@ ValidationBuffer::resolve_pending()
         }
 
         ++it;
+    }
+}
+
+void
+ValidationBuffer::cancel_pending_locked(QuorumCollectStopReason reason)
+{
+    auto const active_vl_sequence = vl_sequence_.value_or(0);
+    auto pending = std::move(pending_);
+    pending_.clear();
+    for (auto& waiter : pending)
+    {
+        if (!waiter.callback)
+            continue;
+        QuorumEntry quorum;
+        quorum.vl_sequence = active_vl_sequence;
+        waiter.callback({std::move(quorum), reason});
     }
 }
 
@@ -992,48 +1236,19 @@ ValidationBuffer::prune_old_entries()
         recent_quorums_.pop_front();
     }
 
-    if (!recent_quorums_.empty())
-    {
-        auto oldest_seq = recent_quorums_.front().ledger_seq;
-        for (auto it = collector_.by_ledger.begin();
-             it != collector_.by_ledger.end();)
-        {
-            if (it->second.empty() ||
-                it->second.front().ledger_seq < oldest_seq)
-            {
-                it = collector_.by_ledger.erase(it);
-            }
-            else
-            {
-                ++it;
-            }
-        }
-    }
-    else
-    {
-        while (collector_.by_ledger.size() > kMaxCollectorLedgers)
-        {
-            auto oldest = collector_.by_ledger.begin();
-            for (auto it = collector_.by_ledger.begin();
-                 it != collector_.by_ledger.end();
-                 ++it)
-            {
-                if (!it->second.empty() && !oldest->second.empty() &&
-                    it->second.front().ledger_seq <
-                        oldest->second.front().ledger_seq)
-                {
-                    oldest = it;
-                }
-            }
-            collector_.by_ledger.erase(oldest);
-        }
-    }
+    collector_.prune_ledgers(kMaxCollectorLedgers);
 }
 
 asio::awaitable<std::optional<QuorumEntry>>
 ValidationBuffer::co_latest_quorum()
 {
     co_await asio::post(strand_, asio::use_awaitable);
+    std::lock_guard publication_lock(publication_mutex_);
+    {
+        std::lock_guard admission_lock(admission_mutex_);
+        if (pending_unl_updates_ != 0)
+            co_return std::nullopt;
+    }
     co_return latest_quorum_locked(ValidationCollector::QuorumMode::live);
 }
 
@@ -1043,6 +1258,12 @@ ValidationBuffer::co_last_full_quorum(
     std::optional<uint32_t> expected_vl_sequence)
 {
     co_await asio::post(strand_, asio::use_awaitable);
+    std::lock_guard publication_lock(publication_mutex_);
+    {
+        std::lock_guard admission_lock(admission_mutex_);
+        if (pending_unl_updates_ != 0)
+            co_return std::nullopt;
+    }
     if (!last_full_quorum_)
         co_return std::nullopt;
     if (expected_vl_sequence &&
@@ -1071,123 +1292,160 @@ ValidationBuffer::co_wait_best_quorum(
     co_await asio::post(strand_, asio::use_awaitable);
     PLOGI(log_, "[", net_label_, "] co_wait_best_quorum: AFTER strand hop");
 
-    if (expected_vl_sequence &&
-        (!vl_sequence_ || *vl_sequence_ != *expected_vl_sequence))
-    {
-        QuorumEntry q;
-        q.vl_sequence = vl_sequence_.value_or(0);
-        QuorumCollectResult result{
-            std::move(q), QuorumCollectStopReason::validator_list_changed};
-        co_await asio::post(caller_ex, asio::use_awaitable);
-        co_return result;
-    }
-
-    // Check if we can resolve immediately (quorum already exists)
-    if (auto proof = latest_quorum_locked(mode))
-    {
-        auto validations =
-            collector_.get_ledger_validations(proof->ledger_hash, mode);
-
-        // Full?
-        if (!validations.empty() && collector_.unl_size > 0 &&
-            static_cast<int>(validations.size()) >= collector_.unl_size)
-        {
-            PLOGI(
-                log_,
-                "[",
-                net_label_,
-                "] co_wait_best_quorum: immediate full seq=",
-                proof->ledger_seq,
-                " (",
-                validations.size(),
-                "/",
-                collector_.unl_size,
-                ")");
-            QuorumCollectResult r{
-                QuorumEntry{
-                    proof->ledger_hash,
-                    proof->ledger_seq,
-                    std::move(validations),
-                    proof->when,
-                    vl_sequence_.value_or(0)},
-                QuorumCollectStopReason::full};
-            co_await asio::post(caller_ex, asio::use_awaitable);
-            co_return r;
-        }
-
-        // Next ledger already?
-        if (has_newer_ledger_locked(proof->ledger_seq))
-        {
-            if (validations.empty())
-                validations = std::move(proof->validations);
-            PLOGI(
-                log_,
-                "[",
-                net_label_,
-                "] co_wait_best_quorum: immediate next-ledger seq=",
-                proof->ledger_seq,
-                " (",
-                validations.size(),
-                "/",
-                collector_.unl_size,
-                ")");
-            QuorumCollectResult r{
-                QuorumEntry{
-                    proof->ledger_hash,
-                    proof->ledger_seq,
-                    std::move(validations),
-                    proof->when,
-                    vl_sequence_.value_or(0)},
-                QuorumCollectStopReason::next_ledger};
-            co_await asio::post(caller_ex, asio::use_awaitable);
-            co_return r;
-        }
-    }
-
-    // Register a pending callback — resolved by check_for_new_quorum
-    // directly on the strand. No timers, no signals, no races.
     auto signal = std::make_shared<asio::steady_timer>(
         strand_, asio::steady_timer::time_point::max());
-
     auto result = std::make_shared<std::optional<QuorumCollectResult>>();
-    auto deadline = std::chrono::steady_clock::now() + timeout;
+    auto const deadline = std::chrono::steady_clock::now() + timeout;
+    std::optional<QuorumCollectResult> immediate;
+    uint64_t pending_id = 0;
 
-    // If we already have a quorum, seed the pending with the ledger info
-    uint32_t seed_seq = 0;
-    Hash256 seed_hash;
-    if (auto proof = latest_quorum_locked(mode))
     {
-        seed_seq = proof->ledger_seq;
-        seed_hash = proof->ledger_hash;
-        PLOGI(
-            log_,
-            "[",
-            net_label_,
-            "] co_wait_best_quorum: waiting for finalization of seq=",
-            seed_seq);
-    }
-    else
-    {
-        PLOGI(
-            log_,
-            "[",
-            net_label_,
-            "] co_wait_best_quorum: waiting for initial quorum...");
+        // Trust admission and this observable quorum read have one
+        // linearization order. If a VL update is admitted but not applied,
+        // register the request and let that update resolve it.
+        std::lock_guard publication_lock(publication_mutex_);
+        bool unl_pending = false;
+        bool stopped = false;
+        {
+            std::lock_guard admission_lock(admission_mutex_);
+            unl_pending = pending_unl_updates_ != 0;
+            stopped = stopped_;
+        }
+
+        if (stopped)
+        {
+            QuorumEntry q;
+            q.vl_sequence = vl_sequence_.value_or(0);
+            immediate = QuorumCollectResult{
+                std::move(q), QuorumCollectStopReason::timeout};
+        }
+
+        if (!stopped && !unl_pending && expected_vl_sequence &&
+            (!vl_sequence_ || *vl_sequence_ != *expected_vl_sequence))
+        {
+            QuorumEntry q;
+            q.vl_sequence = vl_sequence_.value_or(0);
+            immediate = QuorumCollectResult{
+                std::move(q), QuorumCollectStopReason::validator_list_changed};
+        }
+
+        if (!stopped && !unl_pending && !immediate)
+        {
+            if (auto proof = latest_quorum_locked(mode))
+            {
+                auto validations = collector_.get_ledger_validations(
+                    proof->ledger_hash, proof->ledger_seq, mode);
+                if (!validations.empty() && collector_.unl_size > 0 &&
+                    static_cast<int>(validations.size()) >= collector_.unl_size)
+                {
+                    PLOGI(
+                        log_,
+                        "[",
+                        net_label_,
+                        "] co_wait_best_quorum: immediate full seq=",
+                        proof->ledger_seq,
+                        " (",
+                        validations.size(),
+                        "/",
+                        collector_.unl_size,
+                        ")");
+                    immediate = QuorumCollectResult{
+                        QuorumEntry{
+                            proof->ledger_hash,
+                            proof->ledger_seq,
+                            std::move(validations),
+                            proof->when,
+                            vl_sequence_.value_or(0)},
+                        QuorumCollectStopReason::full};
+                }
+                else if (has_newer_ledger_locked(
+                             proof->ledger_hash,
+                             proof->ledger_seq,
+                             ValidationCollector::QuorumMode::proof))
+                {
+                    if (validations.empty())
+                        validations = std::move(proof->validations);
+                    PLOGI(
+                        log_,
+                        "[",
+                        net_label_,
+                        "] co_wait_best_quorum: immediate next-ledger seq=",
+                        proof->ledger_seq,
+                        " (",
+                        validations.size(),
+                        "/",
+                        collector_.unl_size,
+                        ")");
+                    immediate = QuorumCollectResult{
+                        QuorumEntry{
+                            proof->ledger_hash,
+                            proof->ledger_seq,
+                            std::move(validations),
+                            proof->when,
+                            vl_sequence_.value_or(0)},
+                        QuorumCollectStopReason::next_ledger};
+                }
+            }
+        }
+
+        if (!immediate)
+        {
+            uint32_t seed_seq = 0;
+            Hash256 seed_hash;
+            std::vector<ValidationCollector::Entry> seed_validations;
+            if (!unl_pending)
+            {
+                if (auto proof = latest_quorum_locked(mode))
+                {
+                    seed_seq = proof->ledger_seq;
+                    seed_hash = proof->ledger_hash;
+                    seed_validations = std::move(proof->validations);
+                }
+            }
+
+            if (seed_seq != 0)
+            {
+                PLOGI(
+                    log_,
+                    "[",
+                    net_label_,
+                    "] co_wait_best_quorum: waiting for finalization of seq=",
+                    seed_seq);
+            }
+            else
+            {
+                PLOGI(
+                    log_,
+                    "[",
+                    net_label_,
+                    "] co_wait_best_quorum: waiting for initial quorum...");
+            }
+
+            pending_id = next_pending_id_++;
+            pending_.push_back(PendingQuorum{
+                .id = pending_id,
+                .ledger_seq = seed_seq,
+                .ledger_hash = seed_hash,
+                .validations = std::move(seed_validations),
+                .vl_sequence = expected_vl_sequence,
+                .observed_vl_sequence = unl_pending
+                    ? std::nullopt
+                    : std::optional<uint32_t>(vl_sequence_.value_or(0)),
+                .deadline = deadline,
+                .callback =
+                    [signal, result](QuorumCollectResult r) {
+                        *result = std::move(r);
+                        signal->cancel();  // wake the coroutine
+                    },
+            });
+        }
     }
 
-    auto pending_id = next_pending_id_++;
-    pending_.push_back(PendingQuorum{
-        .id = pending_id,
-        .ledger_seq = seed_seq,
-        .ledger_hash = seed_hash,
-        .vl_sequence = expected_vl_sequence,
-        .deadline = deadline,
-        .callback =
-            [signal, result](QuorumCollectResult r) {
-                *result = std::move(r);
-                signal->cancel();  // wake the coroutine
-            },
-    });
+    if (immediate)
+    {
+        co_await asio::post(caller_ex, asio::use_awaitable);
+        co_return std::move(*immediate);
+    }
 
     // Start a deadline timer so resolve_pending() fires even if no
     // validations arrive (e.g. cold start with 0s timeout).
@@ -1198,7 +1456,19 @@ ValidationBuffer::co_wait_best_quorum(
         if (ec)
             return;
         if (auto self = weak.lock())
+        {
+            std::lock_guard publication_lock(self->publication_mutex_);
+#ifdef XPRV_TESTING
+            if (self->deadline_publish_hook_for_test_)
+                self->deadline_publish_hook_for_test_();
+#endif
+            {
+                std::lock_guard admission_lock(self->admission_mutex_);
+                if (self->pending_unl_updates_ != 0)
+                    return;
+            }
             self->resolve_pending();
+        }
     });
 
     // One single co_await — woken by the callback cancelling the timer
@@ -1266,11 +1536,17 @@ ValidationBuffer::latest_quorum_locked(
 }
 
 bool
-ValidationBuffer::has_newer_ledger_locked(uint32_t ledger_seq) const
+ValidationBuffer::has_newer_ledger_locked(
+    Hash256 const& ledger_hash,
+    uint32_t ledger_seq,
+    ValidationCollector::QuorumMode mode) const
 {
-    for (auto const& [_, entries] : collector_.by_ledger)
+    for (auto const& [hash, _] : collector_.by_ledger)
     {
-        if (!entries.empty() && entries.front().ledger_seq > ledger_seq)
+        if (hash == ledger_hash)
+            continue;
+        auto const sequence = collector_.latest_ledger_sequence(hash, mode);
+        if (sequence && *sequence > ledger_seq)
             return true;
     }
     return false;
@@ -1280,6 +1556,12 @@ asio::awaitable<bool>
 ValidationBuffer::co_has_live_only_quorum()
 {
     co_await asio::post(strand_, asio::use_awaitable);
+    std::lock_guard publication_lock(publication_mutex_);
+    {
+        std::lock_guard admission_lock(admission_mutex_);
+        if (pending_unl_updates_ != 0)
+            co_return false;
+    }
     co_return collector_.has_stale_vl_manifests() &&
         collector_.has_quorum(
             kQuorumPercent, ValidationCollector::QuorumMode::live) &&
@@ -1323,6 +1605,20 @@ ValidationBuffer::co_stats()
     }
     co_return stats;
 }
+
+#ifdef XPRV_TESTING
+asio::awaitable<bool>
+ValidationBuffer::co_insert_validation_for_test(
+    ValidationCollector::Entry entry)
+{
+    co_await asio::post(strand_, asio::use_awaitable);
+    std::lock_guard publication_lock(publication_mutex_);
+    auto const inserted = collector_.insert_entry_for_test(std::move(entry));
+    if (inserted)
+        check_for_new_quorum();
+    co_return inserted;
+}
+#endif
 
 void
 ValidationBuffer::start_heartbeat()
