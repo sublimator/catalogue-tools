@@ -6,8 +6,8 @@
 // bootstrap() and try_undiscovered() launch background connection attempts,
 // while wait_for_any_peer()/wait_for_peer() wait for usable results.
 //
-// The intended xprv usage is single-threaded on one io_context. Detached
-// connect coroutines keep PeerSet alive by capturing shared_ptr<PeerSet>.
+// PeerSet-owned state is serialized through its strand. Detached connect
+// coroutines keep PeerSet alive by capturing shared_ptr<PeerSet>.
 
 #include "endpoint-tracker.h"
 #include "peer-crawl-client.h"
@@ -178,22 +178,13 @@ public:
         uint64_t total_disconnects = 0;
     };
 
-    /// Awaitable connection stats — hops to strand for safe read.
+    /// Awaitable connection stats — runs the read on the strand.
     boost::asio::awaitable<ConnectionStats>
-    co_connection_stats()
-    {
-        co_await boost::asio::post(strand_, boost::asio::use_awaitable);
-        co_return ConnectionStats{
-            connections_.size(), total_connects_, total_disconnects_};
-    }
+    co_connection_stats();
 
-    /// Awaitable peer count — hops to strand for safe read.
+    /// Awaitable peer count — runs the read on the strand.
     boost::asio::awaitable<size_t>
-    co_size()
-    {
-        co_await boost::asio::post(strand_, boost::asio::use_awaitable);
-        co_return connections_.size();
-    }
+    co_size();
 
     struct SnapshotEntry
     {
@@ -295,6 +286,21 @@ public:
     hub_peer_count() const;
 
 private:
+    boost::asio::awaitable<PeerSessionPtr>
+    try_connect_on_strand(std::string host, uint16_t port);
+
+    boost::asio::awaitable<PeerSessionPtr>
+    wait_for_any_peer_on_strand(
+        int timeout_secs,
+        std::unordered_set<std::string> excluded);
+
+    boost::asio::awaitable<PeerSessionPtr>
+    wait_for_peer_on_strand(
+        uint32_t ledger_seq,
+        int timeout_secs,
+        std::unordered_set<std::string> excluded,
+        std::shared_ptr<std::atomic<bool>> cancel);
+
     /// Remove a dead peer from the connection map.
     void
     remove_peer(std::string const& key);

@@ -463,7 +463,7 @@ NodeCache::walk_to(
 
     int total_retries = 0;
     int max_retries = max_walk_peer_retries_;
-    bool same_peer_retried = false;
+    bool waited_for_new_peer = false;
     std::unordered_set<std::string> failed_peers;
 
     for (int depth = 0; depth < 64; ++depth)
@@ -475,9 +475,22 @@ NodeCache::walk_to(
             co_return result;
         }
 
+        std::unordered_set<std::string> attempted_peers;
+        bool initiated_fetch = false;
         auto wire = co_await ensure_present(
-            cursor, ledger_hash, tree_type, pos, target_key, spec_depth,
-            peer, peers, ledger_seq, cancel);
+            cursor,
+            ledger_hash,
+            tree_type,
+            pos,
+            target_key,
+            spec_depth,
+            peer,
+            peers,
+            ledger_seq,
+            cancel,
+            &attempted_peers,
+            &failed_peers,
+            &initiated_fetch);
 
         // Halve speculation after each fetch round
         if (spec_depth > 1)
@@ -493,17 +506,78 @@ NodeCache::walk_to(
                 co_return result;
             }
 
-            if (total_retries >= max_retries)
+            // A timed-out fan-out round failed on every endpoint it used.
+            // Carry that complete set into the next selection so each bounded
+            // retry reaches a distinct connected peer.
+            if (initiated_fetch)
             {
-                // Exhausted retries — fall through to give up
+                for (auto const& endpoint : attempted_peers)
+                {
+                    failed_peers.insert(endpoint);
+                    if (peers)
+                        peers->note_ledger_failure(endpoint, ledger_seq);
+                }
             }
-            // First retry: same peer (packet may have been dropped,
-            // peer might still respond to a re-send). The entry stays
-            // in the cache, and ensure_present will re-send via the
-            // stale detection path.
-            else if (!same_peer_retried && peer && peer->is_ready())
+
+            if (total_retries < max_retries && peers)
             {
-                same_peer_retried = true;
+                auto alternatives = co_await peers->co_select_peers_for(
+                    ledger_seq, 1, failed_peers);
+                if (alternatives.empty() && !waited_for_new_peer)
+                {
+                    waited_for_new_peer = true;
+                    auto new_peer = co_await peers->wait_for_peer(
+                        ledger_seq, 1, failed_peers, cancel);
+                    if (new_peer && new_peer->is_ready())
+                        alternatives.push_back(std::move(new_peer));
+                }
+                if (!alternatives.empty())
+                {
+                    peer = alternatives.front();
+                    ++total_retries;
+                    PLOGW(
+                        log_,
+                        "  depth=",
+                        depth,
+                        " MISS hash=",
+                        cursor.hex().substr(0, 16),
+                        " — trying different peer (",
+                        total_retries,
+                        "/",
+                        max_retries,
+                        "), excluded=",
+                        failed_peers.size());
+                    catl::core::emit_status(
+                        "timeout depth=" + std::to_string(depth) +
+                        " — switching peer (" + std::to_string(total_retries) +
+                        "/" + std::to_string(max_retries) + ")");
+                    publish_node_progress(
+                        cursor,
+                        ProgressKind::switch_peer,
+                        ledger_seq,
+                        static_cast<uint16_t>(depth),
+                        static_cast<uint8_t>(total_retries),
+                        static_cast<uint8_t>(max_retries));
+                    catl::core::emit_status(
+                        "acquired peer " + peer->endpoint());
+                    publish_node_progress(
+                        cursor,
+                        ProgressKind::acquired_peer,
+                        ledger_seq,
+                        static_cast<uint16_t>(depth),
+                        static_cast<uint8_t>(total_retries),
+                        static_cast<uint8_t>(max_retries),
+                        peer->endpoint());
+                    --depth;  // retry this depth
+                    continue;
+                }
+            }
+
+            // A small pool may have been covered completely by the first
+            // fan-out. Preserve a bounded resend for packet loss after there
+            // are no distinct or newly connected candidates left.
+            if (total_retries < max_retries && peer && peer->is_ready())
+            {
                 ++total_retries;
                 PLOGW(
                     log_,
@@ -511,15 +585,15 @@ NodeCache::walk_to(
                     depth,
                     " MISS hash=",
                     cursor.hex().substr(0, 16),
-                    " — retrying same peer (",
+                    " — retrying peer after fan-out (",
                     total_retries,
                     "/",
                     max_retries,
                     ")");
                 catl::core::emit_status(
                     "timeout depth=" + std::to_string(depth) +
-                    " — retrying same peer " + peer->endpoint() +
-                    " (" + std::to_string(total_retries) + "/" +
+                    " — retrying peer " + peer->endpoint() + " (" +
+                    std::to_string(total_retries) + "/" +
                     std::to_string(max_retries) + ")");
                 publish_node_progress(
                     cursor,
@@ -529,68 +603,10 @@ NodeCache::walk_to(
                     static_cast<uint8_t>(total_retries),
                     static_cast<uint8_t>(max_retries),
                     peer->endpoint());
-                --depth;  // retry this depth
+                --depth;
                 continue;
             }
-            // Subsequent retries: different peer
-            else if (peers)
-            {
-                same_peer_retried = false;
-                if (peer)
-                {
-                    failed_peers.insert(peer->endpoint());
-                    // Report to PeerSet so ALL callers skip this
-                    // peer for this ledger (shared knowledge).
-                    if (peers)
-                        peers->note_ledger_failure(
-                            peer->endpoint(), ledger_seq);
-                }
 
-                ++total_retries;
-                PLOGW(
-                    log_,
-                    "  depth=",
-                    depth,
-                    " MISS hash=",
-                    cursor.hex().substr(0, 16),
-                    " — trying different peer (",
-                    total_retries,
-                    "/",
-                    max_retries,
-                    "), excluded=",
-                    failed_peers.size());
-                catl::core::emit_status(
-                    "timeout depth=" + std::to_string(depth) +
-                    " — switching peer (" +
-                    std::to_string(total_retries) + "/" +
-                    std::to_string(max_retries) + ")");
-                publish_node_progress(
-                    cursor,
-                    ProgressKind::switch_peer,
-                    ledger_seq,
-                    static_cast<uint16_t>(depth),
-                    static_cast<uint8_t>(total_retries),
-                    static_cast<uint8_t>(max_retries));
-                auto new_peer =
-                    co_await peers->wait_for_peer(
-                        ledger_seq, 10, failed_peers, cancel);
-                if (new_peer && new_peer->is_ready())
-                {
-                    catl::core::emit_status(
-                        "acquired peer " + new_peer->endpoint());
-                    publish_node_progress(
-                        cursor,
-                        ProgressKind::acquired_peer,
-                        ledger_seq,
-                        static_cast<uint16_t>(depth),
-                        static_cast<uint8_t>(total_retries),
-                        static_cast<uint8_t>(max_retries),
-                        new_peer->endpoint());
-                    peer = new_peer;
-                    --depth;  // retry this depth
-                    continue;
-                }
-            }
             PLOGW(
                 log_,
                 "  depth=",
@@ -600,8 +616,7 @@ NodeCache::walk_to(
                 " — giving up");
             catl::core::emit_status(
                 "node fetch failed at depth=" + std::to_string(depth) +
-                " after " + std::to_string(total_retries) +
-                " retries, will retry walk");
+                " after " + std::to_string(total_retries) + " retries");
             publish_node_progress(
                 cursor,
                 ProgressKind::give_up,
@@ -609,11 +624,8 @@ NodeCache::walk_to(
                 static_cast<uint16_t>(depth),
                 static_cast<uint8_t>(total_retries),
                 static_cast<uint8_t>(max_retries));
-            co_return result;  // found=false, caller retries
+            co_return result;
         }
-
-        // Reset same-peer retry flag on success
-        same_peer_retried = false;
 
         WireNodeView node(*wire);
 
@@ -706,8 +718,13 @@ NodeCache::ensure_present(
     PeerSessionPtr peer,
     std::shared_ptr<PeerSet> peers,
     uint32_t ledger_seq,
-    std::shared_ptr<std::atomic<bool>> cancel)
+    std::shared_ptr<std::atomic<bool>> cancel,
+    std::unordered_set<std::string>* attempted_peers,
+    std::unordered_set<std::string> const* excluded_peers,
+    bool* initiated_fetch)
 {
+    if (initiated_fetch)
+        *initiated_fetch = false;
     if (cancel && cancel->load(std::memory_order_relaxed))
         co_return nullptr;
 
@@ -857,6 +874,9 @@ NodeCache::ensure_present(
             co_return nullptr;
         }
 
+        if (initiated_fetch)
+            *initiated_fetch = true;
+
         send_fetch(
             expected_hash,
             ledger_hash,
@@ -865,6 +885,8 @@ NodeCache::ensure_present(
             target_key,
             speculative_depth,
             peer);
+        if (attempted_peers)
+            attempted_peers->insert(peer->endpoint());
 
         if (cancel && cancel->load(std::memory_order_relaxed))
             co_return nullptr;
@@ -874,7 +896,9 @@ NodeCache::ensure_present(
         // Duplicate responses are harmless (already-present early return).
         if (peers && ledger_seq > 0)
         {
-            std::unordered_set<std::string> exclude_set;
+            std::unordered_set<std::string> exclude_set = excluded_peers
+                ? *excluded_peers
+                : std::unordered_set<std::string>{};
             exclude_set.insert(peer->endpoint());
             auto extras = co_await peers->co_select_peers_for(
                 ledger_seq, 2, std::move(exclude_set));
@@ -883,6 +907,8 @@ NodeCache::ensure_present(
             {
                 if (extra && extra->is_ready())
                 {
+                    if (attempted_peers)
+                        attempted_peers->insert(extra->endpoint());
                     PLOGD(
                         log_,
                         "  ensure: fan-out to ",
@@ -964,7 +990,7 @@ NodeCache::ensure_present(
         if (wake_kind == 1)
             continue;
 
-        // Timed out (or write failed) and data still isn't present.
+        // Timed out and data still isn't present.
         // The entry stays alive so a late peer response can still
         // populate the cache for future callers.
         {
@@ -1046,28 +1072,21 @@ NodeCache::send_fetch(
         peer->endpoint());
 
     // Send raw TMGetLedger — no pending_nodes registration.
-    // send_get_nodes just queues an async write, safe outside lock.
-    // On write failure (broken pipe etc), cancel the signal immediately
-    // so waiters don't sit around for the full timeout.
-    std::weak_ptr<NodeCache> weak_self = shared_from_this();
-    auto cancel_hash = expected_hash;
+    // send_get_nodes just queues an async write, safe outside lock. One
+    // fan-out write failure must not wake the shared round early because
+    // another peer may still provide the node.
+    auto endpoint = peer->endpoint();
     peer->send_get_nodes(
         ledger_hash,
         tree_type,
         node_ids,
-        [weak_self, cancel_hash](boost::system::error_code) {
-            if (auto self = weak_self.lock())
-            {
-                std::shared_ptr<asio::steady_timer> sig;
-                {
-                    std::lock_guard lock(self->mutex_);
-                    auto it = self->store_.find(cancel_hash);
-                    if (it != self->store_.end() && !it->second.present)
-                        sig = it->second.signal;
-                }
-                if (sig)
-                    sig->cancel();
-            }
+        [endpoint = std::move(endpoint)](boost::system::error_code ec) {
+            PLOGD(
+                log_,
+                "  send_fetch write failed for ",
+                endpoint,
+                ": ",
+                ec.message());
         });
 
     // Record when this fetch was sent (for stale detection)

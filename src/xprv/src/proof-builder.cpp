@@ -991,59 +991,6 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         std::shared_ptr<NodeCache> node_cache;
         catl::xdata::Protocol protocol;
 
-        // Peer retry state
-        struct PeerRetryPolicy
-        {
-            int per_peer_retries = 2;
-            std::chrono::seconds cooldown{30};
-            int wait_timeout_secs = 15;
-        };
-        PeerRetryPolicy peer_retry_policy;
-        std::unordered_map<std::string, int> peer_retry_counts;
-        std::unordered_map<std::string, std::chrono::steady_clock::time_point>
-            peer_cooldowns;
-
-        // Per-prove peer history — tracks what each peer has failed
-        // to serve so we don't hammer the same peer for the same
-        // ledger across retry loops. Keyed by endpoint (host:port).
-        // Grows during the prove, never resets.
-        struct PeerRecord
-        {
-            std::unordered_set<uint32_t> failed_ledgers;
-            // Room to grow: timeout_count, last_failure_at, etc.
-        };
-        std::unordered_map<std::string, PeerRecord> peer_history;
-
-        // Check if a peer has already failed for a specific ledger
-        bool
-        peer_failed_for(std::string const& ep, uint32_t seq) const
-        {
-            auto it = peer_history.find(ep);
-            if (it == peer_history.end())
-                return false;
-            return it->second.failed_ledgers.count(seq) > 0;
-        }
-
-        // Record that a peer failed for a specific ledger
-        void
-        note_peer_failure(std::string const& ep, uint32_t seq)
-        {
-            peer_history[ep].failed_ledgers.insert(seq);
-        }
-
-        // Build an exclusion set for a specific ledger from history
-        std::unordered_set<std::string>
-        excluded_for(uint32_t seq) const
-        {
-            std::unordered_set<std::string> result;
-            for (auto const& [ep, record] : peer_history)
-            {
-                if (record.failed_ledgers.count(seq))
-                    result.insert(ep);
-            }
-            return result;
-        }
-
         // Anchor state
         Hash256 anchor_hash;
         LedgerHeaderResult anchor_hdr;
@@ -1061,7 +1008,6 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         bool need_flag_hop = false;
         uint32_t distance = 0;
         std::vector<std::tuple<Hash256, StateProofResult>> state_proofs;
-        PeerSessionPtr client;
     };
 
     auto ctx = std::make_shared<ProveContext>();
@@ -1094,7 +1040,11 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             peer,
             ctx->cancel_token);
         if (!result.found)
+        {
+            if (ctx->cancel_token && ctx->cancel_token->load())
+                throw PeerClientException(Error::Cancelled);
             throw PeerClientException(Error::Timeout);
+        }
         co_return result;
     };
 
@@ -1115,7 +1065,11 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             peer,
             ctx->cancel_token);
         if (!result.found)
+        {
+            if (ctx->cancel_token && ctx->cancel_token->load())
+                throw PeerClientException(Error::Cancelled);
             throw PeerClientException(Error::Timeout);
+        }
         co_return result;
     };
 
@@ -1211,163 +1165,46 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         anchor_validations.size(),
         " validators in proof)");
 
-    auto collect_excluded_peers = [ctx]() {
-        std::unordered_set<std::string> excluded;
-        auto const now = std::chrono::steady_clock::now();
-        for (auto it = ctx->peer_cooldowns.begin();
-             it != ctx->peer_cooldowns.end();)
+    // PeerSet chooses a suitable starting peer. NodeCache owns the bounded
+    // fan-out and retry policy for the operation itself; once it gives up,
+    // propagate that result instead of restarting the whole operation here.
+    auto with_peer = [ctx, net_label](
+                         uint32_t required_ledger,
+                         std::string const& purpose,
+                         auto op) -> decltype(op(PeerSessionPtr{})) {
+        if (ctx->cancel_token &&
+            ctx->cancel_token->load(std::memory_order_relaxed))
         {
-            if (it->second <= now)
-            {
-                it = ctx->peer_cooldowns.erase(it);
-                continue;
-            }
-            excluded.insert(it->first);
-            ++it;
+            throw PeerClientException(Error::Cancelled);
         }
-        return excluded;
-    };
 
-    auto acquire_peer = [ctx, collect_excluded_peers, net_label](
-                            PeerSessionPtr& current,
-                            std::optional<uint32_t> required_ledger,
-                            std::string const& purpose)
-        -> boost::asio::awaitable<PeerSessionPtr> {
-        auto peer_covers_ledger = [](PeerSessionPtr const& peer,
-                                     uint32_t ledger_seq) {
-            if (!peer || !peer->is_ready())
-                return false;
-            auto const first = peer->peer_first_seq();
-            auto const last = peer->peer_last_seq();
-            return first != 0 && last != 0 && ledger_seq >= first &&
-                ledger_seq <= last;
-        };
+        auto peer = co_await ctx->peers->wait_for_peer(
+            required_ledger, 15, ctx->cancel_token);
 
-        for (;;)
+        if (ctx->cancel_token &&
+            ctx->cancel_token->load(std::memory_order_relaxed))
         {
-            auto excluded = collect_excluded_peers();
-            // Merge in per-ledger failures from peer history
-            if (required_ledger)
-            {
-                auto ledger_excluded = ctx->excluded_for(*required_ledger);
-                excluded.insert(
-                    ledger_excluded.begin(), ledger_excluded.end());
-            }
-            if (current && current->is_ready() &&
-                !excluded.count(current->endpoint()) &&
-                (!required_ledger ||
-                 peer_covers_ledger(current, *required_ledger)))
-            {
-                co_return current;
-            }
-
-            PeerSessionPtr found;
-            if (required_ledger)
-            {
-                found = co_await ctx->peers->wait_for_peer(
-                    *required_ledger,
-                    ctx->peer_retry_policy.wait_timeout_secs,
-                    excluded);
-            }
-            else
-            {
-                found = co_await ctx->peers->wait_for_any_peer(
-                    ctx->peer_retry_policy.wait_timeout_secs, excluded);
-            }
-
-            if (found)
-            {
-                current = found;
-                if (!current->endpoint().empty())
-                    ctx->peer_retry_counts[current->endpoint()] = 0;
-                PLOGI(
-                    log_, "[", net_label, "] Using peer ", current->endpoint(), " for ", purpose);
-                catl::core::emit_status(
-                    "peer " + current->endpoint() + " → " + purpose);
-                co_return current;
-            }
-
-            PLOGI(
-                log_,
-                "[", net_label, "] Still waiting for peer for ",
-                purpose,
-                " (",
-                excluded.size(),
-                " cooled down)");
-            catl::core::emit_status(
-                "waiting for peer for " + purpose +
-                " (" + std::to_string(excluded.size()) + " excluded)");
+            throw PeerClientException(Error::Cancelled);
         }
-    };
-
-    auto is_retryable_peer_error = [](PeerClientException const& e) {
-        switch (e.error)
+        if (!peer)
         {
-            case Error::Timeout:
-            case Error::Disconnected:
-            case Error::NoLedger:
-            case Error::NoNode:
-                return true;
-            default:
-                return false;
+            throw PeerClientException(
+                Error::NoLedger,
+                "no peer available for ledger " +
+                    std::to_string(required_ledger) + " while trying to " +
+                    purpose);
         }
-    };
 
-    auto with_peer_failover =
-        [ctx, acquire_peer, is_retryable_peer_error](
-            PeerSessionPtr& current,
-            std::optional<uint32_t> required_ledger,
-            std::string const& purpose,
-            auto op) -> decltype(op(current)) {
-        for (;;)
-        {
-            // Don't start new work if cancelled
-            if (ctx->cancel_token &&
-                ctx->cancel_token->load(std::memory_order_relaxed))
-            {
-                throw PeerClientException(Error::Timeout);
-            }
-
-            current = co_await acquire_peer(current, required_ledger, purpose);
-            try
-            {
-                co_return co_await op(current);
-            }
-            catch (PeerClientException const& e)
-            {
-                // Don't retry if cancelled — the failure was from
-                // walk_to bailing, not a real peer error
-                if (ctx->cancel_token &&
-                    ctx->cancel_token->load(std::memory_order_relaxed))
-                {
-                    throw;
-                }
-
-                if (!is_retryable_peer_error(e))
-                    throw;
-
-                auto const endpoint =
-                    current ? current->endpoint() : std::string{};
-                if (endpoint.empty())
-                {
-                    current.reset();
-                    continue;
-                }
-
-                auto& failures = ctx->peer_retry_counts[endpoint];
-                ++failures;
-                if (failures <= ctx->peer_retry_policy.per_peer_retries)
-                    continue;
-
-                failures = 0;
-                ctx->peer_cooldowns[endpoint] =
-                    std::chrono::steady_clock::now() +
-                    ctx->peer_retry_policy.cooldown;
-                if (required_ledger)
-                    ctx->note_peer_failure(endpoint, *required_ledger);
-                current.reset();
-            }
-        }
+        PLOGI(
+            log_,
+            "[",
+            net_label,
+            "] Using peer ",
+            peer->endpoint(),
+            " for ",
+            purpose);
+        catl::core::emit_status("peer " + peer->endpoint() + " → " + purpose);
+        co_return co_await op(peer);
     };
 
     // Don't call prioritize_ledger() — with concurrent prove() calls,
@@ -1479,13 +1316,11 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         auto skip_key_val =
             long_direct ? skip_list_key(tx_ledger_seq) : skip_list_key();
 
-        auto wr = co_await with_peer_failover(
-            ctx->client,
+        auto wr = co_await with_peer(
             anchor_seq,
             "walk short skip list",
-            [ctx, skip_key_val, anchor_seq,
-             walk_state](PeerSessionPtr peer)
-                -> boost::asio::awaitable<WalkResult> {
+            [ctx, skip_key_val, anchor_seq, walk_state](
+                PeerSessionPtr peer) -> boost::asio::awaitable<WalkResult> {
                 co_return co_await walk_state(
                     ctx->anchor_hash,
                     anchor_seq,
@@ -1502,8 +1337,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             make_trie_data(sp.tree, false, TrieData::TreeType::state));
         ctx->state_proofs.emplace_back(skip_key_val, std::move(sp));
 
-        ctx->target_hdr_result = co_await with_peer_failover(
-            ctx->client,
+        ctx->target_hdr_result = co_await with_peer(
             tx_ledger_seq,
             "fetch target ledger header",
             [ctx, tx_ledger_seq](PeerSessionPtr peer)
@@ -1539,13 +1373,11 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         PLOGI(log_, "  Flag ledger: ", flag_seq);
 
         auto long_skip_key = skip_list_key(flag_seq);
-        auto wr1 = co_await with_peer_failover(
-            ctx->client,
+        auto wr1 = co_await with_peer(
             anchor_seq,
             "walk long skip list",
-            [ctx, long_skip_key, anchor_seq,
-             walk_state](PeerSessionPtr peer)
-                -> boost::asio::awaitable<WalkResult> {
+            [ctx, long_skip_key, anchor_seq, walk_state](
+                PeerSessionPtr peer) -> boost::asio::awaitable<WalkResult> {
                 co_return co_await walk_state(
                     ctx->anchor_hash,
                     anchor_seq,
@@ -1564,8 +1396,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             ctx->state_proofs.emplace_back(long_skip_key, std::move(sp));
         }
 
-        ctx->flag_hdr_result = co_await with_peer_failover(
-            ctx->client,
+        ctx->flag_hdr_result = co_await with_peer(
             flag_seq,
             "fetch flag ledger header",
             [ctx, flag_seq](PeerSessionPtr peer)
@@ -1588,13 +1419,11 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         }
 
         auto short_skip_key = skip_list_key();
-        auto wr2 = co_await with_peer_failover(
-            ctx->client,
+        auto wr2 = co_await with_peer(
             flag_seq,
             "walk flag short skip list",
-            [ctx, flag_hash, flag_seq, short_skip_key,
-             walk_state](PeerSessionPtr peer)
-                -> boost::asio::awaitable<WalkResult> {
+            [ctx, flag_hash, flag_seq, short_skip_key, walk_state](
+                PeerSessionPtr peer) -> boost::asio::awaitable<WalkResult> {
                 co_return co_await walk_state(
                     flag_hash,
                     flag_seq,
@@ -1614,8 +1443,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             ctx->state_proofs.emplace_back(short_skip_key, std::move(sp));
         }
 
-        ctx->target_hdr_result = co_await with_peer_failover(
-            ctx->client,
+        ctx->target_hdr_result = co_await with_peer(
             tx_ledger_seq,
             "fetch target ledger header",
             [ctx, tx_ledger_seq](PeerSessionPtr peer)
@@ -1640,8 +1468,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     // ── Step 6: Target header ──
     if (!ctx->target_hdr_result)
     {
-        ctx->target_hdr_result = co_await with_peer_failover(
-            ctx->client,
+        ctx->target_hdr_result = co_await with_peer(
             tx_ledger_seq,
             "fetch target ledger header",
             [ctx, tx_ledger_seq](PeerSessionPtr peer)
@@ -1658,13 +1485,11 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
     PLOGI(log_, "[", net_label, "] Walking TX tree for ", tx_hash_str.substr(0, 16), "...");
     catl::core::emit_status("walking TX tree");
 
-    auto tx_walk = co_await with_peer_failover(
-        ctx->client,
+    auto tx_walk = co_await with_peer(
         tx_ledger_seq,
         "walk transaction tree",
-        [ctx, ledger_hash, tx_ledger_seq, target_header, tx_hash,
-         walk_tx](PeerSessionPtr peer)
-            -> boost::asio::awaitable<WalkResult> {
+        [ctx, ledger_hash, tx_ledger_seq, target_header, tx_hash, walk_tx](
+            PeerSessionPtr peer) -> boost::asio::awaitable<WalkResult> {
             co_return co_await walk_tx(
                 ledger_hash,
                 tx_ledger_seq,

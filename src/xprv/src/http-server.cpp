@@ -19,6 +19,7 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/deferred.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/experimental/parallel_group.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/this_coro.hpp>
@@ -1038,7 +1039,7 @@ HttpServer::handle_session(
                     }
 
                     // Cancel token: atomic flag checked at cancellation
-                    // boundaries (walk_to, with_peer_failover) for fast
+                    // boundaries (peer waits and node walks) for fast
                     // exit without disrupting shared NodeCache state.
                     auto cancel_token =
                         std::make_shared<std::atomic<bool>>(false);
@@ -1054,7 +1055,7 @@ HttpServer::handle_session(
                         // Write raw HTTP response + SSE frames directly.
                         // No chunked encoding — SSE streams are
                         // connection-scoped, closed when done.
-                        stream.expires_never();
+                        stream.expires_after(opts_.write_timeout);
 
                         // Disable Nagle so each write flushes immediately
                         beast::get_lowest_layer(stream).socket().set_option(
@@ -1078,22 +1079,125 @@ HttpServer::handle_session(
                         if (ec)
                             break;
 
-                        int step_index = 0;
-                        auto write_sse =
-                            [&](std::string data) -> asio::awaitable<void> {
-                            auto frame = "data: " + data + "\n\n";
-                            PLOGI(
-                                log_,
-                                "SSE write: ",
-                                frame.size(),
-                                "B type=",
-                                data.substr(0, 40));
-                            co_await asio::async_write(
-                                stream,
-                                asio::buffer(frame),
-                                asio::redirect_error(asio::use_awaitable, ec));
-                            PLOGI(log_, "SSE write done, ec=", ec.message());
+                        using SseFrame = std::optional<std::string>;
+                        using SseChannel =
+                            asio::experimental::concurrent_channel<void(
+                                boost::system::error_code, SseFrame)>;
+                        using CompletionChannel =
+                            asio::experimental::concurrent_channel<void(
+                                boost::system::error_code)>;
+
+                        auto const sse_executor = stream.get_executor();
+                        auto frames =
+                            std::make_shared<SseChannel>(sse_executor, 128);
+                        auto writer_done = std::make_shared<CompletionChannel>(
+                            sse_executor, 1);
+                        auto status_done = std::make_shared<CompletionChannel>(
+                            sse_executor, 1);
+                        auto watcher_done = std::make_shared<CompletionChannel>(
+                            sse_executor, 1);
+                        auto writer_failed =
+                            std::make_shared<std::atomic<bool>>(false);
+
+                        // One coroutine owns every composed write operation.
+                        // Producers only enqueue complete frames, so status and
+                        // proof events cannot overlap writes on the stream.
+                        asio::co_spawn(
+                            sse_executor,
+                            [&stream,
+                             frames,
+                             writer_done,
+                             writer_failed,
+                             cancel_token,
+                             write_timeout = opts_.write_timeout]()
+                                -> asio::awaitable<void> {
+                                try
+                                {
+                                    for (;;)
+                                    {
+                                        auto frame =
+                                            co_await frames->async_receive(
+                                                asio::use_awaitable);
+                                        if (!frame)
+                                            break;
+                                        if (writer_failed->load())
+                                            continue;
+
+                                        PLOGI(
+                                            log_,
+                                            "SSE write: ",
+                                            frame->size(),
+                                            "B");
+                                        stream.expires_after(write_timeout);
+                                        boost::system::error_code wec;
+                                        co_await asio::async_write(
+                                            stream,
+                                            asio::buffer(*frame),
+                                            asio::redirect_error(
+                                                asio::use_awaitable, wec));
+                                        if (wec)
+                                        {
+                                            PLOGD(
+                                                log_,
+                                                "SSE write stopped: ",
+                                                wec.message());
+                                            writer_failed->store(true);
+                                            cancel_token->store(true);
+                                        }
+                                    }
+                                }
+                                catch (std::exception const& e)
+                                {
+                                    PLOGE(
+                                        log_, "SSE writer failed: ", e.what());
+                                    writer_failed->store(true);
+                                    cancel_token->store(true);
+                                    frames->cancel();
+                                    frames->close();
+                                }
+                                writer_done->try_send(
+                                    boost::system::error_code{});
+                            },
+                            asio::detached);
+
+                        auto enqueue_sse =
+                            [frames](
+                                std::string data) -> asio::awaitable<bool> {
+                            auto frame = "data: " + std::move(data) + "\n\n";
+                            boost::system::error_code qec;
+                            co_await frames->async_send(
+                                boost::system::error_code{},
+                                SseFrame{std::move(frame)},
+                                asio::redirect_error(asio::use_awaitable, qec));
+                            co_return !qec;
                         };
+
+                        // SSE dedicates the connection to this response. Any
+                        // read readiness is therefore a close or unusable
+                        // protocol input and cancels the proof.
+                        auto stop_watcher =
+                            std::make_shared<std::atomic<bool>>(false);
+                        asio::co_spawn(
+                            sse_executor,
+                            [&stream,
+                             cancel_token,
+                             stop_watcher,
+                             watcher_done]() -> asio::awaitable<void> {
+                                boost::system::error_code wec;
+                                co_await beast::get_lowest_layer(stream)
+                                    .socket()
+                                    .async_wait(
+                                        asio::ip::tcp::socket::wait_read,
+                                        asio::redirect_error(
+                                            asio::use_awaitable, wec));
+                                if (!stop_watcher->load())
+                                    cancel_token->store(true);
+                                watcher_done->try_send(
+                                    boost::system::error_code{});
+                            },
+                            asio::detached);
+
+                        int step_index = 0;
 
                         auto on_step = [&](ChainStep const& step)
                             -> asio::awaitable<void> {
@@ -1101,86 +1205,196 @@ HttpServer::handle_session(
                             ev["type"] = "step";
                             ev["index"] = step_index++;
                             ev["step"] = step_to_json(step);
-                            co_await write_sse(boost::json::serialize(ev));
+                            if (!(co_await enqueue_sse(
+                                    boost::json::serialize(ev))))
+                            {
+                                cancel_token->store(true);
+                                throw std::runtime_error("SSE queue stopped");
+                            }
                         };
 
-                        // Status drain loop — runs concurrently with prove,
-                        // flushing status events every 500ms. The per-connection
-                        // strand (sec #0059) serializes this connection's
-                        // coroutines, so writes interleave at co_await points,
-                        // never truly concurrently — even at --threads > 1.
-                        auto drain_done = std::make_shared<bool>(false);
-                        auto drain_timer = std::make_shared<asio::steady_timer>(
-                            stream.get_executor());
+                        auto stop_status =
+                            std::make_shared<std::atomic<bool>>(false);
+                        auto drain_timer =
+                            std::make_shared<asio::steady_timer>(sse_executor);
+                        auto cancel_drain_timer = [drain_timer]() noexcept {
+                            try
+                            {
+                                drain_timer->cancel();
+                            }
+                            catch (...)
+                            {
+                            }
+                        };
                         auto drain_ctx = req_ctx;
                         asio::co_spawn(
-                            co_await asio::this_coro::executor,
-                            [drain_done, drain_timer, drain_ctx, &write_sse]()
-                                -> asio::awaitable<void> {
-                                while (!*drain_done)
+                            sse_executor,
+                            [stop_status,
+                             drain_timer,
+                             drain_ctx,
+                             enqueue_sse,
+                             status_done,
+                             cancel_token]() -> asio::awaitable<void> {
+                                try
                                 {
-                                    drain_timer->expires_after(
-                                        std::chrono::milliseconds(300));
-                                    boost::system::error_code tec;
-                                    co_await drain_timer->async_wait(
-                                        asio::redirect_error(
-                                            asio::use_awaitable, tec));
-                                    if (*drain_done)
-                                        break;
-                                    auto msgs = drain_ctx->drain();
-                                    for (auto& msg : msgs)
+                                    bool queue_open = true;
+                                    while (!stop_status->load() && queue_open)
                                     {
-                                        boost::json::object ev;
-                                        ev["type"] = "log";
-                                        ev["msg"] = std::move(msg);
-                                        co_await write_sse(
-                                            boost::json::serialize(ev));
+                                        drain_timer->expires_after(
+                                            std::chrono::milliseconds(300));
+                                        boost::system::error_code tec;
+                                        co_await drain_timer->async_wait(
+                                            asio::redirect_error(
+                                                asio::use_awaitable, tec));
+                                        if (stop_status->load())
+                                            break;
+                                        auto msgs = drain_ctx->drain();
+                                        for (auto& msg : msgs)
+                                        {
+                                            boost::json::object ev;
+                                            ev["type"] = "log";
+                                            ev["msg"] = std::move(msg);
+                                            queue_open = co_await enqueue_sse(
+                                                boost::json::serialize(ev));
+                                            if (!queue_open)
+                                            {
+                                                cancel_token->store(true);
+                                                break;
+                                            }
+                                        }
                                     }
                                 }
+                                catch (std::exception const& e)
+                                {
+                                    PLOGE(
+                                        log_,
+                                        "SSE status drain failed: ",
+                                        e.what());
+                                    cancel_token->store(true);
+                                }
+                                status_done->try_send(
+                                    boost::system::error_code{});
                             },
                             asio::detached);
 
-                        std::string sse_error;
+                        bool status_joined = false;
+                        bool writer_joined = false;
+                        bool writer_stop_enqueued = false;
                         try
                         {
-                            auto result = co_await engine_sp->prove(
-                                tx_it->second,
-                                cancel_token,
-                                ledger_seq_hint,
-                                max_anchor_age,
-                                std::move(on_step));
+                            std::optional<uint32_t> done_network_id;
+                            std::string sse_error;
+                            try
+                            {
+                                auto result = co_await engine_sp->prove(
+                                    tx_it->second,
+                                    cancel_token,
+                                    ledger_seq_hint,
+                                    max_anchor_age,
+                                    std::move(on_step));
+                                done_network_id = result.chain.network_id;
+                            }
+                            catch (std::exception const& e)
+                            {
+                                if (!cancel_token->load())
+                                    sse_error = e.what();
+                            }
 
-                            // Stop drain loop and flush remaining
-                            *drain_done = true;
-                            drain_timer->cancel();
+                            // Join the status producer before the terminal
+                            // event so no later log can overtake it.
+                            stop_status->store(true);
+                            cancel_drain_timer();
+                            boost::system::error_code status_ec;
+                            co_await status_done->async_receive(
+                                asio::redirect_error(
+                                    asio::use_awaitable, status_ec));
+                            status_joined = true;
+
                             auto msgs = req_ctx->drain();
                             for (auto& msg : msgs)
                             {
                                 boost::json::object ev;
                                 ev["type"] = "log";
                                 ev["msg"] = std::move(msg);
-                                co_await write_sse(boost::json::serialize(ev));
+                                if (!(co_await enqueue_sse(
+                                        boost::json::serialize(ev))))
+                                    break;
                             }
 
-                            // Send done event — client stitches proof
-                            // from streamed steps + network_id
-                            boost::json::object done;
-                            done["type"] = "done";
-                            done["network_id"] = result.chain.network_id;
-                            co_await write_sse(boost::json::serialize(done));
+                            if (done_network_id)
+                            {
+                                boost::json::object done;
+                                done["type"] = "done";
+                                done["network_id"] = *done_network_id;
+                                co_await enqueue_sse(
+                                    boost::json::serialize(done));
+                            }
+                            else if (!sse_error.empty())
+                            {
+                                boost::json::object err;
+                                err["type"] = "error";
+                                err["error"] = std::move(sse_error);
+                                co_await enqueue_sse(
+                                    boost::json::serialize(err));
+                            }
+
+                            boost::system::error_code stop_ec;
+                            co_await frames->async_send(
+                                boost::system::error_code{},
+                                SseFrame{},
+                                asio::redirect_error(
+                                    asio::use_awaitable, stop_ec));
+                            writer_stop_enqueued = !stop_ec;
+                            boost::system::error_code writer_ec;
+                            co_await writer_done->async_receive(
+                                asio::redirect_error(
+                                    asio::use_awaitable, writer_ec));
+                            writer_joined = true;
                         }
                         catch (std::exception const& e)
                         {
-                            *drain_done = true;
-                            drain_timer->cancel();
-                            boost::json::object err;
-                            err["type"] = "error";
-                            err["error"] = e.what();
-                            sse_error = boost::json::serialize(err);
+                            PLOGE(log_, "SSE pipeline failed: ", e.what());
+                            cancel_token->store(true);
                         }
 
-                        if (!sse_error.empty())
-                            co_await write_sse(sse_error);
+                        // Unconditional asynchronous cleanup: every spawned
+                        // coroutine is joined before its borrowed stream or
+                        // request context can leave scope.
+                        stop_status->store(true);
+                        cancel_drain_timer();
+                        if (!status_joined)
+                        {
+                            boost::system::error_code status_ec;
+                            co_await status_done->async_receive(
+                                asio::redirect_error(
+                                    asio::use_awaitable, status_ec));
+                        }
+                        if (!writer_joined)
+                        {
+                            if (!writer_stop_enqueued)
+                            {
+                                boost::system::error_code stop_ec;
+                                co_await frames->async_send(
+                                    boost::system::error_code{},
+                                    SseFrame{},
+                                    asio::redirect_error(
+                                        asio::use_awaitable, stop_ec));
+                                if (stop_ec)
+                                    frames->cancel();
+                            }
+                            boost::system::error_code writer_ec;
+                            co_await writer_done->async_receive(
+                                asio::redirect_error(
+                                    asio::use_awaitable, writer_ec));
+                        }
+                        stop_watcher->store(true);
+                        boost::system::error_code cancel_ec;
+                        beast::get_lowest_layer(stream).socket().cancel(
+                            cancel_ec);
+                        boost::system::error_code watcher_ec;
+                        co_await watcher_done->async_receive(
+                            asio::redirect_error(
+                                asio::use_awaitable, watcher_ec));
 
                         // Close the connection — SSE is done
                         break;

@@ -13,9 +13,8 @@
 #include <cctype>
 #include <limits>
 
-// Assert that we're running on the PeerSet strand.
-// Fires in debug/TSAN builds, zero cost in release.
-// Log + assert strand affinity. In release builds, logs but doesn't crash.
+// Diagnose PeerSet state access outside its strand. Live regression runs can
+// opt into fail-fast behavior so a violation cannot be hidden in noisy logs.
 #define ASSERT_ON_STRAND()                            \
     do                                                \
     {                                                 \
@@ -102,8 +101,6 @@ wait_for_signal_or_timeout(
                     asio::deferred))
                 .async_wait(
                     asio::experimental::wait_for_one(), asio::use_awaitable);
-
-        co_await asio::post(strand, asio::use_awaitable);
 
         if (order[0] == 0)
             co_return WaitOutcome::signaled;
@@ -737,8 +734,41 @@ PeerSet::co_select_peers_for(
     int max_count,
     std::unordered_set<std::string> excluded)
 {
-    co_await asio::post(strand_, asio::use_awaitable);
-    co_return select_peers_for(ledger_seq, max_count, excluded);
+    auto self = shared_from_this();
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self, ledger_seq, max_count, excluded = std::move(excluded)]() mutable
+        -> asio::awaitable<std::vector<PeerSessionPtr>> {
+            co_return self->select_peers_for(ledger_seq, max_count, excluded);
+        },
+        asio::use_awaitable);
+}
+
+boost::asio::awaitable<PeerSet::ConnectionStats>
+PeerSet::co_connection_stats()
+{
+    auto self = shared_from_this();
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self]() -> asio::awaitable<ConnectionStats> {
+            co_return ConnectionStats{
+                self->connections_.size(),
+                self->total_connects_,
+                self->total_disconnects_};
+        },
+        asio::use_awaitable);
+}
+
+boost::asio::awaitable<size_t>
+PeerSet::co_size()
+{
+    auto self = shared_from_this();
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self]() -> asio::awaitable<size_t> {
+            co_return self->connections_.size();
+        },
+        asio::use_awaitable);
 }
 
 void
@@ -1694,13 +1724,27 @@ PeerSet::start_connect(std::string const& host, uint16_t port)
 boost::asio::awaitable<PeerSessionPtr>
 PeerSet::try_connect(std::string const& host, uint16_t port)
 {
-    // Hop to strand — touches connections_, in_flight_, etc.
-    co_await asio::post(strand_, asio::use_awaitable);
+    auto self = shared_from_this();
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self,
+         host = std::string(host),
+         port]() mutable -> asio::awaitable<PeerSessionPtr> {
+            co_return co_await self->try_connect_on_strand(
+                std::move(host), port);
+        },
+        asio::use_awaitable);
+}
+
+boost::asio::awaitable<PeerSessionPtr>
+PeerSet::try_connect_on_strand(std::string host, uint16_t port)
+{
+    ASSERT_ON_STRAND();
 
     auto key = make_key(host, port);
 
-    // Already connected?  Note: this check can go stale across the
-    // co_await in co_connect() below — see the re-check after hop-back.
+    // Already connected? This can change while co_connect() is suspended,
+    // so the result is checked again before insertion below.
     auto it = connections_.find(key);
     if (it != connections_.end())
     {
@@ -1785,13 +1829,10 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
         }
 
         co_await co_connect(io_, host, port, std::move(connect_opts), client);
+        ASSERT_ON_STRAND();
 
-        // Re-hop to strand — co_connect resumes on whatever executor
-        // the signal timer uses, which may not be our strand.
-        co_await asio::post(strand_, asio::use_awaitable);
-
-        // Re-check: co_connect() left the strand, so another coroutine
-        // (e.g. connect_batch at startup) may have inserted this key.
+        // Re-check because another strand operation may have inserted this
+        // key while the connection attempt was suspended.
         // Drop ours — first one wins.
         if (auto existing = connections_.find(key);
             existing != connections_.end())
@@ -2234,8 +2275,24 @@ PeerSet::wait_for_any_peer(
     int timeout_secs,
     std::unordered_set<std::string> const& excluded)
 {
-    // Hop to strand — all PeerSet state access must be serialized
-    co_await asio::post(strand_, asio::use_awaitable);
+    auto self = shared_from_this();
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self,
+         timeout_secs,
+         excluded]() mutable -> asio::awaitable<PeerSessionPtr> {
+            co_return co_await self->wait_for_any_peer_on_strand(
+                timeout_secs, std::move(excluded));
+        },
+        asio::use_awaitable);
+}
+
+boost::asio::awaitable<PeerSessionPtr>
+PeerSet::wait_for_any_peer_on_strand(
+    int timeout_secs,
+    std::unordered_set<std::string> excluded)
+{
+    ASSERT_ON_STRAND();
 
     if (auto client = choose_any_peer(excluded))
     {
@@ -2309,6 +2366,7 @@ PeerSet::wait_for_any_peer(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 wait_until - std::chrono::steady_clock::now());
         co_await wait_for_signal_or_timeout(strand_, wait_signal, wait_for);
+        ASSERT_ON_STRAND();
     }
 
     PLOGW(
@@ -2338,8 +2396,32 @@ PeerSet::wait_for_peer(
     std::unordered_set<std::string> const& excluded,
     std::shared_ptr<std::atomic<bool>> cancel)
 {
-    // Hop to strand — all PeerSet state access must be serialized
-    co_await asio::post(strand_, asio::use_awaitable);
+    auto self = shared_from_this();
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self,
+         ledger_seq,
+         timeout_secs,
+         excluded,
+         cancel =
+             std::move(cancel)]() mutable -> asio::awaitable<PeerSessionPtr> {
+            co_return co_await self->wait_for_peer_on_strand(
+                ledger_seq,
+                timeout_secs,
+                std::move(excluded),
+                std::move(cancel));
+        },
+        asio::use_awaitable);
+}
+
+boost::asio::awaitable<PeerSessionPtr>
+PeerSet::wait_for_peer_on_strand(
+    uint32_t ledger_seq,
+    int timeout_secs,
+    std::unordered_set<std::string> excluded,
+    std::shared_ptr<std::atomic<bool>> cancel)
+{
+    ASSERT_ON_STRAND();
 
     if (cancel && cancel->load(std::memory_order_relaxed))
         co_return nullptr;
@@ -2599,6 +2681,7 @@ PeerSet::wait_for_peer(
                 wait_until - std::chrono::steady_clock::now());
         auto outcome = co_await wait_for_signal_or_timeout(
             strand_, wait_signal, wait_for, cancel);
+        ASSERT_ON_STRAND();
         if (outcome == WaitOutcome::canceled)
         {
             cleanup.clean_now();
@@ -2660,8 +2743,13 @@ PeerSet::any_peer(std::unordered_set<std::string> const& excluded) const
 boost::asio::awaitable<PeerSet::Snapshot>
 PeerSet::co_snapshot()
 {
-    co_await asio::post(strand_, asio::use_awaitable);
-    co_return snapshot_unsafe();
+    auto self = shared_from_this();
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self]() -> asio::awaitable<Snapshot> {
+            co_return self->snapshot_unsafe();
+        },
+        asio::use_awaitable);
 }
 
 size_t

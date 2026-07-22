@@ -623,3 +623,286 @@ TEST(PeerSessionInterface, NodeCacheWalkToFailsOverAcrossFakePeers)
     io.stop();
     runner.join();
 }
+
+TEST(PeerSessionInterface, NodeCacheWalkFailureExcludesEveryAttemptedPeer)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = std::chrono::milliseconds(30),
+            .max_walk_peer_retries = 2,
+            .fetch_stale_multiplier = 1,
+        });
+
+    auto const root_hash = hash_with_byte(0x77);
+    auto const target_key = hash_with_byte(0x88);
+    auto const ledger_hash = hash_with_byte(0x99);
+    constexpr uint32_t ledger_seq = 3000;
+
+    auto first = std::make_shared<FakePeerSession>(
+        io, "a-fake-missing:1", true, ledger_seq, 2900, 3100);
+    auto second = std::make_shared<FakePeerSession>(
+        io, "z-fake-missing:1", true, ledger_seq, 2900, 3100);
+
+    std::atomic<int> first_requests{0};
+    std::atomic<int> second_requests{0};
+    first->set_send_get_nodes_handler(
+        [&first_requests](
+            Hash256 const&,
+            int,
+            std::vector<SHAMapNodeID> const&,
+            std::function<void(boost::system::error_code)>) {
+            first_requests.fetch_add(1, std::memory_order_relaxed);
+        });
+    second->set_send_get_nodes_handler(
+        [&second_requests](
+            Hash256 const&,
+            int,
+            std::vector<SHAMapNodeID> const&,
+            std::function<void(boost::system::error_code)>) {
+            second_requests.fetch_add(1, std::memory_order_relaxed);
+        });
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, first);
+    PeerSetTestAccess::insert_connected_peer(io, peers, second);
+
+    std::promise<std::pair<WalkResult, PeerSessionPtr>> promise;
+    auto future = promise.get_future();
+    asio::co_spawn(
+        io,
+        [cache, peers, root_hash, target_key, ledger_hash, first, &promise]()
+            -> asio::awaitable<void> {
+            try
+            {
+                auto result = co_await cache->walk_to(
+                    root_hash,
+                    target_key,
+                    ledger_hash,
+                    ledger_seq,
+                    1,
+                    peers,
+                    first);
+                auto remaining = co_await peers->wait_for_peer(ledger_seq, 0);
+                promise.set_value({std::move(result), std::move(remaining)});
+            }
+            catch (...)
+            {
+                promise.set_exception(std::current_exception());
+            }
+        },
+        asio::detached);
+
+    std::thread runner([&]() { io.run(); });
+    auto [result, remaining] = wait_for_future(future, std::chrono::seconds(3));
+
+    EXPECT_FALSE(result.found);
+    EXPECT_EQ(remaining, nullptr);
+    EXPECT_GE(first_requests.load(std::memory_order_relaxed), 1);
+    EXPECT_GE(second_requests.load(std::memory_order_relaxed), 1);
+
+    io.stop();
+    runner.join();
+}
+
+TEST(PeerSessionInterface, NodeCacheWalkReachesUntriedFanoutPeer)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = std::chrono::milliseconds(30),
+            .max_walk_peer_retries = 3,
+            .fetch_stale_multiplier = 1,
+        });
+
+    auto const root_hash = hash_with_byte(0xA1);
+    auto const target_key = hash_with_byte(0xA2);
+    auto const ledger_hash = hash_with_byte(0xA3);
+    auto const wire = make_leaf_wire(target_key);
+    constexpr uint32_t ledger_seq = 4000;
+
+    std::array<std::shared_ptr<FakePeerSession>, 4> fake_peers;
+    std::array<std::atomic<int>, 4> requests{};
+    for (std::size_t i = 0; i < fake_peers.size(); ++i)
+    {
+        fake_peers[i] = std::make_shared<FakePeerSession>(
+            io,
+            std::string(1, static_cast<char>('a' + i)) + "-fake:1",
+            true,
+            ledger_seq,
+            ledger_seq - static_cast<uint32_t>(400 - i * 100),
+            ledger_seq + static_cast<uint32_t>(400 - i * 100));
+        fake_peers[i]->set_send_get_nodes_handler(
+            [&requests, i](
+                Hash256 const&,
+                int,
+                std::vector<SHAMapNodeID> const&,
+                std::function<void(boost::system::error_code)>) {
+                requests[i].fetch_add(1, std::memory_order_relaxed);
+            });
+        PeerSetTestAccess::insert_connected_peer(io, peers, fake_peers[i]);
+    }
+
+    fake_peers.back()->set_send_get_nodes_handler(
+        [cache, root_hash, wire, &requests](
+            Hash256 const&,
+            int,
+            std::vector<SHAMapNodeID> const&,
+            std::function<void(boost::system::error_code)> on_error) mutable {
+            requests.back().fetch_add(1, std::memory_order_relaxed);
+            cache->insert_and_notify(root_hash, wire);
+            if (on_error)
+                on_error({});
+        });
+
+    std::promise<WalkResult> promise;
+    auto future = promise.get_future();
+    asio::co_spawn(
+        io,
+        [cache,
+         peers,
+         root_hash,
+         target_key,
+         ledger_hash,
+         first = fake_peers.front(),
+         &promise]() -> asio::awaitable<void> {
+            try
+            {
+                promise.set_value(co_await cache->walk_to(
+                    root_hash,
+                    target_key,
+                    ledger_hash,
+                    ledger_seq,
+                    1,
+                    peers,
+                    first));
+            }
+            catch (...)
+            {
+                promise.set_exception(std::current_exception());
+            }
+        },
+        asio::detached);
+
+    std::thread runner([&]() { io.run(); });
+    auto result = wait_for_future(future, std::chrono::seconds(3));
+
+    EXPECT_TRUE(result.found);
+    for (auto const& request_count : requests)
+        EXPECT_GE(request_count.load(std::memory_order_relaxed), 1);
+
+    io.stop();
+    runner.join();
+}
+
+TEST(PeerSessionInterface, NodeCacheFanoutSurvivesOneWriteFailure)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 100ms,
+            .max_walk_peer_retries = 0,
+            .fetch_stale_multiplier = 1,
+        });
+
+    auto const root_hash = hash_with_byte(0xB1);
+    auto const target_key = hash_with_byte(0xB2);
+    auto const ledger_hash = hash_with_byte(0xB3);
+    auto const wire = make_leaf_wire(target_key);
+    constexpr uint32_t ledger_seq = 5000;
+
+    auto failing = std::make_shared<FakePeerSession>(
+        io, "a-fake-write-failure:1", true, ledger_seq, 4900, 5100);
+    auto responding = std::make_shared<FakePeerSession>(
+        io, "z-fake-delayed-response:1", true, ledger_seq, 4900, 5100);
+
+    failing->set_send_get_nodes_handler(
+        [&io](
+            Hash256 const&,
+            int,
+            std::vector<SHAMapNodeID> const&,
+            std::function<void(boost::system::error_code)> on_error) {
+            auto timer = std::make_shared<asio::steady_timer>(io, 5ms);
+            timer->async_wait([timer, on_error = std::move(on_error)](
+                                  boost::system::error_code ec) mutable {
+                if (!ec && on_error)
+                    on_error(asio::error::connection_reset);
+            });
+        });
+    responding->set_send_get_nodes_handler(
+        [&io, cache, root_hash, wire](
+            Hash256 const&,
+            int,
+            std::vector<SHAMapNodeID> const&,
+            std::function<void(boost::system::error_code)>) {
+            auto timer = std::make_shared<asio::steady_timer>(io, 20ms);
+            timer->async_wait(
+                [timer, cache, root_hash, wire](boost::system::error_code ec) {
+                    if (!ec)
+                        cache->insert_and_notify(root_hash, wire);
+                });
+        });
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, failing);
+    PeerSetTestAccess::insert_connected_peer(io, peers, responding);
+
+    std::promise<WalkResult> promise;
+    auto future = promise.get_future();
+    asio::co_spawn(
+        io,
+        [cache, peers, root_hash, target_key, ledger_hash, failing, &promise]()
+            -> asio::awaitable<void> {
+            try
+            {
+                promise.set_value(co_await cache->walk_to(
+                    root_hash,
+                    target_key,
+                    ledger_hash,
+                    ledger_seq,
+                    1,
+                    peers,
+                    failing));
+            }
+            catch (...)
+            {
+                promise.set_exception(std::current_exception());
+            }
+        },
+        asio::detached);
+
+    std::thread runner([&]() { io.run(); });
+    auto result = wait_for_future(future, std::chrono::seconds(3));
+
+    EXPECT_TRUE(result.found);
+
+    io.stop();
+    runner.join();
+}

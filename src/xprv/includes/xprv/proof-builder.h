@@ -63,7 +63,7 @@ struct BuildServices
     GetAnchorFn get_anchor;
 
     // Cancel token — set by HTTP session on client disconnect.
-    // Checked at cancellation boundaries (walk_to, with_peer_failover)
+    // Checked at cancellation boundaries (peer waits and node walks)
     // to stop work without disrupting shared NodeCache state.
     std::shared_ptr<std::atomic<bool>> cancel_token;
 

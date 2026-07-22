@@ -318,7 +318,10 @@ private:
         PeerSessionPtr peer,
         std::shared_ptr<PeerSet> peers = nullptr,
         uint32_t ledger_seq = 0,
-        std::shared_ptr<std::atomic<bool>> cancel = nullptr);
+        std::shared_ptr<std::atomic<bool>> cancel = nullptr,
+        std::unordered_set<std::string>* attempted_peers = nullptr,
+        std::unordered_set<std::string> const* excluded_peers = nullptr,
+        bool* initiated_fetch = nullptr);
 
     /// Send a TMGetLedger request for a node (+ speculative deeper nodes).
     /// Non-coroutine: just builds and sends the request, no waiting.
