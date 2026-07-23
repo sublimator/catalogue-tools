@@ -9,3 +9,8 @@ target_link_libraries(deterministic-scheduler-gtest
 
 include(GoogleTest)
 gtest_discover_tests(deterministic-scheduler-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(operation-ledger-gtest operation-ledger-gtest.cpp)
+target_link_libraries(operation-ledger-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(operation-ledger-gtest DISCOVERY_TIMEOUT 30)

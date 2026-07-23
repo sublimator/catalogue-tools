@@ -267,6 +267,7 @@ private:
 /// set-once and level-triggered, observers poll requested() at commit
 /// points or park on async_wait(), and a wait that begins after the
 /// request completes immediately. Off-strand touches are refused.
+//@@authority state=provider_lab.sticky_cancel_cell owner=provider_lab
 class StickyCancelCell
 {
 public:
@@ -292,6 +293,7 @@ public:
 
     /// Set-once. Returns false (and has no effect) off-strand; the
     /// second and later requests are no-ops returning true.
+    //@@authority transition=provider_lab.sticky_cancel_request owner=provider_lab commit=strand
     bool
     request()
     {
