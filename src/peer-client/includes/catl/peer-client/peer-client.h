@@ -100,7 +100,10 @@ class PeerClient final : public PeerSession,
                          public std::enable_shared_from_this<PeerClient>
 {
 public:
-    using DisconnectCallback = std::function<void()>;
+    /// Fires exactly once on the client strand with the immutable terminal
+    /// fact for this connection instance. The observer must not assume the
+    /// session is still registered anywhere when this runs.
+    using DisconnectCallback = std::function<void(PeerTerminalReason const&)>;
 
     /// Pre-connect configuration. Set these before the read loop starts
     /// to avoid cross-strand races.

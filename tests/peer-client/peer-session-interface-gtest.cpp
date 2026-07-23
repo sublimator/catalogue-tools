@@ -7,6 +7,7 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -1634,4 +1635,247 @@ TEST(PeerSessionInterface, ClaimedProbeSurvivesFallbackButNotCancellation)
         true));
     EXPECT_TRUE(PeerSetTestAccess::has_connection(
         canceled_io, canceled_peers, canceled_existing->endpoint()));
+}
+
+// ---------------------------------------------------------------------------
+// Terminal receipt channel: the peer-client death export and PeerSet's
+// generation-gated consumer (v4 design references T72 -> T39). These are
+// deterministic single-strand interleavings driven through the test access
+// harness — no wall-clock races.
+// ---------------------------------------------------------------------------
+
+TEST(PeerTerminalReceipt, CurrentGenerationTerminalRemovesPeer)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    auto fake = std::make_shared<FakePeerSession>(
+        io, "fake-term:1", true, 500, 400, 600);
+    auto const key = fake->endpoint();
+    auto const gen =
+        PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, fake);
+    ASSERT_GT(gen, 0u);
+    ASSERT_EQ(PeerSetTestAccess::live_generation(io, peers, key), gen);
+
+    PeerSetTestAccess::consume_terminal(
+        io,
+        peers,
+        key,
+        gen,
+        {boost::asio::error::eof, "packet header read: end of stream"});
+
+    EXPECT_EQ(PeerSetTestAccess::live_generation(io, peers, key), 0u);
+    EXPECT_EQ(PeerSetTestAccess::total_disconnects(io, peers), 1u);
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u);
+}
+
+TEST(PeerTerminalReceipt, StaleTerminalCannotRemoveNewerGeneration)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    // Established instance holds the key.
+    auto established = std::make_shared<FakePeerSession>(
+        io, "fake-stale:1", true, 500, 400, 600);
+    auto const key = established->endpoint();
+    auto const live_gen = PeerSetTestAccess::insert_ready_peer_with_generation(
+        io, peers, established);
+
+    // A later candidate for the same endpoint died before admission; its
+    // terminal record arrives carrying a generation the map never admitted.
+    // Before generation gating, this record erased the healthy peer.
+    auto const candidate_gen = live_gen + 1;
+    PeerSetTestAccess::consume_terminal(
+        io,
+        peers,
+        key,
+        candidate_gen,
+        {boost::asio::error::connection_refused, "connect: refused"});
+
+    EXPECT_EQ(PeerSetTestAccess::live_generation(io, peers, key), live_gen)
+        << "stale/foreign terminal must not remove the live instance";
+    EXPECT_EQ(PeerSetTestAccess::total_disconnects(io, peers), 0u);
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 0u)
+        << "a never-admitted candidate's death must not poison live stats";
+    EXPECT_TRUE(PeerSetTestAccess::endpoint_connected_ok(io, peers, key))
+        << "the live endpoint must stay selectable";
+}
+
+TEST(PeerTerminalReceipt, DuplicateTerminalIsIdempotent)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    auto fake = std::make_shared<FakePeerSession>(
+        io, "fake-dup:1", true, 500, 400, 600);
+    auto const key = fake->endpoint();
+    auto const gen =
+        PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, fake);
+
+    PeerTerminalReason const reason{
+        boost::asio::error::connection_reset, "packet payload read: reset"};
+    PeerSetTestAccess::consume_terminal(io, peers, key, gen, reason);
+    PeerSetTestAccess::consume_terminal(io, peers, key, gen, reason);
+
+    EXPECT_EQ(PeerSetTestAccess::total_disconnects(io, peers), 1u)
+        << "replayed terminal record must not double-count";
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u)
+        << "replayed terminal record must not double-record the failure";
+}
+
+TEST(PeerTerminalReceipt, EvictionThenLateTerminalDoesNotDoubleCount)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    auto fake = std::make_shared<FakePeerSession>(
+        io, "fake-evict:1", true, 500, 400, 600);
+    auto const key = fake->endpoint();
+    auto const gen =
+        PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, fake);
+
+    // PeerSet-initiated eviction removes the row first...
+    PeerSetTestAccess::remove_peer_for_test(io, peers, key, false);
+    ASSERT_EQ(PeerSetTestAccess::total_disconnects(io, peers), 1u);
+
+    // ...then the instance's own death record arrives late (a read failure
+    // racing the eviction's close). It must record the failure fact once
+    // and must not double-count the disconnect.
+    PeerSetTestAccess::consume_terminal(
+        io,
+        peers,
+        key,
+        gen,
+        {boost::asio::error::operation_aborted, "socket closed"});
+
+    EXPECT_EQ(PeerSetTestAccess::total_disconnects(io, peers), 1u);
+    EXPECT_EQ(PeerSetTestAccess::live_generation(io, peers, key), 0u);
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 0u)
+        << "an eviction's late terminal must not add a failure";
+}
+
+TEST(PeerTerminalReceipt, InterleavedGenerationsConvergeToNewestSurvivor)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    // gen1 admitted, dies; gen2 admitted at the same endpoint; gen1's
+    // duplicate record and an unknown candidate's record both arrive after.
+    auto fake1 = std::make_shared<FakePeerSession>(
+        io, "fake-ilv:1", true, 500, 400, 600);
+    auto const key = fake1->endpoint();
+    auto const gen1 =
+        PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, fake1);
+    PeerSetTestAccess::consume_terminal(
+        io, peers, key, gen1, {boost::asio::error::eof, "eof"});
+
+    auto fake2 = std::make_shared<FakePeerSession>(
+        io, "fake-ilv:1", true, 520, 400, 650);
+    auto const gen2 =
+        PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, fake2);
+    ASSERT_GT(gen2, gen1);
+
+    // Late duplicate of gen1's terminal: no row carries that generation
+    // any more, so the record has no consuming authority — pure no-op.
+    PeerSetTestAccess::consume_terminal(
+        io, peers, key, gen1, {boost::asio::error::eof, "eof"});
+
+    EXPECT_EQ(PeerSetTestAccess::live_generation(io, peers, key), gen2)
+        << "the newest admitted instance must survive every stale record";
+    EXPECT_EQ(PeerSetTestAccess::total_disconnects(io, peers), 1u);
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u);
+}
+
+TEST(PeerTerminalReceipt, HigherCandidateTerminalCannotBlockLowerLiveTerminal)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    auto live = std::make_shared<FakePeerSession>(
+        io, "fake-order:1", true, 500, 400, 600);
+    auto const key = live->endpoint();
+    auto const live_gen =
+        PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, live);
+
+    // A concurrently minted, never-admitted candidate with a HIGHER
+    // generation dies first. Terminal delivery is not ordered by
+    // generation; this record must be a pure no-op.
+    PeerSetTestAccess::consume_terminal(
+        io,
+        peers,
+        key,
+        live_gen + 5,
+        {boost::asio::error::connection_refused, "connect: refused"});
+    ASSERT_EQ(PeerSetTestAccess::live_generation(io, peers, key), live_gen);
+
+    // The live instance's own, LOWER-generation terminal must still have
+    // full authority afterward. (A scalar high-water broke exactly here:
+    // the dead row would have been stranded in connections_.)
+    PeerSetTestAccess::consume_terminal(
+        io,
+        peers,
+        key,
+        live_gen,
+        {boost::asio::error::eof, "packet header read: end of stream"});
+
+    EXPECT_EQ(PeerSetTestAccess::live_generation(io, peers, key), 0u)
+        << "the live instance's genuine terminal must still remove the row";
+    EXPECT_EQ(PeerSetTestAccess::total_disconnects(io, peers), 1u);
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u);
+}
+
+TEST(PeerTerminalReceipt, PreAdmissionConnectFailureIsCountedExactlyOnce)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    // Reserve an ephemeral loopback port, then close it so the connect is
+    // deterministically refused.
+    boost::asio::ip::tcp::acceptor acceptor(
+        io,
+        boost::asio::ip::tcp::endpoint(
+            boost::asio::ip::make_address("127.0.0.1"), 0));
+    auto const port = acceptor.local_endpoint().port();
+    acceptor.close();
+
+    auto session = PeerSetTestAccess::try_real_connect(
+        io, peers, "127.0.0.1", port);
+    EXPECT_EQ(session, nullptr);
+
+    auto const key = "127.0.0.1:" + std::to_string(port);
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u)
+        << "a refused TCP connect completes in the async-connect handler "
+           "and never reaches fail_and_close, so exactly one failure is "
+           "recorded by the note_connect_failure path alone";
+    EXPECT_EQ(PeerSetTestAccess::total_disconnects(io, peers), 0u);
+    EXPECT_EQ(PeerSetTestAccess::live_generation(io, peers, key), 0u);
+}
+
+TEST(PeerTerminalReceipt, NeverAdmittedTerminalCannotAlterConnectFailureStats)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    // The legacy connect-failure path records the candidate's failure once.
+    auto const key = std::string{"10.0.0.9:51235"};
+    PeerSetTestAccess::note_connect_failure_for_test(
+        io, peers, key, "tls handshake: timeout");
+    ASSERT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u);
+
+    // The same candidate's terminal record then arrives: never admitted,
+    // no row, no authority. It must not double-account the failure or
+    // fabricate a disconnect. This pins the ownership rule that fixed
+    // blocker 2: pre-admission failure belongs to note_connect_failure,
+    // and the terminal channel consumes only exact live matches.
+    PeerSetTestAccess::consume_terminal(
+        io,
+        peers,
+        key,
+        7,
+        {boost::asio::error::timed_out, "tls handshake: timeout"});
+
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u)
+        << "never-admitted terminal must not double-account the failure";
+    EXPECT_EQ(PeerSetTestAccess::total_disconnects(io, peers), 0u);
+    EXPECT_EQ(PeerSetTestAccess::live_generation(io, peers, key), 0u);
 }

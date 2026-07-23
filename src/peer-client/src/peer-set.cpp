@@ -362,8 +362,9 @@ PeerSet::set_unsolicited_handler(UnsolicitedHandler handler)
             current_handler = self->unsolicited_handler_;
         }
 
-        for (auto& [_, client] : self->connections_)
+        for (auto& [_, client_entry] : self->connections_)
         {
+            auto const& client = client_entry.session;
             if (client)
             {
                 client->set_unsolicited_handler(current_handler);
@@ -669,7 +670,7 @@ PeerSet::select_peers_for(
     // Budget: never use more than 1/3 of ready peers, cap at 4
     int ready = 0;
     for (auto const& [_, c] : connections_)
-        if (c && c->is_ready())
+        if (c.session && c.session->is_ready())
             ++ready;
     int budget = std::min({max_count, std::max(1, ready / 3), 4});
 
@@ -683,8 +684,9 @@ PeerSet::select_peers_for(
     std::vector<Candidate> candidates;
     auto const now = std::chrono::steady_clock::now();
 
-    for (auto const& [key, client] : connections_)
+    for (auto const& [key, client_entry] : connections_)
     {
+        auto const& client = client_entry.session;
         if (!client || !client->is_ready())
             continue;
         if (excluded.count(key))
@@ -817,8 +819,9 @@ PeerSet::choose_any_peer(std::unordered_set<std::string> const& excluded)
     PeerSessionPtr best;
     std::string best_key;
 
-    for (auto const& [key, client] : connections_)
+    for (auto const& [key, client_entry] : connections_)
     {
+        auto const& client = client_entry.session;
         if (excluded.count(key))
             continue;
         if (!client || !client->is_ready())
@@ -878,8 +881,9 @@ PeerSet::choose_peer_for(
     std::string best_key;
     uint32_t best_span = std::numeric_limits<uint32_t>::max();
 
-    for (auto const& [key, client] : connections_)
+    for (auto const& [key, client_entry] : connections_)
     {
+        auto const& client = client_entry.session;
         if (excluded.count(key))
             continue;
         if (!client || !client->is_ready())
@@ -1813,7 +1817,9 @@ PeerSet::try_connect_on_strand(
     auto it = connections_.find(key);
     if (it != connections_.end())
     {
-        co_return (it->second && it->second->is_ready()) ? it->second : nullptr;
+        co_return (it->second.session && it->second.session->is_ready())
+            ? it->second.session
+            : nullptr;
     }
 
     // Cached crawl data is only a pre-connect hint. A successful handshake is
@@ -1867,15 +1873,25 @@ PeerSet::try_connect_on_strand(
             std::lock_guard lock(unsolicited_handler_mutex_);
             connect_opts.unsolicited_handler = unsolicited_handler_;
         }
+        // Mint this candidate's instance identity before any handler can
+        // fire. The generation travels in the closure, not on the session:
+        // a death between connect and admission then consumes as a stale
+        // instance instead of erasing whichever peer currently owns the key.
+        //@@authority transition=peer_set.mint_connection_generation v4=T31 owner=peer_set commit=strand
+        auto const generation = ++next_connection_generation_;
         {
             auto self_weak = weak_from_this();
             auto owned_key2 = key;
-            connect_opts.on_disconnect = [self_weak, owned_key2]() {
+            connect_opts.on_disconnect = [self_weak, owned_key2, generation](
+                                             PeerTerminalReason const& reason) {
                 if (auto self2 = self_weak.lock())
                 {
-                    asio::post(self2->strand_, [self2, owned_key2]() {
-                        self2->remove_peer(owned_key2);
-                    });
+                    asio::post(
+                        self2->strand_,
+                        [self2, owned_key2, generation, reason]() {
+                            self2->consume_peer_terminal(
+                                owned_key2, generation, reason);
+                        });
                 }
             };
         }
@@ -1896,7 +1912,7 @@ PeerSet::try_connect_on_strand(
                 "] Discarding duplicate connection for ",
                 key);
             client->disconnect();
-            co_return existing->second;
+            co_return existing->second.session;
         }
 
         if (!client || !client->is_ready())
@@ -1927,7 +1943,7 @@ PeerSet::try_connect_on_strand(
             co_return nullptr;
         }
 
-        connections_[key] = client;
+        connections_[key] = ConnectionEntry{client, generation};
         ++total_connects_;
         failed_at_.erase(key);
         note_connect_success(
@@ -2504,8 +2520,9 @@ PeerSet::peer_for(
     PeerSessionPtr best;
     std::string best_key;
 
-    for (auto const& [key, client] : connections_)
+    for (auto const& [key, client_entry] : connections_)
     {
+        auto const& client = client_entry.session;
         if (excluded.count(key))
             continue;
         if (!client || !client->is_ready())
@@ -2770,8 +2787,9 @@ PeerSet::wait_for_peer_on_strand(
         auto const now = std::chrono::steady_clock::now();
         std::vector<PeerCandidate> candidates;
         candidates.reserve(connections_.size());
-        for (auto const& [key, client] : connections_)
+        for (auto const& [key, client_entry] : connections_)
         {
+            auto const& client = client_entry.session;
             if (!client)
                 continue;
             auto& stats = endpoint_stats_[key];
@@ -2817,7 +2835,7 @@ PeerSet::wait_for_peer_on_strand(
             sel.decision == PeerDecision::use_fallback)
         {
             auto it = connections_.find(sel.endpoint);
-            if (it != connections_.end() && it->second)
+            if (it != connections_.end() && it->second.session)
             {
                 PLOGI(
                     log_,
@@ -2832,7 +2850,7 @@ PeerSet::wait_for_peer_on_strand(
                     ledger_seq);
                 note_peer_selected(sel.endpoint);
                 cleanup.clean_now(sel.decision == PeerDecision::use_fallback);
-                co_return it->second;
+                co_return it->second.session;
             }
         }
     }
@@ -2911,7 +2929,7 @@ PeerSet::wait_for_peer_on_strand(
             case PeerDecision::use_range_match:
             case PeerDecision::use_fallback: {
                 auto it = connections_.find(sel.endpoint);
-                if (it != connections_.end() && it->second)
+                if (it != connections_.end() && it->second.session)
                 {
                     PLOGI(
                         log_,
@@ -2925,14 +2943,14 @@ PeerSet::wait_for_peer_on_strand(
                         " for ledger ",
                         ledger_seq,
                         " (range ",
-                        it->second->peer_first_seq(),
+                        it->second.session->peer_first_seq(),
                         "-",
-                        it->second->peer_last_seq(),
+                        it->second.session->peer_last_seq(),
                         ")");
                     note_peer_selected(sel.endpoint);
                     cleanup.clean_now(
                         sel.decision == PeerDecision::use_fallback);
-                    co_return it->second;
+                    co_return it->second.session;
                 }
                 break;  // selected peer vanished, keep polling
             }
@@ -3027,8 +3045,9 @@ PeerSet::any_peer(std::unordered_set<std::string> const& excluded) const
     PeerSessionPtr best;
     std::string best_key;
 
-    for (auto const& [key, client] : connections_)
+    for (auto const& [key, client_entry] : connections_)
     {
+        auto const& client = client_entry.session;
         if (excluded.count(key))
             continue;
         if (client && client->is_ready())
@@ -3060,8 +3079,9 @@ PeerSet::connected_count() const
 {
     ASSERT_ON_STRAND();
     size_t count = 0;
-    for (auto const& [_, client] : connections_)
+    for (auto const& [_, client_entry] : connections_)
     {
+        auto const& client = client_entry.session;
         if (client && client->is_ready())
         {
             count++;
@@ -3109,8 +3129,9 @@ PeerSet::archival_peer_count() const
 {
     ASSERT_ON_STRAND();
     size_t count = 0;
-    for (auto const& [_, client] : connections_)
+    for (auto const& [_, client_entry] : connections_)
     {
+        auto const& client = client_entry.session;
         if (!client || !client->is_ready())
             continue;
         auto first = client->peer_first_seq();
@@ -3143,8 +3164,9 @@ PeerSet::has_usable_covering_peer(
 {
     ASSERT_ON_STRAND();
     auto const now = std::chrono::steady_clock::now();
-    for (auto const& [key, peer] : connections_)
+    for (auto const& [key, peer_entry] : connections_)
     {
+        auto const& peer = peer_entry.session;
         if (!peer || !peer->is_ready())
             continue;
         if (excluded.count(key))
@@ -3208,7 +3230,7 @@ PeerSet::would_drop_wanted_coverage(
             [&](auto const& connection) {
                 auto const& [key, peer] = connection;
                 return key != victim_key &&
-                    usable(key, peer, ledger_seq, excluded);
+                    usable(key, peer.session, ledger_seq, excluded);
             });
     };
 
@@ -3257,8 +3279,9 @@ PeerSet::rotation_target_for(
     };
     auto has_known_bad_victim = [&](TargetedConnectAuthorization const& auth) {
         auto const now = std::chrono::steady_clock::now();
-        for (auto const& [key, peer] : connections_)
+        for (auto const& [key, peer_entry] : connections_)
         {
+            auto const& peer = peer_entry.session;
             if (!peer || !peer->is_ready() || peer->pending_count() > 0 ||
                 peer_is_archival(peer) != candidate_archival)
             {
@@ -3471,11 +3494,12 @@ PeerSet::snapshot_unsafe() const
             conn_it != connections_.end())
         {
             entry.connected = true;
-            if (conn_it->second)
+            if (conn_it->second.session)
             {
-                entry.peer_headers = conn_it->second->peer_headers();
+                entry.peer_headers =
+                    conn_it->second.session->peer_headers();
             }
-            if (conn_it->second && conn_it->second->is_ready())
+            if (conn_it->second.session && conn_it->second.session->is_ready())
             {
                 entry.ready = true;
                 out.ready_peers++;
@@ -3511,8 +3535,9 @@ PeerSet::evict_hub_for(RotationTarget const& target)
     uint64_t worst_failure_count = 0;
     auto const now = std::chrono::steady_clock::now();
 
-    for (auto const& [key, client] : connections_)
+    for (auto const& [key, client_entry] : connections_)
     {
+        auto const& client = client_entry.session;
         if (!client || !client->is_ready() || peer_is_archival(client))
             continue;
         if (client->pending_count() > 0)
@@ -3561,7 +3586,8 @@ PeerSet::evict_hub_for(RotationTarget const& target)
         target.ledger_seq);
 
     auto it = connections_.find(worst_key);
-    auto victim = it != connections_.end() ? it->second : nullptr;
+    auto victim =
+        it != connections_.end() ? it->second.session : nullptr;
     remove_peer(worst_key, false);
     if (victim)
         victim->disconnect();
@@ -3578,8 +3604,9 @@ PeerSet::evict_archival_for(RotationTarget const& target)
     uint64_t worst_failure_count = 0;
     auto const now = std::chrono::steady_clock::now();
 
-    for (auto const& [key, client] : connections_)
+    for (auto const& [key, client_entry] : connections_)
     {
+        auto const& client = client_entry.session;
         if (!client || !client->is_ready() || !peer_is_archival(client) ||
             client->pending_count() > 0)
         {
@@ -3629,7 +3656,8 @@ PeerSet::evict_archival_for(RotationTarget const& target)
         target.ledger_seq);
 
     auto it = connections_.find(worst_key);
-    auto victim = it != connections_.end() ? it->second : nullptr;
+    auto victim =
+        it != connections_.end() ? it->second.session : nullptr;
     remove_peer(worst_key, false);
     if (victim)
         victim->disconnect();
@@ -3659,6 +3687,75 @@ PeerSet::remove_peer(std::string const& key, bool forget_endpoint)
             tracker_->remove(key);
         notify_waiters();
     }
+}
+
+void
+PeerSet::consume_peer_terminal(
+    std::string const& key,
+    std::uint64_t generation,
+    PeerTerminalReason reason)
+{
+    if (!strand_.running_in_this_thread())
+    {
+        asio::post(
+            strand_,
+            [self = shared_from_this(),
+             key,
+             generation,
+             reason = std::move(reason)]() mutable {
+                self->consume_peer_terminal(
+                    key, generation, std::move(reason));
+            });
+        return;
+    }
+    auto it = connections_.find(key);
+    if (it == connections_.end() || it->second.generation != generation)
+    {
+        // Pure no-op: absent, evicted, duplicate, never-admitted, or
+        // generation-mismatched. A stale candidate's death must not touch
+        // a live endpoint's stats (pre-admission failures are owned by
+        // note_connect_failure), and a duplicate's authority was consumed
+        // when the first matching record erased the row.
+        PLOGD(
+            log_,
+            "[",
+            net_label_,
+            "] Unmatched terminal for ",
+            key,
+            " gen ",
+            generation,
+            " ignored (live gen ",
+            it != connections_.end() ? it->second.generation : 0,
+            ")");
+        return;
+    }
+
+    // Exact live match: this admitted instance's death is recorded once.
+    auto& stats = endpoint_stats_[key];
+    stats.last_failure_at = now_unix();
+    stats.last_seen_at = stats.last_failure_at;
+    stats.failure_count++;
+    stats.connected_ok = false;
+    record_failure_event(
+        key,
+        classify_failure_kind(reason.detail, false),
+        std::chrono::steady_clock::now());
+    PLOGI(
+        log_,
+        "[",
+        net_label_,
+        "] Removing dead peer: ",
+        key,
+        " (gen ",
+        generation,
+        reason.ec ? ", " : "",
+        reason.ec ? reason.ec.message() : std::string{},
+        ")");
+    connections_.erase(it);
+    ++total_disconnects_;
+    tracker_->remove(key);
+    sort_pending_connects();
+    notify_waiters();
 }
 
 void

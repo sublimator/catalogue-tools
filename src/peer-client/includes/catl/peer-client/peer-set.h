@@ -406,9 +406,28 @@ private:
         std::unordered_set<std::string> excluded,
         std::shared_ptr<std::atomic<bool>> cancel);
 
-    /// Remove a dead peer from the connection map.
+    /// Remove a peer by PeerSet's own decision (eviction, tests). For
+    /// deaths reported by the connection itself, use consume_peer_terminal.
+    //@@authority transition=peer_set.remove_peer owner=peer_set commit=strand
     void
     remove_peer(std::string const& key, bool forget_endpoint = true);
+
+    /// Consume one connection instance's terminal record, posted from the
+    /// client strand's export commit. The consumer has authority only when
+    /// the live entry IS that exact generation: record the admitted peer's
+    /// failure once, erase the row, count the disconnect once. Everything
+    /// else — absent, evicted, duplicate, never-admitted, or mismatched —
+    /// is a pure no-op: the row itself is the dedup state (first match
+    /// erases it; later copies find no matching authority), and
+    /// pre-admission connect failures remain owned by the existing
+    /// note_connect_failure path. Terminal delivery is NOT ordered by
+    /// generation, so no scalar mark may gate consumption.
+    //@@authority transition=peer_set.consume_peer_terminal v4=T39 owner=peer_set commit=strand
+    void
+    consume_peer_terminal(
+        std::string const& key,
+        std::uint64_t generation,
+        PeerTerminalReason reason);
 
     /// Check if we're at the hub connection cap.
     bool
@@ -649,7 +668,19 @@ private:
     };
     std::unordered_map<std::string, EndpointStats> endpoint_stats_;
     std::uint64_t next_selection_ticket_ = 0;
-    std::map<std::string, PeerSessionPtr> connections_;
+    /// One admitted connection instance: the session plus the generation
+    /// minted for it at candidate creation. The generation is PeerSet-owned
+    /// instance identity — endpoint strings alone cannot distinguish an old
+    /// instance's delayed death from the instance currently admitted.
+    //@@authority state=peer_set.connections v4=S16 owner=peer_set
+    struct ConnectionEntry
+    {
+        PeerSessionPtr session;
+        std::uint64_t generation = 0;
+    };
+    std::map<std::string, ConnectionEntry> connections_;
+    /// Strand-confined mint for connection-instance identity. Non-reused.
+    std::uint64_t next_connection_generation_ = 0;
     uint64_t total_connects_ = 0;
     uint64_t total_disconnects_ = 0;
     std::map<std::string, std::chrono::steady_clock::time_point> failed_at_;

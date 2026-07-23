@@ -4,6 +4,7 @@
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/system/error_code.hpp>
 
 #include <functional>
 #include <map>
@@ -18,6 +19,17 @@ using Callback = std::function<void(Error, T)>;
 
 using UnsolicitedHandler =
     std::function<void(uint16_t type, std::vector<uint8_t> const& data)>;
+
+/// Immutable terminal fact for one connection instance, formed exactly once
+/// on the owning client strand when that instance dies — possibly after
+/// transport came up but before PeerSet admission/Ready. The
+/// receiving owner treats it as evidence, never as authority: delivery is an
+/// in-process post whose loss is common-fate with the io_context.
+struct PeerTerminalReason
+{
+    boost::system::error_code ec{};
+    std::string detail;
+};
 
 class PeerSession
 {

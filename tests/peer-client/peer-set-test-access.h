@@ -2,6 +2,7 @@
 
 #include <catl/peer-client/peer-set.h>
 
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/post.hpp>
 
 #include <algorithm>
@@ -285,7 +286,9 @@ public:
                     key, peer, admission_leases);
                 if (!admitted)
                     return;
-                set.connections_[key] = peer;
+                set.connections_[key] =
+                    catl::peer_client::PeerSet::ConnectionEntry{
+                        peer, ++set.next_connection_generation_};
                 set.note_connect_success(
                     key,
                     {.first_seq = peer->peer_first_seq(),
@@ -327,7 +330,9 @@ public:
                 auto const key = peer->endpoint();
                 admitted = set.make_room_for_peer(key, peer, leases);
                 if (admitted)
-                    set.connections_[key] = peer;
+                    set.connections_[key] =
+                    catl::peer_client::PeerSet::ConnectionEntry{
+                        peer, ++set.next_connection_generation_};
             });
         return admitted;
     }
@@ -659,7 +664,9 @@ public:
         run_on_strand(
             io, peers, [peer = std::move(peer)](auto& set) {
                 auto const key = peer->endpoint();
-                set.connections_[key] = peer;
+                set.connections_[key] =
+                    catl::peer_client::PeerSet::ConnectionEntry{
+                        peer, ++set.next_connection_generation_};
                 set.note_connect_success(
                     key,
                     {.first_seq = peer->peer_first_seq(),
@@ -678,7 +685,9 @@ public:
         run_on_strand(
             io, peers, [peer = std::move(peer)](auto& set) {
                 auto const key = peer->endpoint();
-                set.connections_[key] = peer;
+                set.connections_[key] =
+                    catl::peer_client::PeerSet::ConnectionEntry{
+                        peer, ++set.next_connection_generation_};
                 set.note_connect_success(
                     key,
                     {.first_seq = peer->peer_first_seq(),
@@ -686,6 +695,174 @@ public:
                      .current_seq = peer->peer_ledger_seq()});
                 set.remove_peer(key);
             });
+    }
+
+
+    /// Insert a ready session as an admitted instance, minting its
+    /// generation exactly as production admission does. Returns the minted
+    /// generation so tests can construct matching or stale terminal records.
+    static std::uint64_t
+    insert_ready_peer_with_generation(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::PeerSessionPtr peer)
+    {
+        std::uint64_t generation = 0;
+        run_on_strand(
+            io, peers, [&generation, peer = std::move(peer)](auto& set) {
+                auto const key = peer->endpoint();
+                generation = ++set.next_connection_generation_;
+                set.connections_[key] =
+                    catl::peer_client::PeerSet::ConnectionEntry{
+                        peer, generation};
+                set.note_connect_success(
+                    key,
+                    {.first_seq = peer->peer_first_seq(),
+                     .last_seq = peer->peer_last_seq(),
+                     .current_seq = peer->peer_ledger_seq()});
+                set.notify_waiters();
+            });
+        return generation;
+    }
+
+    /// Drive the terminal-record consumer deterministically on the strand.
+    static void
+    consume_terminal(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string key,
+        std::uint64_t generation,
+        catl::peer_client::PeerTerminalReason reason = {})
+    {
+        run_on_strand(
+            io,
+            peers,
+            [key = std::move(key), generation, reason = std::move(reason)](
+                auto& set) mutable {
+                set.consume_peer_terminal(key, generation, std::move(reason));
+            });
+    }
+
+    /// Generation of the live entry at key, or 0 when absent.
+    static std::uint64_t
+    live_generation(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string const& key)
+    {
+        std::uint64_t generation = 0;
+        run_on_strand(io, peers, [&generation, key](auto& set) {
+            auto it = set.connections_.find(key);
+            generation = it != set.connections_.end()
+                ? it->second.generation
+                : 0;
+        });
+        return generation;
+    }
+
+    static void
+    remove_peer_for_test(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string key,
+        bool forget_endpoint)
+    {
+        run_on_strand(
+            io, peers, [key = std::move(key), forget_endpoint](auto& set) {
+                set.remove_peer(key, forget_endpoint);
+            });
+    }
+
+    static std::uint64_t
+    endpoint_failure_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string const& key)
+    {
+        std::uint64_t count = 0;
+        run_on_strand(io, peers, [&count, key](auto& set) {
+            auto it = set.endpoint_stats_.find(key);
+            count = it != set.endpoint_stats_.end()
+                ? it->second.failure_count
+                : 0;
+        });
+        return count;
+    }
+
+    static void
+    note_connect_failure_for_test(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        std::string detail)
+    {
+        run_on_strand(
+            io,
+            peers,
+            [endpoint = std::move(endpoint),
+             detail = std::move(detail)](auto& set) mutable {
+                set.note_connect_failure(endpoint, std::move(detail));
+            });
+    }
+
+    static bool
+    endpoint_connected_ok(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string const& key)
+    {
+        bool ok = false;
+        run_on_strand(io, peers, [&ok, key](auto& set) {
+            auto it = set.endpoint_stats_.find(key);
+            ok = it != set.endpoint_stats_.end() && it->second.connected_ok;
+        });
+        return ok;
+    }
+
+    /// Drive the REAL connect path (mint, wiring, co_connect, admission)
+    /// against a live or refusing endpoint. Returns the session or nullptr.
+    static catl::peer_client::PeerSessionPtr
+    try_real_connect(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string host,
+        uint16_t port)
+    {
+        std::promise<catl::peer_client::PeerSessionPtr> done;
+        auto fut = done.get_future();
+        boost::asio::co_spawn(
+            peers->strand_,
+            [peers, host = std::move(host), port]()
+                -> boost::asio::awaitable<catl::peer_client::PeerSessionPtr> {
+                co_return co_await peers->try_connect_on_strand(
+                    host, port, {});
+            },
+            [&done](
+                std::exception_ptr ep,
+                catl::peer_client::PeerSessionPtr session) {
+                if (ep)
+                    done.set_exception(ep);
+                else
+                    done.set_value(std::move(session));
+            });
+        while (fut.wait_for(std::chrono::milliseconds(1)) !=
+               std::future_status::ready)
+        {
+            io.poll();
+            io.restart();
+        }
+        return fut.get();
+    }
+
+    static std::uint64_t
+    total_disconnects(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        std::uint64_t total = 0;
+        run_on_strand(
+            io, peers, [&total](auto& set) { total = set.total_disconnects_; });
+        return total;
     }
 
 private:
