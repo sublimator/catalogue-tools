@@ -326,3 +326,42 @@ TEST(DeterministicScheduler, HandlerMayRearmItsOwnTimer)
     EXPECT_EQ(fires, 3) << "a fired handler re-arming its own timer must "
                            "cascade within one advance";
 }
+
+TEST(DeterministicScheduler, NegativeExpiryClampsAndCannotRegressTime)
+{
+    DeterministicScheduler sched;
+    sched.advance(std::chrono::seconds(100));
+    auto const before = sched.now();
+
+    DeterministicScheduler::Timer timer(sched);
+    timer.expires_after(-std::chrono::seconds(50));
+    bool fired = false;
+    timer.async_wait([&](boost::system::error_code ec) {
+        if (!ec)
+            fired = true;
+    });
+
+    // advance(0) fires the already-due timer WITHOUT moving time
+    // backward — the side door Codex's residual named.
+    sched.advance(std::chrono::seconds(0));
+    EXPECT_TRUE(fired) << "negative expiry means already due";
+    EXPECT_EQ(sched.now(), before) << "virtual time must never regress";
+}
+
+TEST(DeterministicScheduler, NearMaxExpiryClampsWithoutWrap)
+{
+    DeterministicScheduler sched;
+    sched.advance(std::chrono::seconds(100));
+    auto const before = sched.now();
+
+    DeterministicScheduler::Timer timer(sched);
+    timer.expires_after(DeterministicScheduler::duration::max());
+    bool fired = false;
+    timer.async_wait([&](boost::system::error_code) { fired = true; });
+
+    sched.advance(std::chrono::seconds(100));
+    EXPECT_FALSE(fired)
+        << "a clamped far-future deadline must not wrap into the past";
+    EXPECT_EQ(sched.now(), before + std::chrono::seconds(100))
+        << "advance stays monotonic under clamped arithmetic";
+}

@@ -140,7 +140,16 @@ public:
         expires_after(duration d)
         {
             cancel();
-            deadline_ = sched_.now_ + d;
+            // Deadline arithmetic is clamped so no expiry can mint a
+            // deadline before now() (advance would then assign now_
+            // backward through the side door) or wrap past the epoch
+            // ceiling. Negative expiry means "already due": fires on
+            // the next advance, including advance(0).
+            if (d < duration::zero())
+                d = duration::zero();
+            deadline_ = (sched_.now_ > time_point::max() - d)
+                ? time_point::max()
+                : sched_.now_ + d;
         }
 
         /// Cancel a pending wait; its handler completes with
