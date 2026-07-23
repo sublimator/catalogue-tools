@@ -14,3 +14,8 @@ add_executable(operation-ledger-gtest operation-ledger-gtest.cpp)
 target_link_libraries(operation-ledger-gtest
                       PRIVATE Boost::boost GTest::gtest_main)
 gtest_discover_tests(operation-ledger-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(lifecycle-waiters-gtest lifecycle-waiters-gtest.cpp)
+target_link_libraries(lifecycle-waiters-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(lifecycle-waiters-gtest DISCOVERY_TIMEOUT 30)
