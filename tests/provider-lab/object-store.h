@@ -187,10 +187,13 @@ public:
             epoch_, values_.size(), total_inserts_, total_evictions_};
     }
 
-    // Owner-strand introspection.
-    Epoch
+    // Owner-strand introspection: the strand check dominates every
+    // read; off-strand callers get refusal, never a stale scalar.
+    std::optional<Epoch>
     accepted_epoch() const
     {
+        if (!on_owner_strand())
+            return std::nullopt;
         return epoch_;
     }
     std::size_t

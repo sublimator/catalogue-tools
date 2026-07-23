@@ -270,3 +270,74 @@ TEST_F(LedgerFixture, OffStrandMutationsAreRefused)
     sched.run_until_idle();
     EXPECT_TRUE(checked);
 }
+
+TEST_F(LedgerFixture, IntrospectorsRefuseOffStrandBeforeAnyRead)
+{
+    std::optional<RootLease> root;
+    OperationId op = 0;
+    ChildId cid = 0;
+    run([&] {
+        root = ledger.open_root();
+        op = root->id();
+        auto [r, child] = ledger.register_child(*root);
+        ASSERT_EQ(r, OperationLedger::Refusal::ok);
+        cid = child.id();
+        ASSERT_EQ(ledger.publish(child, 7, 42), OperationLedger::Refusal::ok);
+    });
+    bool checked = false;
+    asio::post(sched.io(), [&] {
+        EXPECT_FALSE(ledger.root_active(op));
+        EXPECT_EQ(ledger.child_count(op), 0u);
+        EXPECT_FALSE(ledger.publication_state(cid).has_value());
+        EXPECT_FALSE(ledger.is_inert(cid));
+        checked = true;
+    });
+    sched.run_until_idle();
+    EXPECT_TRUE(checked);
+}
+
+TEST_F(LedgerFixture, PrePublicationCancelSealsThePublicationPathBothOrders)
+{
+    run([&] {
+        auto root = ledger.open_root();
+        auto const op = root->id();
+
+        // Order 1: cancel before publish — publication must refuse, and
+        // the child follows the never_published path to removal.
+        {
+            auto [r, child] = ledger.register_child(*root);
+            ASSERT_EQ(r, OperationLedger::Refusal::ok);
+            auto const cid = child.id();
+            ASSERT_EQ(
+                ledger.request_cancel(cid), OperationLedger::Refusal::ok);
+            EXPECT_EQ(
+                ledger.publish(child, 7, 42),
+                OperationLedger::Refusal::cancelled_inert)
+                << "cancelled pre-publication authority must not publish";
+            EXPECT_EQ(
+                ledger.mark_never_published(child),
+                OperationLedger::Refusal::ok);
+            EXPECT_EQ(
+                ledger.ack_never_published(cid),
+                OperationLedger::AckOutcome::removed);
+        }
+
+        // Order 2: publish before cancel — cancellation marks inert and
+        // the destination ack remains the only remover (existing
+        // contract, re-checked here for the order pair).
+        {
+            auto [r, child] = ledger.register_child(*root);
+            ASSERT_EQ(r, OperationLedger::Refusal::ok);
+            auto const cid = child.id();
+            ASSERT_EQ(
+                ledger.publish(child, 7, 42), OperationLedger::Refusal::ok);
+            ASSERT_EQ(
+                ledger.request_cancel(cid), OperationLedger::Refusal::ok);
+            EXPECT_TRUE(ledger.is_inert(cid));
+            EXPECT_EQ(ledger.child_count(op), 1u);
+            EXPECT_EQ(
+                ledger.ack_terminal(cid, 7, 42),
+                OperationLedger::AckOutcome::removed);
+        }
+    });
+}

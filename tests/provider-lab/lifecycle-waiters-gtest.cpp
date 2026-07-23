@@ -63,7 +63,8 @@ TEST_F(WaiterFixture, CompletesExactlyOnceOnTheWaiterExecutor)
     on_owner([&] {
         EXPECT_EQ(
             ledger.complete_clear(
-                1, {LifecycleResult::Outcome::cleared, 42}),
+                1,
+                {LifecycleWaiterLedger::ClearResult::Outcome::cleared, 42}),
             1u);
     });
     ASSERT_EQ(got.size(), 1u);
@@ -76,7 +77,8 @@ TEST_F(WaiterFixture, CompletesExactlyOnceOnTheWaiterExecutor)
     on_owner([&] {
         EXPECT_EQ(
             ledger.complete_clear(
-                1, {LifecycleResult::Outcome::cleared, 43}),
+                1,
+                {LifecycleWaiterLedger::ClearResult::Outcome::cleared, 43}),
             0u);
     });
     EXPECT_EQ(got.size(), 1u) << "exactly-once delivery";
@@ -102,7 +104,8 @@ TEST_F(WaiterFixture, CancelRemovesOnlyItsWaiterAndTransactionContinues)
     on_owner([&] {
         EXPECT_EQ(
             ledger.complete_clear(
-                1, {LifecycleResult::Outcome::cleared, 7}),
+                1,
+                {LifecycleWaiterLedger::ClearResult::Outcome::cleared, 7}),
             1u);
     });
     ASSERT_EQ(bystander.size(), 1u);
@@ -151,14 +154,18 @@ TEST_F(WaiterFixture, ShutdownTakeoverBothOrders)
                 EXPECT_EQ(l2.shutdown_takeover(1), 1u);
                 EXPECT_EQ(
                     l2.complete_clear(
-                        1, {LifecycleResult::Outcome::cleared, 9}),
+                        1,
+                        {LifecycleWaiterLedger::ClearResult::Outcome::cleared,
+                         9}),
                     0u);
             }
             else
             {
                 EXPECT_EQ(
                     l2.complete_clear(
-                        1, {LifecycleResult::Outcome::cleared, 9}),
+                        1,
+                        {LifecycleWaiterLedger::ClearResult::Outcome::cleared,
+                         9}),
                     1u);
                 EXPECT_EQ(l2.shutdown_takeover(1), 0u);
             }
@@ -188,7 +195,8 @@ TEST_F(WaiterFixture, TargetsAreIndependent)
     on_owner([&] {
         EXPECT_EQ(
             ledger.complete_clear(
-                1, {LifecycleResult::Outcome::failed, 3}),
+                1,
+                {LifecycleWaiterLedger::ClearResult::Outcome::failed, 3}),
             1u);
     });
     EXPECT_EQ(t1.size(), 1u);
@@ -200,7 +208,8 @@ TEST_F(WaiterFixture, WaiterIdsAreNeverReused)
     std::vector<LifecycleResult> got;
     auto const first = add(WaiterKind::clear, 1, got);
     on_owner([&] {
-        ledger.complete_clear(1, {LifecycleResult::Outcome::cleared, 1});
+        ledger.complete_clear(
+            1, {LifecycleWaiterLedger::ClearResult::Outcome::cleared, 1});
     });
     auto const second = add(WaiterKind::clear, 1, got);
     EXPECT_GT(second, first);
@@ -222,7 +231,8 @@ TEST_F(WaiterFixture, OffStrandTouchesAreRefused)
             LifecycleWaiterLedger::Refusal::off_strand);
         EXPECT_EQ(
             ledger.complete_clear(
-                1, {LifecycleResult::Outcome::cleared, 0}),
+                1,
+                {LifecycleWaiterLedger::ClearResult::Outcome::cleared, 0}),
             0u);
         EXPECT_EQ(ledger.pending_count(), 0u)
             << "off-strand observation is refused, not raced";
@@ -231,4 +241,32 @@ TEST_F(WaiterFixture, OffStrandTouchesAreRefused)
     sched.run_until_idle();
     EXPECT_TRUE(checked);
     EXPECT_TRUE(got.empty()) << "no delivery may result from refusals";
+}
+
+TEST(WaiterFateDomain, ForeignContextRegistrationIsRefused)
+{
+    // Two-context negative control: an executor owned by a DIFFERENT
+    // io_context accepts posts but may never run them — "posted once"
+    // is not "deliverable once." Registration must refuse at the mint.
+    DeterministicScheduler owner_sched;
+    DeterministicScheduler foreign_sched;
+    auto owner = owner_sched.make_strand();
+    LifecycleWaiterLedger ledger{owner};
+
+    bool checked = false;
+    asio::post(owner, [&] {
+        auto [r, id] = ledger.register_waiter(
+            WaiterKind::clear,
+            1,
+            foreign_sched.make_strand(),
+            [](LifecycleResult) { FAIL() << "must never deliver"; });
+        EXPECT_EQ(r, LifecycleWaiterLedger::Refusal::foreign_fate_domain);
+        EXPECT_EQ(id, 0u);
+        EXPECT_EQ(ledger.pending_count(), 0u)
+            << "a refused registration must not mint a row";
+        checked = true;
+    });
+    owner_sched.run_until_idle();
+    foreign_sched.run_until_idle();
+    EXPECT_TRUE(checked);
 }

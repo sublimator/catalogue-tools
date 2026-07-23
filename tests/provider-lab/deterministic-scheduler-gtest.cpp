@@ -273,3 +273,56 @@ TEST(DeterministicScheduler, NegativeAdvanceIsRefused)
     sched.advance(std::chrono::milliseconds(50));
     EXPECT_TRUE(fired);
 }
+
+TEST(DeterministicScheduler, SuccessfulFireAllowsRearmWithoutCancel)
+{
+    DeterministicScheduler sched;
+    DeterministicScheduler::Timer timer(sched);
+    int fires = 0;
+
+    timer.expires_after(std::chrono::milliseconds(10));
+    timer.async_wait([&](boost::system::error_code ec) {
+        if (!ec)
+            ++fires;
+    });
+    sched.advance(std::chrono::milliseconds(10));
+    ASSERT_EQ(fires, 1);
+
+    // The armed state must clear on successful fire: a fresh wait is a
+    // new single wait, not a refused "concurrent" one.
+    timer.expires_after(std::chrono::milliseconds(10));
+    boost::system::error_code second_ec = asio::error::operation_not_supported;
+    timer.async_wait([&](boost::system::error_code ec) {
+        second_ec = ec;
+        if (!ec)
+            ++fires;
+    });
+    sched.advance(std::chrono::milliseconds(10));
+    EXPECT_FALSE(second_ec) << "re-arm after successful fire must succeed";
+    EXPECT_EQ(fires, 2);
+}
+
+TEST(DeterministicScheduler, HandlerMayRearmItsOwnTimer)
+{
+    DeterministicScheduler sched;
+    DeterministicScheduler::Timer timer(sched);
+    int fires = 0;
+
+    std::function<void(boost::system::error_code)> tick =
+        [&](boost::system::error_code ec) {
+            if (ec)
+                return;
+            ++fires;
+            if (fires < 3)
+            {
+                timer.expires_after(std::chrono::milliseconds(10));
+                timer.async_wait(tick);
+            }
+        };
+    timer.expires_after(std::chrono::milliseconds(10));
+    timer.async_wait(tick);
+
+    sched.advance(std::chrono::milliseconds(30));
+    EXPECT_EQ(fires, 3) << "a fired handler re-arming its own timer must "
+                           "cascade within one advance";
+}

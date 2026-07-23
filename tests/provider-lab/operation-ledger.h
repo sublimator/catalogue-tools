@@ -118,6 +118,7 @@ public:
         off_strand,
         cell_not_registered,
         already_flipped,
+        cancelled_inert,  // pre-publication cancel: seal never_published
     };
 
     explicit OperationLedger(strand_type strand) : strand_(std::move(strand))
@@ -175,6 +176,10 @@ public:
             return Refusal::cell_not_registered;
         if (c->state != PublicationState::registered_not_published)
             return Refusal::already_flipped;
+        if (c->inert)
+            return Refusal::cancelled_inert;  // work must never publish;
+                                              // the never_published path
+                                              // (mark + sealed ack) remains
         c->state = PublicationState::published;
         c->destination = dest;
         c->work = work;
@@ -277,15 +282,17 @@ public:
     bool
     root_active(OperationId id) const
     {
-        return on_owner_strand() && operations_.count(id) > 0;
+        if (!on_owner_strand())
+            return false;
+        return operations_.count(id) > 0;
     }
     std::size_t
     child_count(OperationId id) const
     {
+        if (!on_owner_strand())
+            return 0;
         auto it = operations_.find(id);
-        return (on_owner_strand() && it != operations_.end())
-            ? it->second.children.size()
-            : 0;
+        return it != operations_.end() ? it->second.children.size() : 0;
     }
     std::optional<PublicationState>
     publication_state(ChildId child_id) const
@@ -300,9 +307,10 @@ public:
     bool
     is_inert(ChildId child_id) const
     {
+        if (!on_owner_strand())
+            return false;
         auto located = const_cast<OperationLedger*>(this)->locate(child_id);
-        return on_owner_strand() && located &&
-            located->second->second.inert;
+        return located && located->second->second.inert;
     }
 
 private:

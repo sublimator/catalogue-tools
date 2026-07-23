@@ -81,10 +81,11 @@ public:
         return now_;
     }
 
-    /// Advance virtual time, firing every timer whose deadline is
-    /// reached, in deadline order (FIFO within one deadline), and
-    /// running handlers to idle after each batch so cascades resolve
-    /// deterministically.
+    /// Advance virtual time with discrete-event semantics: time flows
+    /// TO each due deadline in order (so a fired handler that re-arms
+    /// relative to now() computes from its own fire time, and cascades
+    /// land inside the window), handlers drain to idle after each fire,
+    /// and now() finishes at the target.
     void
     advance(duration d)
     {
@@ -92,14 +93,22 @@ public:
         // strand pending timers. Refuse rather than wrap.
         if (d < duration::zero())
             return;
-        now_ += d;
+        if (now_ > time_point::max() - d)
+            return;  // clamp: overflow would wrap virtual time backward
+        auto const target = now_ + d;
         for (;;)
         {
             auto it = timers_.begin();
-            if (it == timers_.end() || it->first > now_)
+            if (it == timers_.end() || it->first > target)
                 break;
+            now_ = it->first;  // the event's own fire time
             auto handler = std::move(it->second);
             timers_.erase(it);
+            // A live entry implies a live owner (the Timer's destructor
+            // cancels); clearing armed_ BEFORE the handler runs lets a
+            // fired handler re-arm its own timer.
+            if (handler.owner)
+                handler.owner->armed_ = false;
             asio::post(
                 io_,
                 [h = std::move(handler)]() mutable {
@@ -107,6 +116,7 @@ public:
                 });
             run_until_idle();
         }
+        now_ = target;
     }
 
     /// A virtual timer. Target components take a scheduler reference and
@@ -225,6 +235,12 @@ private:
 /// A manual latch for structuring forced interleavings: a coroutine (or
 /// callback chain) parks on wait() until the test opens the gate. Open
 /// is sticky — waits after open complete immediately, in post order.
+///
+/// PRECONDITION (local to this type, not just the scheduler): Gate has
+/// NO runtime confinement — open()/async_wait() must only ever run on
+/// the single test thread driving the io_context. It is a test-harness
+/// tool and must not be copied into production as a general async
+/// primitive; the link-graph boundary keeps it test-only.
 class Gate
 {
 public:

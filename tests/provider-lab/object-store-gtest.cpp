@@ -128,7 +128,7 @@ TEST_F(StoreFixture, ClearAndAdvanceConsumesExactBarrierExactlyOnce)
         EXPECT_EQ(store.clear_and_advance(78), R::wrong_barrier);
 
         EXPECT_EQ(store.clear_and_advance(77), R::ok);
-        EXPECT_EQ(store.accepted_epoch(), 6u);
+        EXPECT_EQ(store.accepted_epoch().value_or(0), 6u);
         EXPECT_EQ(store.size(), 0u) << "advance clears every value";
 
         // Exactly-once: the consumed barrier cannot advance again.
@@ -194,4 +194,20 @@ TEST(ObjectStoreEdge, ZeroCapacityClampsToOneHonestRow)
                "a zero bound";
     });
     sched.run_until_idle();
+}
+
+TEST(ObjectStoreEdge, IntrospectionRefusesOffStrandBeforeAnyRead)
+{
+    DeterministicScheduler sched;
+    auto strand = sched.make_strand();
+    EpochGuardedObjectStore store{strand, 5, 3};
+    bool checked = false;
+    asio::post(sched.io(), [&] {
+        EXPECT_FALSE(store.accepted_epoch().has_value())
+            << "the strand check must dominate the scalar read";
+        EXPECT_EQ(store.size(), 0u);
+        checked = true;
+    });
+    sched.run_until_idle();
+    EXPECT_TRUE(checked);
 }

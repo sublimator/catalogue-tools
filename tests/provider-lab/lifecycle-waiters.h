@@ -55,6 +55,9 @@ public:
         ok,
         off_strand,
         unknown_waiter,
+        foreign_fate_domain,  // executor is not owned by the ledger's
+                              // context: "posted once" would not be
+                              // "deliverable once"
     };
 
     explicit LifecycleWaiterLedger(strand_type strand)
@@ -80,6 +83,20 @@ public:
     {
         if (!on_owner_strand())
             return {Refusal::off_strand, 0};
+        // Fate-domain membership is proven at the mint, not assumed at
+        // delivery: the waiter's executor must be owned by the SAME
+        // io_context as the ledger's strand (inner-executor identity).
+        // A foreign context could accept the post and never run it,
+        // erasing the authoritative row while the delivery evaporates.
+        auto* target_ctx = executor.target<asio::io_context::executor_type>();
+        auto* strand_ctx =
+            executor.target<DeterministicScheduler::strand_type>();
+        auto& owner_ctx = strand_.get_inner_executor().context();
+        bool member = (target_ctx && &target_ctx->context() == &owner_ctx) ||
+            (strand_ctx &&
+             &strand_ctx->get_inner_executor().context() == &owner_ctx);
+        if (!member)
+            return {Refusal::foreign_fate_domain, 0};
         auto const id = ++next_waiter_;
         waiters_.emplace(
             id,
@@ -106,16 +123,32 @@ public:
         return Refusal::ok;
     }
 
+    /// Closed clear-outcome subtype: the clear verb can mint ONLY the
+    /// outcomes it owns. stopped/cancelled/superseded belong to their
+    /// dedicated transitions and are untypeable here by construction.
+    struct ClearResult
+    {
+        enum class Outcome : std::uint8_t { cleared, failed };
+        Outcome outcome{};
+        std::uint64_t value = 0;
+    };
+
     /// Clear completion or failure: completes every remaining clear
     /// waiter for the target exactly once. Returns how many were
     /// completed; a duplicate completion therefore returns zero.
     //@@authority transition=provider_lab.complete_clear owner=provider_lab commit=strand
     std::size_t
-    complete_clear(LifecycleTargetId target, LifecycleResult result)
+    complete_clear(LifecycleTargetId target, ClearResult result)
     {
         if (!on_owner_strand())
             return 0;
-        return complete_kind(WaiterKind::clear, target, result);
+        return complete_kind(
+            WaiterKind::clear,
+            target,
+            {result.outcome == ClearResult::Outcome::cleared
+                 ? LifecycleResult::Outcome::cleared
+                 : LifecycleResult::Outcome::failed,
+             result.value});
     }
 
     /// Shutdown takeover: every remaining clear waiter completes with
