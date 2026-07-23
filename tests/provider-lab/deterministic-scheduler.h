@@ -88,6 +88,10 @@ public:
     void
     advance(duration d)
     {
+        // Virtual time is monotonic; a backward step would silently
+        // strand pending timers. Refuse rather than wrap.
+        if (d < duration::zero())
+            return;
         now_ += d;
         for (;;)
         {
@@ -164,6 +168,19 @@ public:
                 CompletionToken,
                 void(boost::system::error_code)>(
                 [this](auto handler) {
+                    if (armed_)
+                    {
+                        // Single-wait contract: a second concurrent wait
+                        // would orphan the first entry on cancel. Refuse
+                        // it loudly instead of mishandling it silently.
+                        asio::post(
+                            sched_.io_,
+                            [h = std::move(handler)]() mutable {
+                                std::move(h)(
+                                    asio::error::operation_not_supported);
+                            });
+                        return;
+                    }
                     armed_ = true;
                     armed_deadline_ = deadline_;
                     sched_.timers_.emplace(

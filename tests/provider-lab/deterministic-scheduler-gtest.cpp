@@ -230,3 +230,46 @@ TEST(StickyCancelCell, OffStrandTouchesAreRefused)
     sched.run_until_idle();
     EXPECT_FALSE(latched);
 }
+
+TEST(DeterministicScheduler, SecondConcurrentWaitIsRefusedLoudly)
+{
+    DeterministicScheduler sched;
+    DeterministicScheduler::Timer timer(sched);
+    timer.expires_after(std::chrono::milliseconds(100));
+
+    boost::system::error_code first_ec, second_ec;
+    bool first_done = false, second_done = false;
+    timer.async_wait([&](boost::system::error_code ec) {
+        first_done = true;
+        first_ec = ec;
+    });
+    timer.async_wait([&](boost::system::error_code ec) {
+        second_done = true;
+        second_ec = ec;
+    });
+    sched.run_until_idle();
+    EXPECT_FALSE(first_done) << "the armed wait stays armed";
+    EXPECT_TRUE(second_done);
+    EXPECT_EQ(second_ec, asio::error::operation_not_supported)
+        << "a second concurrent wait is refused, not silently mishandled";
+
+    sched.advance(std::chrono::milliseconds(100));
+    EXPECT_TRUE(first_done);
+    EXPECT_FALSE(first_ec);
+}
+
+TEST(DeterministicScheduler, NegativeAdvanceIsRefused)
+{
+    DeterministicScheduler sched;
+    auto const before = sched.now();
+    DeterministicScheduler::Timer timer(sched);
+    timer.expires_after(std::chrono::milliseconds(50));
+    bool fired = false;
+    timer.async_wait([&](boost::system::error_code) { fired = true; });
+
+    sched.advance(-std::chrono::seconds(10));
+    EXPECT_EQ(sched.now(), before) << "virtual time is monotonic";
+    EXPECT_FALSE(fired);
+    sched.advance(std::chrono::milliseconds(50));
+    EXPECT_TRUE(fired);
+}

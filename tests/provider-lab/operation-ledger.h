@@ -45,7 +45,6 @@ class Lease
 {
 public:
     Lease() = default;
-    explicit Lease(std::uint64_t id) : id_(id), valid_(true) {}
 
     Lease(Lease&& other) noexcept
         : id_(other.id_), valid_(std::exchange(other.valid_, false))
@@ -74,9 +73,14 @@ public:
     }
 
 private:
+    friend class OperationLedger;  // sole minter: handles are non-forgeable
+    explicit Lease(std::uint64_t id) : id_(id), valid_(true) {}
+
     std::uint64_t id_ = 0;
     bool valid_ = false;
 };
+
+class OperationLedger;
 
 struct RootTag
 {
