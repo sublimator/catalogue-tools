@@ -739,7 +739,7 @@ PeerClient::do_connect(
             // Always notify the observer (PeerSet needs to know). The
             // terminal fact is formed here, once, on the client strand —
             // this is the sole export commit for this instance's death.
-            //@@authority channel=peer_client.terminal_export v4=T72 owner=peer_client commit=client-strand
+            //@@authority channel=peer_client.terminal_export owner=peer_client commit=client-strand
             if (self->on_disconnect_)
             {
                 PeerTerminalReason reason{

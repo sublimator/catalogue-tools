@@ -422,7 +422,7 @@ private:
     /// pre-admission connect failures remain owned by the existing
     /// note_connect_failure path. Terminal delivery is NOT ordered by
     /// generation, so no scalar mark may gate consumption.
-    //@@authority transition=peer_set.consume_peer_terminal v4=T39 owner=peer_set commit=strand
+    //@@authority transition=peer_set.consume_peer_terminal owner=peer_set commit=strand
     void
     consume_peer_terminal(
         std::string const& key,
