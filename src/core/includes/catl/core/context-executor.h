@@ -2,7 +2,7 @@
 
 // ContextExecutor — wraps any Asio executor to propagate RequestContext.
 //
-// Sets the thread_local g_current_request before each handler runs
+// Sets the thread-local request context before each handler runs
 // and restores the previous value after. Covers coroutine co_awaits
 // that resume through this executor; inner co_spawn / strand hops
 // that use a different executor will not have the context.
@@ -51,7 +51,7 @@ public:
     {
         auto ctx = ctx_;
         base_.execute([ctx = std::move(ctx), f = std::move(f)]() mutable {
-            RequestContextGuard guard(ctx.get());
+            RequestContextGuard guard(std::move(ctx));
             std::move(f)();
         });
     }
@@ -64,7 +64,7 @@ public:
         auto ctx = ctx_;
         base_.post(
             [ctx = std::move(ctx), f = std::move(f)]() mutable {
-                RequestContextGuard guard(ctx.get());
+                RequestContextGuard guard(std::move(ctx));
                 std::move(f)();
             },
             a);
@@ -78,7 +78,7 @@ public:
         auto ctx = ctx_;
         base_.dispatch(
             [ctx = std::move(ctx), f = std::move(f)]() mutable {
-                RequestContextGuard guard(ctx.get());
+                RequestContextGuard guard(std::move(ctx));
                 std::move(f)();
             },
             a);
@@ -92,7 +92,7 @@ public:
         auto ctx = ctx_;
         base_.defer(
             [ctx = std::move(ctx), f = std::move(f)]() mutable {
-                RequestContextGuard guard(ctx.get());
+                RequestContextGuard guard(std::move(ctx));
                 std::move(f)();
             },
             a);

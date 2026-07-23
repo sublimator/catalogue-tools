@@ -242,6 +242,7 @@ static constexpr auto kCrawlRetention = std::chrono::minutes(30);
 static constexpr auto kPrivateCrawlRecheck = std::chrono::hours(6);
 static constexpr auto kFailedEndpointRetention = std::chrono::minutes(30);
 static constexpr auto kRecentFailureRetention = std::chrono::minutes(10);
+static constexpr auto kFailedLedgerTtl = std::chrono::seconds(60);
 static constexpr size_t kMaxRecentFailureEvents = 256;
 
 // ── Bootstrap peers by network ──────────────────────────────────
@@ -688,11 +689,7 @@ PeerSet::select_peers_for(
             continue;
         if (excluded.count(key))
             continue;
-        // Check failed_ledgers
-        auto& stats = endpoint_stats_[key];
-        auto it = stats.failed_ledgers.find(ledger_seq);
-        if (it != stats.failed_ledgers.end() &&
-            now - it->second.at < std::chrono::seconds(60))
+        if (peer_failed_for_ledger(key, ledger_seq, now))
             continue;
 
         uint64_t span = 0;
@@ -783,9 +780,34 @@ PeerSet::note_ledger_failure(std::string const& endpoint, uint32_t ledger_seq)
         return;
     }
     auto key = canonical_endpoint(endpoint);
-    endpoint_stats_[key].failed_ledgers[ledger_seq] = {
-        std::chrono::steady_clock::now()};
+    auto const now = std::chrono::steady_clock::now();
+    auto& stats = endpoint_stats_[key];
+    auto prior = stats.failed_ledgers.find(ledger_seq);
+    if (prior == stats.failed_ledgers.end() ||
+        now - prior->second.at >= kFailedLedgerTtl)
+    {
+        ++stats.ledger_failure_count;
+    }
+    stats.last_ledger_failure_at = now;
+    stats.failed_ledgers[ledger_seq] = {now};
+    sort_pending_connects();
     PLOGD(log_, "Noted ledger failure: peer=", key, " ledger=", ledger_seq);
+}
+
+bool
+PeerSet::peer_failed_for_ledger(
+    std::string const& endpoint,
+    uint32_t ledger_seq,
+    std::chrono::steady_clock::time_point now) const
+{
+    ASSERT_ON_STRAND();
+    auto const key = canonical_endpoint(endpoint);
+    auto stats = endpoint_stats_.find(key);
+    if (stats == endpoint_stats_.end())
+        return false;
+    auto failure = stats->second.failed_ledgers.find(ledger_seq);
+    return failure != stats->second.failed_ledgers.end() &&
+        now - failure->second.at < kFailedLedgerTtl;
 }
 
 PeerSessionPtr
@@ -960,7 +982,7 @@ PeerSet::choose_crawl_status(std::vector<CrawlLedgerRange> const& ranges) const
                             CrawlLedgerRange const& rhs) -> bool {
         // Check if either range covers any wanted ledger
         auto covers_wanted = [&](CrawlLedgerRange const& r) {
-            for (auto seq : wanted_ledgers_)
+            for (auto const& [seq, _] : wanted_ledgers_)
             {
                 if (seq >= r.first_seq && seq <= r.last_seq)
                     return true;
@@ -1030,7 +1052,7 @@ PeerSet::endpoint_covers_preferred_ledger(std::string const& endpoint) const
     if (status.first_seq == 0 || status.last_seq == 0)
         return false;
 
-    for (auto seq : wanted_ledgers_)
+    for (auto const& [seq, _] : wanted_ledgers_)
     {
         if (seq >= status.first_seq && seq <= status.last_seq)
             return true;
@@ -1052,10 +1074,14 @@ PeerSet::should_connect_endpoint(std::string const& endpoint) const
     auto const has_success =
         it != endpoint_stats_.end() && it->second.last_success_at > 0;
 
-    // If this candidate covers the target ledger, always queue it —
-    // try_connect will handle eviction if we're at cap.
+    // Ledger-specific waits explicitly budget replacement probes at a full
+    // pool. General discovery may fill spare capacity, but it must not queue
+    // an unbounded set of cap-evicting candidates.
     if (endpoint_covers_preferred_ledger(key))
-        return true;
+    {
+        return is_archival_endpoint(key) ? !at_archival_cap()
+                                         : !at_connection_cap();
+    }
 
     // Archival peers have their own pool — separate cap from hubs.
     if (is_archival_endpoint(key))
@@ -1110,7 +1136,7 @@ PeerSet::candidate_better(std::string const& lhs, std::string const& rhs) const
     auto covers_any_wanted = [&](EndpointStats const& stats) {
         if (stats.status.first_seq == 0 || stats.status.last_seq == 0)
             return false;
-        for (auto seq : wanted_ledgers_)
+        for (auto const& [seq, _] : wanted_ledgers_)
         {
             if (seq >= stats.status.first_seq && seq <= stats.status.last_seq)
                 return true;
@@ -1142,6 +1168,22 @@ PeerSet::candidate_better(std::string const& lhs, std::string const& rhs) const
 
     if (lhs_has_range != rhs_has_range)
         return lhs_has_range;
+
+    if (lhs_stats.ledger_failure_count != rhs_stats.ledger_failure_count)
+    {
+        return lhs_stats.ledger_failure_count < rhs_stats.ledger_failure_count;
+    }
+
+    auto const lhs_span = lhs_stats.status.last_seq > lhs_stats.status.first_seq
+        ? static_cast<uint64_t>(
+              lhs_stats.status.last_seq - lhs_stats.status.first_seq)
+        : 0;
+    auto const rhs_span = rhs_stats.status.last_seq > rhs_stats.status.first_seq
+        ? static_cast<uint64_t>(
+              rhs_stats.status.last_seq - rhs_stats.status.first_seq)
+        : 0;
+    if (lhs_span != rhs_span)
+        return lhs_span > rhs_span;
 
     if (lhs_stats.last_success_at != rhs_stats.last_success_at)
     {
@@ -1301,6 +1343,20 @@ PeerSet::pump_connects()
         auto key = pending_connects_.front();
         pending_connects_.erase(pending_connects_.begin());
         queued_.erase(key);
+        std::vector<TargetedAdmissionLeasePtr> admission_leases;
+        if (auto targeted = targeted_connects_.find(key);
+            targeted != targeted_connects_.end())
+        {
+            for (auto& authorization : targeted->second)
+            {
+                if (authorization)
+                {
+                    if (auto lease = authorization->claim())
+                        admission_leases.push_back(std::move(lease));
+                }
+            }
+            targeted_connects_.erase(targeted);
+        }
 
         std::string host;
         uint16_t port = 0;
@@ -1326,8 +1382,14 @@ PeerSet::pump_connects()
         auto self = shared_from_this();
         boost::asio::co_spawn(
             strand_,
-            [self, host, port, key]() -> boost::asio::awaitable<void> {
-                co_await self->try_connect(host, port);
+            [self,
+             host,
+             port,
+             key,
+             admission_leases = std::move(
+                 admission_leases)]() mutable -> boost::asio::awaitable<void> {
+                co_await self->try_connect_on_strand(
+                    host, port, std::move(admission_leases));
                 self->in_flight_.erase(key);
                 self->pump_connects();
             },
@@ -1731,13 +1793,16 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
          host = std::string(host),
          port]() mutable -> asio::awaitable<PeerSessionPtr> {
             co_return co_await self->try_connect_on_strand(
-                std::move(host), port);
+                std::move(host), port, {});
         },
         asio::use_awaitable);
 }
 
 boost::asio::awaitable<PeerSessionPtr>
-PeerSet::try_connect_on_strand(std::string host, uint16_t port)
+PeerSet::try_connect_on_strand(
+    std::string host,
+    uint16_t port,
+    std::vector<TargetedAdmissionLeasePtr> admission_leases)
 {
     ASSERT_ON_STRAND();
 
@@ -1751,38 +1816,25 @@ PeerSet::try_connect_on_strand(std::string host, uint16_t port)
         co_return (it->second && it->second->is_ready()) ? it->second : nullptr;
     }
 
-    // Archival peers have their own pool — skip hub cap check.
-    bool incoming_archival = is_archival_endpoint(key);
-
-    // Check the relevant cap: archival or hub.
-    bool at_cap = incoming_archival ? at_archival_cap() : at_connection_cap();
-
-    if (at_cap)
+    // Cached crawl data is only a pre-connect hint. A successful handshake is
+    // the authority for pool classification and admission below.
+    bool expected_archival = is_archival_endpoint(key);
+    bool const expected_pool_full =
+        expected_archival ? at_archival_cap() : at_connection_cap();
+    auto const has_active_authorization = std::any_of(
+        admission_leases.begin(),
+        admission_leases.end(),
+        [](auto const& lease) { return lease && lease->is_available(); });
+    if (endpoint_has_range(key) && expected_pool_full &&
+        !has_active_authorization)
     {
-        // Try to evict for any wanted ledger (pick the first)
-        auto evict_target =
-            wanted_ledgers_.empty() ? 0u : *wanted_ledgers_.begin();
-        if (evict_target != 0 && evict_for(evict_target))
-        {
-            PLOGD(
-                log_,
-                "[",
-                net_label_,
-                "] Evicted idle peer, connecting to ",
-                key);
-        }
-        else
-        {
-            PLOGI(
-                log_,
-                "[",
-                net_label_,
-                "] Connection cap reached (",
-                incoming_archival ? "archival" : "hub",
-                " pool), skipping ",
-                key);
-            co_return nullptr;
-        }
+        PLOGD(
+            log_,
+            "[",
+            net_label_,
+            "] Skipping surplus connection candidate at pool cap: ",
+            key);
+        co_return nullptr;
     }
 
     PLOGI(
@@ -1791,7 +1843,7 @@ PeerSet::try_connect_on_strand(std::string host, uint16_t port)
         net_label_,
         "] Connecting to ",
         key,
-        incoming_archival ? " (archival)" : "",
+        expected_archival ? " (archival candidate)" : "",
         " [hubs=",
         hub_peer_count(),
         "/",
@@ -1837,11 +1889,44 @@ PeerSet::try_connect_on_strand(std::string host, uint16_t port)
         if (auto existing = connections_.find(key);
             existing != connections_.end())
         {
-            PLOGD(log_, "[", net_label_,
-                "] Discarding duplicate connection for ", key);
+            PLOGD(
+                log_,
+                "[",
+                net_label_,
+                "] Discarding duplicate connection for ",
+                key);
             client->disconnect();
             co_return existing->second;
         }
+
+        if (!client || !client->is_ready())
+        {
+            PLOGD(
+                log_,
+                "[",
+                net_label_,
+                "] Connected candidate became unavailable before admission: ",
+                key);
+            if (client)
+                client->disconnect();
+            co_return nullptr;
+        }
+
+        if (!make_room_for_peer(key, client, admission_leases))
+        {
+            PLOGI(
+                log_,
+                "[",
+                net_label_,
+                "] Connected candidate not admitted: ",
+                key,
+                " (",
+                peer_is_archival(client) ? "archival" : "hub",
+                " pool at cap)");
+            client->disconnect();
+            co_return nullptr;
+        }
+
         connections_[key] = client;
         ++total_connects_;
         failed_at_.erase(key);
@@ -2166,11 +2251,13 @@ PeerSet::prioritize_ledger(uint32_t ledger_seq)
         });
         return;
     }
-    wanted_ledgers_.insert(ledger_seq);
-    // Cap at 10 entries — evict oldest if needed
-    while (wanted_ledgers_.size() > 10)
+    if (prioritized_ledgers_.insert(ledger_seq).second)
+        ++wanted_ledgers_[ledger_seq];
+    while (prioritized_ledgers_.size() > 10)
     {
-        wanted_ledgers_.erase(wanted_ledgers_.begin());
+        auto const demoted = *prioritized_ledgers_.begin();
+        prioritized_ledgers_.erase(prioritized_ledgers_.begin());
+        release_wanted_ledger(demoted);
     }
     sort_pending_connects();
     sort_pending_crawls();
@@ -2178,36 +2265,214 @@ PeerSet::prioritize_ledger(uint32_t ledger_seq)
     pump_connects();
 }
 
-void
-PeerSet::try_candidates_for(uint32_t ledger_seq)
+PeerSet::TargetedAdmissionLeasePtr
+PeerSet::TargetedConnectAuthorization::claim()
 {
-    if (!strand_.running_in_this_thread())
-    {
-        asio::post(strand_, [self = shared_from_this(), ledger_seq]() {
-            self->try_candidates_for(ledger_seq);
-        });
+    std::lock_guard lock(leases_mutex);
+    if (!accepting.load(std::memory_order_acquire))
+        return nullptr;
+
+    auto lease = std::make_shared<TargetedAdmissionLease>(shared_from_this());
+    leases.emplace_back(lease);
+    return lease;
+}
+
+void
+PeerSet::TargetedConnectAuthorization::close(bool revoke_claimed) noexcept
+{
+    accepting.store(false, std::memory_order_release);
+    if (!revoke_claimed)
         return;
+
+    std::lock_guard lock(leases_mutex);
+    for (auto it = leases.begin(); it != leases.end();)
+    {
+        if (auto lease = it->lock())
+        {
+            lease->revoke();
+            ++it;
+        }
+        else
+        {
+            it = leases.erase(it);
+        }
     }
-    // Don't call prioritize_ledger() — with concurrent prove() calls,
-    // overwriting the shared preference would retune discovery for all.
-    // Just queue/pump without reranking.
+}
+
+void
+PeerSet::acquire_wanted_ledger(
+    uint32_t ledger_seq,
+    TargetedConnectAuthorizationPtr const& authorization)
+{
+    ASSERT_ON_STRAND();
+    ++wanted_ledgers_[ledger_seq];
+    if (authorization)
+        active_target_authorizations_.push_back(authorization);
+}
+
+void
+PeerSet::release_wanted_ledger(
+    uint32_t ledger_seq,
+    TargetedConnectAuthorizationPtr const& authorization)
+{
+    ASSERT_ON_STRAND();
+    if (authorization)
+    {
+        auto it = std::find(
+            active_target_authorizations_.begin(),
+            active_target_authorizations_.end(),
+            authorization);
+        if (it != active_target_authorizations_.end())
+            active_target_authorizations_.erase(it);
+    }
+
+    auto it = wanted_ledgers_.find(ledger_seq);
+    if (it == wanted_ledgers_.end())
+        return;
+    if (it->second > 1)
+        --it->second;
+    else
+        wanted_ledgers_.erase(it);
+}
+
+void
+PeerSet::finish_targeted_authorization(
+    TargetedConnectAuthorizationPtr const& authorization,
+    bool revoke_claimed)
+{
+    ASSERT_ON_STRAND();
+    if (!authorization)
+        return;
+    authorization->close(revoke_claimed);
+    for (auto it = targeted_connects_.begin(); it != targeted_connects_.end();)
+    {
+        auto& authorizations = it->second;
+        authorizations.erase(
+            std::remove_if(
+                authorizations.begin(),
+                authorizations.end(),
+                [&](auto const& current) {
+                    return !current || !current->is_active() ||
+                        current == authorization;
+                }),
+            authorizations.end());
+        if (authorizations.empty())
+            it = targeted_connects_.erase(it);
+        else
+            ++it;
+    }
+}
+
+std::vector<std::string>
+PeerSet::try_candidates_for(
+    TargetedConnectAuthorizationPtr const& authorization,
+    std::unordered_set<std::string> const& selection_excluded,
+    std::size_t connect_budget)
+{
+    ASSERT_ON_STRAND();
+    if (!authorization || !authorization->is_active())
+        return {};
+    auto const ledger_seq = authorization->ledger_seq;
 
     auto candidates = tracker_->all_endpoints();
     for (auto const& endpoint : candidates)
-    {
         queue_crawl(endpoint);
-        if (should_connect_endpoint(endpoint))
+
+    auto const now = std::chrono::steady_clock::now();
+    candidates.erase(
+        std::remove_if(
+            candidates.begin(),
+            candidates.end(),
+            [&](std::string const& raw_endpoint) {
+                auto const key = canonical_endpoint(raw_endpoint);
+                if (key.empty() || selection_excluded.count(key) ||
+                    connections_.count(key) || in_flight_.count(key) ||
+                    peer_failed_for_ledger(key, ledger_seq, now))
+                {
+                    return true;
+                }
+                auto failed = failed_at_.find(key);
+                return failed != failed_at_.end() &&
+                    now - failed->second < retry_backoff_for(key);
+            }),
+        candidates.end());
+
+    auto range_for = [&](std::string const& raw_endpoint) {
+        auto const key = canonical_endpoint(raw_endpoint);
+        auto stats = endpoint_stats_.find(key);
+        return stats != endpoint_stats_.end() ? stats->second.status
+                                              : PeerStatus{};
+    };
+    std::sort(
+        candidates.begin(),
+        candidates.end(),
+        [&](std::string const& lhs, std::string const& rhs) {
+            auto const lhs_key = canonical_endpoint(lhs);
+            auto const rhs_key = canonical_endpoint(rhs);
+            auto const lhs_status = range_for(lhs_key);
+            auto const rhs_status = range_for(rhs_key);
+            auto const lhs_covers = lhs_status.first_seq != 0 &&
+                lhs_status.last_seq != 0 &&
+                ledger_seq >= lhs_status.first_seq &&
+                ledger_seq <= lhs_status.last_seq;
+            auto const rhs_covers = rhs_status.first_seq != 0 &&
+                rhs_status.last_seq != 0 &&
+                ledger_seq >= rhs_status.first_seq &&
+                ledger_seq <= rhs_status.last_seq;
+            if (lhs_covers != rhs_covers)
+                return lhs_covers;
+
+            auto const lhs_archival = is_archival_endpoint(lhs_key);
+            auto const rhs_archival = is_archival_endpoint(rhs_key);
+            if (lhs_archival != rhs_archival)
+                return lhs_archival;
+
+            auto const lhs_span = lhs_status.last_seq > lhs_status.first_seq
+                ? static_cast<uint64_t>(
+                      lhs_status.last_seq - lhs_status.first_seq)
+                : 0;
+            auto const rhs_span = rhs_status.last_seq > rhs_status.first_seq
+                ? static_cast<uint64_t>(
+                      rhs_status.last_seq - rhs_status.first_seq)
+                : 0;
+            if (lhs_span != rhs_span)
+                return lhs_span > rhs_span;
+            return candidate_better(lhs_key, rhs_key);
+        });
+
+    std::vector<std::string> queued;
+    for (auto const& endpoint : candidates)
+    {
+        if (queued.size() >= connect_budget)
+            break;
+        auto const key = canonical_endpoint(endpoint);
+        if (queued_.count(key))
         {
-            queue_connect(endpoint);
+            auto& authorizations = targeted_connects_[key];
+            if (std::find(
+                    authorizations.begin(),
+                    authorizations.end(),
+                    authorization) == authorizations.end())
+            {
+                authorizations.push_back(authorization);
+            }
+            queued.push_back(key);
+            continue;
+        }
+        auto const before = queued_.size();
+        queue_connect(key);
+        if (queued_.size() != before)
+        {
+            targeted_connects_[key].push_back(authorization);
+            queued.push_back(key);
         }
     }
 
-    // Keep expanding the graph even when cached range data is incomplete.
-    try_undiscovered();
     sort_pending_connects();
     sort_pending_crawls();
     pump_crawls();
     pump_connects();
+    return queued;
 }
 
 boost::asio::awaitable<PeerSessionPtr>
@@ -2427,57 +2692,79 @@ PeerSet::wait_for_peer_on_strand(
         co_return nullptr;
 
     auto self = shared_from_this();
-    struct WantedLedgerCleanup
+    auto authorization =
+        std::make_shared<TargetedConnectAuthorization>(ledger_seq, excluded);
+    struct WaitTargetCleanup
     {
         std::weak_ptr<PeerSet> self;
         asio::strand<asio::io_context::executor_type> strand;
         uint32_t ledger_seq = 0;
+        TargetedConnectAuthorizationPtr authorization;
         bool active = true;
 
         void
-        clean_now()
+        clean_now(bool preserve_claimed = false)
         {
             if (!active)
                 return;
             if (auto locked = self.lock())
-                locked->wanted_ledgers_.erase(ledger_seq);
+            {
+                locked->finish_targeted_authorization(
+                    authorization, !preserve_claimed);
+                locked->release_wanted_ledger(ledger_seq, authorization);
+            }
             active = false;
         }
 
-        ~WantedLedgerCleanup()
+        ~WaitTargetCleanup()
         {
             if (!active)
                 return;
+
+            // Capability invalidation must not wait behind a queued connect
+            // completion. Map/refcount cleanup remains strand-confined.
+            if (authorization)
+                authorization->invalidate();
+
+            if (strand.running_in_this_thread())
+            {
+                if (auto locked = self.lock())
+                {
+                    locked->finish_targeted_authorization(authorization, true);
+                    locked->release_wanted_ledger(ledger_seq, authorization);
+                }
+                active = false;
+                return;
+            }
+
             try
             {
                 asio::post(
                     strand,
                     [self = std::move(self),
-                     ledger_seq = ledger_seq]() mutable {
+                     ledger_seq = ledger_seq,
+                     authorization = std::move(authorization)]() mutable {
                         if (auto locked = self.lock())
-                            locked->wanted_ledgers_.erase(ledger_seq);
+                        {
+                            locked->finish_targeted_authorization(
+                                authorization, true);
+                            locked->release_wanted_ledger(
+                                ledger_seq, authorization);
+                        }
                     });
             }
             catch (...)
             {
             }
         }
-    } cleanup{self, strand_, ledger_seq};
+    } cleanup{self, strand_, ledger_seq, authorization};
 
-    // Register this ledger as a wanted target so should_connect_endpoint
-    // and evict_for can prioritize candidates that cover it.
-    wanted_ledgers_.insert(ledger_seq);
-
-    // Immediately try any undiscovered endpoints
-    try_candidates_for(ledger_seq);
+    // Keep a reference-counted target registration for the complete wait so
+    // concurrent requests for the same ledger cannot clear each other.
+    acquire_wanted_ledger(ledger_seq, authorization);
 
     auto const fallback_ms = static_cast<int>(options_.peer_fallback.count());
     auto const timeout_ms = timeout_secs * 1000;
-
-    // Helper: snapshot connected peers into PeerCandidate structs
-    // for the pure select_peer logic. Checks failed_ledgers with
-    // a 60s TTL so peers get fresh chances.
-    static constexpr auto kFailedLedgerTtl = std::chrono::seconds(60);
 
     auto snapshot_peers = [&]() -> std::vector<PeerCandidate> {
         auto const now = std::chrono::steady_clock::now();
@@ -2509,6 +2796,19 @@ PeerSet::wait_for_peer_on_strand(
         return candidates;
     };
 
+    std::unordered_set<std::string> targeted_candidates;
+    std::size_t targeted_connects = 0;
+    auto queue_targeted_candidate = [&]() {
+        if (targeted_connects >= options_.max_targeted_connect_attempts)
+            return;
+        auto connect_excluded = excluded;
+        connect_excluded.insert(
+            targeted_candidates.begin(), targeted_candidates.end());
+        auto queued = try_candidates_for(authorization, connect_excluded, 1);
+        targeted_connects += queued.size();
+        targeted_candidates.insert(queued.begin(), queued.end());
+    };
+
     // Initial check before entering the poll loop
     {
         auto sel = select_peer(
@@ -2531,11 +2831,15 @@ PeerSet::wait_for_peer_on_strand(
                     " for ledger ",
                     ledger_seq);
                 note_peer_selected(sel.endpoint);
-                cleanup.clean_now();
+                cleanup.clean_now(sel.decision == PeerDecision::use_fallback);
                 co_return it->second;
             }
         }
     }
+
+    // Probe a bounded number of disconnected candidates while this wait is
+    // active. Admission may rotate one unsuitable peer in the same pool.
+    queue_targeted_candidate();
 
     PLOGI(
         log_,
@@ -2577,9 +2881,7 @@ PeerSet::wait_for_peer_on_strand(
 
         if (now >= next_maintenance)
         {
-            if (at_connection_cap())
-                evict_for(ledger_seq);
-            try_candidates_for(ledger_seq);
+            queue_targeted_candidate();
             while (next_maintenance <= now)
                 next_maintenance += std::chrono::seconds(1);
         }
@@ -2628,7 +2930,8 @@ PeerSet::wait_for_peer_on_strand(
                         it->second->peer_last_seq(),
                         ")");
                     note_peer_selected(sel.endpoint);
-                    cleanup.clean_now();
+                    cleanup.clean_now(
+                        sel.decision == PeerDecision::use_fallback);
                     co_return it->second;
                 }
                 break;  // selected peer vanished, keep polling
@@ -2821,6 +3124,233 @@ PeerSet::archival_peer_count() const
     return count;
 }
 
+bool
+PeerSet::peer_is_archival(PeerSessionPtr const& peer) const
+{
+    ASSERT_ON_STRAND();
+    if (!peer || !peer->is_ready())
+        return false;
+    auto const first = peer->peer_first_seq();
+    auto const last = peer->peer_last_seq();
+    return first != 0 && last > first &&
+        (last - first) > options_.archival_range_threshold;
+}
+
+bool
+PeerSet::has_usable_covering_peer(
+    uint32_t ledger_seq,
+    std::unordered_set<std::string> const& excluded) const
+{
+    ASSERT_ON_STRAND();
+    auto const now = std::chrono::steady_clock::now();
+    for (auto const& [key, peer] : connections_)
+    {
+        if (!peer || !peer->is_ready())
+            continue;
+        if (excluded.count(key))
+            continue;
+        auto const first = peer->peer_first_seq();
+        auto const last = peer->peer_last_seq();
+        if (first != 0 && last != 0 && ledger_seq >= first &&
+            ledger_seq <= last && !peer_failed_for_ledger(key, ledger_seq, now))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool
+PeerSet::would_drop_wanted_coverage(
+    std::string const& victim_key,
+    PeerSessionPtr const& victim,
+    RotationTarget const& target,
+    std::chrono::steady_clock::time_point now) const
+{
+    ASSERT_ON_STRAND();
+    if (!victim)
+        return false;
+
+    auto covers = [](PeerSessionPtr const& peer, uint32_t ledger_seq) {
+        if (!peer || !peer->is_ready())
+            return false;
+        auto const first = peer->peer_first_seq();
+        auto const last = peer->peer_last_seq();
+        return first != 0 && last != 0 && ledger_seq >= first &&
+            ledger_seq <= last;
+    };
+    auto usable = [&](std::string const& key,
+                      PeerSessionPtr const& peer,
+                      uint32_t ledger_seq,
+                      std::unordered_set<std::string> const& excluded) {
+        return !excluded.count(key) && covers(peer, ledger_seq) &&
+            !peer_failed_for_ledger(key, ledger_seq, now);
+    };
+    auto candidate_usable =
+        [&](uint32_t ledger_seq,
+            std::unordered_set<std::string> const& excluded) {
+            return target.candidate_first_seq != 0 &&
+                target.candidate_last_seq != 0 &&
+                ledger_seq >= target.candidate_first_seq &&
+                ledger_seq <= target.candidate_last_seq &&
+                !excluded.count(target.candidate_key) &&
+                !peer_failed_for_ledger(target.candidate_key, ledger_seq, now);
+        };
+    auto loses_coverage = [&](uint32_t ledger_seq,
+                              std::unordered_set<std::string> const& excluded) {
+        if (!usable(victim_key, victim, ledger_seq, excluded) ||
+            candidate_usable(ledger_seq, excluded))
+            return false;
+
+        return !std::any_of(
+            connections_.begin(),
+            connections_.end(),
+            [&](auto const& connection) {
+                auto const& [key, peer] = connection;
+                return key != victim_key &&
+                    usable(key, peer, ledger_seq, excluded);
+            });
+    };
+
+    std::unordered_map<uint32_t, std::size_t> constrained_counts;
+    auto const target_authorization =
+        target.lease ? target.lease->authorization : nullptr;
+    for (auto const& authorization : active_target_authorizations_)
+    {
+        if (!authorization || !authorization->is_active())
+            continue;
+        ++constrained_counts[authorization->ledger_seq];
+        if (authorization == target_authorization)
+            continue;
+        if (loses_coverage(authorization->ledger_seq, authorization->excluded))
+            return true;
+    }
+
+    static std::unordered_set<std::string> const no_exclusions;
+    for (auto const& [wanted_seq, count] : wanted_ledgers_)
+    {
+        auto const represented = constrained_counts[wanted_seq];
+        if (count > represented && loses_coverage(wanted_seq, no_exclusions))
+            return true;
+    }
+
+    return false;
+}
+
+std::optional<PeerSet::RotationTarget>
+PeerSet::rotation_target_for(
+    std::string const& candidate_key,
+    PeerSessionPtr const& candidate,
+    std::vector<TargetedAdmissionLeasePtr> const& admission_leases) const
+{
+    ASSERT_ON_STRAND();
+    if (!candidate || !candidate->is_ready())
+        return std::nullopt;
+
+    auto const first = candidate->peer_first_seq();
+    auto const last = candidate->peer_last_seq();
+    auto const candidate_archival = peer_is_archival(candidate);
+
+    auto candidate_covers = [&](uint32_t ledger_seq) {
+        return first != 0 && last != 0 && ledger_seq >= first &&
+            ledger_seq <= last;
+    };
+    auto has_known_bad_victim = [&](TargetedConnectAuthorization const& auth) {
+        auto const now = std::chrono::steady_clock::now();
+        for (auto const& [key, peer] : connections_)
+        {
+            if (!peer || !peer->is_ready() || peer->pending_count() > 0 ||
+                peer_is_archival(peer) != candidate_archival)
+            {
+                continue;
+            }
+            if (auth.excluded.count(key) ||
+                peer_failed_for_ledger(key, auth.ledger_seq, now))
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Prefer a candidate that explicitly advertises the requested ledger.
+    for (auto const& lease : admission_leases)
+    {
+        auto const authorization = lease ? lease->authorization : nullptr;
+        if (!lease || !lease->is_available() || !authorization ||
+            !candidate_covers(authorization->ledger_seq) ||
+            has_usable_covering_peer(
+                authorization->ledger_seq, authorization->excluded))
+        {
+            continue;
+        }
+        return RotationTarget{
+            .ledger_seq = authorization->ledger_seq,
+            .excluded = authorization->excluded,
+            .candidate_covers = true,
+            .candidate_key = candidate_key,
+            .candidate_first_seq = first,
+            .candidate_last_seq = last,
+            .lease = lease,
+        };
+    }
+
+    // Advertised ranges can be incomplete. A bounded targeted probe may still
+    // replace a peer already known to be unusable for this operation.
+    for (auto const& lease : admission_leases)
+    {
+        auto const authorization = lease ? lease->authorization : nullptr;
+        if (!lease || !lease->is_available() || !authorization ||
+            has_usable_covering_peer(
+                authorization->ledger_seq, authorization->excluded) ||
+            !has_known_bad_victim(*authorization))
+        {
+            continue;
+        }
+        return RotationTarget{
+            .ledger_seq = authorization->ledger_seq,
+            .excluded = authorization->excluded,
+            .candidate_covers = false,
+            .candidate_key = candidate_key,
+            .candidate_first_seq = first,
+            .candidate_last_seq = last,
+            .lease = lease,
+        };
+    }
+    return std::nullopt;
+}
+
+bool
+PeerSet::make_room_for_peer(
+    std::string const& candidate_key,
+    PeerSessionPtr const& candidate,
+    std::vector<TargetedAdmissionLeasePtr> const& admission_leases)
+{
+    ASSERT_ON_STRAND();
+    if (!candidate || !candidate->is_ready())
+        return false;
+
+    auto const archival = peer_is_archival(candidate);
+    auto const at_cap = archival ? at_archival_cap() : at_connection_cap();
+    if (!at_cap)
+        return true;
+
+    auto const target =
+        rotation_target_for(candidate_key, candidate, admission_leases);
+    if (!target)
+        return false;
+
+    if (!candidate->is_ready() || !target->lease ||
+        !target->lease->try_consume())
+        return false;
+
+    auto const evicted =
+        archival ? evict_archival_for(*target) : evict_hub_for(*target);
+    if (!evicted)
+        return false;
+    return archival ? !at_archival_cap() : !at_connection_cap();
+}
+
 PeerSet::Snapshot
 PeerSet::snapshot_unsafe() const
 {
@@ -2833,13 +3363,17 @@ PeerSet::snapshot_unsafe() const
     out.crawled_size = crawled_.size();
     out.failed_at_size = failed_at_.size();
     out.connected_peers = connections_.size();
+    out.hub_peers = hub_peer_count();
+    out.archival_peers = archival_peer_count();
     out.total_connects = total_connects_;
     out.total_disconnects = total_disconnects_;
     out.in_flight_connects = in_flight_.size();
     out.queued_connects = pending_connects_.size();
     out.crawl_in_flight = crawl_in_flight_.size();
     out.queued_crawls = pending_crawls_.size();
-    out.wanted_ledgers.assign(wanted_ledgers_.begin(), wanted_ledgers_.end());
+    out.wanted_ledgers.reserve(wanted_ledgers_.size());
+    for (auto const& [ledger_seq, _] : wanted_ledgers_)
+        out.wanted_ledgers.push_back(ledger_seq);
 
     {
         std::unordered_map<std::string, std::size_t> kind_counts;
@@ -2923,6 +3457,12 @@ PeerSet::snapshot_unsafe() const
             entry.last_failure_at = stats.last_failure_at;
             entry.success_count = stats.success_count;
             entry.failure_count = stats.failure_count;
+            entry.ledger_failure_count = stats.ledger_failure_count;
+            for (auto const& [_, failure] : stats.failed_ledgers)
+            {
+                if (now - failure.at < kFailedLedgerTtl)
+                    ++entry.recent_failed_ledgers;
+            }
             entry.selection_count = stats.selection_count;
             entry.last_selected_ticket = stats.last_selected_ticket;
         }
@@ -2962,56 +3502,47 @@ PeerSet::snapshot_unsafe() const
 }
 
 bool
-PeerSet::evict_for(uint32_t target_ledger_seq)
+PeerSet::evict_hub_for(RotationTarget const& target)
 {
-    if (!strand_.running_in_this_thread())
-    {
-        asio::post(strand_, [self = shared_from_this(), target_ledger_seq]() {
-            self->evict_for(target_ledger_seq);
-        });
-        return {};
-    }
-
-    // Find the least useful idle peer that doesn't cover the target.
+    ASSERT_ON_STRAND();
     std::string worst_key;
     uint32_t worst_range_span = std::numeric_limits<uint32_t>::max();
+    bool worst_known_bad = false;
+    uint64_t worst_failure_count = 0;
+    auto const now = std::chrono::steady_clock::now();
 
     for (auto const& [key, client] : connections_)
     {
-        if (!client || !client->is_ready())
+        if (!client || !client->is_ready() || peer_is_archival(client))
             continue;
-
-        // Don't evict peers with in-flight requests.
-        // pending_count() reads PeerClient state — safe because
-        // the request methods now hop to PeerClient's strand,
-        // and atomics/size() are safe to read cross-strand.
-        // But skip eviction entirely if the peer was recently active.
         if (client->pending_count() > 0)
             continue;
 
-        auto first = client->peer_first_seq();
-        auto last = client->peer_last_seq();
-
-        // Don't evict if this peer covers the target
-        if (target_ledger_seq != 0 && first != 0 && last != 0 &&
-            target_ledger_seq >= first && target_ledger_seq <= last)
-        {
+        auto const first = client->peer_first_seq();
+        auto const last = client->peer_last_seq();
+        auto const covers = target.ledger_seq != 0 && first != 0 && last != 0 &&
+            target.ledger_seq >= first && target.ledger_seq <= last;
+        auto const failed = peer_failed_for_ledger(key, target.ledger_seq, now);
+        auto const excluded = target.excluded.count(key) > 0;
+        if (covers && !failed && !excluded)
             continue;
-        }
-
-        // Don't evict archival peers — they have their own pool
-        if (first != 0 && last != 0 &&
-            (last - first) > options_.archival_range_threshold)
-        {
+        auto const known_bad = failed || excluded;
+        if (!target.candidate_covers && !known_bad)
             continue;
-        }
+        if (would_drop_wanted_coverage(key, client, target, now))
+            continue;
 
-        // Score by range span — narrower range = less useful
-        uint32_t span = (first != 0 && last != 0) ? (last - first) : 0;
-        if (worst_key.empty() || span < worst_range_span)
+        auto const span = last > first ? last - first : 0;
+        auto const failures = endpoint_stats_[key].ledger_failure_count;
+        if (worst_key.empty() || (known_bad && !worst_known_bad) ||
+            (known_bad == worst_known_bad && failures > worst_failure_count) ||
+            (known_bad == worst_known_bad && failures == worst_failure_count &&
+             span < worst_range_span))
         {
             worst_key = key;
             worst_range_span = span;
+            worst_known_bad = known_bad;
+            worst_failure_count = failures;
         }
     }
 
@@ -3022,41 +3553,110 @@ PeerSet::evict_for(uint32_t target_ledger_seq)
         log_,
         "[",
         net_label_,
-        "] Evicting idle peer ",
+        "] Rotating idle hub ",
         worst_key,
         " (range span ",
         worst_range_span,
         ") to make room for ledger ",
-        target_ledger_seq);
+        target.ledger_seq);
 
-    // Close the connection via strand-safe close() and remove.
-    // close() posts to the connection's strand if called off-strand.
     auto it = connections_.find(worst_key);
-    if (it != connections_.end() && it->second)
+    auto victim = it != connections_.end() ? it->second : nullptr;
+    remove_peer(worst_key, false);
+    if (victim)
+        victim->disconnect();
+    return true;
+}
+
+bool
+PeerSet::evict_archival_for(RotationTarget const& target)
+{
+    ASSERT_ON_STRAND();
+    std::string worst_key;
+    uint32_t worst_range_span = std::numeric_limits<uint32_t>::max();
+    bool worst_known_bad = false;
+    uint64_t worst_failure_count = 0;
+    auto const now = std::chrono::steady_clock::now();
+
+    for (auto const& [key, client] : connections_)
     {
-        it->second->disconnect();
+        if (!client || !client->is_ready() || !peer_is_archival(client) ||
+            client->pending_count() > 0)
+        {
+            continue;
+        }
+
+        auto const first = client->peer_first_seq();
+        auto const last = client->peer_last_seq();
+        auto const covers = target.ledger_seq != 0 && first != 0 && last != 0 &&
+            target.ledger_seq >= first && target.ledger_seq <= last;
+        auto const failed = peer_failed_for_ledger(key, target.ledger_seq, now);
+        auto const excluded = target.excluded.count(key) > 0;
+        if (covers && !failed && !excluded)
+            continue;
+        auto const known_bad = failed || excluded;
+        if (!target.candidate_covers && !known_bad)
+            continue;
+        if (would_drop_wanted_coverage(key, client, target, now))
+            continue;
+
+        auto const span = last > first ? last - first : 0;
+        auto const failures = endpoint_stats_[key].ledger_failure_count;
+        if (worst_key.empty() || (known_bad && !worst_known_bad) ||
+            (known_bad == worst_known_bad && failures > worst_failure_count) ||
+            (known_bad == worst_known_bad && failures == worst_failure_count &&
+             span < worst_range_span))
+        {
+            worst_key = key;
+            worst_range_span = span;
+            worst_known_bad = known_bad;
+            worst_failure_count = failures;
+        }
     }
-    remove_peer(worst_key);
+
+    if (worst_key.empty())
+        return false;
+
+    PLOGI(
+        log_,
+        "[",
+        net_label_,
+        "] Rotating idle archival peer ",
+        worst_key,
+        " (range span ",
+        worst_range_span,
+        ") to make room for ledger ",
+        target.ledger_seq);
+
+    auto it = connections_.find(worst_key);
+    auto victim = it != connections_.end() ? it->second : nullptr;
+    remove_peer(worst_key, false);
+    if (victim)
+        victim->disconnect();
     return true;
 }
 
 void
-PeerSet::remove_peer(std::string const& key)
+PeerSet::remove_peer(std::string const& key, bool forget_endpoint)
 {
     if (!strand_.running_in_this_thread())
     {
-        asio::post(strand_, [self = shared_from_this(), key]() {
-            self->remove_peer(key);
-        });
+        asio::post(
+            strand_, [self = shared_from_this(), key, forget_endpoint]() {
+                self->remove_peer(key, forget_endpoint);
+            });
         return;
     }
     auto it = connections_.find(key);
     if (it != connections_.end())
     {
         PLOGI(log_, "[", net_label_, "] Removing dead peer: ", key);
+        if (!forget_endpoint)
+            tracker_->add_discovered(key);
         connections_.erase(it);
         ++total_disconnects_;
-        tracker_->remove(key);
+        if (forget_endpoint)
+            tracker_->remove(key);
         notify_waiters();
     }
 }
@@ -3068,7 +3668,6 @@ PeerSet::prune_endpoint_stats()
 
     // Prune expired failed_ledgers from all entries
     auto const now = std::chrono::steady_clock::now();
-    static constexpr auto kFailedLedgerTtl = std::chrono::seconds(60);
     for (auto& [key, stats] : endpoint_stats_)
     {
         for (auto it = stats.failed_ledgers.begin();

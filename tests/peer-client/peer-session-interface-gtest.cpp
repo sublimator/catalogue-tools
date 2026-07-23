@@ -2,6 +2,9 @@
 #include <catl/peer-client/peer-set.h>
 #include "peer-set-test-access.h"
 
+#include <catl/core/context-executor.h>
+#include <catl/core/request-context.h>
+
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/post.hpp>
@@ -10,6 +13,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -35,6 +39,8 @@ public:
         std::vector<SHAMapNodeID> const&,
         std::function<void(boost::system::error_code)>)>;
     using PingHandler = std::function<void(Callback<PingResult>)>;
+    using GetLedgerHeaderHandler =
+        std::function<void(uint32_t, Callback<LedgerHeaderResult>)>;
 
     FakePeerSession(
         asio::io_context& io,
@@ -116,10 +122,33 @@ public:
 
     void
     get_ledger_header(
-        uint32_t,
+        uint32_t ledger_seq,
         Callback<LedgerHeaderResult> callback,
         RequestOptions) override
     {
+        GetLedgerHeaderHandler handler;
+        bool invoke_inline = false;
+        {
+            std::lock_guard lock(mutex_);
+            handler = get_ledger_header_handler_;
+            invoke_inline = invoke_header_handler_inline_;
+        }
+        if (handler)
+        {
+            if (invoke_inline)
+            {
+                handler(ledger_seq, std::move(callback));
+                return;
+            }
+            asio::post(
+                strand_,
+                [handler = std::move(handler),
+                 ledger_seq,
+                 callback = std::move(callback)]() mutable {
+                    handler(ledger_seq, std::move(callback));
+                });
+            return;
+        }
         complete(std::move(callback), Error::Timeout, LedgerHeaderResult{});
     }
 
@@ -240,6 +269,26 @@ public:
         ping_handler_ = std::move(handler);
     }
 
+    void
+    set_get_ledger_header_handler(GetLedgerHeaderHandler handler)
+    {
+        std::lock_guard lock(mutex_);
+        get_ledger_header_handler_ = std::move(handler);
+    }
+
+    void
+    set_invoke_header_handler_inline(bool value)
+    {
+        std::lock_guard lock(mutex_);
+        invoke_header_handler_inline_ = value;
+    }
+
+    void
+    set_ready(bool ready)
+    {
+        ready_.store(ready, std::memory_order_relaxed);
+    }
+
 private:
     template <class Result>
     void
@@ -269,6 +318,8 @@ private:
     UnsolicitedHandler unsolicited_handler_;
     NodeResponseHandler node_response_handler_;
     PingHandler ping_handler_;
+    GetLedgerHeaderHandler get_ledger_header_handler_;
+    bool invoke_header_handler_inline_ = false;
     SendGetNodesHandler send_get_nodes_handler_;
 };
 
@@ -641,6 +692,7 @@ TEST(PeerSessionInterface, NodeCacheWalkFailureExcludesEveryAttemptedPeer)
             .fetch_timeout = std::chrono::milliseconds(30),
             .max_walk_peer_retries = 2,
             .fetch_stale_multiplier = 1,
+            .peer_refresh_timeout_secs = 0,
         });
 
     auto const root_hash = hash_with_byte(0x77);
@@ -905,4 +957,681 @@ TEST(PeerSessionInterface, NodeCacheFanoutSurvivesOneWriteFailure)
 
     io.stop();
     runner.join();
+}
+
+TEST(PeerSessionInterface, LateHeaderFailureCannotCancelNewRound)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 10ms,
+            .header_timeout_floor = 50ms,
+        });
+    constexpr uint32_t ledger_seq = 6000;
+
+    auto old_round = std::make_shared<FakePeerSession>(
+        io, "old-header-round:1", true, ledger_seq, 5900, 6100);
+    auto new_round = std::make_shared<FakePeerSession>(
+        io, "new-header-round:1", false, ledger_seq, 5900, 6100);
+
+    old_round->set_get_ledger_header_handler(
+        [&io](uint32_t, Callback<LedgerHeaderResult> callback) {
+            auto timer = std::make_shared<asio::steady_timer>(io, 70ms);
+            timer->async_wait([timer, callback = std::move(callback)](
+                                  boost::system::error_code ec) mutable {
+                if (!ec)
+                    callback(Error::Timeout, LedgerHeaderResult{});
+            });
+        });
+    new_round->set_get_ledger_header_handler(
+        [&io](uint32_t, Callback<LedgerHeaderResult> callback) {
+            auto timer = std::make_shared<asio::steady_timer>(io, 30ms);
+            timer->async_wait([timer, callback = std::move(callback)](
+                                  boost::system::error_code ec) mutable {
+                if (!ec)
+                    callback(Error::Success, LedgerHeaderResult{});
+            });
+        });
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, old_round);
+    PeerSetTestAccess::insert_connected_peer(io, peers, new_round);
+    asio::steady_timer make_ready(io, 10ms);
+    make_ready.async_wait([new_round](boost::system::error_code ec) {
+        if (!ec)
+            new_round->set_ready(true);
+    });
+
+    std::promise<bool> owner_promise;
+    std::promise<bool> joiner_promise;
+    auto owner_future = owner_promise.get_future();
+    auto joiner_future = joiner_promise.get_future();
+    asio::co_spawn(
+        io,
+        [cache, peers, old_round, &owner_promise]() -> asio::awaitable<void> {
+            try
+            {
+                (void)co_await cache->get_header(6000, peers, old_round);
+                owner_promise.set_value(true);
+            }
+            catch (...)
+            {
+                owner_promise.set_exception(std::current_exception());
+            }
+        },
+        asio::detached);
+    asio::co_spawn(
+        io,
+        [cache, peers, &joiner_promise]() -> asio::awaitable<void> {
+            try
+            {
+                (void)co_await cache->get_header(6000, peers, nullptr);
+                joiner_promise.set_value(true);
+            }
+            catch (...)
+            {
+                joiner_promise.set_exception(std::current_exception());
+            }
+        },
+        asio::detached);
+
+    std::array<std::thread, 4> runners;
+    for (auto& runner : runners)
+        runner = std::thread([&]() { io.run(); });
+    EXPECT_TRUE(wait_for_future(owner_future, std::chrono::seconds(2)));
+    EXPECT_TRUE(wait_for_future(joiner_future, std::chrono::seconds(2)));
+    for (auto& runner : runners)
+        runner.join();
+
+    io.restart();
+    EXPECT_EQ(
+        PeerSetTestAccess::ledger_failure_count(
+            io, peers, old_round->endpoint()),
+        1u);
+    EXPECT_EQ(
+        PeerSetTestAccess::ledger_failure_count(
+            io, peers, new_round->endpoint()),
+        0u);
+}
+
+TEST(PeerSessionInterface, FastHeaderFailureIsLatchedBeforeOwnerWaits)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 10ms,
+            .header_timeout_floor = 500ms,
+        });
+    auto primary = std::make_shared<FakePeerSession>(
+        io, "fast-header-failure:1", true, 6000, 5900, 6100);
+    primary->set_invoke_header_handler_inline(true);
+    primary->set_get_ledger_header_handler(
+        [](uint32_t, Callback<LedgerHeaderResult> callback) {
+            callback(Error::Timeout, LedgerHeaderResult{});
+        });
+
+    bool timed_out = false;
+    auto const started = std::chrono::steady_clock::now();
+    asio::co_spawn(
+        io,
+        [&, cache, peers, primary]() -> asio::awaitable<void> {
+            try
+            {
+                (void)co_await cache->get_header(6000, peers, primary);
+            }
+            catch (PeerClientException const&)
+            {
+                timed_out = true;
+            }
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(timed_out);
+    EXPECT_LT(
+        std::chrono::steady_clock::now() - started,
+        std::chrono::milliseconds(250));
+}
+
+TEST(PeerSessionInterface, HeaderStrandPreservesRequestStatusContext)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 10ms,
+            .header_timeout_floor = 100ms,
+        });
+    auto primary = std::make_shared<FakePeerSession>(
+        io, "context-header:1", true, 6000, 5900, 6100);
+    primary->set_get_ledger_header_handler(
+        [&io](uint32_t, Callback<LedgerHeaderResult> callback) {
+            auto timer = std::make_shared<asio::steady_timer>(io, 10ms);
+            timer->async_wait([timer, callback = std::move(callback)](
+                                  boost::system::error_code ec) mutable {
+                if (!ec)
+                    callback(Error::Success, LedgerHeaderResult{});
+            });
+        });
+
+    auto request = std::make_shared<catl::core::RequestContext>(
+        "request-id", "transaction", std::chrono::steady_clock::now());
+    auto request_executor = catl::core::ContextExecutor(
+        asio::make_strand(io), request);
+    bool completed = false;
+    asio::co_spawn(
+        request_executor,
+        [&, cache, primary]() -> asio::awaitable<void> {
+            (void)co_await cache->get_header(6000, nullptr, primary);
+            completed = true;
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(completed);
+    auto const events = request->drain();
+    EXPECT_TRUE(std::any_of(
+        events.begin(), events.end(), [](std::string const& event) {
+            return event.find("anchor header") != std::string::npos;
+        }));
+}
+
+TEST(PeerSessionInterface, ArchivalAdmissionRotatesOnlyArchivalPool)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 1,
+            .max_archival_peers = 1,
+            .archival_range_threshold = 100,
+        });
+    constexpr uint32_t target = 500;
+
+    auto hub = std::make_shared<FakePeerSession>(
+        io, "hub-kept:1", true, 1000, 900, 950);
+    auto failed_archival = std::make_shared<FakePeerSession>(
+        io, "archive-failed:1", true, 1000, 400, 900);
+    auto replacement = std::make_shared<FakePeerSession>(
+        io, "archive-replacement:1", true, 1000, 300, 1000);
+    auto extra = std::make_shared<FakePeerSession>(
+        io, "archive-extra:1", true, 1000, 200, 1100);
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, hub);
+    PeerSetTestAccess::insert_connected_peer(io, peers, failed_archival);
+    PeerSetTestAccess::note_ledger_failure(
+        io, peers, failed_archival->endpoint(), target);
+    PeerSetTestAccess::acquire_wanted_ledger(io, peers, target);
+
+    EXPECT_TRUE(PeerSetTestAccess::admit_connected_peer(
+        io, peers, replacement, target));
+    EXPECT_TRUE(PeerSetTestAccess::has_connection(io, peers, hub->endpoint()));
+    EXPECT_FALSE(PeerSetTestAccess::has_connection(
+        io, peers, failed_archival->endpoint()));
+    EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, replacement->endpoint()));
+    auto counts = PeerSetTestAccess::connected_pool_counts(io, peers);
+    EXPECT_EQ(counts.first, 1u);
+    EXPECT_EQ(counts.second, 1u);
+
+    // The first replacement is now a usable covering peer, so another
+    // simultaneous candidate cannot churn the pool or cross the cap.
+    EXPECT_FALSE(
+        PeerSetTestAccess::admit_connected_peer(io, peers, extra, target));
+    counts = PeerSetTestAccess::connected_pool_counts(io, peers);
+    EXPECT_EQ(counts.first, 1u);
+    EXPECT_EQ(counts.second, 1u);
+
+    PeerSetTestAccess::release_wanted_ledger(io, peers, target);
+}
+
+TEST(PeerSessionInterface, HubAdmissionNeverConsumesArchivalSlot)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 1,
+            .max_archival_peers = 1,
+            .archival_range_threshold = 500,
+        });
+    constexpr uint32_t target = 100;
+
+    auto archival = std::make_shared<FakePeerSession>(
+        io, "archive-kept:1", true, 2000, 1000, 2000);
+    auto old_hub =
+        std::make_shared<FakePeerSession>(io, "hub-old:1", true, 950, 900, 950);
+    auto target_hub = std::make_shared<FakePeerSession>(
+        io, "hub-target:1", true, 150, 50, 150);
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, archival);
+    PeerSetTestAccess::insert_connected_peer(io, peers, old_hub);
+    PeerSetTestAccess::acquire_wanted_ledger(io, peers, target);
+
+    EXPECT_TRUE(
+        PeerSetTestAccess::admit_connected_peer(io, peers, target_hub, target));
+    EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, archival->endpoint()));
+    EXPECT_FALSE(
+        PeerSetTestAccess::has_connection(io, peers, old_hub->endpoint()));
+    EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, target_hub->endpoint()));
+    auto counts = PeerSetTestAccess::connected_pool_counts(io, peers);
+    EXPECT_EQ(counts.first, 1u);
+    EXPECT_EQ(counts.second, 1u);
+
+    PeerSetTestAccess::release_wanted_ledger(io, peers, target);
+}
+
+TEST(PeerSessionInterface, UsefulArchivalPeerIsNotRotated)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 1,
+            .max_archival_peers = 1,
+            .archival_range_threshold = 100,
+        });
+    constexpr uint32_t target = 500;
+
+    auto useful = std::make_shared<FakePeerSession>(
+        io, "archive-useful:1", true, 1000, 300, 1000);
+    auto candidate = std::make_shared<FakePeerSession>(
+        io, "archive-unneeded:1", true, 1000, 200, 1100);
+    PeerSetTestAccess::insert_connected_peer(io, peers, useful);
+    PeerSetTestAccess::acquire_wanted_ledger(io, peers, target);
+
+    EXPECT_FALSE(
+        PeerSetTestAccess::admit_connected_peer(io, peers, candidate, target));
+    EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, useful->endpoint()));
+    EXPECT_FALSE(
+        PeerSetTestAccess::has_connection(io, peers, candidate->endpoint()));
+    auto counts = PeerSetTestAccess::connected_pool_counts(io, peers);
+    EXPECT_EQ(counts.first, 0u);
+    EXPECT_EQ(counts.second, 1u);
+
+    PeerSetTestAccess::release_wanted_ledger(io, peers, target);
+}
+
+TEST(PeerSessionInterface, UntargetedCandidateCannotRotateFullPool)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 1,
+            .max_archival_peers = 0,
+            .archival_range_threshold = 1000,
+        });
+    constexpr uint32_t target = 100;
+    auto existing = std::make_shared<FakePeerSession>(
+        io, "existing-hub:1", true, 950, 900, 950);
+    auto candidate = std::make_shared<FakePeerSession>(
+        io, "ordinary-candidate:1", true, 150, 50, 150);
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, existing);
+    PeerSetTestAccess::acquire_wanted_ledger(io, peers, target);
+
+    EXPECT_FALSE(PeerSetTestAccess::admit_connected_peer(io, peers, candidate));
+    EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, existing->endpoint()));
+    EXPECT_FALSE(
+        PeerSetTestAccess::has_connection(io, peers, candidate->endpoint()));
+
+    PeerSetTestAccess::release_wanted_ledger(io, peers, target);
+}
+
+TEST(PeerSessionInterface, NonCoveringProbeNeedsKnownBadVictim)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 1,
+            .max_archival_peers = 0,
+            .archival_range_threshold = 1000,
+        });
+    constexpr uint32_t target = 500;
+    auto existing = std::make_shared<FakePeerSession>(
+        io, "untried-hub:1", true, 950, 900, 950);
+    auto candidate = std::make_shared<FakePeerSession>(
+        io, "noncovering-candidate:1", true, 1200, 1100, 1200);
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, existing);
+    EXPECT_FALSE(
+        PeerSetTestAccess::admit_connected_peer(io, peers, candidate, target));
+    EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, existing->endpoint()));
+}
+
+TEST(PeerSessionInterface, NonCoveringProbeCanReplaceFailedVictim)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 1,
+            .max_archival_peers = 0,
+            .archival_range_threshold = 1000,
+        });
+    constexpr uint32_t target = 500;
+    auto failed = std::make_shared<FakePeerSession>(
+        io, "failed-hub:1", true, 950, 900, 950);
+    auto candidate = std::make_shared<FakePeerSession>(
+        io, "untried-candidate:1", true, 1200, 1100, 1200);
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, failed);
+    PeerSetTestAccess::note_ledger_failure(
+        io, peers, failed->endpoint(), target);
+    EXPECT_TRUE(
+        PeerSetTestAccess::admit_connected_peer(io, peers, candidate, target));
+    EXPECT_FALSE(
+        PeerSetTestAccess::has_connection(io, peers, failed->endpoint()));
+    EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, candidate->endpoint()));
+}
+
+TEST(PeerSessionInterface, ExcludedPeerCanBeRotatedAndRemainsDiscoverable)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 1,
+            .max_archival_peers = 0,
+            .archival_range_threshold = 1000,
+        });
+    constexpr uint32_t target = 500;
+    auto existing = std::make_shared<FakePeerSession>(
+        io, "excluded-hub:1", true, 600, 400, 600);
+    auto candidate = std::make_shared<FakePeerSession>(
+        io, "replacement-hub:1", true, 650, 450, 650);
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, existing);
+    EXPECT_TRUE(PeerSetTestAccess::admit_connected_peer(
+        io, peers, candidate, target, {existing->endpoint()}));
+    EXPECT_FALSE(
+        PeerSetTestAccess::has_connection(io, peers, existing->endpoint()));
+    EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, candidate->endpoint()));
+    EXPECT_TRUE(
+        PeerSetTestAccess::tracker_contains(io, peers, existing->endpoint()));
+}
+
+TEST(PeerSessionInterface, RotationPreservesCoverageForOtherWantedLedger)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 2,
+            .max_archival_peers = 0,
+            .archival_range_threshold = 5000,
+        });
+    constexpr uint32_t requested = 500;
+    constexpr uint32_t other_wanted = 900;
+    auto only_other = std::make_shared<FakePeerSession>(
+        io, "only-other-ledger:1", true, 950, 850, 950);
+    auto replaceable = std::make_shared<FakePeerSession>(
+        io, "replaceable-hub:1", true, 2000, 1000, 2000);
+    auto candidate = std::make_shared<FakePeerSession>(
+        io, "requested-ledger:1", true, 550, 450, 550);
+
+    PeerSetTestAccess::prioritize_ledger(io, peers, other_wanted);
+    PeerSetTestAccess::insert_connected_peer(io, peers, only_other);
+    PeerSetTestAccess::insert_connected_peer(io, peers, replaceable);
+
+    EXPECT_TRUE(PeerSetTestAccess::admit_connected_peer(
+        io, peers, candidate, requested));
+    EXPECT_TRUE(PeerSetTestAccess::has_connection(
+        io, peers, only_other->endpoint()));
+    EXPECT_FALSE(PeerSetTestAccess::has_connection(
+        io, peers, replaceable->endpoint()));
+    EXPECT_TRUE(PeerSetTestAccess::has_connection(
+        io, peers, candidate->endpoint()));
+}
+
+TEST(PeerSessionInterface, RotationPreservesSameSequenceConcurrentWaiter)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 1,
+            .max_archival_peers = 0,
+            .archival_range_threshold = 1000,
+        });
+    constexpr uint32_t target = 500;
+    auto useful = std::make_shared<FakePeerSession>(
+        io, "same-seq-useful:1", true, 600, 400, 600);
+    auto candidate = std::make_shared<FakePeerSession>(
+        io, "same-seq-probe:1", true, 900, 700, 900);
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, useful);
+    auto other_wait = PeerSetTestAccess::acquire_targeted_wanted_ledger(
+        io, peers, target);
+
+    EXPECT_FALSE(PeerSetTestAccess::admit_connected_peer(
+        io, peers, candidate, target, {useful->endpoint()}));
+    EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, useful->endpoint()));
+    EXPECT_FALSE(
+        PeerSetTestAccess::has_connection(io, peers, candidate->endpoint()));
+
+    PeerSetTestAccess::release_targeted_wanted_ledger(
+        io, peers, std::move(other_wait));
+}
+
+TEST(PeerSessionInterface, RotationHonorsOtherWaiterExclusions)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 2,
+            .max_archival_peers = 0,
+            .archival_range_threshold = 1000,
+        });
+    constexpr uint32_t target = 500;
+    constexpr uint32_t other_target = 900;
+    auto useful = std::make_shared<FakePeerSession>(
+        io, "other-wait-useful:1", true, 950, 850, 950);
+    auto excluded_alternative = std::make_shared<FakePeerSession>(
+        io, "other-wait-excluded:1", true, 960, 840, 960);
+    auto candidate = std::make_shared<FakePeerSession>(
+        io, "target-candidate:1", true, 550, 450, 550);
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, useful);
+    PeerSetTestAccess::insert_connected_peer(
+        io, peers, excluded_alternative);
+    auto other_wait = PeerSetTestAccess::acquire_targeted_wanted_ledger(
+        io, peers, other_target, {excluded_alternative->endpoint()});
+
+    EXPECT_TRUE(PeerSetTestAccess::admit_connected_peer(
+        io, peers, candidate, target, {useful->endpoint()}));
+    EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, useful->endpoint()));
+    EXPECT_FALSE(PeerSetTestAccess::has_connection(
+        io, peers, excluded_alternative->endpoint()));
+    EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, candidate->endpoint()));
+
+    PeerSetTestAccess::release_targeted_wanted_ledger(
+        io, peers, std::move(other_wait));
+}
+
+TEST(PeerSessionInterface, QuarantinedCandidateCannotReplaceOnlyCoverage)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 1,
+            .max_archival_peers = 0,
+            .archival_range_threshold = 1000,
+        });
+    constexpr uint32_t target = 500;
+    constexpr uint32_t other_target = 550;
+    auto useful = std::make_shared<FakePeerSession>(
+        io, "quarantine-useful:1", true, 600, 400, 600);
+    auto candidate = std::make_shared<FakePeerSession>(
+        io, "quarantined-candidate:1", true, 600, 400, 600);
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, useful);
+    PeerSetTestAccess::prioritize_ledger(io, peers, other_target);
+    PeerSetTestAccess::note_ledger_failure(
+        io, peers, candidate->endpoint(), other_target);
+
+    EXPECT_FALSE(PeerSetTestAccess::admit_connected_peer(
+        io, peers, candidate, target, {useful->endpoint()}));
+    EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, useful->endpoint()));
+    EXPECT_FALSE(
+        PeerSetTestAccess::has_connection(io, peers, candidate->endpoint()));
+}
+
+TEST(PeerSessionInterface, UnavailableCandidateCannotRotatePool)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 1,
+            .max_archival_peers = 0,
+            .archival_range_threshold = 1000,
+        });
+    constexpr uint32_t target = 500;
+    auto existing = std::make_shared<FakePeerSession>(
+        io, "ready-existing:1", true, 600, 400, 600);
+    auto unavailable = std::make_shared<FakePeerSession>(
+        io, "unavailable-candidate:1", false, 600, 400, 600);
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, existing);
+    EXPECT_FALSE(PeerSetTestAccess::admit_connected_peer(
+        io, peers, unavailable, target, {existing->endpoint()}));
+    EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, existing->endpoint()));
+}
+
+TEST(PeerSessionInterface, ClaimedProbeSurvivesFallbackButNotCancellation)
+{
+    constexpr uint32_t target = 500;
+
+    asio::io_context fallback_io;
+    auto fallback_peers = PeerSet::create(
+        fallback_io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 1,
+            .max_archival_peers = 0,
+            .archival_range_threshold = 1000,
+        });
+    auto fallback_existing = std::make_shared<FakePeerSession>(
+        fallback_io, "fallback-existing:1", true, 900, 800, 900);
+    auto fallback_candidate = std::make_shared<FakePeerSession>(
+        fallback_io, "fallback-candidate:1", true, 600, 400, 600);
+    PeerSetTestAccess::insert_connected_peer(
+        fallback_io, fallback_peers, fallback_existing);
+
+    EXPECT_TRUE(PeerSetTestAccess::admit_connected_peer_after_wait_finishes(
+        fallback_io,
+        fallback_peers,
+        fallback_candidate,
+        target,
+        {fallback_existing->endpoint()},
+        false));
+
+    asio::io_context canceled_io;
+    auto canceled_peers = PeerSet::create(
+        canceled_io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_connected_peers = 1,
+            .max_archival_peers = 0,
+            .archival_range_threshold = 1000,
+        });
+    auto canceled_existing = std::make_shared<FakePeerSession>(
+        canceled_io, "canceled-existing:1", true, 900, 800, 900);
+    auto canceled_candidate = std::make_shared<FakePeerSession>(
+        canceled_io, "canceled-candidate:1", true, 600, 400, 600);
+    PeerSetTestAccess::insert_connected_peer(
+        canceled_io, canceled_peers, canceled_existing);
+
+    EXPECT_FALSE(PeerSetTestAccess::admit_connected_peer_after_wait_finishes(
+        canceled_io,
+        canceled_peers,
+        canceled_candidate,
+        target,
+        {canceled_existing->endpoint()},
+        true));
+    EXPECT_TRUE(PeerSetTestAccess::has_connection(
+        canceled_io, canceled_peers, canceled_existing->endpoint()));
 }

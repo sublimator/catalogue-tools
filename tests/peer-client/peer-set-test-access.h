@@ -4,6 +4,7 @@
 
 #include <boost/asio/post.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <future>
@@ -11,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -133,6 +135,324 @@ public:
             found = set.wanted_ledgers_.count(ledger_seq) > 0;
         });
         return found;
+    }
+
+    static std::size_t
+    wanted_ledger_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        uint32_t ledger_seq)
+    {
+        std::size_t count = 0;
+        run_on_strand(io, peers, [&count, ledger_seq](auto& set) {
+            auto it = set.wanted_ledgers_.find(ledger_seq);
+            if (it != set.wanted_ledgers_.end())
+                count = it->second;
+        });
+        return count;
+    }
+
+    static void
+    acquire_wanted_ledger(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        uint32_t ledger_seq)
+    {
+        run_on_strand(io, peers, [ledger_seq](auto& set) {
+            set.acquire_wanted_ledger(ledger_seq);
+        });
+    }
+
+    static void
+    release_wanted_ledger(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        uint32_t ledger_seq)
+    {
+        run_on_strand(io, peers, [ledger_seq](auto& set) {
+            set.release_wanted_ledger(ledger_seq);
+        });
+    }
+
+    static auto
+    acquire_targeted_wanted_ledger(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        uint32_t ledger_seq,
+        std::unordered_set<std::string> excluded = {})
+        -> catl::peer_client::PeerSet::TargetedConnectAuthorizationPtr
+    {
+        catl::peer_client::PeerSet::TargetedConnectAuthorizationPtr
+            authorization;
+        run_on_strand(
+            io,
+            peers,
+            [&authorization,
+             ledger_seq,
+             excluded = std::move(excluded)](auto& set) mutable {
+                authorization = std::make_shared<catl::peer_client::PeerSet::
+                                                     TargetedConnectAuthorization>(
+                    ledger_seq, std::move(excluded));
+                set.acquire_wanted_ledger(ledger_seq, authorization);
+            });
+        return authorization;
+    }
+
+    static void
+    release_targeted_wanted_ledger(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::PeerSet::TargetedConnectAuthorizationPtr
+            authorization)
+    {
+        run_on_strand(
+            io,
+            peers,
+            [authorization = std::move(authorization)](auto& set) {
+                if (!authorization)
+                    return;
+                auto const ledger_seq = authorization->ledger_seq;
+                set.finish_targeted_authorization(authorization, true);
+                set.release_wanted_ledger(ledger_seq, authorization);
+            });
+    }
+
+    static void
+    prioritize_ledger(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        uint32_t ledger_seq)
+    {
+        run_on_strand(io, peers, [ledger_seq](auto& set) {
+            set.prioritize_ledger(ledger_seq);
+        });
+    }
+
+    static std::size_t
+    wanted_ledger_size(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        std::size_t size = 0;
+        run_on_strand(io, peers, [&size](auto& set) {
+            size = set.wanted_ledgers_.size();
+        });
+        return size;
+    }
+
+    static void
+    note_ledger_failure(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        uint32_t ledger_seq)
+    {
+        run_on_strand(
+            io, peers, [endpoint = std::move(endpoint), ledger_seq](auto& set) {
+                set.note_ledger_failure(endpoint, ledger_seq);
+            });
+    }
+
+    static bool
+    admit_connected_peer(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::PeerSessionPtr peer,
+        uint32_t ledger_seq = 0,
+        std::unordered_set<std::string> excluded = {})
+    {
+        bool admitted = false;
+        run_on_strand(
+            io,
+            peers,
+            [&admitted,
+             peer = std::move(peer),
+             ledger_seq,
+             excluded = std::move(excluded)](auto& set) {
+                std::vector<
+                    catl::peer_client::PeerSet::TargetedAdmissionLeasePtr>
+                    admission_leases;
+                if (ledger_seq != 0)
+                {
+                    auto authorization =
+                        std::make_shared<catl::peer_client::PeerSet::
+                                             TargetedConnectAuthorization>(
+                            ledger_seq, std::move(excluded));
+                    admission_leases.push_back(authorization->claim());
+                }
+                auto const key = peer->endpoint();
+                admitted = set.make_room_for_peer(
+                    key, peer, admission_leases);
+                if (!admitted)
+                    return;
+                set.connections_[key] = peer;
+                set.note_connect_success(
+                    key,
+                    {.first_seq = peer->peer_first_seq(),
+                     .last_seq = peer->peer_last_seq(),
+                     .current_seq = peer->peer_ledger_seq()});
+            });
+        return admitted;
+    }
+
+    static bool
+    admit_connected_peer_after_wait_finishes(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::PeerSessionPtr peer,
+        uint32_t ledger_seq,
+        std::unordered_set<std::string> excluded,
+        bool revoke_claimed)
+    {
+        bool admitted = false;
+        run_on_strand(
+            io,
+            peers,
+            [&admitted,
+             peer = std::move(peer),
+             ledger_seq,
+             excluded = std::move(excluded),
+             revoke_claimed](auto& set) mutable {
+                auto authorization =
+                    std::make_shared<catl::peer_client::PeerSet::
+                                         TargetedConnectAuthorization>(
+                        ledger_seq, std::move(excluded));
+                auto lease = authorization->claim();
+                authorization->close(revoke_claimed);
+                std::vector<catl::peer_client::PeerSet::
+                                TargetedAdmissionLeasePtr>
+                    leases;
+                leases.push_back(std::move(lease));
+
+                auto const key = peer->endpoint();
+                admitted = set.make_room_for_peer(key, peer, leases);
+                if (admitted)
+                    set.connections_[key] = peer;
+            });
+        return admitted;
+    }
+
+    static bool
+    has_connection(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        bool found = false;
+        run_on_strand(
+            io, peers, [&found, endpoint = std::move(endpoint)](auto& set) {
+                found = set.connections_.count(endpoint) > 0;
+            });
+        return found;
+    }
+
+    static bool
+    tracker_contains(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        bool found = false;
+        run_on_strand(
+            io, peers, [&found, endpoint = std::move(endpoint)](auto& set) {
+                auto endpoints = set.tracker_->all_endpoints();
+                found =
+                    std::find(endpoints.begin(), endpoints.end(), endpoint) !=
+                    endpoints.end();
+            });
+        return found;
+    }
+
+    static std::uint64_t
+    ledger_failure_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        std::uint64_t count = 0;
+        run_on_strand(
+            io, peers, [&count, endpoint = std::move(endpoint)](auto& set) {
+                auto it = set.endpoint_stats_.find(endpoint);
+                if (it != set.endpoint_stats_.end())
+                    count = it->second.ledger_failure_count;
+            });
+        return count;
+    }
+
+    static std::pair<std::size_t, std::size_t>
+    connected_pool_counts(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        std::pair<std::size_t, std::size_t> counts;
+        run_on_strand(io, peers, [&counts](auto& set) {
+            counts = {set.hub_peer_count(), set.archival_peer_count()};
+        });
+        return counts;
+    }
+
+    static void
+    set_status(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        catl::peer_client::PeerStatus status)
+    {
+        run_on_strand(
+            io, peers, [endpoint = std::move(endpoint), status](auto& set) {
+                auto const key =
+                    catl::peer_client::EndpointTracker::canonical_endpoint(
+                        endpoint);
+                set.endpoint_stats_[key].status = status;
+                set.tracker_->add_discovered(key);
+            });
+    }
+
+    static std::vector<std::string>
+    try_candidates_for(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        uint32_t ledger_seq,
+        std::unordered_set<std::string> excluded,
+        std::size_t connect_budget)
+    {
+        std::vector<std::string> queued;
+        run_on_strand(
+            io,
+            peers,
+            [&queued,
+             ledger_seq,
+             excluded = std::move(excluded),
+             connect_budget](auto& set) {
+                auto authorization = std::make_shared<
+                    catl::peer_client::PeerSet::TargetedConnectAuthorization>(
+                    ledger_seq, excluded);
+                queued = set.try_candidates_for(
+                    authorization, excluded, connect_budget);
+            });
+        return queued;
+    }
+
+    static bool
+    is_targeted_connect(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        bool targeted = false;
+        run_on_strand(
+            io, peers, [&targeted, endpoint = std::move(endpoint)](auto& set) {
+                auto it = set.targeted_connects_.find(endpoint);
+                targeted =
+                    it != set.targeted_connects_.end() &&
+                    std::any_of(
+                        it->second.begin(),
+                        it->second.end(),
+                        [](auto const& authorization) {
+                            return authorization && authorization->is_active();
+                        });
+            });
+        return targeted;
     }
 
     static std::shared_ptr<boost::asio::steady_timer>

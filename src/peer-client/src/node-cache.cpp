@@ -2,14 +2,15 @@
 
 #include "ripple.pb.h"
 
+#include <catl/core/context-executor.h>
 #include <catl/core/log-macros.h>
 #include <catl/core/request-context.h>
 #include <catl/crypto/sha512-half-hasher.h>
 
-#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/deferred.hpp>
 #include <boost/asio/experimental/parallel_group.hpp>
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/this_coro.hpp>  // for reset_cancellation_state
 #include <boost/asio/use_awaitable.hpp>
 
@@ -23,6 +24,31 @@ namespace catl::peer_client {
 LogPartition NodeCache::log_("node-cache", LogLevel::INHERIT);
 
 namespace {
+
+void
+complete_timer_noexcept(
+    std::shared_ptr<asio::steady_timer> const& timer) noexcept
+{
+    if (!timer)
+        return;
+    try
+    {
+        timer->expires_at(std::chrono::steady_clock::now());
+    }
+    catch (...)
+    {
+    }
+}
+
+template <typename Round>
+void
+complete_header_round(std::shared_ptr<Round> const& round) noexcept
+{
+    if (round && !round->completed.exchange(true, std::memory_order_acq_rel))
+    {
+        complete_timer_noexcept(round->signal);
+    }
+}
 
 asio::awaitable<std::pair<int, boost::system::error_code>>
 wait_for_signal_or_progress(
@@ -78,7 +104,8 @@ wait_for_signal_or_progress_or_cancel(
             co_await asio::experimental::make_parallel_group(
                 asio::co_spawn(
                     ex,
-                    [done_signal]() -> asio::awaitable<boost::system::error_code> {
+                    [done_signal]()
+                        -> asio::awaitable<boost::system::error_code> {
                         boost::system::error_code ec;
                         co_await done_signal->async_wait(
                             asio::redirect_error(asio::use_awaitable, ec));
@@ -125,15 +152,18 @@ wait_for_signal_or_progress_or_cancel(
 
 NodeCache::NodeCache(asio::io_context& io, Options opts)
     : io_(io)
+    , header_state_strand_(asio::make_strand(io))
     , max_entries_(opts.max_entries)
     , fetch_timeout_(opts.fetch_timeout)
     , max_walk_peer_retries_(opts.max_walk_peer_retries)
     , fetch_stale_multiplier_(opts.fetch_stale_multiplier)
-    , max_header_entries_(
-          std::max<std::size_t>(
-              128,
-              std::min<std::size_t>(
-                  4096, std::max<std::size_t>(1, max_entries_ / 16))))
+    , peer_refresh_timeout_secs_(opts.peer_refresh_timeout_secs)
+    , header_timeout_floor_(opts.header_timeout_floor)
+    , max_header_entries_(std::max<std::size_t>(
+          128,
+          std::min<std::size_t>(
+              4096,
+              std::max<std::size_t>(1, max_entries_ / 16))))
 {
 }
 
@@ -161,51 +191,56 @@ NodeCache::format_progress(ProgressEvent const& event)
         case ProgressKind::retry_same_peer:
             if (event.depth != kNoDepth)
             {
-                return prefix + ("timeout depth=" +
-                    std::to_string(event.depth) + " — retrying same peer " +
-                    std::string(peer) + " (" +
-                    std::to_string(event.attempt) + "/" +
-                    std::to_string(event.max_attempts) + ")");
+                return prefix +
+                    ("timeout depth=" + std::to_string(event.depth) +
+                     " — retrying same peer " + std::string(peer) + " (" +
+                     std::to_string(event.attempt) + "/" +
+                     std::to_string(event.max_attempts) + ")");
             }
-            return prefix + ("header seq=" + std::to_string(event.ledger_seq) +
-                " — retrying same peer " + std::string(peer) + " (" +
-                std::to_string(event.attempt) + "/" +
-                std::to_string(event.max_attempts) + ")");
+            return prefix +
+                ("header seq=" + std::to_string(event.ledger_seq) +
+                 " — retrying same peer " + std::string(peer) + " (" +
+                 std::to_string(event.attempt) + "/" +
+                 std::to_string(event.max_attempts) + ")");
 
         case ProgressKind::switch_peer:
             if (event.depth != kNoDepth)
             {
-                return prefix + ("timeout depth=" +
-                    std::to_string(event.depth) + " — switching peer (" +
-                    std::to_string(event.attempt) + "/" +
-                    std::to_string(event.max_attempts) + ")");
+                return prefix +
+                    ("timeout depth=" + std::to_string(event.depth) +
+                     " — switching peer (" + std::to_string(event.attempt) +
+                     "/" + std::to_string(event.max_attempts) + ")");
             }
-            return prefix + ("header seq=" + std::to_string(event.ledger_seq) +
-                " — switching peer (" + std::to_string(event.attempt) + "/" +
-                std::to_string(event.max_attempts) + ")");
+            return prefix +
+                ("header seq=" + std::to_string(event.ledger_seq) +
+                 " — switching peer (" + std::to_string(event.attempt) + "/" +
+                 std::to_string(event.max_attempts) + ")");
 
         case ProgressKind::acquired_peer:
             if (event.depth != kNoDepth)
             {
                 return prefix + ("acquired peer " + std::string(peer));
             }
-            return prefix + ("header seq=" + std::to_string(event.ledger_seq) +
-                " — acquired peer " + std::string(peer));
+            return prefix +
+                ("header seq=" + std::to_string(event.ledger_seq) +
+                 " — acquired peer " + std::string(peer));
 
         case ProgressKind::give_up:
             if (event.depth != kNoDepth)
             {
-                return prefix + ("giving up at depth=" +
-                    std::to_string(event.depth) + " after " +
-                    std::to_string(event.attempt) + " retries");
+                return prefix +
+                    ("giving up at depth=" + std::to_string(event.depth) +
+                     " after " + std::to_string(event.attempt) + " retries");
             }
-            return prefix + ("header seq=" + std::to_string(event.ledger_seq) +
-                " — giving up after " + std::to_string(event.attempt) +
-                " retries");
+            return prefix +
+                ("header seq=" + std::to_string(event.ledger_seq) +
+                 " — giving up after " + std::to_string(event.attempt) +
+                 " retries");
 
         case ProgressKind::no_peer_available:
-            return prefix + ("no peer available for ledger " +
-                std::to_string(event.ledger_seq));
+            return prefix +
+                ("no peer available for ledger " +
+                 std::to_string(event.ledger_seq));
     }
 
     return std::string(prefix) + "unknown progress";
@@ -436,12 +471,7 @@ NodeCache::walk_to(
             catl::core::emit_status(
                 "no peer available for ledger " + std::to_string(ledger_seq));
             publish_node_progress(
-                cursor,
-                ProgressKind::no_peer_available,
-                ledger_seq,
-                0,
-                0,
-                0);
+                cursor, ProgressKind::no_peer_available, ledger_seq, 0, 0, 0);
             co_return result;
         }
     }
@@ -527,7 +557,10 @@ NodeCache::walk_to(
                 {
                     waited_for_new_peer = true;
                     auto new_peer = co_await peers->wait_for_peer(
-                        ledger_seq, 1, failed_peers, cancel);
+                        ledger_seq,
+                        peer_refresh_timeout_secs_,
+                        failed_peers,
+                        cancel);
                     if (new_peer && new_peer->is_ready())
                         alternatives.push_back(std::move(new_peer));
                 }
@@ -761,27 +794,26 @@ NodeCache::ensure_present(
             // fresh signal.
             auto now = std::chrono::steady_clock::now();
             bool signal_missing = !it->second.signal;
-            bool signal_expired = it->second.signal &&
-                it->second.signal->expiry() <= now;
-            bool has_prior_fetch =
-                it->second.last_fetch_at != std::chrono::steady_clock::time_point{};
-            auto stale_threshold =
-                fetch_timeout_ * fetch_stale_multiplier_;
-            bool is_stale =
-                now - it->second.last_fetch_at > stale_threshold;
+            bool signal_expired =
+                it->second.signal && it->second.signal->expiry() <= now;
+            bool has_prior_fetch = it->second.last_fetch_at !=
+                std::chrono::steady_clock::time_point{};
+            auto stale_threshold = fetch_timeout_ * fetch_stale_multiplier_;
+            bool is_stale = now - it->second.last_fetch_at > stale_threshold;
 
             if ((signal_missing || signal_expired || is_stale) && peer &&
                 peer->is_ready())
             {
                 // There is no active shared signal or the fetch is stale, so
                 // refresh the wait handle and re-send with the current peer.
-                it->second.signal = std::make_shared<asio::steady_timer>(
-                    io_, fetch_timeout_);
+                it->second.signal =
+                    std::make_shared<asio::steady_timer>(io_, fetch_timeout_);
                 action = Action::send_and_wait;
                 PLOGD(
                     log_,
                     "  ensure: ",
-                    signal_missing ? "RESET" : (signal_expired ? "EXPIRED" : "STALE"),
+                    signal_missing ? "RESET"
+                                   : (signal_expired ? "EXPIRED" : "STALE"),
                     " in-flight hash=",
                     expected_hash.hex().substr(0, 16),
                     " — re-sending");
@@ -791,8 +823,8 @@ NodeCache::ensure_present(
                 // A prior fetch was sent, but there is no active timer left to
                 // wait on. Create a fresh shared signal so another caller can
                 // still benefit from a late response.
-                it->second.signal = std::make_shared<asio::steady_timer>(
-                    io_, fetch_timeout_);
+                it->second.signal =
+                    std::make_shared<asio::steady_timer>(io_, fetch_timeout_);
                 action = Action::wait;
                 PLOGD(
                     log_,
@@ -827,8 +859,8 @@ NodeCache::ensure_present(
         {
             // MISS — new entry, create signal and fetch
             misses_++;
-            it->second.signal = std::make_shared<asio::steady_timer>(
-                io_, fetch_timeout_);
+            it->second.signal =
+                std::make_shared<asio::steady_timer>(io_, fetch_timeout_);
             action = Action::send_and_wait;
             evict_if_needed();
             PLOGD(
@@ -1301,7 +1333,7 @@ void
 NodeCache::send_header_fetch(
     uint32_t ledger_seq,
     PeerSessionPtr peer,
-    std::shared_ptr<std::atomic<int>> outstanding,
+    std::shared_ptr<HeaderRound> round,
     std::shared_ptr<PeerSet> peers)
 {
     fetches_++;
@@ -1319,83 +1351,96 @@ NodeCache::send_header_fetch(
 
     peer->get_ledger_header(
         ledger_seq,
-        [weak_self, ledger_seq, outstanding, peers,
-         endpoint = peer->endpoint()](Error err, LedgerHeaderResult result) {
+        [weak_self, ledger_seq, round, peers, endpoint = peer->endpoint()](
+            Error err, LedgerHeaderResult result) {
             auto self = weak_self.lock();
             if (!self)
                 return;
 
-            if (err != Error::Success)
-            {
-                PLOGD(
-                    NodeCache::log_,
-                    "  send_header_fetch: FAIL seq=",
-                    ledger_seq,
-                    " peer=",
-                    endpoint,
-                    " err=",
-                    static_cast<int>(err));
+            asio::post(
+                self->header_state_strand_,
+                [weak_self,
+                 ledger_seq,
+                 round,
+                 peers,
+                 endpoint,
+                 err,
+                 result = std::move(result)]() mutable {
+                    auto self = weak_self.lock();
+                    if (!self)
+                        return;
 
-                // Record per-peer failure for future peer selection
-                if (peers)
-                {
-                    peers->note_ledger_failure(endpoint, ledger_seq);
-                }
+                    if (err != Error::Success)
+                    {
+                        PLOGD(
+                            NodeCache::log_,
+                            "  send_header_fetch: FAIL seq=",
+                            ledger_seq,
+                            " peer=",
+                            endpoint,
+                            " err=",
+                            static_cast<int>(err));
 
-                // If all fan-out peers have failed, cancel the signal
-                // so waiters wake immediately instead of blocking until
-                // the full timeout.
-                if (outstanding->fetch_sub(1) == 1)
-                {
-                    std::shared_ptr<asio::steady_timer> sig;
+                        // Record per-peer failure for future peer selection
+                        if (peers)
+                        {
+                            peers->note_ledger_failure(endpoint, ledger_seq);
+                        }
+
+                        // If all fan-out peers have failed, wake this round's
+                        // owner instead of waiting for its timeout.
+                        if (round->outstanding.fetch_sub(1) == 1 &&
+                            round->dispatch_complete.load(
+                                std::memory_order_acquire))
+                        {
+                            complete_header_round(round);
+                        }
+                        return;
+                    }
+
+                    round->outstanding.fetch_sub(1);
+
                     {
                         std::lock_guard lock(self->mutex_);
                         auto it = self->header_cache_.find(ledger_seq);
-                        if (it != self->header_cache_.end() &&
-                            !it->second.present)
+                        if (it == self->header_cache_.end())
+                            return;
+                        if (it->second.present)
+                            return;  // another peer already won
+
+                        auto completion_signal = it->second.signal;
+                        auto active_round_signal =
+                            it->second.active_round_signal;
+                        it->second.result = std::move(result);
+                        it->second.present = true;
+                        it->second.signal = nullptr;
+                        it->second.active_round_signal = nullptr;
+                        it->second.progress.signal = nullptr;
+                        self->touch_header_lru(ledger_seq);
+                        self->evict_headers_if_needed();
+
+                        complete_timer_noexcept(completion_signal);
+                        if (active_round_signal &&
+                            active_round_signal != completion_signal)
                         {
-                            sig = it->second.signal;
+                            complete_timer_noexcept(active_round_signal);
+                        }
+                        if (round->signal &&
+                            round->signal != active_round_signal &&
+                            round->signal != completion_signal)
+                        {
+                            complete_timer_noexcept(round->signal);
                         }
                     }
-                    if (sig)
-                    {
-                        sig->cancel();
-                    }
-                }
-                return;
-            }
+                    self->waiter_wakeups_++;
 
-            outstanding->fetch_sub(1);
-
-            std::shared_ptr<asio::steady_timer> sig;
-            {
-                std::lock_guard lock(self->mutex_);
-                auto it = self->header_cache_.find(ledger_seq);
-                if (it == self->header_cache_.end())
-                    return;
-                if (it->second.present)
-                    return;  // another peer already won
-
-                sig = it->second.signal;
-                it->second.result = result;
-                it->second.present = true;
-                it->second.signal = nullptr;
-                it->second.progress.signal = nullptr;
-                self->touch_header_lru(ledger_seq);
-                self->evict_headers_if_needed();
-            }
-            if (sig)
-            {
-                self->waiter_wakeups_++;
-                sig->cancel();
-            }
-
-            PLOGI(
-                NodeCache::log_,
-                "  send_header_fetch: OK seq=",
-                ledger_seq,
-                " peer=",
-                endpoint);
+                    PLOGI(
+                        NodeCache::log_,
+                        "  send_header_fetch: OK seq=",
+                        ledger_seq,
+                        " peer=",
+                        endpoint);
+                });
         },
         opts);
 }
@@ -1406,6 +1451,24 @@ NodeCache::get_header(
     std::shared_ptr<PeerSet> peers,
     PeerSessionPtr peer)
 {
+    if (!header_state_strand_.running_in_this_thread())
+    {
+        auto self = shared_from_this();
+        auto state_executor = catl::core::ContextExecutor(
+            header_state_strand_, catl::core::retain_current_request());
+        co_return co_await asio::co_spawn(
+            std::move(state_executor),
+            [self,
+             ledger_seq,
+             peers = std::move(peers),
+             peer = std::move(
+                 peer)]() mutable -> asio::awaitable<LedgerHeaderResult> {
+                co_return co_await self->get_header(
+                    ledger_seq, std::move(peers), std::move(peer));
+            },
+            asio::use_awaitable);
+    }
+
     // Single lock: check present → check in-flight → create in-flight.
     enum class Action { hit, wait, fetch };
     Action action;
@@ -1445,15 +1508,16 @@ NodeCache::get_header(
 
     auto abandon_header_fetch =
         [&](std::shared_ptr<asio::steady_timer> const& expected_signal) {
-            std::shared_ptr<asio::steady_timer> sig;
+            std::shared_ptr<asio::steady_timer> completion_signal;
+            std::shared_ptr<asio::steady_timer> round_signal;
             {
                 std::lock_guard lock(mutex_);
                 auto it = header_cache_.find(ledger_seq);
-                if (
-                    it != header_cache_.end() && !it->second.present &&
+                if (it != header_cache_.end() && !it->second.present &&
                     (!expected_signal || it->second.signal == expected_signal))
                 {
-                    sig = it->second.signal;
+                    completion_signal = it->second.signal;
+                    round_signal = it->second.active_round_signal;
                     header_cache_.erase(it);
                     if (auto lru_it = header_lru_map_.find(ledger_seq);
                         lru_it != header_lru_map_.end())
@@ -1461,10 +1525,12 @@ NodeCache::get_header(
                         header_lru_.erase(lru_it->second);
                         header_lru_map_.erase(lru_it);
                     }
+
+                    complete_timer_noexcept(completion_signal);
+                    if (round_signal && round_signal != completion_signal)
+                        complete_timer_noexcept(round_signal);
                 }
             }
-            if (sig)
-                sig->cancel();
         };
 
     if (action == Action::wait)
@@ -1482,7 +1548,6 @@ NodeCache::get_header(
             if (it->second.present)
                 co_return it->second.result;
             wait = attach_waiter_locked(it->second);
-            wait.round_seen = it->second.round;
         }
 
         if (!wait.done_signal)
@@ -1494,8 +1559,7 @@ NodeCache::get_header(
                 wait.done_signal, wait.progress_signal);
 
             std::vector<ProgressEvent> progress_events;
-            uint8_t current_round = 0;
-            bool retry_pending = false;
+            bool has_owner = false;
             {
                 std::lock_guard lock(mutex_);
                 auto it = header_cache_.find(ledger_seq);
@@ -1504,9 +1568,9 @@ NodeCache::get_header(
                 if (it->second.present)
                     co_return it->second.result;
 
-                current_round = it->second.round;
-                retry_pending = it->second.retry_pending;
-                progress_events = it->second.progress.journal.replay(wait.cursor);
+                has_owner = it->second.active_round_signal != nullptr;
+                progress_events =
+                    it->second.progress.journal.replay(wait.cursor);
                 refresh_waiter_locked(it->second, wait);
             }
 
@@ -1516,16 +1580,11 @@ NodeCache::get_header(
             if (wake_kind == 1)
                 continue;
 
-            // Owner is dispatching next round — keep waiting
-            if (retry_pending || current_round != wait.round_seen)
-            {
-                wait.round_seen = current_round;
-                continue;
-            }
-
-            // Owner exhausted all retry rounds. Drop the stale
-            // in-flight slot so the next caller starts fresh.
-            abandon_header_fetch(wait.done_signal);
+            // Real fetches are completed or abandoned only by their owner.
+            // A slot without a round signal is an orphan left by an older or
+            // synthetic producer and can be removed by the waking caller.
+            if (!has_owner)
+                abandon_header_fetch(wait.done_signal);
             throw PeerClientException(Error::Timeout);
         }
     }
@@ -1564,8 +1623,7 @@ NodeCache::get_header(
 
     static constexpr int kHeaderFanOut = 3;
     static constexpr int kMaxRounds = 3;
-    auto header_timeout = std::max(
-        fetch_timeout_, std::chrono::milliseconds{6000});
+    auto header_timeout = std::max(fetch_timeout_, header_timeout_floor_);
     std::unordered_set<std::string> tried_peers;
     int total_peers_tried = 0;
 
@@ -1574,10 +1632,26 @@ NodeCache::get_header(
     // dispatched from the wait loop on timeout/all-failed.
     std::vector<std::string> round_peers;
 
+    auto begin_round = [&](uint8_t round_number) {
+        auto round = std::make_shared<HeaderRound>();
+        round->signal = std::make_shared<asio::steady_timer>(
+            io_, asio::steady_timer::time_point::max());
+
+        std::lock_guard lock(mutex_);
+        auto it = header_cache_.find(ledger_seq);
+        if (it == header_cache_.end() || it->second.present ||
+            it->second.signal != owned_signal)
+        {
+            return std::shared_ptr<HeaderRound>{};
+        }
+        it->second.round = round_number;
+        it->second.active_round_signal = round->signal;
+        return round;
+    };
+
     auto dispatch_round =
         [&](PeerSessionPtr primary,
-            std::shared_ptr<std::atomic<int>> outstanding)
-            -> asio::awaitable<int> {
+            std::shared_ptr<HeaderRound> const& round) -> asio::awaitable<int> {
         int sent = 0;
         round_peers.clear();
 
@@ -1585,8 +1659,8 @@ NodeCache::get_header(
         {
             tried_peers.insert(primary->endpoint());
             round_peers.push_back(primary->endpoint());
-            outstanding->fetch_add(1);
-            send_header_fetch(ledger_seq, primary, outstanding, peers);
+            round->outstanding.fetch_add(1, std::memory_order_relaxed);
+            send_header_fetch(ledger_seq, primary, round, peers);
             ++sent;
         }
 
@@ -1600,9 +1674,8 @@ NodeCache::get_header(
                 {
                     tried_peers.insert(extra->endpoint());
                     round_peers.push_back(extra->endpoint());
-                    outstanding->fetch_add(1);
-                    send_header_fetch(
-                        ledger_seq, extra, outstanding, peers);
+                    round->outstanding.fetch_add(1, std::memory_order_relaxed);
+                    send_header_fetch(ledger_seq, extra, round, peers);
                     ++sent;
                 }
             }
@@ -1612,27 +1685,58 @@ NodeCache::get_header(
         // the total retry budget predictable (~18s max).
         if (sent == 0 && peers && total_peers_tried == 0)
         {
-            auto fallback = co_await peers->wait_for_peer(
-                ledger_seq, 5, tried_peers);
+            auto fallback =
+                co_await peers->wait_for_peer(ledger_seq, 5, tried_peers);
             if (fallback && fallback->is_ready())
             {
                 tried_peers.insert(fallback->endpoint());
                 round_peers.push_back(fallback->endpoint());
-                outstanding->fetch_add(1);
-                send_header_fetch(
-                    ledger_seq, fallback, outstanding, peers);
+                round->outstanding.fetch_add(1, std::memory_order_relaxed);
+                send_header_fetch(ledger_seq, fallback, round, peers);
                 ++sent;
+            }
+        }
+
+        // Seal only after every request has been counted. A fast failure
+        // cannot end the round while fan-out is still being assembled.
+        {
+            std::lock_guard lock(mutex_);
+            auto it = header_cache_.find(ledger_seq);
+            if (it != header_cache_.end() && !it->second.present &&
+                it->second.signal == owned_signal &&
+                it->second.active_round_signal == round->signal && sent > 0)
+            {
+                round->signal->expires_after(header_timeout);
+            }
+            round->dispatch_complete.store(true, std::memory_order_release);
+            if (round->outstanding.load(std::memory_order_acquire) == 0)
+            {
+                complete_header_round(round);
             }
         }
 
         co_return sent;
     };
 
-    // Each round gets its own outstanding counter.
-    // The signal is shared across all rounds (single timer object).
-    auto outstanding = std::make_shared<std::atomic<int>>(0);
-    int round_sent = co_await dispatch_round(peer, outstanding);
+    uint8_t round_number = 0;
+    auto round = begin_round(round_number);
+    if (!round)
+        throw PeerClientException(Error::Timeout);
+
+    int round_sent = co_await dispatch_round(peer, round);
     total_peers_tried += round_sent;
+
+    {
+        std::lock_guard lock(mutex_);
+        auto it = header_cache_.find(ledger_seq);
+        if (it == header_cache_.end())
+            throw PeerClientException(Error::Timeout);
+        if (it->second.present)
+        {
+            cleanup.dismiss();
+            co_return it->second.result;
+        }
+    }
 
     if (round_sent == 0)
     {
@@ -1644,23 +1748,9 @@ NodeCache::get_header(
             ProgressKind::no_peer_available,
             0,
             static_cast<uint8_t>(kHeaderFanOut));
+        abandon_header_fetch(owned_signal);
+        cleanup.dismiss();
         throw PeerClientException(Error::Timeout);
-    }
-
-    // Arm the signal now that requests are dispatched.
-    {
-        std::lock_guard lock(mutex_);
-        auto it = header_cache_.find(ledger_seq);
-        if (it != header_cache_.end() && it->second.present)
-        {
-            cleanup.dismiss();
-            co_return it->second.result;
-        }
-        if (it != header_cache_.end() && it->second.signal &&
-            outstanding->load() > 0)
-        {
-            it->second.signal->expires_after(header_timeout);
-        }
     }
 
     {
@@ -1672,15 +1762,13 @@ NodeCache::get_header(
             peer_list += ep;
         }
         catl::core::emit_status(
-            "anchor header: seq=" + std::to_string(ledger_seq) +
-            " asking " + std::to_string(round_sent) +
-            " peer(s): " + peer_list);
+            "anchor header: seq=" + std::to_string(ledger_seq) + " asking " +
+            std::to_string(round_sent) + " peer(s): " + peer_list);
     }
 
     // ── Wait loop ──
-    // Shared across owner and joiners. On round timeout, the owner
-    // dispatches a new round and re-arms the same timer. Joiners
-    // detect the round change via generation counter and keep waiting.
+    // The owner alone consumes per-round timeout/failure signals. Joiners
+    // wait on the overall completion signal, so they cannot race retry state.
     WaitRegistration wait;
     {
         std::lock_guard lock(mutex_);
@@ -1694,19 +1782,8 @@ NodeCache::get_header(
             cleanup.dismiss();
             co_return it->second.result;
         }
-        if (outstanding->load() == 0)
-        {
-            // All peers failed before we could attach — will retry
-            // in the loop below via round advancement.
-        }
-        else
-        {
-            // Note: narrow race between outstanding check and
-            // async_wait — safe because Asio's async_wait on an
-            // already-cancelled timer returns operation_aborted.
-        }
         wait = attach_waiter_locked(it->second);
-        wait.round_seen = it->second.round;
+        wait.done_signal = round->signal;
     }
 
     if (!wait.done_signal)
@@ -1720,8 +1797,6 @@ NodeCache::get_header(
             wait.done_signal, wait.progress_signal);
 
         std::vector<ProgressEvent> progress_events;
-        uint8_t current_round = 0;
-        bool is_present = false;
         {
             std::lock_guard lock(mutex_);
             auto it = header_cache_.find(ledger_seq);
@@ -1735,10 +1810,9 @@ NodeCache::get_header(
                 co_return it->second.result;
             }
 
-            current_round = it->second.round;
-            progress_events =
-                it->second.progress.journal.replay(wait.cursor);
+            progress_events = it->second.progress.journal.replay(wait.cursor);
             refresh_waiter_locked(it->second, wait);
+            wait.done_signal = round->signal;
         }
 
         for (auto const& event : progress_events)
@@ -1749,74 +1823,42 @@ NodeCache::get_header(
         if (wake_kind == 1)
             continue;
 
-        // Round changed by another path — keep waiting
-        if (current_round != wait.round_seen)
+        // This round timed out / all peers failed.
+        if (peers)
         {
-            wait.round_seen = current_round;
-            continue;
+            for (auto const& endpoint : round_peers)
+                peers->note_ledger_failure(endpoint, ledger_seq);
         }
 
-        // This round timed out / all peers failed.
         // Try dispatching a new round with fresh peers.
-        // Increment round BEFORE the co_await so joiners waking
-        // during dispatch see the new generation and keep waiting.
-        if (current_round < kMaxRounds - 1)
+        if (round_number < kMaxRounds - 1)
         {
-            {
-                std::lock_guard lock(mutex_);
-                auto it = header_cache_.find(ledger_seq);
-                if (it != header_cache_.end() && !it->second.present)
-                {
-                    it->second.round++;
-                    it->second.retry_pending = true;
-                    // Re-arm timer before dispatch so joiners waking
-                    // during the co_await see a live timer, not the
-                    // expired one from the previous round.
-                    if (it->second.signal)
-                    {
-                        it->second.signal->expires_after(header_timeout);
-                    }
-                }
-            }
+            ++round_number;
+            round = begin_round(round_number);
+            if (!round)
+                throw PeerClientException(Error::Timeout);
 
-            outstanding = std::make_shared<std::atomic<int>>(0);
-            round_sent = co_await dispatch_round(nullptr, outstanding);
+            round_sent = co_await dispatch_round(nullptr, round);
             total_peers_tried += round_sent;
 
             std::lock_guard lock(mutex_);
-            {
-                auto it2 = header_cache_.find(ledger_seq);
-                if (it2 != header_cache_.end())
-                {
-                    it2->second.retry_pending = false;
-                }
-            }
             auto it = header_cache_.find(ledger_seq);
             if (it == header_cache_.end())
-            {
                 throw PeerClientException(Error::Timeout);
-            }
             if (it->second.present)
             {
                 cleanup.dismiss();
                 co_return it->second.result;
             }
 
-            wait.round_seen = it->second.round;
             if (round_sent > 0)
             {
-                if (outstanding->load() > 0)
-                {
-                    it->second.signal->cancel();
-                    it->second.signal->expires_after(header_timeout);
-                }
+                wait.done_signal = round->signal;
                 catl::core::emit_status(
                     "header seq=" + std::to_string(ledger_seq) +
-                    " — retry round " +
-                    std::to_string(it->second.round + 1) + "/" +
+                    " — retry round " + std::to_string(round_number + 1) + "/" +
                     std::to_string(kMaxRounds) + " asking " +
-                    std::to_string(round_sent) + " peer(s): " +
-                    [&]() {
+                    std::to_string(round_sent) + " peer(s): " + [&]() {
                         std::string s;
                         for (auto const& ep : round_peers)
                         {
@@ -1832,15 +1874,16 @@ NodeCache::get_header(
         }
 
         catl::core::emit_status(
-            "header seq=" + std::to_string(ledger_seq) +
-            " — giving up after " +
+            "header seq=" + std::to_string(ledger_seq) + " — giving up after " +
             std::to_string(total_peers_tried) + " peers across " +
-            std::to_string(current_round + 1) + " round(s)");
+            std::to_string(round_number + 1) + " round(s)");
         publish_header_progress(
             ledger_seq,
             ProgressKind::give_up,
             static_cast<uint8_t>(total_peers_tried),
             static_cast<uint8_t>(kHeaderFanOut * kMaxRounds));
+        abandon_header_fetch(owned_signal);
+        cleanup.dismiss();
         throw PeerClientException(Error::Timeout);
     }
 }
@@ -1897,13 +1940,37 @@ NodeCache::bytes() const
 void
 NodeCache::clear()
 {
-    std::lock_guard lock(mutex_);
-    store_.clear();
-    header_cache_.clear();
-    lru_.clear();
-    lru_map_.clear();
-    header_lru_.clear();
-    header_lru_map_.clear();
+    std::vector<std::shared_ptr<asio::steady_timer>> signals;
+    {
+        std::lock_guard lock(mutex_);
+        signals.reserve(store_.size() * 2 + header_cache_.size() * 3);
+        for (auto const& [_, entry] : store_)
+        {
+            if (entry.signal)
+                signals.push_back(entry.signal);
+            if (entry.progress.signal)
+                signals.push_back(entry.progress.signal);
+        }
+        for (auto const& [_, entry] : header_cache_)
+        {
+            if (entry.signal)
+                signals.push_back(entry.signal);
+            if (entry.active_round_signal)
+                signals.push_back(entry.active_round_signal);
+            if (entry.progress.signal)
+                signals.push_back(entry.progress.signal);
+        }
+
+        store_.clear();
+        header_cache_.clear();
+        lru_.clear();
+        lru_map_.clear();
+        header_lru_.clear();
+        header_lru_map_.clear();
+    }
+
+    for (auto const& signal : signals)
+        complete_timer_noexcept(signal);
 }
 
 NodeCache::Stats

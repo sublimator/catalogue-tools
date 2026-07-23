@@ -24,6 +24,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 
 #include <array>
 #include <atomic>
@@ -87,6 +88,7 @@ struct WalkResult
 class NodeCache : public std::enable_shared_from_this<NodeCache>
 {
     friend class ::NodeCacheTestAccess;
+
 public:
     struct Options
     {
@@ -94,6 +96,8 @@ public:
         std::chrono::milliseconds fetch_timeout{1500};
         int max_walk_peer_retries = 3;
         int fetch_stale_multiplier = 2;
+        int peer_refresh_timeout_secs = 5;
+        std::chrono::milliseconds header_timeout_floor{6000};
     };
 
     static std::shared_ptr<NodeCache>
@@ -101,7 +105,8 @@ public:
 
     /// Walk a SHAMap from root hash to target key, fetching on miss.
     ///
-    /// @param root_hash   Root of the tree (account_hash or tx_hash from header)
+    /// @param root_hash   Root of the tree (account_hash or tx_hash from
+    /// header)
     /// @param target_key  The key to find (tx hash or SLE key)
     /// @param ledger_hash Which ledger to request from peers on miss
     /// @param ledger_seq  Ledger sequence (for peer selection by range)
@@ -263,7 +268,6 @@ private:
         std::shared_ptr<asio::steady_timer> done_signal;
         std::shared_ptr<asio::steady_timer> progress_signal;
         ProgressCursor cursor;
-        uint8_t round_seen = 0;  // for header retry detection
     };
 
     // ── Cache entry ─────────────────────────────────────────────
@@ -293,15 +297,25 @@ private:
         std::chrono::steady_clock::time_point last_fetch_at{};
     };
 
+    struct HeaderRound
+    {
+        std::shared_ptr<asio::steady_timer> signal;
+        std::atomic<int> outstanding{0};
+        std::atomic<bool> dispatch_complete{false};
+        std::atomic<bool> completed{false};
+    };
+
     // Ledger header cache: keyed by seq
     struct HeaderEntry
     {
         LedgerHeaderResult result;
-        std::shared_ptr<asio::steady_timer> signal;  // non-null while in-flight
+        // Overall completion signal shared by callers joining this fetch.
+        // Per-round timeout/failure wakeups use active_round_signal instead.
+        std::shared_ptr<asio::steady_timer> signal;
+        std::shared_ptr<asio::steady_timer> active_round_signal;
         ProgressState progress;
         bool present = false;
-        bool retry_pending = false;  // owner is dispatching next round
-        uint8_t round = 0;           // incremented on fan-out retry
+        uint8_t round = 0;  // incremented on fan-out retry
     };
 
     /// Ensure a node is in the cache. Fetches from peer on miss.
@@ -338,14 +352,14 @@ private:
         PeerSessionPtr peer);
 
     /// Send a header request to a single peer (fire-and-forget).
-    /// On success: populate header_cache_ entry, cancel signal.
-    /// On failure: decrement outstanding counter; if all peers failed,
-    /// cancel signal to wake waiters immediately.
+    /// On success: populate header_cache_ entry and wake all callers.
+    /// On failure: decrement the round counter and wake only that round's
+    /// owner after dispatch has completed.
     void
     send_header_fetch(
         uint32_t ledger_seq,
         PeerSessionPtr peer,
-        std::shared_ptr<std::atomic<int>> outstanding,
+        std::shared_ptr<HeaderRound> round,
         std::shared_ptr<PeerSet> peers);
 
     /// Compute the content hash of an inner wire node.
@@ -428,10 +442,13 @@ private:
         std::string_view peer = {});
 
     asio::io_context& io_;
+    asio::strand<asio::io_context::executor_type> header_state_strand_;
     size_t max_entries_;
     std::chrono::milliseconds fetch_timeout_;
     int max_walk_peer_retries_;
     int fetch_stale_multiplier_;
+    int peer_refresh_timeout_secs_;
+    std::chrono::milliseconds header_timeout_floor_;
 
     mutable std::mutex mutex_;
     std::map<Hash256, Entry> store_;

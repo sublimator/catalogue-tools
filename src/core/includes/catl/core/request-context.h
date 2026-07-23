@@ -60,34 +60,50 @@ struct RequestContext
     }
 };
 
-/// Thread-local pointer to the currently active request context.
-/// Set by ContextExecutor before each handler, cleared after.
-/// nullptr when no request is active (background work, startup, etc.)
-inline thread_local RequestContext const* g_current_request = nullptr;
+/// Thread-local owner for the currently active request context.
+/// Set by ContextExecutor before each handler, restored after. Keeping the
+/// shared owner available lets nested executors preserve the context across
+/// an intentional strand hop.
+inline thread_local std::shared_ptr<RequestContext const>
+    g_current_request_owner;
+
+/// Borrow the active context for synchronous logging/status emission.
+inline RequestContext const*
+current_request() noexcept
+{
+    return g_current_request_owner.get();
+}
+
+/// Retain the active context across an asynchronous executor hop.
+inline std::shared_ptr<RequestContext const>
+retain_current_request()
+{
+    return g_current_request_owner;
+}
 
 /// Emit a status message to the current request's event bus (if any).
 /// Safe to call from anywhere — no-op when no request is active.
 inline void
 emit_status(std::string msg)
 {
-    if (auto const* ctx = g_current_request)
+    if (auto const* ctx = current_request())
         ctx->emit(std::move(msg));
 }
 
 /// RAII guard that sets/restores the thread_local.
 struct RequestContextGuard
 {
-    RequestContext const* prev;
+    std::shared_ptr<RequestContext const> prev;
 
-    explicit RequestContextGuard(RequestContext const* ctx)
-        : prev(g_current_request)
+    explicit RequestContextGuard(std::shared_ptr<RequestContext const> ctx)
+        : prev(std::move(g_current_request_owner))
     {
-        g_current_request = ctx;
+        g_current_request_owner = std::move(ctx);
     }
 
     ~RequestContextGuard()
     {
-        g_current_request = prev;
+        g_current_request_owner = std::move(prev);
     }
 
     RequestContextGuard(RequestContextGuard const&) = delete;

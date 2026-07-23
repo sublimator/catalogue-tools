@@ -559,6 +559,49 @@ TEST(NodeCacheIntegration, TimedOutHeaderWaiterClearsStaleEntry)
     EXPECT_FALSE(NodeCacheTestAccess::has_header(*cache, ledger_seq));
 }
 
+TEST(NodeCacheIntegration, ClearWakesHeaderJoiner)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto cache = NodeCache::create(io, {
+        .max_entries = 1024,
+        .fetch_timeout = 5s,
+    });
+    constexpr uint32_t ledger_seq = 123457u;
+    NodeCacheTestAccess::create_in_flight_header(
+        *cache, ledger_seq, std::chrono::hours(1));
+
+    bool done = false;
+    bool timed_out = false;
+    asio::co_spawn(
+        io,
+        [&, cache]() -> asio::awaitable<void> {
+            try
+            {
+                (void)co_await cache->get_header(ledger_seq, nullptr, nullptr);
+            }
+            catch (PeerClientException const&)
+            {
+                timed_out = true;
+            }
+            done = true;
+        },
+        asio::detached);
+
+    asio::steady_timer clear_timer(io, 10ms);
+    clear_timer.async_wait([cache](boost::system::error_code ec) {
+        if (!ec)
+            cache->clear();
+    });
+
+    io.run();
+
+    EXPECT_TRUE(done);
+    EXPECT_TRUE(timed_out);
+    EXPECT_FALSE(NodeCacheTestAccess::has_header(*cache, ledger_seq));
+}
+
 TEST(NodeCacheIntegration, CancelledEnsurePresentReturnsPromptly)
 {
     asio::io_context io;

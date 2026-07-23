@@ -31,6 +31,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 class PeerSetTestAccess;  // forward decl for test friend
@@ -71,6 +72,10 @@ struct PeerSetOptions
     /// full-history nodes report narrow ranges but can still serve old
     /// data. 0ms = disable fallback. Default 1000ms.
     std::chrono::milliseconds peer_fallback{1000};
+
+    /// Maximum new endpoints one ledger-specific wait may probe. Existing
+    /// connected peers are handled separately by the node/header fan-out.
+    std::size_t max_targeted_connect_attempts = 3;
 };
 
 class PeerSet : public std::enable_shared_from_this<PeerSet>
@@ -204,6 +209,8 @@ public:
         std::int64_t last_failure_at = 0;
         std::uint64_t success_count = 0;
         std::uint64_t failure_count = 0;
+        std::uint64_t ledger_failure_count = 0;
+        std::size_t recent_failed_ledgers = 0;
         std::uint64_t selection_count = 0;
         std::uint64_t last_selected_ticket = 0;
         std::map<std::string, std::string> peer_headers;
@@ -227,6 +234,8 @@ public:
         size_t tracked_endpoints = 0;
         size_t connected_peers = 0;
         size_t ready_peers = 0;
+        size_t hub_peers = 0;
+        size_t archival_peers = 0;
         size_t in_flight_connects = 0;
         size_t queued_connects = 0;
         size_t crawl_in_flight = 0;
@@ -286,8 +295,104 @@ public:
     hub_peer_count() const;
 
 private:
+    struct TargetedConnectAuthorization;
+    using TargetedConnectAuthorizationPtr =
+        std::shared_ptr<TargetedConnectAuthorization>;
+
+    struct TargetedAdmissionLease
+    {
+        enum class State : uint8_t { available, consumed, revoked };
+
+        explicit TargetedAdmissionLease(
+            TargetedConnectAuthorizationPtr authorization_)
+            : authorization(std::move(authorization_))
+        {
+        }
+
+        bool
+        is_available() const noexcept
+        {
+            return state.load(std::memory_order_acquire) == State::available;
+        }
+
+        bool
+        try_consume() noexcept
+        {
+            auto expected = State::available;
+            return state.compare_exchange_strong(
+                expected,
+                State::consumed,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire);
+        }
+
+        void
+        revoke() noexcept
+        {
+            auto expected = State::available;
+            state.compare_exchange_strong(
+                expected,
+                State::revoked,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire);
+        }
+
+        TargetedConnectAuthorizationPtr authorization;
+        std::atomic<State> state{State::available};
+    };
+    using TargetedAdmissionLeasePtr = std::shared_ptr<TargetedAdmissionLease>;
+
+    struct TargetedConnectAuthorization
+        : std::enable_shared_from_this<TargetedConnectAuthorization>
+    {
+        TargetedConnectAuthorization(
+            uint32_t ledger_seq_,
+            std::unordered_set<std::string> excluded_)
+            : ledger_seq(ledger_seq_), excluded(std::move(excluded_))
+        {
+        }
+
+        bool
+        is_active() const noexcept
+        {
+            return accepting.load(std::memory_order_acquire);
+        }
+
+        TargetedAdmissionLeasePtr
+        claim();
+
+        void
+        close(bool revoke_claimed) noexcept;
+
+        void
+        invalidate() noexcept
+        {
+            close(true);
+        }
+
+        uint32_t ledger_seq;
+        std::unordered_set<std::string> excluded;
+        std::atomic<bool> accepting{true};
+        std::mutex leases_mutex;
+        std::vector<std::weak_ptr<TargetedAdmissionLease>> leases;
+    };
+
+    struct RotationTarget
+    {
+        uint32_t ledger_seq = 0;
+        std::unordered_set<std::string> excluded;
+        bool candidate_covers = false;
+        std::string candidate_key;
+        uint32_t candidate_first_seq = 0;
+        uint32_t candidate_last_seq = 0;
+        TargetedAdmissionLeasePtr lease;
+    };
+
     boost::asio::awaitable<PeerSessionPtr>
-    try_connect_on_strand(std::string host, uint16_t port);
+    try_connect_on_strand(
+        std::string host,
+        uint16_t port,
+        std::vector<TargetedAdmissionLeasePtr> admission_leases);
 
     boost::asio::awaitable<PeerSessionPtr>
     wait_for_any_peer_on_strand(
@@ -303,7 +408,7 @@ private:
 
     /// Remove a dead peer from the connection map.
     void
-    remove_peer(std::string const& key);
+    remove_peer(std::string const& key, bool forget_endpoint = true);
 
     /// Check if we're at the hub connection cap.
     bool
@@ -317,10 +422,63 @@ private:
     bool
     is_archival_endpoint(std::string const& key) const;
 
-    /// Try to evict an idle peer that doesn't cover the target ledger.
-    /// Returns true if a peer was evicted (freeing a slot).
+    /// Make room in the candidate's own pool without crossing either cap.
     bool
-    evict_for(uint32_t target_ledger_seq);
+    make_room_for_peer(
+        std::string const& candidate_key,
+        PeerSessionPtr const& candidate,
+        std::vector<TargetedAdmissionLeasePtr> const& admission_leases);
+
+    /// Try to evict an idle hub that is unsuitable for the target ledger.
+    bool
+    evict_hub_for(RotationTarget const& target);
+
+    /// Try to rotate an idle archival peer that failed or cannot cover the
+    /// target ledger.
+    bool
+    evict_archival_for(RotationTarget const& target);
+
+    bool
+    peer_is_archival(PeerSessionPtr const& peer) const;
+
+    bool
+    peer_failed_for_ledger(
+        std::string const& endpoint,
+        uint32_t ledger_seq,
+        std::chrono::steady_clock::time_point now) const;
+
+    bool
+    has_usable_covering_peer(
+        uint32_t ledger_seq,
+        std::unordered_set<std::string> const& excluded) const;
+
+    bool
+    would_drop_wanted_coverage(
+        std::string const& victim_key,
+        PeerSessionPtr const& victim,
+        RotationTarget const& target,
+        std::chrono::steady_clock::time_point now) const;
+
+    std::optional<RotationTarget>
+    rotation_target_for(
+        std::string const& candidate_key,
+        PeerSessionPtr const& candidate,
+        std::vector<TargetedAdmissionLeasePtr> const& admission_leases) const;
+
+    void
+    acquire_wanted_ledger(
+        uint32_t ledger_seq,
+        TargetedConnectAuthorizationPtr const& authorization = nullptr);
+
+    void
+    release_wanted_ledger(
+        uint32_t ledger_seq,
+        TargetedConnectAuthorizationPtr const& authorization = nullptr);
+
+    void
+    finish_targeted_authorization(
+        TargetedConnectAuthorizationPtr const& authorization,
+        bool revoke_claimed);
     PeerSet(boost::asio::io_context& io, PeerSetOptions const& options);
 
     /// Schedule a background connect attempt (deduped, fire-and-forget).
@@ -357,8 +515,11 @@ private:
     void
     start_tracked_endpoints();
 
-    void
-    try_candidates_for(uint32_t ledger_seq);
+    std::vector<std::string>
+    try_candidates_for(
+        TargetedConnectAuthorizationPtr const& authorization,
+        std::unordered_set<std::string> const& selection_excluded,
+        std::size_t connect_budget);
 
     /// Remove stale endpoint_stats_ entries to bound memory.
     /// Keeps entries that are connected, in-flight, queued, or recently seen.
@@ -467,6 +628,8 @@ private:
         std::int64_t last_failure_at = 0;
         std::uint64_t success_count = 0;
         std::uint64_t failure_count = 0;
+        std::uint64_t ledger_failure_count = 0;
+        std::chrono::steady_clock::time_point last_ledger_failure_at{};
         std::uint64_t selection_count = 0;
         std::uint64_t last_selected_ticket = 0;
         bool seen_crawl = false;
@@ -499,15 +662,21 @@ private:
     std::deque<FailureEvent> recent_failures_;
     std::set<std::string> in_flight_;  // currently connecting
     std::set<std::string> queued_;
+    // Request-scoped authority for queued ledger-specific replacement probes.
+    std::map<std::string, std::vector<TargetedConnectAuthorizationPtr>>
+        targeted_connects_;
     std::vector<std::string> pending_connects_;
     std::set<std::string> crawl_in_flight_;
     std::set<std::string> crawl_queued_;
     std::map<std::string, std::chrono::steady_clock::time_point> crawled_;
     std::vector<std::string> pending_crawls_;
     // Active target ledgers from in-flight wait_for_peer calls.
-    // Used by should_connect_endpoint and evict_for to prioritize
-    // candidates that cover any active target.
-    std::set<uint32_t> wanted_ledgers_;
+    // Used by candidate admission and same-pool rotation to prioritize peers
+    // that can serve any active target. Counts preserve concurrent waiters.
+    std::map<uint32_t, std::size_t> wanted_ledgers_;
+    std::vector<TargetedConnectAuthorizationPtr> active_target_authorizations_;
+    // Persistent one-shot priorities registered through prioritize_ledger().
+    std::set<uint32_t> prioritized_ledgers_;
     std::shared_ptr<boost::asio::steady_timer> wait_signal_;
     mutable std::mutex unsolicited_handler_mutex_;
     UnsolicitedHandler unsolicited_handler_;

@@ -67,8 +67,7 @@ is_public_peer_header(std::string const& name)
     // add a separate localhost/debug-only path instead of widening this list.
     return name == "Upgrade" || name == "Server" || name == "Network-ID" ||
         name == "X-Protocol-Ctl" || name == "Public-Key" ||
-        name == "Closed-Ledger" || name == "Previous-Ledger" ||
-        name == "Crawl";
+        name == "Closed-Ledger" || name == "Previous-Ledger" || name == "Crawl";
 }
 
 }  // namespace
@@ -115,6 +114,8 @@ peer_snapshot_to_json(
     body["tracked_endpoints"] = snapshot.tracked_endpoints;
     body["connected_peers"] = snapshot.connected_peers;
     body["ready_peers"] = snapshot.ready_peers;
+    body["hub_peers"] = snapshot.hub_peers;
+    body["archival_peers"] = snapshot.archival_peers;
     body["in_flight_connects"] = snapshot.in_flight_connects;
     body["queued_connects"] = snapshot.queued_connects;
     body["crawl_in_flight"] = snapshot.crawl_in_flight;
@@ -148,6 +149,8 @@ peer_snapshot_to_json(
         item["last_failure_at"] = peer.last_failure_at;
         item["success_count"] = peer.success_count;
         item["failure_count"] = peer.failure_count;
+        item["ledger_failure_count"] = peer.ledger_failure_count;
+        item["recent_failed_ledgers"] = peer.recent_failed_ledgers;
         item["selection_count"] = peer.selection_count;
         item["last_selected_ticket"] = peer.last_selected_ticket;
         if (!peer.peer_headers.empty())

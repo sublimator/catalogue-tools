@@ -134,7 +134,7 @@ configure_logging(LoggingOptions const& opts, std::string& error)
     // Wire up per-request log prefix via thread_local set by ContextExecutor
     Logger::set_request_context_hook([]() -> Logger::RequestIdView const* {
         static thread_local Logger::RequestIdView view;
-        auto const* ctx = catl::core::g_current_request;
+        auto const* ctx = catl::core::current_request();
         if (!ctx)
             return nullptr;
         view.request_id = ctx->request_id;
