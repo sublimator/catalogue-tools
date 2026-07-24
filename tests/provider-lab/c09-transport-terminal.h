@@ -9,10 +9,13 @@
 //  - the command identity is complete across provider/partition, both actor
 //    incarnations, operation/member lineage, transport attempt, command, and
 //    payload;
-//  - transport_complete/rejected/cancelled require a committed attempt;
-//    cancellation before publication atomically seals never_published;
-//  - exactly one terminal variant wins and creates exactly one retained
-//    command. Delivery is a projection of that row, never a second mint;
+//  - retry attempts remain owner-local; publication by any attempt latches on
+//    the member, so a later retry cannot launder it into never_published;
+//  - admission reserves the member's sole command and first attempt identity;
+//    retry terminalization reserves its successor before detaching the old;
+//  - exactly one final terminal variant per member wins and creates exactly
+//    one retained command. Its attempt ID identifies the final attempt;
+//    delivery is a projection of that row, never a second mint;
 //  - only a receiver-minted, fully bound receipt consumes the outbox.
 //
 // The PeerSet inbox, finish-ready derivation, and retention fence are separate
@@ -26,6 +29,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -104,6 +108,7 @@ enum class C09TerminalOutcome : std::uint8_t {
 
 class C09PeerClientTerminalOutbox;
 class C09PeerSetTerminalInbox;
+class C09SenderTestSeed;
 class C09TerminalReceiptTestMint;
 
 /// Sender-owned projection of one selected terminal variant. Construction is
@@ -254,9 +259,20 @@ public:
     using strand_type = DeterministicScheduler::strand_type;
 
     enum class AttemptState : std::uint8_t {
+        reserved,
         unpublished_open,
         attempt_committed,
         terminal,
+        retry_terminal_unpublished,
+        retry_terminal_published,
+    };
+
+    enum class TestFailpoint : std::uint8_t {
+        none,
+        open_after_attempt_reserve,
+        register_pre_commit,
+        terminal_pre_commit,
+        receipt_pre_commit,
     };
 
     enum class Refusal : std::uint8_t {
@@ -264,16 +280,23 @@ public:
         off_strand,
         invalid_identity,
         unknown_member,
+        already_open,
         member_sealed,
+        member_attempt_active,
+        invalid_lease,
         wrong_sender,
         unknown_attempt,
         attempt_already_committed,
         attempt_not_committed,
         attempt_already_terminal,
+        attempt_retired,
         never_published_after_attempt,
         receiver_sequence_invalid,
+        receipt_scope_mismatch,
         receipt_binding_mismatch,
+        unknown_settlement,
         id_exhausted,
+        seed_not_pristine,
     };
 
     struct MemberResult
@@ -300,6 +323,18 @@ public:
         std::optional<C09TerminalCommand> command;
     };
 
+    struct SettlementResult
+    {
+        Refusal refusal = Refusal::invalid_identity;
+        std::optional<C09TerminalReceipt> receipt;
+    };
+
+    struct AttemptStateResult
+    {
+        Refusal refusal = Refusal::invalid_identity;
+        std::optional<AttemptState> state;
+    };
+
     C09PeerClientTerminalOutbox(
         strand_type strand,
         C09Destination destination,
@@ -311,6 +346,13 @@ public:
         , sender_generation_(sender_generation)
     {
     }
+
+    C09PeerClientTerminalOutbox(C09PeerClientTerminalOutbox const&) = delete;
+    C09PeerClientTerminalOutbox&
+    operator=(C09PeerClientTerminalOutbox const&) = delete;
+    C09PeerClientTerminalOutbox(C09PeerClientTerminalOutbox&&) = delete;
+    C09PeerClientTerminalOutbox&
+    operator=(C09PeerClientTerminalOutbox&&) = delete;
 
     bool
     on_owner_strand() const
@@ -334,7 +376,51 @@ public:
             peer_client_incarnation_,
             sender_generation_,
             lineage};
-        members_.try_emplace(member_key(member), MemberRow{member, false, {}});
+        auto const key = member_key(member);
+        auto const existing = members_.find(key);
+        if (existing != members_.end())
+            return {Refusal::already_open, existing->second.member};
+        if (next_command_id_ == std::numeric_limits<std::uint64_t>::max() ||
+            next_attempt_id_ == std::numeric_limits<std::uint64_t>::max())
+            return {Refusal::id_exhausted, std::nullopt};
+        auto const reserved_command = next_command_id_ + 1;
+        auto const reserved_attempt = next_attempt_id_ + 1;
+        auto const [_, attempt_inserted] = attempts_.emplace(
+            reserved_attempt,
+            AttemptRow{
+                member,
+                reserved_attempt,
+                0,
+                AttemptState::reserved,
+                std::nullopt});
+        if (!attempt_inserted)
+            return {Refusal::id_exhausted, std::nullopt};
+        try
+        {
+            test_fail(TestFailpoint::open_after_attempt_reserve);
+            auto const [member_it, inserted] = members_.emplace(
+                key,
+                MemberRow{
+                    member,
+                    reserved_command,
+                    reserved_attempt,
+                    false,
+                    false,
+                    std::nullopt,
+                    {}});
+            if (!inserted)
+            {
+                attempts_.erase(reserved_attempt);
+                return {Refusal::already_open, member_it->second.member};
+            }
+        }
+        catch (...)
+        {
+            attempts_.erase(reserved_attempt);
+            throw;
+        }
+        next_command_id_ = reserved_command;
+        next_attempt_id_ = reserved_attempt;
         return {Refusal::ok, member};
     }
 
@@ -350,21 +436,22 @@ public:
             return {Refusal::unknown_member, {}};
         if (member_it->second.sealed)
             return {Refusal::member_sealed, {}};
-        if (next_attempt_id_ == std::numeric_limits<std::uint64_t>::max() ||
-            next_command_id_ == std::numeric_limits<std::uint64_t>::max())
+        if (member_it->second.active_attempt)
+            return {Refusal::member_attempt_active, {}};
+        if (!member_it->second.reserved_attempt)
             return {Refusal::id_exhausted, {}};
 
-        auto const attempt = next_attempt_id_ + 1;
-        auto const command = next_command_id_ + 1;
-        C09CommandIdentity identity{member, attempt, command, payload};
-        attempts_.emplace(
-            attempt,
-            AttemptRow{
-                std::move(identity),
-                AttemptState::unpublished_open,
-                std::nullopt});
-        next_attempt_id_ = attempt;
-        next_command_id_ = command;
+        auto const attempt = *member_it->second.reserved_attempt;
+        auto attempt_it = attempts_.find(attempt);
+        if (attempt_it == attempts_.end() ||
+            attempt_it->second.member != member ||
+            attempt_it->second.state != AttemptState::reserved)
+            return {Refusal::unknown_attempt, {}};
+        test_fail(TestFailpoint::register_pre_commit);
+        attempt_it->second.payload = payload;
+        attempt_it->second.state = AttemptState::unpublished_open;
+        member_it->second.active_attempt = attempt;
+        member_it->second.reserved_attempt.reset();
         return {Refusal::ok, C09AttemptLease{attempt, owner_token_}};
     }
 
@@ -377,13 +464,62 @@ public:
             return Refusal::off_strand;
         auto* row = find_attempt(lease);
         if (!row)
-            return foreign(lease) ? Refusal::wrong_sender
-                                  : Refusal::unknown_attempt;
+            return missing_attempt_refusal(lease);
         if (row->state == AttemptState::attempt_committed)
             return Refusal::attempt_already_committed;
         if (row->state == AttemptState::terminal)
             return Refusal::attempt_already_terminal;
+        if (is_retry_terminal(row->state))
+            return Refusal::attempt_retired;
+        auto* member = find_member(row->member);
+        if (!member)
+            return Refusal::unknown_member;
         row->state = AttemptState::attempt_committed;
+        member->ever_published = true;
+        return Refusal::ok;
+    }
+
+    /// Commit the owner-local terminal state of a retryable attempt. This
+    /// crosses no actor boundary and therefore creates no C09 command. The
+    /// retained row keeps delayed callbacks owned until the later fence.
+    //@@authority transition=provider_lab.c09_commit_retry_terminal
+    // owner=provider_lab commit=strand
+    Refusal
+    commit_retry_terminal(C09AttemptLease const& lease)
+    {
+        if (!on_owner_strand())
+            return Refusal::off_strand;
+        auto it = find_attempt_iterator(lease);
+        if (it == attempts_.end())
+            return missing_attempt_refusal(lease);
+        if (it->second.state == AttemptState::terminal)
+            return Refusal::attempt_already_terminal;
+        if (is_retry_terminal(it->second.state))
+            return Refusal::attempt_retired;
+        auto* member = find_member(it->second.member);
+        if (!member)
+            return Refusal::unknown_member;
+        if (member->active_attempt != lease.id())
+            return Refusal::unknown_attempt;
+        if (next_attempt_id_ == std::numeric_limits<std::uint64_t>::max())
+            return Refusal::id_exhausted;
+        auto const successor = next_attempt_id_ + 1;
+        auto const [_, inserted] = attempts_.emplace(
+            successor,
+            AttemptRow{
+                it->second.member,
+                successor,
+                0,
+                AttemptState::reserved,
+                std::nullopt});
+        if (!inserted)
+            return Refusal::id_exhausted;
+        it->second.state = it->second.state == AttemptState::attempt_committed
+            ? AttemptState::retry_terminal_published
+            : AttemptState::retry_terminal_unpublished;
+        member->active_attempt.reset();
+        member->reserved_attempt = successor;
+        next_attempt_id_ = successor;
         return Refusal::ok;
     }
 
@@ -404,10 +540,10 @@ public:
         return select_published_terminal(lease, C09TerminalOutcome::rejected);
     }
 
-    /// Cancellation is the exact owner-local absence proof. If publication
-    /// has not committed, this one commit consumes the publication permit and
-    /// selects never_published. If it has committed, cancellation selects the
-    /// published attempt's cancelled terminal variant.
+    /// Cancellation is the exact owner-local absence proof. It selects
+    /// never_published only if no attempt for this member ever committed
+    /// publication. Otherwise it selects the member's cancelled variant, even
+    /// when the final retry itself remained unpublished.
     //@@authority transition=provider_lab.c09_cancel_transport
     // owner=provider_lab commit=strand
     TerminalResult
@@ -417,16 +553,19 @@ public:
             return {Refusal::off_strand, std::nullopt};
         auto* row = find_attempt(lease);
         if (!row)
-            return {
-                foreign(lease) ? Refusal::wrong_sender
-                               : Refusal::unknown_attempt,
-                std::nullopt};
+            return {missing_attempt_refusal(lease), std::nullopt};
         if (row->state == AttemptState::terminal)
             return {Refusal::attempt_already_terminal, row->command};
-        auto const outcome = row->state == AttemptState::unpublished_open
+        if (is_retry_terminal(row->state))
+            return {Refusal::attempt_retired, std::nullopt};
+        auto* member = find_member(row->member);
+        if (!member)
+            return {Refusal::unknown_member, std::nullopt};
+        auto const outcome = row->state == AttemptState::unpublished_open &&
+                !member->ever_published
             ? C09TerminalOutcome::never_published
             : C09TerminalOutcome::cancelled;
-        return commit_terminal(*row, outcome);
+        return commit_terminal(*member, *row, outcome);
     }
 
     /// An enqueue/publish failure selects the same sealed absence variant as
@@ -440,15 +579,19 @@ public:
             return {Refusal::off_strand, std::nullopt};
         auto* row = find_attempt(lease);
         if (!row)
-            return {
-                foreign(lease) ? Refusal::wrong_sender
-                               : Refusal::unknown_attempt,
-                std::nullopt};
-        if (row->state == AttemptState::attempt_committed)
-            return {Refusal::never_published_after_attempt, std::nullopt};
+            return {missing_attempt_refusal(lease), std::nullopt};
+        auto* member = find_member(row->member);
+        if (!member)
+            return {Refusal::unknown_member, std::nullopt};
         if (row->state == AttemptState::terminal)
             return {Refusal::attempt_already_terminal, row->command};
-        return commit_terminal(*row, C09TerminalOutcome::never_published);
+        if (is_retry_terminal(row->state))
+            return {Refusal::attempt_retired, std::nullopt};
+        if (member->ever_published ||
+            row->state == AttemptState::attempt_committed)
+            return {Refusal::never_published_after_attempt, std::nullopt};
+        return commit_terminal(
+            *member, *row, C09TerminalOutcome::never_published);
     }
 
     ReplayResult
@@ -458,10 +601,9 @@ public:
             return {Refusal::off_strand, std::nullopt};
         auto const* row = find_attempt(lease);
         if (!row)
-            return {
-                foreign(lease) ? Refusal::wrong_sender
-                               : Refusal::unknown_attempt,
-                std::nullopt};
+            return {missing_attempt_refusal(lease), std::nullopt};
+        if (is_retry_terminal(row->state))
+            return {Refusal::attempt_retired, std::nullopt};
         if (!row->command)
             return {Refusal::attempt_not_committed, std::nullopt};
         return {Refusal::ok, row->command};
@@ -476,6 +618,12 @@ public:
             return Refusal::off_strand;
         if (receipt.receiver_commit_sequence() == 0)
             return Refusal::receiver_sequence_invalid;
+        auto const& receipt_member = receipt.identity().member;
+        if (receipt_member.destination != destination_ ||
+            receipt_member.peer_client_incarnation !=
+                peer_client_incarnation_ ||
+            receipt_member.sender_generation != sender_generation_)
+            return Refusal::receipt_scope_mismatch;
         auto it = attempts_.find(receipt.identity().transport_attempt);
         if (it == attempts_.end())
             return Refusal::unknown_attempt;
@@ -484,46 +632,90 @@ public:
             row.command->outcome() != receipt.outcome())
             return Refusal::receipt_binding_mismatch;
 
-        auto member_it = members_.find(member_key(row.identity.member));
+        auto member_it = members_.find(member_key(row.member));
         if (member_it == members_.end())
             return Refusal::unknown_member;
+        test_fail(TestFailpoint::receipt_pre_commit);
         member_it->second.settlements.emplace(
-            row.identity.command,
-            Settlement{
-                row.identity.command,
-                receipt.receiver_commit_sequence(),
-                row.command->outcome()});
+            receipt.identity().command, receipt);
+        member_it->second.active_attempt.reset();
         attempts_.erase(it);
         return Refusal::ok;
     }
 
-    std::optional<AttemptState>
+    SettlementResult
+    settlement(C09MemberIdentity const& member, C09CommandId command) const
+    {
+        if (!on_owner_strand())
+            return {Refusal::off_strand, std::nullopt};
+        auto const* row = find_member(member);
+        if (!row)
+            return {Refusal::unknown_member, std::nullopt};
+        auto const it = row->settlements.find(command);
+        if (it == row->settlements.end())
+            return {Refusal::unknown_settlement, std::nullopt};
+        return {Refusal::ok, it->second};
+    }
+
+    AttemptStateResult
     attempt_state(C09AttemptLease const& lease) const
     {
         if (!on_owner_strand())
-            return std::nullopt;
+            return {Refusal::off_strand, std::nullopt};
         auto const* row = find_attempt(lease);
-        return row ? std::optional<AttemptState>{row->state} : std::nullopt;
+        if (!row)
+            return {missing_attempt_refusal(lease), std::nullopt};
+        return {Refusal::ok, row->state};
     }
 
-    std::size_t
+    std::optional<std::size_t>
     outbox_count() const
     {
         if (!on_owner_strand())
-            return 0;
+            return std::nullopt;
         std::size_t count = 0;
         for (auto const& [_, row] : attempts_)
             count += row.command.has_value() ? 1u : 0u;
         return count;
     }
 
-    std::size_t
+    std::optional<std::size_t>
     attempt_count() const
     {
-        return on_owner_strand() ? attempts_.size() : 0;
+        if (!on_owner_strand())
+            return std::nullopt;
+        return attempts_.size();
+    }
+
+    std::optional<std::size_t>
+    live_attempt_count() const
+    {
+        if (!on_owner_strand())
+            return std::nullopt;
+        std::size_t count = 0;
+        for (auto const& [_, row] : attempts_)
+            count += row.state == AttemptState::reserved ||
+                    row.state == AttemptState::unpublished_open ||
+                    row.state == AttemptState::attempt_committed
+                ? 1u
+                : 0u;
+        return count;
+    }
+
+    std::optional<std::size_t>
+    retry_history_count() const
+    {
+        if (!on_owner_strand())
+            return std::nullopt;
+        std::size_t count = 0;
+        for (auto const& [_, row] : attempts_)
+            count += is_retry_terminal(row.state) ? 1u : 0u;
+        return count;
     }
 
 private:
+    friend class C09SenderTestSeed;
+
     struct MemberKey
     {
         C09OperationId operation = 0;
@@ -546,26 +738,32 @@ private:
         }
     };
 
-    struct Settlement
-    {
-        C09CommandId command = 0;
-        C09ReceiverCommitSequence receiver_commit_sequence = 0;
-        C09TerminalOutcome outcome = C09TerminalOutcome::never_published;
-    };
-
     struct MemberRow
     {
         C09MemberIdentity member;
+        C09CommandId reserved_command = 0;
+        std::optional<C09TransportAttemptId> reserved_attempt;
+        bool ever_published = false;
         bool sealed = false;
-        std::map<C09CommandId, Settlement> settlements;
+        std::optional<C09TransportAttemptId> active_attempt;
+        std::map<C09CommandId, C09TerminalReceipt> settlements;
     };
 
     struct AttemptRow
     {
-        C09CommandIdentity identity;
+        C09MemberIdentity member;
+        C09TransportAttemptId attempt = 0;
+        C09PayloadDigest payload = 0;
         AttemptState state = AttemptState::unpublished_open;
         std::optional<C09TerminalCommand> command;
     };
+
+    static bool
+    is_retry_terminal(AttemptState state)
+    {
+        return state == AttemptState::retry_terminal_unpublished ||
+            state == AttemptState::retry_terminal_published;
+    }
 
     static bool
     valid_destination(C09Destination const& destination)
@@ -597,13 +795,49 @@ private:
     bool
     foreign(C09AttemptLease const& lease) const
     {
-        return !lease.valid() || lease.owner_ != owner_token_;
+        return lease.valid() && lease.owner_ != owner_token_;
+    }
+
+    Refusal
+    missing_attempt_refusal(C09AttemptLease const& lease) const
+    {
+        if (!lease.valid())
+            return Refusal::invalid_lease;
+        if (foreign(lease))
+            return Refusal::wrong_sender;
+        return Refusal::unknown_attempt;
+    }
+
+    MemberRow*
+    find_member(C09MemberIdentity const& member)
+    {
+        auto it = members_.find(member_key(member));
+        if (it == members_.end() || it->second.member != member)
+            return nullptr;
+        return &it->second;
+    }
+
+    MemberRow const*
+    find_member(C09MemberIdentity const& member) const
+    {
+        auto it = members_.find(member_key(member));
+        if (it == members_.end() || it->second.member != member)
+            return nullptr;
+        return &it->second;
+    }
+
+    std::map<C09TransportAttemptId, AttemptRow>::iterator
+    find_attempt_iterator(C09AttemptLease const& lease)
+    {
+        if (!lease.valid() || foreign(lease))
+            return attempts_.end();
+        return attempts_.find(lease.attempt_);
     }
 
     AttemptRow*
     find_attempt(C09AttemptLease const& lease)
     {
-        if (foreign(lease))
+        if (!lease.valid() || foreign(lease))
             return nullptr;
         auto it = attempts_.find(lease.attempt_);
         return it == attempts_.end() ? nullptr : &it->second;
@@ -612,7 +846,7 @@ private:
     AttemptRow const*
     find_attempt(C09AttemptLease const& lease) const
     {
-        if (foreign(lease))
+        if (!lease.valid() || foreign(lease))
             return nullptr;
         auto it = attempts_.find(lease.attempt_);
         return it == attempts_.end() ? nullptr : &it->second;
@@ -627,24 +861,42 @@ private:
             return {Refusal::off_strand, std::nullopt};
         auto* row = find_attempt(lease);
         if (!row)
-            return {
-                foreign(lease) ? Refusal::wrong_sender
-                               : Refusal::unknown_attempt,
-                std::nullopt};
+            return {missing_attempt_refusal(lease), std::nullopt};
         if (row->state == AttemptState::unpublished_open)
             return {Refusal::attempt_not_committed, std::nullopt};
         if (row->state == AttemptState::terminal)
             return {Refusal::attempt_already_terminal, row->command};
-        return commit_terminal(*row, outcome);
+        if (is_retry_terminal(row->state))
+            return {Refusal::attempt_retired, std::nullopt};
+        auto* member = find_member(row->member);
+        if (!member)
+            return {Refusal::unknown_member, std::nullopt};
+        return commit_terminal(*member, *row, outcome);
     }
 
-    static TerminalResult
-    commit_terminal(AttemptRow& row, C09TerminalOutcome outcome)
+    TerminalResult
+    commit_terminal(
+        MemberRow& member,
+        AttemptRow& row,
+        C09TerminalOutcome outcome)
     {
-        C09TerminalCommand command{row.identity, outcome};
+        C09TerminalCommand command{
+            C09CommandIdentity{
+                row.member, row.attempt, member.reserved_command, row.payload},
+            outcome};
+        test_fail(TestFailpoint::terminal_pre_commit);
         row.command = command;
         row.state = AttemptState::terminal;
+        member.sealed = true;
+        member.active_attempt.reset();
         return {Refusal::ok, std::move(command)};
+    }
+
+    void
+    test_fail(TestFailpoint point) const
+    {
+        if (test_failpoint_ == point)
+            throw std::runtime_error{"C09 injected pre-commit failure"};
     }
 
     //@@authority state=provider_lab.c09_terminal_outbox owner=provider_lab
@@ -652,11 +904,48 @@ private:
     C09Destination destination_;
     C09PeerClientIncarnation peer_client_incarnation_ = 0;
     C09SenderGeneration sender_generation_ = 0;
+    TestFailpoint test_failpoint_ = TestFailpoint::none;
     std::shared_ptr<void const> owner_token_ = std::make_shared<int>(0);
     C09TransportAttemptId next_attempt_id_ = 0;
     C09CommandId next_command_id_ = 0;
     std::map<MemberKey, MemberRow> members_;
     std::map<C09TransportAttemptId, AttemptRow> attempts_;
+};
+
+/// Owner-strand-only seam for exercising identifier ceilings without billions
+/// of registrations. It cannot rewrite counters while an attempt is live.
+class C09SenderTestSeed
+{
+public:
+    static C09PeerClientTerminalOutbox::Refusal
+    fail_at(
+        C09PeerClientTerminalOutbox& sender,
+        C09PeerClientTerminalOutbox::TestFailpoint failpoint)
+    {
+        using Refusal = C09PeerClientTerminalOutbox::Refusal;
+        if (!sender.on_owner_strand())
+            return Refusal::off_strand;
+        sender.test_failpoint_ = failpoint;
+        return Refusal::ok;
+    }
+
+    static C09PeerClientTerminalOutbox::Refusal
+    next_ids(
+        C09PeerClientTerminalOutbox& sender,
+        C09TransportAttemptId next_attempt_id,
+        C09CommandId next_command_id)
+    {
+        using Refusal = C09PeerClientTerminalOutbox::Refusal;
+        if (!sender.on_owner_strand())
+            return Refusal::off_strand;
+        if (!sender.attempts_.empty())
+            return Refusal::member_attempt_active;
+        if (sender.next_attempt_id_ != 0 || sender.next_command_id_ != 0)
+            return Refusal::seed_not_pristine;
+        sender.next_attempt_id_ = next_attempt_id;
+        sender.next_command_id_ = next_command_id;
+        return Refusal::ok;
+    }
 };
 
 /// Explicit test-only receiver seam. Production construction remains private.
