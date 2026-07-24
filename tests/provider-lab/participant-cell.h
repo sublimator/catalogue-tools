@@ -1,38 +1,30 @@
 #pragma once
 
-// Coordinator increment 3d: participant cells — coordinator-owned
-// one-shot authority. TEST-ONLY: production construction must never
-// reference this.
+// Coordinator increment 3d, round 2: participant cells —
+// coordinator-owned one-shot authority. TEST-ONLY: production
+// construction must never reference this.
 //
-// Shape (accepted coordinator design, increment 3d):
-//  - a cell is revision + active/revoked + one-shot grants;
-//  - spend is exactly-once: unspent -> use_open -> finished, and a
-//    spent (submitted) use retains the ORIGINAL cell revision until
-//    finish — revocation never invalidates in-flight work;
-//  - revoke atomically marks the cell revoked and every UNSPENT grant
-//    revoked, in one owner-strand commit;
-//  - revision mismatch refuses BEFORE any grant-state read: identity
-//    checks dominate reads of reclaimable state.
-//
-// 3c seam obligations carried here:
-//  - this registry is the SOLE PRODUCTION MINTER of
-//    ParticipantRevokedReceipt: revoke_cell consumes the sender-owned
-//    RevokeCommand (full destination authentication: interest, fetch,
-//    AND operation must match the cell — a receipt must authenticate
-//    where the command was addressed, not merely where a receiver
-//    says it committed), mints the bound receipt ONCE, and RETAINS it
-//    for identical replay — the witness survives the fact it attests;
-//  - retirement mirrors 3c's retire_terminal: only possession of the
-//    genuinely minted receipt (unforgeable type, matching binding)
-//    plus a fully drained cell removes the row, exactly once. The
-//    replay home cannot be destroyed by a caller that never held the
-//    witness;
-//  - revision and grant ids fail closed at their ceilings (the
-//    wrap/false-agreement class, refused at its fifth and sixth
-//    habitats) with zero reserved and test-only first-id seams.
+// Composed-review rulings folded in:
+//  - the registry carries its PartitionScope and every cell binds
+//    (scope, epoch, interest, fetch, operation, revision). revoke_cell
+//    compares the COMPLETE destination — including the target
+//    revision — before any other read, so a delayed command minted
+//    for a retired instance (ABA) and any artifact from a different
+//    registry instance with colliding local counters refuse without
+//    effect. Counter uniqueness is scoped to THIS registry instance
+//    and stated as such;
+//  - retirement consumes the INTEREST-minted third-phase witness
+//    (ParticipantReceiptConsumed), never the cell's own outgoing
+//    receipt: possession of your own outbox message proves
+//    production, not downstream consumption. The receipt replay home
+//    therefore survives until the interest provably consumed it;
+//  - grant spend and use finish are NOT public verbs: they are
+//    committed solely by the coordinator seam façade that owns both
+//    state homes on one strand (split-atomic spend/register is
+//    inexpressible). issue_grant remains cell-local authority.
 
+#include "coordinator-artifacts.h"
 #include "deterministic-scheduler.h"
-#include "interest-registry.h"
 
 #include <cstdint>
 #include <limits>
@@ -56,11 +48,6 @@ public:
         already_open,
         revision_mismatch,
         cell_revoked,
-        unknown_grant,
-        not_spent,
-        already_spent,
-        already_finished,
-        grant_revoked,
         not_revoked,
         uses_open,
         wrong_binding,
@@ -95,15 +82,20 @@ public:
 
     explicit ParticipantCellRegistry(
         strand_type strand,
+        PartitionScope scope,
         CellRevision first_minted_revision = 1,
         GrantId first_minted_grant = 1)
         : strand_(std::move(strand))
+        , scope_(scope)
         , next_revision_(
               first_minted_revision == 0 ? 1 : first_minted_revision)
         , next_grant_(first_minted_grant == 0 ? 1 : first_minted_grant)
     {
         // Zero reserved for both mints; the first-id parameters are
         // test-only seams so ceiling controls avoid 2^64 warm-ups.
+        // Revision/grant uniqueness is scoped to THIS registry
+        // instance — cross-instance discrimination comes from the
+        // PartitionScope bound into every artifact.
     }
 
     bool
@@ -112,17 +104,22 @@ public:
         return strand_.running_in_this_thread();
     }
 
+    PartitionScope
+    scope() const
+    {
+        return scope_;
+    }
+
     /// Open the cell for one interest's participation in one fetch,
-    /// minting a fresh revision. Revisions are minted from ONE global
-    /// monotonic counter, so no two cell instances — across interests
-    /// or across a retire/reopen — ever share a revision. Fail-closed
-    /// at the ceiling: nothing minted, nothing mutated.
+    /// under one provider epoch, minting a fresh revision (unique
+    /// within this registry). Fail-closed at the ceiling.
     //@@authority transition=provider_lab.participant_open_cell owner=provider_lab commit=strand
     OpenResult
     open_cell(
         InterestId interest,
         InterestFetchId fetch,
-        InterestOperationId operation)
+        InterestOperationId operation,
+        ProviderEpochId epoch)
     {
         if (!on_owner_strand())
             return {Refusal::off_strand, 0};
@@ -133,9 +130,11 @@ public:
         auto const revision = next_revision_++;
         cells_.emplace(
             interest,
-            Cell{.fetch = fetch,
-                 .operation = operation,
-                 .revision = revision});
+            Cell{
+                .fetch = fetch,
+                .operation = operation,
+                .epoch = epoch,
+                .revision = revision});
         return {Refusal::ok, revision};
     }
 
@@ -163,66 +162,15 @@ public:
         return {Refusal::ok, grant};
     }
 
-    /// Spend exactly once: unspent -> use_open. The submitted use
-    /// retains the original cell revision until finish; a revoked
-    /// UNSPENT grant refuses — revocation killed it atomically.
-    //@@authority transition=provider_lab.participant_spend_grant owner=provider_lab commit=strand
-    Refusal
-    spend_grant(InterestId interest, CellRevision revision, GrantId grant)
-    {
-        return mutate_grant(
-            interest, revision, grant, [](GrantState& s) {
-                switch (s)
-                {
-                    case GrantState::unspent:
-                        s = GrantState::use_open;
-                        return Refusal::ok;
-                    case GrantState::use_open:
-                        return Refusal::already_spent;
-                    case GrantState::finished:
-                        return Refusal::already_finished;
-                    case GrantState::revoked_unspent:
-                        return Refusal::grant_revoked;
-                }
-                return Refusal::unknown_grant;
-            });
-    }
-
-    /// Finish a submitted use: use_open -> finished. LEGAL while the
-    /// cell is revoked — detach-then-finish and finish-then-detach
-    /// must both converge (in-flight work drains under retained
-    /// authority, never ownerless).
-    //@@authority transition=provider_lab.participant_finish_use owner=provider_lab commit=strand
-    Refusal
-    finish_use(InterestId interest, CellRevision revision, GrantId grant)
-    {
-        return mutate_grant(
-            interest, revision, grant, [](GrantState& s) {
-                switch (s)
-                {
-                    case GrantState::use_open:
-                        s = GrantState::finished;
-                        return Refusal::ok;
-                    case GrantState::unspent:
-                        return Refusal::not_spent;
-                    case GrantState::finished:
-                        return Refusal::already_finished;
-                    case GrantState::revoked_unspent:
-                        return Refusal::grant_revoked;
-                }
-                return Refusal::unknown_grant;
-            });
-    }
-
-    /// THE 3c seam: consume the sender-owned revoke command and, in
-    /// one owner-strand commit, mark the cell revoked, kill every
-    /// unspent grant, and mint the bound ParticipantRevokedReceipt —
-    /// retained for identical replay. Destination authentication
-    /// first: the command's interest, fetch, AND operation must all
-    /// match this cell; a command addressed elsewhere refuses before
-    /// any state changes. An identical replay returns the IDENTICAL
-    /// retained receipt; a different command against a revoked cell is
-    /// wrong_binding, never a second mint.
+    /// Consume the sender-owned revoke command. Destination
+    /// authentication FIRST and COMPLETE: partition scope, provider
+    /// epoch, fetch, operation, and target revision must all match
+    /// this cell — a stale-instance (ABA) or cross-registry command
+    /// refuses before any state changes. Then, in one owner-strand
+    /// commit: mark revoked, kill every UNSPENT grant, spare open
+    /// uses, and mint + RETAIN the bound receipt. Identical replay on
+    /// the identical command; a different command against the revoked
+    /// cell is wrong_binding, never a second mint.
     //@@authority transition=provider_lab.participant_revoke_cell owner=provider_lab commit=strand
     RevokeResult
     revoke_cell(RevokeCommand const& command)
@@ -233,7 +181,10 @@ public:
         if (it == cells_.end())
             return {Refusal::unknown_cell, std::nullopt};
         auto& c = it->second;
-        if (command.fetch() != c.fetch ||
+        auto const dest = command.destination();
+        if (dest.scope != scope_ || dest.epoch != c.epoch ||
+            dest.revision != c.revision ||
+            command.fetch() != c.fetch ||
             command.operation() != c.operation)
             return {Refusal::wrong_binding, std::nullopt};
         if (c.receipt_outbox.has_value())
@@ -249,30 +200,33 @@ public:
                 state = GrantState::revoked_unspent;
         }
         c.receipt_outbox = ParticipantRevokedReceipt{
-            command.interest(), command.command(), c.revision};
+            scope_, c.epoch, command.interest(), command.command(),
+            c.revision};
         return {Refusal::ok, c.receipt_outbox};
     }
 
-    /// The exactly-once remover, mirroring 3c's retire_terminal:
-    /// consumes a genuinely minted receipt (possession is evidence —
-    /// the type is compile-closed against forgery) whose binding
-    /// matches the retained outbox, and requires the cell drained
-    /// (revoked, no open uses). The replay home cannot be destroyed
-    /// by a caller that never held the witness.
+    /// The exactly-once remover: consumes the INTEREST-minted
+    /// third-phase witness whose binding matches the retained receipt
+    /// outbox, and requires the cell drained (revoked, no open uses).
+    /// The cell's own outgoing receipt is not evidence — it proves
+    /// production, not consumption — and it does not compile here.
     //@@authority transition=provider_lab.participant_retire_cell owner=provider_lab commit=strand
     Refusal
-    retire_cell(ParticipantRevokedReceipt const& receipt)
+    retire_cell(ParticipantReceiptConsumed const& witness)
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
-        auto it = cells_.find(receipt.interest());
+        auto it = cells_.find(witness.interest());
         if (it == cells_.end())
             return Refusal::unknown_cell;
         auto& c = it->second;
         if (!c.revoked)
             return Refusal::not_revoked;
         if (!c.receipt_outbox.has_value() ||
-            !(*c.receipt_outbox == receipt))
+            witness.scope() != c.receipt_outbox->scope() ||
+            witness.epoch() != c.receipt_outbox->epoch() ||
+            witness.command() != c.receipt_outbox->command() ||
+            witness.revision() != c.receipt_outbox->revision())
             return Refusal::wrong_binding;
         for (auto const& [id, state] : c.grants)
         {
@@ -322,35 +276,56 @@ private:
     {
         InterestFetchId fetch;
         InterestOperationId operation;
+        ProviderEpochId epoch;
         CellRevision revision;
         bool revoked = false;
         std::optional<ParticipantRevokedReceipt> receipt_outbox;
         std::map<GrantId, GrantState> grants;
     };
 
-    template <typename Fn>
-    Refusal
-    mutate_grant(
-        InterestId interest,
-        CellRevision revision,
-        GrantId grant,
-        Fn fn)
+    // Spend/finish are committed ONLY by the seam façade, which owns
+    // both state homes on this strand. NOT public authority: the
+    // façade's transitions carry the annotations.
+    friend class CoordinatorInterestSeams;
+
+    bool
+    can_spend(InterestId interest, CellRevision revision, GrantId grant)
+        const
     {
-        if (!on_owner_strand())
-            return Refusal::off_strand;
         auto it = cells_.find(interest);
-        if (it == cells_.end())
-            return Refusal::unknown_cell;
-        auto& c = it->second;
-        if (revision != c.revision)
-            return Refusal::revision_mismatch;  // before any grant read
-        auto g = c.grants.find(grant);
-        if (g == c.grants.end())
-            return Refusal::unknown_grant;
-        return fn(g->second);
+        if (it == cells_.end() || revision != it->second.revision)
+            return false;
+        auto g = it->second.grants.find(grant);
+        return g != it->second.grants.end() &&
+            g->second == GrantState::unspent;
+    }
+
+    void
+    commit_spend(InterestId interest, GrantId grant)
+    {
+        cells_.at(interest).grants.at(grant) = GrantState::use_open;
+    }
+
+    bool
+    can_finish(InterestId interest, CellRevision revision, GrantId grant)
+        const
+    {
+        auto it = cells_.find(interest);
+        if (it == cells_.end() || revision != it->second.revision)
+            return false;
+        auto g = it->second.grants.find(grant);
+        return g != it->second.grants.end() &&
+            g->second == GrantState::use_open;
+    }
+
+    void
+    commit_finish(InterestId interest, GrantId grant)
+    {
+        cells_.at(interest).grants.at(grant) = GrantState::finished;
     }
 
     strand_type strand_;
+    PartitionScope scope_;
     CellRevision next_revision_;
     GrantId next_grant_;
     //@@authority state=provider_lab.participant_cells owner=provider_lab

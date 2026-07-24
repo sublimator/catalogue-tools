@@ -1,33 +1,39 @@
 #pragma once
 
-// Coordinator increment 3c, round 2: interests with two-phase detach,
-// OWNED command/receipt seams, and a terminal witness that survives
-// the fact it attests. TEST-ONLY: production construction must never
-// reference this.
+// Coordinator increment 3c, round 3: interests with two-phase detach,
+// fully-bound artifact seams, and three-phase handoffs. TEST-ONLY:
+// production construction must never reference this.
 //
-// Round-1 review rulings folded in:
-//  - "calling the raw ID a typed event does not type its authority":
-//    begin_detach now COMMITS a sender-owned, replayable revoke
-//    command (retained outbox on the interest) and revocation
-//    completes only by consuming a bound, sole-minted
-//    ParticipantRevokedReceipt — increment 3d's participant cell is
-//    its sole production minter; until 3d lands, tests mint through
-//    an explicit test-only seam. The unsubscribe seam is identical:
-//    the interest RETAINS its subscription identity from registration
-//    and only a bound UnsubscribeReceipt completes it;
-//  - "the terminal witness must survive the fact it attests": the
-//    join no longer erases-and-returns. Readiness transitions the
-//    interest to terminal_ready, which RETAINS a sender-owned
-//    terminal-ack outbox; the identical ack replays on request, and
-//    only retire_terminal — consuming a genuinely minted ack whose
-//    binding matches — finally removes the row, exactly once;
-//  - InterestIds fail closed at the ceiling (interest_id_exhausted;
-//    the wrap/false-agreement class, fourth sighting, now refused
-//    here too) with zero reserved and a test-only first-id seam;
-//  - duplicate obligation registration is a typed already_registered,
-//    never a fresh ok: two logically distinct debts can no longer
-//    collapse into one.
+// Composed-review rulings folded in (on top of rounds 1-2):
+//  - the interest RETAINS its participant destination expectation
+//    (scope, epoch, revision) from registration; every revoke
+//    artifact is validated against the COMPLETE binding — a receipt
+//    with the right command and the wrong revision is wrong_binding,
+//    before and after exact consumption;
+//  - consuming the participant's revoked receipt mints and RETAINS a
+//    distinct ParticipantReceiptConsumed witness (replayable): the
+//    participant cell retires on THAT, never on its own outgoing
+//    receipt;
+//  - the terminal ack cannot retire the interest: the operation
+//    ledger consumes it and mints InterestTerminalConsumed, and only
+//    that witness removes the terminal-ready row;
+//  - use registration/closure are NOT public verbs: they are
+//    committed solely by the coordinator seam façade that owns both
+//    state homes on one strand (split-atomic spend/register and
+//    raw-id use_terminal forgery are inexpressible);
+//  - delivery acknowledgement's owner is not composed yet: closure is
+//    an explicit test-only seam, not an annotated authority any
+//    caller can assert;
+//  - unsubscribe honesty: detach makes NO claim that an unsubscribe
+//    was initiated (no command, no outbox, no replay exists here).
+//    The row is merely unsubscribe-pending until the subscription
+//    owner is composed; the consumption verb stays typed and bound,
+//    with a test-only minter;
+//  - id counters are unique WITHIN this registry instance (scoped by
+//    its PartitionScope), stated as such, and fail closed at their
+//    ceilings with zero reserved.
 
+#include "coordinator-artifacts.h"
 #include "deterministic-scheduler.h"
 
 #include <cstdint>
@@ -35,250 +41,11 @@
 #include <map>
 #include <optional>
 #include <set>
-#include <type_traits>
 #include <vector>
 
 namespace catl::provider_lab {
 
-using InterestId = std::uint64_t;
-using InterestOperationId = std::uint64_t;
-using InterestChildId = std::uint64_t;
-using InterestFetchId = std::uint64_t;
-using InterestUseId = std::uint64_t;
-using DeliveryId = std::uint64_t;
-using SubscriptionId = std::uint64_t;
-using RevokeCommandId = std::uint64_t;
-using ParticipantRevision = std::uint64_t;
-
-class InterestRegistry;
-class ParticipantCellRegistry;
-class ParticipantReceiptTestMint;
-class UnsubscribeReceiptTestMint;
-class RevokeCommandTestMint;
-
-/// Sender-owned revoke command: a replayable projection from the
-/// interest's retained outbox — losing a copy is safe; replay
-/// re-derives the identical value. Sole-minted nonetheless: the
-/// participant cell treats a presented command as the trigger to
-/// revoke, so a brace-constructible command would let any caller
-/// revoke a cell whose interest never began detach. The interest
-/// registry is the sole production minter; tests mint via the
-/// explicit test-only seam.
-class RevokeCommand
-{
-public:
-    RevokeCommand(RevokeCommand const&) = default;
-    RevokeCommand&
-    operator=(RevokeCommand const&) = default;
-
-    RevokeCommandId
-    command() const
-    {
-        return command_;
-    }
-    InterestId
-    interest() const
-    {
-        return interest_;
-    }
-    InterestFetchId
-    fetch() const
-    {
-        return fetch_;
-    }
-    InterestOperationId
-    operation() const
-    {
-        return operation_;
-    }
-
-    bool
-    operator==(RevokeCommand const&) const = default;
-
-private:
-    friend class InterestRegistry;      // sole production minter
-    friend class RevokeCommandTestMint;  // explicit test-only seam
-    RevokeCommand(
-        RevokeCommandId command,
-        InterestId interest,
-        InterestFetchId fetch,
-        InterestOperationId operation)
-        : command_(command)
-        , interest_(interest)
-        , fetch_(fetch)
-        , operation_(operation)
-    {
-    }
-
-    RevokeCommandId command_;
-    InterestId interest_;
-    InterestFetchId fetch_;
-    InterestOperationId operation_;
-};
-
-static_assert(
-    !std::is_default_constructible_v<RevokeCommand>,
-    "a command must be minted from the owned outbox, never defaulted");
-static_assert(
-    !std::is_constructible_v<
-        RevokeCommand,
-        RevokeCommandId,
-        InterestId,
-        InterestFetchId,
-        InterestOperationId>,
-    "raw-field construction would let any caller trigger revocation");
-
-/// Bound receipt proving the participant cell revoked its grants for
-/// this exact interest/command. Sole production minter:
-/// ParticipantCellRegistry (increment 3d). Tests may mint via the
-/// explicit test-only seam.
-class ParticipantRevokedReceipt
-{
-public:
-    ParticipantRevokedReceipt(ParticipantRevokedReceipt const&) = default;
-    ParticipantRevokedReceipt&
-    operator=(ParticipantRevokedReceipt const&) = default;
-
-    bool
-    operator==(ParticipantRevokedReceipt const&) const = default;
-
-    InterestId
-    interest() const
-    {
-        return interest_;
-    }
-    RevokeCommandId
-    command() const
-    {
-        return command_;
-    }
-    ParticipantRevision
-    revision() const
-    {
-        return revision_;
-    }
-
-private:
-    friend class ParticipantCellRegistry;     // sole production minter
-    friend class ParticipantReceiptTestMint;  // explicit test-only seam
-    ParticipantRevokedReceipt(
-        InterestId interest,
-        RevokeCommandId command,
-        ParticipantRevision revision)
-        : interest_(interest), command_(command), revision_(revision)
-    {
-    }
-
-    InterestId interest_;
-    RevokeCommandId command_;
-    ParticipantRevision revision_;
-};
-
-static_assert(
-    !std::is_default_constructible_v<ParticipantRevokedReceipt>,
-    "a receipt must be minted, never defaulted");
-static_assert(
-    !std::is_constructible_v<
-        ParticipantRevokedReceipt,
-        InterestId,
-        RevokeCommandId,
-        ParticipantRevision>,
-    "raw-field construction would make every caller a second minter");
-
-/// Bound receipt proving the cancellation-subscription owner detached
-/// this exact subscription. Sole production minter: the subscription
-/// owner (request-session composition). Tests mint via the seam.
-class UnsubscribeReceipt
-{
-public:
-    UnsubscribeReceipt(UnsubscribeReceipt const&) = default;
-    UnsubscribeReceipt&
-    operator=(UnsubscribeReceipt const&) = default;
-
-    InterestId
-    interest() const
-    {
-        return interest_;
-    }
-    SubscriptionId
-    subscription() const
-    {
-        return subscription_;
-    }
-
-private:
-    friend class UnsubscribeReceiptTestMint;  // test-only until composed
-    UnsubscribeReceipt(InterestId interest, SubscriptionId subscription)
-        : interest_(interest), subscription_(subscription)
-    {
-    }
-
-    InterestId interest_;
-    SubscriptionId subscription_;
-};
-
-static_assert(
-    !std::is_default_constructible_v<UnsubscribeReceipt>,
-    "a receipt must be minted, never defaulted");
-static_assert(
-    !std::is_constructible_v<UnsubscribeReceipt, InterestId, SubscriptionId>,
-    "raw-field construction would make every caller a second minter");
-
-/// Sole-minted terminal acknowledgement, bound to the original child.
-/// Minted once at terminal readiness, RETAINED in the interest's
-/// outbox, replayed identically on request, and consumed exactly once
-/// by retire_terminal.
-class InterestTerminalAck
-{
-public:
-    InterestTerminalAck(InterestTerminalAck const&) = default;
-    InterestTerminalAck&
-    operator=(InterestTerminalAck const&) = default;
-
-    InterestId
-    interest() const
-    {
-        return interest_;
-    }
-    InterestOperationId
-    operation() const
-    {
-        return operation_;
-    }
-    InterestChildId
-    child() const
-    {
-        return child_;
-    }
-
-    bool
-    operator==(InterestTerminalAck const&) const = default;
-
-private:
-    friend class InterestRegistry;  // sole minter
-    InterestTerminalAck(
-        InterestId interest,
-        InterestOperationId operation,
-        InterestChildId child)
-        : interest_(interest), operation_(operation), child_(child)
-    {
-    }
-
-    InterestId interest_;
-    InterestOperationId operation_;
-    InterestChildId child_;
-};
-
-static_assert(
-    !std::is_default_constructible_v<InterestTerminalAck>,
-    "a terminal ack must be minted, never defaulted");
-static_assert(
-    !std::is_constructible_v<
-        InterestTerminalAck,
-        InterestId,
-        InterestOperationId,
-        InterestChildId>,
-    "raw-field construction would make every caller a second minter");
+class DeliveryAckTestSeam;
 
 class InterestRegistry
 {
@@ -295,7 +62,7 @@ public:
         unknown_delivery,
         already_registered,  // duplicate obligation: typed, no new debt
         already_acked,
-        wrong_binding,  // receipt does not match the retained outbox
+        wrong_binding,  // artifact does not match the retained binding
         interest_id_exhausted,
         revoke_command_id_exhausted,
     };
@@ -310,6 +77,13 @@ public:
     {
         Refusal refusal{};
         std::optional<RevokeCommand> command;
+    };
+
+    struct ConsumeRevokeResult
+    {
+        Refusal refusal{};
+        // Fresh on ok; the IDENTICAL retained witness on already_acked.
+        std::optional<ParticipantReceiptConsumed> consumed;
     };
 
     enum class JoinRefusal : std::uint8_t {
@@ -328,15 +102,21 @@ public:
 
     explicit InterestRegistry(
         strand_type strand,
+        PartitionScope scope,
         InterestId first_minted_id = 1,
         RevokeCommandId first_minted_command = 1)
         : strand_(std::move(strand))
+        , scope_(scope)
         , next_interest_(first_minted_id == 0 ? 1 : first_minted_id)
         , next_revoke_command_(
               first_minted_command == 0 ? 1 : first_minted_command)
     {
         // Zero reserved for both mints; the first-id parameters are
         // test-only seams so ceiling controls avoid 2^64 warm-ups.
+        // Uniqueness of minted ids is scoped to THIS registry
+        // instance — cross-instance discrimination comes from the
+        // PartitionScope carried on every artifact, never from the
+        // counters.
     }
 
     bool
@@ -345,16 +125,24 @@ public:
         return strand_.running_in_this_thread();
     }
 
-    /// Mint one interest retaining its original operation/child and
-    /// its cancellation-subscription identity. Fail-closed at the id
-    /// ceiling: refuses, mints nothing, mutates nothing.
+    PartitionScope
+    scope() const
+    {
+        return scope_;
+    }
+
+    /// Mint one interest retaining its original operation/child, its
+    /// cancellation-subscription identity, and its participant
+    /// destination EXPECTATION (scope/epoch/revision of the cell
+    /// opened for it). Fail-closed at the id ceiling.
     //@@authority transition=provider_lab.register_interest owner=provider_lab commit=strand
     RegisterResult
     register_interest(
         InterestOperationId operation,
         InterestChildId child,
         InterestFetchId fetch,
-        SubscriptionId subscription)
+        SubscriptionId subscription,
+        ParticipantDestination expected)
     {
         if (!on_owner_strand())
             return {Refusal::off_strand, 0};
@@ -367,40 +155,42 @@ public:
                 .operation = operation,
                 .child = child,
                 .fetch = fetch,
-                .subscription = subscription});
+                .subscription = subscription,
+                .expected = expected});
         return {Refusal::ok, id};
     }
 
-    /// Register a submitted use under an ACTIVE interest. A duplicate
-    /// UseId is typed already_registered — it creates no new debt and
-    /// must not report a fresh commit.
-    //@@authority transition=provider_lab.interest_add_use owner=provider_lab commit=strand
-    Refusal
-    add_submitted_use(InterestId id, InterestUseId use)
-    {
-        return add_obligation(id, [&](Interest& i) {
-            return i.open_uses.insert(use).second;
-        });
-    }
-
-    /// Register a delivery obligation under an ACTIVE interest; same
-    /// duplicate discipline.
+    /// Register a delivery obligation under an ACTIVE interest
+    /// (interest-local debt registration by the interest owner). A
+    /// duplicate DeliveryId is typed already_registered. NOTE: debt
+    /// CLOSURE has no composed owner yet — see DeliveryAckTestSeam.
     //@@authority transition=provider_lab.interest_add_delivery owner=provider_lab commit=strand
     Refusal
     add_delivery_obligation(InterestId id, DeliveryId delivery)
     {
-        return add_obligation(id, [&](Interest& i) {
-            return i.open_deliveries.insert(delivery).second;
-        });
+        if (!on_owner_strand())
+            return Refusal::off_strand;
+        auto it = interests_.find(id);
+        if (it == interests_.end())
+            return Refusal::unknown_interest;
+        if (it->second.phase != Phase::active)
+            return Refusal::not_active;
+        return it->second.open_deliveries.insert(delivery).second
+            ? Refusal::ok
+            : Refusal::already_registered;
     }
 
     /// active -> detach_pending: seals new sponsorship AND commits the
-    /// sender-owned revoke command in the same owner-strand commit —
-    /// initiation is a fact with a home, not an arrow. The command is
-    /// retained (replayable) until its bound receipt is consumed.
-    /// Command ids fail closed at the ceiling BEFORE the seal: the
-    /// seal-plus-commit is one atom, so a refused mint leaves the
-    /// interest fully active — never sealed without a command.
+    /// sender-owned revoke command — bound to the COMPLETE retained
+    /// destination expectation — in the same owner-strand commit. The
+    /// command is retained (replayable) until its receipt is consumed.
+    /// Command ids fail closed at the ceiling BEFORE the seal.
+    ///
+    /// HONESTY: detach claims revocation was initiated (the command
+    /// exists, owned and replayable). It makes NO such claim for the
+    /// cancellation subscription: no unsubscribe command or outbox
+    /// exists here. The row is unsubscribe-pending until the
+    /// subscription owner is composed.
     //@@authority transition=provider_lab.interest_begin_detach owner=provider_lab commit=strand
     DetachResult
     begin_detach(InterestId id)
@@ -418,7 +208,7 @@ public:
         auto& i = it->second;
         i.phase = Phase::detach_pending;
         i.revoke_outbox = RevokeCommand{
-            next_revoke_command_++, id, i.fetch, i.operation};
+            next_revoke_command_++, id, i.fetch, i.operation, i.expected};
         return {Refusal::ok, i.revoke_outbox};
     }
 
@@ -435,38 +225,65 @@ public:
         return it->second.revoke_outbox;
     }
 
-    /// Revocation completes ONLY by consuming the bound receipt: the
-    /// receipt's command must match the retained outbox. Binding is
-    /// checked BEFORE the done-flag — the consumed identity is
-    /// retained so an exact replay stays already_acked while a
-    /// mismatched receipt is wrong_binding, never laundered.
+    /// Revocation completes ONLY by consuming the bound receipt, and
+    /// consumption mints + RETAINS the distinct third-phase witness.
+    /// Binding precedence: the COMPLETE destination (scope, epoch,
+    /// revision, vs the retained expectation) is checked BEFORE the
+    /// dedup read, so a wrong-revision receipt is wrong_binding both
+    /// before and after exact consumption. Exact replay returns
+    /// already_acked with the IDENTICAL retained witness.
     //@@authority transition=provider_lab.interest_consume_revoke_receipt owner=provider_lab commit=strand
-    Refusal
+    ConsumeRevokeResult
     consume_revoke_receipt(ParticipantRevokedReceipt const& receipt)
     {
         if (!on_owner_strand())
-            return Refusal::off_strand;
+            return {Refusal::off_strand, std::nullopt};
         auto it = interests_.find(receipt.interest());
         if (it == interests_.end())
-            return Refusal::unknown_interest;
+            return {Refusal::unknown_interest, std::nullopt};
         auto& i = it->second;
         if (i.phase == Phase::active)
-            return Refusal::not_detach_pending;
+            return {Refusal::not_detach_pending, std::nullopt};
+        if (receipt.scope() != i.expected.scope ||
+            receipt.epoch() != i.expected.epoch ||
+            receipt.revision() != i.expected.revision)
+            return {Refusal::wrong_binding, std::nullopt};
         if (i.revoke_consumed.has_value())
-            return receipt.command() == *i.revoke_consumed
-                ? Refusal::already_acked
-                : Refusal::wrong_binding;
+            return receipt.command() == i.revoke_consumed->command()
+                ? ConsumeRevokeResult{Refusal::already_acked,
+                                      i.revoke_consumed}
+                : ConsumeRevokeResult{Refusal::wrong_binding,
+                                      std::nullopt};
         if (!i.revoke_outbox.has_value() ||
             i.revoke_outbox->command() != receipt.command())
-            return Refusal::wrong_binding;
-        i.revoke_consumed = receipt.command();
-        i.revoke_outbox.reset();  // replay home retires; dedup remains
-        return Refusal::ok;
+            return {Refusal::wrong_binding, std::nullopt};
+        i.revoke_consumed = ParticipantReceiptConsumed{
+            receipt.scope(),
+            receipt.epoch(),
+            receipt.interest(),
+            receipt.command(),
+            receipt.revision()};
+        i.revoke_outbox.reset();  // replay home retires; witness remains
+        return {Refusal::ok, i.revoke_consumed};
+    }
+
+    /// Replay home for the third-phase witness: survives loss of both
+    /// the receipt and the returned witness copy.
+    std::optional<ParticipantReceiptConsumed>
+    replay_revoke_consumed(InterestId id) const
+    {
+        if (!on_owner_strand())
+            return std::nullopt;
+        auto it = interests_.find(id);
+        if (it == interests_.end())
+            return std::nullopt;
+        return it->second.revoke_consumed;
     }
 
     /// Unsubscription completes ONLY by consuming a receipt bound to
     /// the subscription identity retained since registration. Binding
-    /// dominates the done-flag here too.
+    /// dominates the done-flag. The MINTER is not composed yet
+    /// (test-only seam); this verb owns consumption alone.
     //@@authority transition=provider_lab.interest_consume_unsubscribe_receipt owner=provider_lab commit=strand
     Refusal
     consume_unsubscribe_receipt(UnsubscribeReceipt const& receipt)
@@ -481,40 +298,17 @@ public:
             return Refusal::not_detach_pending;
         if (receipt.subscription() != i.subscription)
             return Refusal::wrong_binding;
-        if (i.unsubscribe_done)
+        if (i.unsubscribe_consumed)
             return Refusal::already_acked;
-        i.unsubscribe_done = true;
+        i.unsubscribe_consumed = true;
         return Refusal::ok;
-    }
-
-    /// A submitted use reached terminality (legal in both phases).
-    //@@authority transition=provider_lab.interest_use_terminal owner=provider_lab commit=strand
-    Refusal
-    use_terminal(InterestId id, InterestUseId use)
-    {
-        return close_obligation(id, [&](Interest& i) -> Refusal {
-            return i.open_uses.erase(use) ? Refusal::ok
-                                          : Refusal::unknown_use;
-        });
-    }
-
-    /// A delivery obligation was acknowledged (legal in both phases).
-    //@@authority transition=provider_lab.interest_ack_delivery owner=provider_lab commit=strand
-    Refusal
-    ack_delivery(InterestId id, DeliveryId delivery)
-    {
-        return close_obligation(id, [&](Interest& i) -> Refusal {
-            return i.open_deliveries.erase(delivery)
-                ? Refusal::ok
-                : Refusal::unknown_delivery;
-        });
     }
 
     /// Terminal readiness: when every obligation is closed, the
     /// interest transitions to terminal_ready and mints its ack ONCE
-    /// into a retained outbox. The identical ack replays on every
-    /// later call — the witness survives the fact it attests. Removal
-    /// happens ONLY at retire_terminal.
+    /// into a retained outbox; the identical ack replays on every
+    /// later call. The ack is phase TWO of the terminal handoff —
+    /// removal requires the ledger-minted consumption witness.
     //@@authority transition=provider_lab.interest_terminal_join owner=provider_lab commit=strand
     JoinResult
     terminal_join(InterestId id)
@@ -529,31 +323,36 @@ public:
             return {JoinRefusal::ok, i.terminal_outbox};  // replay
         if (i.phase != Phase::detach_pending)
             return {JoinRefusal::not_detach_pending, std::nullopt};
-        if (!i.revoke_consumed.has_value() || !i.unsubscribe_done ||
+        if (!i.revoke_consumed.has_value() || !i.unsubscribe_consumed ||
             !i.open_uses.empty() || !i.open_deliveries.empty())
             return {JoinRefusal::obligations_open, std::nullopt};
         i.phase = Phase::terminal_ready;
-        i.terminal_outbox = InterestTerminalAck{id, i.operation, i.child};
+        i.terminal_outbox =
+            InterestTerminalAck{scope_, id, i.operation, i.child};
         return {JoinRefusal::ok, i.terminal_outbox};
     }
 
-    /// The exactly-once remover: consumes a genuinely minted terminal
-    /// ack whose binding matches the terminal_ready row. Possession is
-    /// evidence (the type is unforgeable); a second retire finds no
-    /// row and is typed.
+    /// The exactly-once remover: consumes the LEDGER-minted terminal
+    /// consumption witness whose binding matches the retained ack
+    /// outbox. The interest's own outgoing ack is not evidence — it
+    /// proves the ack was produced, not that downstream consumed it —
+    /// and it does not compile here.
     //@@authority transition=provider_lab.interest_retire_terminal owner=provider_lab commit=strand
     Refusal
-    retire_terminal(InterestTerminalAck const& ack)
+    retire_terminal(InterestTerminalConsumed const& witness)
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
-        auto it = interests_.find(ack.interest());
+        auto it = interests_.find(witness.interest());
         if (it == interests_.end())
             return Refusal::unknown_interest;
         auto& i = it->second;
         if (i.phase != Phase::terminal_ready)
             return Refusal::not_detach_pending;
-        if (!i.terminal_outbox.has_value() || !(*i.terminal_outbox == ack))
+        if (!i.terminal_outbox.has_value() ||
+            witness.scope() != i.terminal_outbox->scope() ||
+            witness.operation() != i.terminal_outbox->operation() ||
+            witness.child() != i.terminal_outbox->child())
             return Refusal::wrong_binding;
         interests_.erase(it);
         return Refusal::ok;
@@ -577,6 +376,16 @@ public:
             return std::nullopt;
         return interests_.count(id) > 0;
     }
+    std::optional<bool>
+    use_open(InterestId id, InterestUseId use) const
+    {
+        if (!on_owner_strand())
+            return std::nullopt;
+        auto it = interests_.find(id);
+        if (it == interests_.end())
+            return std::nullopt;
+        return it->second.open_uses.count(use) > 0;
+    }
 
 private:
     enum class Phase : std::uint8_t {
@@ -591,40 +400,63 @@ private:
         InterestChildId child;
         InterestFetchId fetch;
         SubscriptionId subscription;
+        ParticipantDestination expected;
         Phase phase = Phase::active;
-        std::optional<RevokeCommandId> revoke_consumed;  // dedup domain
-        bool unsubscribe_done = false;
+        std::optional<ParticipantReceiptConsumed> revoke_consumed;
+        bool unsubscribe_consumed = false;
         std::optional<RevokeCommand> revoke_outbox;
         std::optional<InterestTerminalAck> terminal_outbox;
         std::set<InterestUseId> open_uses;
         std::set<DeliveryId> open_deliveries;
     };
 
-    template <typename Fn>
-    Refusal
-    add_obligation(InterestId id, Fn insert)
+    // Use debt registration/closure: committed ONLY by the seam
+    // façade (which owns both state homes on this strand) and, for
+    // delivery closure, the explicit test seam. NOT public authority:
+    // the façade's transitions carry the annotations.
+    friend class CoordinatorInterestSeams;
+    friend class DeliveryAckTestSeam;
+
+    bool
+    can_add_use(InterestId id, InterestUseId use) const
     {
-        if (!on_owner_strand())
-            return Refusal::off_strand;
         auto it = interests_.find(id);
-        if (it == interests_.end())
-            return Refusal::unknown_interest;
-        if (it->second.phase != Phase::active)
-            return Refusal::not_active;
-        return insert(it->second) ? Refusal::ok
-                                  : Refusal::already_registered;
+        return it != interests_.end() &&
+            it->second.phase == Phase::active &&
+            it->second.open_uses.count(use) == 0;
     }
 
-    template <typename Fn>
+    void
+    commit_add_use(InterestId id, InterestUseId use)
+    {
+        interests_.at(id).open_uses.insert(use);
+    }
+
+    bool
+    can_close_use(InterestId id, InterestUseId use) const
+    {
+        auto it = interests_.find(id);
+        return it != interests_.end() &&
+            it->second.open_uses.count(use) > 0;
+    }
+
+    void
+    commit_close_use(InterestId id, InterestUseId use)
+    {
+        interests_.at(id).open_uses.erase(use);
+    }
+
     Refusal
-    close_obligation(InterestId id, Fn mutate)
+    close_delivery(InterestId id, DeliveryId delivery)
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
         auto it = interests_.find(id);
         if (it == interests_.end())
             return Refusal::unknown_interest;
-        return mutate(it->second);
+        return it->second.open_deliveries.erase(delivery)
+            ? Refusal::ok
+            : Refusal::unknown_delivery;
     }
 
     std::optional<std::vector<InterestId>>
@@ -640,49 +472,23 @@ private:
     }
 
     strand_type strand_;
+    PartitionScope scope_;
     InterestId next_interest_;
     RevokeCommandId next_revoke_command_;
     //@@authority state=provider_lab.interest_registry owner=provider_lab
     std::map<InterestId, Interest> interests_;
 };
 
-/// Test-only receipt mints for the seams whose sole production minters
-/// arrive with increment 3d (participant cell) and the subscription
-/// owner. Explicitly not production authority; no authority annotation.
-class ParticipantReceiptTestMint
+/// Test-only closure of delivery debts: the delivery owner is not
+/// composed, so closure must not be an annotated production authority
+/// that any caller can assert. Explicitly a seam.
+class DeliveryAckTestSeam
 {
 public:
-    static ParticipantRevokedReceipt
-    mint(
-        InterestId interest,
-        RevokeCommandId command,
-        ParticipantRevision revision)
+    static InterestRegistry::Refusal
+    close(InterestRegistry& reg, InterestId id, DeliveryId delivery)
     {
-        return ParticipantRevokedReceipt{interest, command, revision};
-    }
-};
-
-class UnsubscribeReceiptTestMint
-{
-public:
-    static UnsubscribeReceipt
-    mint(InterestId interest, SubscriptionId subscription)
-    {
-        return UnsubscribeReceipt{interest, subscription};
-    }
-};
-
-class RevokeCommandTestMint
-{
-public:
-    static RevokeCommand
-    mint(
-        RevokeCommandId command,
-        InterestId interest,
-        InterestFetchId fetch,
-        InterestOperationId operation)
-    {
-        return RevokeCommand{command, interest, fetch, operation};
+        return reg.close_delivery(id, delivery);
     }
 };
 

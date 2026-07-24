@@ -22,11 +22,13 @@ on_strand(Sched& sched, DeterministicScheduler::strand_type& strand, Fn fn)
     sched.run_until_idle();
 }
 
+PartitionScope const kScope{1, 1};
+
 struct LedgerFixture : ::testing::Test
 {
     DeterministicScheduler sched;
     DeterministicScheduler::strand_type strand = sched.make_strand();
-    OperationLedger ledger{strand};
+    OperationLedger ledger{strand, kScope};
 
     template <typename Fn>
     void
@@ -114,7 +116,7 @@ TEST_F(LedgerFixture, OnlyMatchingDestinationAckWinsBothOrders)
     {
         DeterministicScheduler s2;
         auto strand2 = s2.make_strand();
-        OperationLedger l2{strand2};
+        OperationLedger l2{strand2, kScope};
         on_strand(s2, strand2, [&] {
             auto root = l2.open_root();
             auto [r, child] = l2.register_child(*root);
@@ -339,5 +341,76 @@ TEST_F(LedgerFixture, PrePublicationCancelSealsThePublicationPathBothOrders)
                 ledger.ack_terminal(cid, 7, 42),
                 OperationLedger::AckOutcome::removed);
         }
+    });
+}
+
+TEST_F(LedgerFixture, ConsumeTerminalAckMintsAndReplaysTheWitness)
+{
+    run([&] {
+        auto root = ledger.open_root();
+        auto [r, child] = ledger.register_child(*root);
+        ASSERT_EQ(r, OperationLedger::Refusal::ok);
+        ASSERT_EQ(ledger.publish(child, 9, 4), OperationLedger::Refusal::ok);
+
+        auto const ack = TerminalAckTestMint::mint(
+            kScope, /*interest*/ 42, root->id(), child.id());
+
+        // Scope is authenticated FIRST; a foreign-partition ack is
+        // inert even with matching local identities.
+        EXPECT_EQ(
+            ledger
+                .consume_terminal_ack(
+                    TerminalAckTestMint::mint(
+                        PartitionScope{1, 2}, 42, root->id(), child.id()),
+                    9, 4)
+                .outcome,
+            OperationLedger::AckOutcome::wrong_scope);
+
+        // An ack naming an operation that does not own the child is
+        // wrong_binding, not a removal.
+        EXPECT_EQ(
+            ledger
+                .consume_terminal_ack(
+                    TerminalAckTestMint::mint(
+                        kScope, 42, root->id() + 1, child.id()),
+                    9, 4)
+                .outcome,
+            OperationLedger::AckOutcome::wrong_binding);
+
+        // The existing gate still guards destination and work.
+        EXPECT_EQ(
+            ledger.consume_terminal_ack(ack, 8, 4).outcome,
+            OperationLedger::AckOutcome::wrong_destination);
+        EXPECT_EQ(
+            ledger.consume_terminal_ack(ack, 9, 5).outcome,
+            OperationLedger::AckOutcome::wrong_work);
+        EXPECT_EQ(ledger.child_count(root->id()), 1u)
+            << "every refusal above changed nothing";
+
+        // The exactly-once win removes the child and mints the witness.
+        auto first = ledger.consume_terminal_ack(ack, 9, 4);
+        ASSERT_EQ(first.outcome, OperationLedger::AckOutcome::removed);
+        ASSERT_TRUE(first.witness.has_value());
+        EXPECT_EQ(first.witness->interest(), 42u);
+        EXPECT_EQ(ledger.child_count(root->id()), 0u);
+
+        // Replay: the identical retained witness, from both homes.
+        auto again = ledger.consume_terminal_ack(ack, 9, 4);
+        EXPECT_EQ(again.outcome, OperationLedger::AckOutcome::removed);
+        EXPECT_TRUE(*again.witness == *first.witness);
+        auto from_home = ledger.replay_terminal_consumed(42);
+        ASSERT_TRUE(from_home.has_value());
+        EXPECT_TRUE(*from_home == *first.witness);
+
+        // A DIFFERENT claim under the same interest is wrong_binding,
+        // never a second mint.
+        EXPECT_EQ(
+            ledger
+                .consume_terminal_ack(
+                    TerminalAckTestMint::mint(
+                        kScope, 42, root->id(), child.id() + 1),
+                    9, 4)
+                .outcome,
+            OperationLedger::AckOutcome::wrong_binding);
     });
 }

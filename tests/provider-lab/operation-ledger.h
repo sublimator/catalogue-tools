@@ -23,6 +23,7 @@
 //  - destructors are passive. All state is owner-strand confined and
 //    off-strand mutation is refused, not raced.
 
+#include "coordinator-artifacts.h"
 #include "deterministic-scheduler.h"
 
 #include <cstdint>
@@ -109,6 +110,8 @@ public:
         wrong_work,         // destination matches, work does not — no-op
         unpublished,        // cell never flipped to published — no-op
         off_strand,         // refused: caller is not the owner
+        wrong_scope,    // artifact from another partition instance
+        wrong_binding,  // ack's operation does not own its child
     };
 
     enum class Refusal : std::uint8_t {
@@ -121,7 +124,8 @@ public:
         cancelled_inert,  // pre-publication cancel: seal never_published
     };
 
-    explicit OperationLedger(strand_type strand) : strand_(std::move(strand))
+    explicit OperationLedger(strand_type strand, PartitionScope scope)
+        : strand_(std::move(strand)), scope_(scope)
     {
     }
 
@@ -243,6 +247,81 @@ public:
             return AckOutcome::wrong_work;
         remove_child(op_it, child_it);
         return AckOutcome::removed;
+    }
+
+    struct TerminalConsumeResult
+    {
+        AckOutcome outcome{};
+        // Fresh on the exactly-once win; the IDENTICAL retained
+        // witness when the same ack is re-presented after the win.
+        std::optional<InterestTerminalConsumed> witness;
+    };
+
+    /// Consume an interest's terminal acknowledgement: phase three of
+    /// the terminal handoff. Scope is authenticated FIRST (an ack
+    /// from another partition instance refuses before any read); the
+    /// retained-witness dedup domain is consulted BEFORE the removal
+    /// gate (an exact replay re-derives the identical witness instead
+    /// of falling into duplicate_or_late); then the existing
+    /// exactly-once gate runs, keyed by the ack's original child and
+    /// its published (destination, work). The win removes the child
+    /// and mints + RETAINS the InterestTerminalConsumed witness —
+    /// the only artifact that can retire the terminal-ready interest.
+    /// Witness rows are retained here (bounded by consumed interests);
+    /// their reclamation composes with root-close reclamation later
+    /// and is stated as an honest gap until then.
+    //@@authority transition=provider_lab.ledger_consume_terminal_ack owner=provider_lab commit=strand
+    TerminalConsumeResult
+    consume_terminal_ack(
+        InterestTerminalAck const& ack,
+        DestinationId dest,
+        WorkId work)
+    {
+        if (!on_owner_strand())
+            return {AckOutcome::off_strand, std::nullopt};
+        if (ack.scope() != scope_)
+            return {AckOutcome::wrong_scope, std::nullopt};
+        if (auto w = witnesses_.find(ack.interest());
+            w != witnesses_.end())
+        {
+            if (w->second.operation() == ack.operation() &&
+                w->second.child() == ack.child())
+                return {AckOutcome::removed, w->second};  // replay
+            return {AckOutcome::wrong_binding, std::nullopt};
+        }
+        auto located = locate(ack.child());
+        if (!located)
+            return {AckOutcome::duplicate_or_late, std::nullopt};
+        auto [op_it, child_it] = *located;
+        if (op_it->first != ack.operation())
+            return {AckOutcome::wrong_binding, std::nullopt};
+        auto& c = child_it->second;
+        if (c.state != PublicationState::published)
+            return {AckOutcome::unpublished, std::nullopt};
+        if (c.destination != dest)
+            return {AckOutcome::wrong_destination, std::nullopt};
+        if (c.work != work)
+            return {AckOutcome::wrong_work, std::nullopt};
+        remove_child(op_it, child_it);
+        auto const [w_it, inserted] = witnesses_.emplace(
+            ack.interest(),
+            InterestTerminalConsumed{
+                ack.scope(), ack.interest(), ack.operation(),
+                ack.child()});
+        return {AckOutcome::removed, w_it->second};
+    }
+
+    /// Replay home for the consumption witness: survives loss of the
+    /// returned copy and of the ack itself.
+    std::optional<InterestTerminalConsumed>
+    replay_terminal_consumed(InterestId interest) const
+    {
+        if (!on_owner_strand())
+            return std::nullopt;
+        auto it = witnesses_.find(interest);
+        if (it == witnesses_.end())
+            return std::nullopt;
+        return it->second;
     }
 
     /// Cancellation/deadline/shutdown may request terminality: the
@@ -371,10 +450,12 @@ private:
 
     //@@authority state=provider_lab.operation_children owner=provider_lab
     strand_type strand_;
+    PartitionScope scope_;
     OperationId next_operation_ = 0;
     ChildId next_child_ = 0;
     std::map<OperationId, Operation> operations_;
     std::map<ChildId, OperationId> child_index_;
+    std::map<InterestId, InterestTerminalConsumed> witnesses_;
 };
 
 }  // namespace catl::provider_lab
