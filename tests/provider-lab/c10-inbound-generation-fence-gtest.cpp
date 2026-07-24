@@ -182,6 +182,37 @@ TEST_F(LifecycleFixture, OnePipelineSlotCannotBeRebound)
     });
 }
 
+TEST_F(LifecycleFixture, ChannelGenerationDistinguishesSnapshotSlots)
+{
+    run([&] {
+        auto first = member(1);
+        auto second = first;
+        ++second.lineage.channel_generation;
+
+        EXPECT_EQ(
+            lifecycle.install_fence(fence(101, {first, second})).refusal,
+            Refusal::ok);
+        EXPECT_EQ(lifecycle.member_count(), 2u);
+        expect_invariant();
+    });
+}
+
+TEST_F(LifecycleFixture, MemberSenderGenerationMustMatchFenceScope)
+{
+    run([&] {
+        auto foreign = member(1);
+        ++foreign.sender_generation;
+
+        auto accepted = lifecycle.accept(foreign);
+        EXPECT_EQ(accepted.refusal, Refusal::foreign_member);
+        EXPECT_FALSE(accepted.member);
+        EXPECT_EQ(lifecycle.mode(), Mode::open);
+        EXPECT_EQ(lifecycle.member_count(), 0u);
+        EXPECT_EQ(lifecycle.attempt_count(), 0u);
+        expect_invariant();
+    });
+}
+
 TEST_F(LifecycleFixture, FenceFreezesCompleteSnapshotAndControlsLaterAdmission)
 {
     run([&] {

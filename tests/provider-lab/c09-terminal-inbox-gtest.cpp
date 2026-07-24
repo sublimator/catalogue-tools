@@ -339,6 +339,66 @@ TEST_F(ReceiverFixture, MemberAndCommandKeysAuthenticateTheirFullBindings)
     });
 }
 
+TEST_F(ReceiverFixture, MemberKeyIncludesChannelGeneration)
+{
+    C09MemberIdentity first{kDestination, 6, 7, kLineage};
+    auto second = first;
+    ++second.lineage.channel_generation;
+
+    on_receiver([&] {
+        EXPECT_EQ(
+            C09ReceiverTestRegistration::register_member(receiver, first),
+            RegisterRefusal::ok);
+        EXPECT_EQ(
+            C09ReceiverTestRegistration::register_member(receiver, second),
+            RegisterRefusal::ok);
+        EXPECT_EQ(receiver.member_count(), 2u);
+        EXPECT_EQ(receiver.reserved_sequence_permits(), 2u);
+    });
+}
+
+TEST_F(ReceiverFixture, CommandKeyIncludesPeerClientIncarnation)
+{
+    C09MemberIdentity first{kDestination, 6, 7, kLineage};
+    auto second = first;
+    ++second.peer_client_incarnation;
+    ++second.lineage.pipeline;
+    register_receiver(first);
+    register_receiver(second);
+
+    C09CommandIdentity first_identity{first, 1, 1, 99};
+    auto second_identity = first_identity;
+    second_identity.member = second;
+    auto const first_command = C09TerminalCommandTestMint::mint(
+        first_identity, C09TerminalOutcome::transport_complete);
+    auto const second_command = C09TerminalCommandTestMint::mint(
+        second_identity, C09TerminalOutcome::transport_complete);
+
+    EXPECT_EQ(dispatch(first_command).result, DispatchCase::first_commit);
+    EXPECT_EQ(dispatch(second_command).result, DispatchCase::first_commit);
+}
+
+TEST_F(ReceiverFixture, CommandKeyIncludesSenderGeneration)
+{
+    C09MemberIdentity first{kDestination, 6, 7, kLineage};
+    auto second = first;
+    ++second.sender_generation;
+    ++second.lineage.pipeline;
+    register_receiver(first);
+    register_receiver(second);
+
+    C09CommandIdentity first_identity{first, 1, 1, 99};
+    auto second_identity = first_identity;
+    second_identity.member = second;
+    auto const first_command = C09TerminalCommandTestMint::mint(
+        first_identity, C09TerminalOutcome::transport_complete);
+    auto const second_command = C09TerminalCommandTestMint::mint(
+        second_identity, C09TerminalOutcome::transport_complete);
+
+    EXPECT_EQ(dispatch(first_command).result, DispatchCase::first_commit);
+    EXPECT_EQ(dispatch(second_command).result, DispatchCase::first_commit);
+}
+
 TEST_F(ReceiverFixture, ReceiverSequencePermitIsReservedAtRegistration)
 {
     auto first_member = open();

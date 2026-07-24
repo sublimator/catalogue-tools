@@ -58,7 +58,6 @@ public:
         member_binding_conflict,
         command_reuse_conflict,
         member_terminal_conflict,
-        receiver_sequence_exhausted,
     };
 
     struct DispatchResult
@@ -127,8 +126,6 @@ public:
 
         if (member->state == MemberState::terminal_received)
             return {Case::member_terminal_conflict, std::nullopt};
-        if (!member->sequence_permit)
-            return {Case::receiver_sequence_exhausted, std::nullopt};
 
         auto const sequence = next_receiver_sequence_ + 1;
         C09TerminalReceipt receipt{identity, command.outcome(), sequence};
@@ -140,8 +137,6 @@ public:
             return {Case::command_reuse_conflict, std::nullopt};
 
         member->state = MemberState::terminal_received;
-        member->sequence_permit = false;
-        member->committed_command = dedup_key;
         --reserved_sequence_permits_;
         next_receiver_sequence_ = sequence;
         return {Case::first_commit, inbox->second.receipt};
@@ -223,19 +218,12 @@ private:
                        other.sender_generation,
                        other.command);
         }
-
-        bool
-        operator==(CommandKey const&) const = default;
     };
-
-    static_assert(std::is_nothrow_copy_assignable_v<CommandKey>);
 
     struct MemberRow
     {
         C09MemberIdentity identity;
         MemberState state = MemberState::awaiting_terminal;
-        bool sequence_permit = true;
-        CommandKey committed_command;
         std::unique_ptr<MemberRow> next;
     };
 
@@ -356,12 +344,8 @@ private:
 
         return {
             RegisterRefusal::ok,
-            std::make_unique<MemberRow>(MemberRow{
-                identity,
-                MemberState::awaiting_terminal,
-                true,
-                CommandKey{},
-                nullptr})};
+            std::make_unique<MemberRow>(
+                MemberRow{identity, MemberState::awaiting_terminal, nullptr})};
     }
 
     // No-throw commit half. Prepare and commit form one unsuspended

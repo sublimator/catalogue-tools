@@ -69,6 +69,28 @@ struct C11FenceBinding
     operator==(C11FenceBinding const&) const = default;
 };
 
+/// One exact-set commitment derived by T172 after every frozen C09 member has
+/// a retained settlement. The receiver owns the expected set independently
+/// and compares this commitment against its own C10 snapshot.
+struct C11MemberSetCommitment
+{
+    std::uint64_t count = 0;
+    C11MemberSetDigest digest = 0;
+
+    bool
+    operator==(C11MemberSetCommitment const&) const = default;
+};
+
+/// Retained T172 certificate projected by the later T116 close command.
+struct C11SettlementProjection
+{
+    C11MemberSetCommitment settled_members;
+    C11FinalProjectionSequence final_sequence = 0;
+
+    bool
+    operator==(C11SettlementProjection const&) const = default;
+};
+
 struct C11CloseIdentity
 {
     C09Destination destination;
@@ -77,11 +99,7 @@ struct C11CloseIdentity
     C09SenderGeneration sender_generation = 0;
     C10FenceId fence = 0;
     C11FenceSequence fence_sequence = 0;
-    std::uint64_t expected_member_count = 0;
-    C11MemberSetDigest expected_member_set_digest = 0;
-    std::uint64_t settled_member_count = 0;
-    C11MemberSetDigest settled_member_set_digest = 0;
-    C11FinalProjectionSequence final_projection_sequence = 0;
+    C11SettlementProjection settlement;
     C11C10CommandId c10_command = 0;
     C11C10PayloadDigest c10_payload = 0;
     C11C10Outcome c10_outcome = C11C10Outcome::installed;
@@ -332,11 +350,9 @@ close_payload_digest(C11CloseIdentity const& identity)
           identity.sender_generation,
           identity.fence,
           identity.fence_sequence,
-          identity.expected_member_count,
-          identity.expected_member_set_digest,
-          identity.settled_member_count,
-          identity.settled_member_set_digest,
-          identity.final_projection_sequence,
+          identity.settlement.settled_members.count,
+          identity.settlement.settled_members.digest,
+          identity.settlement.final_sequence,
           identity.c10_command,
           identity.c10_payload,
           static_cast<std::uint64_t>(identity.c10_outcome),
@@ -678,11 +694,7 @@ public:
             sender_generation_,
             *lifecycle_->fence_id(),
             fence_binding_->fence_sequence,
-            projection_barrier_->member_count,
-            projection_barrier_->member_digest,
-            projection_barrier_->member_count,
-            projection_barrier_->member_digest,
-            projection_barrier_->final_sequence,
+            *projection_barrier_,
             fence_binding_->command,
             fence_binding_->payload,
             fence_binding_->outcome,
@@ -810,23 +822,19 @@ private:
         C11PeerGenerationCloseReceipt receipt;
     };
 
-    struct SettlementSummary
-    {
-        std::uint64_t member_count = 0;
-        C11MemberSetDigest member_digest = 0;
-        C11FinalProjectionSequence final_sequence = 0;
-    };
-
-    std::optional<SettlementSummary>
+    std::optional<C11SettlementProjection>
     exact_settlement_summary() const
     {
         auto members = lifecycle_->frozen_snapshot();
-        auto outbox_count = lifecycle_->outbox_count();
-        auto live_count = lifecycle_->live_attempt_count();
-        if (!members || !outbox_count || !live_count || *outbox_count != 0 ||
-            *live_count != 0)
+        if (!members)
             return std::nullopt;
 
+        // Exact retained receipts are the authoritative settlement proof. By
+        // C09 conservation, every frozen member is in exactly one current
+        // phase: live attempt, terminal outbox command, or settlement. Thus
+        // proving every member settled also proves live/outbox drain. The
+        // derived count checks below are deliberately redundant, fail-closed
+        // reconciliation—not independent transition authorities.
         for (auto const& member : *members)
         {
             auto reservation = lifecycle_->reservation(member);
@@ -840,9 +848,17 @@ private:
                 !settlement.receipt)
                 return std::nullopt;
         }
-        return SettlementSummary{
-            static_cast<std::uint64_t>(members->size()),
-            c11_detail::member_set_digest(*members),
+
+        auto outbox_count = lifecycle_->outbox_count();
+        auto live_count = lifecycle_->live_attempt_count();
+        if (!outbox_count || !live_count || *outbox_count != 0 ||
+            *live_count != 0)
+            return std::nullopt;
+
+        return C11SettlementProjection{
+            C11MemberSetCommitment{
+                static_cast<std::uint64_t>(members->size()),
+                c11_detail::member_set_digest(*members)},
             next_async_source_};
     }
 
@@ -891,7 +907,7 @@ private:
     C11AsyncSourceId next_async_source_ = 0;
     std::set<C11AsyncSourceId> async_sources_;
     std::optional<C11FenceBinding> fence_binding_;
-    std::optional<SettlementSummary> projection_barrier_;
+    std::optional<C11SettlementProjection> projection_barrier_;
     //@@authority state=provider_lab.c11_command_permit owner=provider_lab
     bool command_permit_available_ = false;
     std::optional<C11PeerGenerationCloseCommand> close_outbox_;
@@ -1158,8 +1174,7 @@ private:
     valid_close_identity(C11CloseIdentity const& identity) const
     {
         if (identity.fence == 0 || identity.fence_sequence == 0 ||
-            identity.expected_member_set_digest == 0 ||
-            identity.settled_member_set_digest == 0 ||
+            identity.settlement.settled_members.digest == 0 ||
             identity.c10_command == 0 || identity.c10_payload == 0 ||
             identity.c10_receiver_commit_sequence == 0 ||
             identity.receipt_permit == 0 || identity.close_sequence == 0 ||
@@ -1189,13 +1204,15 @@ private:
     bool
     receiver_exact_settlement(C11CloseIdentity const& identity) const
     {
-        if (identity.expected_member_count != snapshot_->members.size() ||
-            identity.settled_member_count != snapshot_->members.size() ||
-            identity.expected_member_set_digest != snapshot_->digest ||
-            identity.settled_member_set_digest != snapshot_->digest ||
+        if (identity.settlement.settled_members.count !=
+                snapshot_->members.size() ||
+            identity.settlement.settled_members.digest != snapshot_->digest ||
             terminal_inbox_.member_count() != snapshot_->members.size() ||
             terminal_inbox_.inbox_count() != snapshot_->members.size())
             return false;
+        // Registration is exactly the frozen set, and C09 commits one inbox
+        // row and the matching terminal state atomically. The walk is a
+        // redundant reconciliation defence, not a separately reachable gate.
         for (auto const& member : snapshot_->members)
         {
             auto state = terminal_inbox_.member_state(member);

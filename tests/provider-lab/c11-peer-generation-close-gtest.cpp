@@ -322,6 +322,37 @@ TEST_F(CloseFixture, CloseRequiresExactSettlementAndProjectionBarrier)
     });
 }
 
+TEST_F(CloseFixture, SettledGenerationStillWaitsForExactAsyncSource)
+{
+    auto const a = member(1);
+    install({a});
+    deliver_and_settle(terminal(a, 201));
+
+    C11AsyncSourceLease delayed;
+    on_sender([&] {
+        auto opened = sender.open_async_source();
+        ASSERT_EQ(opened.refusal, SenderRefusal::ok);
+        delayed = std::move(opened.lease);
+
+        EXPECT_EQ(
+            sender.commit_projection_barrier().refusal,
+            SenderRefusal::async_source_pending);
+
+        C09AttemptLease retired_attempt;
+        auto dispatched = sender.dispatch_async_attempt(
+            std::move(delayed),
+            retired_attempt,
+            Sender::AsyncAttemptAction::state);
+        EXPECT_EQ(dispatched.dispatch, Sender::AsyncDispatchCase::forwarded);
+        EXPECT_EQ(
+            dispatched.refusal,
+            C09PeerClientTerminalOutbox::Refusal::invalid_lease);
+        EXPECT_FALSE(delayed.valid());
+        EXPECT_EQ(
+            sender.commit_projection_barrier().refusal, SenderRefusal::ok);
+    });
+}
+
 TEST_F(CloseFixture, FenceBindingCannotPrecedeOrRewriteTheC10Commit)
 {
     on_sender([&] {
@@ -604,9 +635,9 @@ TEST_F(CloseFixture, EmptyGenerationStillClosesExactly)
 {
     install({});
     auto command = ready_close();
-    EXPECT_EQ(command.identity().expected_member_count, 0u);
-    EXPECT_EQ(command.identity().settled_member_count, 0u);
-    EXPECT_EQ(command.identity().final_projection_sequence, 0u);
+    EXPECT_EQ(command.identity().settlement.settled_members.count, 0u);
+    EXPECT_NE(command.identity().settlement.settled_members.digest, 0u);
+    EXPECT_EQ(command.identity().settlement.final_sequence, 0u);
 
     std::optional<C11PeerGenerationCloseReceipt> receipt;
     on_receiver([&] {
@@ -710,6 +741,31 @@ TEST_F(CloseFixture, ReceiverRefusesBeforeAllTerminalMembersArrive)
         EXPECT_EQ(receiver.closure_pending(), false);
         EXPECT_EQ(receiver.terminal_member_count(), 2u);
         EXPECT_EQ(receiver.terminal_inbox_count(), 1u);
+    });
+}
+
+TEST_F(CloseFixture, ReceiverRefusesSameCardinalityDifferentMemberSet)
+{
+    auto const local = member(1);
+    auto const foreign = member(2);
+    auto foreign_exchange =
+        honest_exchange(kDestination, kFenceBinding, {foreign});
+
+    install({local});
+    deliver_and_settle(terminal(local, 201));
+
+    ASSERT_EQ(
+        foreign_exchange.first.identity().settlement.settled_members.count, 1u);
+    ASSERT_NE(
+        foreign_exchange.first.identity().settlement.settled_members.digest,
+        c11_detail::member_set_digest({local}));
+    on_receiver([&] {
+        EXPECT_EQ(receiver.terminal_member_count(), 1u);
+        EXPECT_EQ(receiver.terminal_inbox_count(), 1u);
+        EXPECT_EQ(
+            receiver.dispatch_close(foreign_exchange.first).result,
+            ReceiverCase::settlement_mismatch);
+        EXPECT_EQ(receiver.closure_pending(), false);
     });
 }
 
