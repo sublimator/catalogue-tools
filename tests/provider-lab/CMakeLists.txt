@@ -44,3 +44,8 @@ add_executable(interest-registry-gtest interest-registry-gtest.cpp)
 target_link_libraries(interest-registry-gtest
                       PRIVATE Boost::boost GTest::gtest_main)
 gtest_discover_tests(interest-registry-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(participant-cell-gtest participant-cell-gtest.cpp)
+target_link_libraries(participant-cell-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(participant-cell-gtest DISCOVERY_TIMEOUT 30)
