@@ -124,11 +124,11 @@ TEST_F(PartitionFixture, BarrierSealsAdmissionWhileExistingWorkDrains)
         auto advanced = part.advance_epoch(7);
         ASSERT_EQ(advanced.refusal, R::ok);
         ASSERT_TRUE(advanced.receipt.has_value());
-        EXPECT_EQ(advanced.receipt->provider, 11u);
-        EXPECT_EQ(advanced.receipt->partition, 2u);
-        EXPECT_EQ(advanced.receipt->barrier, 7u);
-        EXPECT_EQ(advanced.receipt->old_epoch, 3u);
-        EXPECT_EQ(advanced.receipt->new_epoch, 4u);
+        EXPECT_EQ(advanced.receipt->provider(), 11u);
+        EXPECT_EQ(advanced.receipt->partition(), 2u);
+        EXPECT_EQ(advanced.receipt->barrier(), 7u);
+        EXPECT_EQ(advanced.receipt->old_epoch(), 3u);
+        EXPECT_EQ(advanced.receipt->new_epoch(), 4u);
         EXPECT_EQ(part.accepted_epoch().value_or(0), 4u);
 
         // The old epoch's key mints FRESH under the new epoch.
@@ -188,6 +188,40 @@ TEST_F(PartitionFixture, OffStrandTouchesAreRefusedBeforeAnyRead)
     sched.run_until_idle();
     EXPECT_TRUE(checked);
     run([&] { EXPECT_EQ(part.fetch_count().value_or(99), 0u); });
+}
+
+TEST_F(PartitionFixture, BarrierAuthorityDominatesTheZeroRead)
+{
+    run([&] {
+        // A live row exists throughout; authority/phase refusals must
+        // win BEFORE drain state is consulted, and the row plus the
+        // absence of any receipt must survive every refusal.
+        auto f = part.get_or_create_fetch(3, "live", "s");
+        ASSERT_EQ(f.refusal, R::ok);
+
+        // Running (no barrier installed) + arbitrary id: phase refusal,
+        // never not_drained.
+        auto running = part.advance_epoch(99);
+        EXPECT_EQ(running.refusal, R::not_running)
+            << "an unauthorized caller must not learn drain state";
+        EXPECT_FALSE(running.receipt.has_value());
+
+        ASSERT_EQ(part.install_barrier(7), R::ok);
+
+        // Installed barrier + WRONG id: identity refusal, never
+        // not_drained.
+        auto wrong = part.advance_epoch(8);
+        EXPECT_EQ(wrong.refusal, R::wrong_barrier);
+        EXPECT_FALSE(wrong.receipt.has_value());
+
+        // Exact installed id + live row: only NOW may drain state
+        // answer.
+        auto drained_check = part.advance_epoch(7);
+        EXPECT_EQ(drained_check.refusal, R::not_drained);
+        EXPECT_FALSE(drained_check.receipt.has_value());
+        EXPECT_EQ(part.fetch_count().value_or(0), 1u)
+            << "every refusal leaves the row intact";
+    });
 }
 
 TEST_F(PartitionFixture, BarrierIdsRemainAMonotonicAcceptanceGate)

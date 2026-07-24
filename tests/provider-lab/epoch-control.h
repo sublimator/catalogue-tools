@@ -68,6 +68,22 @@ public:
         return Check::ok;
     }
 
+    /// Nonmutating authority check: is `id` the exact installed
+    /// barrier? Lets callers validate identity/phase BEFORE reading any
+    /// reclaimable state (guard precedence), then consume in the same
+    /// non-interleaved owner-strand commit.
+    Check
+    check_installed_barrier(BarrierId id) const
+    {
+        if (state_ == State::stopped)
+            return Check::stopped;
+        if (state_ != State::barrier)
+            return Check::not_running;
+        if (barrier_ != id)
+            return Check::wrong_barrier;
+        return Check::ok;
+    }
+
     /// T81-analog: consume the exact barrier and advance. The state
     /// change consumes the barrier, so the acknowledgement is
     /// exactly-once by construction. The CALLER clears its values in

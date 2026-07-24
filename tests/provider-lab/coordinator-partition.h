@@ -30,6 +30,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 namespace catl::provider_lab {
@@ -40,17 +41,85 @@ using TransportShape = std::string;
 using ProviderId = std::uint64_t;
 using PartitionId = std::uint64_t;
 
+class CoordinatorPartition;
+
 /// Immutable exact receipt for one partition epoch advance — the leaf
-/// evidence a later provider-level fan-out join reconciles. Only the
-/// drained success path can mint one; no refusal carries a receipt.
-struct PartitionAdvanceReceipt
+/// evidence a later provider-level fan-out join reconciles. SOLE
+/// minter: CoordinatorPartition's drained success path. Construction
+/// from raw fields is impossible by type (private constructor, no
+/// default) — possession IS evidence, which is the transition-ledger
+/// rule in C++ form. Copying a validly minted receipt stays legal for
+/// replay/delivery.
+class PartitionAdvanceReceipt
 {
-    ProviderId provider = 0;
-    PartitionId partition = 0;
-    BarrierId barrier = 0;
-    Epoch old_epoch = 0;
-    Epoch new_epoch = 0;
+public:
+    PartitionAdvanceReceipt(PartitionAdvanceReceipt const&) = default;
+    PartitionAdvanceReceipt&
+    operator=(PartitionAdvanceReceipt const&) = default;
+
+    ProviderId
+    provider() const
+    {
+        return provider_;
+    }
+    PartitionId
+    partition() const
+    {
+        return partition_;
+    }
+    BarrierId
+    barrier() const
+    {
+        return barrier_;
+    }
+    Epoch
+    old_epoch() const
+    {
+        return old_epoch_;
+    }
+    Epoch
+    new_epoch() const
+    {
+        return new_epoch_;
+    }
+
+private:
+    friend class CoordinatorPartition;  // sole minter
+    PartitionAdvanceReceipt(
+        ProviderId provider,
+        PartitionId partition,
+        BarrierId barrier,
+        Epoch old_epoch,
+        Epoch new_epoch)
+        : provider_(provider)
+        , partition_(partition)
+        , barrier_(barrier)
+        , old_epoch_(old_epoch)
+        , new_epoch_(new_epoch)
+    {
+    }
+
+    ProviderId provider_;
+    PartitionId partition_;
+    BarrierId barrier_;
+    Epoch old_epoch_;
+    Epoch new_epoch_;
 };
+
+// Compile-time forge controls: no default construction, no construction
+// from raw fields outside the sole minter.
+static_assert(
+    !std::is_default_constructible_v<PartitionAdvanceReceipt>,
+    "a receipt must be minted, never defaulted");
+static_assert(
+    !std::is_constructible_v<
+        PartitionAdvanceReceipt,
+        ProviderId,
+        PartitionId,
+        BarrierId,
+        Epoch,
+        Epoch>,
+    "raw-field construction would make every caller a second minter");
 
 class CoordinatorPartition
 {
@@ -191,6 +260,13 @@ public:
     {
         if (!on_owner_strand())
             return {Refusal::off_strand, std::nullopt};
+        // Guard precedence: exact barrier AUTHORITY dominates the zero
+        // read — an unauthorized or wrong-phase caller must not learn
+        // or branch on drain state. One owner strand makes the check
+        // and the consume below a single non-interleaved commit.
+        if (auto check = control_.check_installed_barrier(id);
+            check != EpochControl::Check::ok)
+            return {map_check(check), std::nullopt};
         if (!records_.empty() || !index_.empty())
             return {Refusal::not_drained, std::nullopt};
         auto const old_epoch = control_.epoch();
