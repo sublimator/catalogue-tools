@@ -103,7 +103,9 @@ public:
 
     /// Mint a one-shot grant under an ACTIVE cell. The caller proves
     /// it holds the current cell instance by presenting its revision;
-    /// the revision gate dominates every other read.
+    /// the revision gate dominates every other read. Consistent minter
+    /// rule: the node is prepared before the allocation-free commit,
+    /// and the counter advances only after the insert.
     //@@authority transition=provider_lab.participant_issue_grant owner=provider_lab commit=strand
     GrantResult
     issue_grant(InterestId interest, CellRevision revision)
@@ -120,8 +122,13 @@ public:
             return {Refusal::cell_revoked, 0};
         if (next_grant_ == std::numeric_limits<GrantId>::max())
             return {Refusal::grant_id_exhausted, 0};
-        auto const grant = next_grant_++;
-        c.grants.emplace(grant, GrantState::unspent);
+        auto const grant = next_grant_;
+        // PREPARE (throwing), then allocation-free COMMIT + counter.
+        std::map<GrantId, GrantState> tmp;
+        tmp.emplace(grant, GrantState::unspent);
+        auto node = tmp.extract(grant);
+        c.grants.insert(std::move(node));
+        ++next_grant_;
         return {Refusal::ok, grant};
     }
 
@@ -168,41 +175,6 @@ public:
             scope_, c.epoch, command.interest(), command.command(),
             c.revision};
         return {Refusal::ok, c.receipt_outbox};
-    }
-
-    /// The exactly-once remover: consumes the INTEREST-minted
-    /// third-phase witness whose binding matches the retained receipt
-    /// outbox, and requires the cell drained (revoked, no open uses).
-    /// SCOPE FIRST, before the witness's interest id is used to look
-    /// anything up. The cell's own outgoing receipt is not evidence —
-    /// it proves production, not consumption — and does not compile
-    /// here.
-    //@@authority transition=provider_lab.participant_retire_cell owner=provider_lab commit=strand
-    Refusal
-    retire_cell(ParticipantReceiptConsumed const& witness)
-    {
-        if (!on_owner_strand())
-            return Refusal::off_strand;
-        if (witness.scope() != scope_)
-            return Refusal::wrong_scope;
-        auto it = cells_.find(witness.interest());
-        if (it == cells_.end())
-            return Refusal::unknown_cell;
-        auto& c = it->second;
-        if (!c.revoked)
-            return Refusal::not_revoked;
-        if (!c.receipt_outbox.has_value() ||
-            witness.epoch() != c.receipt_outbox->epoch() ||
-            witness.command() != c.receipt_outbox->command() ||
-            witness.revision() != c.receipt_outbox->revision())
-            return Refusal::wrong_binding;
-        for (auto const& [id, state] : c.grants)
-        {
-            if (state == GrantState::use_open)
-                return Refusal::uses_open;
-        }
-        cells_.erase(it);
-        return Refusal::ok;
     }
 
     // Owner-strand introspection; refusal dominates every read.
@@ -254,12 +226,72 @@ private:
     using CellMap = std::map<InterestId, Cell>;
     using CellNode = CellMap::node_type;
 
-    // Cell creation and spend/finish are committed ONLY by the
-    // aggregate seam façade (which owns this registry); component
-    // tests create cells through the explicit test seam. NOT public
-    // authority: the façade's transitions carry the annotations.
+    // Cell creation, spend/finish, and retirement are committed ONLY
+    // by the aggregate seam façade (which owns this registry);
+    // component tests reach them through the explicit test seam. NOT
+    // public authority: the façade's transitions carry the
+    // annotations.
     friend class CoordinatorInterestSeams;
     friend class ParticipantCellTestAccess;
+
+    /// The exactly-once remover: consumes the INTEREST-minted
+    /// third-phase witness whose binding matches the retained receipt
+    /// outbox, and requires the cell drained (revoked, no open uses).
+    /// SCOPE FIRST, before the witness's interest id is used to look
+    /// anything up. The cell's own outgoing receipt is not evidence —
+    /// it proves production, not consumption — and does not compile
+    /// here. Sole production caller: the aggregate's terminal
+    /// retirement, which derives the witness from the interest's
+    /// RETAINED home and releases every remaining home in one commit.
+    Refusal
+    retire_cell(ParticipantReceiptConsumed const& witness)
+    {
+        if (!on_owner_strand())
+            return Refusal::off_strand;
+        if (witness.scope() != scope_)
+            return Refusal::wrong_scope;
+        auto it = cells_.find(witness.interest());
+        if (it == cells_.end())
+            return Refusal::unknown_cell;
+        auto& c = it->second;
+        if (!c.revoked)
+            return Refusal::not_revoked;
+        if (!c.receipt_outbox.has_value() ||
+            witness.epoch() != c.receipt_outbox->epoch() ||
+            witness.command() != c.receipt_outbox->command() ||
+            witness.revision() != c.receipt_outbox->revision())
+            return Refusal::wrong_binding;
+        for (auto const& [id, state] : c.grants)
+        {
+            if (state == GrantState::use_open)
+                return Refusal::uses_open;
+        }
+        cells_.erase(it);
+        return Refusal::ok;
+    }
+
+    /// Erasure primitive for the aggregate's non-throwing commit
+    /// section; every validation happens at the seam first.
+    void
+    erase_cell(InterestId interest) noexcept
+    {
+        cells_.erase(interest);
+    }
+
+    /// Drain check for the aggregate's final retirement (read-only).
+    bool
+    cell_drained(InterestId interest) const
+    {
+        auto it = cells_.find(interest);
+        if (it == cells_.end() || !it->second.revoked)
+            return false;
+        for (auto const& [id, state] : it->second.grants)
+        {
+            if (state == GrantState::use_open)
+                return false;
+        }
+        return true;
+    }
 
     bool
     revision_mint_available() const
@@ -382,6 +414,14 @@ public:
         reg.commit_cell(reg.prepare_cell(
             interest, fetch, operation, epoch, revision));
         return {true, revision};
+    }
+
+    static ParticipantCellRegistry::Refusal
+    retire(
+        ParticipantCellRegistry& reg,
+        ParticipantReceiptConsumed const& witness)
+    {
+        return reg.retire_cell(witness);
     }
 };
 

@@ -363,7 +363,11 @@ TEST_F(LedgerFixture, ConsumeTerminalAckMintsAndReplaysTheWitness)
         auto [r, child] = ledger.register_child(root);
         ASSERT_EQ(r, OperationLedger::Refusal::ok);
         ASSERT_EQ(
-            ledger.publish_for_interest(child, 9, 4, /*interest*/ 42),
+            OperationLedgerTestAccess::reserve(ledger, child, 42),
+            OperationLedger::Refusal::ok);
+        ASSERT_EQ(
+            OperationLedgerTestAccess::publish_reserved(
+                ledger, child, 9, 4),
             OperationLedger::Refusal::ok);
 
         auto const ack = TerminalAckTestMint::mint(
@@ -435,12 +439,27 @@ TEST_F(LedgerFixture, TerminalVariantIsClosedInBothOrders)
         auto root = open_ok(ledger);
 
         // Interest-bound row: the raw gate REFUSES first, and the
-        // three-phase consume still wins after.
+        // three-phase consume still wins after. The reservation is
+        // the variant choice: store publication refuses a reserved
+        // child, and interest publication refuses an unreserved one.
         {
             auto [r, child] = ledger.register_child(root);
             ASSERT_EQ(r, OperationLedger::Refusal::ok);
+            EXPECT_EQ(
+                OperationLedgerTestAccess::publish_reserved(
+                    ledger, child, 9, 4),
+                OperationLedger::Refusal::not_reserved)
+                << "no reservation, no interest publication";
             ASSERT_EQ(
-                ledger.publish_for_interest(child, 9, 4, 42),
+                OperationLedgerTestAccess::reserve(ledger, child, 42),
+                OperationLedger::Refusal::ok);
+            EXPECT_EQ(
+                ledger.publish(child, 9, 4),
+                OperationLedger::Refusal::interest_reserved)
+                << "the store verb refuses a reserved child";
+            ASSERT_EQ(
+                OperationLedgerTestAccess::publish_reserved(
+                    ledger, child, 9, 4),
                 OperationLedger::Refusal::ok);
             EXPECT_EQ(
                 ledger.ack_terminal(child.id(), 9, 4),
@@ -504,14 +523,18 @@ TEST_F(LedgerFixture, ConsumeCommitIsExceptionAtomicAtTheFailpoint)
         auto [r, child] = ledger.register_child(root);
         ASSERT_EQ(r, OperationLedger::Refusal::ok);
         ASSERT_EQ(
-            ledger.publish_for_interest(child, 9, 4, 42),
+            OperationLedgerTestAccess::reserve(ledger, child, 42),
+            OperationLedger::Refusal::ok);
+        ASSERT_EQ(
+            OperationLedgerTestAccess::publish_reserved(
+                ledger, child, 9, 4),
             OperationLedger::Refusal::ok);
         auto const ack = TerminalAckTestMint::mint(
             kScope, 42, root.id(), child.id());
 
         // Inject a throw between PREPARE and COMMIT: the child must
         // survive and no witness may be observable — pre-state exactly.
-        ledger.test_pre_commit_hook = [] {
+        ledger.test_hooks.consume_pre_commit = [] {
             throw std::runtime_error{"injected"};
         };
         EXPECT_THROW(ledger.consume_terminal_ack(ack, 9, 4),
@@ -522,7 +545,7 @@ TEST_F(LedgerFixture, ConsumeCommitIsExceptionAtomicAtTheFailpoint)
             << "no half-minted witness is observable";
 
         // Disarm: the identical consume now wins exactly once.
-        ledger.test_pre_commit_hook = nullptr;
+        ledger.test_hooks.consume_pre_commit = nullptr;
         auto win = ledger.consume_terminal_ack(ack, 9, 4);
         EXPECT_EQ(win.outcome, OperationLedger::AckOutcome::removed);
         EXPECT_EQ(ledger.child_count(root.id()), 0u);
@@ -567,4 +590,41 @@ TEST(LedgerEdge, MinterCeilingsFailClosedWithNothingMutated)
         });
         sched.run_until_idle();
     }
+}
+
+TEST_F(LedgerFixture, MinterCommitsAreExceptionAtomicAtTheFailpoints)
+{
+    run([&] {
+        // open_root: a throw after preparation leaves no operation row
+        // and an unmoved counter — the retry mints the SAME id.
+        ledger.test_hooks.open_root_pre_commit = [] {
+            throw std::runtime_error{"injected"};
+        };
+        EXPECT_THROW(ledger.open_root(), std::runtime_error);
+        ledger.test_hooks.open_root_pre_commit = nullptr;
+        auto root = open_ok(ledger);
+        EXPECT_TRUE(ledger.root_active(root.id()))
+            << "the failed attempt minted nothing; this one is real";
+
+        // register_child: TWO homes (child row + index). A throw after
+        // preparation leaves row, index, and counter mutually
+        // unchanged — the retry mints the SAME child id and the child
+        // is fully locatable (publish + ack work).
+        ledger.test_hooks.register_child_pre_commit = [] {
+            throw std::runtime_error{"injected"};
+        };
+        EXPECT_THROW(ledger.register_child(root), std::runtime_error);
+        ledger.test_hooks.register_child_pre_commit = nullptr;
+        EXPECT_EQ(ledger.child_count(root.id()), 0u)
+            << "no half-registered child row";
+        auto [r, child] = ledger.register_child(root);
+        ASSERT_EQ(r, OperationLedger::Refusal::ok);
+        EXPECT_EQ(ledger.child_count(root.id()), 1u);
+        ASSERT_EQ(ledger.publish(child, 7, 42), OperationLedger::Refusal::ok);
+        EXPECT_EQ(
+            ledger.ack_terminal(child.id(), 7, 42),
+            OperationLedger::AckOutcome::removed)
+            << "row and index agree: the child is locatable and "
+               "removable — no two-home tear";
+    });
 }

@@ -76,10 +76,12 @@ public:
         wrong_scope,       // artifact scope-first refusal
         cell_refuses,      // grant/phase invalid on the cell
         interest_refuses,  // interest missing/sealed or debt state wrong
+        ledger_refuses,    // child absent/foreign/already published
+        child_already_claimed,  // another interest reserved this child
         binding_mismatch,  // retained expectation != cell's actuality
         unknown_interest,
         not_terminal_ready,
-        wrong_witness,  // witness matches neither/only one retained home
+        wrong_witness,  // witness disagrees with a retained home
         interest_id_exhausted,
         revision_exhausted,
     };
@@ -96,6 +98,7 @@ public:
     {
         std::function<void()> open_pre_commit;
         std::function<void()> sponsor_pre_commit;
+        std::function<void()> retire_pre_commit;
     };
 
     using Seeds = CoordinatorSeamSeeds;
@@ -143,23 +146,40 @@ public:
         return ledger_;
     }
 
-    /// THE pair mint: one interest and its participant cell, bound to
-    /// each other exactly, committed both-or-neither. Ceilings are
-    /// typed refusals BEFORE any preparation; preparation does all
-    /// allocation; the commit section is allocation-free node inserts
-    /// and cannot throw. A failpoint throw between the phases leaves
-    /// both registries and both counters untouched.
+    /// THE pair mint — now a TRIPLE bind: one interest, its
+    /// participant cell, and the exact ledger child it sponsors,
+    /// committed all-or-nothing. The child is presented as a genuine
+    /// ChildLease; its owning operation is DERIVED from the ledger
+    /// (never caller-supplied), it must exist, be unpublished, and be
+    /// unclaimed, and the commit reserves it for the newly minted
+    /// InterestId. The aggregate thereby owns one exact relation
+    /// InterestId <-> cell <-> (OperationId, ChildId), not two pairs
+    /// joined by caller convention. Ceilings and ledger refusals are
+    /// typed BEFORE any preparation; preparation does all allocation;
+    /// the commit is node inserts plus a nothrow reservation flip. A
+    /// failpoint throw leaves every home and counter untouched.
     //@@authority transition=provider_lab.seam_open_interest_with_cell owner=provider_lab commit=strand
     OpenResult
     open_interest_with_cell(
-        InterestOperationId operation,
-        InterestChildId child,
+        ChildLease const& child,
         InterestFetchId fetch,
         SubscriptionId subscription,
         ProviderEpochId epoch)
     {
         if (!on_owner_strand())
             return {Refusal::off_strand, 0, 0};
+        auto const operation = ledger_.operation_of(child);
+        if (!operation.has_value())
+            return {Refusal::ledger_refuses, 0, 0};
+        switch (ledger_.can_reserve(child))
+        {
+            case OperationLedger::Refusal::ok:
+                break;
+            case OperationLedger::Refusal::interest_reserved:
+                return {Refusal::child_already_claimed, 0, 0};
+            default:
+                return {Refusal::ledger_refuses, 0, 0};
+        }
         if (!interests_.interest_mint_available())
             return {Refusal::interest_id_exhausted, 0, 0};
         if (!cells_.revision_mint_available())
@@ -168,16 +188,30 @@ public:
         auto const revision = cells_.peek_revision();
         // PREPARE (throwing allowed; no state changed).
         auto interest_node = interests_.prepare_interest(
-            id, operation, child, fetch, subscription,
+            id, *operation, child.id(), fetch, subscription,
             ParticipantDestination{scope_, epoch, revision});
-        auto cell_node =
-            cells_.prepare_cell(id, fetch, operation, epoch, revision);
+        auto cell_node = cells_.prepare_cell(
+            id, fetch, *operation, epoch, revision);
         if (test_hooks.open_pre_commit)
             test_hooks.open_pre_commit();
-        // COMMIT (non-throwing).
+        // COMMIT (non-throwing): two inserts + the reservation flip.
         interests_.commit_interest(std::move(interest_node));
         cells_.commit_cell(std::move(cell_node));
+        ledger_.commit_reserve(child, id);
         return {Refusal::ok, id, revision};
+    }
+
+    /// Interest publication: flips the reserved child to published.
+    /// The InterestId is derived from the retained reservation — no
+    /// caller-supplied identity exists on this path, and the store
+    /// verb refuses reserved children, so neither variant can be
+    /// selected by caller convention.
+    //@@authority transition=provider_lab.seam_publish_for_interest owner=provider_lab commit=strand
+    OperationLedger::Refusal
+    publish_for_interest(
+        ChildLease const& child, DestinationId dest, WorkId work)
+    {
+        return ledger_.publish_reserved(child, dest, work);
     }
 
     /// Atomic sponsor: grant unspent -> use_open AND the interest debt
@@ -228,14 +262,18 @@ public:
         return Refusal::ok;
     }
 
-    /// THE terminal retirement, and the witness home's named release:
-    /// consumes the ledger-minted InterestTerminalConsumed, validates
-    /// it scope-first and against BOTH retained homes (the interest's
-    /// terminal-ack outbox AND the ledger's witness row), then in one
-    /// non-throwing commit erases the interest row and releases the
-    /// ledger's replay home. Witness rows are thereby hard-bounded by
-    /// live terminal-consumed interests. Exactly-once: the second
-    /// attempt finds no interest row.
+    /// THE terminal retirement: the aggregate reconciles EVERY
+    /// remaining home before releasing ANY of them. Scope-first, then:
+    /// the terminal witness must match the interest's retained ack
+    /// outbox AND the ledger's retained witness row; the interest's
+    /// RETAINED ParticipantReceiptConsumed (never a caller copy) must
+    /// match the participant cell's retained receipt home; the cell
+    /// must be drained. Then one non-throwing commit erases the
+    /// participant cell, the interest row, and the ledger witness —
+    /// all three or, at the failpoint, none. No home is ever left
+    /// behind without a replay path, and no caller-held copy is ever
+    /// load-bearing. Exactly-once: the second attempt finds no
+    /// interest row.
     //@@authority transition=provider_lab.seam_retire_interest_terminal owner=provider_lab commit=strand
     Refusal
     retire_interest_terminal(InterestTerminalConsumed const& witness)
@@ -257,7 +295,23 @@ public:
             ledger_.replay_terminal_consumed(witness.interest());
         if (!ledger_home.has_value() || !(*ledger_home == witness))
             return Refusal::wrong_witness;
-        // COMMIT (non-throwing): both erasures, one owner.
+        // The participant homes, derived from RETAINED state only.
+        auto const* cell = cells_.find_cell(witness.interest());
+        if (!cell || !cells_.cell_drained(witness.interest()))
+            return Refusal::cell_refuses;
+        if (!row->revoke_consumed.has_value() ||
+            !cell->receipt_outbox.has_value() ||
+            row->revoke_consumed->command() !=
+                cell->receipt_outbox->command() ||
+            row->revoke_consumed->epoch() !=
+                cell->receipt_outbox->epoch() ||
+            row->revoke_consumed->revision() !=
+                cell->receipt_outbox->revision())
+            return Refusal::wrong_witness;
+        if (test_hooks.retire_pre_commit)
+            test_hooks.retire_pre_commit();
+        // COMMIT (non-throwing): all three erasures, one owner.
+        cells_.erase_cell(witness.interest());
         interests_.erase_interest(witness.interest());
         ledger_.release_terminal_witness(witness.interest());
         return Refusal::ok;

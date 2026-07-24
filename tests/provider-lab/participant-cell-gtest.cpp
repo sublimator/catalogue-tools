@@ -116,11 +116,11 @@ TEST_F(CellFixture, ForeignScopeRefusesBeforeAnyLookup)
 
         // Foreign-scope witness: same discipline on the retire path.
         EXPECT_EQ(
-            cells.retire_cell(ParticipantConsumedTestMint::mint(
+            ParticipantCellTestAccess::retire(cells,ParticipantConsumedTestMint::mint(
                 kForeign, kEpoch, 1, 77, rev)),
             R::wrong_scope);
         EXPECT_EQ(
-            cells.retire_cell(ParticipantConsumedTestMint::mint(
+            ParticipantCellTestAccess::retire(cells,ParticipantConsumedTestMint::mint(
                 kForeign, kEpoch, 999, 77, rev)),
             R::wrong_scope);
 
@@ -206,7 +206,7 @@ TEST_F(CellFixture, StaleCommandFromRetiredInstanceCannotTouchReopened)
         auto stale = command_for(1, rev1);  // the delayed copy
         auto revoke = cells.revoke_cell(stale);
         ASSERT_EQ(revoke.refusal, R::ok);
-        ASSERT_EQ(cells.retire_cell(consumed_for(*revoke.receipt)), R::ok);
+        ASSERT_EQ(ParticipantCellTestAccess::retire(cells,consumed_for(*revoke.receipt)), R::ok);
 
         // Instance R2: same interest key, same fetch/operation/epoch.
         auto reopen = ParticipantCellTestAccess::open(
@@ -229,7 +229,7 @@ TEST_F(CellFixture, RetireConsumesTheWitnessNotTheCellsOwnReceipt)
     run([&] {
         auto rev = opened_cell();
         EXPECT_EQ(
-            cells.retire_cell(ParticipantConsumedTestMint::mint(
+            ParticipantCellTestAccess::retire(cells,ParticipantConsumedTestMint::mint(
                 kScope, kEpoch, 1, 77, rev)),
             R::not_revoked)
             << "an active cell cannot be retired, witness or not";
@@ -241,11 +241,11 @@ TEST_F(CellFixture, RetireConsumesTheWitnessNotTheCellsOwnReceipt)
         // compile — retire_cell only accepts the interest-minted
         // ParticipantReceiptConsumed. Runtime binding is checked too:
         EXPECT_EQ(
-            cells.retire_cell(ParticipantConsumedTestMint::mint(
+            ParticipantCellTestAccess::retire(cells,ParticipantConsumedTestMint::mint(
                 kScope, kEpoch, 1, 78, rev)),
             R::wrong_binding);
         EXPECT_EQ(
-            cells.retire_cell(ParticipantConsumedTestMint::mint(
+            ParticipantCellTestAccess::retire(cells,ParticipantConsumedTestMint::mint(
                 kScope, kEpoch + 1, 1, 77, rev)),
             R::wrong_binding);
 
@@ -255,10 +255,10 @@ TEST_F(CellFixture, RetireConsumesTheWitnessNotTheCellsOwnReceipt)
         ASSERT_EQ(replay.refusal, R::ok);
         ASSERT_TRUE(replay.receipt.has_value());
 
-        ASSERT_EQ(cells.retire_cell(consumed_for(*replay.receipt)), R::ok);
+        ASSERT_EQ(ParticipantCellTestAccess::retire(cells,consumed_for(*replay.receipt)), R::ok);
         EXPECT_FALSE(cells.cell_present(1).value_or(true));
         EXPECT_EQ(
-            cells.retire_cell(consumed_for(*replay.receipt)),
+            ParticipantCellTestAccess::retire(cells,consumed_for(*replay.receipt)),
             R::unknown_cell)
             << "removed exactly once, typed on the second attempt";
     });
@@ -324,7 +324,7 @@ TEST_F(CellFixture, OffStrandTouchesAreRefusedBeforeAnyRead)
         EXPECT_EQ(
             cells.revoke_cell(command_for(1, 1)).refusal, R::off_strand)
             << "off_strand dominates even the scope gate";
-        EXPECT_EQ(cells.retire_cell(*witness), R::off_strand)
+        EXPECT_EQ(ParticipantCellTestAccess::retire(cells,*witness), R::off_strand)
             << "even the matching witness cannot retire off-strand";
         EXPECT_FALSE(cells.cell_revision(1).has_value());
         EXPECT_FALSE(cells.cell_present(1).has_value());
@@ -335,5 +335,5 @@ TEST_F(CellFixture, OffStrandTouchesAreRefusedBeforeAnyRead)
 
     // The refusals read nothing and consumed nothing: the same
     // witness still retires on the owner strand.
-    run([&] { EXPECT_EQ(cells.retire_cell(*witness), R::ok); });
+    run([&] { EXPECT_EQ(ParticipantCellTestAccess::retire(cells,*witness), R::ok); });
 }
