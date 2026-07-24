@@ -47,10 +47,12 @@ public:
 
     /// T80-analog: install the barrier; old-epoch commands reject after.
     /// BarrierIds must be strictly increasing: the exact-barrier claim
-    /// is only as strong as the id's non-reuse, so the control machine
-    /// enforces it as a monotonic mint (ordering authority:
-    /// single-producer sequence) rather than assuming a separately
-    /// owned minter the lab does not have.
+    /// is only as strong as the id's non-reuse. The controller is a
+    /// MONOTONIC ACCEPTANCE GATE, not a mint — the caller supplies the
+    /// id and this gate refuses reuse/regression via last_barrier_
+    /// (ordering authority: single-producer sequence). Zero is
+    /// implicitly reserved: last_barrier_ starts at zero, so id 0 is
+    /// never acceptable and stays outside the id vocabulary.
     Check
     install_barrier(BarrierId id)
     {
