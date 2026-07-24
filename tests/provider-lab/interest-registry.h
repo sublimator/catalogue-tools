@@ -51,32 +51,96 @@ using RevokeCommandId = std::uint64_t;
 using ParticipantRevision = std::uint64_t;
 
 class InterestRegistry;
+class ParticipantCellRegistry;
 class ParticipantReceiptTestMint;
 class UnsubscribeReceiptTestMint;
+class RevokeCommandTestMint;
 
-/// Sender-owned revoke command: a non-authoritative, replayable
-/// projection from the interest's retained outbox. Losing it is safe;
-/// replay re-derives the identical value.
-struct RevokeCommand
+/// Sender-owned revoke command: a replayable projection from the
+/// interest's retained outbox — losing a copy is safe; replay
+/// re-derives the identical value. Sole-minted nonetheless: the
+/// participant cell treats a presented command as the trigger to
+/// revoke, so a brace-constructible command would let any caller
+/// revoke a cell whose interest never began detach. The interest
+/// registry is the sole production minter; tests mint via the
+/// explicit test-only seam.
+class RevokeCommand
 {
-    RevokeCommandId command = 0;
-    InterestId interest = 0;
-    InterestFetchId fetch = 0;
-    InterestOperationId operation = 0;
+public:
+    RevokeCommand(RevokeCommand const&) = default;
+    RevokeCommand&
+    operator=(RevokeCommand const&) = default;
+
+    RevokeCommandId
+    command() const
+    {
+        return command_;
+    }
+    InterestId
+    interest() const
+    {
+        return interest_;
+    }
+    InterestFetchId
+    fetch() const
+    {
+        return fetch_;
+    }
+    InterestOperationId
+    operation() const
+    {
+        return operation_;
+    }
 
     bool
     operator==(RevokeCommand const&) const = default;
+
+private:
+    friend class InterestRegistry;      // sole production minter
+    friend class RevokeCommandTestMint;  // explicit test-only seam
+    RevokeCommand(
+        RevokeCommandId command,
+        InterestId interest,
+        InterestFetchId fetch,
+        InterestOperationId operation)
+        : command_(command)
+        , interest_(interest)
+        , fetch_(fetch)
+        , operation_(operation)
+    {
+    }
+
+    RevokeCommandId command_;
+    InterestId interest_;
+    InterestFetchId fetch_;
+    InterestOperationId operation_;
 };
 
+static_assert(
+    !std::is_default_constructible_v<RevokeCommand>,
+    "a command must be minted from the owned outbox, never defaulted");
+static_assert(
+    !std::is_constructible_v<
+        RevokeCommand,
+        RevokeCommandId,
+        InterestId,
+        InterestFetchId,
+        InterestOperationId>,
+    "raw-field construction would let any caller trigger revocation");
+
 /// Bound receipt proving the participant cell revoked its grants for
-/// this exact interest/command. Sole production minter: increment 3d's
-/// participant cell. Tests mint via the explicit test-only seam.
+/// this exact interest/command. Sole production minter:
+/// ParticipantCellRegistry (increment 3d). Tests may mint via the
+/// explicit test-only seam.
 class ParticipantRevokedReceipt
 {
 public:
     ParticipantRevokedReceipt(ParticipantRevokedReceipt const&) = default;
     ParticipantRevokedReceipt&
     operator=(ParticipantRevokedReceipt const&) = default;
+
+    bool
+    operator==(ParticipantRevokedReceipt const&) const = default;
 
     InterestId
     interest() const
@@ -95,7 +159,8 @@ public:
     }
 
 private:
-    friend class ParticipantReceiptTestMint;  // test-only until 3d
+    friend class ParticipantCellRegistry;     // sole production minter
+    friend class ParticipantReceiptTestMint;  // explicit test-only seam
     ParticipantRevokedReceipt(
         InterestId interest,
         RevokeCommandId command,
@@ -232,12 +297,19 @@ public:
         already_acked,
         wrong_binding,  // receipt does not match the retained outbox
         interest_id_exhausted,
+        revoke_command_id_exhausted,
     };
 
     struct RegisterResult
     {
         Refusal refusal{};
         InterestId interest = 0;
+    };
+
+    struct DetachResult
+    {
+        Refusal refusal{};
+        std::optional<RevokeCommand> command;
     };
 
     enum class JoinRefusal : std::uint8_t {
@@ -256,12 +328,15 @@ public:
 
     explicit InterestRegistry(
         strand_type strand,
-        InterestId first_minted_id = 1)
+        InterestId first_minted_id = 1,
+        RevokeCommandId first_minted_command = 1)
         : strand_(std::move(strand))
         , next_interest_(first_minted_id == 0 ? 1 : first_minted_id)
+        , next_revoke_command_(
+              first_minted_command == 0 ? 1 : first_minted_command)
     {
-        // Zero reserved; first_minted_id is a test-only seam so the
-        // ceiling control avoids 2^64 warm-up mints.
+        // Zero reserved for both mints; the first-id parameters are
+        // test-only seams so ceiling controls avoid 2^64 warm-ups.
     }
 
     bool
@@ -323,20 +398,28 @@ public:
     /// sender-owned revoke command in the same owner-strand commit —
     /// initiation is a fact with a home, not an arrow. The command is
     /// retained (replayable) until its bound receipt is consumed.
+    /// Command ids fail closed at the ceiling BEFORE the seal: the
+    /// seal-plus-commit is one atom, so a refused mint leaves the
+    /// interest fully active — never sealed without a command.
     //@@authority transition=provider_lab.interest_begin_detach owner=provider_lab commit=strand
-    std::optional<RevokeCommand>
+    DetachResult
     begin_detach(InterestId id)
     {
         if (!on_owner_strand())
-            return std::nullopt;
+            return {Refusal::off_strand, std::nullopt};
         auto it = interests_.find(id);
-        if (it == interests_.end() || it->second.phase != Phase::active)
-            return std::nullopt;
+        if (it == interests_.end())
+            return {Refusal::unknown_interest, std::nullopt};
+        if (it->second.phase != Phase::active)
+            return {Refusal::not_active, std::nullopt};
+        if (next_revoke_command_ ==
+            std::numeric_limits<RevokeCommandId>::max())
+            return {Refusal::revoke_command_id_exhausted, std::nullopt};
         auto& i = it->second;
         i.phase = Phase::detach_pending;
         i.revoke_outbox = RevokeCommand{
-            ++next_revoke_command_, id, i.fetch, i.operation};
-        return i.revoke_outbox;
+            next_revoke_command_++, id, i.fetch, i.operation};
+        return {Refusal::ok, i.revoke_outbox};
     }
 
     /// Replay the retained revoke command (identical) until its
@@ -374,7 +457,7 @@ public:
                 ? Refusal::already_acked
                 : Refusal::wrong_binding;
         if (!i.revoke_outbox.has_value() ||
-            i.revoke_outbox->command != receipt.command())
+            i.revoke_outbox->command() != receipt.command())
             return Refusal::wrong_binding;
         i.revoke_consumed = receipt.command();
         i.revoke_outbox.reset();  // replay home retires; dedup remains
@@ -558,7 +641,7 @@ private:
 
     strand_type strand_;
     InterestId next_interest_;
-    RevokeCommandId next_revoke_command_ = 0;
+    RevokeCommandId next_revoke_command_;
     //@@authority state=provider_lab.interest_registry owner=provider_lab
     std::map<InterestId, Interest> interests_;
 };
@@ -586,6 +669,20 @@ public:
     mint(InterestId interest, SubscriptionId subscription)
     {
         return UnsubscribeReceipt{interest, subscription};
+    }
+};
+
+class RevokeCommandTestMint
+{
+public:
+    static RevokeCommand
+    mint(
+        RevokeCommandId command,
+        InterestId interest,
+        InterestFetchId fetch,
+        InterestOperationId operation)
+    {
+        return RevokeCommand{command, interest, fetch, operation};
     }
 };
 

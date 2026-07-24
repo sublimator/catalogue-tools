@@ -33,11 +33,11 @@ struct RegistryFixture : ::testing::Test
     {
         auto r = reg.register_interest(100, 7, 1, /*subscription*/ 900);
         EXPECT_EQ(r.refusal, InterestRegistry::Refusal::ok);
-        auto cmd = reg.begin_detach(r.interest);
-        EXPECT_TRUE(cmd.has_value());
+        auto d = reg.begin_detach(r.interest);
+        EXPECT_EQ(d.refusal, InterestRegistry::Refusal::ok);
         EXPECT_EQ(
             reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
-                r.interest, cmd->command, /*revision*/ 3)),
+                r.interest, d.command->command(), /*revision*/ 3)),
             InterestRegistry::Refusal::ok);
         EXPECT_EQ(
             reg.consume_unsubscribe_receipt(
@@ -58,23 +58,24 @@ TEST_F(RegistryFixture, DetachCommitsAnOwnedReplayableRevokeCommand)
         auto r = reg.register_interest(100, 7, 1, 900);
         ASSERT_EQ(r.refusal, R::ok);
 
-        auto cmd = reg.begin_detach(r.interest);
-        ASSERT_TRUE(cmd.has_value())
+        auto d = reg.begin_detach(r.interest);
+        ASSERT_EQ(d.refusal, R::ok)
             << "initiation is a fact with a home, not an arrow";
-        EXPECT_EQ(cmd->interest, r.interest);
-        EXPECT_EQ(cmd->fetch, 1u);
-        EXPECT_EQ(cmd->operation, 100u);
-        EXPECT_GT(cmd->command, 0u);
+        auto const& cmd = *d.command;
+        EXPECT_EQ(cmd.interest(), r.interest);
+        EXPECT_EQ(cmd.fetch(), 1u);
+        EXPECT_EQ(cmd.operation(), 100u);
+        EXPECT_GT(cmd.command(), 0u);
 
         // The projection is replayable, identically, until receipted.
         auto replay = reg.replay_revoke_command(r.interest);
         ASSERT_TRUE(replay.has_value());
-        EXPECT_TRUE(*replay == *cmd);
+        EXPECT_TRUE(*replay == cmd);
 
         // Receipt consumption retires the outbox.
         ASSERT_EQ(
             reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
-                r.interest, cmd->command, 3)),
+                r.interest, cmd.command(), 3)),
             R::ok);
         EXPECT_FALSE(reg.replay_revoke_command(r.interest).has_value())
             << "a consumed receipt retires the replay home";
@@ -85,28 +86,29 @@ TEST_F(RegistryFixture, RevocationCompletesOnlyByBoundReceipt)
 {
     run([&] {
         auto r = reg.register_interest(100, 7, 1, 900);
-        auto cmd = reg.begin_detach(r.interest);
-        ASSERT_TRUE(cmd.has_value());
+        auto d = reg.begin_detach(r.interest);
+        ASSERT_EQ(d.refusal, R::ok);
+        auto const id = d.command->command();
 
         // A receipt bound to a DIFFERENT command cannot complete it.
         EXPECT_EQ(
             reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
-                r.interest, cmd->command + 1, 3)),
+                r.interest, id + 1, 3)),
             R::wrong_binding)
             << "no raw assertion path exists; the binding is checked";
 
         ASSERT_EQ(
             reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
-                r.interest, cmd->command, 3)),
+                r.interest, id, 3)),
             R::ok);
         EXPECT_EQ(
             reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
-                r.interest, cmd->command, 3)),
+                r.interest, id, 3)),
             R::already_acked)
             << "exact replay after consumption is a typed no-op";
         EXPECT_EQ(
             reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
-                r.interest, cmd->command + 1, 3)),
+                r.interest, id + 1, 3)),
             R::wrong_binding)
             << "a mismatched receipt post-consumption must not launder "
                "as already_acked: binding dominates the done state";
@@ -166,15 +168,17 @@ TEST_F(RegistryFixture, SoleInterestDetachBothOrdersThroughOwnedSeams)
             std::optional<RevokeCommand> cmd;
             if (detach_first)
             {
-                cmd = r2.begin_detach(id);
-                ASSERT_TRUE(cmd.has_value());
+                auto d = r2.begin_detach(id);
+                ASSERT_EQ(d.refusal, R::ok);
+                cmd = d.command;
                 ASSERT_EQ(r2.use_terminal(id, 500), R::ok);
             }
             else
             {
                 ASSERT_EQ(r2.use_terminal(id, 500), R::ok);
-                cmd = r2.begin_detach(id);
-                ASSERT_TRUE(cmd.has_value());
+                auto d = r2.begin_detach(id);
+                ASSERT_EQ(d.refusal, R::ok);
+                cmd = d.command;
             }
             EXPECT_TRUE(r2.interest_present(id).value_or(false));
             EXPECT_EQ(r2.sponsors_of(1)->size(), 0u);
@@ -184,7 +188,7 @@ TEST_F(RegistryFixture, SoleInterestDetachBothOrdersThroughOwnedSeams)
 
             ASSERT_EQ(
                 r2.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
-                    id, cmd->command, 3)),
+                    id, cmd->command(), 3)),
                 R::ok);
             ASSERT_EQ(
                 r2.consume_unsubscribe_receipt(
@@ -216,10 +220,11 @@ TEST_F(RegistryFixture, DuplicateObligationsAreTypedAndCreateNoDebt)
 
         // One terminal event closes exactly one debt: the duplicate
         // did not create a second, and the join is gated on the ONE.
-        auto cmd = reg.begin_detach(r.interest);
+        auto d = reg.begin_detach(r.interest);
+        ASSERT_EQ(d.refusal, R::ok);
         ASSERT_EQ(
             reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
-                r.interest, cmd->command, 3)),
+                r.interest, d.command->command(), 3)),
             R::ok);
         ASSERT_EQ(
             reg.consume_unsubscribe_receipt(
@@ -245,10 +250,10 @@ TEST_F(RegistryFixture, DetachSealsAndJoinGatesEveryObligation)
         EXPECT_EQ(reg.terminal_join(r.interest).refusal,
                   J::not_detach_pending);
 
-        auto cmd = reg.begin_detach(r.interest);
-        ASSERT_TRUE(cmd.has_value());
-        EXPECT_FALSE(reg.begin_detach(r.interest).has_value())
-            << "detach is not repeatable";
+        auto d = reg.begin_detach(r.interest);
+        ASSERT_EQ(d.refusal, R::ok);
+        EXPECT_EQ(reg.begin_detach(r.interest).refusal, R::not_active)
+            << "detach is not repeatable, and the refusal is typed";
         EXPECT_EQ(reg.add_submitted_use(r.interest, 501), R::not_active)
             << "detach seals new sponsorship";
 
@@ -260,7 +265,7 @@ TEST_F(RegistryFixture, DetachSealsAndJoinGatesEveryObligation)
                   J::obligations_open);
         ASSERT_EQ(
             reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
-                r.interest, cmd->command, 3)),
+                r.interest, d.command->command(), 3)),
             R::ok);
         EXPECT_EQ(reg.terminal_join(r.interest).refusal,
                   J::obligations_open);
@@ -281,7 +286,7 @@ TEST_F(RegistryFixture, NoRootAdoptionIsStructural)
         ASSERT_EQ(second.refusal, R::ok);
         EXPECT_GT(second.interest, first.interest);
 
-        ASSERT_TRUE(reg.begin_detach(first.interest).has_value());
+        ASSERT_EQ(reg.begin_detach(first.interest).refusal, R::ok);
         auto sponsors = reg.sponsors_of(1);
         ASSERT_EQ(sponsors->size(), 1u);
         EXPECT_EQ(sponsors->front(), second.interest)
@@ -312,6 +317,31 @@ TEST(RegistryEdge, InterestIdCeilingFailsClosedWithNothingMutated)
     sched.run_until_idle();
 }
 
+TEST(RegistryEdge, RevokeCommandCeilingRefusesWithoutSealingTheInterest)
+{
+    DeterministicScheduler sched;
+    auto strand = sched.make_strand();
+    InterestRegistry reg{
+        strand, 1, std::numeric_limits<RevokeCommandId>::max()};
+    asio::post(strand, [&] {
+        using R = InterestRegistry::Refusal;
+        auto r = reg.register_interest(100, 7, 1, 900);
+        ASSERT_EQ(r.refusal, R::ok);
+        auto d = reg.begin_detach(r.interest);
+        EXPECT_EQ(d.refusal, R::revoke_command_id_exhausted)
+            << "the wrap class, refused at the command minter too";
+        EXPECT_FALSE(d.command.has_value());
+        EXPECT_FALSE(reg.replay_revoke_command(r.interest).has_value())
+            << "no command committed";
+        EXPECT_EQ(reg.add_submitted_use(r.interest, 500), R::ok)
+            << "seal-plus-commit is one atom: the refused mint left "
+               "the interest fully ACTIVE, not sealed commandless";
+        EXPECT_EQ(reg.begin_detach(r.interest).refusal,
+                  R::revoke_command_id_exhausted);
+    });
+    sched.run_until_idle();
+}
+
 TEST_F(RegistryFixture, OffStrandTouchesAreRefusedBeforeAnyRead)
 {
     // Mint a genuine terminal ack on the owner strand first: retire is
@@ -327,7 +357,7 @@ TEST_F(RegistryFixture, OffStrandTouchesAreRefusedBeforeAnyRead)
     bool checked = false;
     asio::post(sched.io(), [&] {
         EXPECT_EQ(reg.register_interest(1, 2, 3, 4).refusal, R::off_strand);
-        EXPECT_FALSE(reg.begin_detach(1).has_value());
+        EXPECT_EQ(reg.begin_detach(1).refusal, R::off_strand);
         EXPECT_FALSE(reg.replay_revoke_command(1).has_value());
         EXPECT_EQ(reg.use_terminal(1, 1), R::off_strand);
         EXPECT_EQ(reg.ack_delivery(1, 1), R::off_strand);
