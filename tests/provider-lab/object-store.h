@@ -23,6 +23,7 @@
 //    once. Destructors are passive; off-strand touches are refused.
 
 #include "deterministic-scheduler.h"
+#include "epoch-control.h"
 
 #include <cstdint>
 #include <functional>
@@ -34,8 +35,6 @@
 
 namespace catl::provider_lab {
 
-using Epoch = std::uint64_t;
-using BarrierId = std::uint64_t;
 using ContentHash = std::uint64_t;
 
 /// Lab stand-in for canonical hashing: the CHECK is the point, not the
@@ -75,7 +74,7 @@ public:
         Epoch initial_epoch,
         std::size_t capacity)
         : strand_(std::move(strand))
-        , epoch_(initial_epoch)
+        , control_(initial_epoch)
         , capacity_(capacity == 0 ? 1 : capacity)
     {
         // A zero-capacity store would breach its own bound on first
@@ -97,7 +96,7 @@ public:
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
-        if (auto r = check_running(tag); r != Refusal::ok)
+        if (auto r = admit(tag); r != Refusal::ok)
             return r;
         if (lab_content_hash(bytes) != key)
             return Refusal::hash_mismatch;
@@ -126,7 +125,7 @@ public:
     {
         if (!on_owner_strand())
             return {Refusal::off_strand, std::nullopt};
-        if (auto r = check_running(tag); r != Refusal::ok)
+        if (auto r = admit(tag); r != Refusal::ok)
             return {r, std::nullopt};
         auto it = values_.find(key);
         if (it == values_.end())
@@ -144,13 +143,7 @@ public:
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
-        if (state_ == State::stopped)
-            return Refusal::stopped;
-        if (state_ != State::running)
-            return Refusal::not_running;
-        state_ = State::barrier;
-        barrier_ = id;
-        return Refusal::ok;
+        return map_check(control_.install_barrier(id));
     }
 
     /// T81-analog: consume the exact barrier, clear all values, advance
@@ -162,17 +155,13 @@ public:
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
-        if (state_ == State::stopped)
-            return Refusal::stopped;
-        if (state_ != State::barrier)
-            return Refusal::not_running;
-        if (barrier_ != id)
-            return Refusal::wrong_barrier;
-        values_.clear();
-        lru_.clear();
-        ++epoch_;
-        state_ = State::running;
-        return Refusal::ok;
+        auto const check = control_.consume_barrier_and_advance(id);
+        if (check == EpochControl::Check::ok)
+        {
+            values_.clear();
+            lru_.clear();
+        }
+        return map_check(check);
     }
 
     /// T82-analog: absorbing stop; emits the witness exactly once.
@@ -180,11 +169,13 @@ public:
     std::optional<StopWitness>
     stop()
     {
-        if (!on_owner_strand() || state_ == State::stopped)
+        if (!on_owner_strand() || !control_.stop())
             return std::nullopt;
-        state_ = State::stopped;
         return StopWitness{
-            epoch_, values_.size(), total_inserts_, total_evictions_};
+            control_.epoch(),
+            values_.size(),
+            total_inserts_,
+            total_evictions_};
     }
 
     // Owner-strand introspection: the strand check dominates every
@@ -194,17 +185,17 @@ public:
     {
         if (!on_owner_strand())
             return std::nullopt;
-        return epoch_;
+        return control_.epoch();
     }
-    std::size_t
+    std::optional<std::size_t>
     size() const
     {
-        return on_owner_strand() ? values_.size() : 0;
+        if (!on_owner_strand())
+            return std::nullopt;
+        return values_.size();
     }
 
 private:
-    enum class State : std::uint8_t { running, barrier, stopped };
-
     struct Value
     {
         std::string bytes;
@@ -212,15 +203,30 @@ private:
     };
 
     Refusal
-    check_running(Epoch tag) const
+    admit(Epoch tag) const
     {
-        if (state_ == State::stopped)
-            return Refusal::stopped;
-        if (state_ == State::barrier)
-            return Refusal::barrier_installed;
-        if (tag != epoch_)
-            return Refusal::wrong_epoch;
-        return Refusal::ok;
+        return map_check(control_.check_running(tag));
+    }
+
+    static Refusal
+    map_check(EpochControl::Check check)
+    {
+        switch (check)
+        {
+            case EpochControl::Check::ok:
+                return Refusal::ok;
+            case EpochControl::Check::wrong_epoch:
+                return Refusal::wrong_epoch;
+            case EpochControl::Check::barrier_installed:
+                return Refusal::barrier_installed;
+            case EpochControl::Check::stopped:
+                return Refusal::stopped;
+            case EpochControl::Check::wrong_barrier:
+                return Refusal::wrong_barrier;
+            case EpochControl::Check::not_running:
+                return Refusal::not_running;
+        }
+        return Refusal::not_running;
     }
 
     void
@@ -233,9 +239,7 @@ private:
 
     strand_type strand_;
     //@@authority state=provider_lab.store_control owner=provider_lab
-    State state_ = State::running;
-    Epoch epoch_;
-    BarrierId barrier_ = 0;
+    EpochControl control_;
     std::size_t capacity_;
     //@@authority state=provider_lab.object_store_values owner=provider_lab
     std::map<ContentHash, Value> values_;

@@ -24,3 +24,8 @@ add_executable(object-store-gtest object-store-gtest.cpp)
 target_link_libraries(object-store-gtest
                       PRIVATE Boost::boost GTest::gtest_main)
 gtest_discover_tests(object-store-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(header-store-gtest header-store-gtest.cpp)
+target_link_libraries(header-store-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(header-store-gtest DISCOVERY_TIMEOUT 30)

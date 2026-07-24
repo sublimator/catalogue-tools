@@ -61,7 +61,7 @@ TEST_F(StoreFixture, HashVerificationGuardsEveryInsert)
         auto [h, bytes] = value("node-a");
         EXPECT_EQ(store.insert(5, h + 1, bytes), R::hash_mismatch)
             << "bytes must hash to the claimed key before any mutation";
-        EXPECT_EQ(store.size(), 0u);
+        EXPECT_EQ(store.size().value_or(999), 0u);
         EXPECT_EQ(store.insert(5, h, bytes), R::ok);
     });
 }
@@ -72,7 +72,7 @@ TEST_F(StoreFixture, ImmutableValuesReinsertIdempotently)
         auto [h, bytes] = value("node-a");
         EXPECT_EQ(store.insert(5, h, bytes), R::ok);
         EXPECT_EQ(store.insert(5, h, bytes), R::ok);
-        EXPECT_EQ(store.size(), 1u) << "immutable: one row per content";
+        EXPECT_EQ(store.size().value_or(0), 1u) << "immutable: one row per content";
     });
 }
 
@@ -129,7 +129,7 @@ TEST_F(StoreFixture, ClearAndAdvanceConsumesExactBarrierExactlyOnce)
 
         EXPECT_EQ(store.clear_and_advance(77), R::ok);
         EXPECT_EQ(store.accepted_epoch().value_or(0), 6u);
-        EXPECT_EQ(store.size(), 0u) << "advance clears every value";
+        EXPECT_EQ(store.size().value_or(999), 0u) << "advance clears every value";
 
         // Exactly-once: the consumed barrier cannot advance again.
         EXPECT_EQ(store.clear_and_advance(77), R::not_running);
@@ -172,11 +172,13 @@ TEST_F(StoreFixture, OffStrandTouchesAreRefused)
         EXPECT_EQ(store.install_barrier(1), R::off_strand);
         EXPECT_EQ(store.clear_and_advance(1), R::off_strand);
         EXPECT_FALSE(store.stop().has_value());
+        EXPECT_FALSE(store.size().has_value())
+            << "off-strand size is refused, never a zero sentinel";
         checked = true;
     });
     sched.run_until_idle();
     EXPECT_TRUE(checked);
-    run([&] { EXPECT_EQ(store.size(), 0u); });
+    run([&] { EXPECT_EQ(store.size().value_or(999), 0u); });
 }
 
 TEST(ObjectStoreEdge, ZeroCapacityClampsToOneHonestRow)
@@ -189,7 +191,7 @@ TEST(ObjectStoreEdge, ZeroCapacityClampsToOneHonestRow)
         auto h = lab_content_hash(bytes);
         EXPECT_EQ(
             store.insert(1, h, bytes), EpochGuardedObjectStore::Refusal::ok);
-        EXPECT_EQ(store.size(), 1u)
+        EXPECT_EQ(store.size().value_or(0), 1u)
             << "capacity clamps to one honest row rather than breaching "
                "a zero bound";
     });
@@ -205,7 +207,8 @@ TEST(ObjectStoreEdge, IntrospectionRefusesOffStrandBeforeAnyRead)
     asio::post(sched.io(), [&] {
         EXPECT_FALSE(store.accepted_epoch().has_value())
             << "the strand check must dominate the scalar read";
-        EXPECT_EQ(store.size(), 0u);
+        EXPECT_FALSE(store.size().has_value())
+            << "off-strand size is refused, never a zero sentinel";
         checked = true;
     });
     sched.run_until_idle();
