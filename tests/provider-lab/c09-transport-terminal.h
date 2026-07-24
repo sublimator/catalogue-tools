@@ -877,7 +877,8 @@ private:
     valid_lineage(C09MemberLineage const& lineage)
     {
         return lineage.operation != 0 && lineage.interest != 0 &&
-            lineage.use != 0 && lineage.pipeline != 0;
+            lineage.use != 0 && lineage.pipeline != 0 &&
+            lineage.channel_generation != 0;
     }
 
     static MemberKey

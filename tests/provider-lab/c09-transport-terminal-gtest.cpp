@@ -119,6 +119,11 @@ TEST_F(SenderFixture, InvalidOrUnopenedMemberCannotMintAnAttempt)
     run([&] {
         auto invalid = sender.open_member({});
         EXPECT_EQ(invalid.refusal, Refusal::invalid_identity);
+        auto zero_generation = kLineage;
+        zero_generation.channel_generation = 0;
+        EXPECT_EQ(
+            sender.open_member(zero_generation).refusal,
+            Refusal::invalid_identity);
 
         C09MemberIdentity forged{
             kDestination, 6, 7, C09MemberLineage{21, 22, 23, 24, 25}};

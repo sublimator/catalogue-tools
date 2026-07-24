@@ -23,6 +23,7 @@
 namespace catl::provider_lab {
 
 class C09PeerSetTerminalAggregate;
+class C11PeerSetGenerationAggregate;
 class C09ReceiverTestRegistration;
 class C09ReceiverTestSeed;
 
@@ -189,6 +190,7 @@ public:
 
 private:
     friend class C09PeerSetTerminalAggregate;
+    friend class C11PeerSetGenerationAggregate;
     friend class C09ReceiverTestRegistration;
     friend class C09ReceiverTestSeed;
 
@@ -274,7 +276,8 @@ private:
         return valid_destination(identity.destination) &&
             identity.peer_client_incarnation != 0 &&
             identity.sender_generation != 0 && lineage.operation != 0 &&
-            lineage.interest != 0 && lineage.use != 0 && lineage.pipeline != 0;
+            lineage.interest != 0 && lineage.use != 0 &&
+            lineage.pipeline != 0 && lineage.channel_generation != 0;
     }
 
     static bool

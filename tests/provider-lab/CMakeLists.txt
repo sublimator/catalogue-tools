@@ -75,3 +75,9 @@ add_executable(c10-inbound-generation-fence-gtest
 target_link_libraries(c10-inbound-generation-fence-gtest
                       PRIVATE Boost::boost GTest::gtest_main)
 gtest_discover_tests(c10-inbound-generation-fence-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(c11-peer-generation-close-gtest
+               c11-peer-generation-close-gtest.cpp)
+target_link_libraries(c11-peer-generation-close-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(c11-peer-generation-close-gtest DISCOVERY_TIMEOUT 30)
