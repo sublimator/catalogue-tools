@@ -311,7 +311,11 @@ static_assert(
 /// this exact subscription. Sole production minter: the subscription
 /// owner (NOT yet composed — tests mint via the seam, and the interest
 /// makes NO claim that an unsubscribe was initiated; see the honesty
-/// note on InterestRegistry::begin_detach).
+/// note on InterestRegistry::begin_detach). Cross-component artifact,
+/// so the schema carries PartitionScope even while its producer is
+/// deferred; any lifecycle generation the subscription owner needs to
+/// prevent reuse is that increment's obligation, stated here so it is
+/// not forgotten.
 class UnsubscribeReceipt
 {
 public:
@@ -319,6 +323,11 @@ public:
     UnsubscribeReceipt&
     operator=(UnsubscribeReceipt const&) = default;
 
+    PartitionScope
+    scope() const
+    {
+        return scope_;
+    }
     InterestId
     interest() const
     {
@@ -332,11 +341,15 @@ public:
 
 private:
     friend class UnsubscribeReceiptTestMint;  // test-only until composed
-    UnsubscribeReceipt(InterestId interest, SubscriptionId subscription)
-        : interest_(interest), subscription_(subscription)
+    UnsubscribeReceipt(
+        PartitionScope scope,
+        InterestId interest,
+        SubscriptionId subscription)
+        : scope_(scope), interest_(interest), subscription_(subscription)
     {
     }
 
+    PartitionScope scope_;
     InterestId interest_;
     SubscriptionId subscription_;
 };
@@ -345,7 +358,11 @@ static_assert(
     !std::is_default_constructible_v<UnsubscribeReceipt>,
     "a receipt must be minted, never defaulted");
 static_assert(
-    !std::is_constructible_v<UnsubscribeReceipt, InterestId, SubscriptionId>,
+    !std::is_constructible_v<
+        UnsubscribeReceipt,
+        PartitionScope,
+        InterestId,
+        SubscriptionId>,
     "raw-field construction would make every caller a second minter");
 
 /// Sole-minted terminal acknowledgement, bound to the original child
@@ -542,9 +559,12 @@ class UnsubscribeReceiptTestMint
 {
 public:
     static UnsubscribeReceipt
-    mint(InterestId interest, SubscriptionId subscription)
+    mint(
+        PartitionScope scope,
+        InterestId interest,
+        SubscriptionId subscription)
     {
-        return UnsubscribeReceipt{interest, subscription};
+        return UnsubscribeReceipt{scope, interest, subscription};
     }
 };
 

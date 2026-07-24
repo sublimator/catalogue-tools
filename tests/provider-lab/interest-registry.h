@@ -1,37 +1,28 @@
 #pragma once
 
-// Coordinator increment 3c, round 3: interests with two-phase detach,
-// fully-bound artifact seams, and three-phase handoffs. TEST-ONLY:
+// Coordinator increment 3c, round 4: interests with two-phase detach,
+// scope-first authentication, and three-phase handoffs. TEST-ONLY:
 // production construction must never reference this.
 //
-// Composed-review rulings folded in (on top of rounds 1-2):
-//  - the interest RETAINS its participant destination expectation
-//    (scope, epoch, revision) from registration; every revoke
-//    artifact is validated against the COMPLETE binding — a receipt
-//    with the right command and the wrong revision is wrong_binding,
-//    before and after exact consumption;
-//  - consuming the participant's revoked receipt mints and RETAINS a
-//    distinct ParticipantReceiptConsumed witness (replayable): the
-//    participant cell retires on THAT, never on its own outgoing
-//    receipt;
-//  - the terminal ack cannot retire the interest: the operation
-//    ledger consumes it and mints InterestTerminalConsumed, and only
-//    that witness removes the terminal-ready row;
-//  - use registration/closure are NOT public verbs: they are
-//    committed solely by the coordinator seam façade that owns both
-//    state homes on one strand (split-atomic spend/register and
-//    raw-id use_terminal forgery are inexpressible);
-//  - delivery acknowledgement's owner is not composed yet: closure is
-//    an explicit test-only seam, not an annotated authority any
-//    caller can assert;
-//  - unsubscribe honesty: detach makes NO claim that an unsubscribe
-//    was initiated (no command, no outbox, no replay exists here).
-//    The row is merely unsubscribe-pending until the subscription
-//    owner is composed; the consumption verb stays typed and bound,
-//    with a test-only minter;
-//  - id counters are unique WITHIN this registry instance (scoped by
-//    its PartitionScope), stated as such, and fail closed at their
-//    ceilings with zero reserved.
+// Round-4 rulings folded in (on top of rounds 1-3):
+//  - SCOPE FIRST, actually: every verb consuming a scope-carrying
+//    artifact compares the artifact's PartitionScope against this
+//    registry's immutable scope immediately after the strand guard
+//    and BEFORE any lookup keyed by the artifact's ids. Foreign-scope
+//    artifacts get the same wrong_scope whether the local id exists
+//    or not — presence is never leaked before authentication;
+//  - UnsubscribeReceipt now carries PartitionScope and is
+//    authenticated scope-first like every other artifact;
+//  - the interest row is CREATED only by the aggregate façade's
+//    atomic open_interest_with_cell (prepare/commit primitives below;
+//    node insertion is allocation-free so the commit section cannot
+//    throw), and RETIRED only by the façade's atomic
+//    retire_interest_terminal, which releases the ledger's witness
+//    home in the same commit. register_interest/retire_terminal are
+//    no longer public verbs;
+//  - use debt registration/closure remain façade-only (round 3), with
+//    the debt node PREPARED before any mutation so the seam commit is
+//    exception-atomic.
 
 #include "coordinator-artifacts.h"
 #include "deterministic-scheduler.h"
@@ -55,22 +46,15 @@ public:
     enum class Refusal : std::uint8_t {
         ok,
         off_strand,
+        wrong_scope,  // scope-first: refused before any lookup
         unknown_interest,
         not_active,
         not_detach_pending,
-        unknown_use,
         unknown_delivery,
         already_registered,  // duplicate obligation: typed, no new debt
         already_acked,
         wrong_binding,  // artifact does not match the retained binding
-        interest_id_exhausted,
         revoke_command_id_exhausted,
-    };
-
-    struct RegisterResult
-    {
-        Refusal refusal{};
-        InterestId interest = 0;
     };
 
     struct DetachResult
@@ -113,10 +97,9 @@ public:
     {
         // Zero reserved for both mints; the first-id parameters are
         // test-only seams so ceiling controls avoid 2^64 warm-ups.
-        // Uniqueness of minted ids is scoped to THIS registry
-        // instance — cross-instance discrimination comes from the
-        // PartitionScope carried on every artifact, never from the
-        // counters.
+        // Id uniqueness is scoped to THIS registry instance —
+        // cross-instance discrimination comes from the PartitionScope
+        // carried on every artifact, never from the counters.
     }
 
     bool
@@ -129,35 +112,6 @@ public:
     scope() const
     {
         return scope_;
-    }
-
-    /// Mint one interest retaining its original operation/child, its
-    /// cancellation-subscription identity, and its participant
-    /// destination EXPECTATION (scope/epoch/revision of the cell
-    /// opened for it). Fail-closed at the id ceiling.
-    //@@authority transition=provider_lab.register_interest owner=provider_lab commit=strand
-    RegisterResult
-    register_interest(
-        InterestOperationId operation,
-        InterestChildId child,
-        InterestFetchId fetch,
-        SubscriptionId subscription,
-        ParticipantDestination expected)
-    {
-        if (!on_owner_strand())
-            return {Refusal::off_strand, 0};
-        if (next_interest_ == std::numeric_limits<InterestId>::max())
-            return {Refusal::interest_id_exhausted, 0};
-        auto const id = next_interest_++;
-        interests_.emplace(
-            id,
-            Interest{
-                .operation = operation,
-                .child = child,
-                .fetch = fetch,
-                .subscription = subscription,
-                .expected = expected});
-        return {Refusal::ok, id};
     }
 
     /// Register a delivery obligation under an ACTIVE interest
@@ -227,25 +181,28 @@ public:
 
     /// Revocation completes ONLY by consuming the bound receipt, and
     /// consumption mints + RETAINS the distinct third-phase witness.
-    /// Binding precedence: the COMPLETE destination (scope, epoch,
-    /// revision, vs the retained expectation) is checked BEFORE the
-    /// dedup read, so a wrong-revision receipt is wrong_binding both
-    /// before and after exact consumption. Exact replay returns
-    /// already_acked with the IDENTICAL retained witness.
+    /// SCOPE FIRST: the receipt's partition scope is authenticated
+    /// against this registry before its interest id touches any
+    /// lookup. Then the full destination (epoch, revision vs the
+    /// retained expectation) is checked BEFORE the dedup read, so a
+    /// wrong-revision receipt is wrong_binding both before and after
+    /// exact consumption. Exact replay returns already_acked with the
+    /// IDENTICAL retained witness.
     //@@authority transition=provider_lab.interest_consume_revoke_receipt owner=provider_lab commit=strand
     ConsumeRevokeResult
     consume_revoke_receipt(ParticipantRevokedReceipt const& receipt)
     {
         if (!on_owner_strand())
             return {Refusal::off_strand, std::nullopt};
+        if (receipt.scope() != scope_)
+            return {Refusal::wrong_scope, std::nullopt};
         auto it = interests_.find(receipt.interest());
         if (it == interests_.end())
             return {Refusal::unknown_interest, std::nullopt};
         auto& i = it->second;
         if (i.phase == Phase::active)
             return {Refusal::not_detach_pending, std::nullopt};
-        if (receipt.scope() != i.expected.scope ||
-            receipt.epoch() != i.expected.epoch ||
+        if (receipt.epoch() != i.expected.epoch ||
             receipt.revision() != i.expected.revision)
             return {Refusal::wrong_binding, std::nullopt};
         if (i.revoke_consumed.has_value())
@@ -281,15 +238,18 @@ public:
     }
 
     /// Unsubscription completes ONLY by consuming a receipt bound to
-    /// the subscription identity retained since registration. Binding
-    /// dominates the done-flag. The MINTER is not composed yet
-    /// (test-only seam); this verb owns consumption alone.
+    /// the subscription identity retained since registration. SCOPE
+    /// FIRST, then lookup, then binding; binding dominates the
+    /// done-flag. The MINTER is not composed yet (test-only seam);
+    /// this verb owns consumption alone.
     //@@authority transition=provider_lab.interest_consume_unsubscribe_receipt owner=provider_lab commit=strand
     Refusal
     consume_unsubscribe_receipt(UnsubscribeReceipt const& receipt)
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
+        if (receipt.scope() != scope_)
+            return Refusal::wrong_scope;
         auto it = interests_.find(receipt.interest());
         if (it == interests_.end())
             return Refusal::unknown_interest;
@@ -308,7 +268,9 @@ public:
     /// interest transitions to terminal_ready and mints its ack ONCE
     /// into a retained outbox; the identical ack replays on every
     /// later call. The ack is phase TWO of the terminal handoff —
-    /// removal requires the ledger-minted consumption witness.
+    /// removal happens only through the façade's atomic
+    /// retire_interest_terminal, which consumes the ledger-minted
+    /// witness and releases the ledger's replay home in one commit.
     //@@authority transition=provider_lab.interest_terminal_join owner=provider_lab commit=strand
     JoinResult
     terminal_join(InterestId id)
@@ -330,32 +292,6 @@ public:
         i.terminal_outbox =
             InterestTerminalAck{scope_, id, i.operation, i.child};
         return {JoinRefusal::ok, i.terminal_outbox};
-    }
-
-    /// The exactly-once remover: consumes the LEDGER-minted terminal
-    /// consumption witness whose binding matches the retained ack
-    /// outbox. The interest's own outgoing ack is not evidence — it
-    /// proves the ack was produced, not that downstream consumed it —
-    /// and it does not compile here.
-    //@@authority transition=provider_lab.interest_retire_terminal owner=provider_lab commit=strand
-    Refusal
-    retire_terminal(InterestTerminalConsumed const& witness)
-    {
-        if (!on_owner_strand())
-            return Refusal::off_strand;
-        auto it = interests_.find(witness.interest());
-        if (it == interests_.end())
-            return Refusal::unknown_interest;
-        auto& i = it->second;
-        if (i.phase != Phase::terminal_ready)
-            return Refusal::not_detach_pending;
-        if (!i.terminal_outbox.has_value() ||
-            witness.scope() != i.terminal_outbox->scope() ||
-            witness.operation() != i.terminal_outbox->operation() ||
-            witness.child() != i.terminal_outbox->child())
-            return Refusal::wrong_binding;
-        interests_.erase(it);
-        return Refusal::ok;
     }
 
     // Owner-strand introspection; refusal dominates every read.
@@ -410,12 +346,75 @@ private:
         std::set<DeliveryId> open_deliveries;
     };
 
-    // Use debt registration/closure: committed ONLY by the seam
-    // façade (which owns both state homes on this strand) and, for
-    // delivery closure, the explicit test seam. NOT public authority:
-    // the façade's transitions carry the annotations.
+    using InterestMap = std::map<InterestId, Interest>;
+    using InterestNode = InterestMap::node_type;
+    using UseSet = std::set<InterestUseId>;
+    using UseNode = UseSet::node_type;
+
+    // Row creation, use debt, and terminal retirement are committed
+    // ONLY by the aggregate seam façade (which owns this registry) —
+    // and delivery closure by its explicit test seam. NOT public
+    // authority: the façade's transitions carry the annotations.
     friend class CoordinatorInterestSeams;
+    friend class InterestRegistryTestAccess;  // component-test creation
     friend class DeliveryAckTestSeam;
+
+    bool
+    interest_mint_available() const
+    {
+        return next_interest_ != std::numeric_limits<InterestId>::max();
+    }
+
+    InterestId
+    peek_interest_id() const
+    {
+        return next_interest_;
+    }
+
+    /// PREPARE: all allocation happens here, no state changes. The
+    /// returned node commits without allocating.
+    InterestNode
+    prepare_interest(
+        InterestId id,
+        InterestOperationId operation,
+        InterestChildId child,
+        InterestFetchId fetch,
+        SubscriptionId subscription,
+        ParticipantDestination expected)
+    {
+        InterestMap tmp;
+        tmp.emplace(
+            id,
+            Interest{
+                .operation = operation,
+                .child = child,
+                .fetch = fetch,
+                .subscription = subscription,
+                .expected = expected});
+        return tmp.extract(id);
+    }
+
+    /// COMMIT: node insertion is allocation-free; integer comparison
+    /// cannot throw. Counter advances only here.
+    void
+    commit_interest(InterestNode&& node) noexcept
+    {
+        interests_.insert(std::move(node));
+        ++next_interest_;
+    }
+
+    Interest const*
+    find_row(InterestId id) const
+    {
+        auto it = interests_.find(id);
+        return it == interests_.end() ? nullptr : &it->second;
+    }
+
+    bool
+    row_terminal_ready(Interest const& row) const
+    {
+        return row.phase == Phase::terminal_ready;
+    }
 
     bool
     can_add_use(InterestId id, InterestUseId use) const
@@ -426,10 +425,18 @@ private:
             it->second.open_uses.count(use) == 0;
     }
 
-    void
-    commit_add_use(InterestId id, InterestUseId use)
+    UseNode
+    prepare_use(InterestUseId use)
     {
-        interests_.at(id).open_uses.insert(use);
+        UseSet tmp;
+        tmp.insert(use);
+        return tmp.extract(use);
+    }
+
+    void
+    commit_add_use(InterestId id, UseNode&& node) noexcept
+    {
+        interests_.find(id)->second.open_uses.insert(std::move(node));
     }
 
     bool
@@ -441,9 +448,15 @@ private:
     }
 
     void
-    commit_close_use(InterestId id, InterestUseId use)
+    commit_close_use(InterestId id, InterestUseId use) noexcept
     {
-        interests_.at(id).open_uses.erase(use);
+        interests_.find(id)->second.open_uses.erase(use);
+    }
+
+    void
+    erase_interest(InterestId id) noexcept
+    {
+        interests_.erase(id);
     }
 
     Refusal
@@ -476,7 +489,7 @@ private:
     InterestId next_interest_;
     RevokeCommandId next_revoke_command_;
     //@@authority state=provider_lab.interest_registry owner=provider_lab
-    std::map<InterestId, Interest> interests_;
+    InterestMap interests_;
 };
 
 /// Test-only closure of delivery debts: the delivery owner is not
@@ -489,6 +502,45 @@ public:
     close(InterestRegistry& reg, InterestId id, DeliveryId delivery)
     {
         return reg.close_delivery(id, delivery);
+    }
+};
+
+/// Test-only row creation for COMPONENT tests of this registry alone.
+/// Production rows are created solely by the aggregate façade's
+/// atomic open_interest_with_cell; this seam exists so the component
+/// suite can exercise interest-local behavior without composing the
+/// participant registry. Explicitly not production authority.
+class InterestRegistryTestAccess
+{
+public:
+    struct Result
+    {
+        bool ok = false;
+        InterestId interest = 0;
+    };
+
+    static Result
+    create(
+        InterestRegistry& reg,
+        InterestOperationId operation,
+        InterestChildId child,
+        InterestFetchId fetch,
+        SubscriptionId subscription,
+        ParticipantDestination expected)
+    {
+        if (!reg.on_owner_strand() || !reg.interest_mint_available())
+            return {};
+        auto const id = reg.peek_interest_id();
+        reg.commit_interest(reg.prepare_interest(
+            id, operation, child, fetch, subscription, expected));
+        return {true, id};
+    }
+
+    static void
+    erase(InterestRegistry& reg, InterestId id)
+    {
+        if (reg.on_owner_strand())
+            reg.erase_interest(id);
     }
 };
 

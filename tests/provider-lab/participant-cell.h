@@ -1,27 +1,25 @@
 #pragma once
 
-// Coordinator increment 3d, round 2: participant cells —
+// Coordinator increment 3d, round 3: participant cells —
 // coordinator-owned one-shot authority. TEST-ONLY: production
 // construction must never reference this.
 //
-// Composed-review rulings folded in:
-//  - the registry carries its PartitionScope and every cell binds
-//    (scope, epoch, interest, fetch, operation, revision). revoke_cell
-//    compares the COMPLETE destination — including the target
-//    revision — before any other read, so a delayed command minted
-//    for a retired instance (ABA) and any artifact from a different
-//    registry instance with colliding local counters refuse without
-//    effect. Counter uniqueness is scoped to THIS registry instance
-//    and stated as such;
-//  - retirement consumes the INTEREST-minted third-phase witness
-//    (ParticipantReceiptConsumed), never the cell's own outgoing
-//    receipt: possession of your own outbox message proves
-//    production, not downstream consumption. The receipt replay home
-//    therefore survives until the interest provably consumed it;
-//  - grant spend and use finish are NOT public verbs: they are
-//    committed solely by the coordinator seam façade that owns both
-//    state homes on one strand (split-atomic spend/register is
-//    inexpressible). issue_grant remains cell-local authority.
+// Round-4 composed rulings folded in (on top of earlier rounds):
+//  - SCOPE FIRST, actually: revoke_cell and retire_cell authenticate
+//    the artifact's PartitionScope against this registry's immutable
+//    scope immediately after the strand guard and BEFORE the interest
+//    id touches any lookup. Foreign-scope artifacts get the same
+//    wrong_scope whether the local id exists or not;
+//  - cell creation is no longer a public verb: a cell exists only as
+//    half of an interest/cell pair minted by the aggregate façade's
+//    atomic open_interest_with_cell (prepare/commit primitives below;
+//    commit is allocation-free and cannot throw). Component tests use
+//    the explicit test seam. No public path can create half a pair;
+//  - spend/finish remain façade-only (round 3): the façade prepares
+//    the interest debt node BEFORE flipping the grant, so the seam
+//    commit is exception-atomic;
+//  - retirement consumes the INTEREST-minted third-phase witness,
+//    never the cell's own outgoing receipt (round 3).
 
 #include "coordinator-artifacts.h"
 #include "deterministic-scheduler.h"
@@ -44,14 +42,13 @@ public:
     enum class Refusal : std::uint8_t {
         ok,
         off_strand,
+        wrong_scope,  // scope-first: refused before any lookup
         unknown_cell,
-        already_open,
         revision_mismatch,
         cell_revoked,
         not_revoked,
         uses_open,
         wrong_binding,
-        revision_exhausted,
         grant_id_exhausted,
     };
 
@@ -60,12 +57,6 @@ public:
         use_open,
         finished,
         revoked_unspent,
-    };
-
-    struct OpenResult
-    {
-        Refusal refusal{};
-        CellRevision revision = 0;
     };
 
     struct GrantResult
@@ -110,34 +101,6 @@ public:
         return scope_;
     }
 
-    /// Open the cell for one interest's participation in one fetch,
-    /// under one provider epoch, minting a fresh revision (unique
-    /// within this registry). Fail-closed at the ceiling.
-    //@@authority transition=provider_lab.participant_open_cell owner=provider_lab commit=strand
-    OpenResult
-    open_cell(
-        InterestId interest,
-        InterestFetchId fetch,
-        InterestOperationId operation,
-        ProviderEpochId epoch)
-    {
-        if (!on_owner_strand())
-            return {Refusal::off_strand, 0};
-        if (cells_.count(interest))
-            return {Refusal::already_open, 0};
-        if (next_revision_ == std::numeric_limits<CellRevision>::max())
-            return {Refusal::revision_exhausted, 0};
-        auto const revision = next_revision_++;
-        cells_.emplace(
-            interest,
-            Cell{
-                .fetch = fetch,
-                .operation = operation,
-                .epoch = epoch,
-                .revision = revision});
-        return {Refusal::ok, revision};
-    }
-
     /// Mint a one-shot grant under an ACTIVE cell. The caller proves
     /// it holds the current cell instance by presenting its revision;
     /// the revision gate dominates every other read.
@@ -162,28 +125,30 @@ public:
         return {Refusal::ok, grant};
     }
 
-    /// Consume the sender-owned revoke command. Destination
-    /// authentication FIRST and COMPLETE: partition scope, provider
-    /// epoch, fetch, operation, and target revision must all match
-    /// this cell — a stale-instance (ABA) or cross-registry command
-    /// refuses before any state changes. Then, in one owner-strand
-    /// commit: mark revoked, kill every UNSPENT grant, spare open
-    /// uses, and mint + RETAIN the bound receipt. Identical replay on
-    /// the identical command; a different command against the revoked
-    /// cell is wrong_binding, never a second mint.
+    /// Consume the sender-owned revoke command. SCOPE FIRST: the
+    /// command's destination scope is authenticated against this
+    /// registry before its interest id touches any lookup. Then the
+    /// remaining destination — provider epoch, TARGET REVISION, fetch,
+    /// operation — must all match the cell, so a stale-instance (ABA)
+    /// command refuses before any state changes. Then, in one
+    /// owner-strand commit: mark revoked, kill every UNSPENT grant,
+    /// spare open uses, and mint + RETAIN the bound receipt.
+    /// Identical replay on the identical command; a different command
+    /// against the revoked cell is wrong_binding, never a second mint.
     //@@authority transition=provider_lab.participant_revoke_cell owner=provider_lab commit=strand
     RevokeResult
     revoke_cell(RevokeCommand const& command)
     {
         if (!on_owner_strand())
             return {Refusal::off_strand, std::nullopt};
+        auto const dest = command.destination();
+        if (dest.scope != scope_)
+            return {Refusal::wrong_scope, std::nullopt};
         auto it = cells_.find(command.interest());
         if (it == cells_.end())
             return {Refusal::unknown_cell, std::nullopt};
         auto& c = it->second;
-        auto const dest = command.destination();
-        if (dest.scope != scope_ || dest.epoch != c.epoch ||
-            dest.revision != c.revision ||
+        if (dest.epoch != c.epoch || dest.revision != c.revision ||
             command.fetch() != c.fetch ||
             command.operation() != c.operation)
             return {Refusal::wrong_binding, std::nullopt};
@@ -208,14 +173,18 @@ public:
     /// The exactly-once remover: consumes the INTEREST-minted
     /// third-phase witness whose binding matches the retained receipt
     /// outbox, and requires the cell drained (revoked, no open uses).
-    /// The cell's own outgoing receipt is not evidence — it proves
-    /// production, not consumption — and it does not compile here.
+    /// SCOPE FIRST, before the witness's interest id is used to look
+    /// anything up. The cell's own outgoing receipt is not evidence —
+    /// it proves production, not consumption — and does not compile
+    /// here.
     //@@authority transition=provider_lab.participant_retire_cell owner=provider_lab commit=strand
     Refusal
     retire_cell(ParticipantReceiptConsumed const& witness)
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
+        if (witness.scope() != scope_)
+            return Refusal::wrong_scope;
         auto it = cells_.find(witness.interest());
         if (it == cells_.end())
             return Refusal::unknown_cell;
@@ -223,7 +192,6 @@ public:
         if (!c.revoked)
             return Refusal::not_revoked;
         if (!c.receipt_outbox.has_value() ||
-            witness.scope() != c.receipt_outbox->scope() ||
             witness.epoch() != c.receipt_outbox->epoch() ||
             witness.command() != c.receipt_outbox->command() ||
             witness.revision() != c.receipt_outbox->revision())
@@ -283,17 +251,70 @@ private:
         std::map<GrantId, GrantState> grants;
     };
 
-    // Spend/finish are committed ONLY by the seam façade, which owns
-    // both state homes on this strand. NOT public authority: the
-    // façade's transitions carry the annotations.
+    using CellMap = std::map<InterestId, Cell>;
+    using CellNode = CellMap::node_type;
+
+    // Cell creation and spend/finish are committed ONLY by the
+    // aggregate seam façade (which owns this registry); component
+    // tests create cells through the explicit test seam. NOT public
+    // authority: the façade's transitions carry the annotations.
     friend class CoordinatorInterestSeams;
+    friend class ParticipantCellTestAccess;
 
     bool
-    can_spend(InterestId interest, CellRevision revision, GrantId grant)
-        const
+    revision_mint_available() const
+    {
+        return next_revision_ !=
+            std::numeric_limits<CellRevision>::max();
+    }
+
+    CellRevision
+    peek_revision() const
+    {
+        return next_revision_;
+    }
+
+    /// PREPARE: all allocation happens here, no state changes.
+    CellNode
+    prepare_cell(
+        InterestId interest,
+        InterestFetchId fetch,
+        InterestOperationId operation,
+        ProviderEpochId epoch,
+        CellRevision revision)
+    {
+        CellMap tmp;
+        tmp.emplace(
+            interest,
+            Cell{
+                .fetch = fetch,
+                .operation = operation,
+                .epoch = epoch,
+                .revision = revision});
+        return tmp.extract(interest);
+    }
+
+    /// COMMIT: allocation-free node insertion; cannot throw. Counter
+    /// advances only here.
+    void
+    commit_cell(CellNode&& node) noexcept
+    {
+        cells_.insert(std::move(node));
+        ++next_revision_;
+    }
+
+    Cell const*
+    find_cell(InterestId interest) const
     {
         auto it = cells_.find(interest);
-        if (it == cells_.end() || revision != it->second.revision)
+        return it == cells_.end() ? nullptr : &it->second;
+    }
+
+    bool
+    can_spend(InterestId interest, GrantId grant) const
+    {
+        auto it = cells_.find(interest);
+        if (it == cells_.end())
             return false;
         auto g = it->second.grants.find(grant);
         return g != it->second.grants.end() &&
@@ -301,17 +322,17 @@ private:
     }
 
     void
-    commit_spend(InterestId interest, GrantId grant)
+    commit_spend(InterestId interest, GrantId grant) noexcept
     {
-        cells_.at(interest).grants.at(grant) = GrantState::use_open;
+        cells_.find(interest)->second.grants.find(grant)->second =
+            GrantState::use_open;
     }
 
     bool
-    can_finish(InterestId interest, CellRevision revision, GrantId grant)
-        const
+    can_finish(InterestId interest, GrantId grant) const
     {
         auto it = cells_.find(interest);
-        if (it == cells_.end() || revision != it->second.revision)
+        if (it == cells_.end())
             return false;
         auto g = it->second.grants.find(grant);
         return g != it->second.grants.end() &&
@@ -319,9 +340,10 @@ private:
     }
 
     void
-    commit_finish(InterestId interest, GrantId grant)
+    commit_finish(InterestId interest, GrantId grant) noexcept
     {
-        cells_.at(interest).grants.at(grant) = GrantState::finished;
+        cells_.find(interest)->second.grants.find(grant)->second =
+            GrantState::finished;
     }
 
     strand_type strand_;
@@ -329,7 +351,38 @@ private:
     CellRevision next_revision_;
     GrantId next_grant_;
     //@@authority state=provider_lab.participant_cells owner=provider_lab
-    std::map<InterestId, Cell> cells_;
+    CellMap cells_;
+};
+
+/// Test-only cell creation for COMPONENT tests of this registry
+/// alone. Production cells exist only as half of the pair minted by
+/// the façade's atomic open_interest_with_cell. Explicitly not
+/// production authority.
+class ParticipantCellTestAccess
+{
+public:
+    struct Result
+    {
+        bool ok = false;
+        CellRevision revision = 0;
+    };
+
+    static Result
+    open(
+        ParticipantCellRegistry& reg,
+        InterestId interest,
+        InterestFetchId fetch,
+        InterestOperationId operation,
+        ProviderEpochId epoch)
+    {
+        if (!reg.on_owner_strand() || !reg.revision_mint_available() ||
+            reg.cells_.count(interest))
+            return {};
+        auto const revision = reg.peek_revision();
+        reg.commit_cell(reg.prepare_cell(
+            interest, fetch, operation, epoch, revision));
+        return {true, revision};
+    }
 };
 
 }  // namespace catl::provider_lab

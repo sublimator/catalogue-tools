@@ -22,11 +22,36 @@
 //    lease leaves a visible row — false-empty is never the policy;
 //  - destructors are passive. All state is owner-strand confined and
 //    off-strand mutation is refused, not raced.
+//
+// Round-4 composed rulings folded in:
+//  - operation/child minters FAIL CLOSED at their ceilings with typed
+//    exhaustion refusals (the wrap class, closed here too); zero stays
+//    reserved; test-only first-id ctor seams;
+//  - publication records a CLOSED terminal-consumer variant: a row is
+//    either store-acknowledged (raw ack_terminal) or interest-bound
+//    three-phase (publish_for_interest records the exact InterestId).
+//    Raw ack_terminal REFUSES interest-bound rows; consume_terminal_ack
+//    REFUSES non-interest rows and requires the exact retained
+//    InterestId. The old gate cannot accept the new variant, so the
+//    protocol is structural, not conventional;
+//  - consume_terminal_ack is exception-atomic: the witness node is
+//    PREPARED (all allocation) before the non-throwing commit section
+//    (node insert + child removal), with a test failpoint between.
+//    Scope is authenticated first; the witness dedup domain is
+//    consulted before the removal gate;
+//  - the witness home has a NAMED release: the aggregate façade's
+//    atomic retire_interest_terminal erases the interest row and this
+//    ledger's witness row in one commit (release_terminal_witness,
+//    façade-only). Bound: witness rows <= terminal-consumed interests
+//    not yet retired — a hard bound over live protocol state, not
+//    process lifetime.
 
 #include "coordinator-artifacts.h"
 #include "deterministic-scheduler.h"
 
 #include <cstdint>
+#include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <utility>
@@ -82,6 +107,7 @@ private:
 };
 
 class OperationLedger;
+class CoordinatorInterestSeams;
 
 struct RootTag
 {
@@ -110,8 +136,10 @@ public:
         wrong_work,         // destination matches, work does not — no-op
         unpublished,        // cell never flipped to published — no-op
         off_strand,         // refused: caller is not the owner
-        wrong_scope,    // artifact from another partition instance
-        wrong_binding,  // ack's operation does not own its child
+        wrong_scope,     // artifact from another partition instance
+        wrong_binding,   // ack's operation/interest does not own the row
+        interest_bound,  // raw gate refused: row needs the 3-phase path
+        not_interest_bound,  // consume refused: row is store-terminal
     };
 
     enum class Refusal : std::uint8_t {
@@ -122,11 +150,29 @@ public:
         cell_not_registered,
         already_flipped,
         cancelled_inert,  // pre-publication cancel: seal never_published
+        operation_id_exhausted,
+        child_id_exhausted,
     };
 
-    explicit OperationLedger(strand_type strand, PartitionScope scope)
-        : strand_(std::move(strand)), scope_(scope)
+    struct RootResult
     {
+        Refusal refusal{};
+        RootLease lease;
+    };
+
+    explicit OperationLedger(
+        strand_type strand,
+        PartitionScope scope,
+        OperationId first_minted_operation = 1,
+        ChildId first_minted_child = 1)
+        : strand_(std::move(strand))
+        , scope_(scope)
+        , next_operation_(
+              first_minted_operation == 0 ? 1 : first_minted_operation)
+        , next_child_(first_minted_child == 0 ? 1 : first_minted_child)
+    {
+        // Zero reserved for both mints; first-id parameters are
+        // test-only seams so ceiling controls avoid 2^64 warm-ups.
     }
 
     bool
@@ -135,21 +181,30 @@ public:
         return strand_.running_in_this_thread();
     }
 
-    /// T50-analog: mint one root operation row.
+    PartitionScope
+    scope() const
+    {
+        return scope_;
+    }
+
+    /// T50-analog: mint one root operation row. Fail-closed at the id
+    /// ceiling: typed refusal, nothing minted, counter unmoved.
     //@@authority transition=provider_lab.open_root owner=provider_lab commit=strand
-    std::optional<RootLease>
+    RootResult
     open_root()
     {
         if (!on_owner_strand())
-            return std::nullopt;
-        auto const id = ++next_operation_;
+            return {Refusal::off_strand, RootLease{}};
+        if (next_operation_ == std::numeric_limits<OperationId>::max())
+            return {Refusal::operation_id_exhausted, RootLease{}};
+        auto const id = next_operation_++;
         operations_.emplace(id, Operation{});
-        return RootLease(id);
+        return {Refusal::ok, RootLease(id)};
     }
 
     /// Register one child under a live, non-closing root. The returned
-    /// lease's ChildId is never reused, and registration linearizes
-    /// before any publication of work.
+    /// lease's ChildId is never reused (fail-closed at the ceiling),
+    /// and registration linearizes before any publication of work.
     //@@authority transition=provider_lab.register_child owner=provider_lab commit=strand
     std::pair<Refusal, ChildLease>
     register_child(RootLease const& root)
@@ -162,32 +217,37 @@ public:
             return {Refusal::unknown_root, ChildLease{}};
         if (it->second.closing)
             return {Refusal::root_closing, ChildLease{}};
-        auto const child_id = ++next_child_;
+        if (next_child_ == std::numeric_limits<ChildId>::max())
+            return {Refusal::child_id_exhausted, ChildLease{}};
+        auto const child_id = next_child_++;
         it->second.children.emplace(child_id, Child{});
         child_index_.emplace(child_id, root.id());
         return {Refusal::ok, ChildLease(child_id)};
     }
 
-    /// Level-triggered flip: registered_not_published -> published.
+    /// Level-triggered flip to the STORE-terminal variant: raw
+    /// ack_terminal is this row's remover; consume_terminal_ack will
+    /// refuse it.
     //@@authority transition=provider_lab.publish_child owner=provider_lab commit=strand
     Refusal
     publish(ChildLease const& child, DestinationId dest, WorkId work)
     {
-        if (!on_owner_strand())
-            return Refusal::off_strand;
-        auto* c = find_child(child);
-        if (!c)
-            return Refusal::cell_not_registered;
-        if (c->state != PublicationState::registered_not_published)
-            return Refusal::already_flipped;
-        if (c->inert)
-            return Refusal::cancelled_inert;  // work must never publish;
-                                              // the never_published path
-                                              // (mark + sealed ack) remains
-        c->state = PublicationState::published;
-        c->destination = dest;
-        c->work = work;
-        return Refusal::ok;
+        return publish_impl(child, dest, work, std::nullopt);
+    }
+
+    /// Level-triggered flip to the INTEREST three-phase variant: the
+    /// row records the exact InterestId it was published for. Raw
+    /// ack_terminal refuses this row; only consume_terminal_ack with
+    /// the matching interest's ack removes it.
+    //@@authority transition=provider_lab.publish_child_for_interest owner=provider_lab commit=strand
+    Refusal
+    publish_for_interest(
+        ChildLease const& child,
+        DestinationId dest,
+        WorkId work,
+        InterestId interest)
+    {
+        return publish_impl(child, dest, work, interest);
     }
 
     /// Enqueue failure: registered_not_published -> never_published,
@@ -225,9 +285,11 @@ public:
         return AckOutcome::removed;
     }
 
-    /// The exactly-once terminality gate. Only the published
-    /// destination's exact (DestinationId, WorkId) acknowledgement
-    /// removes the child; everything else is a typed no-op.
+    /// The exactly-once terminality gate for STORE-terminal rows.
+    /// Only the published destination's exact (DestinationId, WorkId)
+    /// acknowledgement removes the child; an interest-bound row is
+    /// REFUSED here — its remover is the three-phase consume below,
+    /// and this refusal is what makes the protocol structural.
     //@@authority transition=provider_lab.ack_terminal owner=provider_lab commit=strand
     AckOutcome
     ack_terminal(ChildId child_id, DestinationId dest, WorkId work)
@@ -241,6 +303,8 @@ public:
         auto& c = child_it->second;
         if (c.state != PublicationState::published)
             return AckOutcome::unpublished;
+        if (c.interest_binding.has_value())
+            return AckOutcome::interest_bound;
         if (c.destination != dest)
             return AckOutcome::wrong_destination;
         if (c.work != work)
@@ -258,18 +322,16 @@ public:
     };
 
     /// Consume an interest's terminal acknowledgement: phase three of
-    /// the terminal handoff. Scope is authenticated FIRST (an ack
-    /// from another partition instance refuses before any read); the
-    /// retained-witness dedup domain is consulted BEFORE the removal
-    /// gate (an exact replay re-derives the identical witness instead
-    /// of falling into duplicate_or_late); then the existing
-    /// exactly-once gate runs, keyed by the ack's original child and
-    /// its published (destination, work). The win removes the child
-    /// and mints + RETAINS the InterestTerminalConsumed witness —
-    /// the only artifact that can retire the terminal-ready interest.
-    /// Witness rows are retained here (bounded by consumed interests);
-    /// their reclamation composes with root-close reclamation later
-    /// and is stated as an honest gap until then.
+    /// the terminal handoff, for INTEREST-BOUND rows only. Order:
+    /// strand guard; SCOPE authenticated before any lookup; the
+    /// retained-witness dedup domain before the removal gate; then
+    /// the exactly-once gate, which additionally requires the row's
+    /// retained InterestId to equal the ack's — an ack from a
+    /// different interest in the same scope cannot steal the child.
+    /// The win is exception-atomic: the witness node is PREPARED
+    /// (allocation) before the non-throwing commit (node insert +
+    /// child removal); `test_pre_commit_hook` is a test-only
+    /// failpoint proving pre-state survives a throw at the boundary.
     //@@authority transition=provider_lab.ledger_consume_terminal_ack owner=provider_lab commit=strand
     TerminalConsumeResult
     consume_terminal_ack(
@@ -298,21 +360,34 @@ public:
         auto& c = child_it->second;
         if (c.state != PublicationState::published)
             return {AckOutcome::unpublished, std::nullopt};
+        if (!c.interest_binding.has_value())
+            return {AckOutcome::not_interest_bound, std::nullopt};
+        if (*c.interest_binding != ack.interest())
+            return {AckOutcome::wrong_binding, std::nullopt};
         if (c.destination != dest)
             return {AckOutcome::wrong_destination, std::nullopt};
         if (c.work != work)
             return {AckOutcome::wrong_work, std::nullopt};
-        remove_child(op_it, child_it);
-        auto const [w_it, inserted] = witnesses_.emplace(
+
+        // PREPARE (throwing): build the witness node off to the side.
+        WitnessMap tmp;
+        tmp.emplace(
             ack.interest(),
             InterestTerminalConsumed{
                 ack.scope(), ack.interest(), ack.operation(),
                 ack.child()});
+        auto node = tmp.extract(ack.interest());
+        if (test_pre_commit_hook)
+            test_pre_commit_hook();
+        // COMMIT (non-throwing): node insert + erasures.
+        auto const w_it = witnesses_.insert(std::move(node)).position;
+        remove_child(op_it, child_it);
         return {AckOutcome::removed, w_it->second};
     }
 
     /// Replay home for the consumption witness: survives loss of the
-    /// returned copy and of the ack itself.
+    /// returned copy and of the ack itself. Released only by the
+    /// façade's atomic retire_interest_terminal.
     std::optional<InterestTerminalConsumed>
     replay_terminal_consumed(InterestId interest) const
     {
@@ -326,7 +401,7 @@ public:
 
     /// Cancellation/deadline/shutdown may request terminality: the
     /// child's destination capability becomes inert, but the child is
-    /// NOT removed — only the destination's matching ack removes it.
+    /// NOT removed — only the matching terminal path removes it.
     //@@authority transition=provider_lab.request_cancel owner=provider_lab commit=strand
     Refusal
     request_cancel(ChildId child_id)
@@ -392,12 +467,17 @@ public:
         return located && located->second->second.inert;
     }
 
+    /// TEST-ONLY failpoint: called between prepare and commit inside
+    /// consume_terminal_ack. Empty in production shapes.
+    std::function<void()> test_pre_commit_hook;
+
 private:
     struct Child
     {
         PublicationState state = PublicationState::registered_not_published;
         DestinationId destination = 0;
         WorkId work = 0;
+        std::optional<InterestId> interest_binding;  // closed variant
         bool inert = false;
     };
     struct Operation
@@ -408,6 +488,42 @@ private:
 
     using OpIter = std::map<OperationId, Operation>::iterator;
     using ChildIter = std::map<ChildId, Child>::iterator;
+    using WitnessMap = std::map<InterestId, InterestTerminalConsumed>;
+
+    // Witness release is owned by the aggregate façade's atomic
+    // retire_interest_terminal — never a public verb.
+    friend class CoordinatorInterestSeams;
+
+    void
+    release_terminal_witness(InterestId interest) noexcept
+    {
+        witnesses_.erase(interest);
+    }
+
+    Refusal
+    publish_impl(
+        ChildLease const& child,
+        DestinationId dest,
+        WorkId work,
+        std::optional<InterestId> interest)
+    {
+        if (!on_owner_strand())
+            return Refusal::off_strand;
+        auto* c = find_child(child);
+        if (!c)
+            return Refusal::cell_not_registered;
+        if (c->state != PublicationState::registered_not_published)
+            return Refusal::already_flipped;
+        if (c->inert)
+            return Refusal::cancelled_inert;  // work must never publish;
+                                              // the never_published path
+                                              // (mark + sealed ack) remains
+        c->state = PublicationState::published;
+        c->destination = dest;
+        c->work = work;
+        c->interest_binding = interest;
+        return Refusal::ok;
+    }
 
     Child*
     find_child(ChildLease const& lease)
@@ -451,11 +567,11 @@ private:
     //@@authority state=provider_lab.operation_children owner=provider_lab
     strand_type strand_;
     PartitionScope scope_;
-    OperationId next_operation_ = 0;
-    ChildId next_child_ = 0;
+    OperationId next_operation_;
+    ChildId next_child_;
     std::map<OperationId, Operation> operations_;
     std::map<ChildId, OperationId> child_index_;
-    std::map<InterestId, InterestTerminalConsumed> witnesses_;
+    WitnessMap witnesses_;
 };
 
 }  // namespace catl::provider_lab
