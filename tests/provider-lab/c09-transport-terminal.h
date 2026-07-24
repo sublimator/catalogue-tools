@@ -109,6 +109,7 @@ enum class C09TerminalOutcome : std::uint8_t {
 class C09PeerClientTerminalOutbox;
 class C09PeerSetTerminalInbox;
 class C09SenderTestSeed;
+class C09TerminalCommandTestMint;
 class C09TerminalReceiptTestMint;
 
 /// Sender-owned projection of one selected terminal variant. Construction is
@@ -138,6 +139,7 @@ public:
 
 private:
     friend class C09PeerClientTerminalOutbox;
+    friend class C09TerminalCommandTestMint;
     C09TerminalCommand(C09CommandIdentity identity, C09TerminalOutcome outcome)
         : identity_(std::move(identity)), outcome_(outcome)
     {

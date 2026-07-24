@@ -64,3 +64,8 @@ add_executable(c09-transport-terminal-gtest c09-transport-terminal-gtest.cpp)
 target_link_libraries(c09-transport-terminal-gtest
                       PRIVATE Boost::boost GTest::gtest_main)
 gtest_discover_tests(c09-transport-terminal-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(c09-terminal-inbox-gtest c09-terminal-inbox-gtest.cpp)
+target_link_libraries(c09-terminal-inbox-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(c09-terminal-inbox-gtest DISCOVERY_TIMEOUT 30)
