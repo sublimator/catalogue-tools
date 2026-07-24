@@ -30,7 +30,7 @@
 //    retained homes, and in one non-throwing commit erases the
 //    interest row AND releases the ledger's witness replay home.
 //    That is the named release protocol for the witness map: rows
-//    are bounded by terminal-consumed-but-not-yet-retired interests;
+//    are bounded by child-terminal interests awaiting retirement;
 //  - test failpoints (test_hooks) sit between prepare and commit in
 //    the two allocating transitions, proving pre-state survival.
 
@@ -276,7 +276,7 @@ public:
     /// interest row.
     //@@authority transition=provider_lab.seam_retire_interest_terminal owner=provider_lab commit=strand
     Refusal
-    retire_interest_terminal(InterestTerminalConsumed const& witness)
+    retire_interest_terminal(InterestChildTerminalWitness const& witness)
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
@@ -292,7 +292,7 @@ public:
             witness.child() != row->terminal_outbox->child())
             return Refusal::wrong_witness;
         auto ledger_home =
-            ledger_.replay_terminal_consumed(witness.interest());
+            ledger_.replay_child_terminal_witness(witness.interest());
         if (!ledger_home.has_value() || !(*ledger_home == witness))
             return Refusal::wrong_witness;
         // The participant homes, derived from RETAINED state only.
@@ -313,7 +313,7 @@ public:
         // COMMIT (non-throwing): all three erasures, one owner.
         cells_.erase_cell(witness.interest());
         interests_.erase_interest(witness.interest());
-        ledger_.release_terminal_witness(witness.interest());
+        ledger_.release_child_terminal_witness(witness.interest());
         return Refusal::ok;
     }
 

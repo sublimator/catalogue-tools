@@ -46,7 +46,7 @@ class ParticipantConsumedTestMint;
 class UnsubscribeReceiptTestMint;
 class RevokeCommandTestMint;
 class TerminalAckTestMint;
-class TerminalConsumedTestMint;
+class ChildTerminalWitnessTestMint;
 
 /// Instance identity: which provider/partition a registry belongs to.
 /// A configuration VALUE, not authority — brace-constructible.
@@ -369,7 +369,7 @@ static_assert(
 /// AND the minting registry's partition scope. Minted once at terminal
 /// readiness, retained in the interest's outbox, replayed identically.
 /// Phase two of three: the operation ledger consumes it and mints the
-/// distinct InterestTerminalConsumed; the ack itself can NOT retire
+/// distinct InterestChildTerminalWitness; the ack itself can NOT retire
 /// the interest.
 class InterestTerminalAck
 {
@@ -436,27 +436,34 @@ static_assert(
     "raw-field construction would make every caller a second minter");
 
 /// How an interest's original child reached terminality. Two distinct
-/// histories, never laundered into one: the published child's exact
-/// terminal acknowledgement was consumed, or the child was sealed
-/// never-published (no acknowledgement ever existed). Both prove the
-/// child can produce no further work; APIs must never report the
-/// second as the first.
+/// histories, never laundered into one:
+///  - terminal_ack_consumed: the published child's exact terminal
+///    acknowledgement was consumed by the ledger;
+///  - never_published: the ledger established child terminality via
+///    the sealed enqueue-failure path WITHOUT consuming the interest
+///    terminal acknowledgement. This does NOT mean such an
+///    acknowledgement can never exist — the interest's later
+///    terminal_join legitimately mints one into its retained outbox,
+///    and aggregate retirement reconciles it there.
+/// Both prove the child can produce no further work; APIs must never
+/// report the second history as acknowledgement consumption.
 enum class TerminalDisposition : std::uint8_t {
     terminal_ack_consumed,
     never_published,
 };
 
-/// Phase three of the terminal handoff: the OPERATION LEDGER's witness
-/// that the interest's original child is terminal, carrying the
-/// explicit DISPOSITION by which that became true. Sole production
-/// minter: OperationLedger. Only THIS may remove the terminal-ready
-/// interest.
-class InterestTerminalConsumed
+/// The OPERATION LEDGER's witness that the interest's original child
+/// is TERMINAL, carrying the explicit disposition by which that
+/// became true. (Named for the fact it proves — child terminality —
+/// not for one variant's mechanism.) Sole production minter:
+/// OperationLedger. Only THIS may remove the terminal-ready interest.
+class InterestChildTerminalWitness
 {
 public:
-    InterestTerminalConsumed(InterestTerminalConsumed const&) = default;
-    InterestTerminalConsumed&
-    operator=(InterestTerminalConsumed const&) = default;
+    InterestChildTerminalWitness(InterestChildTerminalWitness const&) =
+        default;
+    InterestChildTerminalWitness&
+    operator=(InterestChildTerminalWitness const&) = default;
 
     PartitionScope
     scope() const
@@ -485,12 +492,12 @@ public:
     }
 
     bool
-    operator==(InterestTerminalConsumed const&) const = default;
+    operator==(InterestChildTerminalWitness const&) const = default;
 
 private:
     friend class OperationLedger;           // sole production minter
-    friend class TerminalConsumedTestMint;  // explicit test-only seam
-    InterestTerminalConsumed(
+    friend class ChildTerminalWitnessTestMint;  // explicit test-only seam
+    InterestChildTerminalWitness(
         PartitionScope scope,
         InterestId interest,
         InterestOperationId operation,
@@ -512,11 +519,11 @@ private:
 };
 
 static_assert(
-    !std::is_default_constructible_v<InterestTerminalConsumed>,
+    !std::is_default_constructible_v<InterestChildTerminalWitness>,
     "a consumption witness must be minted, never defaulted");
 static_assert(
     !std::is_constructible_v<
-        InterestTerminalConsumed,
+        InterestChildTerminalWitness,
         PartitionScope,
         InterestId,
         InterestOperationId,
@@ -603,10 +610,10 @@ public:
     }
 };
 
-class TerminalConsumedTestMint
+class ChildTerminalWitnessTestMint
 {
 public:
-    static InterestTerminalConsumed
+    static InterestChildTerminalWitness
     mint(
         PartitionScope scope,
         InterestId interest,
@@ -615,7 +622,7 @@ public:
         TerminalDisposition disposition =
             TerminalDisposition::terminal_ack_consumed)
     {
-        return InterestTerminalConsumed{
+        return InterestChildTerminalWitness{
             scope, interest, operation, child, disposition};
     }
 };

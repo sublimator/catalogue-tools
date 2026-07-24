@@ -417,7 +417,7 @@ TEST_F(LedgerFixture, ConsumeTerminalAckMintsAndReplaysTheWitness)
         auto again = ledger.consume_terminal_ack(ack, 9, 4);
         EXPECT_EQ(again.outcome, OperationLedger::AckOutcome::removed);
         EXPECT_TRUE(*again.witness == *first.witness);
-        auto from_home = ledger.replay_terminal_consumed(42);
+        auto from_home = ledger.replay_child_terminal_witness(42);
         ASSERT_TRUE(from_home.has_value());
         EXPECT_TRUE(*from_home == *first.witness);
 
@@ -491,7 +491,7 @@ TEST_F(LedgerFixture, TerminalVariantIsClosedInBothOrders)
                 ledger.ack_terminal(child.id(), 9, 4),
                 OperationLedger::AckOutcome::duplicate_or_late);
             EXPECT_TRUE(
-                ledger.replay_terminal_consumed(42).has_value());
+                ledger.replay_child_terminal_witness(42).has_value());
         }
 
         // Store row: consume refuses, the raw gate remains the owner.
@@ -542,7 +542,7 @@ TEST_F(LedgerFixture, ConsumeCommitIsExceptionAtomicAtTheFailpoint)
                      std::runtime_error);
         EXPECT_EQ(ledger.child_count(root.id()), 1u)
             << "the terminal obligation survived the failure";
-        EXPECT_FALSE(ledger.replay_terminal_consumed(42).has_value())
+        EXPECT_FALSE(ledger.replay_child_terminal_witness(42).has_value())
             << "no half-minted witness is observable";
 
         // Disarm: the identical consume now wins exactly once.
@@ -690,6 +690,16 @@ TEST(LedgerEdge, ForeignLeasesRefuseBeforeAnyLookup)
             << "every foreign refusal mutated nothing";
         EXPECT_EQ(a.publish(a_child, 7, 42), OperationLedger::Refusal::ok)
             << "A's own authority is intact";
+
+        // Counters proven untouched by MINTING the next ids: they are
+        // exactly the successors of A's own prior mints.
+        auto next_root = open_ok(a);
+        EXPECT_EQ(next_root.id(), a_root.id() + 1)
+            << "no foreign refusal advanced the operation counter";
+        auto [nr, next_child] = a.register_child(next_root);
+        ASSERT_EQ(nr, OperationLedger::Refusal::ok);
+        EXPECT_EQ(next_child.id(), a_child.id() + 1)
+            << "no foreign refusal advanced the child counter";
     });
 
     // Recreated incarnation, same scope: old leases are foreign to

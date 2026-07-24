@@ -331,7 +331,7 @@ TEST_F(SeamsFixture, BadSequence2_CrossPartitionArtifactsRefuse)
             AO::wrong_scope);
         EXPECT_EQ(
             seams.retire_interest_terminal(
-                TerminalConsumedTestMint::mint(scope_b, 1, 100, 7)),
+                ChildTerminalWitnessTestMint::mint(scope_b, 1, 100, 7)),
             SR::wrong_scope)
             << "scope-first at the seam too: no phase leak";
 
@@ -382,7 +382,7 @@ TEST_F(SeamsFixture, BadSequence3_ProducerHomesSurviveUntilConsumption)
         EXPECT_TRUE(
             interests.interest_present(t.interest).value_or(false));
         EXPECT_EQ(
-            seams.retire_interest_terminal(TerminalConsumedTestMint::mint(
+            seams.retire_interest_terminal(ChildTerminalWitnessTestMint::mint(
                 kScope, t.interest, join.ack->operation(),
                 join.ack->child())),
             SR::wrong_witness)
@@ -545,7 +545,7 @@ TEST_F(SeamsFixture, RoundTripRetirementReleasesEveryHomeOrNone)
             interests.interest_present(t.interest).value_or(false));
         EXPECT_TRUE(cells.cell_present(t.interest).value_or(false));
         EXPECT_TRUE(
-            ledger.replay_terminal_consumed(t.interest).has_value())
+            ledger.replay_child_terminal_witness(t.interest).has_value())
             << "all three or none: the failed retirement released "
                "nothing";
 
@@ -559,7 +559,7 @@ TEST_F(SeamsFixture, RoundTripRetirementReleasesEveryHomeOrNone)
             << "the participant cell is released by the aggregate, "
                "never by a lucky caller copy";
         EXPECT_FALSE(
-            ledger.replay_terminal_consumed(t.interest).has_value())
+            ledger.replay_child_terminal_witness(t.interest).has_value())
             << "the ledger witness home is released in the same commit";
         EXPECT_EQ(seams.retire_interest_terminal(*consumed.witness),
                   SR::unknown_interest)
@@ -580,14 +580,15 @@ TEST_F(SeamsFixture, NeverPublishedReservedChildStillYieldsTheWitness)
         ASSERT_EQ(ledger.mark_never_published(t.child), LR::ok);
         EXPECT_EQ(
             ledger.ack_never_published(t.child.id()), AO::removed);
-        auto witness = ledger.replay_terminal_consumed(t.interest);
+        auto witness = ledger.replay_child_terminal_witness(t.interest);
         ASSERT_TRUE(witness.has_value())
             << "the never-published removal minted a retained witness";
         EXPECT_EQ(witness->child(), t.child.id());
         EXPECT_EQ(witness->disposition(),
                   TerminalDisposition::never_published)
-            << "the witness records what HAPPENED, not a stronger "
-               "event: no acknowledgement ever existed";
+            << "the witness records what HAPPENED: terminality "
+               "without consuming an acknowledgement (the interest's "
+               "later join may still mint one into its outbox)";
 
         // Presenting a terminal ack for this child must NOT report an
         // acknowledgement as consumed — none was ever produced.
@@ -599,7 +600,7 @@ TEST_F(SeamsFixture, NeverPublishedReservedChildStillYieldsTheWitness)
             << "two terminal histories are not laundered into one";
         EXPECT_FALSE(probe.witness.has_value());
         EXPECT_EQ(
-            ledger.replay_terminal_consumed(t.interest)->disposition(),
+            ledger.replay_child_terminal_witness(t.interest)->disposition(),
             TerminalDisposition::never_published)
             << "replay preserves the honest disposition";
 
@@ -621,7 +622,7 @@ TEST_F(SeamsFixture, NeverPublishedReservedChildStillYieldsTheWitness)
             interests.interest_present(t.interest).value_or(true));
         EXPECT_FALSE(cells.cell_present(t.interest).value_or(true));
         EXPECT_FALSE(
-            ledger.replay_terminal_consumed(t.interest).has_value());
+            ledger.replay_child_terminal_witness(t.interest).has_value());
     });
 }
 
@@ -641,7 +642,7 @@ TEST_F(SeamsFixture, OffStrandSeamCommitsAreRefused)
         EXPECT_EQ(
             seams.publish_for_interest(t.child, 9, 4), LR::off_strand);
         EXPECT_EQ(
-            seams.retire_interest_terminal(TerminalConsumedTestMint::mint(
+            seams.retire_interest_terminal(ChildTerminalWitnessTestMint::mint(
                 kScope, t.interest, 100, 7)),
             SR::off_strand);
         checked = true;

@@ -41,10 +41,10 @@
 //    consulted before the removal gate;
 //  - the witness home has a NAMED release: the aggregate façade's
 //    atomic retire_interest_terminal erases the interest row and this
-//    ledger's witness row in one commit (release_terminal_witness,
-//    façade-only). Bound: witness rows <= terminal-consumed interests
-//    not yet retired — a hard bound over live protocol state, not
-//    process lifetime.
+//    ledger's witness row in one commit (release_child_terminal_witness,
+//    façade-only). Bound: witness rows <= interests whose child is
+//    terminal but which await aggregate retirement — a hard bound
+//    over live protocol state, not process lifetime.
 
 #include "coordinator-artifacts.h"
 #include "deterministic-scheduler.h"
@@ -324,7 +324,7 @@ public:
     /// Exactly-once; a second call is duplicate_or_late. An
     /// INTEREST-RESERVED child that fails enqueue is still that
     /// interest's original child, so this path mints and retains the
-    /// same InterestTerminalConsumed witness the published path would
+    /// same InterestChildTerminalWitness witness the published path would
     /// — otherwise the never-published gate would be a second bypass
     /// that destroys the terminal obligation with no witness, and the
     /// interest could never retire. Witness node prepared before the
@@ -345,12 +345,16 @@ public:
         if (c.interest_binding.has_value())
         {
             // PREPARE (throwing): the witness node — with the HONEST
-            // disposition: no terminal acknowledgement existed on
-            // this path, and the witness must never claim one did.
+            // disposition: terminality is established here WITHOUT
+            // consuming an interest terminal acknowledgement. (One
+            // may legitimately exist later — the interest's
+            // terminal_join mints into its retained outbox and
+            // aggregate retirement reconciles it there; this witness
+            // simply never claims to have consumed it.)
             WitnessMap tmp;
             tmp.emplace(
                 *c.interest_binding,
-                InterestTerminalConsumed{
+                InterestChildTerminalWitness{
                     scope_, *c.interest_binding, op_it->first, child_id,
                     TerminalDisposition::never_published});
             auto node = tmp.extract(*c.interest_binding);
@@ -394,7 +398,7 @@ public:
         AckOutcome outcome{};
         // Fresh on the exactly-once win; the IDENTICAL retained
         // witness when the same ack is re-presented after the win.
-        std::optional<InterestTerminalConsumed> witness;
+        std::optional<InterestChildTerminalWitness> witness;
     };
 
     /// Consume an interest's terminal acknowledgement: phase three of
@@ -425,8 +429,9 @@ public:
             if (w->second.operation() != ack.operation() ||
                 w->second.child() != ack.child())
                 return {AckOutcome::wrong_binding, std::nullopt};
-            // A never_published disposition means NO acknowledgement
-            // ever existed: this verb must not report one as consumed.
+            // never_published means terminality was established
+            // WITHOUT consuming an acknowledgement: this verb must
+            // not report one as consumed, whatever exists elsewhere.
             if (w->second.disposition() ==
                 TerminalDisposition::never_published)
                 return {AckOutcome::unpublished, std::nullopt};
@@ -454,7 +459,7 @@ public:
         WitnessMap tmp;
         tmp.emplace(
             ack.interest(),
-            InterestTerminalConsumed{
+            InterestChildTerminalWitness{
                 ack.scope(), ack.interest(), ack.operation(),
                 ack.child(),
                 TerminalDisposition::terminal_ack_consumed});
@@ -470,8 +475,8 @@ public:
     /// Replay home for the consumption witness: survives loss of the
     /// returned copy and of the ack itself. Released only by the
     /// façade's atomic retire_interest_terminal.
-    std::optional<InterestTerminalConsumed>
-    replay_terminal_consumed(InterestId interest) const
+    std::optional<InterestChildTerminalWitness>
+    replay_child_terminal_witness(InterestId interest) const
     {
         if (!on_owner_strand())
             return std::nullopt;
@@ -578,7 +583,7 @@ private:
 
     using OpIter = std::map<OperationId, Operation>::iterator;
     using ChildIter = std::map<ChildId, Child>::iterator;
-    using WitnessMap = std::map<InterestId, InterestTerminalConsumed>;
+    using WitnessMap = std::map<InterestId, InterestChildTerminalWitness>;
 
     // Witness release, child reservation, and interest publication are
     // owned by the aggregate façade — never public verbs. Component
@@ -588,7 +593,7 @@ private:
     friend class OperationLedgerTestAccess;
 
     void
-    release_terminal_witness(InterestId interest) noexcept
+    release_child_terminal_witness(InterestId interest) noexcept
     {
         witnesses_.erase(interest);
     }
