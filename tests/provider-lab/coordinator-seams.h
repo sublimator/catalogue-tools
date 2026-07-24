@@ -158,7 +158,7 @@ public:
     /// typed BEFORE any preparation; preparation does all allocation;
     /// the commit is node inserts plus a nothrow reservation flip. A
     /// failpoint throw leaves every home and counter untouched.
-    //@@authority transition=provider_lab.seam_open_interest_with_cell owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.seam_open_interest_with_cell owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     OpenResult
     open_interest_with_cell(
         ChildLease const& child,
@@ -206,7 +206,7 @@ public:
     /// caller-supplied identity exists on this path, and the store
     /// verb refuses reserved children, so neither variant can be
     /// selected by caller convention.
-    //@@authority transition=provider_lab.seam_publish_for_interest owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.seam_publish_for_interest owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     OperationLedger::Refusal
     publish_for_interest(
         ChildLease const& child, DestinationId dest, WorkId work)
@@ -220,7 +220,7 @@ public:
     /// epoch/revision and the pair's fetch/operation — then each home,
     /// then prepare-debt / commit-both. A refusal or failpoint throw
     /// leaves the grant unspent and the interest debt-free.
-    //@@authority transition=provider_lab.seam_sponsor_use owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.seam_sponsor_use owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     Refusal
     sponsor_use(InterestId interest, GrantId grant)
     {
@@ -245,7 +245,7 @@ public:
     /// Atomic finish: grant use_open -> finished AND the exact
     /// interest debt closed. The commit section is erase + enum flip:
     /// structurally non-throwing, no failpoint needed.
-    //@@authority transition=provider_lab.seam_finish_use owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.seam_finish_use owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     Refusal
     finish_use(InterestId interest, GrantId grant)
     {
@@ -274,7 +274,7 @@ public:
     /// behind without a replay path, and no caller-held copy is ever
     /// load-bearing. Exactly-once: the second attempt finds no
     /// interest row.
-    //@@authority transition=provider_lab.seam_retire_interest_terminal owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.seam_retire_interest_terminal owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     Refusal
     retire_interest_terminal(InterestChildTerminalWitness const& witness)
     {

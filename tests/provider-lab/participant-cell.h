@@ -106,7 +106,7 @@ public:
     /// the revision gate dominates every other read. Consistent minter
     /// rule: the node is prepared before the allocation-free commit,
     /// and the counter advances only after the insert.
-    //@@authority transition=provider_lab.participant_issue_grant owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.participant_issue_grant owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     GrantResult
     issue_grant(InterestId interest, CellRevision revision)
     {
@@ -142,7 +142,7 @@ public:
     /// spare open uses, and mint + RETAIN the bound receipt.
     /// Identical replay on the identical command; a different command
     /// against the revoked cell is wrong_binding, never a second mint.
-    //@@authority transition=provider_lab.participant_revoke_cell owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.participant_revoke_cell owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     RevokeResult
     revoke_cell(RevokeCommand const& command)
     {
@@ -382,7 +382,7 @@ private:
     PartitionScope scope_;
     CellRevision next_revision_;
     GrantId next_grant_;
-    //@@authority state=provider_lab.participant_cells owner=provider_lab
+    //@@authority state=provider_lab.participant_cells owner=provider_lab lifecycle=coordinator_3c_3d
     CellMap cells_;
 };
 

@@ -303,7 +303,7 @@ public:
 
     /// Enqueue failure: registered_not_published -> never_published,
     /// permitting exactly one sealed never-published acknowledgement.
-    //@@authority transition=provider_lab.mark_never_published owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.mark_never_published owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     Refusal
     mark_never_published(ChildLease const& child)
     {
@@ -329,7 +329,7 @@ public:
     /// that destroys the terminal obligation with no witness, and the
     /// interest could never retire. Witness node prepared before the
     /// non-throwing removal.
-    //@@authority transition=provider_lab.ack_never_published owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.ack_never_published owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     AckOutcome
     ack_never_published(ChildId child_id)
     {
@@ -412,7 +412,7 @@ public:
     /// (allocation) before the non-throwing commit (node insert +
     /// child removal); `test_pre_commit_hook` is a test-only
     /// failpoint proving pre-state survives a throw at the boundary.
-    //@@authority transition=provider_lab.ledger_consume_terminal_ack owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.ledger_consume_terminal_ack owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     TerminalConsumeResult
     consume_terminal_ack(
         InterestTerminalAck const& ack,
@@ -710,7 +710,7 @@ private:
             operations_.erase(op_it);
     }
 
-    //@@authority state=provider_lab.operation_children owner=provider_lab
+    //@@authority state=provider_lab.operation_children owner=provider_lab lifecycle=coordinator_3c_3d
     strand_type strand_;
     PartitionScope scope_;
     // The incarnation token: an opaque control block whose address is

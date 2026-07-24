@@ -118,7 +118,7 @@ public:
     /// (interest-local debt registration by the interest owner). A
     /// duplicate DeliveryId is typed already_registered. NOTE: debt
     /// CLOSURE has no composed owner yet — see DeliveryAckTestSeam.
-    //@@authority transition=provider_lab.interest_add_delivery owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.interest_add_delivery owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     Refusal
     add_delivery_obligation(InterestId id, DeliveryId delivery)
     {
@@ -145,7 +145,7 @@ public:
     /// cancellation subscription: no unsubscribe command or outbox
     /// exists here. The row is unsubscribe-pending until the
     /// subscription owner is composed.
-    //@@authority transition=provider_lab.interest_begin_detach owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.interest_begin_detach owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     DetachResult
     begin_detach(InterestId id)
     {
@@ -188,7 +188,7 @@ public:
     /// wrong-revision receipt is wrong_binding both before and after
     /// exact consumption. Exact replay returns already_acked with the
     /// IDENTICAL retained witness.
-    //@@authority transition=provider_lab.interest_consume_revoke_receipt owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.interest_consume_revoke_receipt owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     ConsumeRevokeResult
     consume_revoke_receipt(ParticipantRevokedReceipt const& receipt)
     {
@@ -242,7 +242,7 @@ public:
     /// FIRST, then lookup, then binding; binding dominates the
     /// done-flag. The MINTER is not composed yet (test-only seam);
     /// this verb owns consumption alone.
-    //@@authority transition=provider_lab.interest_consume_unsubscribe_receipt owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.interest_consume_unsubscribe_receipt owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     Refusal
     consume_unsubscribe_receipt(UnsubscribeReceipt const& receipt)
     {
@@ -271,7 +271,7 @@ public:
     /// removal happens only through the façade's atomic
     /// retire_interest_terminal, which consumes the ledger-minted
     /// witness and releases the ledger's replay home in one commit.
-    //@@authority transition=provider_lab.interest_terminal_join owner=provider_lab commit=strand
+    //@@authority transition=provider_lab.interest_terminal_join owner=provider_lab commit=strand lifecycle=coordinator_3c_3d
     JoinResult
     terminal_join(InterestId id)
     {
@@ -488,7 +488,7 @@ private:
     PartitionScope scope_;
     InterestId next_interest_;
     RevokeCommandId next_revoke_command_;
-    //@@authority state=provider_lab.interest_registry owner=provider_lab
+    //@@authority state=provider_lab.interest_registry owner=provider_lab lifecycle=coordinator_3c_3d
     InterestMap interests_;
 };
 
