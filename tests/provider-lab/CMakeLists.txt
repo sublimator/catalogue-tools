@@ -54,3 +54,8 @@ add_executable(coordinator-seams-gtest coordinator-seams-gtest.cpp)
 target_link_libraries(coordinator-seams-gtest
                       PRIVATE Boost::boost GTest::gtest_main)
 gtest_discover_tests(coordinator-seams-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(c02-close-gtest c02-close-gtest.cpp)
+target_link_libraries(c02-close-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(c02-close-gtest DISCOVERY_TIMEOUT 30)

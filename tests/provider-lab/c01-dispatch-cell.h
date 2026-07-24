@@ -1,8 +1,40 @@
 #pragma once
 
-// Coordinator increment 3b, round 3: the closed C01 receiver dispatch
-// cell with full destination authentication. TEST-ONLY: production
-// construction must never reference this.
+// Coordinator increments 3b + 3e: the closed C01 receiver dispatch
+// cell with full destination authentication, and the C02 generation
+// close authority. TEST-ONLY: production construction must never
+// reference this.
+//
+// Increment 3e (C02 close), per the accepted design:
+//  - the close command is sole-minted (its production minter — the
+//    sender's channel owner — is not composed; tests mint via the
+//    explicit seam) and carries the COMPLETE destination plus its
+//    close identity; destination is authenticated before any read;
+//  - closes are STRICT CONTIGUOUS SUCCESSORS: the sole production
+//    mover of the stale high-water calls the pure
+//    check_close_successor, so the mark's ordering authority is
+//    receipt-gated succession, proven not assumed (R6). Succession is
+//    ordering, not permission: the authority is this cell's serialized
+//    close slot plus the bound command, never the arithmetic alone;
+//  - the close consumes the SERIALIZED SLOT (begin occupies, complete
+//    applies-and-releases; a second begin refuses while one is in
+//    flight) and while generation g of a namespace is closing, the
+//    cell seals that closing prefix: commands at or below g for that
+//    namespace refuse, so reclamation can never race a first-commit;
+//  - completion advances the high-water and bulk-reclaims EXACTLY the
+//    named generation's inbox rows (the exact prefix property follows
+//    from contiguity: every earlier generation was reclaimed by its
+//    own close); it mints and RETAINS the bound close receipt —
+//    identical replay for the latest closed generation per namespace;
+//  - boundedness, stated honestly: retained close receipts <= sender
+//    namespaces (older receipts are reclaimed by the successor close;
+//    the sender's serialized close pipeline consumes each receipt
+//    before issuing the next close — composition assumption, stated);
+//    the slot is <= 1; inbox row SIZE stays bounded and row COUNT
+//    stays unbounded until sender credits compose (unchanged claims);
+//  - completion is exception-atomic under the consistent minter rule:
+//    nodes prepared before a non-throwing commit, with a test
+//    failpoint between.
 //
 // The dispatch contract, from the v4 corpus plus two review rulings:
 //  - an incoming command carries its DESTINATION (ProviderId,
@@ -35,6 +67,7 @@
 #include "deterministic-scheduler.h"
 
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <optional>
@@ -153,6 +186,146 @@ static_assert(
         Outcome>,
     "raw-field construction would make every caller a second minter");
 
+class C02CloseCommandTestMint;
+
+/// Sender-owned C02 close command: the sender's channel owner (not
+/// yet composed — tests mint via the explicit seam) asserts that
+/// generation `generation` of its namespace is finished. Sole-minted
+/// because the cell treats a presented close command as the trigger
+/// to occupy the close slot; carries the COMPLETE destination.
+class C02CloseCommand
+{
+public:
+    C02CloseCommand(C02CloseCommand const&) = default;
+    C02CloseCommand&
+    operator=(C02CloseCommand const&) = default;
+
+    C01Destination const&
+    destination() const
+    {
+        return destination_;
+    }
+    SenderGeneration
+    sender_generation() const
+    {
+        return sender_generation_;
+    }
+    ChannelGeneration
+    generation() const
+    {
+        return generation_;
+    }
+    CommandId
+    close_command() const
+    {
+        return close_command_;
+    }
+
+    bool
+    operator==(C02CloseCommand const&) const = default;
+
+private:
+    friend class C02CloseCommandTestMint;  // test-only until composed
+    C02CloseCommand(
+        C01Destination destination,
+        SenderGeneration sender_generation,
+        ChannelGeneration generation,
+        CommandId close_command)
+        : destination_(destination)
+        , sender_generation_(sender_generation)
+        , generation_(generation)
+        , close_command_(close_command)
+    {
+    }
+
+    C01Destination destination_;
+    SenderGeneration sender_generation_;
+    ChannelGeneration generation_;
+    CommandId close_command_;
+};
+
+static_assert(
+    !std::is_default_constructible_v<C02CloseCommand>,
+    "a close command must be minted, never defaulted");
+static_assert(
+    !std::is_constructible_v<
+        C02CloseCommand,
+        C01Destination,
+        SenderGeneration,
+        ChannelGeneration,
+        CommandId>,
+    "raw-field construction would let any caller trigger a close");
+
+class C01DispatchCell;
+
+/// Sole-minted close receipt, bound to the complete cell identity plus
+/// the close identity: the evidence the sender's serialized close
+/// pipeline consumes to retire its close outbox. Retained by the cell
+/// for the LATEST closed generation of each namespace and replayed
+/// identically.
+class C02CloseReceipt
+{
+public:
+    C02CloseReceipt(C02CloseReceipt const&) = default;
+    C02CloseReceipt&
+    operator=(C02CloseReceipt const&) = default;
+
+    C01Destination const&
+    cell() const
+    {
+        return cell_;
+    }
+    SenderGeneration
+    sender_generation() const
+    {
+        return sender_generation_;
+    }
+    ChannelGeneration
+    generation() const
+    {
+        return generation_;
+    }
+    CommandId
+    close_command() const
+    {
+        return close_command_;
+    }
+
+    bool
+    operator==(C02CloseReceipt const&) const = default;
+
+private:
+    friend class C01DispatchCell;  // sole minter
+    C02CloseReceipt(
+        C01Destination cell,
+        SenderGeneration sender_generation,
+        ChannelGeneration generation,
+        CommandId close_command)
+        : cell_(cell)
+        , sender_generation_(sender_generation)
+        , generation_(generation)
+        , close_command_(close_command)
+    {
+    }
+
+    C01Destination cell_;
+    SenderGeneration sender_generation_;
+    ChannelGeneration generation_;
+    CommandId close_command_;
+};
+
+static_assert(
+    !std::is_default_constructible_v<C02CloseReceipt>,
+    "a receipt must be minted, never defaulted");
+static_assert(
+    !std::is_constructible_v<
+        C02CloseReceipt,
+        C01Destination,
+        SenderGeneration,
+        ChannelGeneration,
+        CommandId>,
+    "raw-field construction would make every caller a second minter");
+
 class C01CellTestSeed;
 
 class C01DispatchCell
@@ -168,6 +341,7 @@ public:
         wrong_destination_rejected,  // any of the four destination
                                      // fields disagrees with this cell
         invalid_identity,            // reserved CommandId 0
+        closing_rejected,  // the closing prefix is sealed mid-close
         off_strand,
     };
 
@@ -235,6 +409,13 @@ public:
         if (hw != high_water_.end() &&
             id.channel_generation <= hw->second)
             return {Case::stale_rejected, std::nullopt};
+        // A generation mid-close seals its closing prefix: reclamation
+        // must never race a first-commit for the generation it is
+        // about to erase.
+        if (close_slot_.has_value() &&
+            id.sender_generation == close_slot_->sender_generation() &&
+            id.channel_generation <= close_slot_->generation())
+            return {Case::closing_rejected, std::nullopt};
         auto const key = std::tuple{
             id.sender_generation, id.channel_generation, id.command};
         if (auto it = inbox_.find(key); it != inbox_.end())
@@ -248,6 +429,131 @@ public:
         return {Case::first_commit, receipt};
     }
 
+    enum class CloseRefusal : std::uint8_t {
+        ok,
+        off_strand,
+        wrong_destination,
+        invalid_identity,  // reserved close-command id 0
+        already_closed,    // exact replay: the retained receipt returns
+        close_conflict,    // same generation, different close identity
+        stale_close,  // older than the retained receipt home covers
+        slot_occupied,
+        not_successor,
+        generation_exhausted,
+        no_close_in_flight,
+    };
+
+    struct CloseResult
+    {
+        CloseRefusal refusal{};
+        // already_closed replay (begin) and the fresh mint (complete).
+        std::optional<C02CloseReceipt> receipt;
+    };
+
+    /// Occupy the serialized close slot for one strictly-successive
+    /// generation close. Order: destination authentication; reserved
+    /// identity; the retained-receipt dedup domain (exact replay
+    /// returns the IDENTICAL receipt; a different close identity for
+    /// the closed generation conflicts; older generations are typed
+    /// stale — their receipt home was reclaimed by the successor
+    /// close); the slot; then the pure successor arithmetic. Nothing
+    /// mutates except the slot.
+    //@@authority transition=provider_lab.c02_begin_close owner=provider_lab commit=strand
+    CloseResult
+    begin_close(C02CloseCommand const& command)
+    {
+        if (!on_owner_strand())
+            return {CloseRefusal::off_strand, std::nullopt};
+        if (command.destination() != cell_)
+            return {CloseRefusal::wrong_destination, std::nullopt};
+        if (command.close_command() == 0)
+            return {CloseRefusal::invalid_identity, std::nullopt};
+        auto const ns = command.sender_generation();
+        if (auto closed = closed_.find(ns); closed != closed_.end())
+        {
+            auto const& receipt = closed->second;
+            if (command.generation() == receipt.generation())
+            {
+                if (command.close_command() == receipt.close_command())
+                    return {CloseRefusal::already_closed, receipt};
+                return {CloseRefusal::close_conflict, std::nullopt};
+            }
+            if (command.generation() < receipt.generation())
+                return {CloseRefusal::stale_close, std::nullopt};
+        }
+        if (close_slot_.has_value())
+            return {CloseRefusal::slot_occupied, std::nullopt};
+        auto hw = high_water_.find(ns);
+        auto const current = hw == high_water_.end()
+            ? std::optional<ChannelGeneration>{}
+            : std::optional<ChannelGeneration>{hw->second};
+        switch (check_close_successor(current, command.generation()))
+        {
+            case SuccessorCheck::not_successor:
+                return {CloseRefusal::not_successor, std::nullopt};
+            case SuccessorCheck::generation_exhausted:
+                return {CloseRefusal::generation_exhausted, std::nullopt};
+            case SuccessorCheck::ok:
+                break;
+        }
+        close_slot_ = command;
+        return {CloseRefusal::ok, std::nullopt};
+    }
+
+    /// Apply the in-flight close: advance the high-water, bulk-reclaim
+    /// EXACTLY the named generation's inbox rows, mint + RETAIN the
+    /// bound close receipt (displacing the namespace's previous one),
+    /// and release the slot — one owner-strand commit. Exception-
+    /// atomic: both map nodes are PREPARED before the non-throwing
+    /// commit; a failpoint throw leaves the mark, the rows, the
+    /// receipts, and the still-occupied slot untouched, and the retry
+    /// completes identically.
+    //@@authority transition=provider_lab.c02_complete_close owner=provider_lab commit=strand
+    CloseResult
+    complete_close()
+    {
+        if (!on_owner_strand())
+            return {CloseRefusal::off_strand, std::nullopt};
+        if (!close_slot_.has_value())
+            return {CloseRefusal::no_close_in_flight, std::nullopt};
+        auto const& cmd = *close_slot_;
+        auto const ns = cmd.sender_generation();
+        auto const generation = cmd.generation();
+        // PREPARE (throwing): both nodes, no state changed.
+        std::map<SenderGeneration, ChannelGeneration> tmp_hw;
+        tmp_hw.emplace(ns, generation);
+        auto hw_node = tmp_hw.extract(ns);
+        std::map<SenderGeneration, C02CloseReceipt> tmp_receipt;
+        tmp_receipt.emplace(
+            ns,
+            C02CloseReceipt{
+                cell_, ns, generation, cmd.close_command()});
+        auto receipt_node = tmp_receipt.extract(ns);
+        if (test_complete_pre_commit)
+            test_complete_pre_commit();
+        // COMMIT (non-throwing): displace-and-insert both nodes,
+        // reclaim exactly this generation's rows, release the slot.
+        high_water_.erase(ns);
+        high_water_.insert(std::move(hw_node));
+        closed_.erase(ns);
+        auto const it = closed_.insert(std::move(receipt_node)).position;
+        // Range end via upper_bound of the maximal key IN the
+        // generation — no successor arithmetic, so closing the
+        // ceiling generation cannot wrap the range (the class again,
+        // refused at the reclamation boundary).
+        inbox_.erase(
+            inbox_.lower_bound(std::tuple{ns, generation, CommandId{0}}),
+            inbox_.upper_bound(std::tuple{
+                ns, generation,
+                std::numeric_limits<CommandId>::max()}));
+        close_slot_.reset();
+        return {CloseRefusal::ok, it->second};
+    }
+
+    /// TEST-ONLY failpoint between complete_close's prepare and
+    /// commit. Empty in production shapes.
+    std::function<void()> test_complete_pre_commit;
+
     // Owner-strand introspection; refusal dominates every read.
     std::optional<std::size_t>
     row_count() const
@@ -255,6 +561,13 @@ public:
         if (!on_owner_strand())
             return std::nullopt;
         return inbox_.size();
+    }
+    std::optional<bool>
+    close_in_flight() const
+    {
+        if (!on_owner_strand())
+            return std::nullopt;
+        return close_slot_.has_value();
     }
     std::optional<ChannelGeneration>
     stale_high_water(SenderGeneration ns) const
@@ -287,6 +600,28 @@ private:
         inbox_;
     //@@authority state=provider_lab.c01_stale_high_water owner=provider_lab
     std::map<SenderGeneration, ChannelGeneration> high_water_;
+    //@@authority state=provider_lab.c02_close_slot owner=provider_lab
+    std::optional<C02CloseCommand> close_slot_;
+    //@@authority state=provider_lab.c02_closed_receipts owner=provider_lab
+    std::map<SenderGeneration, C02CloseReceipt> closed_;
+};
+
+/// Test-only mint for the C02 close command, whose production minter
+/// (the sender's channel owner) is not composed. Explicitly not
+/// production authority.
+class C02CloseCommandTestMint
+{
+public:
+    static C02CloseCommand
+    mint(
+        C01Destination destination,
+        SenderGeneration sender_generation,
+        ChannelGeneration generation,
+        CommandId close_command)
+    {
+        return C02CloseCommand{
+            destination, sender_generation, generation, close_command};
+    }
 };
 
 /// Test-only seed for stale state. Not a transition, not annotated,

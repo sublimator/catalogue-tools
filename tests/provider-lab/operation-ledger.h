@@ -472,7 +472,7 @@ public:
         return {AckOutcome::removed, w_it->second};
     }
 
-    /// Replay home for the consumption witness: survives loss of the
+    /// Replay home for the child-terminal witness: survives loss of the
     /// returned copy and of the ack itself. Released only by the
     /// façade's atomic retire_interest_terminal.
     std::optional<InterestChildTerminalWitness>

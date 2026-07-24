@@ -368,9 +368,11 @@ static_assert(
 /// Sole-minted terminal acknowledgement, bound to the original child
 /// AND the minting registry's partition scope. Minted once at terminal
 /// readiness, retained in the interest's outbox, replayed identically.
-/// Phase two of three: the operation ledger consumes it and mints the
-/// distinct InterestChildTerminalWitness; the ack itself can NOT retire
-/// the interest.
+/// On the PUBLISHED-child history the operation ledger consumes it
+/// and mints the distinct InterestChildTerminalWitness; on the
+/// never-published history that witness already exists and aggregate
+/// retirement reconciles this ack in the outbox instead. Either way,
+/// the ack itself can NOT retire the interest.
 class InterestTerminalAck
 {
 public:
@@ -520,7 +522,7 @@ private:
 
 static_assert(
     !std::is_default_constructible_v<InterestChildTerminalWitness>,
-    "a consumption witness must be minted, never defaulted");
+    "a child-terminal witness must be minted, never defaulted");
 static_assert(
     !std::is_constructible_v<
         InterestChildTerminalWitness,
@@ -529,7 +531,7 @@ static_assert(
         InterestOperationId,
         InterestChildId,
         TerminalDisposition>,
-    "raw-field construction would fake downstream consumption");
+    "raw-field construction would fake a child-terminal fact");
 
 // Test-only mints for every artifact whose production minter is either
 // deferred or under adversarial test. Explicitly not production
