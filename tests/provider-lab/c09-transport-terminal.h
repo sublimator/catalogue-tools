@@ -33,6 +33,7 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace catl::provider_lab {
 
@@ -108,6 +109,7 @@ enum class C09TerminalOutcome : std::uint8_t {
 
 class C09PeerClientTerminalOutbox;
 class C09PeerSetTerminalInbox;
+class C10PeerClientGenerationLifecycle;
 class C09SenderTestSeed;
 class C09TerminalCommandTestMint;
 class C09TerminalReceiptTestMint;
@@ -272,6 +274,7 @@ public:
     enum class TestFailpoint : std::uint8_t {
         none,
         open_after_attempt_reserve,
+        fence_prepare_after_member,
         register_pre_commit,
         terminal_pre_commit,
         receipt_pre_commit,
@@ -336,6 +339,21 @@ public:
     {
         Refusal refusal = Refusal::invalid_identity;
         std::optional<AttemptState> state;
+    };
+
+    struct MemberReservation
+    {
+        C09CommandId command = 0;
+        std::optional<C09TransportAttemptId> attempt;
+
+        bool
+        operator==(MemberReservation const&) const = default;
+    };
+
+    struct ReservationResult
+    {
+        Refusal refusal = Refusal::invalid_identity;
+        std::optional<MemberReservation> reservation;
     };
 
     C09PeerClientTerminalOutbox(
@@ -614,6 +632,27 @@ public:
         return {Refusal::ok, row->command};
     }
 
+    /// Replay by exact member identity. Fence-synthesized never-published
+    /// members deliberately have no external lease, so their retained command
+    /// must remain projectable from the sender-owned member home.
+    ReplayResult
+    replay(C09MemberIdentity const& member) const
+    {
+        if (!on_owner_strand())
+            return {Refusal::off_strand, std::nullopt};
+        auto const* member_row = find_member(member);
+        if (!member_row)
+            return {Refusal::unknown_member, std::nullopt};
+        for (auto const& [_, attempt] : attempts_)
+        {
+            if (attempt.member == member && attempt.command &&
+                attempt.command->identity().command ==
+                    member_row->reserved_command)
+                return {Refusal::ok, attempt.command};
+        }
+        return {Refusal::attempt_not_committed, std::nullopt};
+    }
+
     //@@authority transition=provider_lab.c09_consume_terminal_receipt
     // owner=provider_lab commit=strand
     Refusal
@@ -676,6 +715,39 @@ public:
         return {Refusal::ok, row->state};
     }
 
+    ReservationResult
+    reservation(C09MemberIdentity const& member) const
+    {
+        if (!on_owner_strand())
+            return {Refusal::off_strand, std::nullopt};
+        auto const* row = find_member(member);
+        if (!row)
+            return {Refusal::unknown_member, std::nullopt};
+        return {
+            Refusal::ok,
+            MemberReservation{row->reserved_command, row->reserved_attempt}};
+    }
+
+    std::optional<std::vector<C09MemberIdentity>>
+    member_snapshot() const
+    {
+        if (!on_owner_strand())
+            return std::nullopt;
+        std::vector<C09MemberIdentity> result;
+        result.reserve(members_.size());
+        for (auto const& [_, row] : members_)
+            result.push_back(row.member);
+        return result;
+    }
+
+    std::optional<std::size_t>
+    member_count() const
+    {
+        if (!on_owner_strand())
+            return std::nullopt;
+        return members_.size();
+    }
+
     std::optional<std::size_t>
     outbox_count() const
     {
@@ -722,6 +794,7 @@ public:
     }
 
 private:
+    friend class C10PeerClientGenerationLifecycle;
     friend class C09SenderTestSeed;
 
     struct MemberKey
@@ -765,6 +838,24 @@ private:
         AttemptState state = AttemptState::unpublished_open;
         std::optional<C09TerminalCommand> command;
     };
+
+    struct PreparedFenceMembers
+    {
+        C09TransportAttemptId next_attempt = 0;
+        C09CommandId next_command = 0;
+        std::map<MemberKey, MemberRow> members;
+        std::map<C09TransportAttemptId, AttemptRow> attempts;
+    };
+
+    struct PrepareFenceMembersResult
+    {
+        Refusal refusal = Refusal::invalid_identity;
+        std::optional<PreparedFenceMembers> prepared;
+    };
+
+    static_assert(std::is_nothrow_swappable_v<std::map<MemberKey, MemberRow>>);
+    static_assert(std::is_nothrow_swappable_v<
+                  std::map<C09TransportAttemptId, AttemptRow>>);
 
     static bool
     is_retry_terminal(AttemptState state)
@@ -844,6 +935,92 @@ private:
                 return &it->second;
         }
         return nullptr;
+    }
+
+    /// Prepare a complete replacement of the C09 sender rows in local state.
+    /// Every expected member absent at the fence becomes a retained
+    /// never-published command. Existing members are copied unchanged. The
+    /// caller may abandon this value with no effect.
+    PrepareFenceMembersResult
+    prepare_fence_members(
+        std::vector<C09MemberIdentity> const& expected,
+        C09PayloadDigest never_published_payload) const
+    {
+        if (!on_owner_strand())
+            return {Refusal::off_strand, std::nullopt};
+        for (auto const& member : expected)
+        {
+            if (member.destination != destination_ ||
+                member.peer_client_incarnation != peer_client_incarnation_ ||
+                member.sender_generation != sender_generation_ ||
+                !valid_lineage(member.lineage))
+                return {Refusal::invalid_identity, std::nullopt};
+        }
+
+        PreparedFenceMembers prepared{
+            next_attempt_id_, next_command_id_, members_, attempts_};
+        for (auto const& member : expected)
+        {
+            auto const key = member_key(member);
+            auto const existing = prepared.members.find(key);
+            if (existing != prepared.members.end())
+            {
+                if (existing->second.member != member)
+                    return {Refusal::invalid_identity, std::nullopt};
+                continue;
+            }
+            if (prepared.next_command ==
+                    std::numeric_limits<C09CommandId>::max() ||
+                prepared.next_attempt ==
+                    std::numeric_limits<C09TransportAttemptId>::max())
+                return {Refusal::id_exhausted, std::nullopt};
+
+            auto const command_id = ++prepared.next_command;
+            auto const attempt_id = ++prepared.next_attempt;
+            C09TerminalCommand command{
+                C09CommandIdentity{
+                    member, attempt_id, command_id, never_published_payload},
+                C09TerminalOutcome::never_published};
+            auto const [attempt_it, attempt_inserted] =
+                prepared.attempts.emplace(
+                    attempt_id,
+                    AttemptRow{
+                        member,
+                        attempt_id,
+                        never_published_payload,
+                        AttemptState::terminal,
+                        command});
+            if (!attempt_inserted)
+                return {Refusal::id_exhausted, std::nullopt};
+            auto const [_, member_inserted] = prepared.members.emplace(
+                key,
+                MemberRow{
+                    member,
+                    command_id,
+                    std::nullopt,
+                    false,
+                    true,
+                    std::nullopt,
+                    {}});
+            if (!member_inserted)
+            {
+                prepared.attempts.erase(attempt_it);
+                return {Refusal::invalid_identity, std::nullopt};
+            }
+            test_fail(TestFailpoint::fence_prepare_after_member);
+        }
+        return {Refusal::ok, std::move(prepared)};
+    }
+
+    /// Commit a fully prepared replacement. No allocation, callback, or await
+    /// is permitted between this flip and the enclosing C10 snapshot flip.
+    void
+    commit_fence_members(PreparedFenceMembers&& prepared) noexcept
+    {
+        members_.swap(prepared.members);
+        attempts_.swap(prepared.attempts);
+        next_attempt_id_ = prepared.next_attempt;
+        next_command_id_ = prepared.next_command;
     }
 
     std::map<C09TransportAttemptId, AttemptRow>::iterator
