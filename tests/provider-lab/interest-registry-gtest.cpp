@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <utility>
 
 using namespace catl::provider_lab;
@@ -24,6 +25,26 @@ struct RegistryFixture : ::testing::Test
         asio::post(strand, std::move(fn));
         sched.run_until_idle();
     }
+
+    /// Drive one interest to detach_pending with obligations closed
+    /// through the OWNED seams, returning its id.
+    InterestId
+    drained_interest()
+    {
+        auto r = reg.register_interest(100, 7, 1, /*subscription*/ 900);
+        EXPECT_EQ(r.refusal, InterestRegistry::Refusal::ok);
+        auto cmd = reg.begin_detach(r.interest);
+        EXPECT_TRUE(cmd.has_value());
+        EXPECT_EQ(
+            reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
+                r.interest, cmd->command, /*revision*/ 3)),
+            InterestRegistry::Refusal::ok);
+        EXPECT_EQ(
+            reg.consume_unsubscribe_receipt(
+                UnsubscribeReceiptTestMint::mint(r.interest, 900)),
+            InterestRegistry::Refusal::ok);
+        return r.interest;
+    }
 };
 
 using R = InterestRegistry::Refusal;
@@ -31,177 +52,296 @@ using J = InterestRegistry::JoinRefusal;
 
 }  // namespace
 
-TEST_F(RegistryFixture, RegistrationRetainsOriginalIdentityAndSponsors)
+TEST_F(RegistryFixture, DetachCommitsAnOwnedReplayableRevokeCommand)
 {
     run([&] {
-        auto a = reg.register_interest(/*op*/ 100, /*child*/ 7, /*fetch*/ 1);
-        auto b = reg.register_interest(101, 8, 1);
-        ASSERT_TRUE(a && b);
-        EXPECT_GT(*b, *a) << "interest ids are non-reused";
+        auto r = reg.register_interest(100, 7, 1, 900);
+        ASSERT_EQ(r.refusal, R::ok);
 
-        auto sponsors = reg.sponsors_of(1);
-        ASSERT_TRUE(sponsors.has_value());
-        EXPECT_EQ(sponsors->size(), 2u)
-            << "both actives sponsor the shared fetch";
+        auto cmd = reg.begin_detach(r.interest);
+        ASSERT_TRUE(cmd.has_value())
+            << "initiation is a fact with a home, not an arrow";
+        EXPECT_EQ(cmd->interest, r.interest);
+        EXPECT_EQ(cmd->fetch, 1u);
+        EXPECT_EQ(cmd->operation, 100u);
+        EXPECT_GT(cmd->command, 0u);
+
+        // The projection is replayable, identically, until receipted.
+        auto replay = reg.replay_revoke_command(r.interest);
+        ASSERT_TRUE(replay.has_value());
+        EXPECT_TRUE(*replay == *cmd);
+
+        // Receipt consumption retires the outbox.
+        ASSERT_EQ(
+            reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
+                r.interest, cmd->command, 3)),
+            R::ok);
+        EXPECT_FALSE(reg.replay_revoke_command(r.interest).has_value())
+            << "a consumed receipt retires the replay home";
     });
 }
 
-TEST_F(RegistryFixture, NoRootAdoptionIsStructural)
+TEST_F(RegistryFixture, RevocationCompletesOnlyByBoundReceipt)
 {
     run([&] {
-        auto first = reg.register_interest(100, 7, 1);
-        auto second = reg.register_interest(101, 8, 1);
-        ASSERT_TRUE(first && second);
+        auto r = reg.register_interest(100, 7, 1, 900);
+        auto cmd = reg.begin_detach(r.interest);
+        ASSERT_TRUE(cmd.has_value());
 
-        // The FIRST waiter detaches; the shared fetch is still owned
-        // by the second — no adopted root, because there is no
-        // first-waiter field to adopt: the sponsor set is derived.
-        ASSERT_EQ(reg.begin_detach(*first), R::ok);
-        auto sponsors = reg.sponsors_of(1);
-        ASSERT_TRUE(sponsors.has_value());
-        ASSERT_EQ(sponsors->size(), 1u);
-        EXPECT_EQ(sponsors->front(), *second);
+        // A receipt bound to a DIFFERENT command cannot complete it.
+        EXPECT_EQ(
+            reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
+                r.interest, cmd->command + 1, 3)),
+            R::wrong_binding)
+            << "no raw assertion path exists; the binding is checked";
 
-        // The detached-pending interest is draining under retained
-        // authority — visible, owned, never gone.
-        auto draining = reg.draining_of(1);
-        ASSERT_TRUE(draining.has_value());
-        ASSERT_EQ(draining->size(), 1u);
-        EXPECT_EQ(draining->front(), *first);
+        ASSERT_EQ(
+            reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
+                r.interest, cmd->command, 3)),
+            R::ok);
+        EXPECT_EQ(
+            reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
+                r.interest, cmd->command, 3)),
+            R::already_acked)
+            << "exact replay after consumption is a typed no-op";
+        EXPECT_EQ(
+            reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
+                r.interest, cmd->command + 1, 3)),
+            R::wrong_binding)
+            << "a mismatched receipt post-consumption must not launder "
+               "as already_acked: binding dominates the done state";
+
+        // Unsubscribe: binding to the RETAINED subscription identity.
+        EXPECT_EQ(
+            reg.consume_unsubscribe_receipt(
+                UnsubscribeReceiptTestMint::mint(r.interest, 901)),
+            R::wrong_binding);
+        EXPECT_EQ(
+            reg.consume_unsubscribe_receipt(
+                UnsubscribeReceiptTestMint::mint(r.interest, 900)),
+            R::ok);
     });
 }
 
-TEST_F(RegistryFixture, SoleInterestDetachBothOrders)
+TEST_F(RegistryFixture, TerminalWitnessSurvivesLossAndRetiresOnce)
 {
-    // THE control the design was amended for: the sole interest
-    // detaches with a submitted use in flight, in both orders, and the
-    // row remains through the gap — removed exactly once at the join.
+    run([&] {
+        auto id = drained_interest();
+
+        // First join transitions to terminal_ready and mints the ack.
+        auto first = reg.terminal_join(id);
+        ASSERT_EQ(first.refusal, J::ok);
+        ASSERT_TRUE(first.ack.has_value());
+        EXPECT_EQ(first.ack->child(), 7u);
+        EXPECT_TRUE(reg.interest_present(id).value_or(false))
+            << "the join no longer erases: the witness has a home";
+
+        // The caller LOSES the ack; asking again replays the
+        // IDENTICAL binding — the witness survives the fact.
+        auto replay = reg.terminal_join(id);
+        ASSERT_EQ(replay.refusal, J::ok);
+        EXPECT_TRUE(*replay.ack == *first.ack);
+
+        // Retirement consumes a genuinely minted matching ack, once.
+        ASSERT_EQ(reg.retire_terminal(*replay.ack), R::ok);
+        EXPECT_FALSE(reg.interest_present(id).value_or(true));
+        EXPECT_EQ(reg.retire_terminal(*first.ack), R::unknown_interest)
+            << "removed exactly once, typed on the second attempt";
+    });
+}
+
+TEST_F(RegistryFixture, SoleInterestDetachBothOrdersThroughOwnedSeams)
+{
     for (bool detach_first : {true, false})
     {
         DeterministicScheduler s2;
         auto strand2 = s2.make_strand();
         InterestRegistry r2{strand2};
         asio::post(strand2, [&] {
-            auto id = r2.register_interest(100, 7, 1);
-            ASSERT_TRUE(id.has_value());
-            ASSERT_EQ(r2.add_submitted_use(*id, 500), R::ok);
+            auto r = r2.register_interest(100, 7, 1, 900);
+            ASSERT_EQ(r.refusal, R::ok);
+            auto const id = r.interest;
+            ASSERT_EQ(r2.add_submitted_use(id, 500), R::ok);
 
+            std::optional<RevokeCommand> cmd;
             if (detach_first)
             {
-                ASSERT_EQ(r2.begin_detach(*id), R::ok);
-                EXPECT_TRUE(r2.interest_present(*id).value_or(false))
-                    << "detach removes nothing";
-                ASSERT_EQ(r2.use_terminal(*id, 500), R::ok);
+                cmd = r2.begin_detach(id);
+                ASSERT_TRUE(cmd.has_value());
+                ASSERT_EQ(r2.use_terminal(id, 500), R::ok);
             }
             else
             {
-                ASSERT_EQ(r2.use_terminal(*id, 500), R::ok)
-                    << "use completion is legal while active";
-                ASSERT_EQ(r2.begin_detach(*id), R::ok);
+                ASSERT_EQ(r2.use_terminal(id, 500), R::ok);
+                cmd = r2.begin_detach(id);
+                ASSERT_TRUE(cmd.has_value());
             }
-            EXPECT_TRUE(r2.interest_present(*id).value_or(false))
-                << "the row survives the gap: zero active interests is "
-                   "draining under retained authority, never ownerless";
+            EXPECT_TRUE(r2.interest_present(id).value_or(false));
             EXPECT_EQ(r2.sponsors_of(1)->size(), 0u);
-            EXPECT_EQ(r2.draining_of(1)->size(), 1u);
+            EXPECT_EQ(r2.draining_of(1)->size(), 1u)
+                << "zero active sponsors is draining under retained "
+                   "authority, never ownerless";
 
-            ASSERT_EQ(r2.ack_revoke(*id), R::ok);
-            ASSERT_EQ(r2.ack_unsubscribe(*id), R::ok);
+            ASSERT_EQ(
+                r2.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
+                    id, cmd->command, 3)),
+                R::ok);
+            ASSERT_EQ(
+                r2.consume_unsubscribe_receipt(
+                    UnsubscribeReceiptTestMint::mint(id, 900)),
+                R::ok);
 
-            auto join = r2.terminal_join(*id);
+            auto join = r2.terminal_join(id);
             ASSERT_EQ(join.refusal, J::ok);
-            ASSERT_TRUE(join.ack.has_value());
-            EXPECT_EQ(join.ack->interest(), *id);
             EXPECT_EQ(join.ack->operation(), 100u);
-            EXPECT_EQ(join.ack->child(), 7u)
-                << "the join emits the exact ORIGINAL child terminal ack";
-
-            EXPECT_FALSE(r2.interest_present(*id).value_or(true));
-            EXPECT_EQ(r2.terminal_join(*id).refusal, J::unknown_interest)
-                << "removed exactly once";
+            EXPECT_EQ(join.ack->child(), 7u);
+            ASSERT_EQ(r2.retire_terminal(*join.ack), R::ok);
+            EXPECT_FALSE(r2.interest_present(id).value_or(true));
         });
         s2.run_until_idle();
     }
 }
 
-TEST_F(RegistryFixture, DetachSealsNewSponsorshipExistingWorkContinues)
+TEST_F(RegistryFixture, DuplicateObligationsAreTypedAndCreateNoDebt)
 {
     run([&] {
-        auto id = reg.register_interest(100, 7, 1);
-        ASSERT_EQ(reg.add_submitted_use(*id, 500), R::ok);
-        ASSERT_EQ(reg.begin_detach(*id), R::ok);
+        auto r = reg.register_interest(100, 7, 1, 900);
+        ASSERT_EQ(reg.add_submitted_use(r.interest, 500), R::ok);
+        EXPECT_EQ(reg.add_submitted_use(r.interest, 500),
+                  R::already_registered)
+            << "a duplicate must never report a fresh commit";
+        ASSERT_EQ(reg.add_delivery_obligation(r.interest, 600), R::ok);
+        EXPECT_EQ(reg.add_delivery_obligation(r.interest, 600),
+                  R::already_registered);
 
-        EXPECT_EQ(reg.add_submitted_use(*id, 501), R::not_active)
-            << "detach seals NEW sponsorship";
-        EXPECT_EQ(reg.add_delivery_obligation(*id, 600), R::not_active);
-        EXPECT_EQ(reg.begin_detach(*id), R::not_active)
+        // One terminal event closes exactly one debt: the duplicate
+        // did not create a second, and the join is gated on the ONE.
+        auto cmd = reg.begin_detach(r.interest);
+        ASSERT_EQ(
+            reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
+                r.interest, cmd->command, 3)),
+            R::ok);
+        ASSERT_EQ(
+            reg.consume_unsubscribe_receipt(
+                UnsubscribeReceiptTestMint::mint(r.interest, 900)),
+            R::ok);
+        EXPECT_EQ(reg.terminal_join(r.interest).refusal,
+                  J::obligations_open);
+        ASSERT_EQ(reg.use_terminal(r.interest, 500), R::ok);
+        EXPECT_EQ(reg.use_terminal(r.interest, 500), R::unknown_use)
+            << "the single debt closed once";
+        EXPECT_EQ(reg.terminal_join(r.interest).refusal,
+                  J::obligations_open);
+        ASSERT_EQ(reg.ack_delivery(r.interest, 600), R::ok);
+        EXPECT_EQ(reg.terminal_join(r.interest).refusal, J::ok);
+    });
+}
+
+TEST_F(RegistryFixture, DetachSealsAndJoinGatesEveryObligation)
+{
+    run([&] {
+        auto r = reg.register_interest(100, 7, 1, 900);
+        ASSERT_EQ(reg.add_submitted_use(r.interest, 500), R::ok);
+        EXPECT_EQ(reg.terminal_join(r.interest).refusal,
+                  J::not_detach_pending);
+
+        auto cmd = reg.begin_detach(r.interest);
+        ASSERT_TRUE(cmd.has_value());
+        EXPECT_FALSE(reg.begin_detach(r.interest).has_value())
             << "detach is not repeatable";
+        EXPECT_EQ(reg.add_submitted_use(r.interest, 501), R::not_active)
+            << "detach seals new sponsorship";
 
-        EXPECT_EQ(reg.use_terminal(*id, 500), R::ok)
-            << "existing submitted work drains normally";
+        // Each obligation left open alone blocks the join.
+        EXPECT_EQ(reg.terminal_join(r.interest).refusal,
+                  J::obligations_open);
+        ASSERT_EQ(reg.use_terminal(r.interest, 500), R::ok);
+        EXPECT_EQ(reg.terminal_join(r.interest).refusal,
+                  J::obligations_open);
+        ASSERT_EQ(
+            reg.consume_revoke_receipt(ParticipantReceiptTestMint::mint(
+                r.interest, cmd->command, 3)),
+            R::ok);
+        EXPECT_EQ(reg.terminal_join(r.interest).refusal,
+                  J::obligations_open);
+        ASSERT_EQ(
+            reg.consume_unsubscribe_receipt(
+                UnsubscribeReceiptTestMint::mint(r.interest, 900)),
+            R::ok);
+        EXPECT_EQ(reg.terminal_join(r.interest).refusal, J::ok);
     });
 }
 
-TEST_F(RegistryFixture, JoinRefusesWhileAnyObligationRemainsOpen)
+TEST_F(RegistryFixture, NoRootAdoptionIsStructural)
 {
     run([&] {
-        auto id = reg.register_interest(100, 7, 1);
-        ASSERT_EQ(reg.add_submitted_use(*id, 500), R::ok);
-        ASSERT_EQ(reg.add_delivery_obligation(*id, 600), R::ok);
+        auto first = reg.register_interest(100, 7, 1, 900);
+        auto second = reg.register_interest(101, 8, 1, 901);
+        ASSERT_EQ(first.refusal, R::ok);
+        ASSERT_EQ(second.refusal, R::ok);
+        EXPECT_GT(second.interest, first.interest);
 
-        EXPECT_EQ(reg.terminal_join(*id).refusal, J::not_detach_pending)
-            << "an active interest cannot join";
-        ASSERT_EQ(reg.begin_detach(*id), R::ok);
-
-        // Each obligation left open alone blocks the join; the row
-        // stays through every refusal.
-        EXPECT_EQ(reg.terminal_join(*id).refusal, J::obligations_open);
-        ASSERT_EQ(reg.ack_revoke(*id), R::ok);
-        EXPECT_EQ(reg.terminal_join(*id).refusal, J::obligations_open);
-        ASSERT_EQ(reg.use_terminal(*id, 500), R::ok);
-        EXPECT_EQ(reg.terminal_join(*id).refusal, J::obligations_open);
-        ASSERT_EQ(reg.ack_delivery(*id, 600), R::ok);
-        EXPECT_EQ(reg.terminal_join(*id).refusal, J::obligations_open);
-        EXPECT_TRUE(reg.interest_present(*id).value_or(false));
-
-        ASSERT_EQ(reg.ack_unsubscribe(*id), R::ok);
-        EXPECT_EQ(reg.terminal_join(*id).refusal, J::ok);
+        ASSERT_TRUE(reg.begin_detach(first.interest).has_value());
+        auto sponsors = reg.sponsors_of(1);
+        ASSERT_EQ(sponsors->size(), 1u);
+        EXPECT_EQ(sponsors->front(), second.interest)
+            << "shared work is owned by remaining actives; no adopted "
+               "root exists";
+        EXPECT_EQ(reg.draining_of(1)->size(), 1u);
     });
 }
 
-TEST_F(RegistryFixture, DuplicateAndPrematureAcksAreTyped)
+TEST(RegistryEdge, InterestIdCeilingFailsClosedWithNothingMutated)
 {
-    run([&] {
-        auto id = reg.register_interest(100, 7, 1);
-
-        EXPECT_EQ(reg.ack_revoke(*id), R::not_detach_pending)
-            << "a revoke ack cannot precede the detach that initiates it";
-        EXPECT_EQ(reg.ack_unsubscribe(*id), R::not_detach_pending);
-
-        ASSERT_EQ(reg.begin_detach(*id), R::ok);
-        ASSERT_EQ(reg.ack_revoke(*id), R::ok);
-        EXPECT_EQ(reg.ack_revoke(*id), R::already_acked)
-            << "duplicate acks are typed no-ops";
-        EXPECT_EQ(reg.use_terminal(*id, 999), R::unknown_use);
-        EXPECT_EQ(reg.ack_delivery(*id, 999), R::unknown_delivery);
+    DeterministicScheduler sched;
+    auto strand = sched.make_strand();
+    InterestRegistry reg{
+        strand, std::numeric_limits<InterestId>::max()};
+    asio::post(strand, [&] {
+        auto r = reg.register_interest(1, 2, 3, 4);
+        EXPECT_EQ(r.refusal, InterestRegistry::Refusal::interest_id_exhausted)
+            << "the wrap class, refused at its fourth known habitat";
+        EXPECT_EQ(r.interest, 0u);
+        EXPECT_FALSE(reg.interest_present(0).value_or(true))
+            << "zero stays reserved; nothing minted, nothing mutated";
+        // A later attempt refuses identically: the counter did not move.
+        EXPECT_EQ(
+            reg.register_interest(1, 2, 3, 4).refusal,
+            InterestRegistry::Refusal::interest_id_exhausted);
     });
+    sched.run_until_idle();
 }
 
 TEST_F(RegistryFixture, OffStrandTouchesAreRefusedBeforeAnyRead)
 {
+    // Mint a genuine terminal ack on the owner strand first: retire is
+    // only callable with a minted ack (construction is compile-closed).
+    std::optional<InterestTerminalAck> ack;
+    run([&] {
+        auto id = drained_interest();
+        auto join = reg.terminal_join(id);
+        ASSERT_EQ(join.refusal, J::ok);
+        ack = join.ack;
+    });
+
     bool checked = false;
     asio::post(sched.io(), [&] {
-        EXPECT_FALSE(reg.register_interest(1, 2, 3).has_value());
-        EXPECT_EQ(reg.begin_detach(1), R::off_strand);
-        EXPECT_EQ(reg.ack_revoke(1), R::off_strand);
+        EXPECT_EQ(reg.register_interest(1, 2, 3, 4).refusal, R::off_strand);
+        EXPECT_FALSE(reg.begin_detach(1).has_value());
+        EXPECT_FALSE(reg.replay_revoke_command(1).has_value());
         EXPECT_EQ(reg.use_terminal(1, 1), R::off_strand);
+        EXPECT_EQ(reg.ack_delivery(1, 1), R::off_strand);
         EXPECT_EQ(reg.terminal_join(1).refusal, J::off_strand);
+        EXPECT_EQ(reg.retire_terminal(*ack), R::off_strand)
+            << "even a genuinely minted ack cannot retire off-strand";
         EXPECT_FALSE(reg.sponsors_of(1).has_value());
-        EXPECT_FALSE(reg.draining_of(1).has_value());
         EXPECT_FALSE(reg.interest_present(1).has_value());
         checked = true;
     });
     sched.run_until_idle();
     EXPECT_TRUE(checked);
-    run([&] { EXPECT_EQ(reg.sponsors_of(1)->size(), 0u); });
+
+    // Back on the owner strand the SAME ack still retires: the refusal
+    // above read nothing and consumed nothing.
+    run([&] { EXPECT_EQ(reg.retire_terminal(*ack), R::ok); });
 }
