@@ -12,13 +12,14 @@ namespace asio = boost::asio;
 
 namespace {
 
+constexpr C01Destination kCell{
+    /*provider*/ 11, /*partition*/ 2, /*epoch*/ 9, /*receiver*/ 5};
+
 struct CellFixture : ::testing::Test
 {
     DeterministicScheduler sched;
     DeterministicScheduler::strand_type strand = sched.make_strand();
-    C01DispatchCell cell{
-        strand, /*provider*/ 11, /*partition*/ 2, /*epoch*/ 9,
-        /*receiver generation*/ 5};
+    C01DispatchCell cell{strand, kCell};
 
     template <typename Fn>
     void
@@ -28,52 +29,94 @@ struct CellFixture : ::testing::Test
         sched.run_until_idle();
     }
 
-    static C01CommandIdentity
-    identity(
+    static C01Command
+    command(
         SenderGeneration ns = 1,
         ChannelGeneration gen = 0,
         CommandId cmd = 40,
-        PayloadDigest payload = 777)
+        PayloadDigest payload = 777,
+        C01Destination destination = kCell)
     {
-        return C01CommandIdentity{
-            /*operation*/ 100, /*interest*/ 200, /*use*/ 300,
-            /*pipeline*/ 400, ns, gen, cmd, payload};
+        return C01Command{
+            destination,
+            C01CommandIdentity{
+                /*operation*/ 100, /*interest*/ 200, /*use*/ 300,
+                /*pipeline*/ 400, ns, gen, cmd, payload}};
     }
 };
 
 using Case = C01DispatchCell::Case;
-using Close = C01DispatchCell::CloseResult;
+using Succ = C01DispatchCell::SuccessorCheck;
 
 }  // namespace
 
 TEST_F(CellFixture, FirstCommitMintsFullyBoundReceipt)
 {
     run([&] {
-        auto id = identity();
-        auto r = cell.dispatch(5, id, /*outcome*/ 9);
+        auto c = command();
+        auto r = cell.dispatch(c, /*outcome*/ 9);
         ASSERT_EQ(r.dispatch, Case::first_commit);
         ASSERT_TRUE(r.receipt.has_value());
-        EXPECT_EQ(r.receipt->provider(), 11u);
-        EXPECT_EQ(r.receipt->partition(), 2u);
-        EXPECT_EQ(r.receipt->provider_epoch(), 9u);
-        EXPECT_EQ(r.receipt->receiver(), 5u);
-        EXPECT_TRUE(r.receipt->identity() == id)
-            << "the receipt binds the COMPLETE command identity, so a "
-               "T117-analog can retire the exact outbox";
+        EXPECT_TRUE(r.receipt->cell() == kCell)
+            << "the receipt binds the authenticated destination";
+        EXPECT_TRUE(r.receipt->identity() == c.identity);
         EXPECT_EQ(r.receipt->outcome(), 9u);
     });
+}
+
+TEST_F(CellFixture, DestinationMismatchesRefuseBeforeAnyStateBothWays)
+{
+    // Table-driven: each of the four destination fields, varied alone,
+    // must refuse with no receipt and no row — and the SAME command
+    // must still first-commit on its intended cell.
+    struct Variant
+    {
+        char const* name;
+        C01Destination destination;
+    };
+    Variant const variants[] = {
+        {"provider", {12, 2, 9, 5}},
+        {"partition", {11, 3, 9, 5}},
+        {"epoch", {11, 2, 10, 5}},
+        {"receiver", {11, 2, 9, 6}},
+    };
+    for (auto const& v : variants)
+    {
+        run([&] {
+            auto misrouted = command(1, 0, 40, 777, v.destination);
+            auto r = cell.dispatch(misrouted, 1);
+            EXPECT_EQ(r.dispatch, Case::wrong_destination_rejected)
+                << v.name << " mismatch must refuse";
+            EXPECT_FALSE(r.receipt.has_value())
+                << v.name << ": a misroute must never mint evidence";
+            EXPECT_EQ(cell.row_count().value_or(99), 0u)
+                << v.name << ": a misroute must never commit a row";
+        });
+    }
+    // The intended cell accepts the identical identity.
+    DeterministicScheduler sched2;
+    auto strand2 = sched2.make_strand();
+    C01Destination const other{12, 2, 9, 5};
+    C01DispatchCell intended{strand2, other};
+    asio::post(strand2, [&] {
+        auto routed = command(1, 0, 40, 777, other);
+        auto r = intended.dispatch(routed, 9);
+        EXPECT_EQ(r.dispatch, Case::first_commit)
+            << "the same command first-commits where it was addressed";
+        EXPECT_TRUE(r.receipt->cell() == other);
+    });
+    sched2.run_until_idle();
 }
 
 TEST_F(CellFixture, ExactReplayReturnsIdenticalReceiptEffectOnce)
 {
     run([&] {
-        auto id = identity();
-        auto first = cell.dispatch(5, id, 9);
+        auto c = command();
+        auto first = cell.dispatch(c, 9);
         ASSERT_EQ(first.dispatch, Case::first_commit);
 
-        auto replay = cell.dispatch(5, id, /*different would-be*/ 999);
+        auto replay = cell.dispatch(c, /*different would-be*/ 999);
         ASSERT_EQ(replay.dispatch, Case::exact_replay);
-        ASSERT_TRUE(replay.receipt.has_value());
         EXPECT_TRUE(*replay.receipt == *first.receipt)
             << "replay derives the same receipt; the effect ran once";
         EXPECT_EQ(replay.receipt->outcome(), 9u);
@@ -84,157 +127,126 @@ TEST_F(CellFixture, ExactReplayReturnsIdenticalReceiptEffectOnce)
 TEST_F(CellFixture, AliasingIdentitiesConflictNeverReplay)
 {
     run([&] {
-        auto id = identity();
-        ASSERT_EQ(cell.dispatch(5, id, 9).dispatch, Case::first_commit);
+        auto c = command();
+        ASSERT_EQ(cell.dispatch(c, 9).dispatch, Case::first_commit);
 
-        // The sharp alias control: SAME row key (namespace, generation,
-        // command) but a different UseId / PipelineId / payload must
-        // CONFLICT with no receipt and no effect — never replay the
-        // first command's outcome.
-        auto other_use = id;
-        other_use.use = 301;
-        auto r1 = cell.dispatch(5, other_use, 1);
-        EXPECT_EQ(r1.dispatch, Case::conflict_rejected);
-        EXPECT_FALSE(r1.receipt.has_value());
+        auto vary = [&](auto mutate) {
+            auto aliased = c;
+            mutate(aliased.identity);
+            auto r = cell.dispatch(aliased, 1);
+            EXPECT_EQ(r.dispatch, Case::conflict_rejected);
+            EXPECT_FALSE(r.receipt.has_value());
+        };
+        vary([](C01CommandIdentity& i) { i.use = 301; });
+        vary([](C01CommandIdentity& i) { i.pipeline = 401; });
+        vary([](C01CommandIdentity& i) { i.operation = 101; });
+        vary([](C01CommandIdentity& i) { i.interest = 201; });
+        vary([](C01CommandIdentity& i) { i.payload = 778; });
 
-        auto other_pipeline = id;
-        other_pipeline.pipeline = 401;
-        EXPECT_EQ(
-            cell.dispatch(5, other_pipeline, 1).dispatch,
-            Case::conflict_rejected);
-
-        auto other_payload = id;
-        other_payload.payload = 778;
-        EXPECT_EQ(
-            cell.dispatch(5, other_payload, 1).dispatch,
-            Case::conflict_rejected);
-
-        // The original full binding still replays untouched.
-        auto replay = cell.dispatch(5, id, 0);
-        EXPECT_EQ(replay.dispatch, Case::exact_replay);
+        auto replay = cell.dispatch(c, 0);
+        EXPECT_EQ(replay.dispatch, Case::exact_replay)
+            << "the original full binding still replays untouched";
         EXPECT_EQ(replay.receipt->outcome(), 9u);
         EXPECT_EQ(cell.row_count().value_or(0), 1u);
     });
 }
 
-TEST_F(CellFixture, StrictSuccessorCloseIsTheOnlyHighWaterAuthority)
+TEST_F(CellFixture, StaleRejectsAtAndBelowTheSeededMark)
 {
     run([&] {
-        // Untouched namespace: only generation 0 may close first.
-        EXPECT_EQ(cell.close_generation(1, 1), Close::not_successor);
-        EXPECT_EQ(cell.close_generation(1, 100), Close::not_successor);
-        EXPECT_FALSE(cell.stale_high_water(1).has_value())
-            << "refused closes must not move the mark";
+        C01CellTestSeed::seed_stale_high_water(cell, 1, 3);
 
-        ASSERT_EQ(cell.close_generation(1, 0), Close::ok);
-        EXPECT_EQ(cell.stale_high_water(1).value_or(99), 0u);
-
-        // Then exactly current+1: gaps, replays, regressions refuse.
-        EXPECT_EQ(cell.close_generation(1, 2), Close::not_successor);
-        EXPECT_EQ(cell.close_generation(1, 0), Close::not_successor);
-        ASSERT_EQ(cell.close_generation(1, 1), Close::ok);
-        EXPECT_EQ(cell.stale_high_water(1).value_or(99), 1u);
+        EXPECT_EQ(cell.dispatch(command(1, 3, 40), 1).dispatch,
+                  Case::stale_rejected)
+            << "at the mark is stale";
+        EXPECT_EQ(cell.dispatch(command(1, 2, 41), 1).dispatch,
+                  Case::stale_rejected)
+            << "below the mark is stale";
+        EXPECT_EQ(cell.dispatch(command(1, 4, 42), 1).dispatch,
+                  Case::first_commit)
+            << "above the mark first-commits";
+        // A different sender GENERATION owns an independent mark: a
+        // restarted sender starts at the sentinel.
+        EXPECT_EQ(cell.dispatch(command(2, 0, 43), 1).dispatch,
+                  Case::first_commit);
     });
 }
 
-TEST_F(CellFixture, CloseReclaimsExactlyTheClosedGeneration)
+TEST_F(CellFixture, RefusalPrecedenceIsTotalOrder)
 {
     run([&] {
-        // Rows in generations 0, 1, 2 of namespace 1; one in ns 2.
-        ASSERT_EQ(
-            cell.dispatch(5, identity(1, 0, 40), 1).dispatch,
-            Case::first_commit);
-        ASSERT_EQ(
-            cell.dispatch(5, identity(1, 1, 41), 1).dispatch,
-            Case::first_commit);
-        ASSERT_EQ(
-            cell.dispatch(5, identity(1, 2, 42), 1).dispatch,
-            Case::first_commit);
-        ASSERT_EQ(
-            cell.dispatch(5, identity(2, 0, 43), 1).dispatch,
-            Case::first_commit);
-        ASSERT_EQ(cell.row_count().value_or(0), 4u);
+        C01CellTestSeed::seed_stale_high_water(cell, 1, 3);
 
-        ASSERT_EQ(cell.close_generation(1, 0), Close::ok);
-        EXPECT_EQ(cell.row_count().value_or(0), 3u)
-            << "exact-prefix: only generation 0 of namespace 1 leaves";
+        // Wrong destination beats reserved identity AND staleness.
+        auto worst = command(1, 0, /*command*/ 0, 777,
+                             C01Destination{12, 2, 9, 5});
+        EXPECT_EQ(cell.dispatch(worst, 1).dispatch,
+                  Case::wrong_destination_rejected);
 
-        // Generations 1 and 2 remain replayable; the closed identity
-        // re-arrives as STALE, never absent-therefore-first.
-        EXPECT_EQ(
-            cell.dispatch(5, identity(1, 1, 41), 0).dispatch,
-            Case::exact_replay);
-        EXPECT_EQ(
-            cell.dispatch(5, identity(1, 0, 40), 1).dispatch,
-            Case::stale_rejected);
-        // Namespace 2 untouched.
-        EXPECT_EQ(
-            cell.dispatch(5, identity(2, 0, 43), 0).dispatch,
-            Case::exact_replay);
+        // Destination valid: reserved CommandId 0 rejects BEFORE the
+        // high-water read — both-zero-and-stale yields invalid_identity.
+        auto zero_and_stale = command(1, 0, 0);
+        EXPECT_EQ(cell.dispatch(zero_and_stale, 1).dispatch,
+                  Case::invalid_identity);
+
+        // ChannelGeneration 0 stays valid vocabulary on a fresh
+        // namespace (the sentinel sits immediately before zero).
+        EXPECT_EQ(cell.dispatch(command(3, 0, 60), 1).dispatch,
+                  Case::first_commit);
     });
 }
 
-TEST_F(CellFixture, SenderGenerationNamespacesOwnIndependentMarks)
+TEST(C01SuccessorArithmetic, PureFunctionIncludesExecutedCeiling)
 {
-    run([&] {
-        ASSERT_EQ(cell.close_generation(1, 0), Close::ok);
-        // A restarted sender (new SenderGeneration) starts at the
-        // sentinel: its generation 0 is live, not stale.
-        EXPECT_EQ(
-            cell.dispatch(5, identity(2, 0, 50), 1).dispatch,
-            Case::first_commit);
-        // While namespace 1's generation 0 is stale.
-        EXPECT_EQ(
-            cell.dispatch(5, identity(1, 0, 51), 1).dispatch,
-            Case::stale_rejected);
-    });
+    using Cell = C01DispatchCell;
+    constexpr auto kMax = std::numeric_limits<ChannelGeneration>::max();
+
+    // Untouched namespace: only generation 0 may close first.
+    EXPECT_EQ(Cell::check_close_successor(std::nullopt, 0), Succ::ok);
+    EXPECT_EQ(
+        Cell::check_close_successor(std::nullopt, 1), Succ::not_successor);
+    EXPECT_EQ(
+        Cell::check_close_successor(std::nullopt, 100),
+        Succ::not_successor);
+
+    // Then exactly current+1; gaps, replays, regressions refuse.
+    EXPECT_EQ(Cell::check_close_successor(0, 1), Succ::ok);
+    EXPECT_EQ(Cell::check_close_successor(0, 0), Succ::not_successor);
+    EXPECT_EQ(Cell::check_close_successor(0, 2), Succ::not_successor);
+    EXPECT_EQ(Cell::check_close_successor(41, 42), Succ::ok);
+    EXPECT_EQ(Cell::check_close_successor(41, 41), Succ::not_successor);
+
+    // The EXECUTED ceiling refusals: a mark at max has no successor —
+    // every candidate, including max itself and a wrap to 0, is
+    // generation_exhausted, never ok.
+    EXPECT_EQ(
+        Cell::check_close_successor(kMax, 0), Succ::generation_exhausted);
+    EXPECT_EQ(
+        Cell::check_close_successor(kMax, kMax),
+        Succ::generation_exhausted);
+    EXPECT_EQ(
+        Cell::check_close_successor(kMax - 1, kMax), Succ::ok)
+        << "the last legal close is max itself";
 }
 
-TEST_F(CellFixture, CeilingFailsClosedWithMarkAndRowsIntact)
+TEST_F(CellFixture, SeededMaxMarkKeepsDispatchStateIntact)
 {
     run([&] {
-        // Drive the mark to the ceiling via the lab's only legal path
-        // shape: seed by closing 0, then verify the exhausted branch
-        // using a namespace whose mark IS the ceiling. Constructing
-        // that state through 2^64 closes is not viable, so this
-        // control validates the refusal arithmetic at the boundary:
-        // a mark of max has no successor.
-        ASSERT_EQ(cell.close_generation(7, 0), Close::ok);
-        // Directly assert the arithmetic contract at max via the type:
-        // when high_water == max, close(anything) is exhausted. We
-        // cannot reach max legally in-lab; the guard is exercised by
-        // the header's explicit check and this documents the contract.
-        EXPECT_EQ(cell.close_generation(7, 2), Close::not_successor)
-            << "gaps refuse long before the ceiling can matter";
-    });
-}
-
-TEST_F(CellFixture, WrongReceiverAndInvalidIdentityPrecedence)
-{
-    run([&] {
-        ASSERT_EQ(cell.close_generation(1, 0), Close::ok);
-
-        // Wrong receiver beats everything, including invalid identity
-        // and staleness.
-        auto stale_and_zero = identity(1, 0, /*command*/ 0);
+        // A namespace whose mark IS the ceiling (test seed): every
+        // generation is stale, rows and marks stay untouched by
+        // dispatch refusals.
+        ASSERT_EQ(cell.dispatch(command(2, 0, 50), 1).dispatch,
+                  Case::first_commit);
+        C01CellTestSeed::seed_stale_high_water(
+            cell, 1, std::numeric_limits<ChannelGeneration>::max());
+        EXPECT_EQ(cell.dispatch(command(1, 0, 40), 1).dispatch,
+                  Case::stale_rejected);
         EXPECT_EQ(
-            cell.dispatch(4, stale_and_zero, 1).dispatch,
-            Case::wrong_receiver_rejected);
-
-        // Reserved CommandId 0 rejects AFTER receiver validation and
-        // BEFORE the high-water read: an input that is both zero-id
-        // and stale yields invalid_identity, proving the order.
-        EXPECT_EQ(
-            cell.dispatch(5, stale_and_zero, 1).dispatch,
-            Case::invalid_identity)
-            << "reserved identity precedes reclaimable reads";
-
-        // ChannelGeneration 0 remains VALID vocabulary (the namespace
-        // sentinel sits immediately before it): fresh namespace,
-        // generation 0, nonzero command first-commits.
-        EXPECT_EQ(
-            cell.dispatch(5, identity(3, 0, 60), 1).dispatch,
-            Case::first_commit);
+            cell.stale_high_water(1).value_or(0),
+            std::numeric_limits<ChannelGeneration>::max())
+            << "the mark is unchanged";
+        EXPECT_EQ(cell.row_count().value_or(0), 1u)
+            << "existing rows are unchanged";
     });
 }
 
@@ -242,10 +254,9 @@ TEST_F(CellFixture, OffStrandTouchesAreRefusedBeforeAnyRead)
 {
     bool checked = false;
     asio::post(sched.io(), [&] {
-        auto r = cell.dispatch(5, identity(), 1);
+        auto r = cell.dispatch(command(), 1);
         EXPECT_EQ(r.dispatch, Case::off_strand);
         EXPECT_FALSE(r.receipt.has_value());
-        EXPECT_EQ(cell.close_generation(1, 0), Close::off_strand);
         EXPECT_FALSE(cell.row_count().has_value());
         EXPECT_FALSE(cell.stale_high_water(1).has_value());
         checked = true;
