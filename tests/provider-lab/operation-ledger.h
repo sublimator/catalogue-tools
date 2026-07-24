@@ -165,6 +165,7 @@ public:
         off_strand,
         cell_not_registered,
         already_flipped,
+        already_never_published,
         cancelled_inert,  // pre-publication cancel: seal never_published
         operation_id_exhausted,
         child_id_exhausted,
@@ -314,6 +315,8 @@ public:
         auto* c = find_child(child);
         if (!c)
             return Refusal::cell_not_registered;
+        if (c->state == PublicationState::never_published)
+            return Refusal::already_never_published;
         if (c->state != PublicationState::registered_not_published)
             return Refusal::already_flipped;
         c->state = PublicationState::never_published;
@@ -668,10 +671,6 @@ private:
             return Refusal::cancelled_inert;
         if (c.state != PublicationState::registered_not_published)
             return Refusal::already_flipped;
-        if (c.inert)
-            return Refusal::cancelled_inert;  // work must never publish;
-                                              // the never_published path
-                                              // (mark + sealed ack) remains
         c.state = PublicationState::published;
         c.destination = dest;
         c.work = work;

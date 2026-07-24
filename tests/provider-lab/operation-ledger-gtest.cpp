@@ -105,6 +105,11 @@ TEST_F(LedgerFixture, NeverPublishedRemovesViaOneSealedAck)
             ledger.mark_never_published(child),
             OperationLedger::Refusal::ok);
         EXPECT_EQ(
+            ledger.mark_never_published(child),
+            OperationLedger::Refusal::already_never_published)
+            << "a repeated absence selector tells the caller to proceed "
+               "along the already-sealed absence path";
+        EXPECT_EQ(
             ledger.ack_terminal(cid, 7, 42),
             OperationLedger::AckOutcome::unpublished)
             << "a terminal ack cannot substitute for the sealed "
@@ -406,6 +411,11 @@ TEST(OperationLedger, QueuedCancelAndPublishSelectOneTerminalPathBothOrders)
                 EXPECT_EQ(publish_result, Refusal::cancelled_inert);
                 EXPECT_EQ(
                     ledger.publication_state(child_id), State::never_published);
+                EXPECT_EQ(
+                    ledger.mark_never_published(child),
+                    Refusal::already_never_published)
+                    << "cancel-seal and enqueue-failure selection remain "
+                       "distinguishable from losing to publication";
                 EXPECT_EQ(ledger.ack_never_published(child_id), Ack::removed);
             }
             else
