@@ -16,7 +16,8 @@ struct PartitionFixture : ::testing::Test
 {
     DeterministicScheduler sched;
     DeterministicScheduler::strand_type strand = sched.make_strand();
-    CoordinatorPartition part{strand, /*epoch*/ 3};
+    CoordinatorPartition part{
+        strand, /*provider*/ 11, /*partition*/ 2, /*epoch*/ 3};
 
     template <typename Fn>
     void
@@ -50,6 +51,25 @@ TEST_F(PartitionFixture, OneFetchIdPerLogicalNeedAcrossShapes)
     });
 }
 
+TEST_F(PartitionFixture, JoinerCannotRewriteTheActiveAttemptContract)
+{
+    run([&] {
+        auto created = part.get_or_create_fetch(3, "hdr:200", "S1");
+        ASSERT_EQ(created.refusal, R::ok);
+
+        // A joiner with a different shape has NO authority over the
+        // active attempt's response contract: validation uses the
+        // exact shape that was SENT.
+        auto joined = part.get_or_create_fetch(3, "hdr:200", "S2");
+        ASSERT_EQ(joined.refusal, R::ok);
+        ASSERT_FALSE(joined.created);
+        EXPECT_EQ(part.active_shape_of(created.fetch).value_or(""), "S1")
+            << "the active revision/shape remains exactly as sent; "
+               "shape changes need an explicit owner transition after "
+               "the prior attempt terminalizes";
+    });
+}
+
 TEST_F(PartitionFixture, RemovalIsAtomicAndNothingResurrects)
 {
     run([&] {
@@ -66,29 +86,50 @@ TEST_F(PartitionFixture, RemovalIsAtomicAndNothingResurrects)
             << "a re-miss mints a NEW FetchId; nothing resurrects";
 
         EXPECT_EQ(part.remove_fetch(3, first.fetch), R::unknown_fetch)
-            << "the removed id stays dead";
+            << "the removed id stays dead (typed inert no-op)";
     });
 }
 
-TEST_F(PartitionFixture, EpochGateGovernsBothVerbs)
+TEST_F(PartitionFixture, BarrierSealsAdmissionWhileExistingWorkDrains)
 {
     run([&] {
         auto f = part.get_or_create_fetch(3, "k", "s");
         ASSERT_EQ(f.refusal, R::ok);
 
-        EXPECT_EQ(part.get_or_create_fetch(2, "k", "s").refusal, R::wrong_epoch);
+        EXPECT_EQ(
+            part.get_or_create_fetch(2, "k", "s").refusal, R::wrong_epoch);
         EXPECT_EQ(part.remove_fetch(4, f.fetch), R::wrong_epoch);
 
         ASSERT_EQ(part.install_barrier(7), R::ok);
-        EXPECT_EQ(
-            part.get_or_create_fetch(3, "k", "s").refusal,
-            R::barrier_installed);
-        EXPECT_EQ(part.remove_fetch(3, f.fetch), R::barrier_installed);
 
-        ASSERT_EQ(part.clear_and_advance(7), R::ok);
+        // New-work admission is sealed...
+        EXPECT_EQ(
+            part.get_or_create_fetch(3, "k2", "s").refusal,
+            R::barrier_installed);
+
+        // ...and advance refuses while live rows exist: the zero
+        // witness is a PRECONDITION, never destructive work. The
+        // barrier stays installed and no receipt exists.
+        auto blocked = part.advance_epoch(7);
+        EXPECT_EQ(blocked.refusal, R::not_drained);
+        EXPECT_FALSE(blocked.receipt.has_value());
+        EXPECT_EQ(part.fetch_count().value_or(0), 1u)
+            << "advance must not drop live work";
+
+        // Terminal removal of registered old-epoch work is the
+        // barrier's purpose: legal under the barrier, exact tag.
+        EXPECT_EQ(part.remove_fetch(3, f.fetch), R::ok);
+
+        // Drained: advance succeeds and mints the exact bound receipt.
+        auto advanced = part.advance_epoch(7);
+        ASSERT_EQ(advanced.refusal, R::ok);
+        ASSERT_TRUE(advanced.receipt.has_value());
+        EXPECT_EQ(advanced.receipt->provider, 11u);
+        EXPECT_EQ(advanced.receipt->partition, 2u);
+        EXPECT_EQ(advanced.receipt->barrier, 7u);
+        EXPECT_EQ(advanced.receipt->old_epoch, 3u);
+        EXPECT_EQ(advanced.receipt->new_epoch, 4u);
         EXPECT_EQ(part.accepted_epoch().value_or(0), 4u);
-        EXPECT_EQ(part.fetch_count().value_or(99), 0u)
-            << "advance clears index and records together";
 
         // The old epoch's key mints FRESH under the new epoch.
         auto fresh = part.get_or_create_fetch(4, "k", "s");
@@ -104,7 +145,7 @@ TEST(PartitionEdge, FetchIdCeilingRefusesMintButServicesJoins)
     auto strand = sched.make_strand();
     // Lab seam: start the mint one below the ceiling.
     CoordinatorPartition part{
-        strand, 1, std::numeric_limits<FetchId>::max() - 1};
+        strand, 1, 1, 1, std::numeric_limits<FetchId>::max() - 1};
     asio::post(strand, [&] {
         auto last = part.get_or_create_fetch(1, "existing", "s");
         ASSERT_EQ(last.refusal, CoordinatorPartition::Refusal::ok);
@@ -136,10 +177,12 @@ TEST_F(PartitionFixture, OffStrandTouchesAreRefusedBeforeAnyRead)
             part.get_or_create_fetch(3, "k", "s").refusal, R::off_strand);
         EXPECT_EQ(part.remove_fetch(3, 1), R::off_strand);
         EXPECT_EQ(part.install_barrier(1), R::off_strand);
-        EXPECT_EQ(part.clear_and_advance(1), R::off_strand);
+        EXPECT_EQ(part.advance_epoch(1).refusal, R::off_strand);
+        EXPECT_FALSE(part.advance_epoch(1).receipt.has_value());
         EXPECT_FALSE(part.accepted_epoch().has_value());
         EXPECT_FALSE(part.fetch_count().has_value());
         EXPECT_FALSE(part.joins_of(1).has_value());
+        EXPECT_FALSE(part.active_shape_of(1).has_value());
         checked = true;
     });
     sched.run_until_idle();
@@ -151,10 +194,10 @@ TEST_F(PartitionFixture, BarrierIdsRemainAMonotonicAcceptanceGate)
 {
     run([&] {
         ASSERT_EQ(part.install_barrier(5), R::ok);
-        ASSERT_EQ(part.clear_and_advance(5), R::ok);
+        ASSERT_EQ(part.advance_epoch(5).refusal, R::ok);
         EXPECT_EQ(part.install_barrier(5), R::barrier_reused);
         EXPECT_EQ(part.install_barrier(6), R::ok);
-        ASSERT_EQ(part.clear_and_advance(6), R::ok);
+        ASSERT_EQ(part.advance_epoch(6).refusal, R::ok);
         EXPECT_EQ(part.accepted_epoch().value_or(0), 5u);
     });
 }

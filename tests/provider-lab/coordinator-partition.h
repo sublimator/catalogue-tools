@@ -37,6 +37,20 @@ namespace catl::provider_lab {
 using FetchId = std::uint64_t;
 using DemandFetchKey = std::string;
 using TransportShape = std::string;
+using ProviderId = std::uint64_t;
+using PartitionId = std::uint64_t;
+
+/// Immutable exact receipt for one partition epoch advance — the leaf
+/// evidence a later provider-level fan-out join reconciles. Only the
+/// drained success path can mint one; no refusal carries a receipt.
+struct PartitionAdvanceReceipt
+{
+    ProviderId provider = 0;
+    PartitionId partition = 0;
+    BarrierId barrier = 0;
+    Epoch old_epoch = 0;
+    Epoch new_epoch = 0;
+};
 
 class CoordinatorPartition
 {
@@ -55,6 +69,15 @@ public:
         barrier_reused,
         fetch_id_exhausted,  // mint at ceiling: refused, records intact
         unknown_fetch,
+        not_drained,  // advance requires the zero witness as a
+                      // PRECONDITION; live rows refuse it, the barrier
+                      // stays installed, and no receipt exists
+    };
+
+    struct AdvanceResult
+    {
+        Refusal refusal{};
+        std::optional<PartitionAdvanceReceipt> receipt;
     };
 
     struct FetchResult
@@ -66,9 +89,13 @@ public:
 
     CoordinatorPartition(
         strand_type strand,
+        ProviderId provider,
+        PartitionId partition,
         Epoch initial_epoch,
         FetchId first_minted_id = 1)
         : strand_(std::move(strand))
+        , provider_(provider)
+        , partition_(partition)
         , control_(initial_epoch)
         , next_fetch_(first_minted_id == 0 ? 1 : first_minted_id)
     {
@@ -96,9 +123,15 @@ public:
             return {r};
         if (auto it = index_.find(key); it != index_.end())
         {
+            // A joiner has NO authority over the active attempt's
+            // response contract: the shape that was sent is the shape
+            // that validates. A hit is accounting only; shape changes
+            // arrive solely through an explicit owner transition
+            // (advance_revision, owned by the attempt/retry increment)
+            // after the prior attempt terminalizes.
             auto& record = records_.at(it->second);
-            record.last_shape = std::move(shape);
-            ++record.joins;
+            if (record.joins < std::numeric_limits<std::uint64_t>::max())
+                ++record.joins;  // diagnostic; saturates, never wraps
             return {Refusal::ok, it->second, false};
         }
         if (next_fetch_ == std::numeric_limits<FetchId>::max())
@@ -118,13 +151,17 @@ public:
 
     /// Remove the fetch record and its index entry in one owner-strand
     /// commit. A later re-miss mints a NEW FetchId — no resurrection.
+    /// Terminal/drain admission: legal in running OR under the barrier
+    /// (draining old-epoch work is the barrier's purpose); the exact
+    /// epoch tag is still validated. New-work admission stays
+    /// running-only in get_or_create_fetch.
     //@@authority transition=provider_lab.remove_fetch owner=provider_lab commit=strand
     Refusal
     remove_fetch(Epoch tag, FetchId id)
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
-        if (auto r = admit(tag); r != Refusal::ok)
+        if (auto r = admit_terminal(tag); r != Refusal::ok)
             return r;
         auto it = records_.find(id);
         if (it == records_.end())
@@ -143,21 +180,27 @@ public:
         return map_check(control_.install_barrier(id));
     }
 
-    /// The clear/advance receipt this returns (ok) is the LEAF evidence
-    /// the later provider-level fan-out join consumes.
+    /// Advance requires the zero witness as a PRECONDITION: live
+    /// index/records refuse `not_drained`, the barrier stays installed,
+    /// and no receipt exists. On the drained success path this mints
+    /// the immutable PartitionAdvanceReceipt — the exact leaf evidence
+    /// the later provider-level fan-out join reconciles.
     //@@authority transition=provider_lab.clear_and_advance_partition owner=provider_lab commit=strand
-    Refusal
-    clear_and_advance(BarrierId id)
+    AdvanceResult
+    advance_epoch(BarrierId id)
     {
         if (!on_owner_strand())
-            return Refusal::off_strand;
+            return {Refusal::off_strand, std::nullopt};
+        if (!records_.empty() || !index_.empty())
+            return {Refusal::not_drained, std::nullopt};
+        auto const old_epoch = control_.epoch();
         auto const check = control_.consume_barrier_and_advance(id);
-        if (check == EpochControl::Check::ok)
-        {
-            index_.clear();
-            records_.clear();
-        }
-        return map_check(check);
+        if (check != EpochControl::Check::ok)
+            return {map_check(check), std::nullopt};
+        return {
+            Refusal::ok,
+            PartitionAdvanceReceipt{
+                provider_, partition_, id, old_epoch, control_.epoch()}};
     }
 
     // Owner-strand introspection; refusal dominates every read.
@@ -185,6 +228,18 @@ public:
             return std::nullopt;
         return it->second.joins;
     }
+    /// The ACTIVE attempt's shape — the contract responses validate
+    /// against. Joiners cannot rewrite it (see get_or_create_fetch).
+    std::optional<TransportShape>
+    active_shape_of(FetchId id) const
+    {
+        if (!on_owner_strand())
+            return std::nullopt;
+        auto it = records_.find(id);
+        if (it == records_.end())
+            return std::nullopt;
+        return it->second.last_shape;
+    }
 
 private:
     struct FetchRecord
@@ -198,6 +253,17 @@ private:
     admit(Epoch tag) const
     {
         return map_check(control_.check_running(tag));
+    }
+
+    /// Terminal/drain admission: running or barrier, exact epoch only.
+    Refusal
+    admit_terminal(Epoch tag) const
+    {
+        if (control_.state() == EpochControl::State::stopped)
+            return Refusal::stopped;
+        if (tag != control_.epoch())
+            return Refusal::wrong_epoch;
+        return Refusal::ok;
     }
 
     static Refusal
@@ -226,6 +292,8 @@ private:
     }
 
     strand_type strand_;
+    ProviderId provider_;
+    PartitionId partition_;
     //@@authority state=provider_lab.partition_control owner=provider_lab
     EpochControl control_;
     FetchId next_fetch_;
