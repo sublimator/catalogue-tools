@@ -294,6 +294,7 @@ public:
         receiver_sequence_invalid,
         receipt_scope_mismatch,
         receipt_binding_mismatch,
+        already_settled,
         unknown_settlement,
         id_exhausted,
         seed_not_pristine,
@@ -362,6 +363,8 @@ public:
 
     //@@authority transition=provider_lab.c09_open_member owner=provider_lab
     // commit=strand
+    // A member that never starts transport still uses its reserved attempt:
+    // register it, then cancel it to export the owned absence proof.
     MemberResult
     open_member(C09MemberLineage lineage)
     {
@@ -624,6 +627,9 @@ public:
                 peer_client_incarnation_ ||
             receipt_member.sender_generation != sender_generation_)
             return Refusal::receipt_scope_mismatch;
+        if (auto const* settled = find_settlement(receipt.identity().command))
+            return *settled == receipt ? Refusal::already_settled
+                                       : Refusal::receipt_binding_mismatch;
         auto it = attempts_.find(receipt.identity().transport_attempt);
         if (it == attempts_.end())
             return Refusal::unknown_attempt;
@@ -824,6 +830,18 @@ private:
         if (it == members_.end() || it->second.member != member)
             return nullptr;
         return &it->second;
+    }
+
+    C09TerminalReceipt const*
+    find_settlement(C09CommandId command) const
+    {
+        for (auto const& [_, member] : members_)
+        {
+            auto const it = member.settlements.find(command);
+            if (it != member.settlements.end())
+                return &it->second;
+        }
+        return nullptr;
     }
 
     std::map<C09TransportAttemptId, AttemptRow>::iterator

@@ -500,8 +500,29 @@ TEST_F(SenderFixture, OnlyTheExactReceiverReceiptConsumesTheOutbox)
         ASSERT_TRUE(settlement.receipt);
         EXPECT_EQ(*settlement.receipt, exact)
             << "the sender retains the complete receipt identity";
-        EXPECT_EQ(sender.consume_receipt(exact), Refusal::unknown_attempt)
-            << "a duplicate receipt cannot consume a later row";
+        EXPECT_EQ(sender.consume_receipt(exact), Refusal::already_settled)
+            << "an exact replay is a typed no-op against retained settlement";
+
+        auto conflicting_identity = identity;
+        ++conflicting_identity.member.lineage.interest;
+        auto conflicting_binding = C09TerminalReceiptTestMint::mint(
+            conflicting_identity, terminal.command->outcome(), 9);
+        EXPECT_EQ(
+            sender.consume_receipt(conflicting_binding),
+            Refusal::receipt_binding_mismatch)
+            << "the globally unique command resolves before attempt absence";
+
+        auto conflicting_outcome = C09TerminalReceiptTestMint::mint(
+            identity, C09TerminalOutcome::cancelled, 9);
+        EXPECT_EQ(
+            sender.consume_receipt(conflicting_outcome),
+            Refusal::receipt_binding_mismatch);
+
+        auto conflicting_sequence = C09TerminalReceiptTestMint::mint(
+            identity, terminal.command->outcome(), 10);
+        EXPECT_EQ(
+            sender.consume_receipt(conflicting_sequence),
+            Refusal::receipt_binding_mismatch);
         auto replay_after_receipt = sender.replay(lease);
         EXPECT_EQ(replay_after_receipt.refusal, Refusal::unknown_attempt);
         EXPECT_FALSE(replay_after_receipt.command);
