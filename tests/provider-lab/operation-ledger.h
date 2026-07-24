@@ -486,9 +486,11 @@ public:
         return it->second;
     }
 
-    /// Cancellation/deadline/shutdown may request terminality: the
-    /// child's destination capability becomes inert, but the child is
-    /// NOT removed — only the matching terminal path removes it.
+    /// Cancellation/deadline/shutdown atomically select the terminal
+    /// path. Before publication, cancellation seals never_published so
+    /// no later caller must remember a second flip. After publication,
+    /// the destination capability becomes inert, but the child is NOT
+    /// removed — only the matching destination terminal path removes it.
     //@@authority transition=provider_lab.request_cancel owner=provider_lab commit=strand
     Refusal
     request_cancel(ChildId child_id)
@@ -498,7 +500,10 @@ public:
         auto located = locate(child_id);
         if (!located)
             return Refusal::cell_not_registered;
-        located->second->second.inert = true;
+        auto& child = located->second->second;
+        child.inert = true;
+        if (child.state == PublicationState::registered_not_published)
+            child.state = PublicationState::never_published;
         return Refusal::ok;
     }
 
@@ -659,6 +664,8 @@ private:
     Refusal
     publish_impl(Child& c, DestinationId dest, WorkId work)
     {
+        if (c.inert && c.state == PublicationState::never_published)
+            return Refusal::cancelled_inert;
         if (c.state != PublicationState::registered_not_published)
             return Refusal::already_flipped;
         if (c.inert)

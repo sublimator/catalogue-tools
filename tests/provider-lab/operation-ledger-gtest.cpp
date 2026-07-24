@@ -330,8 +330,10 @@ TEST_F(LedgerFixture, PrePublicationCancelSealsThePublicationPathBothOrders)
                 OperationLedger::Refusal::cancelled_inert)
                 << "cancelled pre-publication authority must not publish";
             EXPECT_EQ(
-                ledger.mark_never_published(child),
-                OperationLedger::Refusal::ok);
+                ledger.publication_state(cid),
+                OperationLedger::PublicationState::never_published)
+                << "cancel commits the terminal variant; no second caller "
+                   "flip is required";
             EXPECT_EQ(
                 ledger.ack_never_published(cid),
                 OperationLedger::AckOutcome::removed);
@@ -355,6 +357,66 @@ TEST_F(LedgerFixture, PrePublicationCancelSealsThePublicationPathBothOrders)
                 OperationLedger::AckOutcome::removed);
         }
     });
+}
+
+TEST(OperationLedger, QueuedCancelAndPublishSelectOneTerminalPathBothOrders)
+{
+    using Refusal = OperationLedger::Refusal;
+    using Ack = OperationLedger::AckOutcome;
+    using State = OperationLedger::PublicationState;
+
+    for (bool cancel_first : {true, false})
+    {
+        DeterministicScheduler sched;
+        auto strand = sched.make_strand();
+        OperationLedger ledger{strand, kScope};
+        ChildLease child;
+        OperationId operation = 0;
+        ChildId child_id = 0;
+
+        on_strand(sched, strand, [&] {
+            auto root = open_ok(ledger);
+            operation = root.id();
+            auto [registered, lease] = ledger.register_child(root);
+            ASSERT_EQ(registered, Refusal::ok);
+            child = std::move(lease);
+            child_id = child.id();
+        });
+
+        std::optional<Refusal> cancel_result;
+        std::optional<Refusal> publish_result;
+        auto cancel = [&] { cancel_result = ledger.request_cancel(child_id); };
+        auto publish = [&] { publish_result = ledger.publish(child, 7, 42); };
+        if (cancel_first)
+        {
+            asio::post(strand, cancel);
+            asio::post(strand, publish);
+        }
+        else
+        {
+            asio::post(strand, publish);
+            asio::post(strand, cancel);
+        }
+        sched.run_until_idle();
+
+        on_strand(sched, strand, [&] {
+            ASSERT_EQ(cancel_result, Refusal::ok);
+            if (cancel_first)
+            {
+                EXPECT_EQ(publish_result, Refusal::cancelled_inert);
+                EXPECT_EQ(
+                    ledger.publication_state(child_id), State::never_published);
+                EXPECT_EQ(ledger.ack_never_published(child_id), Ack::removed);
+            }
+            else
+            {
+                EXPECT_EQ(publish_result, Refusal::ok);
+                EXPECT_EQ(ledger.publication_state(child_id), State::published);
+                EXPECT_EQ(ledger.ack_terminal(child_id, 7, 42), Ack::removed);
+            }
+            EXPECT_EQ(ledger.child_count(operation), 0u);
+        });
+    }
 }
 
 TEST_F(LedgerFixture, ConsumeTerminalAckMintsAndReplaysTheWitness)
