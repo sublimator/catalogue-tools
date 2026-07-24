@@ -20,7 +20,7 @@
 
 #include "deterministic-scheduler.h"
 #include "epoch-control.h"
-#include "object-store.h"  // lab_content_hash, ContentHash
+#include "lab-hash.h"
 
 #include <cstdint>
 #include <limits>
@@ -77,6 +77,8 @@ public:
         wrong_barrier,
         not_running,
         stopped,
+        epoch_exhausted,   // advance would wrap: refused, fail closed
+        barrier_reused,    // BarrierIds are a strictly increasing mint
     };
 
     struct StopWitness
@@ -258,6 +260,10 @@ private:
                 return Refusal::wrong_barrier;
             case EpochControl::Check::not_running:
                 return Refusal::not_running;
+            case EpochControl::Check::epoch_exhausted:
+                return Refusal::epoch_exhausted;
+            case EpochControl::Check::barrier_reused:
+                return Refusal::barrier_reused;
         }
         return Refusal::not_running;
     }

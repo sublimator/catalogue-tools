@@ -214,3 +214,60 @@ TEST(HeaderStoreEdge, OverflowingInternalSequenceIsRefusedNotWrapped)
     });
     sched.run_until_idle();
 }
+
+TEST(HeaderStoreEdge, EpochExhaustionRefusesFailClosedWithValuesIntact)
+{
+    DeterministicScheduler sched;
+    auto strand = sched.make_strand();
+    EpochGuardedHeaderStore store{
+        strand, std::numeric_limits<Epoch>::max(), 3};
+    asio::post(strand, [&] {
+        auto bytes = std::string{"7:x"};
+        auto h = lab_content_hash(bytes);
+        auto const last = std::numeric_limits<Epoch>::max();
+        ASSERT_EQ(
+            store.insert(last, 7, h, bytes),
+            EpochGuardedHeaderStore::Refusal::ok);
+        ASSERT_EQ(
+            store.install_barrier(1), EpochGuardedHeaderStore::Refusal::ok);
+        EXPECT_EQ(
+            store.clear_and_advance(1),
+            EpochGuardedHeaderStore::Refusal::epoch_exhausted)
+            << "advance past the last epoch would wrap to zero and "
+               "reopen ancient tags — refused";
+        EXPECT_EQ(
+            store.insert(0, 7, h, bytes),
+            EpochGuardedHeaderStore::Refusal::barrier_installed)
+            << "fail closed: the barrier stays installed";
+        EXPECT_EQ(store.stop()->values_at_stop, 1u)
+            << "values remain intact through the refusal";
+    });
+    sched.run_until_idle();
+}
+
+TEST(HeaderStoreEdge, BarrierIdsAreAStrictlyIncreasingMint)
+{
+    DeterministicScheduler sched;
+    auto strand = sched.make_strand();
+    EpochGuardedHeaderStore store{strand, 1, 3};
+    asio::post(strand, [&] {
+        ASSERT_EQ(
+            store.install_barrier(5), EpochGuardedHeaderStore::Refusal::ok);
+        ASSERT_EQ(
+            store.clear_and_advance(5), EpochGuardedHeaderStore::Refusal::ok);
+
+        // Reuse of a consumed id — and anything below it — is refused:
+        // the exact-barrier claim is only as strong as id non-reuse.
+        EXPECT_EQ(
+            store.install_barrier(5),
+            EpochGuardedHeaderStore::Refusal::barrier_reused);
+        EXPECT_EQ(
+            store.install_barrier(4),
+            EpochGuardedHeaderStore::Refusal::barrier_reused);
+        EXPECT_EQ(
+            store.install_barrier(6), EpochGuardedHeaderStore::Refusal::ok);
+        EXPECT_EQ(
+            store.clear_and_advance(6), EpochGuardedHeaderStore::Refusal::ok);
+    });
+    sched.run_until_idle();
+}

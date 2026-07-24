@@ -6,6 +6,7 @@
 // than two spellings of it. TEST-ONLY, like everything in this lab.
 
 #include <cstdint>
+#include <limits>
 #include <optional>
 
 namespace catl::provider_lab {
@@ -25,6 +26,8 @@ public:
         stopped,
         wrong_barrier,
         not_running,
+        epoch_exhausted,  // advance would wrap: refuse, fail closed
+        barrier_reused,   // BarrierIds are a strictly increasing mint
     };
 
     explicit EpochControl(Epoch initial_epoch) : epoch_(initial_epoch) {}
@@ -43,6 +46,11 @@ public:
     }
 
     /// T80-analog: install the barrier; old-epoch commands reject after.
+    /// BarrierIds must be strictly increasing: the exact-barrier claim
+    /// is only as strong as the id's non-reuse, so the control machine
+    /// enforces it as a monotonic mint (ordering authority:
+    /// single-producer sequence) rather than assuming a separately
+    /// owned minter the lab does not have.
     Check
     install_barrier(BarrierId id)
     {
@@ -50,8 +58,11 @@ public:
             return Check::stopped;
         if (state_ != State::running)
             return Check::not_running;
+        if (id <= last_barrier_)
+            return Check::barrier_reused;
         state_ = State::barrier;
         barrier_ = id;
+        last_barrier_ = id;
         return Check::ok;
     }
 
@@ -68,6 +79,14 @@ public:
             return Check::not_running;
         if (barrier_ != id)
             return Check::wrong_barrier;
+        if (epoch_ == std::numeric_limits<Epoch>::max())
+        {
+            // Advancing would wrap to epoch zero and reopen every
+            // ancient zero-tagged command — the same false-agreement
+            // class as a wrapped sequence parse, refused the same way.
+            // The barrier stays installed: fail closed, values intact.
+            return Check::epoch_exhausted;
+        }
         ++epoch_;
         state_ = State::running;
         return Check::ok;
@@ -99,6 +118,7 @@ private:
     State state_ = State::running;
     Epoch epoch_;
     BarrierId barrier_ = 0;
+    BarrierId last_barrier_ = 0;
 };
 
 }  // namespace catl::provider_lab

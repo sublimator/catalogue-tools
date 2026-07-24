@@ -24,9 +24,9 @@
 
 #include "deterministic-scheduler.h"
 #include "epoch-control.h"
+#include "lab-hash.h"
 
 #include <cstdint>
-#include <functional>
 #include <list>
 #include <map>
 #include <optional>
@@ -34,16 +34,6 @@
 #include <utility>
 
 namespace catl::provider_lab {
-
-using ContentHash = std::uint64_t;
-
-/// Lab stand-in for canonical hashing: the CHECK is the point, not the
-/// function. Production uses the real content hash.
-inline ContentHash
-lab_content_hash(std::string const& bytes)
-{
-    return std::hash<std::string>{}(bytes);
-}
 
 class EpochGuardedObjectStore
 {
@@ -59,6 +49,8 @@ public:
         wrong_barrier,     // advance with a non-matching BarrierId
         not_running,       // barrier install outside running state
         stopped,           // absorbing tombstone: rejection only
+        epoch_exhausted,   // advance would wrap: refused, fail closed
+        barrier_reused,    // BarrierIds are a strictly increasing mint
     };
 
     struct StopWitness
@@ -225,6 +217,10 @@ private:
                 return Refusal::wrong_barrier;
             case EpochControl::Check::not_running:
                 return Refusal::not_running;
+            case EpochControl::Check::epoch_exhausted:
+                return Refusal::epoch_exhausted;
+            case EpochControl::Check::barrier_reused:
+                return Refusal::barrier_reused;
         }
         return Refusal::not_running;
     }
