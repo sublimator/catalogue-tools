@@ -12,10 +12,15 @@
 //    close identity; destination is authenticated before any read;
 //  - closes are STRICT CONTIGUOUS SUCCESSORS: the sole production
 //    mover of the stale high-water calls the pure
-//    check_close_successor, so the mark's ordering authority is
-//    receipt-gated succession, proven not assumed (R6). Succession is
-//    ordering, not permission: the authority is this cell's serialized
-//    close slot plus the bound command, never the arithmetic alone;
+//    check_close_successor. What THIS component proves is
+//    receiver-side strict contiguous ordering plus a retained,
+//    replayable latest receipt; RECEIPT-GATED succession — the sender
+//    consumes close receipt N before minting close N+1 — is the
+//    sender composition's obligation, stated here as a precondition
+//    and proven only when that composition lands (R6's citation is
+//    completed there, not here). Succession is ordering, not
+//    permission: the authority is this cell's serialized close slot
+//    plus the bound command, never the arithmetic alone;
 //  - the close consumes the SERIALIZED SLOT (begin occupies, complete
 //    applies-and-releases; a second begin refuses while one is in
 //    flight) and while generation g of a namespace is closing, the
@@ -79,6 +84,8 @@ namespace catl::provider_lab {
 using SenderGeneration = std::uint64_t;
 using ChannelGeneration = std::uint64_t;
 using CommandId = std::uint64_t;
+using CloseSequence = std::uint64_t;
+using CloseKind = std::uint64_t;
 using ReceiverGeneration = std::uint64_t;
 using PayloadDigest = std::uint64_t;
 using Outcome = std::uint64_t;
@@ -192,7 +199,13 @@ class C02CloseCommandTestMint;
 /// yet composed — tests mint via the explicit seam) asserts that
 /// generation `generation` of its namespace is finished. Sole-minted
 /// because the cell treats a presented close command as the trigger
-/// to occupy the close slot; carries the COMPLETE destination.
+/// to occupy the close slot. Carries the CANONICAL C02 identity:
+/// the complete destination (provider, partition, epoch, receiver
+/// generation) plus sender generation, channel generation, close
+/// sequence, close kind, command id, and payload digest. The receiver
+/// retains and echoes close sequence/kind/payload and never collapses
+/// distinct bindings; close-sequence SUCCESSION is the sender's
+/// obligation when composed.
 class C02CloseCommand
 {
 public:
@@ -215,10 +228,25 @@ public:
     {
         return generation_;
     }
+    CloseSequence
+    close_sequence() const
+    {
+        return close_sequence_;
+    }
+    CloseKind
+    close_kind() const
+    {
+        return close_kind_;
+    }
     CommandId
     close_command() const
     {
         return close_command_;
+    }
+    PayloadDigest
+    payload() const
+    {
+        return payload_;
     }
 
     bool
@@ -230,18 +258,27 @@ private:
         C01Destination destination,
         SenderGeneration sender_generation,
         ChannelGeneration generation,
-        CommandId close_command)
+        CloseSequence close_sequence,
+        CloseKind close_kind,
+        CommandId close_command,
+        PayloadDigest payload)
         : destination_(destination)
         , sender_generation_(sender_generation)
         , generation_(generation)
+        , close_sequence_(close_sequence)
+        , close_kind_(close_kind)
         , close_command_(close_command)
+        , payload_(payload)
     {
     }
 
     C01Destination destination_;
     SenderGeneration sender_generation_;
     ChannelGeneration generation_;
+    CloseSequence close_sequence_;
+    CloseKind close_kind_;
     CommandId close_command_;
+    PayloadDigest payload_;
 };
 
 static_assert(
@@ -253,16 +290,20 @@ static_assert(
         C01Destination,
         SenderGeneration,
         ChannelGeneration,
-        CommandId>,
+        CloseSequence,
+        CloseKind,
+        CommandId,
+        PayloadDigest>,
     "raw-field construction would let any caller trigger a close");
 
 class C01DispatchCell;
 
 /// Sole-minted close receipt, bound to the complete cell identity plus
-/// the close identity: the evidence the sender's serialized close
-/// pipeline consumes to retire its close outbox. Retained by the cell
-/// for the LATEST closed generation of each namespace and replayed
-/// identically.
+/// the FULL canonical close identity (sequence, kind, command, payload
+/// echoed): the evidence the sender's serialized close pipeline — and
+/// the close-kind-specific result consumers behind it — consume to
+/// retire the close outbox. Retained by the cell for the LATEST closed
+/// generation of each namespace and replayed identically.
 class C02CloseReceipt
 {
 public:
@@ -285,10 +326,25 @@ public:
     {
         return generation_;
     }
+    CloseSequence
+    close_sequence() const
+    {
+        return close_sequence_;
+    }
+    CloseKind
+    close_kind() const
+    {
+        return close_kind_;
+    }
     CommandId
     close_command() const
     {
         return close_command_;
+    }
+    PayloadDigest
+    payload() const
+    {
+        return payload_;
     }
 
     bool
@@ -300,18 +356,27 @@ private:
         C01Destination cell,
         SenderGeneration sender_generation,
         ChannelGeneration generation,
-        CommandId close_command)
+        CloseSequence close_sequence,
+        CloseKind close_kind,
+        CommandId close_command,
+        PayloadDigest payload)
         : cell_(cell)
         , sender_generation_(sender_generation)
         , generation_(generation)
+        , close_sequence_(close_sequence)
+        , close_kind_(close_kind)
         , close_command_(close_command)
+        , payload_(payload)
     {
     }
 
     C01Destination cell_;
     SenderGeneration sender_generation_;
     ChannelGeneration generation_;
+    CloseSequence close_sequence_;
+    CloseKind close_kind_;
     CommandId close_command_;
+    PayloadDigest payload_;
 };
 
 static_assert(
@@ -323,7 +388,10 @@ static_assert(
         C01Destination,
         SenderGeneration,
         ChannelGeneration,
-        CommandId>,
+        CloseSequence,
+        CloseKind,
+        CommandId,
+        PayloadDigest>,
     "raw-field construction would make every caller a second minter");
 
 class C01CellTestSeed;
@@ -474,7 +542,14 @@ public:
             auto const& receipt = closed->second;
             if (command.generation() == receipt.generation())
             {
-                if (command.close_command() == receipt.close_command())
+                // FULL binding governs replay vs conflict (T129):
+                // sequence, kind, command, and payload must ALL match
+                // the retained receipt — distinct bindings are never
+                // collapsed into an exact replay.
+                if (command.close_sequence() == receipt.close_sequence() &&
+                    command.close_kind() == receipt.close_kind() &&
+                    command.close_command() == receipt.close_command() &&
+                    command.payload() == receipt.payload())
                     return {CloseRefusal::already_closed, receipt};
                 return {CloseRefusal::close_conflict, std::nullopt};
             }
@@ -527,7 +602,8 @@ public:
         tmp_receipt.emplace(
             ns,
             C02CloseReceipt{
-                cell_, ns, generation, cmd.close_command()});
+                cell_, ns, generation, cmd.close_sequence(),
+                cmd.close_kind(), cmd.close_command(), cmd.payload()});
         auto receipt_node = tmp_receipt.extract(ns);
         if (test_complete_pre_commit)
             test_complete_pre_commit();
@@ -617,10 +693,15 @@ public:
         C01Destination destination,
         SenderGeneration sender_generation,
         ChannelGeneration generation,
-        CommandId close_command)
+        CloseSequence close_sequence,
+        CloseKind close_kind,
+        CommandId close_command,
+        PayloadDigest payload)
     {
         return C02CloseCommand{
-            destination, sender_generation, generation, close_command};
+            destination,   sender_generation, generation,
+            close_sequence, close_kind,       close_command,
+            payload};
     }
 };
 

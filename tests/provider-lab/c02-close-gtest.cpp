@@ -38,9 +38,13 @@ struct CloseFixture : ::testing::Test
         SenderGeneration ns,
         ChannelGeneration generation,
         CommandId id = 77,
-        C01Destination dest = kCell)
+        C01Destination dest = kCell,
+        CloseSequence seq = 1,
+        CloseKind kind = 2,
+        PayloadDigest payload = 0xC1)
     {
-        return C02CloseCommandTestMint::mint(dest, ns, generation, id);
+        return C02CloseCommandTestMint::mint(
+            dest, ns, generation, seq, kind, id, payload);
     }
 
     /// Dispatch one command into (ns, generation) with a distinct id.
@@ -107,8 +111,12 @@ TEST_F(CloseFixture, ClosesAreStrictContiguousSuccessors)
 TEST_F(CloseFixture, CeilingRefusesTypedNothingMutated)
 {
     run([&] {
-        // Seed the mark at the ceiling (test-only seam) and prove the
-        // executed exhaustion case through the real authority.
+        // SEEDED state, stated honestly: the mark sits at max with NO
+        // retained receipt (only the test seam can produce this — a
+        // real max close retains its receipt, so representable inputs
+        // classify as replay/conflict/stale BEFORE the pure exhaustion
+        // branch). The seed is how the executed exhaustion refusal is
+        // reached through the real authority.
         C01CellTestSeed::seed_stale_high_water(
             cell, 5, std::numeric_limits<ChannelGeneration>::max());
         EXPECT_EQ(cell.begin_close(close_cmd(5, 0)).refusal,
@@ -118,6 +126,40 @@ TEST_F(CloseFixture, CeilingRefusesTypedNothingMutated)
         EXPECT_EQ(
             cell.stale_high_water(5),
             std::numeric_limits<ChannelGeneration>::max());
+    });
+}
+
+TEST_F(CloseFixture, CeilingGenerationClosesAndReclaimsWithoutWrap)
+{
+    run([&] {
+        auto const g_max = std::numeric_limits<ChannelGeneration>::max();
+        // A legitimate close OF generation max: mark at max-1, a live
+        // row at (5, max) with the maximal CommandId — the exact
+        // range endpoint that motivated upper_bound over
+        // generation + 1.
+        C01CellTestSeed::seed_stale_high_water(cell, 5, g_max - 1);
+        ASSERT_EQ(
+            fill_row(5, g_max, std::numeric_limits<CommandId>::max()),
+            DC::first_commit);
+        ASSERT_EQ(fill_row(6, 0, 13), DC::first_commit);
+        ASSERT_EQ(cell.row_count(), 2u);
+
+        auto receipt = closed(5, g_max, 70);
+        EXPECT_EQ(receipt.generation(), g_max)
+            << "the receipt records the ceiling generation itself";
+        EXPECT_EQ(cell.stale_high_water(5), g_max);
+        EXPECT_EQ(cell.row_count(), 1u)
+            << "exactly the (5, max) row reclaimed — no wrap erased "
+               "or spared the wrong range";
+        EXPECT_EQ(fill_row(6, 0, 13), DC::exact_replay)
+            << "the unrelated namespace survived the ceiling close";
+
+        // Post-ceiling, representable inputs classify via the
+        // retained receipt, never the exhaustion branch.
+        EXPECT_EQ(cell.begin_close(close_cmd(5, g_max, 70)).refusal,
+                  CR::already_closed);
+        EXPECT_EQ(cell.begin_close(close_cmd(5, 0, 71)).refusal,
+                  CR::stale_close);
     });
 }
 
@@ -163,6 +205,43 @@ TEST_F(CloseFixture, ReclamationIsExactInBothDirections)
     });
 }
 
+TEST_F(CloseFixture, FullBindingGovernsReplayVersusConflict)
+{
+    run([&] {
+        auto receipt = closed(5, 0, 70);
+
+        // T129 at the close channel: at the closed generation, vary
+        // each identity field INDEPENDENTLY — sequence, kind, command,
+        // payload. Every mismatch conflicts without a receipt, without
+        // the slot, without state; only the exact full binding replays.
+        struct Variation
+        {
+            CloseSequence seq;
+            CloseKind kind;
+            CommandId id;
+            PayloadDigest payload;
+        };
+        for (auto v : {Variation{9, 2, 70, 0xC1},    // sequence differs
+                       Variation{1, 9, 70, 0xC1},    // kind differs
+                       Variation{1, 2, 71, 0xC1},    // command differs
+                       Variation{1, 2, 70, 0xD2}})   // payload differs
+        {
+            auto r = cell.begin_close(C02CloseCommandTestMint::mint(
+                kCell, 5, 0, v.seq, v.kind, v.id, v.payload));
+            EXPECT_EQ(r.refusal, CR::close_conflict)
+                << "same identity, payload/kind/sequence mismatch is a "
+                   "conflict, never collapsed into replay";
+            EXPECT_FALSE(r.receipt.has_value());
+            EXPECT_FALSE(cell.close_in_flight().value_or(true));
+        }
+
+        auto exact = cell.begin_close(close_cmd(5, 0, 70));
+        EXPECT_EQ(exact.refusal, CR::already_closed);
+        EXPECT_TRUE(*exact.receipt == receipt)
+            << "only the exact full binding replays, identically";
+    });
+}
+
 TEST_F(CloseFixture, CloseReceiptBindsRetainsAndReplays)
 {
     run([&] {
@@ -170,7 +249,11 @@ TEST_F(CloseFixture, CloseReceiptBindsRetainsAndReplays)
         EXPECT_EQ(receipt.cell(), kCell);
         EXPECT_EQ(receipt.sender_generation(), 5u);
         EXPECT_EQ(receipt.generation(), 0u);
+        EXPECT_EQ(receipt.close_sequence(), 1u);
+        EXPECT_EQ(receipt.close_kind(), 2u);
         EXPECT_EQ(receipt.close_command(), 70u);
+        EXPECT_EQ(receipt.payload(), 0xC1u)
+            << "the fresh receipt echoes every identity field";
 
         // The caller loses the receipt: re-presenting the IDENTICAL
         // close command replays the IDENTICAL retained receipt.
