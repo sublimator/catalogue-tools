@@ -40,7 +40,7 @@ struct CloseFixture : ::testing::Test
         CommandId id = 77,
         C01Destination dest = kCell,
         CloseSequence seq = 1,
-        CloseKind kind = 2,
+        CloseKind kind = CloseKind::clear,
         PayloadDigest payload = 0xC1)
     {
         return C02CloseCommandTestMint::mint(
@@ -205,35 +205,40 @@ TEST_F(CloseFixture, ReclamationIsExactInBothDirections)
     });
 }
 
-TEST_F(CloseFixture, FullBindingGovernsReplayVersusConflict)
+TEST_F(CloseFixture, EqualGenerationPartitionsIntoReplayConflictUnmatched)
 {
     run([&] {
         auto receipt = closed(5, 0, 70);
 
-        // T129 at the close channel: at the closed generation, vary
-        // each identity field INDEPENDENTLY — sequence, kind, command,
-        // payload. Every mismatch conflicts without a receipt, without
-        // the slot, without state; only the exact full binding replays.
+        // The canonical equal-generation partition. T129: the SAME
+        // dedup identity (CommandId 70) with sequence, kind, or
+        // payload differing is an identity/payload conflict.
         struct Variation
         {
             CloseSequence seq;
             CloseKind kind;
-            CommandId id;
             PayloadDigest payload;
         };
-        for (auto v : {Variation{9, 2, 70, 0xC1},    // sequence differs
-                       Variation{1, 9, 70, 0xC1},    // kind differs
-                       Variation{1, 2, 71, 0xC1},    // command differs
-                       Variation{1, 2, 70, 0xD2}})   // payload differs
+        for (auto v : {Variation{9, CloseKind::clear, 0xC1},     // seq
+                       Variation{1, CloseKind::terminal, 0xC1},  // kind
+                       Variation{1, CloseKind::clear, 0xD2}})    // payload
         {
             auto r = cell.begin_close(C02CloseCommandTestMint::mint(
-                kCell, 5, 0, v.seq, v.kind, v.id, v.payload));
+                kCell, 5, 0, v.seq, v.kind, /*id*/ 70, v.payload));
             EXPECT_EQ(r.refusal, CR::close_conflict)
-                << "same identity, payload/kind/sequence mismatch is a "
-                   "conflict, never collapsed into replay";
+                << "T129: same identity, mismatched binding — never "
+                   "collapsed into replay";
             EXPECT_FALSE(r.receipt.has_value());
             EXPECT_FALSE(cell.close_in_flight().value_or(true));
         }
+
+        // T127: a DIFFERENT CommandId at the retained high-water
+        // generation is unmatched-equal, not a conflict.
+        auto unmatched = cell.begin_close(close_cmd(5, 0, /*id*/ 71));
+        EXPECT_EQ(unmatched.refusal, CR::unmatched_equal)
+            << "T127: different identity at the closed generation";
+        EXPECT_FALSE(unmatched.receipt.has_value());
+        EXPECT_FALSE(cell.close_in_flight().value_or(true));
 
         auto exact = cell.begin_close(close_cmd(5, 0, 70));
         EXPECT_EQ(exact.refusal, CR::already_closed);
@@ -250,7 +255,7 @@ TEST_F(CloseFixture, CloseReceiptBindsRetainsAndReplays)
         EXPECT_EQ(receipt.sender_generation(), 5u);
         EXPECT_EQ(receipt.generation(), 0u);
         EXPECT_EQ(receipt.close_sequence(), 1u);
-        EXPECT_EQ(receipt.close_kind(), 2u);
+        EXPECT_EQ(receipt.close_kind(), CloseKind::clear);
         EXPECT_EQ(receipt.close_command(), 70u);
         EXPECT_EQ(receipt.payload(), 0xC1u)
             << "the fresh receipt echoes every identity field";
@@ -264,11 +269,11 @@ TEST_F(CloseFixture, CloseReceiptBindsRetainsAndReplays)
         EXPECT_FALSE(cell.close_in_flight().value_or(true))
             << "replay never occupies the slot";
 
-        // A DIFFERENT close identity claiming the closed generation
-        // conflicts without effect or receipt.
-        auto conflict = cell.begin_close(close_cmd(5, 0, 71));
-        EXPECT_EQ(conflict.refusal, CR::close_conflict);
-        EXPECT_FALSE(conflict.receipt.has_value());
+        // A DIFFERENT CommandId claiming the closed generation is the
+        // T127 unmatched-equal case: no effect, no receipt.
+        auto unmatched = cell.begin_close(close_cmd(5, 0, 71));
+        EXPECT_EQ(unmatched.refusal, CR::unmatched_equal);
+        EXPECT_FALSE(unmatched.receipt.has_value());
 
         // The successor close DISPLACES the retained receipt: the
         // older generation's home is reclaimed and typed stale.

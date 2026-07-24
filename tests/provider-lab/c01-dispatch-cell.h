@@ -85,7 +85,16 @@ using SenderGeneration = std::uint64_t;
 using ChannelGeneration = std::uint64_t;
 using CommandId = std::uint64_t;
 using CloseSequence = std::uint64_t;
-using CloseKind = std::uint64_t;
+
+/// The canonical close-kind domain is CLOSED: downstream close-result
+/// handling (T150/T146) is exhaustive over exactly this partition, so
+/// an open integer here could mint a close no canonical consumer
+/// handles. A closed enum makes invalid construction impossible.
+enum class CloseKind : std::uint8_t {
+    capacity,
+    clear,
+    terminal,
+};
 using ReceiverGeneration = std::uint64_t;
 using PayloadDigest = std::uint64_t;
 using Outcome = std::uint64_t;
@@ -503,7 +512,9 @@ public:
         wrong_destination,
         invalid_identity,  // reserved close-command id 0
         already_closed,    // exact replay: the retained receipt returns
-        close_conflict,    // same generation, different close identity
+        close_conflict,    // T129: same CommandId, different binding
+        unmatched_equal,   // T127: different CommandId at the retained
+                           // high-water generation
         stale_close,  // older than the retained receipt home covers
         slot_occupied,
         not_successor,
@@ -542,13 +553,15 @@ public:
             auto const& receipt = closed->second;
             if (command.generation() == receipt.generation())
             {
-                // FULL binding governs replay vs conflict (T129):
-                // sequence, kind, command, and payload must ALL match
-                // the retained receipt — distinct bindings are never
-                // collapsed into an exact replay.
+                // The canonical equal-generation partition: a
+                // DIFFERENT CommandId is T127 unmatched-equal; the
+                // SAME CommandId with any bound field differing is
+                // the T129 identity/payload conflict; only the exact
+                // full binding replays. All three are no-effect here.
+                if (command.close_command() != receipt.close_command())
+                    return {CloseRefusal::unmatched_equal, std::nullopt};
                 if (command.close_sequence() == receipt.close_sequence() &&
                     command.close_kind() == receipt.close_kind() &&
-                    command.close_command() == receipt.close_command() &&
                     command.payload() == receipt.payload())
                     return {CloseRefusal::already_closed, receipt};
                 return {CloseRefusal::close_conflict, std::nullopt};
