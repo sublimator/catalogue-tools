@@ -59,3 +59,8 @@ add_executable(c02-close-gtest c02-close-gtest.cpp)
 target_link_libraries(c02-close-gtest
                       PRIVATE Boost::boost GTest::gtest_main)
 gtest_discover_tests(c02-close-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(c09-transport-terminal-gtest c09-transport-terminal-gtest.cpp)
+target_link_libraries(c09-transport-terminal-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(c09-transport-terminal-gtest DISCOVERY_TIMEOUT 30)
