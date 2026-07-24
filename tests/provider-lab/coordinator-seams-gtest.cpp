@@ -283,11 +283,15 @@ TEST_F(SeamsFixture, BadSequence2_CrossPartitionArtifactsRefuse)
     CoordinatorInterestSeams b{strand2, scope_b};
     std::optional<RevokeCommand> cmd_b;
     std::optional<ParticipantRevokedReceipt> receipt_b;
+    ChildLease spare_b;  // unclaimed child from B's ledger incarnation
     asio::post(strand2, [&] {
         auto rr = b.ledger().open_root();
         ASSERT_EQ(rr.refusal, OperationLedger::Refusal::ok);
         auto [cr, child_b] = b.ledger().register_child(rr.lease);
         ASSERT_EQ(cr, OperationLedger::Refusal::ok);
+        auto [cr2, spare] = b.ledger().register_child(rr.lease);
+        ASSERT_EQ(cr2, OperationLedger::Refusal::ok);
+        spare_b = std::move(spare);
         auto o = b.open_interest_with_cell(child_b, 10, 900, kEpoch);
         ASSERT_EQ(o.refusal, SR::ok);
         auto d = b.interests().begin_detach(o.interest);
@@ -330,6 +334,15 @@ TEST_F(SeamsFixture, BadSequence2_CrossPartitionArtifactsRefuse)
                 TerminalConsumedTestMint::mint(scope_b, 1, 100, 7)),
             SR::wrong_scope)
             << "scope-first at the seam too: no phase leak";
+
+        // A child LEASE from B's ledger incarnation cannot anchor an
+        // interest here, even though its numeric id may collide: the
+        // lease is bound to its minting incarnation, not to an id.
+        EXPECT_EQ(
+            seams.open_interest_with_cell(spare_b, 10, 902, kEpoch)
+                .refusal,
+            SR::ledger_refuses)
+            << "foreign leases resolve to nothing before any lookup";
     });
 }
 
@@ -515,6 +528,9 @@ TEST_F(SeamsFixture, RoundTripRetirementReleasesEveryHomeOrNone)
         auto consumed = ledger.consume_terminal_ack(*ack, 9, 4);
         ASSERT_EQ(consumed.outcome, AO::removed);
         ASSERT_TRUE(consumed.witness.has_value());
+        EXPECT_EQ(consumed.witness->disposition(),
+                  TerminalDisposition::terminal_ack_consumed)
+            << "the ordinary path records genuine ack consumption";
         EXPECT_EQ(ledger.child_count(t.operation), 0u);
 
         // Injected failure at the retirement failpoint: EVERY home
@@ -566,9 +582,26 @@ TEST_F(SeamsFixture, NeverPublishedReservedChildStillYieldsTheWitness)
             ledger.ack_never_published(t.child.id()), AO::removed);
         auto witness = ledger.replay_terminal_consumed(t.interest);
         ASSERT_TRUE(witness.has_value())
-            << "the never-published removal minted the same retained "
-               "witness the published path would";
+            << "the never-published removal minted a retained witness";
         EXPECT_EQ(witness->child(), t.child.id());
+        EXPECT_EQ(witness->disposition(),
+                  TerminalDisposition::never_published)
+            << "the witness records what HAPPENED, not a stronger "
+               "event: no acknowledgement ever existed";
+
+        // Presenting a terminal ack for this child must NOT report an
+        // acknowledgement as consumed — none was ever produced.
+        auto probe = ledger.consume_terminal_ack(
+            TerminalAckTestMint::mint(
+                kScope, t.interest, t.operation, t.child.id()),
+            9, 4);
+        EXPECT_EQ(probe.outcome, AO::unpublished)
+            << "two terminal histories are not laundered into one";
+        EXPECT_FALSE(probe.witness.has_value());
+        EXPECT_EQ(
+            ledger.replay_terminal_consumed(t.interest)->disposition(),
+            TerminalDisposition::never_published)
+            << "replay preserves the honest disposition";
 
         // The interest drains normally and retires on that witness.
         auto d = interests.begin_detach(t.interest);

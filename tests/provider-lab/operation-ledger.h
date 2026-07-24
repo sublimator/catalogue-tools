@@ -53,6 +53,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <utility>
 
@@ -66,6 +67,14 @@ using WorkId = std::uint64_t;
 /// Move-only handle to a registered row. Dropping it does NOT release
 /// the row (destructors are passive); only the ledger's exactly-once
 /// gates remove rows. A moved-from lease is empty.
+///
+/// A lease is bound to the exact LEDGER INCARNATION that minted it:
+/// it carries an opaque owner token (a shared control block whose
+/// address cannot alias any other live or reachable incarnation,
+/// because the lease itself keeps the block alive). Numeric ids are
+/// instance-local and DO collide across ledgers; the token, not the
+/// id and not the PartitionScope, is the authority identity. Every
+/// lease-accepting verb validates the token before any id lookup.
 template <typename Tag>
 class Lease
 {
@@ -73,13 +82,16 @@ public:
     Lease() = default;
 
     Lease(Lease&& other) noexcept
-        : id_(other.id_), valid_(std::exchange(other.valid_, false))
+        : id_(other.id_)
+        , owner_(std::move(other.owner_))
+        , valid_(std::exchange(other.valid_, false))
     {
     }
     Lease&
     operator=(Lease&& other) noexcept
     {
         id_ = other.id_;
+        owner_ = std::move(other.owner_);
         valid_ = std::exchange(other.valid_, false);
         return *this;
     }
@@ -100,9 +112,13 @@ public:
 
 private:
     friend class OperationLedger;  // sole minter: handles are non-forgeable
-    explicit Lease(std::uint64_t id) : id_(id), valid_(true) {}
+    Lease(std::uint64_t id, std::shared_ptr<void const> owner)
+        : id_(id), owner_(std::move(owner)), valid_(true)
+    {
+    }
 
     std::uint64_t id_ = 0;
+    std::shared_ptr<void const> owner_;
     bool valid_ = false;
 };
 
@@ -154,6 +170,7 @@ public:
         child_id_exhausted,
         interest_reserved,  // store verbs refuse an interest-bound child
         not_reserved,       // interest publication needs a reservation
+        wrong_ledger,  // lease minted by another ledger incarnation
     };
 
     struct RootResult
@@ -189,6 +206,16 @@ public:
         return scope_;
     }
 
+    /// Incarnation authentication: a VALID lease minted by any other
+    /// ledger incarnation is foreign, whatever its numeric id.
+    /// Checked before any id lookup in every lease-accepting verb.
+    template <typename Tag>
+    bool
+    foreign(Lease<Tag> const& lease) const
+    {
+        return lease.valid() && lease.owner_.get() != incarnation_.get();
+    }
+
     /// T50-analog: mint one root operation row. Fail-closed at the id
     /// ceiling; prepare-then-commit (the node is built before any
     /// state or counter mutation, and the commit is allocation-free).
@@ -210,7 +237,7 @@ public:
         // COMMIT (non-throwing): insert, then advance the counter.
         operations_.insert(std::move(node));
         ++next_operation_;
-        return {Refusal::ok, RootLease(id)};
+        return {Refusal::ok, RootLease(id, incarnation_)};
     }
 
     /// Register one child under a live, non-closing root. The returned
@@ -226,6 +253,8 @@ public:
     {
         if (!on_owner_strand())
             return {Refusal::off_strand, ChildLease{}};
+        if (foreign(root))
+            return {Refusal::wrong_ledger, ChildLease{}};
         auto it = root.valid() ? operations_.find(root.id())
                                : operations_.end();
         if (it == operations_.end())
@@ -248,7 +277,7 @@ public:
         it->second.children.insert(std::move(child_node));
         child_index_.insert(std::move(index_node));
         ++next_child_;
-        return {Refusal::ok, ChildLease(child_id)};
+        return {Refusal::ok, ChildLease(child_id, incarnation_)};
     }
 
     /// Level-triggered flip to the STORE-terminal variant: raw
@@ -262,6 +291,8 @@ public:
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
+        if (foreign(child))
+            return Refusal::wrong_ledger;
         auto* c = find_child(child);
         if (!c)
             return Refusal::cell_not_registered;
@@ -278,6 +309,8 @@ public:
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
+        if (foreign(child))
+            return Refusal::wrong_ledger;
         auto* c = find_child(child);
         if (!c)
             return Refusal::cell_not_registered;
@@ -311,13 +344,15 @@ public:
             return AckOutcome::unpublished;
         if (c.interest_binding.has_value())
         {
-            // PREPARE (throwing): the witness node.
+            // PREPARE (throwing): the witness node — with the HONEST
+            // disposition: no terminal acknowledgement existed on
+            // this path, and the witness must never claim one did.
             WitnessMap tmp;
             tmp.emplace(
                 *c.interest_binding,
                 InterestTerminalConsumed{
-                    scope_, *c.interest_binding, op_it->first,
-                    child_id});
+                    scope_, *c.interest_binding, op_it->first, child_id,
+                    TerminalDisposition::never_published});
             auto node = tmp.extract(*c.interest_binding);
             // COMMIT (non-throwing).
             witnesses_.insert(std::move(node));
@@ -387,10 +422,15 @@ public:
         if (auto w = witnesses_.find(ack.interest());
             w != witnesses_.end())
         {
-            if (w->second.operation() == ack.operation() &&
-                w->second.child() == ack.child())
-                return {AckOutcome::removed, w->second};  // replay
-            return {AckOutcome::wrong_binding, std::nullopt};
+            if (w->second.operation() != ack.operation() ||
+                w->second.child() != ack.child())
+                return {AckOutcome::wrong_binding, std::nullopt};
+            // A never_published disposition means NO acknowledgement
+            // ever existed: this verb must not report one as consumed.
+            if (w->second.disposition() ==
+                TerminalDisposition::never_published)
+                return {AckOutcome::unpublished, std::nullopt};
+            return {AckOutcome::removed, w->second};  // ack replay
         }
         auto located = locate(ack.child());
         if (!located)
@@ -416,7 +456,8 @@ public:
             ack.interest(),
             InterestTerminalConsumed{
                 ack.scope(), ack.interest(), ack.operation(),
-                ack.child()});
+                ack.child(),
+                TerminalDisposition::terminal_ack_consumed});
         auto node = tmp.extract(ack.interest());
         if (test_hooks.consume_pre_commit)
             test_hooks.consume_pre_commit();
@@ -464,6 +505,8 @@ public:
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
+        if (foreign(root))
+            return Refusal::wrong_ledger;
         auto it = root.valid() ? operations_.find(root.id())
                                : operations_.end();
         if (it == operations_.end())
@@ -550,11 +593,13 @@ private:
         witnesses_.erase(interest);
     }
 
-    /// Reservation validation: the child must exist, be unpublished,
-    /// and be unclaimed. Read-only.
+    /// Reservation validation: the lease must be OURS, and the child
+    /// must exist, be unpublished, and be unclaimed. Read-only.
     Refusal
     can_reserve(ChildLease const& child) const
     {
+        if (foreign(child))
+            return Refusal::wrong_ledger;
         auto* c = const_cast<OperationLedger*>(this)->find_child(child);
         if (!c)
             return Refusal::cell_not_registered;
@@ -583,6 +628,8 @@ private:
     {
         if (!on_owner_strand())
             return Refusal::off_strand;
+        if (foreign(child))
+            return Refusal::wrong_ledger;
         auto* c = find_child(child);
         if (!c)
             return Refusal::cell_not_registered;
@@ -592,10 +639,11 @@ private:
     }
 
     /// Locate the owning operation of a lease's child (read-only).
+    /// Foreign leases resolve to nothing: the id is never consulted.
     std::optional<OperationId>
     operation_of(ChildLease const& child) const
     {
-        if (!child.valid())
+        if (!child.valid() || foreign(child))
             return std::nullopt;
         auto it = child_index_.find(child.id());
         if (it == child_index_.end())
@@ -660,6 +708,11 @@ private:
     //@@authority state=provider_lab.operation_children owner=provider_lab
     strand_type strand_;
     PartitionScope scope_;
+    // The incarnation token: an opaque control block whose address is
+    // unique among all incarnations any live lease can name (leases
+    // pin their minter's block, so it can never be freed and reused
+    // while a lease survives). PartitionScope stays diagnostic only.
+    std::shared_ptr<void const> incarnation_ = std::make_shared<int>(0);
     OperationId next_operation_;
     ChildId next_child_;
     std::map<OperationId, Operation> operations_;

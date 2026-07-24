@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -626,5 +627,88 @@ TEST_F(LedgerFixture, MinterCommitsAreExceptionAtomicAtTheFailpoints)
             OperationLedger::AckOutcome::removed)
             << "row and index agree: the child is locatable and "
                "removable — no two-home tear";
+    });
+}
+
+TEST(LedgerEdge, ForeignLeasesRefuseBeforeAnyLookup)
+{
+    // Ledger A is the target; B (same scope) and C (different scope)
+    // mint colliding local ids; D is destroyed and recreated in the
+    // same scope to prove incarnation identity, not scope, is the
+    // authority.
+    DeterministicScheduler sched;
+    auto strand_a = sched.make_strand();
+    OperationLedger a{strand_a, kScope};
+
+    DeterministicScheduler s_b;
+    auto strand_b = s_b.make_strand();
+    OperationLedger b{strand_b, kScope};  // SAME scope
+    RootLease b_root;
+    ChildLease b_child;
+    ChildLease b_child2;
+    on_strand(s_b, strand_b, [&] {
+        b_root = open_ok(b);
+        auto [r1, c1] = b.register_child(b_root);
+        ASSERT_EQ(r1, OperationLedger::Refusal::ok);
+        b_child = std::move(c1);
+        auto [r2, c2] = b.register_child(b_root);
+        ASSERT_EQ(r2, OperationLedger::Refusal::ok);
+        b_child2 = std::move(c2);  // id 2: ABSENT in A
+    });
+
+    DeterministicScheduler s_c;
+    auto strand_c = s_c.make_strand();
+    OperationLedger c{strand_c, PartitionScope{1, 2}};
+    RootLease c_root;
+    on_strand(s_c, strand_c, [&] { c_root = open_ok(c); });
+
+    on_strand(sched, strand_a, [&] {
+        auto a_root = open_ok(a);
+        auto [ar, a_child] = a.register_child(a_root);
+        ASSERT_EQ(ar, OperationLedger::Refusal::ok);
+        ASSERT_EQ(a_root.id(), b_root.id())
+            << "the collision is real: identical local ids";
+
+        // Present-id foreign leases: the SAME wrong_ledger refusal,
+        // and A's own state untouched.
+        EXPECT_EQ(a.register_child(b_root).first,
+                  OperationLedger::Refusal::wrong_ledger);
+        EXPECT_EQ(a.begin_close(b_root),
+                  OperationLedger::Refusal::wrong_ledger);
+        EXPECT_EQ(a.publish(b_child, 7, 42),
+                  OperationLedger::Refusal::wrong_ledger);
+        EXPECT_EQ(a.mark_never_published(b_child),
+                  OperationLedger::Refusal::wrong_ledger);
+        // Absent-id foreign lease: identical refusal, no presence leak.
+        EXPECT_EQ(a.publish(b_child2, 7, 42),
+                  OperationLedger::Refusal::wrong_ledger);
+        // Different scope changes nothing about the refusal.
+        EXPECT_EQ(a.register_child(c_root).first,
+                  OperationLedger::Refusal::wrong_ledger);
+
+        EXPECT_EQ(a.child_count(a_root.id()), 1u)
+            << "every foreign refusal mutated nothing";
+        EXPECT_EQ(a.publish(a_child, 7, 42), OperationLedger::Refusal::ok)
+            << "A's own authority is intact";
+    });
+
+    // Recreated incarnation, same scope: old leases are foreign to
+    // the successor even though its counters restart identically.
+    DeterministicScheduler s_d;
+    auto strand_d = s_d.make_strand();
+    auto d = std::make_unique<OperationLedger>(strand_d, kScope);
+    RootLease old_root;
+    on_strand(s_d, strand_d, [&] { old_root = open_ok(*d); });
+    d = std::make_unique<OperationLedger>(strand_d, kScope);
+    on_strand(s_d, strand_d, [&] {
+        auto fresh = open_ok(*d);
+        ASSERT_EQ(fresh.id(), old_root.id())
+            << "the successor restarted its counters";
+        EXPECT_EQ(d->register_child(old_root).first,
+                  OperationLedger::Refusal::wrong_ledger)
+            << "an old incarnation's lease has no authority over the "
+               "successor";
+        EXPECT_EQ(d->register_child(fresh).first,
+                  OperationLedger::Refusal::ok);
     });
 }

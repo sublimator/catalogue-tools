@@ -435,8 +435,20 @@ static_assert(
         InterestChildId>,
     "raw-field construction would make every caller a second minter");
 
+/// How an interest's original child reached terminality. Two distinct
+/// histories, never laundered into one: the published child's exact
+/// terminal acknowledgement was consumed, or the child was sealed
+/// never-published (no acknowledgement ever existed). Both prove the
+/// child can produce no further work; APIs must never report the
+/// second as the first.
+enum class TerminalDisposition : std::uint8_t {
+    terminal_ack_consumed,
+    never_published,
+};
+
 /// Phase three of the terminal handoff: the OPERATION LEDGER's witness
-/// that it consumed the interest's terminal ack. Sole production
+/// that the interest's original child is terminal, carrying the
+/// explicit DISPOSITION by which that became true. Sole production
 /// minter: OperationLedger. Only THIS may remove the terminal-ready
 /// interest.
 class InterestTerminalConsumed
@@ -466,6 +478,11 @@ public:
     {
         return child_;
     }
+    TerminalDisposition
+    disposition() const
+    {
+        return disposition_;
+    }
 
     bool
     operator==(InterestTerminalConsumed const&) const = default;
@@ -477,11 +494,13 @@ private:
         PartitionScope scope,
         InterestId interest,
         InterestOperationId operation,
-        InterestChildId child)
+        InterestChildId child,
+        TerminalDisposition disposition)
         : scope_(scope)
         , interest_(interest)
         , operation_(operation)
         , child_(child)
+        , disposition_(disposition)
     {
     }
 
@@ -489,6 +508,7 @@ private:
     InterestId interest_;
     InterestOperationId operation_;
     InterestChildId child_;
+    TerminalDisposition disposition_;
 };
 
 static_assert(
@@ -500,7 +520,8 @@ static_assert(
         PartitionScope,
         InterestId,
         InterestOperationId,
-        InterestChildId>,
+        InterestChildId,
+        TerminalDisposition>,
     "raw-field construction would fake downstream consumption");
 
 // Test-only mints for every artifact whose production minter is either
@@ -590,9 +611,12 @@ public:
         PartitionScope scope,
         InterestId interest,
         InterestOperationId operation,
-        InterestChildId child)
+        InterestChildId child,
+        TerminalDisposition disposition =
+            TerminalDisposition::terminal_ack_consumed)
     {
-        return InterestTerminalConsumed{scope, interest, operation, child};
+        return InterestTerminalConsumed{
+            scope, interest, operation, child, disposition};
     }
 };
 
