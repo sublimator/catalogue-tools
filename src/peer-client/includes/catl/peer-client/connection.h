@@ -366,6 +366,19 @@ private:
     //                      bytes: the two live in the same row but are consumed
     //                      by different owners at different times.
     //   admission_closed_  admission gate. Refuse before queue mutation.
+    //@@authority state=peer_client.connection_write_rows v4=S51 owner=peer_client
+    // S51 is PeerClient.PhysicalLifecycle[GenerationId] — "socket, timers, write
+    // queue, and callback gates", minted by T31. These rows are the write-queue
+    // portion of it. peer_connection is deliberately NOT an owner: it is
+    // constructed with PeerClient's strand, and the canonical model states that a
+    // name absent from `owners:` cannot mint authority.
+    //
+    // MODEL DISAGREEMENT (filed, not resolved): S51 is one row for four things
+    // whose release points differ. The active write's BYTES outlive its logical
+    // terminal, which outlives the queued successors, and the close disposition
+    // outlives all three. Three review rounds found real defects at exactly those
+    // seams. This annotation binds the code honestly to the row that exists; it
+    // does not claim the row is correctly decomposed.
     std::deque<PendingWrite> write_queue_;
     std::optional<PendingWrite> active_write_;
 

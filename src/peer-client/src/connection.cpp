@@ -1051,6 +1051,8 @@ peer_connection::drain_payload(std::size_t remaining)
         });
 }
 
+//@@authority transition=peer_client.admit_write owner=peer_client commit=strand
+// Admission authority. Refuses before any queue mutation once admission closes.
 void
 peer_connection::async_send_packet(
     packet_type type,
@@ -1109,6 +1111,8 @@ peer_connection::async_send_packet(
     do_write();
 }
 
+//@@authority transition=peer_client.initiate_write owner=peer_client commit=strand
+// Selects one successor into the active row and hands its bytes to Asio.
 void
 peer_connection::do_write()
 {
@@ -1184,6 +1188,8 @@ peer_connection::do_write()
     }
 }
 
+//@@authority transition=peer_client.complete_write owner=peer_client commit=strand
+// The only releaser of the active row's physical bytes.
 void
 peer_connection::on_write_complete(boost::system::error_code ec)
 {
@@ -1697,6 +1703,9 @@ peer_connection::close()
     close_impl();
 }
 
+//@@authority transition=peer_client.settle_connection owner=peer_client commit=strand
+// The single teardown transition: commits admission closed, settles
+// owner-local, then exposes callbacks.
 //@@settlement
 void
 peer_connection::settle_and_close(
@@ -1777,6 +1786,8 @@ peer_connection::settle_and_close(
     }
 }
 
+//@@authority transition=peer_client.select_close_disposition owner=peer_client commit=strand
+// Mints the terminal disposition into an owned row before external code runs.
 void
 peer_connection::select_close_disposition(
     boost::system::error_code cause,
