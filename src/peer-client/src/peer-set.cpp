@@ -2536,32 +2536,84 @@ PeerSet::try_candidates_for(
 /// authority-bearing seal lives in seal_node_batch_command_on_strand, which is
 /// where the directive belongs. authority-coverage.py's capability-mint rule
 /// proved the marker was on this wrapper while the mint was in the helper.
-void
+bool
 PeerSet::seal_node_batch_command(
     NodeBatchIntent intent,
     PeerGenerationPin pin_share,
+    asio::any_io_executor completion_executor,
     std::function<void(std::optional<NodeBatchCommand>)> on_sealed)
 {
-    if (!on_sealed)
-        return;
+    if (!on_sealed || !completion_executor)
+        return false;
 
     // Sealing is owner-strand authority, so enter it rather than validating
-    // against connections_ from the coordinator's executor.
-    asio::post(
-        strand_,
-        [self = shared_from_this(),
-         intent = std::move(intent),
-         pin = std::move(pin_share),
-         on_sealed = std::move(on_sealed)]() mutable {
-            on_sealed(self->seal_node_batch_command_on_strand(intent, pin));
-        });
+    // against connections_ from the caller's executor. `post` can throw before
+    // ownership transfers, and a void API could not tell the caller that
+    // nothing was queued, so the failure is reported rather than swallowed.
+    try
+    {
+        asio::post(
+            strand_,
+            [self = shared_from_this(),
+             intent = std::move(intent),
+             pin = std::move(pin_share),
+             completion_executor = std::move(completion_executor),
+             on_sealed = std::move(on_sealed)]() mutable {
+                auto sealed = self->seal_node_batch_command_on_strand(
+                    std::move(intent), pin);
+                self->deliver_seal_result(
+                    std::move(completion_executor),
+                    std::move(on_sealed),
+                    std::move(sealed));
+            });
+    }
+    catch (...)
+    {
+        return false;
+    }
+    return true;
+}
+
+//@@callback-funnel
+void
+PeerSet::deliver_seal_result(
+    asio::any_io_executor completion_executor,
+    std::function<void(std::optional<NodeBatchCommand>)> on_sealed,
+    std::optional<NodeBatchCommand> sealed)
+{
+    // The ONE place a seal result reaches caller code. The consumer runs on its
+    // own executor, so it cannot unwind a PeerSet owner-strand handler and
+    // cannot re-enter PeerSet while the sealing transition is still on the
+    // stack. Containment is a property of this function rather than of every
+    // call site, which is what makes try/catch around an arbitrary callback the
+    // wrong tool here.
+    //
+    // If the completion cannot be queued the capability is DROPPED rather than
+    // delivered from the wrong executor: an unsealed row is retryable, whereas a
+    // command delivered onto PeerSet's strand is an authority leak.
+    try
+    {
+        asio::post(
+            std::move(completion_executor),
+            [on_sealed = std::move(on_sealed),
+             sealed = std::move(sealed)]() mutable {
+                on_sealed(std::move(sealed));
+            });
+    }
+    catch (...)
+    {
+        PLOGE(
+            log_,
+            "seal completion could not be queued; capability dropped, "
+            "caller must retry");
+    }
 }
 
 //@@authority transition=peer_set.seal_node_batch_command owner=peer_set
 // commit=strand
 std::optional<NodeBatchCommand>
 PeerSet::seal_node_batch_command_on_strand(
-    NodeBatchIntent const& intent,
+    NodeBatchIntent intent,
     PeerGenerationPin const& pin)
 {
     ASSERT_ON_STRAND();
@@ -2576,10 +2628,13 @@ PeerSet::seal_node_batch_command_on_strand(
 
     // Its pin row must still be active. A released or pruned pin no longer
     // holds the eviction veto the seal depends on, even if the connection map
-    // still happens to agree.
+    // still happens to agree. Every field the bind claims is proved against the
+    // authoritative row, including the endpoint: relying on the pin
+    // constructor's history would be trusting provenance instead of checking.
     auto const active = active_peer_pins_.find(pin.pin_id());
     if (active == active_peer_pins_.end() ||
-        active->second.connection_generation != pin.connection_generation())
+        active->second.connection_generation != pin.connection_generation() ||
+        active->second.endpoint != pin.endpoint())
     {
         return std::nullopt;
     }
@@ -2596,8 +2651,12 @@ PeerSet::seal_node_batch_command_on_strand(
         return std::nullopt;
     }
 
+    // Commit section: move, never copy. NodeBatchIntent holds a vector, so a
+    // copy here could allocate and throw after every guard had passed.
+    static_assert(std::is_nothrow_move_constructible_v<NodeBatchIntent>);
     return NodeBatchCommand{
-        intent, PeerConnectionGenerationId{connection->second.generation}};
+        std::move(intent),
+        PeerConnectionGenerationId{connection->second.generation}};
 }
 
 PeerGenerationPin

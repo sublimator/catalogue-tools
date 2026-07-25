@@ -143,10 +143,21 @@ public:
     /// `pin_share` is an explicit `share()`, so validation cannot be performed
     /// against a handle the caller has since dropped, and the caller's outbox
     /// keeps owning the retention.
-    void
+    ///
+    /// Completion is delivered on `completion_executor`, never on PeerSet's
+    /// strand. Containment is therefore structural: a throwing consumer cannot
+    /// unwind a PeerSet owner-strand handler, and cannot re-enter PeerSet while
+    /// its own transition is still on the stack. That is why this takes an
+    /// executor rather than wrapping an arbitrary callback in try/catch.
+    ///
+    /// Returns false when the bind projection could not be queued at all, so a
+    /// caller can distinguish "accepted, await completion" from "nothing
+    /// happened" instead of waiting forever on a silent failure.
+    [[nodiscard]] bool
     seal_node_batch_command(
         NodeBatchIntent intent,
         PeerGenerationPin pin_share,
+        boost::asio::any_io_executor completion_executor,
         std::function<void(std::optional<NodeBatchCommand>)> on_sealed);
 
     /// Synchronous check: any connected peer with this ledger?
@@ -432,10 +443,22 @@ private:
     PeerGenerationPin
     make_peer_pin(PeerSessionPtr const& expected_session);
 
-    /// Owner-strand half of seal_node_batch_command.
+    /// The single delivery point for a seal result. Marked //@@callback-funnel
+    /// in the implementation: consumer code runs on its own executor, so
+    /// containment and ordering are properties of one function.
+    void
+    deliver_seal_result(
+        boost::asio::any_io_executor completion_executor,
+        std::function<void(std::optional<NodeBatchCommand>)> on_sealed,
+        std::optional<NodeBatchCommand> sealed);
+
+    /// Owner-strand half of seal_node_batch_command. Takes the intent BY VALUE
+    /// so the capability can be constructed with a move: a copy here would
+    /// allocate on the owner strand after every guard had already passed, which
+    /// is precisely the throwing commit section the prepare/commit rule forbids.
     std::optional<NodeBatchCommand>
     seal_node_batch_command_on_strand(
-        NodeBatchIntent const& intent,
+        NodeBatchIntent intent,
         PeerGenerationPin const& pin);
 
     //@@authority transition=peer_set.release_generation_pin owner=peer_set
