@@ -1207,6 +1207,14 @@ struct PublishFixture
             PeerSetTestAccess::make_peer_pin_for_session(io, peers, client));
     }
 
+    /// Run exactly one ready handler, so a control can observe a row mid-flight.
+    std::size_t
+    step()
+    {
+        io.restart();
+        return io.poll_one();
+    }
+
     void
     settle()
     {
@@ -1411,4 +1419,62 @@ TEST(LedgerFetchCoordinatorPublish, ExhaustedAcknowledgementCountsTheOrphanedRow
            "repair a sender that broke this";
     EXPECT_EQ(row->phase, Phase::terminal);
     EXPECT_EQ(f.coord->work_outstanding(), 0u);
+}
+
+/// 36. The acknowledgement path REFUSES to run on a row that is still projecting.
+///
+/// Control 32 asserts the end state, and by then the row is terminal whichever
+/// order things happened in — a probe that deleted the phase advance was caught
+/// only incidentally, by other controls whose acks then never fired. This asserts
+/// the guard itself: driven directly with the row mid-publication, nothing is
+/// acknowledged. That is what "forbidden at its source" has to mean to be a
+/// property of the code rather than of the sequence a test happened to produce.
+TEST(LedgerFetchCoordinatorPublish, AcknowledgementRefusesWhileStillProjecting)
+{
+    PublishFixture f{1, /*with_connection=*/true};
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+
+    // Step until the row is mid-publication. Stepping until the PROPERTY holds
+    // rather than counting handlers: the seal takes two strand hops before
+    // publication even begins, so a fixed count is both brittle and less
+    // informative than the condition it is standing in for.
+    // Access::Row, not the coordinator's private nested type: the row is private
+    // and only the declared test seam may name it.
+    Access::Row* row = nullptr;
+    std::optional<TransportAttemptId> attempt;
+    for (int i = 0; i < 16; ++i)
+    {
+        if (f.step() == 0)
+        {
+            break;
+        }
+        attempt = Access::attempt_at(f.coord, 0);
+        if (!attempt)
+        {
+            continue;
+        }
+        row = Access::find_any(f.coord, *attempt);
+        if (row != nullptr && row->phase == Phase::awaiting_receipt)
+        {
+            break;
+        }
+    }
+    ASSERT_TRUE(attempt.has_value());
+    ASSERT_TRUE(row != nullptr);
+    ASSERT_EQ(row->phase, Phase::awaiting_receipt) << "still projecting";
+    ASSERT_TRUE(row->publish_open);
+
+    // Force the acknowledgement path against a row that has not stopped
+    // projecting. It must decline.
+    Access::acknowledge(f.coord, *attempt);
+    EXPECT_EQ(row->ack_attempts, 0u)
+        << "acknowledging a row that could still republish is exactly the "
+           "post-ack replay the canonical cut forbids at its source";
+    EXPECT_FALSE(row->receipt.has_value());
+
+    // And the ordinary path still completes, so the refusal above is the guard
+    // rather than a broken fixture.
+    f.settle();
+    EXPECT_EQ(row->ack_attempts, 1u);
+    EXPECT_EQ(row->phase, Phase::terminal);
 }

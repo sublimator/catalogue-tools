@@ -106,6 +106,16 @@ public:
         return true;
     }
 
+    /// Drive the acknowledgement path directly, to prove it declines a row that
+    /// has not stopped projecting.
+    static void
+    acknowledge(
+        std::shared_ptr<Coordinator> const& c,
+        catl::peer_client::TransportAttemptId attempt)
+    {
+        c->acknowledge_on_strand(attempt);
+    }
+
     static void
     set_acknowledgement_failure(
         std::shared_ptr<Coordinator> const& c,
