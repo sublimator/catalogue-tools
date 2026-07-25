@@ -16,11 +16,15 @@
 #include "peer-session.h"
 
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 
 namespace catl::peer_client {
@@ -60,6 +64,10 @@ public:
                 return "ParseError";
             case Error::Cancelled:
                 return "Cancelled";
+            case Error::DuplicateRequest:
+                return "DuplicateRequest";
+            case Error::ResourceExhausted:
+                return "ResourceExhausted";
             default:
                 return "Unknown(" + std::to_string(static_cast<int>(e)) + ")";
         }
@@ -79,39 +87,94 @@ public:
 //------------------------------------------------------------------------------
 // Bridge: callback → awaitable
 //
-// Uses a timer set to max as a signal. The callback cancels the timer,
-// waking the coroutine. Works because both run on the same io_context.
+// Uses a timer set to max as a signal. Each bridge creates a private strand
+// from the coroutine's birth executor. Completion, cancellation arbitration,
+// timer operations, and result consumption all run on that strand—even when
+// the birth executor is a multi-threaded raw io_context executor.
 //------------------------------------------------------------------------------
 
 namespace detail {
 
-/// Bridge callback API to awaitable. Signal and result are shared_ptr
-/// so they survive coroutine destruction if cancellation fires while
-/// the callback is still in-flight (e.g. || operator cancels the prove
-/// but the peer hasn't responded yet).
+template <typename T>
+struct AwaitableCompletion
+{
+    enum class Phase : std::uint8_t { pending, completed, cancelled, consumed };
+
+    explicit AwaitableCompletion(asio::any_io_executor executor)
+        : arbitration(asio::make_strand(std::move(executor)))
+        , signal(arbitration, asio::steady_timer::time_point::max())
+    {
+    }
+
+    asio::strand<asio::any_io_executor> arbitration;
+    asio::steady_timer signal;
+    Phase phase = Phase::pending;
+    Error error = Error::Success;
+    std::optional<T> result;
+};
+
+/// Bridge callback API to awaitable. The retained cell survives coroutine
+/// cancellation and serializes completion/cancellation on a private strand.
+/// Whichever terminal event reaches that strand first wins; late completion is
+/// consumed as stale and never mutates a returned result.
 template <typename T>
 asio::awaitable<T>
 callback_to_awaitable(std::function<void(Callback<T>)> initiator)
 {
     auto executor = co_await asio::this_coro::executor;
-    auto signal = std::make_shared<asio::steady_timer>(
-        executor, asio::steady_timer::time_point::max());
-    auto err = std::make_shared<Error>(Error::Success);
-    auto result = std::make_shared<T>();
+    auto completion = std::make_shared<AwaitableCompletion<T>>(executor);
 
-    initiator([signal, err, result](Error e, T r) {
-        *err = e;
-        *result = std::move(r);
-        signal->cancel();
-    });
+    try
+    {
+        initiator([completion](Error error, T result) mutable {
+            asio::post(
+                completion->arbitration,
+                [completion, error, result = std::move(result)]() mutable {
+                    if (completion->phase !=
+                        AwaitableCompletion<T>::Phase::pending)
+                    {
+                        return;
+                    }
+                    completion->error = error;
+                    completion->result.emplace(std::move(result));
+                    completion->phase =
+                        AwaitableCompletion<T>::Phase::completed;
+                    completion->signal.cancel();
+                });
+        });
+    }
+    catch (...)
+    {
+        throw;
+    }
 
-    boost::system::error_code ec;
-    co_await signal->async_wait(asio::redirect_error(asio::use_awaitable, ec));
+    co_return co_await asio::co_spawn(
+        completion->arbitration,
+        [completion]() -> asio::awaitable<T> {
+            if (completion->phase == AwaitableCompletion<T>::Phase::pending)
+            {
+                boost::system::error_code ec;
+                co_await completion->signal.async_wait(
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
 
-    if (*err != Error::Success)
-        throw PeerClientException(*err);
+            if (completion->phase != AwaitableCompletion<T>::Phase::completed)
+            {
+                completion->phase = AwaitableCompletion<T>::Phase::cancelled;
+                throw PeerClientException(Error::Cancelled);
+            }
 
-    co_return std::move(*result);
+            auto const error = completion->error;
+            auto result = std::move(*completion->result);
+            completion->result.reset();
+            completion->phase = AwaitableCompletion<T>::Phase::consumed;
+
+            if (error != Error::Success)
+                throw PeerClientException(error);
+
+            co_return result;
+        },
+        asio::use_awaitable);
 }
 
 }  // namespace detail
@@ -126,7 +189,6 @@ co_get_ledger_header(
     uint32_t ledger_seq,
     RequestOptions opts = {})
 {
-    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<LedgerHeaderResult>(
         [&](Callback<LedgerHeaderResult> cb) {
             client->get_ledger_header(ledger_seq, std::move(cb), opts);
@@ -139,7 +201,6 @@ co_get_ledger_header(
     Hash256 const& ledger_hash,
     RequestOptions opts = {})
 {
-    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<LedgerHeaderResult>(
         [&](Callback<LedgerHeaderResult> cb) {
             client->get_ledger_header(ledger_hash, std::move(cb), opts);
@@ -153,7 +214,6 @@ co_get_state_nodes(
     std::vector<SHAMapNodeID> const& node_ids,
     RequestOptions opts = {})
 {
-    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<LedgerNodesResult>(
         [&](Callback<LedgerNodesResult> cb) {
             client->get_state_nodes(ledger_hash, node_ids, std::move(cb), opts);
@@ -167,7 +227,6 @@ co_get_tx_nodes(
     std::vector<SHAMapNodeID> const& node_ids,
     RequestOptions opts = {})
 {
-    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<LedgerNodesResult>(
         [&](Callback<LedgerNodesResult> cb) {
             client->get_tx_nodes(ledger_hash, node_ids, std::move(cb), opts);
@@ -181,7 +240,6 @@ co_get_tx_proof_path(
     Hash256 const& key,
     RequestOptions opts = {})
 {
-    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<ProofPathResult>(
         [&](Callback<ProofPathResult> cb) {
             client->get_tx_proof_path(ledger_hash, key, std::move(cb), opts);
@@ -195,7 +253,6 @@ co_get_state_proof_path(
     Hash256 const& key,
     RequestOptions opts = {})
 {
-    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<ProofPathResult>(
         [&](Callback<ProofPathResult> cb) {
             client->get_state_proof_path(ledger_hash, key, std::move(cb), opts);
@@ -205,7 +262,6 @@ co_get_state_proof_path(
 inline asio::awaitable<PingResult>
 co_ping(PeerSessionPtr client, RequestOptions opts = {})
 {
-    co_await asio::post(client->strand(), asio::use_awaitable);
     co_return co_await detail::callback_to_awaitable<PingResult>(
         [&](Callback<PingResult> cb) { client->ping(std::move(cb), opts); });
 }

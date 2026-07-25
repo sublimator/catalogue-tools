@@ -44,15 +44,44 @@ add_executable(connection-write-lifecycle-gtest
 target_link_libraries(connection-write-lifecycle-gtest
                       PRIVATE catl::peer-client GTest::gtest_main)
 
+add_executable(peer-set-strand-discipline-gtest
+               peer-set-strand-discipline-gtest.cpp)
+target_link_libraries(peer-set-strand-discipline-gtest
+                      PRIVATE catl::peer-client GTest::gtest_main)
+
 include(GoogleTest)
-gtest_discover_tests(connection-write-lifecycle-gtest DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(peer-client-gtest DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(peer-endpoint-cache-gtest DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(tree-walk-state-gtest DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(peer-selector-gtest DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(peer-set-pruning-gtest DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(node-cache-signal-gtest DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(peer-session-interface-gtest DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(node-credentials-gtest DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(session-signature-gtest DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(inbound-budget-gtest DISCOVERY_TIMEOUT 30)
+
+# Strand violations are FATAL under test.
+#
+# PeerSet's ASSERT_ON_STRAND() only logs an OFF-STRAND error and continues
+# unless XPRV_STRAND_FAIL_FAST is set, which is exactly how an executor-affinity
+# regression becomes a "random glitch": detected, written to a log nobody reads,
+# then execution carries on. Setting it here makes such a regression abort the
+# test instead.
+#
+# The switch is not taken on trust — peer-set-strand-discipline-gtest owns three
+# controls proving the assertion aborts off-strand, survives on-strand, and
+# survives when the variable is unset.
+#
+# Discovery goes through a loop rather than one call per target so a new test
+# cannot silently be added without this environment.
+set(CATL_PEER_CLIENT_TEST_TARGETS
+    peer-set-strand-discipline-gtest
+    connection-write-lifecycle-gtest
+    peer-client-gtest
+    peer-endpoint-cache-gtest
+    tree-walk-state-gtest
+    peer-selector-gtest
+    peer-set-pruning-gtest
+    node-cache-signal-gtest
+    peer-session-interface-gtest
+    node-credentials-gtest
+    session-signature-gtest
+    inbound-budget-gtest)
+
+foreach(catl_test IN LISTS CATL_PEER_CLIENT_TEST_TARGETS)
+  gtest_discover_tests(
+    ${catl_test}
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES ENVIRONMENT "XPRV_STRAND_FAIL_FAST=1")
+endforeach()

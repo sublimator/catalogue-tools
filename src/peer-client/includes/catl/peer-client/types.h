@@ -37,6 +37,7 @@ enum class Error {
     ParseError,
     Cancelled,
     DuplicateRequest,
+    ResourceExhausted,
 };
 
 //------------------------------------------------------------------------------

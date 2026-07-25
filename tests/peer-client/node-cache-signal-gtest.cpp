@@ -21,7 +21,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <memory>
+#include <thread>
 #include <vector>
 
 using namespace catl::peer_client;
@@ -45,6 +47,195 @@ make_data(size_t size, uint8_t fill = 0x42)
 
 }  // namespace
 
+TEST(SerializedTimerSignal, CompleteBeforeWaitIsLatched)
+{
+    asio::io_context io;
+    auto signal = SerializedTimerSignal::create(
+        io, std::chrono::seconds(30));
+
+    signal->complete();
+    io.poll();
+    io.restart();
+
+    bool done = false;
+    boost::system::error_code result;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            result = co_await signal->wait();
+            done = true;
+        },
+        asio::detached);
+
+    io.run();
+    EXPECT_TRUE(done);
+    EXPECT_EQ(result, asio::error::operation_aborted);
+}
+
+TEST(SerializedTimerSignal, CompleteBeforeExpiryUpdateCannotResurrect)
+{
+    asio::io_context io;
+    auto signal = SerializedTimerSignal::create(
+        io, std::chrono::seconds(30));
+
+    signal->complete();
+    signal->expires_after(std::chrono::seconds(30));
+
+    bool done = false;
+    boost::system::error_code result;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            result = co_await signal->wait();
+            done = true;
+        },
+        asio::detached);
+
+    io.run();
+    EXPECT_TRUE(done);
+    EXPECT_EQ(result, asio::error::operation_aborted);
+}
+
+TEST(SerializedTimerSignal, CompletionWakesEveryWaiterExactlyOnce)
+{
+    asio::io_context io;
+    auto signal = SerializedTimerSignal::create(
+        io, std::chrono::seconds(30));
+
+    std::array<boost::system::error_code, 3> results;
+    std::atomic<unsigned> completions = 0;
+    for (auto& result : results)
+    {
+        asio::co_spawn(
+            io,
+            [&signal, &result, &completions]() -> asio::awaitable<void> {
+                result = co_await signal->wait();
+                completions.fetch_add(1, std::memory_order_relaxed);
+            },
+            asio::detached);
+    }
+
+    io.poll();
+    EXPECT_EQ(completions.load(std::memory_order_relaxed), 0u);
+    io.restart();
+    signal->complete();
+    io.run();
+
+    EXPECT_EQ(completions.load(std::memory_order_relaxed), results.size());
+    for (auto const& result : results)
+        EXPECT_EQ(result, asio::error::operation_aborted);
+}
+
+TEST(SerializedTimerSignal, CancellingOneWaitDoesNotPoisonAnotherExecutor)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto first_executor = asio::make_strand(io);
+    auto second_executor = asio::make_strand(io);
+    auto signal = SerializedTimerSignal::create(io, 30s);
+
+    std::promise<void> first_done;
+    auto first_done_future = first_done.get_future();
+    std::promise<void> second_done;
+    auto second_done_future = second_done.get_future();
+    boost::system::error_code first_result;
+    boost::system::error_code second_result;
+    std::atomic<bool> second_completed = false;
+
+    asio::co_spawn(
+        first_executor,
+        [signal, &first_result, &first_done]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            auto result =
+                co_await asio::experimental::make_parallel_group(
+                    asio::co_spawn(ex, signal->wait(), asio::deferred),
+                    asio::co_spawn(
+                        ex,
+                        []() -> asio::awaitable<void> {
+                            auto ex = co_await asio::this_coro::executor;
+                            asio::steady_timer timer(ex, 20ms);
+                            boost::system::error_code ec;
+                            co_await timer.async_wait(asio::redirect_error(
+                                asio::use_awaitable, ec));
+                        },
+                        asio::deferred))
+                    .async_wait(
+                        asio::experimental::wait_for_one(),
+                        asio::use_awaitable);
+            first_result = std::get<2>(result);
+            first_done.set_value();
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        second_executor,
+        [signal,
+         &second_result,
+         &second_completed,
+         &second_done]() -> asio::awaitable<void> {
+            second_result = co_await signal->wait();
+            second_completed.store(true, std::memory_order_release);
+            second_done.set_value();
+        },
+        asio::detached);
+
+    std::thread first_runner([&io]() { io.run(); });
+    std::thread second_runner([&io]() { io.run(); });
+
+    auto first_status = first_done_future.wait_for(2s);
+    EXPECT_EQ(first_status, std::future_status::ready);
+    if (first_status != std::future_status::ready)
+    {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+        return;
+    }
+    EXPECT_EQ(first_result, asio::error::operation_aborted);
+    EXPECT_FALSE(second_completed.load(std::memory_order_acquire));
+
+    signal->complete();
+    auto second_status = second_done_future.wait_for(2s);
+    EXPECT_EQ(second_status, std::future_status::ready);
+    if (second_status != std::future_status::ready)
+    {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+        return;
+    }
+    EXPECT_EQ(second_result, asio::error::operation_aborted);
+
+    std::promise<boost::system::error_code> late_done;
+    auto late_done_future = late_done.get_future();
+    asio::co_spawn(
+        first_executor,
+        [signal, &late_done]() -> asio::awaitable<void> {
+            late_done.set_value(co_await signal->wait());
+        },
+        asio::detached);
+    auto late_status = late_done_future.wait_for(2s);
+    EXPECT_EQ(late_status, std::future_status::ready);
+    if (late_status != std::future_status::ready)
+    {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+        return;
+    }
+    EXPECT_EQ(late_done_future.get(), asio::error::operation_aborted);
+
+    work.reset();
+    io.stop();
+    first_runner.join();
+    second_runner.join();
+}
+
 /// Test access shim — exposes private members for integration testing.
 class NodeCacheTestAccess
 {
@@ -61,8 +252,8 @@ public:
         auto [it, inserted] = cache.store_.try_emplace(hash);
         if (inserted || !it->second.present)
         {
-            it->second.signal = std::make_shared<asio::steady_timer>(
-                cache.io_, timeout);
+            it->second.signal =
+                SerializedTimerSignal::create(cache.io_, timeout);
             it->second.present = false;
             it->second.last_fetch_at = std::chrono::steady_clock::now();
         }
@@ -83,6 +274,7 @@ public:
             hash,             // target_key
             1,                // speculative_depth
             nullptr,          // no peer (wait path)
+            {},               // no managed generation pin
             nullptr,          // no peers
             0,
             nullptr);         // ledger_seq / cancel
@@ -102,13 +294,14 @@ public:
             hash,             // target_key
             1,                // speculative_depth
             nullptr,          // no peer (wait path)
+            {},               // no managed generation pin
             nullptr,          // no peers
             0,
             cancel);          // ledger_seq / cancel
     }
 
     /// Get the signal for an entry (for testing expiry behavior).
-    static std::shared_ptr<asio::steady_timer>
+    static std::shared_ptr<SerializedTimerSignal>
     get_signal(NodeCache& cache, Hash256 const& hash)
     {
         std::lock_guard lock(cache.mutex_);
@@ -155,7 +348,7 @@ public:
         std::lock_guard lock(cache.mutex_);
         auto& entry = cache.header_cache_[ledger_seq];
         entry.present = true;
-        entry.signal = nullptr;
+        entry.fetch.reset();
         cache.touch_header_lru(ledger_seq);
         cache.evict_headers_if_needed();
     }
@@ -166,12 +359,45 @@ public:
         uint32_t ledger_seq,
         std::chrono::milliseconds timeout)
     {
-        std::lock_guard lock(cache.mutex_);
-        auto& entry = cache.header_cache_[ledger_seq];
-        entry.present = false;
-        entry.signal = std::make_shared<asio::steady_timer>(cache.io_, timeout);
-        cache.touch_header_lru(ledger_seq);
-        cache.evict_headers_if_needed();
+        std::shared_ptr<NodeCache::HeaderFetchState> fetch;
+        {
+            std::lock_guard lock(cache.mutex_);
+            auto& entry = cache.header_cache_[ledger_seq];
+            entry.present = false;
+            fetch = std::make_shared<NodeCache::HeaderFetchState>();
+            fetch->completion_signal = SerializedTimerSignal::create(
+                cache.io_, asio::steady_timer::time_point::max());
+            fetch->deadline_signal =
+                SerializedTimerSignal::create(cache.io_, timeout);
+            fetch->driver_done_signal = SerializedTimerSignal::create(
+                cache.io_, asio::steady_timer::time_point::max());
+            fetch->deadline_done_signal = SerializedTimerSignal::create(
+                cache.io_, asio::steady_timer::time_point::max());
+            fetch->operation_id = ++cache.next_header_fetch_id_;
+            fetch->epoch = cache.header_epoch_;
+            fetch->driver_frame_done = true;
+            fetch->driver_done_signal->complete();
+            cache.active_header_fetches_.emplace(
+                fetch->operation_id, fetch);
+            entry.fetch = fetch;
+            cache.touch_header_lru(ledger_seq);
+            cache.evict_headers_if_needed();
+        }
+
+        auto weak = cache.weak_from_this();
+        asio::co_spawn(
+            cache.header_state_strand_,
+            [weak, ledger_seq, fetch]() -> asio::awaitable<void> {
+                auto const ec = co_await fetch->deadline_signal->wait();
+                if (ec == asio::error::operation_aborted)
+                    co_return;
+                if (auto self = weak.lock())
+                    self->finish_header_fetch(ledger_seq, fetch);
+            },
+            [weak, fetch](std::exception_ptr) {
+                if (auto self = weak.lock())
+                    self->on_header_servant_done(fetch, false);
+            });
     }
 
     static bool
@@ -573,7 +799,7 @@ TEST(NodeCacheIntegration, ClearWakesHeaderJoiner)
         *cache, ledger_seq, std::chrono::hours(1));
 
     bool done = false;
-    bool timed_out = false;
+    std::optional<Error> terminal_error;
     asio::co_spawn(
         io,
         [&, cache]() -> asio::awaitable<void> {
@@ -581,24 +807,25 @@ TEST(NodeCacheIntegration, ClearWakesHeaderJoiner)
             {
                 (void)co_await cache->get_header(ledger_seq, nullptr, nullptr);
             }
-            catch (PeerClientException const&)
+            catch (PeerClientException const& e)
             {
-                timed_out = true;
+                terminal_error = e.error;
             }
             done = true;
         },
         asio::detached);
 
     asio::steady_timer clear_timer(io, 10ms);
-    clear_timer.async_wait([cache](boost::system::error_code ec) {
+    clear_timer.async_wait([&io, cache](boost::system::error_code ec) {
         if (!ec)
-            cache->clear();
+            asio::co_spawn(io, cache->co_clear_headers(), asio::detached);
     });
 
     io.run();
 
     EXPECT_TRUE(done);
-    EXPECT_TRUE(timed_out);
+    ASSERT_TRUE(terminal_error);
+    EXPECT_EQ(*terminal_error, Error::Cancelled);
     EXPECT_FALSE(NodeCacheTestAccess::has_header(*cache, ledger_seq));
 }
 
@@ -697,7 +924,7 @@ TEST(NodeCacheIntegration, CancelledEnsurePresentDoesNotPoisonSharedEntry)
     EXPECT_EQ(second_result->size(), 88u);
 }
 
-TEST(NodeCacheIntegration, CancelledHeaderFetchClearsInFlightEntry)
+TEST(NodeCacheIntegration, CancelledHeaderWaiterDoesNotOwnSharedFetch)
 {
     asio::io_context io;
     auto cache = NodeCache::create(io, {
@@ -712,6 +939,7 @@ TEST(NodeCacheIntegration, CancelledHeaderFetchClearsInFlightEntry)
 
     bool done = false;
     bool cancel_branch_won = false;
+    bool fetch_survived_caller = false;
     constexpr uint32_t ledger_seq = 654321u;
 
     asio::co_spawn(
@@ -741,19 +969,23 @@ TEST(NodeCacheIntegration, CancelledHeaderFetchClearsInFlightEntry)
                         asio::use_awaitable);
 
             cancel_branch_won = (std::get<0>(result)[0] == 1);
-
-            asio::steady_timer drain(ex, std::chrono::milliseconds(1));
-            boost::system::error_code drain_ec;
-            co_await drain.async_wait(
-                asio::redirect_error(asio::use_awaitable, drain_ec));
-
             done = true;
         },
         asio::detached);
+
+    asio::steady_timer inspect_timer(io, std::chrono::milliseconds(20));
+    inspect_timer.async_wait([&](boost::system::error_code const& ec) {
+        if (ec)
+            return;
+        fetch_survived_caller =
+            NodeCacheTestAccess::has_header(*cache, ledger_seq);
+        asio::co_spawn(io, cache->co_clear_headers(), asio::detached);
+    });
 
     io.run();
 
     EXPECT_TRUE(done);
     EXPECT_TRUE(cancel_branch_won);
+    EXPECT_TRUE(fetch_survived_caller);
     EXPECT_FALSE(NodeCacheTestAccess::has_header(*cache, ledger_seq));
 }

@@ -22,20 +22,28 @@
 #include <catl/core/types.h>
 
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/asio/use_awaitable.hpp>
 
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <list>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 class NodeCacheTestAccess;  // forward decl for test friend
@@ -43,6 +51,155 @@ class NodeCacheTestAccess;  // forward decl for test friend
 namespace catl::peer_client {
 
 namespace asio = boost::asio;
+
+/**
+ * A latched one-shot signal whose timer operations are confined to one strand.
+ *
+ * Boost permits concurrent waits, but a shared basic_waitable_timer object is
+ * otherwise unsafe. NodeCache signals are intentionally shared by unrelated
+ * request executors, so every wait initiation and every expiry/cancel mutation
+ * crosses this owner strand. Completion is retained as state: a waiter that
+ * arrives after complete() observes operation_aborted immediately, and a later
+ * expiry update cannot resurrect the signal.
+ */
+class SerializedTimerSignal
+    : public std::enable_shared_from_this<SerializedTimerSignal>
+{
+public:
+    using TimePoint = asio::steady_timer::time_point;
+    using Duration = asio::steady_timer::duration;
+
+    static std::shared_ptr<SerializedTimerSignal>
+    create(asio::io_context& io, TimePoint expiry)
+    {
+        return std::shared_ptr<SerializedTimerSignal>(
+            new SerializedTimerSignal(io, expiry));
+    }
+
+    static std::shared_ptr<SerializedTimerSignal>
+    create(asio::io_context& io, Duration duration)
+    {
+        return create(io, std::chrono::steady_clock::now() + duration);
+    }
+
+    asio::awaitable<boost::system::error_code>
+    wait()
+    {
+        auto self = shared_from_this();
+        co_return co_await asio::co_spawn(
+            strand_,
+            [self]() -> asio::awaitable<boost::system::error_code> {
+                if (self->completed_)
+                    co_return self->completion_ec_;
+
+                boost::system::error_code ec;
+                co_await self->timer_.async_wait(
+                    asio::redirect_error(asio::use_awaitable, ec));
+
+                if (self->completed_)
+                    co_return self->completion_ec_;
+
+                // Cancellation of this particular wait (for example, when a
+                // progress signal wins a parallel_group) is not completion of
+                // the shared one-shot signal.
+                if (ec == asio::error::operation_aborted)
+                    co_return ec;
+
+                if (!self->completed_)
+                {
+                    self->completed_ = true;
+                    self->completion_ec_ = ec;
+                    std::lock_guard lock(self->projection_mutex_);
+                    self->projected_completed_ = true;
+                }
+                co_return ec;
+            },
+            asio::use_awaitable);
+    }
+
+    TimePoint
+    expiry() const
+    {
+        std::lock_guard lock(projection_mutex_);
+        return projected_completed_ ? TimePoint::min() : projected_expiry_;
+    }
+
+    void
+    expires_at(TimePoint expiry) noexcept
+    {
+        try
+        {
+            auto self = shared_from_this();
+            asio::post(strand_, [self, expiry]() {
+                if (self->completed_)
+                    return;
+                try
+                {
+                    self->timer_.expires_at(expiry);
+                    std::lock_guard lock(self->projection_mutex_);
+                    self->projected_expiry_ = expiry;
+                }
+                catch (...)
+                {
+                }
+            });
+        }
+        catch (...)
+        {
+        }
+    }
+
+    void
+    expires_after(Duration duration) noexcept
+    {
+        expires_at(std::chrono::steady_clock::now() + duration);
+    }
+
+    void
+    complete() noexcept
+    {
+        try
+        {
+            auto self = shared_from_this();
+            asio::post(strand_, [self]() {
+                if (self->completed_)
+                    return;
+                self->completed_ = true;
+                self->completion_ec_ = asio::error::operation_aborted;
+                {
+                    std::lock_guard lock(self->projection_mutex_);
+                    self->projected_completed_ = true;
+                }
+                try
+                {
+                    self->timer_.cancel();
+                }
+                catch (...)
+                {
+                }
+            });
+        }
+        catch (...)
+        {
+        }
+    }
+
+private:
+    SerializedTimerSignal(asio::io_context& io, TimePoint expiry)
+        : strand_(asio::make_strand(io))
+        , timer_(strand_, expiry)
+        , projected_expiry_(expiry)
+    {
+    }
+
+    asio::strand<asio::io_context::executor_type> strand_;
+    asio::steady_timer timer_;
+    bool completed_ = false;
+    boost::system::error_code completion_ec_;
+    mutable std::mutex projection_mutex_;
+    TimePoint projected_expiry_;
+    bool projected_completed_ = false;
+};
 
 // ─────────────────────────────────────────────────────────────────────
 // Result types
@@ -122,6 +279,20 @@ public:
         uint32_t ledger_seq,
         int tree_type,
         std::shared_ptr<PeerSet> peers,
+        PeerGenerationPin peer,
+        std::shared_ptr<std::atomic<bool>> cancel = nullptr);
+
+    /// Unmanaged compatibility overload for callers whose session does not
+    /// come from PeerSet (principally direct/test sessions). PeerSet-selected
+    /// production work must use the generation-pin overload above.
+    asio::awaitable<WalkResult>
+    walk_to(
+        Hash256 root_hash,
+        Hash256 target_key,
+        Hash256 ledger_hash,
+        uint32_t ledger_seq,
+        int tree_type,
+        std::shared_ptr<PeerSet> peers,
         PeerSessionPtr peer = nullptr,
         std::shared_ptr<std::atomic<bool>> cancel = nullptr);
 
@@ -172,6 +343,13 @@ public:
     get_header(
         uint32_t ledger_seq,
         std::shared_ptr<PeerSet> peers,
+        PeerGenerationPin peer);
+
+    /// Unmanaged compatibility overload; see walk_to().
+    asio::awaitable<LedgerHeaderResult>
+    get_header(
+        uint32_t ledger_seq,
+        std::shared_ptr<PeerSet> peers,
         PeerSessionPtr peer = nullptr);
 
     /// Number of present entries in the cache.
@@ -182,9 +360,17 @@ public:
     size_t
     bytes() const;
 
-    /// Clear all entries.
+    /// Synchronously invalidate node-store entries and wake their waiters.
+    /// This is not a shutdown/drain receipt.
     void
-    clear();
+    clear_nodes();
+
+    /// Invalidate every pre-boundary header entry and wait until its detached
+    /// drivers have ended and PeerSet has consumed their pin releases.
+    /// Overlapping clears join one boundary. New header admissions are refused
+    /// until that boundary is acknowledged.
+    asio::awaitable<void>
+    co_clear_headers();
 
 private:
     NodeCache(asio::io_context& io, Options opts);
@@ -260,13 +446,13 @@ private:
     struct ProgressState
     {
         ProgressJournal<kProgressCapacity> journal;
-        std::shared_ptr<asio::steady_timer> signal;
+        std::shared_ptr<SerializedTimerSignal> signal;
     };
 
     struct WaitRegistration
     {
-        std::shared_ptr<asio::steady_timer> done_signal;
-        std::shared_ptr<asio::steady_timer> progress_signal;
+        std::shared_ptr<SerializedTimerSignal> done_signal;
+        std::shared_ptr<SerializedTimerSignal> progress_signal;
         ProgressCursor cursor;
     };
 
@@ -278,7 +464,7 @@ private:
     // Key invariant: entries are NEVER erased on timeout/error.
     // A timed-out caller returns nullptr, but the entry stays alive
     // so that late-arriving peer responses still populate it.
-    // Next caller detects stale via last_fetch_at, re-sends, and
+    // Next caller detects stale via round_opened_at, re-sends, and
     // creates a fresh signal.
     //
     // Entries are only removed by LRU eviction (which skips
@@ -286,36 +472,120 @@ private:
     struct Entry
     {
         std::shared_ptr<std::vector<uint8_t>> wire_data;
-        std::shared_ptr<asio::steady_timer> signal;  // non-null while in-flight
+        std::shared_ptr<SerializedTimerSignal>
+            signal;  // non-null while in-flight
+        // Physical generation pins for the transport round represented by
+        // signal. Shared waiters do not own these; the coalesced entry does.
+        std::vector<PeerGenerationPin> peer_pins;
         ProgressState progress;
         bool present = false;
 
-        // When the most recent TMGetLedger was sent for this hash.
-        // Used for stale detection: if now - last_fetch_at >
-        // fetch_timeout * stale_multiplier, a new caller will
-        // re-send the request (original sender likely timed out).
+        // Admission time of the physical round represented by signal.
+        // Publishing the signal and this timestamp is one mutex commit, so a
+        // second caller cannot immediately replace a freshly admitted round
+        // using its predecessor's stale timestamp.
+        std::chrono::steady_clock::time_point round_opened_at{};
+
+        // Hash-level evidence that at least one TMGetLedger request was
+        // actually submitted. Unlike round_opened_at, this may outlive exact
+        // round retirement because a late content-addressed response remains
+        // useful. It justifies waiting without a currently usable peer.
         std::chrono::steady_clock::time_point last_fetch_at{};
     };
 
     struct HeaderRound
     {
-        std::shared_ptr<asio::steady_timer> signal;
+        std::shared_ptr<SerializedTimerSignal> signal;
+        std::vector<PeerGenerationPin> peer_pins;
+        std::mutex peer_pins_mutex;
         std::atomic<int> outstanding{0};
         std::atomic<bool> dispatch_complete{false};
         std::atomic<bool> completed{false};
+        bool closed = false;
+
+        bool
+        try_begin_send(PeerGenerationPin pin)
+        {
+            std::lock_guard lock(peer_pins_mutex);
+            if (closed)
+                return false;
+            if (pin)
+                peer_pins.push_back(std::move(pin));
+            outstanding.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+
+        void
+        close_and_release_peer_pins() noexcept
+        {
+            std::vector<PeerGenerationPin> released;
+            {
+                std::lock_guard lock(peer_pins_mutex);
+                closed = true;
+                released.swap(peer_pins);
+            }
+        }
+    };
+
+    struct HeaderFetchState
+    {
+        enum class Phase : std::uint8_t {
+            running,
+            succeeded,
+            failed,
+            cleared,
+        };
+
+        // Overall terminal signal is distinct from per-round timeout signals.
+        std::shared_ptr<SerializedTimerSignal> completion_signal;
+        std::shared_ptr<SerializedTimerSignal> deadline_signal;
+        std::shared_ptr<SerializedTimerSignal> driver_done_signal;
+        std::shared_ptr<SerializedTimerSignal> deadline_done_signal;
+        std::shared_ptr<PeerSet> peers;
+        // Receipt routing is distinct from selection authority. This contains
+        // the actual owner of the initial managed pin plus any PeerSet that
+        // can mint later fan-out pins.
+        std::vector<std::shared_ptr<PeerSet>> release_owners;
+        std::shared_ptr<std::atomic<bool>> cancel =
+            std::make_shared<std::atomic<bool>>(false);
+
+        // Exactly one of these owns the initial session borrow.
+        PeerGenerationPin initial_pin;
+        PeerSessionPtr unmanaged_owner;
+
+        std::unordered_set<std::string> tried_peers;
+        std::vector<std::string> round_peers;
+        int total_peers_tried = 0;
+        std::uint8_t round_number = 0;
+        std::shared_ptr<HeaderRound> active_round;
+        std::uint64_t operation_id = 0;
+        std::uint64_t epoch = 0;
+        bool driver_frame_done = false;
+        bool deadline_frame_done = false;
+        bool retirement_started = false;
+        Phase phase = Phase::running;
+    };
+
+    struct HeaderClearState
+    {
+        enum class Phase : std::uint8_t { running, succeeded, failed };
+
+        std::shared_ptr<SerializedTimerSignal> completion_signal;
+        std::exception_ptr failure;
+        Phase phase = Phase::running;
     };
 
     // Ledger header cache: keyed by seq
     struct HeaderEntry
     {
         LedgerHeaderResult result;
-        // Overall completion signal shared by callers joining this fetch.
-        // Per-round timeout/failure wakeups use active_round_signal instead.
-        std::shared_ptr<asio::steady_timer> signal;
-        std::shared_ptr<asio::steady_timer> active_round_signal;
+        // One authoritative shared operation. Its pointer identity fences
+        // callbacks, retries, deadline, and clear from later same-sequence
+        // work.
+        //@@authority state=node_cache.header_fetch_slots owner=node_cache
+        std::shared_ptr<HeaderFetchState> fetch;
         ProgressState progress;
         bool present = false;
-        uint8_t round = 0;  // incremented on fan-out retry
     };
 
     /// Ensure a node is in the cache. Fetches from peer on miss.
@@ -329,7 +599,8 @@ private:
         SHAMapNodeID position,
         Hash256 const& target_key,
         int speculative_depth,
-        PeerSessionPtr peer,
+        PeerSession* peer,
+        PeerGenerationPin peer_pin,
         std::shared_ptr<PeerSet> peers = nullptr,
         uint32_t ledger_seq = 0,
         std::shared_ptr<std::atomic<bool>> cancel = nullptr,
@@ -349,7 +620,7 @@ private:
         SHAMapNodeID position,
         Hash256 const& target_key,
         int speculative_depth,
-        PeerSessionPtr peer);
+        PeerSession& peer);
 
     /// Send a header request to a single peer (fire-and-forget).
     /// On success: populate header_cache_ entry and wake all callers.
@@ -358,9 +629,37 @@ private:
     void
     send_header_fetch(
         uint32_t ledger_seq,
-        PeerSessionPtr peer,
+        PeerSession& peer,
+        std::shared_ptr<HeaderFetchState> fetch,
         std::shared_ptr<HeaderRound> round,
         std::shared_ptr<PeerSet> peers);
+
+    asio::awaitable<void>
+    drive_header_fetch(
+        uint32_t ledger_seq,
+        std::shared_ptr<HeaderFetchState> fetch);
+
+    asio::awaitable<void>
+    drive_header_clear(std::shared_ptr<HeaderClearState> clear);
+
+    void
+    on_header_servant_done(
+        std::shared_ptr<HeaderFetchState> const& fetch,
+        bool driver) noexcept;
+
+    asio::awaitable<void>
+    retire_header_fetch(std::shared_ptr<HeaderFetchState> fetch);
+
+    asio::awaitable<LedgerHeaderResult>
+    wait_for_header_fetch(
+        uint32_t ledger_seq,
+        std::shared_ptr<HeaderFetchState> fetch);
+
+    void
+    finish_header_fetch(
+        uint32_t ledger_seq,
+        std::shared_ptr<HeaderFetchState> const& fetch,
+        std::optional<LedgerHeaderResult> result = std::nullopt) noexcept;
 
     /// Compute the content hash of an inner wire node.
     /// Expands compressed format to canonical 16×32 layout, then
@@ -371,7 +670,40 @@ private:
     /// Install our response handler on a peer.
     /// Safe to call repeatedly; PeerClient just overwrites the handler.
     void
-    ensure_response_handler(PeerSessionPtr peer);
+    ensure_response_handler(PeerSession& peer);
+
+    /// Give a physical node-fetch round a deadline owner independent of all
+    /// subscriber coroutine frames. Missing responses therefore release
+    /// generation pins even when every waiter has cancelled.
+    bool
+    arm_node_round_deadline(
+        Hash256 hash,
+        std::shared_ptr<SerializedTimerSignal> signal) noexcept;
+
+    void
+    retire_node_fetch_round(
+        Hash256 const& hash,
+        std::shared_ptr<SerializedTimerSignal> const& signal) noexcept;
+
+    asio::awaitable<WalkResult>
+    walk_to_impl(
+        Hash256 root_hash,
+        Hash256 target_key,
+        Hash256 ledger_hash,
+        uint32_t ledger_seq,
+        int tree_type,
+        std::shared_ptr<PeerSet> peers,
+        PeerSession* peer,
+        PeerGenerationPin peer_pin,
+        PeerSessionPtr unmanaged_owner,
+        std::shared_ptr<std::atomic<bool>> cancel);
+
+    asio::awaitable<LedgerHeaderResult>
+    get_header_impl(
+        uint32_t ledger_seq,
+        std::shared_ptr<PeerSet> peers,
+        PeerGenerationPin peer_pin,
+        PeerSessionPtr unmanaged_owner);
 
     /// Called by the response handler for every TMLedgerData node response.
     /// Computes content hash for each node, inserts into cache, wakes waiters.
@@ -385,7 +717,7 @@ private:
     void
     evict_headers_if_needed();
 
-    std::shared_ptr<asio::steady_timer>
+    std::shared_ptr<SerializedTimerSignal>
     make_progress_signal();
 
     static std::string
@@ -403,7 +735,7 @@ private:
     void
     refresh_waiter_locked(HeaderEntry& entry, WaitRegistration& wait);
 
-    std::shared_ptr<asio::steady_timer>
+    std::shared_ptr<SerializedTimerSignal>
     publish_progress_locked(
         Entry& entry,
         ProgressKind kind,
@@ -413,7 +745,7 @@ private:
         uint8_t max_attempts,
         std::string_view peer = {});
 
-    std::shared_ptr<asio::steady_timer>
+    std::shared_ptr<SerializedTimerSignal>
     publish_progress_locked(
         HeaderEntry& entry,
         ProgressKind kind,
@@ -453,6 +785,21 @@ private:
     mutable std::mutex mutex_;
     std::map<Hash256, Entry> store_;
     std::map<uint32_t, HeaderEntry> header_cache_;
+    // Immutable off-strand projection. The container itself remains owned by
+    // header_state_strand_; observability never reads it across that boundary.
+    std::atomic<size_t> header_entries_projection_{0};
+    // Cache terminality and servant terminality are separate transitions.
+    // This registry owns every operation until both coroutine frames are gone
+    // and PeerSet has consumed their generation-pin releases.
+    //@@authority state=node_cache.active_header_fetches owner=node_cache
+    std::map<std::uint64_t, std::shared_ptr<HeaderFetchState>>
+        active_header_fetches_;
+    std::uint64_t next_header_fetch_id_ = 0;
+    // Owner-strand lifecycle state. A non-null barrier means one clear
+    // boundary has committed and is still draining predecessor authority.
+    //@@authority state=node_cache.header_clear_boundary owner=node_cache
+    std::shared_ptr<HeaderClearState> header_clear_state_;
+    std::uint64_t header_epoch_ = 0;
 
     // LRU tracking: front = most recently accessed (mutable for const get())
     // Includes present nodes and non-present placeholders so failed fetches
@@ -471,6 +818,16 @@ private:
 
     void
     touch_header_lru(uint32_t ledger_seq) const;
+
+    void
+    refresh_header_entries_projection_locked() noexcept;
+
+    // Deterministic interleaving seams. Production instances leave these
+    // empty; tests use them to stop precisely at the authority boundaries.
+    std::function<void()> before_node_send_commit_for_test_;
+    std::function<void()> after_node_waiter_attached_for_test_;
+    std::function<void()> node_deadline_servant_hook_for_test_;
+    std::function<void()> node_round_retired_hook_for_test_;
 
     // Stats — atomic for lock-free concurrent access
     mutable std::atomic<size_t> hits_{0};

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "node-transport.h"
 #include "types.h"
 
 #include <boost/asio/io_context.hpp>
@@ -124,6 +125,26 @@ public:
         int type,
         std::vector<SHAMapNodeID> const& node_ids,
         std::function<void(boost::system::error_code)> on_error = nullptr) = 0;
+
+    /// Publish one sealed node-batch projection. A true return means the
+    /// projection was queued for owner-strand admission; the sender must retain
+    /// its outbox until it consumes a receipt. Executor progress and exhaustive
+    /// quiescence are lifecycle preconditions, not consequences of this call.
+    /// A false return means no projection was queued.
+    virtual bool
+    submit_node_batch(
+        NodeBatchCommand command,
+        NodeBatchWriteHandler on_receipt) = 0;
+
+    /// Queue retirement of one exact retained terminal receipt. Stale,
+    /// duplicate, conflicting, and wrong-generation acknowledgements are
+    /// fail-closed and do not retire another row. The sole sender executor must
+    /// stop projecting the matching command before it derives this capability;
+    /// command and acknowledgement submissions to this session are then
+    /// ordered by the receiver strand. This causal rule is enforced by the
+    /// coordinator outbox transition, not reconstructed by PeerSession.
+    virtual bool
+    acknowledge_node_batch_receipt(NodeBatchReceiptAck ack) = 0;
 };
 
 using PeerSessionPtr = std::shared_ptr<PeerSession>;

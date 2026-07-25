@@ -4,11 +4,139 @@
 #include <catl/common/utils.h>
 #include <catl/crypto/sha512-half-hasher.h>
 
+#include <boost/asio/dispatch.hpp>
+
+#include <algorithm>
+#include <cassert>
+#include <limits>
+#include <stdexcept>
+
 namespace catl::peer_client {
 
 LogPartition PeerClient::log_("peer-client", LogLevel::INHERIT);
 
 namespace {
+
+class NodeBatchIngressPermit
+{
+public:
+    NodeBatchIngressPermit(
+        std::shared_ptr<PeerClient> owner,
+        std::atomic<std::size_t>& ingress_count,
+        std::atomic<std::size_t>& work_count) noexcept
+        : owner_(std::move(owner))
+        , ingress_count_(&ingress_count)
+        , work_count_(&work_count)
+    {
+    }
+
+    NodeBatchIngressPermit(NodeBatchIngressPermit const&) = delete;
+    NodeBatchIngressPermit&
+    operator=(NodeBatchIngressPermit const&) = delete;
+
+    ~NodeBatchIngressPermit()
+    {
+        release();
+    }
+
+    PeerClient&
+    owner() const noexcept
+    {
+        return *owner_;
+    }
+
+    void
+    release() noexcept
+    {
+        release_ingress();
+        if (work_count_)
+        {
+            auto const previous =
+                work_count_->fetch_sub(1, std::memory_order_acq_rel);
+            assert(previous != 0);
+            work_count_ = nullptr;
+        }
+    }
+
+    void
+    transfer_to_retained_row() noexcept
+    {
+        release_ingress();
+        // The already-counted work projection is now owned by the retained
+        // row and is released only when its exact acknowledgement commits.
+        work_count_ = nullptr;
+    }
+
+private:
+    void
+    release_ingress() noexcept
+    {
+        if (!ingress_count_)
+            return;
+        auto const previous =
+            ingress_count_->fetch_sub(1, std::memory_order_acq_rel);
+        assert(previous != 0);
+        ingress_count_ = nullptr;
+    }
+
+    std::shared_ptr<PeerClient> owner_;
+    std::atomic<std::size_t>* ingress_count_;
+    std::atomic<std::size_t>* work_count_;
+};
+
+bool
+try_acquire_node_batch_ingress(
+    std::atomic<std::size_t>& ingress_count,
+    std::atomic<std::size_t>& work_count) noexcept
+{
+    constexpr auto max_work =
+        kMaxNodeBatchReceiptRows + kMaxNodeBatchIngressProjections;
+    auto work = work_count.load(std::memory_order_relaxed);
+    do
+    {
+        if (work >= max_work)
+            return false;
+    } while (!work_count.compare_exchange_weak(
+        work,
+        work + 1,
+        std::memory_order_acq_rel,
+        std::memory_order_relaxed));
+
+    auto ingress = ingress_count.load(std::memory_order_relaxed);
+    do
+    {
+        if (ingress >= kMaxNodeBatchIngressProjections)
+        {
+            work_count.fetch_sub(1, std::memory_order_acq_rel);
+            return false;
+        }
+    } while (!ingress_count.compare_exchange_weak(
+        ingress,
+        ingress + 1,
+        std::memory_order_acq_rel,
+        std::memory_order_relaxed));
+    return true;
+}
+
+std::uint64_t
+mint_peer_client_instance_id()
+{
+    static std::atomic<std::uint64_t> next{1};
+    auto current = next.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        if (current == std::numeric_limits<std::uint64_t>::max())
+            throw std::overflow_error{"PeerClient instance identity exhausted"};
+        if (next.compare_exchange_weak(
+                current,
+                current + 1,
+                std::memory_order_relaxed,
+                std::memory_order_relaxed))
+        {
+            return current;
+        }
+    }
+}
 
 std::string
 peer_net_label(uint32_t network_id)
@@ -21,6 +149,44 @@ peer_net_label(uint32_t network_id)
             return "xahau";
         default:
             return "net-" + std::to_string(network_id);
+    }
+}
+
+bool
+is_pre_ready_state(State state)
+{
+    return state == State::Connecting || state == State::Connected ||
+        state == State::ExchangingStatus;
+}
+
+Error
+terminal_request_error(State state)
+{
+    return state == State::Disconnected ? Error::Cancelled
+                                        : Error::Disconnected;
+}
+
+template <typename T>
+void
+complete_callback_noexcept(LogPartition& log, Callback<T> callback, Error error)
+{
+    if (!callback)
+        return;
+
+    try
+    {
+        callback(error, T{});
+    }
+    catch (std::exception const& e)
+    {
+        PLOGE(
+            log,
+            "request callback threw during terminal completion: ",
+            e.what());
+    }
+    catch (...)
+    {
+        PLOGE(log, "request callback threw during terminal completion");
     }
 }
 
@@ -124,123 +290,189 @@ PeerClient::register_callback(
 {
     auto it = map.find(key);
 
-    // Existing entry — piggyback if deduping
-    if (it != map.end() && dedupe)
+    if (it != map.end() && !dedupe)
     {
+        PLOGW(
+            log_,
+            "register_callback: refusing overlapping non-deduped key=",
+            key.hex().substr(0, 16));
+        complete_callback_noexcept(
+            log_, std::move(callback), Error::DuplicateRequest);
+        return false;
+    }
+
+    auto arm_timeout = [this, &map, key](
+                           asio::steady_timer& timer,
+                           std::uint64_t entry_incarnation,
+                           std::uint64_t callback_incarnation) {
+        try
+        {
+            auto self = shared_from_this();
+            timer.async_wait(
+                [self, &map, key, entry_incarnation, callback_incarnation](
+                    boost::system::error_code ec) {
+                    if (ec)
+                        return;
+
+                    auto current = map.find(key);
+                    if (current == map.end() ||
+                        current->second.incarnation != entry_incarnation)
+                    {
+                        return;
+                    }
+
+                    auto& callbacks = current->second.callbacks;
+                    auto callback_it = std::find_if(
+                        callbacks.begin(),
+                        callbacks.end(),
+                        [callback_incarnation](auto const& candidate) {
+                            return candidate.incarnation ==
+                                callback_incarnation;
+                        });
+                    if (callback_it == callbacks.end())
+                        return;
+
+                    auto callback = std::move(callback_it->callback);
+                    callbacks.erase(callback_it);
+                    if (callbacks.empty())
+                        map.erase(current);
+                    self->refresh_pending_count_projection();
+
+                    PLOGW(
+                        PeerClient::log_,
+                        "TIMEOUT key=",
+                        key.hex().substr(0, 16),
+                        " entry=",
+                        entry_incarnation,
+                        " callback=",
+                        callback_incarnation);
+                    complete_callback_noexcept(
+                        PeerClient::log_, std::move(callback), Error::Timeout);
+                });
+            return true;
+        }
+        catch (std::exception const& e)
+        {
+            PLOGE(log_, "failed to arm request timeout: ", e.what());
+        }
+        catch (...)
+        {
+            PLOGE(log_, "failed to arm request timeout");
+        }
+        return false;
+    };
+
+    if (it != map.end())
+    {
+        if (next_callback_incarnation_ == 0 ||
+            next_callback_incarnation_ ==
+                std::numeric_limits<std::uint64_t>::max())
+        {
+            PLOGE(
+                log_,
+                "register_callback: callback identity exhausted for key=",
+                key.hex().substr(0, 16));
+            complete_callback_noexcept(
+                log_, std::move(callback), Error::ResourceExhausted);
+            return false;
+        }
+
         PLOGD(
             log_,
             "register_callback: piggyback key=",
             key.hex().substr(0, 16),
             " existing_callbacks=",
             it->second.callbacks.size());
+
+        auto const entry_incarnation = it->second.incarnation;
+        auto const callback_incarnation = next_callback_incarnation_++;
         auto timer =
             std::make_unique<asio::steady_timer>(strand_, opts.timeout);
-        auto* tp = timer.get();
-        it->second.callbacks.push_back({std::move(callback), std::move(timer)});
-        auto idx = it->second.callbacks.size() - 1;
+        auto* timer_ptr = timer.get();
+        it->second.callbacks.push_back(
+            {callback_incarnation, std::move(callback), std::move(timer)});
+        refresh_pending_count_projection();
 
-        auto self = shared_from_this();
-        tp->async_wait([self, &map, key, idx](boost::system::error_code ec) {
-            if (ec)
-                return;
-            PLOGW(
-                PeerClient::log_,
-                "TIMEOUT (piggyback) key=",
-                key.hex().substr(0, 16),
-                " idx=",
-                idx);
-            auto it2 = map.find(key);
-            if (it2 == map.end())
-                return;
-            auto& cbs = it2->second.callbacks;
-            if (idx < cbs.size() && cbs[idx].callback)
+        if (arm_timeout(*timer_ptr, entry_incarnation, callback_incarnation))
+        {
+            return false;
+        }
+
+        it = map.find(key);
+        Callback<T> failed;
+        if (it != map.end() && it->second.incarnation == entry_incarnation)
+        {
+            auto& callbacks = it->second.callbacks;
+            auto callback_it = std::find_if(
+                callbacks.begin(),
+                callbacks.end(),
+                [callback_incarnation](auto const& candidate) {
+                    return candidate.incarnation == callback_incarnation;
+                });
+            if (callback_it != callbacks.end())
             {
-                auto cb = std::move(cbs[idx].callback);
-                cbs[idx].callback = nullptr;
-                cb(Error::Timeout, T{});
+                failed = std::move(callback_it->callback);
+                callbacks.erase(callback_it);
             }
-            bool all_done = true;
-            for (auto& c : cbs)
-                if (c.callback)
-                    all_done = false;
-            if (all_done)
-                map.erase(it2);
-        });
-
+            if (callbacks.empty())
+                map.erase(it);
+        }
+        refresh_pending_count_projection();
+        complete_callback_noexcept(log_, std::move(failed), Error::Cancelled);
         return false;
     }
 
-    // New entry
+    if (next_pending_incarnation_ == 0 ||
+        next_pending_incarnation_ ==
+            std::numeric_limits<std::uint64_t>::max() ||
+        next_callback_incarnation_ == 0 ||
+        next_callback_incarnation_ ==
+            std::numeric_limits<std::uint64_t>::max())
+    {
+        PLOGE(
+            log_,
+            "register_callback: request identity exhausted for key=",
+            key.hex().substr(0, 16));
+        complete_callback_noexcept(
+            log_, std::move(callback), Error::ResourceExhausted);
+        return false;
+    }
+
+    auto const entry_incarnation = next_pending_incarnation_++;
+    auto const callback_incarnation = next_callback_incarnation_++;
+    auto timer = std::make_unique<asio::steady_timer>(strand_, opts.timeout);
+    auto* timer_ptr = timer.get();
+
+    PendingEntry<T> entry;
+    entry.incarnation = entry_incarnation;
+    entry.network_request_sent = true;
+    entry.callbacks.push_back(
+        {callback_incarnation, std::move(callback), std::move(timer)});
+
+    auto [inserted_it, inserted] = map.emplace(key, std::move(entry));
+    assert(inserted);
+    refresh_pending_count_projection();
+
     PLOGD(
         log_,
         "register_callback: NEW key=",
         key.hex().substr(0, 16),
+        " entry=",
+        entry_incarnation,
+        " callback=",
+        callback_incarnation,
         " timeout=",
         opts.timeout.count(),
-        "s",
-        " callback_valid=",
-        static_cast<bool>(callback));
-    PendingEntry<T> entry;
-    auto timer = std::make_unique<asio::steady_timer>(strand_, opts.timeout);
-    auto* tp = timer.get();
-    entry.callbacks.push_back({std::move(callback), std::move(timer)});
-    PLOGT(
-        log_,
-        "  after push_back: callback_valid=",
-        static_cast<bool>(entry.callbacks[0].callback));
-    entry.network_request_sent = true;
-    map[key] = std::move(entry);
-    PLOGD(
-        log_,
-        "  stored in map: callback_valid=",
-        static_cast<bool>(map[key].callbacks[0].callback),
-        " map_size=",
-        map.size());
+        "s");
 
-    auto self = shared_from_this();
-    tp->async_wait([self, &map, key](boost::system::error_code ec) {
-        if (ec)
-        {
-            PLOGD(
-                PeerClient::log_,
-                "timer cancelled key=",
-                key.hex().substr(0, 16));
-            return;
-        }
-        PLOGW(
-            PeerClient::log_,
-            "TIMEOUT key=",
-            key.hex().substr(0, 16),
-            " map_size=",
-            map.size());
-        auto it2 = map.find(key);
-        if (it2 == map.end())
-        {
-            PLOGW(PeerClient::log_, "  key already gone from map");
-            return;
-        }
-        auto& cbs = it2->second.callbacks;
-        PLOGW(
-            PeerClient::log_,
-            "  callbacks=",
-            cbs.size(),
-            " cb[0]_valid=",
-            (!cbs.empty() ? static_cast<bool>(cbs[0].callback) : false));
-        if (!cbs.empty() && cbs[0].callback)
-        {
-            auto cb = std::move(cbs[0].callback);
-            cbs[0].callback = nullptr;
-            cb(Error::Timeout, T{});
-        }
-        bool all_done = true;
-        for (auto& c : cbs)
-            if (c.callback)
-                all_done = false;
-        if (all_done)
-            map.erase(it2);
-    });
+    if (arm_timeout(*timer_ptr, entry_incarnation, callback_incarnation))
+        return true;
 
-    return true;
+    auto failed = std::move(inserted_it->second.callbacks.front().callback);
+    map.erase(inserted_it);
+    refresh_pending_count_projection();
+    complete_callback_noexcept(log_, std::move(failed), Error::Cancelled);
+    return false;
 }
 
 template <typename T>
@@ -283,6 +515,7 @@ PeerClient::resolve(PendingMap<T>& map, Hash256 const& key, Error err, T result)
 
     auto entry = std::move(it->second);
     map.erase(it);
+    refresh_pending_count_projection();
 
     for (size_t i = 0; i < entry.callbacks.size(); ++i)
     {
@@ -570,12 +803,12 @@ ProofPathResult::leaf_data() const
 PeerClient::PeerClient(asio::io_context& io_context)
     : io_context_(io_context), strand_(asio::make_strand(io_context))
 {
+    receiver_instance_id_ = mint_peer_client_instance_id();
 }
 
 PeerClient::~PeerClient()
 {
     PLOGD(log_, "~PeerClient");
-    cancel_all();
 }
 
 std::shared_ptr<PeerClient>
@@ -592,6 +825,7 @@ PeerClient::connect(
         client->tracker_ = std::move(opts.tracker);
         client->unsolicited_handler_ = std::move(opts.unsolicited_handler);
     }
+    client->connection_generation_ = opts.connection_generation;
     client->on_disconnect_ = std::move(opts.on_disconnect);
     client->do_connect(
         host,
@@ -642,8 +876,32 @@ PeerClient::set_node_response_handler(NodeResponseHandler handler)
 void
 PeerClient::disconnect()
 {
+    auto self = shared_from_this();
+    asio::dispatch(strand_, [self]() { self->disconnect_on_strand(); });
+}
+
+void
+PeerClient::disconnect_on_strand()
+{
+    assert(strand_.running_in_this_thread());
+    auto const previous = state_.exchange(State::Disconnected);
+
+    if (previous != State::Disconnected && previous != State::Failed)
+        complete_all_pending(Error::Cancelled);
+
+    // Logical terminality does not imply that the physical transport was
+    // closed. In particular, an HTTP-upgrade/connect failure can set Failed
+    // while leaving an open TCP socket behind. close() is idempotent, so every
+    // disconnect consumes the physical lifecycle before deciding whether the
+    // logical completion work has already run.
     if (connection_)
         connection_->close();
+
+    if (previous == State::Disconnected || previous == State::Failed)
+        return;
+
+    if (previous != State::Ready)
+        complete_connect(boost::asio::error::operation_aborted);
 }
 
 void
@@ -653,6 +911,27 @@ PeerClient::send_get_nodes(
     std::vector<SHAMapNodeID> const& node_ids,
     std::function<void(boost::system::error_code)> on_error)
 {
+    auto self = shared_from_this();
+    asio::dispatch(
+        strand_,
+        [self,
+         ledger_hash,
+         type,
+         node_ids,
+         on_error = std::move(on_error)]() mutable {
+            self->send_get_nodes_on_strand(
+                ledger_hash, type, std::move(node_ids), std::move(on_error));
+        });
+}
+
+void
+PeerClient::send_get_nodes_on_strand(
+    Hash256 ledger_hash,
+    int type,
+    std::vector<SHAMapNodeID> node_ids,
+    std::function<void(boost::system::error_code)> on_error)
+{
+    assert(strand_.running_in_this_thread());
     if (state_ != State::Ready)
     {
         PLOGD(log_, "send_get_nodes: not ready, dropping");
@@ -695,6 +974,439 @@ PeerClient::send_get_nodes(
         });
 }
 
+bool
+PeerClient::submit_node_batch(
+    NodeBatchCommand command,
+    NodeBatchWriteHandler on_receipt)
+{
+    if (!on_receipt || command.attempt_id().value() == 0 ||
+        command.sender_generation().value() == 0 ||
+        command.peer_generation().value() == 0 ||
+        command.node_ids().empty() ||
+        command.node_ids().size() > kMaxNodeBatchRequestNodes ||
+        (command.tree() != NodeTree::transaction &&
+         command.tree() != NodeTree::account_state))
+    {
+        return false;
+    }
+
+    if (!try_acquire_node_batch_ingress(
+            node_batch_ingress_projections_, node_batch_work_projection_))
+        return false;
+
+    std::shared_ptr<NodeBatchIngressPermit> permit;
+    try
+    {
+        auto self = shared_from_this();
+        permit = std::make_shared<NodeBatchIngressPermit>(
+            std::move(self),
+            node_batch_ingress_projections_,
+            node_batch_work_projection_);
+        // Always queue this boundary. A receiver receipt must not re-enter a
+        // sender before submit_node_batch() has reported that publication was
+        // accepted.
+        asio::post(
+            strand_,
+            [permit,
+             command = std::move(command),
+             on_receipt = std::move(on_receipt)]() mutable {
+                try
+                {
+                    if (permit->owner().submit_node_batch_on_strand(
+                            std::move(command), std::move(on_receipt)))
+                    {
+                        permit->transfer_to_retained_row();
+                        return;
+                    }
+                }
+                catch (std::exception const& e)
+                {
+                    PLOGE(
+                        PeerClient::log_,
+                        "node-batch admission threw: ",
+                        e.what());
+                }
+                catch (...)
+                {
+                    PLOGE(PeerClient::log_, "node-batch admission threw");
+                }
+                permit->release();
+            });
+        return true;
+    }
+    catch (...)
+    {
+        if (permit)
+            permit->release();
+        else
+        {
+            node_batch_ingress_projections_.fetch_sub(
+                1, std::memory_order_acq_rel);
+            node_batch_work_projection_.fetch_sub(
+                1, std::memory_order_acq_rel);
+        }
+        return false;
+    }
+}
+
+bool
+PeerClient::acknowledge_node_batch_receipt(NodeBatchReceiptAck ack)
+{
+    if (ack.attempt_id().value() == 0 ||
+        ack.sender_generation().value() == 0 ||
+        ack.peer_generation().value() == 0 ||
+        ack.receiver_instance_id() == 0 ||
+        ack.receiver_commit_sequence() == 0)
+    {
+        return false;
+    }
+    if (!try_acquire_node_batch_ingress(
+            node_batch_ingress_projections_, node_batch_work_projection_))
+        return false;
+
+    std::shared_ptr<NodeBatchIngressPermit> permit;
+    try
+    {
+        auto self = shared_from_this();
+        permit = std::make_shared<NodeBatchIngressPermit>(
+            std::move(self),
+            node_batch_ingress_projections_,
+            node_batch_work_projection_);
+        asio::post(strand_, [permit, ack = std::move(ack)]() mutable {
+            permit->owner().acknowledge_node_batch_receipt_on_strand(
+                std::move(ack));
+            permit->release();
+        });
+        return true;
+    }
+    catch (...)
+    {
+        if (permit)
+            permit->release();
+        else
+        {
+            node_batch_ingress_projections_.fetch_sub(
+                1, std::memory_order_acq_rel);
+            node_batch_work_projection_.fetch_sub(
+                1, std::memory_order_acq_rel);
+        }
+        return false;
+    }
+}
+
+bool
+PeerClient::submit_node_batch_on_strand(
+    NodeBatchCommand command,
+    NodeBatchWriteHandler on_receipt)
+{
+    assert(strand_.running_in_this_thread());
+
+    auto refuse = [&](NodeBatchWriteOutcome outcome,
+                      boost::system::error_code ec = {}) noexcept {
+        try
+        {
+            on_receipt(NodeBatchWriteReceipt{
+                command, outcome, receiver_instance_id_, ec});
+        }
+        catch (std::exception const& e)
+        {
+            PLOGE(log_, "node-batch receipt handler threw: ", e.what());
+        }
+        catch (...)
+        {
+            PLOGE(log_, "node-batch receipt handler threw");
+        }
+    };
+
+    if (command.peer_generation().value() != connection_generation_)
+    {
+        refuse(NodeBatchWriteOutcome::generation_mismatch);
+        return false;
+    }
+
+    auto const same_identity = [&](NodeBatchWriteRecord const& record) {
+        return record.sender_generation == command.sender_generation() &&
+            record.attempt_id == command.attempt_id();
+    };
+    if (auto const existing = std::find_if(
+            node_batch_write_records_.begin(),
+            node_batch_write_records_.end(),
+            same_identity);
+        existing != node_batch_write_records_.end())
+    {
+        if (existing->payload_digest != command.payload_digest())
+        {
+            refuse(NodeBatchWriteOutcome::identity_conflict);
+            return false;
+        }
+
+        if (existing->terminal_receipt)
+        {
+            auto const receipt = *existing->terminal_receipt;
+            try
+            {
+                on_receipt(receipt);
+            }
+            catch (std::exception const& e)
+            {
+                PLOGE(log_, "node-batch replay handler threw: ", e.what());
+            }
+            catch (...)
+            {
+                PLOGE(log_, "node-batch replay handler threw");
+            }
+            return false;
+        }
+
+        if (existing->waiter_count >= existing->waiters.size())
+        {
+            // This is still the same command. Publishing a different
+            // capacity outcome would create two terminal facts for one
+            // identity. The sender retains its outbox and may replay after
+            // the original terminal receipt is available.
+            PLOGD(
+                log_,
+                "node-batch duplicate waiter capacity reached for attempt ",
+                command.attempt_id().value());
+            return false;
+        }
+        existing->waiters[existing->waiter_count++] = std::move(on_receipt);
+        return false;
+    }
+
+    switch (state_.load(std::memory_order_acquire))
+    {
+        case State::Ready:
+            break;
+        case State::Connecting:
+        case State::Connected:
+        case State::ExchangingStatus:
+            refuse(NodeBatchWriteOutcome::not_ready);
+            return false;
+        case State::Failed:
+            refuse(
+                NodeBatchWriteOutcome::generation_closed,
+                boost::asio::error::connection_aborted);
+            return false;
+        case State::Disconnected:
+            refuse(
+                NodeBatchWriteOutcome::generation_closed,
+                boost::asio::error::operation_aborted);
+            return false;
+    }
+
+    if (!connection_)
+    {
+        refuse(
+            NodeBatchWriteOutcome::disconnected,
+            boost::asio::error::not_connected);
+        return false;
+    }
+
+    if (node_batch_write_records_.size() >= kMaxNodeBatchReceiptRows)
+    {
+        refuse(NodeBatchWriteOutcome::receipt_capacity_exhausted);
+        return false;
+    }
+    if (node_batch_write_records_.capacity() <
+        kMaxNodeBatchReceiptRows)
+    {
+        try
+        {
+            node_batch_write_records_.reserve(kMaxNodeBatchReceiptRows);
+        }
+        catch (...)
+        {
+            refuse(NodeBatchWriteOutcome::receipt_capacity_exhausted);
+            return false;
+        }
+    }
+    auto const remaining_receipt_sequences =
+        std::numeric_limits<std::uint64_t>::max() -
+        next_node_batch_receipt_sequence_;
+    if (reserved_node_batch_receipt_sequences_ >=
+        remaining_receipt_sequences)
+    {
+        refuse(NodeBatchWriteOutcome::receipt_sequence_exhausted);
+        return false;
+    }
+
+    std::vector<std::uint8_t> data;
+    try
+    {
+        protocol::TMGetLedger request;
+        request.set_itype(static_cast<protocol::TMLedgerInfoType>(
+            static_cast<std::uint8_t>(command.tree())));
+        request.set_ledgerhash(command.ledger_hash().data(), Hash256::size());
+        request.set_querytype(protocol::qtINDIRECT);
+        request.set_querydepth(0);
+        for (auto const& node_id : command.node_ids())
+            request.add_nodeids(node_id.to_wire());
+
+        auto const wire_size = request.ByteSizeLong();
+        if (wire_size > kMaxFramePayloadSize)
+        {
+            refuse(NodeBatchWriteOutcome::write_failed);
+            return false;
+        }
+        data.resize(wire_size);
+        if (!request.SerializeToArray(
+                data.data(), static_cast<int>(data.size())))
+        {
+            refuse(NodeBatchWriteOutcome::write_failed);
+            return false;
+        }
+    }
+    catch (std::exception const& e)
+    {
+        PLOGE(log_, "node-batch serialization failed: ", e.what());
+        refuse(NodeBatchWriteOutcome::write_failed);
+        return false;
+    }
+    catch (...)
+    {
+        PLOGE(log_, "node-batch serialization failed");
+        refuse(NodeBatchWriteOutcome::write_failed);
+        return false;
+    }
+
+    auto const attempt_id = command.attempt_id();
+    auto const sender_generation = command.sender_generation();
+    bool retained = false;
+    try
+    {
+        node_batch_write_records_.emplace_back(
+            std::move(command), std::move(on_receipt));
+        retained = true;
+        ++reserved_node_batch_receipt_sequences_;
+        refresh_pending_count_projection();
+
+        auto self = shared_from_this();
+        connection_->async_send_packet(
+            packet_type::get_ledger,
+            data,
+            [self, sender_generation, attempt_id](
+                boost::system::error_code ec) {
+                self->complete_node_batch_write(
+                    sender_generation, attempt_id, ec);
+            });
+    }
+    catch (std::exception const& e)
+    {
+        PLOGE(log_, "node-batch write initiation failed: ", e.what());
+        complete_node_batch_write(
+            sender_generation,
+            attempt_id,
+            boost::asio::error::operation_aborted,
+            NodeBatchWriteOutcome::write_failed);
+    }
+    catch (...)
+    {
+        PLOGE(log_, "node-batch write initiation failed");
+        complete_node_batch_write(
+            sender_generation,
+            attempt_id,
+            boost::asio::error::operation_aborted,
+            NodeBatchWriteOutcome::write_failed);
+    }
+    return retained;
+}
+
+void
+PeerClient::complete_node_batch_write(
+    SenderGenerationId sender_generation,
+    TransportAttemptId attempt_id,
+    boost::system::error_code ec,
+    NodeBatchWriteOutcome terminal_override) noexcept
+{
+    assert(strand_.running_in_this_thread());
+    auto const found = std::find_if(
+        node_batch_write_records_.begin(),
+        node_batch_write_records_.end(),
+        [=](NodeBatchWriteRecord const& record) {
+            return record.sender_generation == sender_generation &&
+                record.attempt_id == attempt_id;
+        });
+    if (found == node_batch_write_records_.end() ||
+        !found->pending_command)
+    {
+        return;
+    }
+
+    auto const outcome =
+        terminal_override == NodeBatchWriteOutcome::written && ec
+        ? NodeBatchWriteOutcome::write_failed
+        : terminal_override;
+    assert(reserved_node_batch_receipt_sequences_ != 0);
+    auto const receiver_commit_sequence =
+        next_node_batch_receipt_sequence_ + 1;
+    found->terminal_receipt =
+        NodeBatchWriteReceipt{
+            *found->pending_command,
+            outcome,
+            receiver_instance_id_,
+            receiver_commit_sequence,
+            ec};
+    found->pending_command.reset();
+    --reserved_node_batch_receipt_sequences_;
+    next_node_batch_receipt_sequence_ = receiver_commit_sequence;
+
+    std::array<NodeBatchWriteHandler, kMaxNodeBatchReceiptWaiters> waiters;
+    auto const waiter_count = found->waiter_count;
+    for (std::size_t i = 0; i < waiter_count; ++i)
+        waiters[i] = std::move(found->waiters[i]);
+    found->waiter_count = 0;
+    auto const receipt = *found->terminal_receipt;
+
+    for (std::size_t i = 0; i < waiter_count; ++i)
+    {
+        try
+        {
+            waiters[i](receipt);
+        }
+        catch (std::exception const& e)
+        {
+            PLOGE(log_, "node-batch receipt handler threw: ", e.what());
+        }
+        catch (...)
+        {
+            PLOGE(log_, "node-batch receipt handler threw");
+        }
+    }
+}
+
+void
+PeerClient::acknowledge_node_batch_receipt_on_strand(
+    NodeBatchReceiptAck ack) noexcept
+{
+    assert(strand_.running_in_this_thread());
+    if (ack.receiver_instance_id() != receiver_instance_id_ ||
+        ack.peer_generation().value() != connection_generation_)
+        return;
+
+    auto const found = std::find_if(
+        node_batch_write_records_.begin(),
+        node_batch_write_records_.end(),
+        [&](NodeBatchWriteRecord const& record) {
+            return record.sender_generation == ack.sender_generation() &&
+                record.attempt_id == ack.attempt_id();
+        });
+    if (found == node_batch_write_records_.end() ||
+        !found->terminal_receipt ||
+        found->payload_digest != ack.payload_digest() ||
+        found->terminal_receipt->receiver_commit_sequence() !=
+            ack.receiver_commit_sequence())
+    {
+        return;
+    }
+
+    node_batch_write_records_.erase(found);
+    auto const previous =
+        node_batch_work_projection_.fetch_sub(1, std::memory_order_acq_rel);
+    assert(previous != 0);
+    refresh_pending_count_projection();
+}
+
 void
 PeerClient::do_connect(
     std::string const& host,
@@ -730,56 +1442,72 @@ PeerClient::do_connect(
     // Notifies both PeerClient (state update) and any registered observer
     // (PeerSet removal).  Uses weak_ptr to avoid shared_ptr cycle:
     // peer_connection -> disconnect_handler_ -> PeerClient -> connection_
-    connection_->set_disconnect_handler(
-        [weak = weak_from_this()](boost::system::error_code ec) {
-            auto self = weak.lock();
-            if (!self)
-                return;
+    connection_->set_disconnect_handler([weak = weak_from_this()](
+                                            boost::system::error_code ec) {
+        auto self = weak.lock();
+        if (!self)
+            return;
 
-            // Always notify the observer (PeerSet needs to know). The
-            // terminal fact is formed here, once, on the client strand —
-            // this is the sole export commit for this instance's death.
-            //@@authority channel=peer_client.terminal_export owner=peer_client commit=client-strand
-            if (self->on_disconnect_)
+        auto const previous = self->state_.exchange(State::Failed);
+        if (previous == State::Disconnected || previous == State::Failed)
+            return;
+
+        self->complete_all_pending(Error::Disconnected);
+
+        // Always notify the observer (PeerSet needs to know). The
+        // terminal fact is formed here, once, on the client strand —
+        // this is the sole export commit for this instance's death.
+        //@@authority channel=peer_client.terminal_export owner=peer_client
+        // commit=client-strand
+        if (self->on_disconnect_)
+        {
+            PeerTerminalReason reason{
+                ec,
+                self->connection_ ? self->connection_->connect_failure_detail()
+                                  : std::string{}};
+            try
             {
-                PeerTerminalReason reason{
-                    ec,
-                    self->connection_ ? self->connection_->connect_failure_detail()
-                                      : std::string{}};
                 self->on_disconnect_(reason);
             }
-
-            if (self->state_ == State::Ready || self->state_ == State::Failed)
-            {
-                return;
-            }
-
-            if (ec == boost::asio::error::invalid_argument ||
-                ec == boost::asio::error::operation_aborted)
-            {
-                PLOGD(
-                    PeerClient::log_,
-                    "[",
-                    self->net_label_,
-                    "] [",
-                    self->endpoint_str_,
-                    "] Connection lost before ready: ",
-                    ec.message());
-            }
-            else
+            catch (std::exception const& e)
             {
                 PLOGE(
-                    PeerClient::log_,
-                    "[",
-                    self->net_label_,
-                    "] [",
-                    self->endpoint_str_,
-                    "] Connection lost before ready: ",
-                    ec.message());
+                    PeerClient::log_, "disconnect observer threw: ", e.what());
             }
-            self->state_ = State::Failed;
-            self->complete_connect(ec);
-        });
+            catch (...)
+            {
+                PLOGE(PeerClient::log_, "disconnect observer threw");
+            }
+        }
+
+        if (previous == State::Ready)
+            return;
+
+        if (ec == boost::asio::error::invalid_argument ||
+            ec == boost::asio::error::operation_aborted)
+        {
+            PLOGD(
+                PeerClient::log_,
+                "[",
+                self->net_label_,
+                "] [",
+                self->endpoint_str_,
+                "] Connection lost before ready: ",
+                ec.message());
+        }
+        else
+        {
+            PLOGE(
+                PeerClient::log_,
+                "[",
+                self->net_label_,
+                "] [",
+                self->endpoint_str_,
+                "] Connection lost before ready: ",
+                ec.message());
+        }
+        self->complete_connect(ec);
+    });
 
     // Connect callback fires on the strand (socket is strand-aware).
     // One-shot callback — shared_ptr capture is fine here, it completes
@@ -799,10 +1527,15 @@ PeerClient::do_connect(
                 self->endpoint_str_,
                 "] Connection failed: ",
                 ec.message());
-            self->state_ = State::Failed;
+            auto const previous = self->state_.exchange(State::Failed);
+            if (previous != State::Disconnected && previous != State::Failed)
+                self->complete_all_pending(Error::Disconnected);
             self->complete_connect(ec);
             return;
         }
+        auto const state = self->state_.load();
+        if (state == State::Disconnected || state == State::Failed)
+            return;
         self->on_connected(std::move(on_ready));
     });
 }
@@ -874,32 +1607,41 @@ PeerClient::send_initial_probe_ping()
 
     RequestOptions opts;
     opts.timeout = std::chrono::seconds{10};
-    register_callback<PingResult>(
-        pending_pings_,
-        key,
-        Callback<PingResult>{[seq](Error err, PingResult) {
-            if (err == Error::Success)
-            {
-                PLOGD(
-                    PeerClient::log_,
-                    "Initial probe ping seq=",
-                    seq,
-                    " received pong");
-                return;
-            }
+    if (!register_callback<PingResult>(
+            pending_pings_,
+            key,
+            Callback<PingResult>{[seq](Error err, PingResult) {
+                if (err == Error::Success)
+                {
+                    PLOGD(
+                        PeerClient::log_,
+                        "Initial probe ping seq=",
+                        seq,
+                        " received pong");
+                    return;
+                }
 
-            if (err != Error::Timeout)
-            {
-                PLOGD(
-                    PeerClient::log_,
-                    "Initial probe ping seq=",
-                    seq,
-                    " completed with err=",
-                    static_cast<int>(err));
-            }
-        }},
-        opts,
-        false);
+                if (err != Error::Timeout)
+                {
+                    PLOGD(
+                        PeerClient::log_,
+                        "Initial probe ping seq=",
+                        seq,
+                        " completed with err=",
+                        static_cast<int>(err));
+                }
+            }},
+            opts,
+            false))
+    {
+        PLOGW(
+            log_,
+            "[",
+            net_label_,
+            "] Initial probe ping refused before send seq=",
+            seq);
+        return;
+    }
 
     protocol::TMPing msg;
     msg.set_type(protocol::TMPing_pingType_ptPING);
@@ -1531,17 +2273,42 @@ PeerClient::get_ledger_header(
     Callback<LedgerHeaderResult> callback,
     RequestOptions opts)
 {
-    if (state_ != State::Ready)
+    auto self = shared_from_this();
+    asio::dispatch(
+        strand_,
+        [self, ledger_seq, callback = std::move(callback), opts]() mutable {
+            self->get_ledger_header_on_strand(
+                ledger_seq, std::move(callback), opts);
+        });
+}
+
+void
+PeerClient::get_ledger_header_on_strand(
+    uint32_t ledger_seq,
+    Callback<LedgerHeaderResult> callback,
+    RequestOptions opts)
+{
+    assert(strand_.running_in_this_thread());
+    auto const state = state_.load();
+    if (state != State::Ready)
     {
-        PLOGD(
-            log_,
-            "get_ledger_header(seq=",
-            ledger_seq,
-            "): not ready, queuing");
-        queue_if_not_ready(
-            [this, ledger_seq, cb = std::move(callback), opts]() mutable {
-                get_ledger_header(ledger_seq, std::move(cb), opts);
-            });
+        if (is_pre_ready_state(state))
+        {
+            PLOGD(
+                log_,
+                "get_ledger_header(seq=",
+                ledger_seq,
+                "): not ready, queuing");
+            defer_request(
+                [this, ledger_seq, cb = std::move(callback), opts]() mutable {
+                    get_ledger_header(ledger_seq, std::move(cb), opts);
+                });
+        }
+        else
+        {
+            complete_callback_noexcept(
+                log_, std::move(callback), terminal_request_error(state));
+        }
         return;
     }
 
@@ -1589,13 +2356,38 @@ PeerClient::get_ledger_header(
     Callback<LedgerHeaderResult> callback,
     RequestOptions opts)
 {
-    if (state_ != State::Ready)
+    auto self = shared_from_this();
+    asio::dispatch(
+        strand_,
+        [self, ledger_hash, callback = std::move(callback), opts]() mutable {
+            self->get_ledger_header_on_strand(
+                ledger_hash, std::move(callback), opts);
+        });
+}
+
+void
+PeerClient::get_ledger_header_on_strand(
+    Hash256 ledger_hash,
+    Callback<LedgerHeaderResult> callback,
+    RequestOptions opts)
+{
+    assert(strand_.running_in_this_thread());
+    auto const state = state_.load();
+    if (state != State::Ready)
     {
-        PLOGD(log_, "get_ledger_header(hash): not ready, queuing");
-        queue_if_not_ready(
-            [this, ledger_hash, cb = std::move(callback), opts]() mutable {
-                get_ledger_header(ledger_hash, std::move(cb), opts);
-            });
+        if (is_pre_ready_state(state))
+        {
+            PLOGD(log_, "get_ledger_header(hash): not ready, queuing");
+            defer_request(
+                [this, ledger_hash, cb = std::move(callback), opts]() mutable {
+                    get_ledger_header(ledger_hash, std::move(cb), opts);
+                });
+        }
+        else
+        {
+            complete_callback_noexcept(
+                log_, std::move(callback), terminal_request_error(state));
+        }
         return;
     }
 
@@ -1630,16 +2422,46 @@ PeerClient::get_state_nodes(
     Callback<LedgerNodesResult> callback,
     RequestOptions opts)
 {
-    if (state_ != State::Ready)
-    {
-        PLOGD(log_, "get_state_nodes: not ready, queuing");
-        queue_if_not_ready([this,
-                            ledger_hash,
-                            node_ids,
-                            cb = std::move(callback),
-                            opts]() mutable {
-            get_state_nodes(ledger_hash, node_ids, std::move(cb), opts);
+    auto self = shared_from_this();
+    asio::dispatch(
+        strand_,
+        [self,
+         ledger_hash,
+         node_ids,
+         callback = std::move(callback),
+         opts]() mutable {
+            self->get_state_nodes_on_strand(
+                ledger_hash, std::move(node_ids), std::move(callback), opts);
         });
+}
+
+void
+PeerClient::get_state_nodes_on_strand(
+    Hash256 ledger_hash,
+    std::vector<SHAMapNodeID> node_ids,
+    Callback<LedgerNodesResult> callback,
+    RequestOptions opts)
+{
+    assert(strand_.running_in_this_thread());
+    auto const state = state_.load();
+    if (state != State::Ready)
+    {
+        if (is_pre_ready_state(state))
+        {
+            PLOGD(log_, "get_state_nodes: not ready, queuing");
+            defer_request([this,
+                           ledger_hash,
+                           node_ids,
+                           cb = std::move(callback),
+                           opts]() mutable {
+                get_state_nodes(ledger_hash, node_ids, std::move(cb), opts);
+            });
+        }
+        else
+        {
+            complete_callback_noexcept(
+                log_, std::move(callback), terminal_request_error(state));
+        }
         return;
     }
 
@@ -1695,16 +2517,46 @@ PeerClient::get_tx_nodes(
     Callback<LedgerNodesResult> callback,
     RequestOptions opts)
 {
-    if (state_ != State::Ready)
-    {
-        PLOGD(log_, "get_tx_nodes: not ready, queuing");
-        queue_if_not_ready([this,
-                            ledger_hash,
-                            node_ids,
-                            cb = std::move(callback),
-                            opts]() mutable {
-            get_tx_nodes(ledger_hash, node_ids, std::move(cb), opts);
+    auto self = shared_from_this();
+    asio::dispatch(
+        strand_,
+        [self,
+         ledger_hash,
+         node_ids,
+         callback = std::move(callback),
+         opts]() mutable {
+            self->get_tx_nodes_on_strand(
+                ledger_hash, std::move(node_ids), std::move(callback), opts);
         });
+}
+
+void
+PeerClient::get_tx_nodes_on_strand(
+    Hash256 ledger_hash,
+    std::vector<SHAMapNodeID> node_ids,
+    Callback<LedgerNodesResult> callback,
+    RequestOptions opts)
+{
+    assert(strand_.running_in_this_thread());
+    auto const state = state_.load();
+    if (state != State::Ready)
+    {
+        if (is_pre_ready_state(state))
+        {
+            PLOGD(log_, "get_tx_nodes: not ready, queuing");
+            defer_request([this,
+                           ledger_hash,
+                           node_ids,
+                           cb = std::move(callback),
+                           opts]() mutable {
+                get_tx_nodes(ledger_hash, node_ids, std::move(cb), opts);
+            });
+        }
+        else
+        {
+            complete_callback_noexcept(
+                log_, std::move(callback), terminal_request_error(state));
+        }
         return;
     }
 
@@ -1760,13 +2612,46 @@ PeerClient::get_tx_proof_path(
     Callback<ProofPathResult> callback,
     RequestOptions opts)
 {
-    if (state_ != State::Ready)
+    auto self = shared_from_this();
+    asio::dispatch(
+        strand_,
+        [self,
+         ledger_hash,
+         key,
+         callback = std::move(callback),
+         opts]() mutable {
+            self->get_tx_proof_path_on_strand(
+                ledger_hash, key, std::move(callback), opts);
+        });
+}
+
+void
+PeerClient::get_tx_proof_path_on_strand(
+    Hash256 ledger_hash,
+    Hash256 key,
+    Callback<ProofPathResult> callback,
+    RequestOptions opts)
+{
+    assert(strand_.running_in_this_thread());
+    auto const state = state_.load();
+    if (state != State::Ready)
     {
-        PLOGD(log_, "get_tx_proof_path: not ready, queuing");
-        queue_if_not_ready(
-            [this, ledger_hash, key, cb = std::move(callback), opts]() mutable {
+        if (is_pre_ready_state(state))
+        {
+            PLOGD(log_, "get_tx_proof_path: not ready, queuing");
+            defer_request([this,
+                           ledger_hash,
+                           key,
+                           cb = std::move(callback),
+                           opts]() mutable {
                 get_tx_proof_path(ledger_hash, key, std::move(cb), opts);
             });
+        }
+        else
+        {
+            complete_callback_noexcept(
+                log_, std::move(callback), terminal_request_error(state));
+        }
         return;
     }
 
@@ -1813,13 +2698,46 @@ PeerClient::get_state_proof_path(
     Callback<ProofPathResult> callback,
     RequestOptions opts)
 {
-    if (state_ != State::Ready)
+    auto self = shared_from_this();
+    asio::dispatch(
+        strand_,
+        [self,
+         ledger_hash,
+         key,
+         callback = std::move(callback),
+         opts]() mutable {
+            self->get_state_proof_path_on_strand(
+                ledger_hash, key, std::move(callback), opts);
+        });
+}
+
+void
+PeerClient::get_state_proof_path_on_strand(
+    Hash256 ledger_hash,
+    Hash256 key,
+    Callback<ProofPathResult> callback,
+    RequestOptions opts)
+{
+    assert(strand_.running_in_this_thread());
+    auto const state = state_.load();
+    if (state != State::Ready)
     {
-        PLOGD(log_, "get_state_proof_path: not ready, queuing");
-        queue_if_not_ready(
-            [this, ledger_hash, key, cb = std::move(callback), opts]() mutable {
+        if (is_pre_ready_state(state))
+        {
+            PLOGD(log_, "get_state_proof_path: not ready, queuing");
+            defer_request([this,
+                           ledger_hash,
+                           key,
+                           cb = std::move(callback),
+                           opts]() mutable {
                 get_state_proof_path(ledger_hash, key, std::move(cb), opts);
             });
+        }
+        else
+        {
+            complete_callback_noexcept(
+                log_, std::move(callback), terminal_request_error(state));
+        }
         return;
     }
 
@@ -1862,12 +2780,32 @@ PeerClient::get_state_proof_path(
 void
 PeerClient::ping(Callback<PingResult> callback, RequestOptions opts)
 {
-    if (state_ != State::Ready)
-    {
-        PLOGD(log_, "ping: not ready, queuing");
-        queue_if_not_ready([this, cb = std::move(callback), opts]() mutable {
-            ping(std::move(cb), opts);
+    auto self = shared_from_this();
+    asio::dispatch(
+        strand_, [self, callback = std::move(callback), opts]() mutable {
+            self->ping_on_strand(std::move(callback), opts);
         });
+}
+
+void
+PeerClient::ping_on_strand(Callback<PingResult> callback, RequestOptions opts)
+{
+    assert(strand_.running_in_this_thread());
+    auto const state = state_.load();
+    if (state != State::Ready)
+    {
+        if (is_pre_ready_state(state))
+        {
+            PLOGD(log_, "ping: not ready, queuing");
+            defer_request([this, cb = std::move(callback), opts]() mutable {
+                ping(std::move(cb), opts);
+            });
+        }
+        else
+        {
+            complete_callback_noexcept(
+                log_, std::move(callback), terminal_request_error(state));
+        }
         return;
     }
 
@@ -1875,7 +2813,12 @@ PeerClient::ping(Callback<PingResult> callback, RequestOptions opts)
     auto key = ping_key(seq);
     PLOGD(log_, "ping: seq=", seq, " key=", key.hex().substr(0, 16));
 
-    register_callback(pending_pings_, key, std::move(callback), opts, false);
+    if (!register_callback(
+            pending_pings_, key, std::move(callback), opts, false))
+    {
+        PLOGD(log_, "ping: registration refused before send");
+        return;
+    }
 
     protocol::TMPing msg;
     msg.set_type(protocol::TMPing_pingType_ptPING);
@@ -1892,20 +2835,20 @@ PeerClient::ping(Callback<PingResult> callback, RequestOptions opts)
 // Queue & misc
 // ═══════════════════════════════════════════════════════════════════════
 
-bool
-PeerClient::queue_if_not_ready(DeferredRequest fn)
+void
+PeerClient::defer_request(DeferredRequest fn)
 {
-    if (state_ == State::Ready)
-        return false;
+    assert(strand_.running_in_this_thread());
+    assert(is_pre_ready_state(state_.load()));
     PLOGD(
         log_,
-        "queue_if_not_ready: queuing (state=",
+        "defer_request: queuing (state=",
         static_cast<int>(state_.load()),
         " queue_size=",
         pending_queue_.size() + 1,
         ")");
     pending_queue_.push_back(std::move(fn));
-    return true;
+    refresh_pending_count_projection();
 }
 
 void
@@ -1921,54 +2864,132 @@ PeerClient::flush_queue()
     {
         auto fn = std::move(pending_queue_.front());
         pending_queue_.pop_front();
-        fn();
+        ++active_deferred_handoffs_;
+        refresh_pending_count_projection();
+        try
+        {
+            // The deque no longer owns this request while arbitrary callback
+            // code runs. The explicit handoff cell keeps the pending
+            // projection nonzero without leaving a re-entrant terminal drain
+            // able to erase the slot that this frame would later pop.
+            fn();
+        }
+        catch (std::exception const& e)
+        {
+            PLOGE(log_, "deferred request threw while flushing: ", e.what());
+        }
+        catch (...)
+        {
+            PLOGE(log_, "deferred request threw while flushing");
+        }
+        --active_deferred_handoffs_;
+        refresh_pending_count_projection();
     }
 }
 
 void
-PeerClient::cancel_all()
+PeerClient::complete_all_pending(Error error)
 {
-    PLOGD(
-        log_,
-        "cancel_all: headers=",
-        pending_headers_.size(),
-        " nodes=",
-        pending_nodes_.size(),
-        " pings=",
-        pending_pings_.size(),
-        " proofs=",
-        pending_proof_paths_.size(),
-        " queue=",
-        pending_queue_.size());
-    auto cancel = [](auto& map) {
+    assert(strand_.running_in_this_thread());
+
+    PendingMap<LedgerHeaderResult> headers;
+    PendingMap<LedgerNodesResult> nodes;
+    PendingMap<PingResult> pings;
+    PendingMap<ProofPathResult> proof_paths;
+    std::deque<DeferredRequest> deferred;
+
+    headers.swap(pending_headers_);
+    nodes.swap(pending_nodes_);
+    pings.swap(pending_pings_);
+    proof_paths.swap(pending_proof_paths_);
+    deferred.swap(pending_queue_);
+    refresh_pending_count_projection();
+
+    auto complete_map = [error](auto& map) {
         for (auto& [_, entry] : map)
-            for (auto& pc : entry.callbacks)
+        {
+            for (auto& pending : entry.callbacks)
             {
-                if (pc.timer)
-                    pc.timer->cancel();
+                if (pending.timer)
+                    pending.timer->cancel();
+                auto callback = std::move(pending.callback);
+                complete_callback_noexcept(log_, std::move(callback), error);
             }
-        map.clear();
+        }
     };
-    cancel(pending_headers_);
-    cancel(pending_nodes_);
-    cancel(pending_pings_);
-    cancel(pending_proof_paths_);
-    pending_queue_.clear();
+
+    complete_map(headers);
+    complete_map(nodes);
+    complete_map(pings);
+    complete_map(proof_paths);
+
+    auto const node_batch_outcome = error == Error::Cancelled
+        ? NodeBatchWriteOutcome::cancelled
+        : NodeBatchWriteOutcome::disconnected;
+    auto const node_batch_error = error == Error::Cancelled
+        ? boost::system::error_code{boost::asio::error::operation_aborted}
+        : boost::system::error_code{boost::asio::error::connection_aborted};
+    for (std::size_t i = 0; i < node_batch_write_records_.size(); ++i)
+    {
+        auto const& record = node_batch_write_records_[i];
+        if (record.pending_command)
+            complete_node_batch_write(
+                record.sender_generation,
+                record.attempt_id,
+                node_batch_error,
+                node_batch_outcome);
+    }
+    // Ordinary transport death is not the modeled generation-close
+    // settlement. Terminal rows remain replayable until the coordinator
+    // consumes them and returns their exact acknowledgements.
+    refresh_pending_count_projection();
+
+    // Deferred functions re-enter their public request wrapper. Because the
+    // terminal state was committed before this drain, each one completes its
+    // retained callback instead of rejoining the queue.
+    for (auto& fn : deferred)
+    {
+        try
+        {
+            fn();
+        }
+        catch (std::exception const& e)
+        {
+            PLOGE(
+                log_,
+                "deferred request threw during terminal drain: ",
+                e.what());
+        }
+        catch (...)
+        {
+            PLOGE(log_, "deferred request threw during terminal drain");
+        }
+    }
+}
+
+void
+PeerClient::refresh_pending_count_projection() noexcept
+{
+    assert(strand_.running_in_this_thread());
+    auto count_live = [](auto const& map) {
+        std::size_t count = 0;
+        for (auto const& [_, entry] : map)
+            for (auto const& callback : entry.callbacks)
+                if (callback.callback)
+                    ++count;
+        return count;
+    };
+    auto const count = pending_queue_.size() + active_deferred_handoffs_ +
+        count_live(pending_headers_) + count_live(pending_nodes_) +
+        count_live(pending_pings_) + count_live(pending_proof_paths_);
+    pending_count_projection_.store(count, std::memory_order_release);
 }
 
 size_t
 PeerClient::pending_count() const
 {
-    size_t n = pending_queue_.size();
-    for (auto const& [_, e] : pending_headers_)
-        n += e.callbacks.size();
-    for (auto const& [_, e] : pending_nodes_)
-        n += e.callbacks.size();
-    for (auto const& [_, e] : pending_pings_)
-        n += e.callbacks.size();
-    for (auto const& [_, e] : pending_proof_paths_)
-        n += e.callbacks.size();
-    return n;
+    return node_batch_work_projection_.load(std::memory_order_acquire) +
+        pending_count_projection_.load(std::memory_order_acquire);
 }
 
 }  // namespace catl::peer_client

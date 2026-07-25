@@ -1,12 +1,181 @@
-#include <catl/peer-client/peer-client.h>
-#include <catl/peer-client/peer-client-coro.h>
-#include <catl/peer-client/peer-crawl-client.h>
 #include <catl/peer-client/connection-types.h>
 #include <catl/peer-client/endpoint-tracker.h>
+#include <catl/peer-client/peer-client-coro.h>
+#include <catl/peer-client/peer-client.h>
+#include <catl/peer-client/peer-crawl-client.h>
 #include <catl/peer-client/types.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <limits>
+#include <stdexcept>
+
 namespace catl::peer_client {
+
+class PeerClientTestAccess
+{
+public:
+    static std::shared_ptr<PeerClient>
+    make(
+        asio::io_context& io,
+        State state,
+        std::uint64_t connection_generation = 1)
+    {
+        auto client = std::shared_ptr<PeerClient>(new PeerClient(io));
+        client->state_ = state;
+        client->connection_generation_ = connection_generation;
+        return client;
+    }
+
+    static NodeBatchCommand
+    node_batch_command(
+        std::uint64_t attempt_id,
+        std::uint64_t peer_generation,
+        Hash256 ledger_hash = {},
+        NodeTree tree = NodeTree::transaction,
+        std::vector<SHAMapNodeID> node_ids = {SHAMapNodeID{}},
+        std::uint64_t sender_generation = 1)
+    {
+        NodeBatchIntent intent{
+            TransportAttemptId{attempt_id},
+            SenderGenerationId{sender_generation},
+            std::move(ledger_hash),
+            tree,
+            std::move(node_ids)};
+        return NodeBatchCommand{
+            std::move(intent),
+            PeerConnectionGenerationId{peer_generation}};
+    }
+
+    static void
+    seed_pending_node_batch(
+        PeerClient& client,
+        NodeBatchCommand command,
+        NodeBatchWriteHandler on_receipt)
+    {
+        auto const attempt_id = command.attempt_id();
+        ASSERT_EQ(
+            std::count_if(
+                client.node_batch_write_records_.begin(),
+                client.node_batch_write_records_.end(),
+                [&](PeerClient::NodeBatchWriteRecord const& record) {
+                    return record.attempt_id == attempt_id;
+                }),
+            0);
+        client.node_batch_write_records_.emplace_back(
+            std::move(command), std::move(on_receipt));
+        ++client.reserved_node_batch_receipt_sequences_;
+        client.node_batch_work_projection_.fetch_add(
+            1, std::memory_order_release);
+        client.refresh_pending_count_projection();
+    }
+
+    static void
+    submit_node_batch_on_strand(
+        PeerClient& client,
+        NodeBatchCommand command,
+        NodeBatchWriteHandler on_receipt)
+    {
+        client.node_batch_work_projection_.fetch_add(
+            1, std::memory_order_release);
+        if (!client.submit_node_batch_on_strand(
+                std::move(command), std::move(on_receipt)))
+        {
+            client.node_batch_work_projection_.fetch_sub(
+                1, std::memory_order_release);
+        }
+    }
+
+    static void
+    complete_node_batch_write(
+        PeerClient& client,
+        std::uint64_t attempt_id,
+        boost::system::error_code ec = {})
+    {
+        client.complete_node_batch_write(
+            SenderGenerationId{1}, TransportAttemptId{attempt_id}, ec);
+    }
+
+    static NodeBatchReceiptAck
+    acknowledgment(NodeBatchWriteReceipt const& receipt)
+    {
+        if (receipt.receiver_commit_sequence() == 0)
+            throw std::logic_error{"receipt has no retained commit"};
+        return NodeBatchReceiptAck{receipt};
+    }
+
+    static void
+    seed_receipt_sequence(
+        PeerClient& client,
+        std::uint64_t next_sequence)
+    {
+        client.next_node_batch_receipt_sequence_ = next_sequence;
+    }
+
+    static std::size_t
+    deferred_count(PeerClient const& client)
+    {
+        return client.pending_queue_.size();
+    }
+
+    static bool
+    seed_pending_header(
+        PeerClient& client,
+        Callback<LedgerHeaderResult> callback,
+        std::chrono::seconds timeout = std::chrono::seconds{30},
+        bool dedupe = true)
+    {
+        RequestOptions opts;
+        opts.timeout = timeout;
+        auto const key = PeerClient::ledger_key(1, 0);
+        return client.register_callback(
+            client.pending_headers_, key, std::move(callback), opts, dedupe);
+    }
+
+    static void
+    resolve_pending_header(PeerClient& client)
+    {
+        auto const key = PeerClient::ledger_key(1, 0);
+        client.resolve(
+            client.pending_headers_, key, Error::Success, LedgerHeaderResult{});
+    }
+
+    static void
+    defer(
+        PeerClient& client,
+        PeerClient::DeferredRequest request)
+    {
+        client.defer_request(std::move(request));
+    }
+
+    static void
+    become_ready_and_flush(PeerClient& client)
+    {
+        client.state_ = State::Ready;
+        client.flush_queue();
+    }
+
+    static void
+    seed_incarnations(
+        PeerClient& client,
+        std::uint64_t pending,
+        std::uint64_t callback)
+    {
+        client.next_pending_incarnation_ = pending;
+        client.next_callback_incarnation_ = callback;
+    }
+
+    static void
+    seed_open_connection(PeerClient& client, asio::ssl::context& ssl_context)
+    {
+        peer_config config;
+        client.connection_ = std::make_shared<peer_connection>(
+            client.strand_, ssl_context, std::move(config));
+        boost::system::error_code ec;
+        client.connection_->socket().lowest_layer().open(tcp::v4(), ec);
+        ASSERT_FALSE(ec);
+    }
+};
 
 TEST(PeerClientTypes, ErrorEnumValues)
 {
@@ -61,8 +230,7 @@ TEST(PeerClientTypes, SummarizeCrawlErrorStripsBoostSourceNoise)
             "function 'foo']"),
         "Connection refused");
     EXPECT_EQ(
-        summarize_crawl_error(
-            "Host not found (authoritative) [asio.netdb:1]"),
+        summarize_crawl_error("Host not found (authoritative) [asio.netdb:1]"),
         "Host not found (authoritative)");
     EXPECT_EQ(
         summarize_crawl_error("crawl returned HTTP 500"),
@@ -90,7 +258,9 @@ TEST(PeerClientTypes, CanonicalEndpointNormalizesMappedIpv4AndIpv6)
         "[2001:db8::1]:51235");
 }
 
-TEST(PeerClientTypes, NormalizeDiscoveredEndpointRejectsPrivateAndSpecialLiterals)
+TEST(
+    PeerClientTypes,
+    NormalizeDiscoveredEndpointRejectsPrivateAndSpecialLiterals)
 {
     EXPECT_FALSE(
         EndpointTracker::normalize_discovered_endpoint("10.179.19.37:2459")
@@ -98,15 +268,16 @@ TEST(PeerClientTypes, NormalizeDiscoveredEndpointRejectsPrivateAndSpecialLiteral
     EXPECT_FALSE(
         EndpointTracker::normalize_discovered_endpoint("192.168.1.8:51235")
             .has_value());
-    EXPECT_FALSE(
-        EndpointTracker::normalize_discovered_endpoint("[::1]:51235")
-            .has_value());
+    EXPECT_FALSE(EndpointTracker::normalize_discovered_endpoint("[::1]:51235")
+                     .has_value());
     EXPECT_FALSE(
         EndpointTracker::normalize_discovered_endpoint("[fc00::1]:51235")
             .has_value());
 }
 
-TEST(PeerClientTypes, NormalizeDiscoveredEndpointAcceptsPublicLiteralsAndHostnames)
+TEST(
+    PeerClientTypes,
+    NormalizeDiscoveredEndpointAcceptsPublicLiteralsAndHostnames)
 {
     auto const public_ip =
         EndpointTracker::normalize_discovered_endpoint("54.37.85.99:21337");
@@ -124,7 +295,9 @@ TEST(PeerClientTypes, NormalizeDiscoveredEndpointAcceptsPublicLiteralsAndHostnam
     EXPECT_EQ(*repaired, "217.182.197.33:21337");
 }
 
-TEST(PeerClientTypes, NormalizeDiscoveredHostUsesSuppliedPortAndFiltersPrivateLiterals)
+TEST(
+    PeerClientTypes,
+    NormalizeDiscoveredHostUsesSuppliedPortAndFiltersPrivateLiterals)
 {
     auto const public_ip =
         EndpointTracker::normalize_discovered_host("54.37.85.99", 21337);
@@ -139,14 +312,1057 @@ TEST(PeerClientTypes, NormalizeDiscoveredHostUsesSuppliedPortAndFiltersPrivateLi
     EXPECT_FALSE(
         EndpointTracker::normalize_discovered_host("10.179.19.37", 2459)
             .has_value());
-    EXPECT_FALSE(
-        EndpointTracker::normalize_discovered_host("fc00::1", 51235)
-            .has_value());
+    EXPECT_FALSE(EndpointTracker::normalize_discovered_host("fc00::1", 51235)
+                     .has_value());
 
-    auto const prequalified =
-        EndpointTracker::normalize_discovered_host("217.182.197.33:21337", 21337);
+    auto const prequalified = EndpointTracker::normalize_discovered_host(
+        "217.182.197.33:21337", 21337);
     ASSERT_TRUE(prequalified.has_value());
     EXPECT_EQ(*prequalified, "217.182.197.33:21337");
+}
+
+TEST(PeerClientLifecycle, SubmissionThenDisconnectDrainsDeferredRequest)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Connecting);
+    std::vector<Error> completions;
+
+    client->get_ledger_header(
+        1, [&completions](Error error, LedgerHeaderResult) {
+            completions.push_back(error);
+        });
+    client->disconnect();
+
+    io.run();
+
+    ASSERT_EQ(completions.size(), 1);
+    EXPECT_EQ(completions.front(), Error::Cancelled);
+    EXPECT_EQ(client->state(), State::Disconnected);
+    EXPECT_EQ(client->pending_count(), 0);
+    EXPECT_EQ(PeerClientTestAccess::deferred_count(*client), 0);
+}
+
+TEST(PeerClientLifecycle, DisconnectThenSubmissionRejectsWithoutQueueing)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Connecting);
+    std::vector<Error> completions;
+
+    client->disconnect();
+    client->get_ledger_header(
+        1, [&completions](Error error, LedgerHeaderResult) {
+            completions.push_back(error);
+        });
+
+    io.run();
+
+    ASSERT_EQ(completions.size(), 1);
+    EXPECT_EQ(completions.front(), Error::Cancelled);
+    EXPECT_EQ(client->pending_count(), 0);
+    EXPECT_EQ(PeerClientTestAccess::deferred_count(*client), 0);
+}
+
+TEST(PeerClientLifecycle, FailedLogicalStateStillClosesPhysicalTransport)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Failed);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+
+    ASSERT_TRUE(client->raw_connection().socket().lowest_layer().is_open());
+
+    client->disconnect();
+    io.run();
+
+    EXPECT_EQ(client->state(), State::Disconnected);
+    EXPECT_FALSE(client->raw_connection().socket().lowest_layer().is_open());
+}
+
+TEST(PeerClientLifecycle, FailedClientRejectsWithoutQueueing)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Failed);
+    std::vector<Error> completions;
+
+    client->get_ledger_header(
+        1, [&completions](Error error, LedgerHeaderResult) {
+            completions.push_back(error);
+        });
+
+    io.run();
+
+    ASSERT_EQ(completions.size(), 1);
+    EXPECT_EQ(completions.front(), Error::Disconnected);
+    EXPECT_EQ(client->pending_count(), 0);
+    EXPECT_EQ(PeerClientTestAccess::deferred_count(*client), 0);
+}
+
+TEST(
+    PeerClientNodeBatchWrite,
+    PublicationIsQueuedAndWrongGenerationRefusesExactly)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::vector<NodeBatchWriteReceipt> receipts;
+
+    EXPECT_TRUE(client->submit_node_batch(
+        PeerClientTestAccess::node_batch_command(41, 8),
+        [&receipts](NodeBatchWriteReceipt receipt) {
+            receipts.push_back(std::move(receipt));
+        }));
+    EXPECT_TRUE(receipts.empty());
+
+    io.run();
+
+    ASSERT_EQ(receipts.size(), 1u);
+    EXPECT_EQ(receipts.front().attempt_id().value(), 41u);
+    EXPECT_EQ(receipts.front().peer_generation().value(), 8u);
+    EXPECT_EQ(
+        receipts.front().outcome(),
+        NodeBatchWriteOutcome::generation_mismatch);
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, PreReadyStateRefusesWithoutInstallingState)
+{
+    asio::io_context io;
+    auto client =
+        PeerClientTestAccess::make(io, State::ExchangingStatus, 7);
+    std::vector<NodeBatchWriteReceipt> receipts;
+
+    EXPECT_TRUE(client->submit_node_batch(
+        PeerClientTestAccess::node_batch_command(42, 7),
+        [&receipts](NodeBatchWriteReceipt receipt) {
+            receipts.push_back(std::move(receipt));
+        }));
+
+    io.run();
+
+    ASSERT_EQ(receipts.size(), 1u);
+    EXPECT_EQ(receipts.front().outcome(), NodeBatchWriteOutcome::not_ready);
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, PublicIngressProjectionIsBoundedBeforeStrandRuns)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::vector<NodeBatchWriteOutcome> outcomes;
+
+    for (std::size_t i = 0; i < kMaxNodeBatchIngressProjections; ++i)
+    {
+        EXPECT_TRUE(client->submit_node_batch(
+            PeerClientTestAccess::node_batch_command(10000 + i, 7),
+            [&outcomes](NodeBatchWriteReceipt receipt) {
+                outcomes.push_back(receipt.outcome());
+            }));
+    }
+    EXPECT_EQ(client->pending_count(), kMaxNodeBatchIngressProjections);
+    EXPECT_FALSE(client->submit_node_batch(
+        PeerClientTestAccess::node_batch_command(20000, 7),
+        [&outcomes](NodeBatchWriteReceipt receipt) {
+            outcomes.push_back(receipt.outcome());
+        }));
+
+    io.run();
+
+    ASSERT_EQ(outcomes.size(), kMaxNodeBatchIngressProjections);
+    EXPECT_TRUE(std::all_of(
+        outcomes.begin(), outcomes.end(), [](NodeBatchWriteOutcome outcome) {
+            return outcome == NodeBatchWriteOutcome::disconnected;
+        }));
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, InvalidCommandIsNotPublished)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::size_t receipts = 0;
+
+    EXPECT_FALSE(client->submit_node_batch(
+        PeerClientTestAccess::node_batch_command(0, 7),
+        [&receipts](NodeBatchWriteReceipt) { ++receipts; }));
+
+    io.run();
+    EXPECT_EQ(receipts, 0u);
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, OversizedNodeVectorIsRejectedBeforeIngress)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::size_t receipts = 0;
+    std::vector<SHAMapNodeID> node_ids(
+        kMaxNodeBatchRequestNodes + 1, SHAMapNodeID{});
+
+    EXPECT_FALSE(client->submit_node_batch(
+        PeerClientTestAccess::node_batch_command(
+            40,
+            7,
+            {},
+            NodeTree::transaction,
+            std::move(node_ids)),
+        [&receipts](NodeBatchWriteReceipt) { ++receipts; }));
+
+    EXPECT_EQ(client->pending_count(), 0u);
+    io.run();
+    EXPECT_EQ(receipts, 0u);
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(
+    PeerClientNodeBatchWrite,
+    ActiveAttemptJoinsExactDuplicateAndRejectsIdentityConflict)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+
+    std::vector<NodeBatchWriteReceipt> original;
+    std::vector<NodeBatchWriteReceipt> duplicate;
+    std::vector<NodeBatchWriteOutcome> conflict;
+    asio::post(
+        client->strand(),
+        [client, &original, &duplicate, &conflict]() {
+            auto command =
+                PeerClientTestAccess::node_batch_command(43, 7);
+            PeerClientTestAccess::seed_pending_node_batch(
+                *client,
+                command,
+                [&original](NodeBatchWriteReceipt receipt) {
+                    original.push_back(std::move(receipt));
+                });
+
+            PeerClientTestAccess::submit_node_batch_on_strand(
+                *client,
+                command,
+                [&duplicate](NodeBatchWriteReceipt receipt) {
+                    duplicate.push_back(std::move(receipt));
+                });
+            PeerClientTestAccess::submit_node_batch_on_strand(
+                *client,
+                PeerClientTestAccess::node_batch_command(
+                    43, 7, {}, NodeTree::account_state),
+                [&conflict](NodeBatchWriteReceipt receipt) {
+                    conflict.push_back(receipt.outcome());
+                });
+
+            client->disconnect();
+        });
+
+    io.run();
+
+    ASSERT_EQ(conflict.size(), 1u);
+    EXPECT_EQ(conflict.front(), NodeBatchWriteOutcome::identity_conflict);
+    ASSERT_EQ(duplicate.size(), 1u);
+    EXPECT_EQ(
+        duplicate.front().outcome(), NodeBatchWriteOutcome::cancelled);
+    ASSERT_EQ(original.size(), 1u);
+    EXPECT_EQ(original.front().outcome(), NodeBatchWriteOutcome::cancelled);
+    EXPECT_EQ(client->pending_count(), 1u);
+
+    EXPECT_TRUE(client->acknowledge_node_batch_receipt(
+        PeerClientTestAccess::acknowledgment(original.front())));
+    io.restart();
+    io.run();
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, TerminalDrainMakesLateWriteCallbackInert)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::vector<NodeBatchWriteReceipt> receipts;
+
+    asio::post(client->strand(), [client, &receipts]() {
+        PeerClientTestAccess::seed_pending_node_batch(
+            *client,
+            PeerClientTestAccess::node_batch_command(44, 7),
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        ASSERT_EQ(client->pending_count(), 1u);
+
+        client->disconnect();
+        PeerClientTestAccess::complete_node_batch_write(*client, 44);
+    });
+
+    io.run();
+
+    ASSERT_EQ(receipts.size(), 1u);
+    EXPECT_EQ(receipts.front().outcome(), NodeBatchWriteOutcome::cancelled);
+    EXPECT_EQ(client->pending_count(), 1u);
+
+    EXPECT_TRUE(client->acknowledge_node_batch_receipt(
+        PeerClientTestAccess::acknowledgment(receipts.front())));
+    io.restart();
+    io.run();
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, WriteCompletionPublishesOneExactReceipt)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::vector<NodeBatchWriteReceipt> receipts;
+
+    asio::post(client->strand(), [client, &receipts]() {
+        auto command =
+            PeerClientTestAccess::node_batch_command(45, 7);
+        auto const digest = command.payload_digest();
+        PeerClientTestAccess::seed_pending_node_batch(
+            *client,
+            std::move(command),
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+
+        PeerClientTestAccess::complete_node_batch_write(*client, 45);
+        PeerClientTestAccess::complete_node_batch_write(*client, 45);
+
+        ASSERT_EQ(receipts.size(), 1u);
+        EXPECT_EQ(receipts.front().payload_digest(), digest);
+        EXPECT_TRUE(client->acknowledge_node_batch_receipt(
+            PeerClientTestAccess::acknowledgment(receipts.front())));
+    });
+
+    io.run();
+
+    ASSERT_EQ(receipts.size(), 1u);
+    EXPECT_EQ(receipts.front().attempt_id().value(), 45u);
+    EXPECT_EQ(receipts.front().peer_generation().value(), 7u);
+    EXPECT_EQ(receipts.front().outcome(), NodeBatchWriteOutcome::written);
+    EXPECT_FALSE(receipts.front().error());
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, TerminalReceiptReplaysUntilExactAck)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::vector<NodeBatchWriteReceipt> receipts;
+
+    asio::post(client->strand(), [client, &receipts]() {
+        auto command =
+            PeerClientTestAccess::node_batch_command(46, 7);
+        PeerClientTestAccess::seed_pending_node_batch(
+            *client,
+            command,
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        PeerClientTestAccess::complete_node_batch_write(*client, 46);
+        ASSERT_EQ(client->pending_count(), 1u);
+
+        PeerClientTestAccess::submit_node_batch_on_strand(
+            *client,
+            command,
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        ASSERT_EQ(client->pending_count(), 1u);
+        ASSERT_EQ(receipts.size(), 2u);
+        EXPECT_EQ(receipts[0].outcome(), receipts[1].outcome());
+        EXPECT_EQ(receipts[0].payload_digest(), receipts[1].payload_digest());
+
+        EXPECT_TRUE(client->acknowledge_node_batch_receipt(
+            PeerClientTestAccess::acknowledgment(receipts.back())));
+    });
+
+    io.run();
+
+    ASSERT_EQ(receipts.size(), 2u);
+    EXPECT_EQ(receipts.front().outcome(), NodeBatchWriteOutcome::written);
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(
+    PeerClientNodeBatchWrite,
+    TerminalReceiptSurvivesDisconnectAndReplaysBeforeAck)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::vector<NodeBatchWriteReceipt> receipts;
+    auto command = PeerClientTestAccess::node_batch_command(460, 7);
+
+    asio::post(client->strand(), [client, command, &receipts]() mutable {
+        PeerClientTestAccess::seed_pending_node_batch(
+            *client,
+            command,
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        PeerClientTestAccess::complete_node_batch_write(*client, 460);
+        client->disconnect();
+
+        PeerClientTestAccess::submit_node_batch_on_strand(
+            *client,
+            command,
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+    });
+
+    io.run();
+
+    ASSERT_EQ(receipts.size(), 2u);
+    EXPECT_EQ(receipts[0].outcome(), NodeBatchWriteOutcome::written);
+    EXPECT_EQ(receipts[1].outcome(), receipts[0].outcome());
+    EXPECT_EQ(
+        receipts[1].receiver_commit_sequence(),
+        receipts[0].receiver_commit_sequence());
+    EXPECT_EQ(client->pending_count(), 1u);
+
+    EXPECT_TRUE(client->acknowledge_node_batch_receipt(
+        PeerClientTestAccess::acknowledgment(receipts.back())));
+    io.restart();
+    io.run();
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, TerminalIdentityConflictCannotReplaceReceipt)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::vector<NodeBatchWriteReceipt> receipts;
+
+    asio::post(client->strand(), [client, &receipts]() {
+        PeerClientTestAccess::seed_pending_node_batch(
+            *client,
+            PeerClientTestAccess::node_batch_command(49, 7),
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        PeerClientTestAccess::complete_node_batch_write(*client, 49);
+
+        PeerClientTestAccess::submit_node_batch_on_strand(
+            *client,
+            PeerClientTestAccess::node_batch_command(
+                49, 7, {}, NodeTree::account_state),
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        ASSERT_EQ(receipts.size(), 2u);
+        EXPECT_EQ(
+            receipts.back().outcome(),
+            NodeBatchWriteOutcome::identity_conflict);
+
+        PeerClientTestAccess::submit_node_batch_on_strand(
+            *client,
+            PeerClientTestAccess::node_batch_command(49, 7),
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        ASSERT_EQ(receipts.size(), 3u);
+        EXPECT_EQ(receipts.back().outcome(), NodeBatchWriteOutcome::written);
+        EXPECT_TRUE(client->acknowledge_node_batch_receipt(
+            PeerClientTestAccess::acknowledgment(receipts.back())));
+    });
+
+    io.run();
+
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, WrongGenerationAckCannotRetireTerminalReceipt)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::vector<NodeBatchWriteReceipt> receipts;
+
+    asio::post(client->strand(), [client, &receipts]() {
+        auto command =
+            PeerClientTestAccess::node_batch_command(50, 7);
+        PeerClientTestAccess::seed_pending_node_batch(
+            *client,
+            command,
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        PeerClientTestAccess::complete_node_batch_write(*client, 50);
+
+        PeerClientTestAccess::submit_node_batch_on_strand(
+            *client,
+            PeerClientTestAccess::node_batch_command(50, 8),
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        ASSERT_EQ(receipts.size(), 2u);
+        EXPECT_EQ(
+            receipts.back().outcome(),
+            NodeBatchWriteOutcome::generation_mismatch);
+        EXPECT_EQ(receipts.back().receiver_commit_sequence(), 0u);
+
+        PeerClientTestAccess::submit_node_batch_on_strand(
+            *client,
+            command,
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+    });
+
+    io.run();
+
+    ASSERT_EQ(receipts.size(), 3u);
+    EXPECT_EQ(receipts.back().outcome(), NodeBatchWriteOutcome::written);
+    EXPECT_EQ(client->pending_count(), 1u);
+
+    EXPECT_TRUE(client->acknowledge_node_batch_receipt(
+        PeerClientTestAccess::acknowledgment(receipts.back())));
+    io.restart();
+    io.run();
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, ForeignReceiverAckCannotRetireMatchingRow)
+{
+    asio::io_context io;
+    auto first = PeerClientTestAccess::make(io, State::Ready, 7);
+    auto second = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::vector<NodeBatchWriteReceipt> first_receipts;
+    std::vector<NodeBatchWriteReceipt> second_receipts;
+
+    asio::post(
+        first->strand(), [first, &first_receipts]() {
+            PeerClientTestAccess::seed_pending_node_batch(
+                *first,
+                PeerClientTestAccess::node_batch_command(500, 7),
+                [&first_receipts](NodeBatchWriteReceipt receipt) {
+                    first_receipts.push_back(std::move(receipt));
+                });
+            PeerClientTestAccess::complete_node_batch_write(*first, 500);
+        });
+    asio::post(
+        second->strand(), [second, &second_receipts]() {
+            PeerClientTestAccess::seed_pending_node_batch(
+                *second,
+                PeerClientTestAccess::node_batch_command(500, 7),
+                [&second_receipts](NodeBatchWriteReceipt receipt) {
+                    second_receipts.push_back(std::move(receipt));
+                });
+            PeerClientTestAccess::complete_node_batch_write(*second, 500);
+        });
+    io.run();
+
+    ASSERT_EQ(first_receipts.size(), 1u);
+    ASSERT_EQ(second_receipts.size(), 1u);
+    EXPECT_NE(
+        first_receipts.front().receiver_instance_id(),
+        second_receipts.front().receiver_instance_id());
+    EXPECT_TRUE(second->acknowledge_node_batch_receipt(
+        PeerClientTestAccess::acknowledgment(first_receipts.front())));
+    io.restart();
+    io.run();
+    EXPECT_EQ(second->pending_count(), 1u);
+
+    EXPECT_TRUE(first->acknowledge_node_batch_receipt(
+        PeerClientTestAccess::acknowledgment(first_receipts.front())));
+    EXPECT_TRUE(second->acknowledge_node_batch_receipt(
+        PeerClientTestAccess::acknowledgment(second_receipts.front())));
+    io.restart();
+    io.run();
+    EXPECT_EQ(first->pending_count(), 0u);
+    EXPECT_EQ(second->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, AckIngressIsBoundedBeforeStrandRuns)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::vector<NodeBatchWriteReceipt> receipts;
+
+    asio::post(client->strand(), [client, &receipts]() {
+        PeerClientTestAccess::seed_pending_node_batch(
+            *client,
+            PeerClientTestAccess::node_batch_command(505, 7),
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        PeerClientTestAccess::complete_node_batch_write(*client, 505);
+    });
+    io.run();
+
+    ASSERT_EQ(receipts.size(), 1u);
+    auto const ack =
+        PeerClientTestAccess::acknowledgment(receipts.front());
+    for (std::size_t i = 0; i < kMaxNodeBatchIngressProjections; ++i)
+        EXPECT_TRUE(client->acknowledge_node_batch_receipt(ack));
+    EXPECT_EQ(
+        client->pending_count(), kMaxNodeBatchIngressProjections + 1);
+    EXPECT_FALSE(client->acknowledge_node_batch_receipt(ack));
+
+    io.restart();
+    io.run();
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, WriteFailureReceiptReplaysExactly)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::vector<NodeBatchWriteReceipt> receipts;
+
+    asio::post(client->strand(), [client, &receipts]() {
+        auto command =
+            PeerClientTestAccess::node_batch_command(51, 7);
+        PeerClientTestAccess::seed_pending_node_batch(
+            *client,
+            command,
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        PeerClientTestAccess::complete_node_batch_write(
+            *client, 51, boost::asio::error::connection_reset);
+
+        client->disconnect();
+        PeerClientTestAccess::submit_node_batch_on_strand(
+            *client,
+            command,
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        ASSERT_EQ(receipts.size(), 2u);
+        EXPECT_EQ(receipts[0].outcome(), NodeBatchWriteOutcome::write_failed);
+        EXPECT_EQ(receipts[1].outcome(), receipts[0].outcome());
+        EXPECT_EQ(receipts[1].error(), receipts[0].error());
+        EXPECT_TRUE(client->acknowledge_node_batch_receipt(
+            PeerClientTestAccess::acknowledgment(receipts.back())));
+    });
+
+    io.run();
+
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(
+    PeerClientNodeBatchWrite,
+    PendingReceiptReservationPreventsSequenceWrap)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+    std::vector<NodeBatchWriteReceipt> terminal;
+    std::vector<NodeBatchWriteReceipt> refused;
+
+    asio::post(client->strand(), [client, &terminal, &refused]() {
+        PeerClientTestAccess::seed_receipt_sequence(
+            *client, std::numeric_limits<std::uint64_t>::max() - 1);
+        PeerClientTestAccess::seed_pending_node_batch(
+            *client,
+            PeerClientTestAccess::node_batch_command(510, 7),
+            [&terminal](NodeBatchWriteReceipt receipt) {
+                terminal.push_back(std::move(receipt));
+            });
+
+        PeerClientTestAccess::submit_node_batch_on_strand(
+            *client,
+            PeerClientTestAccess::node_batch_command(511, 7),
+            [&refused](NodeBatchWriteReceipt receipt) {
+                refused.push_back(std::move(receipt));
+            });
+        ASSERT_EQ(refused.size(), 1u);
+        EXPECT_EQ(
+            refused.front().outcome(),
+            NodeBatchWriteOutcome::receipt_sequence_exhausted);
+        EXPECT_EQ(refused.front().receiver_commit_sequence(), 0u);
+
+        PeerClientTestAccess::complete_node_batch_write(*client, 510);
+    });
+
+    io.run();
+
+    ASSERT_EQ(terminal.size(), 1u);
+    EXPECT_EQ(
+        terminal.front().receiver_commit_sequence(),
+        std::numeric_limits<std::uint64_t>::max());
+    EXPECT_TRUE(client->acknowledge_node_batch_receipt(
+        PeerClientTestAccess::acknowledgment(terminal.front())));
+    io.restart();
+    io.run();
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(
+    PeerClientNodeBatchWrite,
+    DuplicateWaiterOverflowCannotPublishAContradictoryTerminal)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    auto command = PeerClientTestAccess::node_batch_command(520, 7);
+    std::vector<NodeBatchWriteReceipt> receipts;
+    std::size_t overflow_completions = 0;
+
+    asio::post(
+        client->strand(),
+        [client,
+         command,
+         &receipts,
+         &overflow_completions]() mutable {
+            PeerClientTestAccess::seed_pending_node_batch(
+                *client,
+                command,
+                [&receipts](NodeBatchWriteReceipt receipt) {
+                    receipts.push_back(std::move(receipt));
+                });
+            for (std::size_t i = 1; i < kMaxNodeBatchReceiptWaiters; ++i)
+            {
+                PeerClientTestAccess::submit_node_batch_on_strand(
+                    *client,
+                    command,
+                    [&receipts](NodeBatchWriteReceipt receipt) {
+                        receipts.push_back(std::move(receipt));
+                    });
+            }
+            PeerClientTestAccess::submit_node_batch_on_strand(
+                *client,
+                command,
+                [&overflow_completions](NodeBatchWriteReceipt) {
+                    ++overflow_completions;
+                });
+
+            PeerClientTestAccess::complete_node_batch_write(*client, 520);
+            ASSERT_EQ(receipts.size(), kMaxNodeBatchReceiptWaiters);
+            EXPECT_EQ(overflow_completions, 0u);
+            EXPECT_TRUE(std::all_of(
+                receipts.begin(),
+                receipts.end(),
+                [](NodeBatchWriteReceipt const& receipt) {
+                    return receipt.outcome() ==
+                        NodeBatchWriteOutcome::written;
+                }));
+
+            PeerClientTestAccess::submit_node_batch_on_strand(
+                *client,
+                command,
+                [&receipts](NodeBatchWriteReceipt receipt) {
+                    receipts.push_back(std::move(receipt));
+                });
+            ASSERT_EQ(receipts.size(), kMaxNodeBatchReceiptWaiters + 1);
+            EXPECT_TRUE(client->acknowledge_node_batch_receipt(
+                PeerClientTestAccess::acknowledgment(receipts.back())));
+        });
+
+    io.run();
+
+    EXPECT_EQ(overflow_completions, 0u);
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, ThrowingHandlerLeavesReceiptReplayable)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    std::vector<NodeBatchWriteReceipt> receipts;
+
+    asio::post(client->strand(), [client, &receipts]() {
+        auto command =
+            PeerClientTestAccess::node_batch_command(47, 7);
+        PeerClientTestAccess::seed_pending_node_batch(
+            *client, command, [](NodeBatchWriteReceipt) {
+                throw std::runtime_error("expected test throw");
+            });
+        PeerClientTestAccess::submit_node_batch_on_strand(
+            *client,
+            command,
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        PeerClientTestAccess::complete_node_batch_write(*client, 47);
+        ASSERT_EQ(receipts.size(), 1u);
+        EXPECT_TRUE(client->acknowledge_node_batch_receipt(
+            PeerClientTestAccess::acknowledgment(receipts.front())));
+    });
+
+    io.run();
+
+    ASSERT_EQ(receipts.size(), 1u);
+    EXPECT_EQ(receipts.front().outcome(), NodeBatchWriteOutcome::written);
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientNodeBatchWrite, RealQueuedWriteIsCancelledBeforeSocketClose)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+    std::vector<NodeBatchWriteReceipt> receipts;
+
+    asio::post(client->strand(), [client, &receipts]() {
+        PeerClientTestAccess::submit_node_batch_on_strand(
+            *client,
+            PeerClientTestAccess::node_batch_command(48, 7),
+            [&receipts](NodeBatchWriteReceipt receipt) {
+                receipts.push_back(std::move(receipt));
+            });
+        ASSERT_EQ(client->pending_count(), 1u);
+        client->disconnect();
+    });
+
+    io.run();
+
+    ASSERT_EQ(receipts.size(), 1u);
+    EXPECT_EQ(receipts.front().outcome(), NodeBatchWriteOutcome::cancelled);
+    EXPECT_EQ(client->pending_count(), 1u);
+
+    EXPECT_TRUE(client->acknowledge_node_batch_receipt(
+        PeerClientTestAccess::acknowledgment(receipts.front())));
+    io.restart();
+    io.run();
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(
+    PeerClientNodeBatchWrite,
+    ReceiptRowsAreBoundedAndSurviveTransportCloseUntilAck)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready, 7);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+    std::vector<NodeBatchWriteReceipt> drained;
+    std::vector<NodeBatchWriteOutcome> refused;
+
+    asio::post(client->strand(), [client, &drained, &refused]() {
+        for (std::size_t i = 0; i < kMaxNodeBatchReceiptRows; ++i)
+        {
+            PeerClientTestAccess::seed_pending_node_batch(
+                *client,
+                PeerClientTestAccess::node_batch_command(1000 + i, 7),
+                [&drained](NodeBatchWriteReceipt receipt) {
+                    if (receipt.outcome() == NodeBatchWriteOutcome::cancelled)
+                        drained.push_back(std::move(receipt));
+                });
+        }
+        ASSERT_EQ(
+            client->pending_count(), kMaxNodeBatchReceiptRows);
+
+        PeerClientTestAccess::submit_node_batch_on_strand(
+            *client,
+            PeerClientTestAccess::node_batch_command(9999, 7),
+            [&refused](NodeBatchWriteReceipt receipt) {
+                refused.push_back(receipt.outcome());
+            });
+        ASSERT_EQ(refused.size(), 1u);
+        EXPECT_EQ(
+            refused.front(),
+            NodeBatchWriteOutcome::receipt_capacity_exhausted);
+        EXPECT_EQ(
+            client->pending_count(), kMaxNodeBatchReceiptRows);
+
+        client->disconnect();
+    });
+
+    io.run();
+
+    ASSERT_EQ(drained.size(), kMaxNodeBatchReceiptRows);
+    EXPECT_EQ(client->pending_count(), kMaxNodeBatchReceiptRows);
+
+    for (auto const& receipt : drained)
+    {
+        EXPECT_TRUE(client->acknowledge_node_batch_receipt(
+            PeerClientTestAccess::acknowledgment(receipt)));
+    }
+    io.restart();
+    io.run();
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(PeerClientLifecycle, DisconnectConsumesPendingCallbackBeforeTimer)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    std::vector<Error> completions;
+
+    asio::post(client->strand(), [client, &completions]() {
+        ASSERT_TRUE(PeerClientTestAccess::seed_pending_header(
+            *client, [&completions](Error error, LedgerHeaderResult) {
+                completions.push_back(error);
+            }));
+        client->disconnect();
+    });
+
+    io.run();
+
+    ASSERT_EQ(completions.size(), 1);
+    EXPECT_EQ(completions.front(), Error::Cancelled);
+    EXPECT_EQ(client->pending_count(), 0);
+}
+
+TEST(PeerClientLifecycle, ResponseThenDisconnectCompletesExactlyOnce)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    std::vector<Error> completions;
+
+    asio::post(client->strand(), [client, &completions]() {
+        ASSERT_TRUE(PeerClientTestAccess::seed_pending_header(
+            *client, [&completions](Error error, LedgerHeaderResult) {
+                completions.push_back(error);
+            }));
+        PeerClientTestAccess::resolve_pending_header(*client);
+        client->disconnect();
+    });
+
+    io.run();
+
+    ASSERT_EQ(completions.size(), 1);
+    EXPECT_EQ(completions.front(), Error::Success);
+    EXPECT_EQ(client->pending_count(), 0);
+}
+
+TEST(PeerClientLifecycle, IncarnationExhaustionRefusesBeforeInstallingState)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    std::vector<Error> completions;
+
+    asio::post(client->strand(), [client, &completions]() {
+        PeerClientTestAccess::seed_incarnations(
+            *client,
+            std::numeric_limits<std::uint64_t>::max(),
+            std::numeric_limits<std::uint64_t>::max());
+
+        EXPECT_FALSE(PeerClientTestAccess::seed_pending_header(
+            *client, [&completions](Error error, LedgerHeaderResult) {
+                completions.push_back(error);
+            }));
+        EXPECT_EQ(client->pending_count(), 0);
+    });
+
+    io.run();
+
+    ASSERT_EQ(completions.size(), 1);
+    EXPECT_EQ(completions.front(), Error::ResourceExhausted);
+    EXPECT_EQ(client->pending_count(), 0);
+}
+
+TEST(PeerClientLifecycle, CallbackExhaustionCannotMutateSharedEntry)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    std::vector<Error> first_completions;
+    std::vector<Error> refused_completions;
+
+    asio::post(
+        client->strand(),
+        [client, &first_completions, &refused_completions]() {
+            ASSERT_TRUE(PeerClientTestAccess::seed_pending_header(
+                *client,
+                [&first_completions](Error error, LedgerHeaderResult) {
+                    first_completions.push_back(error);
+                }));
+            ASSERT_EQ(client->pending_count(), 1);
+
+            PeerClientTestAccess::seed_incarnations(
+                *client,
+                2,
+                std::numeric_limits<std::uint64_t>::max());
+            EXPECT_FALSE(PeerClientTestAccess::seed_pending_header(
+                *client,
+                [&refused_completions](
+                    Error error, LedgerHeaderResult) {
+                    refused_completions.push_back(error);
+                }));
+            EXPECT_EQ(client->pending_count(), 1);
+
+            PeerClientTestAccess::resolve_pending_header(*client);
+        });
+
+    io.run();
+
+    ASSERT_EQ(refused_completions.size(), 1);
+    EXPECT_EQ(refused_completions.front(), Error::ResourceExhausted);
+    ASSERT_EQ(first_completions.size(), 1);
+    EXPECT_EQ(first_completions.front(), Error::Success);
+    EXPECT_EQ(client->pending_count(), 0);
+}
+
+TEST(PeerClientLifecycle, OverlappingNonDedupedKeyRefusesWithoutOverwrite)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    std::vector<Error> first_completions;
+    std::vector<Error> second_completions;
+
+    asio::post(
+        client->strand(), [client, &first_completions, &second_completions]() {
+            ASSERT_TRUE(PeerClientTestAccess::seed_pending_header(
+                *client, [&first_completions](Error error, LedgerHeaderResult) {
+                    first_completions.push_back(error);
+                }));
+            EXPECT_FALSE(PeerClientTestAccess::seed_pending_header(
+                *client,
+                [&second_completions](Error error, LedgerHeaderResult) {
+                    second_completions.push_back(error);
+                },
+                std::chrono::seconds{30},
+                false));
+            client->disconnect();
+        });
+
+    io.run();
+
+    ASSERT_EQ(first_completions.size(), 1);
+    EXPECT_EQ(first_completions.front(), Error::Cancelled);
+    ASSERT_EQ(second_completions.size(), 1);
+    EXPECT_EQ(second_completions.front(), Error::DuplicateRequest);
+    EXPECT_EQ(client->pending_count(), 0);
+}
+
+TEST(PeerClientLifecycle, ReentrantTerminalDrainDuringFlushIsExactlyOnce)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Connecting);
+    std::vector<Error> first_completions;
+    std::vector<Error> second_completions;
+
+    asio::post(
+        client->strand(),
+        [client, &first_completions, &second_completions]() {
+            PeerClientTestAccess::defer(
+                *client,
+                [client, &first_completions]() {
+                    EXPECT_TRUE(PeerClientTestAccess::seed_pending_header(
+                        *client,
+                        [&first_completions](
+                            Error error, LedgerHeaderResult) {
+                            first_completions.push_back(error);
+                        },
+                        std::chrono::seconds{30},
+                        false));
+                });
+            PeerClientTestAccess::defer(
+                *client,
+                [client, &second_completions]() {
+                    EXPECT_FALSE(PeerClientTestAccess::seed_pending_header(
+                        *client,
+                        [client, &second_completions](
+                            Error error, LedgerHeaderResult) {
+                            second_completions.push_back(error);
+                            client->disconnect();
+                        },
+                        std::chrono::seconds{30},
+                        false));
+                });
+
+            ASSERT_EQ(PeerClientTestAccess::deferred_count(*client), 2u);
+            PeerClientTestAccess::become_ready_and_flush(*client);
+        });
+
+    io.run();
+
+    ASSERT_EQ(first_completions.size(), 1u);
+    EXPECT_EQ(first_completions.front(), Error::Cancelled);
+    ASSERT_EQ(second_completions.size(), 1u);
+    EXPECT_EQ(second_completions.front(), Error::DuplicateRequest);
+    EXPECT_EQ(client->state(), State::Disconnected);
+    EXPECT_EQ(client->pending_count(), 0u);
+    EXPECT_EQ(PeerClientTestAccess::deferred_count(*client), 0u);
 }
 
 }  // namespace catl::peer_client

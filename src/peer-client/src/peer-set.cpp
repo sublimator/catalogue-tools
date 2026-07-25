@@ -659,7 +659,7 @@ PeerSet::notify_waiters()
         wake->cancel();
 }
 
-std::vector<PeerSessionPtr>
+std::vector<PeerGenerationPin>
 PeerSet::select_peers_for(
     uint32_t ledger_seq,
     int max_count,
@@ -716,18 +716,19 @@ PeerSet::select_peers_for(
             return a.span > b.span;          // wider range preferred
         });
 
-    std::vector<PeerSessionPtr> result;
+    std::vector<PeerGenerationPin> result;
     for (auto const& c : candidates)
     {
         if (static_cast<int>(result.size()) >= budget)
             break;
         note_peer_selected(c.key);
-        result.push_back(c.client);
+        if (auto pin = make_peer_pin(c.client))
+            result.push_back(std::move(pin));
     }
     return result;
 }
 
-boost::asio::awaitable<std::vector<PeerSessionPtr>>
+boost::asio::awaitable<std::vector<PeerGenerationPin>>
 PeerSet::co_select_peers_for(
     uint32_t ledger_seq,
     int max_count,
@@ -737,8 +738,27 @@ PeerSet::co_select_peers_for(
     co_return co_await asio::co_spawn(
         strand_,
         [self, ledger_seq, max_count, excluded = std::move(excluded)]() mutable
-        -> asio::awaitable<std::vector<PeerSessionPtr>> {
+        -> asio::awaitable<std::vector<PeerGenerationPin>> {
             co_return self->select_peers_for(ledger_seq, max_count, excluded);
+        },
+        asio::use_awaitable);
+}
+
+boost::asio::awaitable<void>
+PeerSet::co_generation_pin_release_barrier()
+{
+    // All PeerGenerationPin release callbacks use post(strand_, ...). This
+    // child is spawned only after the sender has destroyed every predecessor
+    // pin, so strand ordering makes its completion the receiver-side receipt.
+    // co_spawn keeps the parent coroutine on its birth executor after the
+    // child completes.
+    auto self = shared_from_this();
+    co_await asio::co_spawn(
+        strand_,
+        [self]() -> asio::awaitable<void> {
+            assert(self->strand_.running_in_this_thread());
+            self->prune_expired_peer_pins();
+            co_return;
         },
         asio::use_awaitable);
 }
@@ -1112,7 +1132,11 @@ PeerSet::should_connect_endpoint(std::string const& endpoint) const
     // We still need at least one ready peer for validations and anchor work,
     // so allow known-good cached peers to race in even before they have been
     // proven to cover the target ledger.
-    if (!any_peer() && (endpoint_has_range(key) || has_success))
+    auto const has_ready_peer = std::any_of(
+        connections_.begin(), connections_.end(), [](auto const& entry) {
+            return entry.second.session && entry.second.session->is_ready();
+        });
+    if (!has_ready_peer && (endpoint_has_range(key) || has_success))
         return true;
 
     return false;
@@ -1787,7 +1811,7 @@ PeerSet::start_connect(std::string const& host, uint16_t port)
     pump_connects();
 }
 
-boost::asio::awaitable<PeerSessionPtr>
+boost::asio::awaitable<PeerGenerationPin>
 PeerSet::try_connect(std::string const& host, uint16_t port)
 {
     auto self = shared_from_this();
@@ -1795,9 +1819,12 @@ PeerSet::try_connect(std::string const& host, uint16_t port)
         strand_,
         [self,
          host = std::string(host),
-         port]() mutable -> asio::awaitable<PeerSessionPtr> {
-            co_return co_await self->try_connect_on_strand(
-                std::move(host), port, {});
+         port]() mutable -> asio::awaitable<PeerGenerationPin> {
+            auto client =
+                co_await self->try_connect_on_strand(std::move(host), port, {});
+            if (!client)
+                co_return PeerGenerationPin{};
+            co_return self->make_peer_pin(client);
         },
         asio::use_awaitable);
 }
@@ -1874,11 +1901,25 @@ PeerSet::try_connect_on_strand(
             connect_opts.unsolicited_handler = unsolicited_handler_;
         }
         // Mint this candidate's instance identity before any handler can
-        // fire. The generation travels in the closure, not on the session:
-        // a death between connect and admission then consumes as a stale
-        // instance instead of erasing whichever peer currently owns the key.
-        //@@authority transition=peer_set.mint_connection_generation v4=T31 owner=peer_set commit=strand
+        // fire. The generation travels both in terminal closures and in the
+        // session's sealed command checks: a death between connect and
+        // admission then consumes as a stale instance instead of erasing
+        // whichever peer currently owns the key.
+        //@@authority transition=peer_set.mint_connection_generation v4=T31
+        // owner=peer_set commit=strand
+        if (next_connection_generation_ ==
+            std::numeric_limits<std::uint64_t>::max())
+        {
+            PLOGE(
+                log_,
+                "[",
+                net_label_,
+                "] connection generation space exhausted; refusing ",
+                key);
+            co_return nullptr;
+        }
         auto const generation = ++next_connection_generation_;
+        connect_opts.connection_generation = generation;
         {
             auto self_weak = weak_from_this();
             auto owned_key2 = key;
@@ -2491,7 +2532,96 @@ PeerSet::try_candidates_for(
     return queued;
 }
 
-boost::asio::awaitable<PeerSessionPtr>
+PeerGenerationPin
+PeerSet::make_peer_pin(PeerSessionPtr const& expected_session)
+{
+    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread() || !expected_session ||
+        next_peer_pin_id_ == std::numeric_limits<std::uint64_t>::max())
+    {
+        return {};
+    }
+
+    auto const key = canonical_endpoint(expected_session->endpoint());
+    auto connection = connections_.find(key);
+    if (connection == connections_.end() || !connection->second.session ||
+        connection->second.session != expected_session ||
+        !expected_session->is_ready())
+    {
+        return {};
+    }
+
+    auto const pin_id = next_peer_pin_id_ + 1;
+    auto const generation = connection->second.generation;
+    auto weak = weak_from_this();
+    PeerGenerationPin pin{
+        connection->second.session,
+        key,
+        generation,
+        pin_id,
+        weak,
+        [weak, pin_id, generation]() {
+            if (auto self = weak.lock())
+            {
+                asio::post(
+                    self->strand_, [self, pin_id, generation]() noexcept {
+                        self->release_peer_pin(pin_id, generation);
+                    });
+            }
+        }};
+
+    auto [_, inserted] = active_peer_pins_.emplace(
+        pin_id,
+        ActivePeerPin{
+            .endpoint = key,
+            .connection_generation = generation,
+            .live_handle = pin.state_,
+        });
+    if (!inserted)
+        return {};
+
+    next_peer_pin_id_ = pin_id;
+    return pin;
+}
+
+void
+PeerSet::release_peer_pin(
+    std::uint64_t pin_id,
+    std::uint64_t connection_generation) noexcept
+{
+    ASSERT_ON_STRAND();
+    auto pin = active_peer_pins_.find(pin_id);
+    if (pin == active_peer_pins_.end() ||
+        pin->second.connection_generation != connection_generation)
+    {
+        return;
+    }
+    active_peer_pins_.erase(pin);
+}
+
+void
+PeerSet::prune_expired_peer_pins() const noexcept
+{
+    ASSERT_ON_STRAND();
+    std::erase_if(active_peer_pins_, [](auto const& item) {
+        return item.second.live_handle.expired();
+    });
+}
+
+bool
+PeerSet::generation_has_active_pin(std::uint64_t connection_generation) const
+{
+    ASSERT_ON_STRAND();
+    prune_expired_peer_pins();
+    return std::any_of(
+        active_peer_pins_.begin(),
+        active_peer_pins_.end(),
+        [connection_generation](auto const& entry) {
+            return entry.second.connection_generation == connection_generation;
+        });
+}
+
+boost::asio::awaitable<PeerGenerationPin>
 PeerSet::add(std::string const& host, uint16_t port)
 {
     auto client = co_await try_connect(host, port);
@@ -2500,21 +2630,21 @@ PeerSet::add(std::string const& host, uint16_t port)
         throw std::runtime_error(
             "PeerSet: failed to connect to " + make_key(host, port));
     }
-    co_return client;
+    co_return std::move(client);
 }
 
-PeerSessionPtr
-PeerSet::peer_for(uint32_t ledger_seq) const
+PeerGenerationPin
+PeerSet::peer_for(uint32_t ledger_seq)
 {
     ASSERT_ON_STRAND();
     static std::unordered_set<std::string> const empty;
     return peer_for(ledger_seq, empty);
 }
 
-PeerSessionPtr
+PeerGenerationPin
 PeerSet::peer_for(
     uint32_t ledger_seq,
-    std::unordered_set<std::string> const& excluded) const
+    std::unordered_set<std::string> const& excluded)
 {
     ASSERT_ON_STRAND();
     PeerSessionPtr best;
@@ -2538,21 +2668,20 @@ PeerSet::peer_for(
             }
         }
     }
-    if (best)
-    {
-        return best;
-    }
-    return nullptr;
+    if (!best)
+        return {};
+    note_peer_selected(best_key);
+    return make_peer_pin(best);
 }
 
-boost::asio::awaitable<PeerSessionPtr>
+boost::asio::awaitable<PeerGenerationPin>
 PeerSet::wait_for_any_peer(int timeout_secs)
 {
     static std::unordered_set<std::string> const empty;
     co_return co_await wait_for_any_peer(timeout_secs, empty);
 }
 
-boost::asio::awaitable<PeerSessionPtr>
+boost::asio::awaitable<PeerGenerationPin>
 PeerSet::wait_for_any_peer(
     int timeout_secs,
     std::unordered_set<std::string> const& excluded)
@@ -2562,9 +2691,12 @@ PeerSet::wait_for_any_peer(
         strand_,
         [self,
          timeout_secs,
-         excluded]() mutable -> asio::awaitable<PeerSessionPtr> {
-            co_return co_await self->wait_for_any_peer_on_strand(
+         excluded]() mutable -> asio::awaitable<PeerGenerationPin> {
+            auto client = co_await self->wait_for_any_peer_on_strand(
                 timeout_secs, std::move(excluded));
+            if (!client)
+                co_return PeerGenerationPin{};
+            co_return self->make_peer_pin(client);
         },
         asio::use_awaitable);
 }
@@ -2661,7 +2793,7 @@ PeerSet::wait_for_any_peer_on_strand(
     co_return nullptr;
 }
 
-boost::asio::awaitable<PeerSessionPtr>
+boost::asio::awaitable<PeerGenerationPin>
 PeerSet::wait_for_peer(
     uint32_t ledger_seq,
     int timeout_secs,
@@ -2671,7 +2803,7 @@ PeerSet::wait_for_peer(
     co_return co_await wait_for_peer(ledger_seq, timeout_secs, empty, cancel);
 }
 
-boost::asio::awaitable<PeerSessionPtr>
+boost::asio::awaitable<PeerGenerationPin>
 PeerSet::wait_for_peer(
     uint32_t ledger_seq,
     int timeout_secs,
@@ -2685,13 +2817,16 @@ PeerSet::wait_for_peer(
          ledger_seq,
          timeout_secs,
          excluded,
-         cancel =
-             std::move(cancel)]() mutable -> asio::awaitable<PeerSessionPtr> {
-            co_return co_await self->wait_for_peer_on_strand(
+         cancel = std::move(
+             cancel)]() mutable -> asio::awaitable<PeerGenerationPin> {
+            auto client = co_await self->wait_for_peer_on_strand(
                 ledger_seq,
                 timeout_secs,
                 std::move(excluded),
                 std::move(cancel));
+            if (!client)
+                co_return PeerGenerationPin{};
+            co_return self->make_peer_pin(client);
         },
         asio::use_awaitable);
 }
@@ -3030,16 +3165,16 @@ PeerSet::wait_for_peer_on_strand(
     co_return nullptr;
 }
 
-PeerSessionPtr
-PeerSet::any_peer() const
+PeerGenerationPin
+PeerSet::any_peer()
 {
     ASSERT_ON_STRAND();
     static std::unordered_set<std::string> const empty;
     return any_peer(empty);
 }
 
-PeerSessionPtr
-PeerSet::any_peer(std::unordered_set<std::string> const& excluded) const
+PeerGenerationPin
+PeerSet::any_peer(std::unordered_set<std::string> const& excluded)
 {
     ASSERT_ON_STRAND();
     PeerSessionPtr best;
@@ -3059,7 +3194,10 @@ PeerSet::any_peer(std::unordered_set<std::string> const& excluded) const
             }
         }
     }
-    return best;
+    if (!best)
+        return {};
+    note_peer_selected(best_key);
+    return make_peer_pin(best);
 }
 
 boost::asio::awaitable<PeerSet::Snapshot>
@@ -3282,7 +3420,8 @@ PeerSet::rotation_target_for(
         for (auto const& [key, peer_entry] : connections_)
         {
             auto const& peer = peer_entry.session;
-            if (!peer || !peer->is_ready() || peer->pending_count() > 0 ||
+            if (!peer || !peer->is_ready() ||
+                generation_has_active_pin(peer_entry.generation) ||
                 peer_is_archival(peer) != candidate_archival)
             {
                 continue;
@@ -3496,8 +3635,7 @@ PeerSet::snapshot_unsafe() const
             entry.connected = true;
             if (conn_it->second.session)
             {
-                entry.peer_headers =
-                    conn_it->second.session->peer_headers();
+                entry.peer_headers = conn_it->second.session->peer_headers();
             }
             if (conn_it->second.session && conn_it->second.session->is_ready())
             {
@@ -3540,7 +3678,7 @@ PeerSet::evict_hub_for(RotationTarget const& target)
         auto const& client = client_entry.session;
         if (!client || !client->is_ready() || peer_is_archival(client))
             continue;
-        if (client->pending_count() > 0)
+        if (generation_has_active_pin(client_entry.generation))
             continue;
 
         auto const first = client->peer_first_seq();
@@ -3586,8 +3724,7 @@ PeerSet::evict_hub_for(RotationTarget const& target)
         target.ledger_seq);
 
     auto it = connections_.find(worst_key);
-    auto victim =
-        it != connections_.end() ? it->second.session : nullptr;
+    auto victim = it != connections_.end() ? it->second.session : nullptr;
     remove_peer(worst_key, false);
     if (victim)
         victim->disconnect();
@@ -3608,7 +3745,7 @@ PeerSet::evict_archival_for(RotationTarget const& target)
     {
         auto const& client = client_entry.session;
         if (!client || !client->is_ready() || !peer_is_archival(client) ||
-            client->pending_count() > 0)
+            generation_has_active_pin(client_entry.generation))
         {
             continue;
         }
@@ -3656,8 +3793,7 @@ PeerSet::evict_archival_for(RotationTarget const& target)
         target.ledger_seq);
 
     auto it = connections_.find(worst_key);
-    auto victim =
-        it != connections_.end() ? it->second.session : nullptr;
+    auto victim = it != connections_.end() ? it->second.session : nullptr;
     remove_peer(worst_key, false);
     if (victim)
         victim->disconnect();
@@ -3703,8 +3839,7 @@ PeerSet::consume_peer_terminal(
              key,
              generation,
              reason = std::move(reason)]() mutable {
-                self->consume_peer_terminal(
-                    key, generation, std::move(reason));
+                self->consume_peer_terminal(key, generation, std::move(reason));
             });
         return;
     }

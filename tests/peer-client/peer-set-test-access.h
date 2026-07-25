@@ -294,6 +294,7 @@ public:
                     {.first_seq = peer->peer_first_seq(),
                      .last_seq = peer->peer_last_seq(),
                      .current_seq = peer->peer_ledger_seq()});
+                set.notify_waiters();
             });
         return admitted;
     }
@@ -760,6 +761,60 @@ public:
         return generation;
     }
 
+    static catl::peer_client::PeerGenerationPin
+    make_peer_pin(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string const& key)
+    {
+        catl::peer_client::PeerGenerationPin pin;
+        run_on_strand(io, peers, [&pin, key](auto& set) {
+            auto const it = set.connections_.find(key);
+            if (it != set.connections_.end())
+                pin = set.make_peer_pin(it->second.session);
+        });
+        return pin;
+    }
+
+    static catl::peer_client::PeerGenerationPin
+    make_peer_pin_for_session(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::PeerSessionPtr const& session)
+    {
+        catl::peer_client::PeerGenerationPin pin;
+        run_on_strand(io, peers, [&pin, &session](auto& set) {
+            pin = set.make_peer_pin(session);
+        });
+        return pin;
+    }
+
+    static std::size_t
+    active_peer_pin_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        std::size_t count = 0;
+        run_on_strand(io, peers, [&count](auto& set) {
+            count = set.active_peer_pins_.size();
+        });
+        return count;
+    }
+
+    static void
+    block_strand_until(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::promise<void>& entered,
+        std::shared_future<void> release)
+    {
+        boost::asio::post(
+            peers->strand_,
+            [&entered, release = std::move(release)]() mutable {
+                entered.set_value();
+                release.wait();
+            });
+    }
+
     static void
     remove_peer_for_test(
         boost::asio::io_context& io,
@@ -863,6 +918,22 @@ public:
         run_on_strand(
             io, peers, [&total](auto& set) { total = set.total_disconnects_; });
         return total;
+    }
+
+    /// NEGATIVE CONTROL ONLY — never a route to production behaviour.
+    ///
+    /// Calls an ASSERT_ON_STRAND()-guarded method directly on the caller's
+    /// thread, deliberately skipping the strand hop, so a test can prove the
+    /// strand assertion actually fires. Every other accessor in this class
+    /// posts through run_on_strand precisely so this cannot happen by accident;
+    /// that discipline is also why a run of the whole suite reports zero
+    /// OFF-STRAND lines, and why that zero needs a control to mean anything.
+    static std::chrono::steady_clock::duration
+    retry_backoff_off_strand_unchecked(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string const& endpoint)
+    {
+        return peers->retry_backoff_for(endpoint);
     }
 
 private:

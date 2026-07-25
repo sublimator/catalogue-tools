@@ -8,6 +8,7 @@
 #include <catl/core/logger.h>
 #include <catl/core/types.h>
 
+#include <array>
 #include <atomic>
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -17,7 +18,10 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <type_traits>
+#include <vector>
 
 namespace catl::peer_client {
 
@@ -74,7 +78,10 @@ enum class State {
  * canonical key that already has an in-flight request, the callback is
  * appended to the existing entry. No new network request is sent. When
  * the response arrives, ALL callbacks for that key are called with the
- * same result. Set dedupe=false to force a new network request.
+ * same result. Set dedupe=false to request an independent network request.
+ * If the same canonical key is already live on this connection, the new
+ * request is refused with DuplicateRequest: the wire protocol cannot
+ * unambiguously correlate two overlapping responses for that key.
  *
  * ## Timeouts
  *
@@ -92,10 +99,12 @@ enum class State {
  *
  * ## Threading
  *
- * Single io_context thread. No mutex. All get_* calls and callbacks
- * run on the io_context. Use asio::post(io_context, ...) if calling
- * from another thread.
+ * Request submission is thread-safe: every public request enters the
+ * PeerClient strand before reading or mutating request state. Completion
+ * callbacks run on that strand. Callers never need to enter it themselves.
  */
+class PeerClientTestAccess;
+
 class PeerClient final : public PeerSession,
                          public std::enable_shared_from_this<PeerClient>
 {
@@ -110,6 +119,7 @@ public:
     struct ConnectOptions
     {
         uint32_t network_id{};
+        std::uint64_t connection_generation{};
         ReadyCallback on_ready{};
         ConnectCompletionCallback on_complete{};
         std::shared_ptr<EndpointTracker> tracker{};
@@ -255,8 +265,7 @@ public:
     /// Send a raw TMGetLedger for specific node IDs without registering
     /// in pending_nodes. The response will be delivered via the
     /// node_response_handler (if set) and then through normal dispatch.
-    /// Thread-safe: async_send_packet posts to the connection's write
-    /// queue which is strand-serialized internally.
+    /// Thread-safe: submission first enters the PeerClient/connection strand.
     /// Optional on_error callback fires if the async write fails (e.g.
     /// broken pipe) — use this to cancel signal timers immediately
     /// instead of waiting for the full fetch timeout.
@@ -268,11 +277,16 @@ public:
         std::function<void(boost::system::error_code)> on_error =
             nullptr) override;
 
-    void
-    disconnect() override;
+    bool
+    submit_node_batch(
+        NodeBatchCommand command,
+        NodeBatchWriteHandler on_receipt) override;
+
+    bool
+    acknowledge_node_batch_receipt(NodeBatchReceiptAck ack) override;
 
     void
-    cancel_all();
+    disconnect() override;
 
     size_t
     pending_count() const override;
@@ -298,6 +312,8 @@ public:
     }
 
 private:
+    friend class PeerClientTestAccess;
+
     /// Pairs a callback with its timeout timer.
     template <typename T>
     struct PendingRequest
@@ -358,19 +374,92 @@ private:
     dispatch_proof_path_response(std::vector<uint8_t> const& data);
 
     // ---------------------------------------------------------------
+    // Owner-strand request implementations
+    // ---------------------------------------------------------------
+
+    void
+    disconnect_on_strand();
+
+    void
+    send_get_nodes_on_strand(
+        Hash256 ledger_hash,
+        int type,
+        std::vector<SHAMapNodeID> node_ids,
+        std::function<void(boost::system::error_code)> on_error);
+
+    bool
+    submit_node_batch_on_strand(
+        NodeBatchCommand command,
+        NodeBatchWriteHandler on_receipt);
+
+    void
+    complete_node_batch_write(
+        SenderGenerationId sender_generation,
+        TransportAttemptId attempt_id,
+        boost::system::error_code ec,
+        NodeBatchWriteOutcome terminal_override =
+            NodeBatchWriteOutcome::written) noexcept;
+
+    void
+    acknowledge_node_batch_receipt_on_strand(
+        NodeBatchReceiptAck ack) noexcept;
+
+    void
+    get_ledger_header_on_strand(
+        uint32_t ledger_seq,
+        Callback<LedgerHeaderResult> callback,
+        RequestOptions opts);
+
+    void
+    get_ledger_header_on_strand(
+        Hash256 ledger_hash,
+        Callback<LedgerHeaderResult> callback,
+        RequestOptions opts);
+
+    void
+    get_state_nodes_on_strand(
+        Hash256 ledger_hash,
+        std::vector<SHAMapNodeID> node_ids,
+        Callback<LedgerNodesResult> callback,
+        RequestOptions opts);
+
+    void
+    get_tx_nodes_on_strand(
+        Hash256 ledger_hash,
+        std::vector<SHAMapNodeID> node_ids,
+        Callback<LedgerNodesResult> callback,
+        RequestOptions opts);
+
+    void
+    get_tx_proof_path_on_strand(
+        Hash256 ledger_hash,
+        Hash256 key,
+        Callback<ProofPathResult> callback,
+        RequestOptions opts);
+
+    void
+    get_state_proof_path_on_strand(
+        Hash256 ledger_hash,
+        Hash256 key,
+        Callback<ProofPathResult> callback,
+        RequestOptions opts);
+
+    void
+    ping_on_strand(Callback<PingResult> callback, RequestOptions opts);
+
+    // ---------------------------------------------------------------
     // Request queue (pre-ready)
     // ---------------------------------------------------------------
 
     using DeferredRequest = std::function<void()>;
     std::deque<DeferredRequest> pending_queue_;
+    std::size_t active_deferred_handoffs_ = 0;
 
     void
     flush_queue();
 
-    /// If not ready, queue the callable and return true. Otherwise return
-    /// false.
-    bool
-    queue_if_not_ready(DeferredRequest fn);
+    void
+    defer_request(DeferredRequest fn);
 
     // ---------------------------------------------------------------
     // Sequence allocator (for ping seq)
@@ -389,6 +478,7 @@ private:
     template <typename T>
     struct PendingCallback
     {
+        std::uint64_t incarnation = 0;
         Callback<T> callback;
         std::unique_ptr<asio::steady_timer> timer;
     };
@@ -396,6 +486,7 @@ private:
     template <typename T>
     struct PendingEntry
     {
+        std::uint64_t incarnation = 0;
         std::vector<PendingCallback<T>> callbacks;
         bool network_request_sent =
             false;          // first callback sends, rest piggyback
@@ -457,10 +548,58 @@ private:
     void
     resolve(PendingMap<T>& map, Hash256 const& key, Error err, T result);
 
+    void
+    complete_all_pending(Error error);
+
+    void
+    refresh_pending_count_projection() noexcept;
+
     PendingMap<LedgerHeaderResult> pending_headers_;
     PendingMap<LedgerNodesResult> pending_nodes_;
     PendingMap<PingResult> pending_pings_;
     PendingMap<ProofPathResult> pending_proof_paths_;
+
+    struct NodeBatchWriteRecord
+    {
+        explicit NodeBatchWriteRecord(
+            NodeBatchCommand command,
+            NodeBatchWriteHandler on_receipt) noexcept
+            : attempt_id(command.attempt_id())
+            , sender_generation(command.sender_generation())
+            , payload_digest(command.payload_digest())
+            , pending_command(std::move(command))
+        {
+            waiters[0] = std::move(on_receipt);
+            waiter_count = 1;
+        }
+
+        NodeBatchWriteRecord(NodeBatchWriteRecord const&) = delete;
+        NodeBatchWriteRecord&
+        operator=(NodeBatchWriteRecord const&) = delete;
+        NodeBatchWriteRecord(NodeBatchWriteRecord&&) noexcept = default;
+        NodeBatchWriteRecord&
+        operator=(NodeBatchWriteRecord&&) noexcept = default;
+
+        TransportAttemptId attempt_id;
+        SenderGenerationId sender_generation;
+        Hash256 payload_digest;
+        std::optional<NodeBatchCommand> pending_command;
+        std::array<NodeBatchWriteHandler, kMaxNodeBatchReceiptWaiters> waiters;
+        std::size_t waiter_count = 0;
+        std::optional<NodeBatchWriteReceipt> terminal_receipt;
+    };
+    static_assert(
+        std::is_nothrow_move_constructible_v<NodeBatchWriteRecord>);
+    static_assert(
+        std::is_nothrow_move_assignable_v<NodeBatchWriteRecord>);
+    std::vector<NodeBatchWriteRecord> node_batch_write_records_;
+    std::atomic<std::size_t> node_batch_ingress_projections_{0};
+    std::atomic<std::size_t> node_batch_work_projection_{0};
+    std::uint64_t next_node_batch_receipt_sequence_ = 0;
+    std::uint64_t reserved_node_batch_receipt_sequences_ = 0;
+    std::uint64_t next_pending_incarnation_{1};
+    std::uint64_t next_callback_incarnation_{1};
+    std::atomic<std::size_t> pending_count_projection_{0};
 
     // Request state assumes strand affinity. Late-bound handler pointers
     // are separately mutex-protected so callers do not reintroduce races
@@ -485,6 +624,8 @@ private:
     std::atomic<uint32_t> peer_last_seq_{0};
     std::string net_label_;
     std::string endpoint_str_;  // "host:port" for tracker
+    std::uint64_t receiver_instance_id_ = 0;
+    std::uint64_t connection_generation_ = 0;
 
     /// Optional shared tracker — fed from TMStatusChange.
     std::shared_ptr<EndpointTracker> tracker_;

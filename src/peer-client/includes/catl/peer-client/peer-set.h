@@ -12,6 +12,7 @@
 #include "endpoint-tracker.h"
 #include "peer-crawl-client.h"
 #include "peer-endpoint-cache.h"
+#include "peer-generation-pin.h"
 #include "peer-session.h"
 
 #include <atomic>
@@ -110,7 +111,7 @@ public:
     }
 
     /// Connect to a peer and add it to the set (awaitable).
-    boost::asio::awaitable<PeerSessionPtr>
+    boost::asio::awaitable<PeerGenerationPin>
     add(std::string const& host, uint16_t port);
 
     /// Start connecting to all bootstrap peers in parallel.
@@ -130,33 +131,33 @@ public:
 
     /// Synchronous check: any connected peer with this ledger?
     /// Returns nullptr if none found.
-    PeerSessionPtr
-    peer_for(uint32_t ledger_seq) const;
+    PeerGenerationPin
+    peer_for(uint32_t ledger_seq);
 
-    PeerSessionPtr
+    PeerGenerationPin
     peer_for(
         uint32_t ledger_seq,
-        std::unordered_set<std::string> const& excluded) const;
+        std::unordered_set<std::string> const& excluded);
 
     /// Wait until any ready peer is available.
     /// Returns nullptr on timeout.
-    boost::asio::awaitable<PeerSessionPtr>
+    boost::asio::awaitable<PeerGenerationPin>
     wait_for_any_peer(int timeout_secs = 15);
 
-    boost::asio::awaitable<PeerSessionPtr>
+    boost::asio::awaitable<PeerGenerationPin>
     wait_for_any_peer(
         int timeout_secs,
         std::unordered_set<std::string> const& excluded);
 
     /// Wait until a peer with the given ledger is available.
     /// Returns nullptr on timeout.
-    boost::asio::awaitable<PeerSessionPtr>
+    boost::asio::awaitable<PeerGenerationPin>
     wait_for_peer(
         uint32_t ledger_seq,
         int timeout_secs = 300,
         std::shared_ptr<std::atomic<bool>> cancel = nullptr);
 
-    boost::asio::awaitable<PeerSessionPtr>
+    boost::asio::awaitable<PeerGenerationPin>
     wait_for_peer(
         uint32_t ledger_seq,
         int timeout_secs,
@@ -164,17 +165,11 @@ public:
         std::shared_ptr<std::atomic<bool>> cancel = nullptr);
 
     /// Get any ready peer.
-    PeerSessionPtr
-    any_peer() const;
+    PeerGenerationPin
+    any_peer();
 
-    PeerSessionPtr
-    any_peer(std::unordered_set<std::string> const& excluded) const;
-
-    size_t
-    size() const
-    {
-        return connections_.size();
-    }
+    PeerGenerationPin
+    any_peer(std::unordered_set<std::string> const& excluded);
 
     struct ConnectionStats
     {
@@ -258,7 +253,7 @@ public:
 
     /// Try to connect to an endpoint. Returns nullptr on failure.
     /// Redirect IPs from 503 are fed into the tracker + tried immediately.
-    boost::asio::awaitable<PeerSessionPtr>
+    boost::asio::awaitable<PeerGenerationPin>
     try_connect(std::string const& host, uint16_t port);
 
     /// Number of live (ready) peer connections (all types).
@@ -267,18 +262,24 @@ public:
 
     /// Get up to N peers for a ledger, for fan-out requests.
     /// Synchronous version — must be called on strand.
-    std::vector<PeerSessionPtr>
+    std::vector<PeerGenerationPin>
     select_peers_for(
         uint32_t ledger_seq,
         int max_count,
         std::unordered_set<std::string> const& excluded);
 
     /// Awaitable version — hops to strand internally.
-    boost::asio::awaitable<std::vector<PeerSessionPtr>>
+    boost::asio::awaitable<std::vector<PeerGenerationPin>>
     co_select_peers_for(
         uint32_t ledger_seq,
         int max_count,
         std::unordered_set<std::string> excluded);
+
+    /// A receipt for every generation-pin release command posted before this
+    /// call. This does not assert that unrelated pins are absent; it proves
+    /// only that PeerSet has consumed the causally preceding releases.
+    boost::asio::awaitable<void>
+    co_generation_pin_release_barrier();
 
     /// Record that a peer failed to serve a specific ledger.
     /// All peer selection methods will exclude this peer for this
@@ -406,6 +407,24 @@ private:
         std::unordered_set<std::string> excluded,
         std::shared_ptr<std::atomic<bool>> cancel);
 
+    //@@authority transition=peer_set.mint_generation_pin owner=peer_set
+    // commit=strand
+    PeerGenerationPin
+    make_peer_pin(PeerSessionPtr const& expected_session);
+
+    //@@authority transition=peer_set.release_generation_pin owner=peer_set
+    // commit=strand
+    void
+    release_peer_pin(
+        std::uint64_t pin_id,
+        std::uint64_t connection_generation) noexcept;
+
+    void
+    prune_expired_peer_pins() const noexcept;
+
+    bool
+    generation_has_active_pin(std::uint64_t connection_generation) const;
+
     /// Remove a peer by PeerSet's own decision (eviction, tests). For
     /// deaths reported by the connection itself, use consume_peer_terminal.
     //@@authority transition=peer_set.remove_peer owner=peer_set commit=strand
@@ -422,7 +441,8 @@ private:
     /// pre-admission connect failures remain owned by the existing
     /// note_connect_failure path. Terminal delivery is NOT ordered by
     /// generation, so no scalar mark may gate consumption.
-    //@@authority transition=peer_set.consume_peer_terminal owner=peer_set commit=strand
+    //@@authority transition=peer_set.consume_peer_terminal owner=peer_set
+    // commit=strand
     void
     consume_peer_terminal(
         std::string const& key,
@@ -681,6 +701,15 @@ private:
     std::map<std::string, ConnectionEntry> connections_;
     /// Strand-confined mint for connection-instance identity. Non-reused.
     std::uint64_t next_connection_generation_ = 0;
+    struct ActivePeerPin
+    {
+        std::string endpoint;
+        std::uint64_t connection_generation = 0;
+        std::weak_ptr<void> live_handle;
+    };
+    //@@authority state=peer_set.active_generation_pins owner=peer_set
+    mutable std::map<std::uint64_t, ActivePeerPin> active_peer_pins_;
+    std::uint64_t next_peer_pin_id_ = 0;
     uint64_t total_connects_ = 0;
     uint64_t total_disconnects_ = 0;
     std::map<std::string, std::chrono::steady_clock::time_point> failed_at_;

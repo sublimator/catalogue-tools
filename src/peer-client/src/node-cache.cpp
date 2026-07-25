@@ -9,13 +9,16 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/deferred.hpp>
+#include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/parallel_group.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/this_coro.hpp>  // for reset_cancellation_state
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <string_view>
 #include <unordered_set>
 
@@ -27,17 +30,11 @@ namespace {
 
 void
 complete_timer_noexcept(
-    std::shared_ptr<asio::steady_timer> const& timer) noexcept
+    std::shared_ptr<SerializedTimerSignal> const& timer) noexcept
 {
     if (!timer)
         return;
-    try
-    {
-        timer->expires_at(std::chrono::steady_clock::now());
-    }
-    catch (...)
-    {
-    }
+    timer->complete();
 }
 
 template <typename Round>
@@ -46,14 +43,15 @@ complete_header_round(std::shared_ptr<Round> const& round) noexcept
 {
     if (round && !round->completed.exchange(true, std::memory_order_acq_rel))
     {
+        round->close_and_release_peer_pins();
         complete_timer_noexcept(round->signal);
     }
 }
 
 asio::awaitable<std::pair<int, boost::system::error_code>>
 wait_for_signal_or_progress(
-    std::shared_ptr<asio::steady_timer> done_signal,
-    std::shared_ptr<asio::steady_timer> progress_signal)
+    std::shared_ptr<SerializedTimerSignal> done_signal,
+    std::shared_ptr<SerializedTimerSignal> progress_signal)
 {
     auto ex = co_await asio::this_coro::executor;
     auto [order, ex0, ec0, ex1, ec1] =
@@ -61,20 +59,14 @@ wait_for_signal_or_progress(
             asio::co_spawn(
                 ex,
                 [done_signal]() -> asio::awaitable<boost::system::error_code> {
-                    boost::system::error_code ec;
-                    co_await done_signal->async_wait(
-                        asio::redirect_error(asio::use_awaitable, ec));
-                    co_return ec;
+                    co_return co_await done_signal->wait();
                 },
                 asio::deferred),
             asio::co_spawn(
                 ex,
                 [progress_signal]()
                     -> asio::awaitable<boost::system::error_code> {
-                    boost::system::error_code ec;
-                    co_await progress_signal->async_wait(
-                        asio::redirect_error(asio::use_awaitable, ec));
-                    co_return ec;
+                    co_return co_await progress_signal->wait();
                 },
                 asio::deferred))
             .async_wait(
@@ -87,8 +79,8 @@ wait_for_signal_or_progress(
 
 asio::awaitable<std::pair<int, boost::system::error_code>>
 wait_for_signal_or_progress_or_cancel(
-    std::shared_ptr<asio::steady_timer> done_signal,
-    std::shared_ptr<asio::steady_timer> progress_signal,
+    std::shared_ptr<SerializedTimerSignal> done_signal,
+    std::shared_ptr<SerializedTimerSignal> progress_signal,
     std::shared_ptr<std::atomic<bool>> cancel)
 {
     if (!cancel)
@@ -106,20 +98,14 @@ wait_for_signal_or_progress_or_cancel(
                     ex,
                     [done_signal]()
                         -> asio::awaitable<boost::system::error_code> {
-                        boost::system::error_code ec;
-                        co_await done_signal->async_wait(
-                            asio::redirect_error(asio::use_awaitable, ec));
-                        co_return ec;
+                        co_return co_await done_signal->wait();
                     },
                     asio::deferred),
                 asio::co_spawn(
                     ex,
                     [progress_signal]()
                         -> asio::awaitable<boost::system::error_code> {
-                        boost::system::error_code ec;
-                        co_await progress_signal->async_wait(
-                            asio::redirect_error(asio::use_awaitable, ec));
-                        co_return ec;
+                        co_return co_await progress_signal->wait();
                     },
                     asio::deferred),
                 asio::co_spawn(
@@ -173,10 +159,10 @@ NodeCache::create(asio::io_context& io, Options opts)
     return std::shared_ptr<NodeCache>(new NodeCache(io, std::move(opts)));
 }
 
-std::shared_ptr<asio::steady_timer>
+std::shared_ptr<SerializedTimerSignal>
 NodeCache::make_progress_signal()
 {
-    return std::make_shared<asio::steady_timer>(
+    return SerializedTimerSignal::create(
         io_, asio::steady_timer::time_point::max());
 }
 
@@ -265,7 +251,7 @@ NodeCache::attach_waiter_locked(HeaderEntry& entry)
         entry.progress.signal = make_progress_signal();
 
     return WaitRegistration{
-        .done_signal = entry.signal,
+        .done_signal = entry.fetch ? entry.fetch->completion_signal : nullptr,
         .progress_signal = entry.progress.signal,
         .cursor = entry.progress.journal.subscribe()};
 }
@@ -282,13 +268,13 @@ NodeCache::refresh_waiter_locked(Entry& entry, WaitRegistration& wait)
 void
 NodeCache::refresh_waiter_locked(HeaderEntry& entry, WaitRegistration& wait)
 {
-    wait.done_signal = entry.signal;
+    wait.done_signal = entry.fetch ? entry.fetch->completion_signal : nullptr;
     if (!entry.progress.signal)
         entry.progress.signal = make_progress_signal();
     wait.progress_signal = entry.progress.signal;
 }
 
-std::shared_ptr<asio::steady_timer>
+std::shared_ptr<SerializedTimerSignal>
 NodeCache::publish_progress_locked(
     Entry& entry,
     ProgressKind kind,
@@ -315,7 +301,7 @@ NodeCache::publish_progress_locked(
     return wake;
 }
 
-std::shared_ptr<asio::steady_timer>
+std::shared_ptr<SerializedTimerSignal>
 NodeCache::publish_progress_locked(
     HeaderEntry& entry,
     ProgressKind kind,
@@ -352,7 +338,7 @@ NodeCache::publish_node_progress(
     uint8_t max_attempts,
     std::string_view peer)
 {
-    std::shared_ptr<asio::steady_timer> wake;
+    std::shared_ptr<SerializedTimerSignal> wake;
     {
         std::lock_guard lock(mutex_);
         auto it = store_.find(hash);
@@ -372,7 +358,7 @@ NodeCache::publish_node_progress(
     if (wake)
     {
         waiter_wakeups_++;
-        wake->cancel();
+        wake->complete();
     }
 }
 
@@ -384,7 +370,7 @@ NodeCache::publish_header_progress(
     uint8_t max_attempts,
     std::string_view peer)
 {
-    std::shared_ptr<asio::steady_timer> wake;
+    std::shared_ptr<SerializedTimerSignal> wake;
     {
         std::lock_guard lock(mutex_);
         auto it = header_cache_.find(ledger_seq);
@@ -404,7 +390,7 @@ NodeCache::publish_header_progress(
     if (wake)
     {
         waiter_wakeups_++;
-        wake->cancel();
+        wake->complete();
     }
 }
 
@@ -420,9 +406,76 @@ NodeCache::walk_to(
     uint32_t ledger_seq,
     int tree_type,
     std::shared_ptr<PeerSet> peers,
+    PeerGenerationPin peer,
+    std::shared_ptr<std::atomic<bool>> cancel)
+{
+    if (peer)
+    {
+        auto const owner = peer.release_owner();
+        if (!owner)
+            throw PeerClientException(
+                Error::Cancelled,
+                "managed peer pin release owner no longer exists");
+        if (peers && owner != peers)
+            throw PeerClientException(
+                Error::BadRequest,
+                "managed peer pin does not belong to the supplied PeerSet");
+    }
+    auto* session = peer.get();
+    co_return co_await walk_to_impl(
+        root_hash,
+        target_key,
+        ledger_hash,
+        ledger_seq,
+        tree_type,
+        std::move(peers),
+        session,
+        std::move(peer),
+        nullptr,
+        std::move(cancel));
+}
+
+asio::awaitable<WalkResult>
+NodeCache::walk_to(
+    Hash256 root_hash,
+    Hash256 target_key,
+    Hash256 ledger_hash,
+    uint32_t ledger_seq,
+    int tree_type,
+    std::shared_ptr<PeerSet> peers,
     PeerSessionPtr peer,
     std::shared_ptr<std::atomic<bool>> cancel)
 {
+    auto* session = peer.get();
+    co_return co_await walk_to_impl(
+        root_hash,
+        target_key,
+        ledger_hash,
+        ledger_seq,
+        tree_type,
+        std::move(peers),
+        session,
+        {},
+        std::move(peer),
+        std::move(cancel));
+}
+
+asio::awaitable<WalkResult>
+NodeCache::walk_to_impl(
+    Hash256 root_hash,
+    Hash256 target_key,
+    Hash256 ledger_hash,
+    uint32_t ledger_seq,
+    int tree_type,
+    std::shared_ptr<PeerSet> peers,
+    PeerSession* peer,
+    PeerGenerationPin peer_pin,
+    PeerSessionPtr unmanaged_owner,
+    std::shared_ptr<std::atomic<bool>> cancel)
+{
+    // The unmanaged owner is intentionally retained by this frame. Managed
+    // production sessions are retained by peer_pin instead.
+    (void)unmanaged_owner;
     // ── CANCELLATION BOUNDARY ──
     // Shield all inner co_awaits (ensure_present, signal timers)
     // from the || operator's enable_total_cancellation. Without this,
@@ -444,7 +497,7 @@ NodeCache::walk_to(
     // This eliminates per-depth strand contention that was causing laggards
     // with 300+ concurrent proves. On failure mid-walk, we retry with a
     // different peer (max retries per walk).
-    auto peer_covers = [](PeerSessionPtr const& p, uint32_t seq) {
+    auto peer_covers = [](PeerSession const* p, uint32_t seq) {
         if (!p || !p->is_ready())
             return false;
         auto first = p->peer_first_seq();
@@ -463,7 +516,8 @@ NodeCache::walk_to(
                 " doesn't cover ledger ",
                 ledger_seq,
                 " — acquiring one");
-            peer = co_await peers->wait_for_peer(ledger_seq, 10, cancel);
+            peer_pin = co_await peers->wait_for_peer(ledger_seq, 10, cancel);
+            peer = peer_pin.get();
         }
         if (!peer || !peer->is_ready())
         {
@@ -515,6 +569,7 @@ NodeCache::walk_to(
             target_key,
             spec_depth,
             peer,
+            peer_pin.share(),
             peers,
             ledger_seq,
             cancel,
@@ -551,6 +606,13 @@ NodeCache::walk_to(
 
             if (total_retries < max_retries && peers)
             {
+                // The completed Entry round has released its retained share.
+                // Drop this frame's operation pin before asking PeerSet to
+                // rotate/admit: at max_connected_peers=1, retaining the failed
+                // generation here would make replacement impossible.
+                peer_pin.reset();
+                peer = nullptr;
+
                 auto alternatives = co_await peers->co_select_peers_for(
                     ledger_seq, 1, failed_peers);
                 if (alternatives.empty() && !waited_for_new_peer)
@@ -566,7 +628,8 @@ NodeCache::walk_to(
                 }
                 if (!alternatives.empty())
                 {
-                    peer = alternatives.front();
+                    peer_pin = std::move(alternatives.front());
+                    peer = peer_pin.get();
                     ++total_retries;
                     PLOGW(
                         log_,
@@ -748,7 +811,8 @@ NodeCache::ensure_present(
     SHAMapNodeID position,
     Hash256 const& target_key,
     int speculative_depth,
-    PeerSessionPtr peer,
+    PeerSession* peer,
+    PeerGenerationPin peer_pin,
     std::shared_ptr<PeerSet> peers,
     uint32_t ledger_seq,
     std::shared_ptr<std::atomic<bool>> cancel,
@@ -764,6 +828,8 @@ NodeCache::ensure_present(
     enum class Action { hit, return_null, wait, send_and_wait };
     Action action;
     std::shared_ptr<std::vector<uint8_t>> hit_data;
+    std::shared_ptr<SerializedTimerSignal> send_signal;
+    std::shared_ptr<SerializedTimerSignal> deadline_signal;
 
     {
         std::lock_guard lock(mutex_);
@@ -798,16 +864,23 @@ NodeCache::ensure_present(
                 it->second.signal && it->second.signal->expiry() <= now;
             bool has_prior_fetch = it->second.last_fetch_at !=
                 std::chrono::steady_clock::time_point{};
+            bool has_open_round = it->second.round_opened_at !=
+                std::chrono::steady_clock::time_point{};
             auto stale_threshold = fetch_timeout_ * fetch_stale_multiplier_;
-            bool is_stale = now - it->second.last_fetch_at > stale_threshold;
+            bool is_stale = has_open_round &&
+                now - it->second.round_opened_at > stale_threshold;
 
             if ((signal_missing || signal_expired || is_stale) && peer &&
                 peer->is_ready())
             {
                 // There is no active shared signal or the fetch is stale, so
                 // refresh the wait handle and re-send with the current peer.
+                it->second.peer_pins.clear();
                 it->second.signal =
-                    std::make_shared<asio::steady_timer>(io_, fetch_timeout_);
+                    SerializedTimerSignal::create(io_, fetch_timeout_);
+                it->second.round_opened_at = now;
+                send_signal = it->second.signal;
+                deadline_signal = it->second.signal;
                 action = Action::send_and_wait;
                 PLOGD(
                     log_,
@@ -824,7 +897,8 @@ NodeCache::ensure_present(
                 // wait on. Create a fresh shared signal so another caller can
                 // still benefit from a late response.
                 it->second.signal =
-                    std::make_shared<asio::steady_timer>(io_, fetch_timeout_);
+                    SerializedTimerSignal::create(io_, fetch_timeout_);
+                deadline_signal = it->second.signal;
                 action = Action::wait;
                 PLOGD(
                     log_,
@@ -860,7 +934,10 @@ NodeCache::ensure_present(
             // MISS — new entry, create signal and fetch
             misses_++;
             it->second.signal =
-                std::make_shared<asio::steady_timer>(io_, fetch_timeout_);
+                SerializedTimerSignal::create(io_, fetch_timeout_);
+            it->second.round_opened_at = std::chrono::steady_clock::now();
+            send_signal = it->second.signal;
+            deadline_signal = it->second.signal;
             action = Action::send_and_wait;
             evict_if_needed();
             PLOGD(
@@ -873,12 +950,40 @@ NodeCache::ensure_present(
         }
     }  // mutex released
 
+    auto abandon_exact_send_round = [&]() {
+        retire_node_fetch_round(expected_hash, send_signal);
+    };
+
+    if (action == Action::send_and_wait &&
+        before_node_send_commit_for_test_)
+    {
+        try
+        {
+            before_node_send_commit_for_test_();
+        }
+        catch (...)
+        {
+            abandon_exact_send_round();
+            throw;
+        }
+    }
+
+    if (deadline_signal &&
+        !arm_node_round_deadline(expected_hash, deadline_signal))
+    {
+        retire_node_fetch_round(expected_hash, deadline_signal);
+        co_return nullptr;
+    }
+
     if (action == Action::hit)
         co_return hit_data;
     if (action == Action::return_null)
         co_return nullptr;
-    if (cancel && cancel->load(std::memory_order_relaxed))
+    if (action != Action::send_and_wait && cancel &&
+        cancel->load(std::memory_order_relaxed))
+    {
         co_return nullptr;
+    }
 
     if (action == Action::wait)
     {
@@ -897,26 +1002,61 @@ NodeCache::ensure_present(
                 "  ensure: peer not ready for hash=",
                 expected_hash.hex().substr(0, 16));
             fetch_errors_++;
-            {
-                std::lock_guard lock(mutex_);
-                auto it = store_.find(expected_hash);
-                if (it != store_.end() && !it->second.present)
-                    it->second.signal = nullptr;
-            }
+            abandon_exact_send_round();
             co_return nullptr;
         }
 
         if (initiated_fetch)
             *initiated_fetch = true;
 
-        send_fetch(
-            expected_hash,
-            ledger_hash,
-            tree_type,
-            position,
-            target_key,
-            speculative_depth,
-            peer);
+        try
+        {
+            std::lock_guard lock(mutex_);
+            auto it = store_.find(expected_hash);
+            if (it == store_.end() || it->second.present ||
+                it->second.signal != send_signal)
+            {
+                co_return it != store_.end() && it->second.present
+                    ? it->second.wire_data
+                    : nullptr;
+            }
+            if (peer_pin)
+                it->second.peer_pins.push_back(peer_pin.share());
+            // The admission timestamp was committed with this exact signal.
+            // This commit adds the primary transport pin without reopening
+            // stale-round selection.
+        }
+        catch (...)
+        {
+            abandon_exact_send_round();
+            throw;
+        }
+
+        try
+        {
+            send_fetch(
+                expected_hash,
+                ledger_hash,
+                tree_type,
+                position,
+                target_key,
+                speculative_depth,
+                *peer);
+        }
+        catch (...)
+        {
+            abandon_exact_send_round();
+            throw;
+        }
+        {
+            // Content-addressed late responses remain useful even if this
+            // exact round was concurrently retired. Record only after the
+            // synchronous submission path succeeds.
+            std::lock_guard lock(mutex_);
+            auto const it = store_.find(expected_hash);
+            if (it != store_.end() && !it->second.present)
+                it->second.last_fetch_at = std::chrono::steady_clock::now();
+        }
         if (attempted_peers)
             attempted_peers->insert(peer->endpoint());
 
@@ -932,13 +1072,23 @@ NodeCache::ensure_present(
                 ? *excluded_peers
                 : std::unordered_set<std::string>{};
             exclude_set.insert(peer->endpoint());
-            auto extras = co_await peers->co_select_peers_for(
+            auto fanout_pins = co_await peers->co_select_peers_for(
                 ledger_seq, 2, std::move(exclude_set));
 
-            for (auto const& extra : extras)
+            for (auto& extra : fanout_pins)
             {
                 if (extra && extra->is_ready())
                 {
+                    {
+                        std::lock_guard lock(mutex_);
+                        auto it = store_.find(expected_hash);
+                        if (it == store_.end() || it->second.present ||
+                            it->second.signal != send_signal)
+                        {
+                            break;
+                        }
+                        it->second.peer_pins.push_back(extra.share());
+                    }
                     if (attempted_peers)
                         attempted_peers->insert(extra->endpoint());
                     PLOGD(
@@ -954,7 +1104,8 @@ NodeCache::ensure_present(
                         position,
                         target_key,
                         speculative_depth,
-                        extra);
+                        *extra);
+                    extra.reset();
                 }
             }
         }
@@ -980,13 +1131,19 @@ NodeCache::ensure_present(
         wait = attach_waiter_locked(it->second);
     }
 
+    if (after_node_waiter_attached_for_test_)
+        after_node_waiter_attached_for_test_();
+
     if (!wait.done_signal)
         co_return nullptr;
 
     for (;;)
     {
+        auto const waited_signal = wait.done_signal;
+        if (!waited_signal)
+            co_return nullptr;
         auto [wake_kind, ec] = co_await wait_for_signal_or_progress_or_cancel(
-            wait.done_signal, wait.progress_signal, cancel);
+            waited_signal, wait.progress_signal, cancel);
 
         std::vector<ProgressEvent> progress_events;
         {
@@ -1020,20 +1177,16 @@ NodeCache::ensure_present(
         }
 
         if (wake_kind == 1)
+        {
+            if (!wait.done_signal)
+                co_return nullptr;
             continue;
+        }
 
         // Timed out and data still isn't present.
         // The entry stays alive so a late peer response can still
         // populate the cache for future callers.
-        {
-            std::lock_guard lock(mutex_);
-            auto it = store_.find(expected_hash);
-            if (it != store_.end() && !it->second.present &&
-                it->second.signal == wait.done_signal)
-            {
-                it->second.signal = nullptr;
-            }
-        }
+        retire_node_fetch_round(expected_hash, waited_signal);
         if (ec != asio::error::operation_aborted)
         {
             PLOGD(
@@ -1049,8 +1202,8 @@ NodeCache::ensure_present(
 // ═══════════════════════════════════════════════════════════════════════
 // send_fetch — fire-and-forget TMGetLedger request
 //
-// Sends the request to the peer and records last_fetch_at. Does NOT
-// wait for a response — that's handled by the shared signal in
+// Sends the request to the peer. The caller records successful submission.
+// Does NOT wait for a response — that's handled by the shared signal in
 // ensure_present. The response arrives asynchronously via
 // on_node_response → insert_and_notify → signal cancelled.
 // ═══════════════════════════════════════════════════════════════════════
@@ -1063,7 +1216,7 @@ NodeCache::send_fetch(
     SHAMapNodeID position,
     Hash256 const& target_key,
     int speculative_depth,
-    PeerSessionPtr peer)
+    PeerSession& peer)
 {
     fetches_++;
 
@@ -1101,14 +1254,14 @@ NodeCache::send_fetch(
         " nodeids=",
         node_ids.size(),
         " peer=",
-        peer->endpoint());
+        peer.endpoint());
 
     // Send raw TMGetLedger — no pending_nodes registration.
     // send_get_nodes just queues an async write, safe outside lock. One
     // fan-out write failure must not wake the shared round early because
     // another peer may still provide the node.
-    auto endpoint = peer->endpoint();
-    peer->send_get_nodes(
+    auto endpoint = peer.endpoint();
+    peer.send_get_nodes(
         ledger_hash,
         tree_type,
         node_ids,
@@ -1120,16 +1273,6 @@ NodeCache::send_fetch(
                 ": ",
                 ec.message());
         });
-
-    // Record when this fetch was sent (for stale detection)
-    {
-        std::lock_guard lock(mutex_);
-        auto it = store_.find(expected_hash);
-        if (it != store_.end())
-        {
-            it->second.last_fetch_at = std::chrono::steady_clock::now();
-        }
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1137,15 +1280,106 @@ NodeCache::send_fetch(
 // ═══════════════════════════════════════════════════════════════════════
 
 void
-NodeCache::ensure_response_handler(PeerSessionPtr peer)
+NodeCache::ensure_response_handler(PeerSession& peer)
 {
     auto self = shared_from_this();
-    peer->set_node_response_handler(
+    peer.set_node_response_handler(
         [self](std::shared_ptr<protocol::TMLedgerData> const& msg) {
             self->on_node_response(msg);
         });
 
-    PLOGD(log_, "  installed response handler on peer ", peer->endpoint());
+    PLOGD(log_, "  installed response handler on peer ", peer.endpoint());
+}
+
+bool
+NodeCache::arm_node_round_deadline(
+    Hash256 hash,
+    std::shared_ptr<SerializedTimerSignal> signal) noexcept
+{
+    try
+    {
+        auto weak = weak_from_this();
+        asio::co_spawn(
+            io_,
+            [weak, hash, signal]() -> asio::awaitable<void> {
+                try
+                {
+                    // Keep servant startup observably after successful co_spawn
+                    // initiation. Tests can now fault the runtime body rather
+                    // than merely the caller-side launch.
+                    auto ex = co_await asio::this_coro::executor;
+                    co_await asio::post(ex, asio::use_awaitable);
+                    if (auto self = weak.lock();
+                        self && self->node_deadline_servant_hook_for_test_)
+                    {
+                        self->node_deadline_servant_hook_for_test_();
+                    }
+
+                    auto ec = co_await signal->wait();
+                    if (ec == asio::error::operation_aborted)
+                        co_return;
+                    if (auto self = weak.lock())
+                        self->retire_node_fetch_round(hash, signal);
+                }
+                catch (...)
+                {
+                    // A servant-body failure still consumes the exact
+                    // lifecycle obligation it was created to own.
+                    if (auto self = weak.lock())
+                        self->retire_node_fetch_round(hash, signal);
+                }
+            },
+            asio::detached);
+        return true;
+    }
+    catch (std::exception const& e)
+    {
+        PLOGE(log_, "failed to arm node-round deadline: ", e.what());
+    }
+    catch (...)
+    {
+        PLOGE(log_, "failed to arm node-round deadline");
+    }
+    return false;
+}
+
+void
+NodeCache::retire_node_fetch_round(
+    Hash256 const& hash,
+    std::shared_ptr<SerializedTimerSignal> const& signal) noexcept
+{
+    bool retired = false;
+    try
+    {
+        std::lock_guard lock(mutex_);
+        auto const it = store_.find(hash);
+        if (it != store_.end() && !it->second.present &&
+            it->second.signal == signal)
+        {
+            it->second.signal.reset();
+            it->second.peer_pins.clear();
+            retired = true;
+        }
+    }
+    catch (...)
+    {
+        return;
+    }
+
+    if (!retired)
+        return;
+    complete_timer_noexcept(signal);
+    if (node_round_retired_hook_for_test_)
+    {
+        try
+        {
+            node_round_retired_hook_for_test_();
+        }
+        catch (...)
+        {
+            // Test observation must not weaken the noexcept retirement path.
+        }
+    }
 }
 
 void
@@ -1273,6 +1507,7 @@ NodeCache::insert(Hash256 const& hash, std::vector<uint8_t> data)
             std::make_shared<std::vector<uint8_t>>(std::move(data));
         it->second.present = true;
         it->second.signal = nullptr;
+        it->second.peer_pins.clear();
         it->second.progress.signal = nullptr;
         touch_lru(hash);
         evict_if_needed();
@@ -1293,7 +1528,7 @@ NodeCache::insert(Hash256 const& hash, std::vector<uint8_t> data)
 void
 NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
 {
-    std::shared_ptr<asio::steady_timer> signal;
+    std::shared_ptr<SerializedTimerSignal> signal;
 
     {
         std::lock_guard lock(mutex_);
@@ -1307,6 +1542,7 @@ NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
             std::make_shared<std::vector<uint8_t>>(std::move(data));
         it->second.present = true;
         it->second.signal = nullptr;
+        it->second.peer_pins.clear();
         it->second.progress.signal = nullptr;
         touch_lru(hash);
         evict_if_needed();
@@ -1325,14 +1561,15 @@ NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
     if (signal)
     {
         waiter_wakeups_++;
-        signal->cancel();
+        signal->complete();
     }
 }
 
 void
 NodeCache::send_header_fetch(
     uint32_t ledger_seq,
-    PeerSessionPtr peer,
+    PeerSession& peer,
+    std::shared_ptr<HeaderFetchState> fetch,
     std::shared_ptr<HeaderRound> round,
     std::shared_ptr<PeerSet> peers)
 {
@@ -1343,16 +1580,20 @@ NodeCache::send_header_fetch(
         "  send_header_fetch: seq=",
         ledger_seq,
         " peer=",
-        peer->endpoint());
+        peer.endpoint());
 
     std::weak_ptr<NodeCache> weak_self = shared_from_this();
     RequestOptions opts;
     opts.dedupe = false;
 
-    peer->get_ledger_header(
+    peer.get_ledger_header(
         ledger_seq,
-        [weak_self, ledger_seq, round, peers, endpoint = peer->endpoint()](
-            Error err, LedgerHeaderResult result) {
+        [weak_self,
+         ledger_seq,
+         fetch,
+         round,
+         peers,
+         endpoint = peer.endpoint()](Error err, LedgerHeaderResult result) {
             auto self = weak_self.lock();
             if (!self)
                 return;
@@ -1361,6 +1602,7 @@ NodeCache::send_header_fetch(
                 self->header_state_strand_,
                 [weak_self,
                  ledger_seq,
+                 fetch,
                  round,
                  peers,
                  endpoint,
@@ -1369,6 +1611,18 @@ NodeCache::send_header_fetch(
                     auto self = weak_self.lock();
                     if (!self)
                         return;
+
+                    {
+                        std::lock_guard lock(self->mutex_);
+                        auto const it = self->header_cache_.find(ledger_seq);
+                        if (it == self->header_cache_.end() ||
+                            it->second.fetch != fetch ||
+                            fetch->phase != HeaderFetchState::Phase::running ||
+                            fetch->active_round != round)
+                        {
+                            return;
+                        }
+                    }
 
                     if (err != Error::Success)
                     {
@@ -1399,40 +1653,8 @@ NodeCache::send_header_fetch(
                     }
 
                     round->outstanding.fetch_sub(1);
-
-                    {
-                        std::lock_guard lock(self->mutex_);
-                        auto it = self->header_cache_.find(ledger_seq);
-                        if (it == self->header_cache_.end())
-                            return;
-                        if (it->second.present)
-                            return;  // another peer already won
-
-                        auto completion_signal = it->second.signal;
-                        auto active_round_signal =
-                            it->second.active_round_signal;
-                        it->second.result = std::move(result);
-                        it->second.present = true;
-                        it->second.signal = nullptr;
-                        it->second.active_round_signal = nullptr;
-                        it->second.progress.signal = nullptr;
-                        self->touch_header_lru(ledger_seq);
-                        self->evict_headers_if_needed();
-
-                        complete_timer_noexcept(completion_signal);
-                        if (active_round_signal &&
-                            active_round_signal != completion_signal)
-                        {
-                            complete_timer_noexcept(active_round_signal);
-                        }
-                        if (round->signal &&
-                            round->signal != active_round_signal &&
-                            round->signal != completion_signal)
-                        {
-                            complete_timer_noexcept(round->signal);
-                        }
-                    }
-                    self->waiter_wakeups_++;
+                    self->finish_header_fetch(
+                        ledger_seq, fetch, std::move(result));
 
                     PLOGI(
                         NodeCache::log_,
@@ -1449,7 +1671,40 @@ asio::awaitable<LedgerHeaderResult>
 NodeCache::get_header(
     uint32_t ledger_seq,
     std::shared_ptr<PeerSet> peers,
+    PeerGenerationPin peer)
+{
+    if (peer)
+    {
+        auto const owner = peer.release_owner();
+        if (!owner)
+            throw PeerClientException(
+                Error::Cancelled,
+                "managed peer pin release owner no longer exists");
+        if (peers && owner != peers)
+            throw PeerClientException(
+                Error::BadRequest,
+                "managed peer pin does not belong to the supplied PeerSet");
+    }
+    co_return co_await get_header_impl(
+        ledger_seq, std::move(peers), std::move(peer), nullptr);
+}
+
+asio::awaitable<LedgerHeaderResult>
+NodeCache::get_header(
+    uint32_t ledger_seq,
+    std::shared_ptr<PeerSet> peers,
     PeerSessionPtr peer)
+{
+    co_return co_await get_header_impl(
+        ledger_seq, std::move(peers), {}, std::move(peer));
+}
+
+asio::awaitable<LedgerHeaderResult>
+NodeCache::get_header_impl(
+    uint32_t ledger_seq,
+    std::shared_ptr<PeerSet> peers,
+    PeerGenerationPin peer_pin,
+    PeerSessionPtr unmanaged_owner)
 {
     if (!header_state_strand_.running_in_this_thread())
     {
@@ -1461,430 +1716,687 @@ NodeCache::get_header(
             [self,
              ledger_seq,
              peers = std::move(peers),
-             peer = std::move(
-                 peer)]() mutable -> asio::awaitable<LedgerHeaderResult> {
-                co_return co_await self->get_header(
-                    ledger_seq, std::move(peers), std::move(peer));
+             peer_pin = std::move(peer_pin),
+             unmanaged_owner = std::move(unmanaged_owner)]() mutable
+            -> asio::awaitable<LedgerHeaderResult> {
+                co_return co_await self->get_header_impl(
+                    ledger_seq,
+                    std::move(peers),
+                    std::move(peer_pin),
+                    std::move(unmanaged_owner));
             },
             asio::use_awaitable);
     }
 
-    // Single lock: check present → check in-flight → create in-flight.
-    enum class Action { hit, wait, fetch };
-    Action action;
-    LedgerHeaderResult hit_result;
+    // Clear is a closed admission boundary, not a best-effort map erase. A
+    // caller that races it receives a typed refusal and may retry after the
+    // acknowledged boundary; it cannot mint post-clear work inside the drain.
+    if (header_clear_state_)
+        throw PeerClientException(
+            Error::Cancelled, "ledger-header store is clearing");
 
+    // Single owner-strand transaction: check present, join the exact operation,
+    // or install one new HeaderFetchState. The detached driver is an executor
+    // servant; HeaderEntry::fetch remains the operation authority.
+    std::shared_ptr<HeaderFetchState> fetch;
+    LedgerHeaderResult hit_result;
+    bool start_fetch = false;
     {
         std::lock_guard lock(mutex_);
+        auto const existing = header_cache_.find(ledger_seq);
+        if ((existing == header_cache_.end() ||
+             (!existing->second.present && !existing->second.fetch)) &&
+            next_header_fetch_id_ ==
+                std::numeric_limits<std::uint64_t>::max())
+        {
+            throw PeerClientException(
+                Error::ResourceExhausted,
+                "ledger-header operation identity exhausted");
+        }
+
         auto [it, inserted] = header_cache_.try_emplace(ledger_seq);
         touch_header_lru(ledger_seq);
 
         if (!inserted && it->second.present)
         {
-            action = Action::hit;
             hit_result = it->second.result;
-            PLOGD(log_, "  get_header: HIT seq=", ledger_seq);
         }
-        else if (!inserted && it->second.signal)
+        else if (!inserted && it->second.fetch)
         {
-            action = Action::wait;
-            PLOGD(log_, "  get_header: IN-FLIGHT seq=", ledger_seq);
+            fetch = it->second.fetch;
         }
         else
         {
-            // Create signal with max expiry — real timeout is set after
-            // peer acquisition and dispatch (see Action::fetch below).
-            it->second.signal = std::make_shared<asio::steady_timer>(
+            auto const round_timeout =
+                std::max(fetch_timeout_, header_timeout_floor_);
+            fetch = std::make_shared<HeaderFetchState>();
+            fetch->completion_signal = SerializedTimerSignal::create(
                 io_, asio::steady_timer::time_point::max());
+            fetch->deadline_signal = SerializedTimerSignal::create(
+                io_, round_timeout * 3 + std::chrono::seconds(5));
+            fetch->driver_done_signal = SerializedTimerSignal::create(
+                io_, asio::steady_timer::time_point::max());
+            fetch->deadline_done_signal = SerializedTimerSignal::create(
+                io_, asio::steady_timer::time_point::max());
+            fetch->peers = std::move(peers);
+            if (auto owner = peer_pin.release_owner())
+                fetch->release_owners.push_back(std::move(owner));
+            if (fetch->peers &&
+                std::find(
+                    fetch->release_owners.begin(),
+                    fetch->release_owners.end(),
+                    fetch->peers) == fetch->release_owners.end())
+            {
+                fetch->release_owners.push_back(fetch->peers);
+            }
+            fetch->initial_pin = std::move(peer_pin);
+            fetch->unmanaged_owner = std::move(unmanaged_owner);
+            fetch->operation_id = next_header_fetch_id_ + 1;
+            fetch->epoch = header_epoch_;
+            //@@authority transition=node_cache.install_header_fetch
+            // owner=node_cache commit=header-state-strand
+            active_header_fetches_.emplace(fetch->operation_id, fetch);
+            next_header_fetch_id_ = fetch->operation_id;
             it->second.present = false;
-            action = Action::fetch;
+            it->second.fetch = fetch;
+            start_fetch = true;
             evict_headers_if_needed();
-            PLOGD(log_, "  get_header: MISS seq=", ledger_seq, " — fetching");
+            refresh_header_entries_projection_locked();
         }
-    }  // mutex released
+    }
 
-    if (action == Action::hit)
+    // A caller that joins someone else's shared operation contributes no
+    // transport authority. Release its unused preferred generation before
+    // suspending so coalescing cannot become an accidental eviction veto.
+    if (!start_fetch)
+    {
+        peer_pin.reset();
+        unmanaged_owner.reset();
+        peers.reset();
+    }
+
+    if (!fetch)
         co_return hit_result;
 
-    auto abandon_header_fetch =
-        [&](std::shared_ptr<asio::steady_timer> const& expected_signal) {
-            std::shared_ptr<asio::steady_timer> completion_signal;
-            std::shared_ptr<asio::steady_timer> round_signal;
-            {
-                std::lock_guard lock(mutex_);
-                auto it = header_cache_.find(ledger_seq);
-                if (it != header_cache_.end() && !it->second.present &&
-                    (!expected_signal || it->second.signal == expected_signal))
-                {
-                    completion_signal = it->second.signal;
-                    round_signal = it->second.active_round_signal;
-                    header_cache_.erase(it);
-                    if (auto lru_it = header_lru_map_.find(ledger_seq);
-                        lru_it != header_lru_map_.end())
+    if (start_fetch)
+    {
+        auto self = shared_from_this();
+        auto weak = weak_from_this();
+        try
+        {
+            asio::co_spawn(
+                header_state_strand_,
+                [weak, ledger_seq, fetch]() -> asio::awaitable<void> {
+                    auto ec = co_await fetch->deadline_signal->wait();
+                    if (ec != asio::error::operation_aborted)
                     {
-                        header_lru_.erase(lru_it->second);
-                        header_lru_map_.erase(lru_it);
+                        if (auto self = weak.lock())
+                            self->finish_header_fetch(ledger_seq, fetch);
                     }
-
-                    complete_timer_noexcept(completion_signal);
-                    if (round_signal && round_signal != completion_signal)
-                        complete_timer_noexcept(round_signal);
-                }
-            }
-        };
-
-    if (action == Action::wait)
-    {
-        catl::core::emit_status(
-            "[shared] joining in-flight header fetch seq=" +
-            std::to_string(ledger_seq));
-
-        WaitRegistration wait;
+                },
+                [weak, ledger_seq, fetch](std::exception_ptr error) {
+                    // co_spawn invokes this only after the coroutine frame and
+                    // all of its locals have been destroyed.
+                    if (error)
+                    {
+                        if (auto self = weak.lock())
+                            self->finish_header_fetch(ledger_seq, fetch);
+                    }
+                    if (auto self = weak.lock())
+                        self->on_header_servant_done(fetch, false);
+                });
+        }
+        catch (...)
         {
-            std::lock_guard lock(mutex_);
-            auto it = header_cache_.find(ledger_seq);
-            if (it == header_cache_.end())
-                throw PeerClientException(Error::Timeout);
-            if (it->second.present)
-                co_return it->second.result;
-            wait = attach_waiter_locked(it->second);
+            finish_header_fetch(ledger_seq, fetch);
+            on_header_servant_done(fetch, false);
         }
 
-        if (!wait.done_signal)
-            throw PeerClientException(Error::Timeout);
-
-        for (;;)
+        auto owner_executor = catl::core::ContextExecutor(
+            header_state_strand_, catl::core::retain_current_request());
+        try
         {
-            auto [wake_kind, ec] = co_await wait_for_signal_or_progress(
-                wait.done_signal, wait.progress_signal);
-
-            std::vector<ProgressEvent> progress_events;
-            bool has_owner = false;
-            {
-                std::lock_guard lock(mutex_);
-                auto it = header_cache_.find(ledger_seq);
-                if (it == header_cache_.end())
-                    throw PeerClientException(Error::Timeout);
-                if (it->second.present)
-                    co_return it->second.result;
-
-                has_owner = it->second.active_round_signal != nullptr;
-                progress_events =
-                    it->second.progress.journal.replay(wait.cursor);
-                refresh_waiter_locked(it->second, wait);
-            }
-
-            for (auto const& event : progress_events)
-                catl::core::emit_status(format_progress(event));
-
-            if (wake_kind == 1)
-                continue;
-
-            // Real fetches are completed or abandoned only by their owner.
-            // A slot without a round signal is an orphan left by an older or
-            // synthetic producer and can be removed by the waking caller.
-            if (!has_owner)
-                abandon_header_fetch(wait.done_signal);
-            throw PeerClientException(Error::Timeout);
+            asio::co_spawn(
+                std::move(owner_executor),
+                [self, ledger_seq, fetch]() -> asio::awaitable<void> {
+                    co_await self->drive_header_fetch(ledger_seq, fetch);
+                },
+                [weak, ledger_seq, fetch](std::exception_ptr error) {
+                    // This acknowledgement is deliberately the co_spawn
+                    // completion, not a finally inside drive_header_fetch:
+                    // selection vectors and their pins are gone first.
+                    if (error)
+                    {
+                        if (auto self = weak.lock())
+                            self->finish_header_fetch(ledger_seq, fetch);
+                    }
+                    if (auto self = weak.lock())
+                        self->on_header_servant_done(fetch, true);
+                });
+        }
+        catch (...)
+        {
+            finish_header_fetch(ledger_seq, fetch);
+            on_header_servant_done(fetch, true);
         }
     }
 
-    // action == Action::fetch
-    //
-    // Fan-out: send header request to up to 3 peers simultaneously.
-    // First response wins via send_header_fetch callback.
-    // Then wait on the shared signal.
-    std::shared_ptr<asio::steady_timer> owned_signal;
+    co_return co_await wait_for_header_fetch(ledger_seq, fetch);
+}
+
+//@@authority transition=node_cache.ack_header_servant owner=node_cache
+// commit=header-state-strand
+void
+NodeCache::on_header_servant_done(
+    std::shared_ptr<HeaderFetchState> const& fetch,
+    bool driver) noexcept
+{
+    if (!header_state_strand_.running_in_this_thread())
     {
-        std::lock_guard lock(mutex_);
-        auto it = header_cache_.find(ledger_seq);
-        if (it != header_cache_.end())
-            owned_signal = it->second.signal;
+        try
+        {
+            asio::post(
+                header_state_strand_,
+                [self = shared_from_this(), fetch, driver]() {
+                    self->on_header_servant_done(fetch, driver);
+                });
+        }
+        catch (...)
+        {
+            // No state is published off-strand. The done signal still lets a
+            // committed clear remain fail-closed rather than wait on a frame
+            // that has already ended.
+            auto const& signal =
+                driver ? fetch->driver_done_signal
+                       : fetch->deadline_done_signal;
+            complete_timer_noexcept(signal);
+        }
+        return;
     }
 
-    struct HeaderFetchCleanup
+    if (driver)
     {
-        decltype(abandon_header_fetch)& abandon;
-        std::shared_ptr<asio::steady_timer> owned_signal;
-        bool active = true;
+        fetch->driver_frame_done = true;
+        complete_timer_noexcept(fetch->driver_done_signal);
+    }
+    else
+    {
+        fetch->deadline_frame_done = true;
+        complete_timer_noexcept(fetch->deadline_done_signal);
+    }
 
-        void
-        dismiss()
-        {
-            active = false;
-        }
+    if (!fetch->driver_frame_done || !fetch->deadline_frame_done ||
+        fetch->retirement_started)
+    {
+        return;
+    }
 
-        ~HeaderFetchCleanup()
-        {
-            if (active)
-                abandon(owned_signal);
-        }
-    } cleanup{abandon_header_fetch, owned_signal};
-
-    static constexpr int kHeaderFanOut = 3;
-    static constexpr int kMaxRounds = 3;
-    auto header_timeout = std::max(fetch_timeout_, header_timeout_floor_);
-    std::unordered_set<std::string> tried_peers;
-    int total_peers_tried = 0;
-
-    // ── Dispatch round ──
-    // Returns {peers_sent, peer_names}. Subsequent rounds are
-    // dispatched from the wait loop on timeout/all-failed.
-    std::vector<std::string> round_peers;
-
-    auto begin_round = [&](uint8_t round_number) {
-        auto round = std::make_shared<HeaderRound>();
-        round->signal = std::make_shared<asio::steady_timer>(
-            io_, asio::steady_timer::time_point::max());
-
-        std::lock_guard lock(mutex_);
-        auto it = header_cache_.find(ledger_seq);
-        if (it == header_cache_.end() || it->second.present ||
-            it->second.signal != owned_signal)
-        {
-            return std::shared_ptr<HeaderRound>{};
-        }
-        it->second.round = round_number;
-        it->second.active_round_signal = round->signal;
-        return round;
-    };
-
-    auto dispatch_round =
-        [&](PeerSessionPtr primary,
-            std::shared_ptr<HeaderRound> const& round) -> asio::awaitable<int> {
-        int sent = 0;
-        round_peers.clear();
-
-        if (primary && primary->is_ready())
-        {
-            tried_peers.insert(primary->endpoint());
-            round_peers.push_back(primary->endpoint());
-            round->outstanding.fetch_add(1, std::memory_order_relaxed);
-            send_header_fetch(ledger_seq, primary, round, peers);
-            ++sent;
-        }
-
-        if (peers && sent < kHeaderFanOut)
-        {
-            auto extras = co_await peers->co_select_peers_for(
-                ledger_seq, kHeaderFanOut - sent, tried_peers);
-            for (auto const& extra : extras)
-            {
-                if (extra && extra->is_ready())
+    fetch->retirement_started = true;
+    try
+    {
+        auto weak = weak_from_this();
+        asio::co_spawn(
+            header_state_strand_,
+            [self = shared_from_this(), fetch]() -> asio::awaitable<void> {
+                co_await self->retire_header_fetch(fetch);
+            },
+            [weak, fetch](std::exception_ptr error) {
+                if (error)
                 {
-                    tried_peers.insert(extra->endpoint());
-                    round_peers.push_back(extra->endpoint());
-                    round->outstanding.fetch_add(1, std::memory_order_relaxed);
-                    send_header_fetch(ledger_seq, extra, round, peers);
-                    ++sent;
+                    if (auto self = weak.lock())
+                    {
+                        PLOGE(
+                            NodeCache::log_,
+                            "header servant retirement failed: operation=",
+                            fetch->operation_id);
+                    }
                 }
-            }
-        }
+            });
+    }
+    catch (...)
+    {
+        // The operation stays in the active registry. A later acknowledged
+        // clear can still reap it; silently erasing would manufacture a false
+        // drain receipt.
+        fetch->retirement_started = false;
+    }
+}
 
-        // Fallback: wait for a peer only on the first round to keep
-        // the total retry budget predictable (~18s max).
-        if (sent == 0 && peers && total_peers_tried == 0)
-        {
-            auto fallback =
-                co_await peers->wait_for_peer(ledger_seq, 5, tried_peers);
-            if (fallback && fallback->is_ready())
-            {
-                tried_peers.insert(fallback->endpoint());
-                round_peers.push_back(fallback->endpoint());
-                round->outstanding.fetch_add(1, std::memory_order_relaxed);
-                send_header_fetch(ledger_seq, fallback, round, peers);
-                ++sent;
-            }
-        }
+//@@authority transition=node_cache.retire_header_fetch owner=node_cache
+// commit=header-state-strand
+asio::awaitable<void>
+NodeCache::retire_header_fetch(std::shared_ptr<HeaderFetchState> fetch)
+{
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::disable_cancellation());
 
-        // Seal only after every request has been counted. A fast failure
-        // cannot end the round while fan-out is still being assembled.
-        {
-            std::lock_guard lock(mutex_);
-            auto it = header_cache_.find(ledger_seq);
-            if (it != header_cache_.end() && !it->second.present &&
-                it->second.signal == owned_signal &&
-                it->second.active_round_signal == round->signal && sent > 0)
-            {
-                round->signal->expires_after(header_timeout);
-            }
-            round->dispatch_complete.store(true, std::memory_order_release);
-            if (round->outstanding.load(std::memory_order_acquire) == 0)
-            {
-                complete_header_round(round);
-            }
-        }
+    for (auto const& owner : fetch->release_owners)
+        co_await owner->co_generation_pin_release_barrier();
 
-        co_return sent;
-    };
+    if (!header_state_strand_.running_in_this_thread())
+        co_await asio::post(header_state_strand_, asio::use_awaitable);
 
-    uint8_t round_number = 0;
-    auto round = begin_round(round_number);
-    if (!round)
-        throw PeerClientException(Error::Timeout);
+    auto const it = active_header_fetches_.find(fetch->operation_id);
+    if (it != active_header_fetches_.end() && it->second == fetch)
+        active_header_fetches_.erase(it);
+}
 
-    int round_sent = co_await dispatch_round(peer, round);
-    total_peers_tried += round_sent;
+//@@authority transition=node_cache.publish_header_terminal owner=node_cache
+// commit=header-state-strand
+void
+NodeCache::finish_header_fetch(
+    uint32_t ledger_seq,
+    std::shared_ptr<HeaderFetchState> const& fetch,
+    std::optional<LedgerHeaderResult> result) noexcept
+{
+    std::shared_ptr<HeaderRound> active_round;
+    std::shared_ptr<SerializedTimerSignal> completion_signal;
+    std::shared_ptr<SerializedTimerSignal> deadline_signal;
+    std::shared_ptr<SerializedTimerSignal> progress_signal;
+    PeerGenerationPin initial_pin;
+    PeerSessionPtr unmanaged_owner;
 
     {
         std::lock_guard lock(mutex_);
-        auto it = header_cache_.find(ledger_seq);
-        if (it == header_cache_.end())
-            throw PeerClientException(Error::Timeout);
-        if (it->second.present)
+        auto const it = header_cache_.find(ledger_seq);
+        if (it == header_cache_.end() || it->second.fetch != fetch ||
+            fetch->phase != HeaderFetchState::Phase::running)
         {
-            cleanup.dismiss();
-            co_return it->second.result;
+            return;
+        }
+
+        fetch->phase = result ? HeaderFetchState::Phase::succeeded
+                              : HeaderFetchState::Phase::failed;
+        fetch->cancel->store(true, std::memory_order_release);
+        active_round = std::move(fetch->active_round);
+        initial_pin = std::move(fetch->initial_pin);
+        unmanaged_owner = std::move(fetch->unmanaged_owner);
+        completion_signal = fetch->completion_signal;
+        deadline_signal = fetch->deadline_signal;
+        progress_signal = it->second.progress.signal;
+
+        if (result)
+        {
+            it->second.result = std::move(*result);
+            it->second.present = true;
+            it->second.fetch.reset();
+            it->second.progress.signal.reset();
+        }
+        else
+        {
+            if (auto const lru_it = header_lru_map_.find(ledger_seq);
+                lru_it != header_lru_map_.end())
+            {
+                header_lru_.erase(lru_it->second);
+                header_lru_map_.erase(lru_it);
+            }
+            header_cache_.erase(it);
+            refresh_header_entries_projection_locked();
         }
     }
 
-    if (round_sent == 0)
+    complete_header_round(active_round);
+    complete_timer_noexcept(deadline_signal);
+    complete_timer_noexcept(progress_signal);
+    if (completion_signal)
     {
-        catl::core::emit_status(
-            "header seq=" + std::to_string(ledger_seq) +
-            " — no peers available");
-        publish_header_progress(
-            ledger_seq,
-            ProgressKind::no_peer_available,
-            0,
-            static_cast<uint8_t>(kHeaderFanOut));
-        abandon_header_fetch(owned_signal);
-        cleanup.dismiss();
-        throw PeerClientException(Error::Timeout);
+        waiter_wakeups_++;
+        complete_timer_noexcept(completion_signal);
     }
+}
 
-    {
-        std::string peer_list;
-        for (auto const& ep : round_peers)
-        {
-            if (!peer_list.empty())
-                peer_list += ", ";
-            peer_list += ep;
-        }
-        catl::core::emit_status(
-            "anchor header: seq=" + std::to_string(ledger_seq) + " asking " +
-            std::to_string(round_sent) + " peer(s): " + peer_list);
-    }
-
-    // ── Wait loop ──
-    // The owner alone consumes per-round timeout/failure signals. Joiners
-    // wait on the overall completion signal, so they cannot race retry state.
+asio::awaitable<LedgerHeaderResult>
+NodeCache::wait_for_header_fetch(
+    uint32_t ledger_seq,
+    std::shared_ptr<HeaderFetchState> fetch)
+{
     WaitRegistration wait;
     {
         std::lock_guard lock(mutex_);
-        auto it = header_cache_.find(ledger_seq);
+        if (fetch->phase == HeaderFetchState::Phase::cleared)
+            throw PeerClientException(Error::Cancelled);
+        auto const it = header_cache_.find(ledger_seq);
         if (it == header_cache_.end())
+            throw PeerClientException(Error::Timeout);
+        if (it->second.present)
+            co_return it->second.result;
+        if (it->second.fetch != fetch ||
+            fetch->phase != HeaderFetchState::Phase::running)
         {
             throw PeerClientException(Error::Timeout);
         }
-        if (it->second.present)
-        {
-            cleanup.dismiss();
-            co_return it->second.result;
-        }
         wait = attach_waiter_locked(it->second);
-        wait.done_signal = round->signal;
     }
 
     if (!wait.done_signal)
-    {
         throw PeerClientException(Error::Timeout);
-    }
 
     for (;;)
     {
         auto [wake_kind, ec] = co_await wait_for_signal_or_progress(
             wait.done_signal, wait.progress_signal);
+        (void)ec;
 
         std::vector<ProgressEvent> progress_events;
         {
             std::lock_guard lock(mutex_);
-            auto it = header_cache_.find(ledger_seq);
+            if (fetch->phase == HeaderFetchState::Phase::cleared)
+                throw PeerClientException(Error::Cancelled);
+            auto const it = header_cache_.find(ledger_seq);
             if (it == header_cache_.end())
+                throw PeerClientException(Error::Timeout);
+            if (it->second.present)
+                co_return it->second.result;
+            if (it->second.fetch != fetch ||
+                fetch->phase != HeaderFetchState::Phase::running)
             {
                 throw PeerClientException(Error::Timeout);
-            }
-            if (it->second.present)
-            {
-                cleanup.dismiss();
-                co_return it->second.result;
             }
 
             progress_events = it->second.progress.journal.replay(wait.cursor);
             refresh_waiter_locked(it->second, wait);
-            wait.done_signal = round->signal;
         }
+
+        auto const cancel_state =
+            co_await asio::this_coro::cancellation_state;
+        if (cancel_state.cancelled() != asio::cancellation_type::none)
+            throw boost::system::system_error(asio::error::operation_aborted);
 
         for (auto const& event : progress_events)
-        {
             catl::core::emit_status(format_progress(event));
-        }
 
+        // A progress pulse only refreshes the journal cursor. Cancellation of
+        // this observer was handled above without touching HeaderFetchState;
+        // shared terminality remains exclusively operation-owned.
         if (wake_kind == 1)
             continue;
+    }
+}
 
-        // This round timed out / all peers failed.
-        if (peers)
+asio::awaitable<void>
+NodeCache::drive_header_fetch(
+    uint32_t ledger_seq,
+    std::shared_ptr<HeaderFetchState> fetch)
+{
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::disable_cancellation());
+
+    static constexpr int kHeaderFanOut = 3;
+    static constexpr std::uint8_t kMaxRounds = 3;
+    auto const header_timeout = std::max(fetch_timeout_, header_timeout_floor_);
+
+    auto round_is_active =
+        [this, ledger_seq, &fetch](std::shared_ptr<HeaderRound> const& round) {
+            std::lock_guard lock(mutex_);
+            auto const it = header_cache_.find(ledger_seq);
+            return it != header_cache_.end() && !it->second.present &&
+                it->second.fetch == fetch &&
+                fetch->phase == HeaderFetchState::Phase::running &&
+                fetch->active_round == round;
+        };
+
+    auto begin_round = [this, ledger_seq, &fetch](std::uint8_t round_number) {
+        auto round = std::make_shared<HeaderRound>();
+        round->signal = SerializedTimerSignal::create(
+            io_, asio::steady_timer::time_point::max());
+
+        std::lock_guard lock(mutex_);
+        auto const it = header_cache_.find(ledger_seq);
+        if (it == header_cache_.end() || it->second.present ||
+            it->second.fetch != fetch ||
+            fetch->phase != HeaderFetchState::Phase::running)
         {
-            for (auto const& endpoint : round_peers)
-                peers->note_ledger_failure(endpoint, ledger_seq);
+            return std::shared_ptr<HeaderRound>{};
+        }
+        fetch->round_number = round_number;
+        fetch->round_peers.clear();
+        fetch->active_round = round;
+        return round;
+    };
+
+    auto send_one = [this, ledger_seq, &fetch, &round_is_active](
+                        PeerSession* session,
+                        PeerGenerationPin pin,
+                        std::shared_ptr<HeaderRound> const& round) {
+        if (!session || !session->is_ready() || !round_is_active(round))
+            return false;
+
+        auto const endpoint = session->endpoint();
+        if (!round->try_begin_send(std::move(pin)))
+            return false;
+
+        fetch->tried_peers.insert(endpoint);
+        fetch->round_peers.push_back(endpoint);
+        try
+        {
+            send_header_fetch(ledger_seq, *session, fetch, round, fetch->peers);
+        }
+        catch (...)
+        {
+            fetch_errors_++;
+            if (fetch->peers)
+                fetch->peers->note_ledger_failure(endpoint, ledger_seq);
+            if (round->outstanding.fetch_sub(1, std::memory_order_acq_rel) ==
+                    1 &&
+                round->dispatch_complete.load(std::memory_order_acquire))
+            {
+                complete_header_round(round);
+            }
+        }
+        return true;
+    };
+
+    auto dispatch_round =
+        [this, ledger_seq, &fetch, &round_is_active, &send_one, header_timeout](
+            std::shared_ptr<HeaderRound> const& round,
+            PeerGenerationPin primary_pin,
+            PeerSessionPtr primary_owner) -> asio::awaitable<int> {
+        int sent = 0;
+
+        PeerSession* primary =
+            primary_pin ? primary_pin.get() : primary_owner.get();
+        if (primary)
+        {
+            if (send_one(primary, std::move(primary_pin), round))
+                ++sent;
+        }
+        // HeaderRound is the only managed authority allowed to survive the
+        // synchronous send. Do not retain a duplicate generation pin (or an
+        // unmanaged owner) across peer selection: clear() must be able to
+        // drain the admitted round while this detached driver is suspended.
+        primary_pin.reset();
+        primary_owner.reset();
+
+        if (fetch->peers && sent < kHeaderFanOut && round_is_active(round))
+        {
+            auto extras = co_await fetch->peers->co_select_peers_for(
+                ledger_seq, kHeaderFanOut - sent, fetch->tried_peers);
+            for (auto& extra : extras)
+            {
+                if (!round_is_active(round))
+                    break;
+                auto* session = extra.get();
+                if (send_one(session, std::move(extra), round))
+                    ++sent;
+            }
         }
 
-        // Try dispatching a new round with fresh peers.
-        if (round_number < kMaxRounds - 1)
+        // Only the first empty round waits for targeted admission. The
+        // operation-owned cancellation token makes clear/deadline drain
+        // this wait instead of leaving a detached driver behind.
+        if (sent == 0 && fetch->peers && fetch->total_peers_tried == 0 &&
+            round_is_active(round))
         {
-            ++round_number;
-            round = begin_round(round_number);
-            if (!round)
-                throw PeerClientException(Error::Timeout);
-
-            round_sent = co_await dispatch_round(nullptr, round);
-            total_peers_tried += round_sent;
-
-            std::lock_guard lock(mutex_);
-            auto it = header_cache_.find(ledger_seq);
-            if (it == header_cache_.end())
-                throw PeerClientException(Error::Timeout);
-            if (it->second.present)
+            auto fallback = co_await fetch->peers->wait_for_peer(
+                ledger_seq,
+                std::max(0, peer_refresh_timeout_secs_),
+                fetch->tried_peers,
+                fetch->cancel);
+            if (round_is_active(round))
             {
-                cleanup.dismiss();
-                co_return it->second.result;
+                auto* session = fallback.get();
+                if (send_one(session, std::move(fallback), round))
+                    ++sent;
+            }
+            fallback.reset();
+        }
+
+        if (sent > 0 && round_is_active(round))
+            round->signal->expires_after(header_timeout);
+
+        round->dispatch_complete.store(true, std::memory_order_release);
+        if (round->outstanding.load(std::memory_order_acquire) == 0)
+            complete_header_round(round);
+
+        co_return sent;
+    };
+
+    try
+    {
+        for (std::uint8_t round_number = 0; round_number < kMaxRounds;
+             ++round_number)
+        {
+            auto round = begin_round(round_number);
+            if (!round)
+                co_return;
+
+            PeerGenerationPin primary_pin;
+            PeerSessionPtr primary_owner;
+            if (round_number == 0)
+            {
+                std::lock_guard lock(mutex_);
+                auto const it = header_cache_.find(ledger_seq);
+                if (it == header_cache_.end() || it->second.fetch != fetch ||
+                    fetch->phase != HeaderFetchState::Phase::running)
+                {
+                    co_return;
+                }
+                primary_pin = fetch->initial_pin.share();
+                primary_owner = fetch->unmanaged_owner;
             }
 
-            if (round_sent > 0)
+            auto const sent = co_await dispatch_round(
+                round, std::move(primary_pin), std::move(primary_owner));
+            fetch->total_peers_tried += sent;
+
+            if (round_number == 0)
             {
-                wait.done_signal = round->signal;
+                PeerGenerationPin initial_pin;
+                {
+                    std::lock_guard lock(mutex_);
+                    auto const it = header_cache_.find(ledger_seq);
+                    if (it != header_cache_.end() && it->second.fetch == fetch)
+                    {
+                        initial_pin = std::move(fetch->initial_pin);
+                    }
+                }
+            }
+
+            if (!round_is_active(round))
+                co_return;
+
+            if (sent == 0)
+            {
                 catl::core::emit_status(
                     "header seq=" + std::to_string(ledger_seq) +
-                    " — retry round " + std::to_string(round_number + 1) + "/" +
-                    std::to_string(kMaxRounds) + " asking " +
-                    std::to_string(round_sent) + " peer(s): " + [&]() {
-                        std::string s;
-                        for (auto const& ep : round_peers)
-                        {
-                            if (!s.empty())
-                                s += ", ";
-                            s += ep;
-                        }
-                        return s;
-                    }());
-                continue;
+                    " — no peers available");
+                publish_header_progress(
+                    ledger_seq,
+                    ProgressKind::no_peer_available,
+                    0,
+                    static_cast<std::uint8_t>(kHeaderFanOut));
+                finish_header_fetch(ledger_seq, fetch);
+                co_return;
             }
-            // No new peers found — fall through to give up
+
+            std::string peer_list;
+            for (auto const& endpoint : fetch->round_peers)
+            {
+                if (!peer_list.empty())
+                    peer_list += ", ";
+                peer_list += endpoint;
+            }
+            catl::core::emit_status(
+                (round_number == 0 ? "anchor header: seq="
+                                   : "header retry: seq=") +
+                std::to_string(ledger_seq) + " asking " + std::to_string(sent) +
+                " peer(s): " + peer_list);
+
+            WaitRegistration wait;
+            {
+                std::lock_guard lock(mutex_);
+                auto const it = header_cache_.find(ledger_seq);
+                if (it == header_cache_.end() || it->second.fetch != fetch ||
+                    fetch->phase != HeaderFetchState::Phase::running)
+                {
+                    co_return;
+                }
+                wait = attach_waiter_locked(it->second);
+                wait.done_signal = round->signal;
+            }
+
+            for (;;)
+            {
+                auto [wake_kind, ec] = co_await wait_for_signal_or_progress(
+                    wait.done_signal, wait.progress_signal);
+                (void)ec;
+
+                std::vector<ProgressEvent> progress_events;
+                {
+                    std::lock_guard lock(mutex_);
+                    auto const it = header_cache_.find(ledger_seq);
+                    if (it == header_cache_.end() || it->second.present ||
+                        it->second.fetch != fetch ||
+                        fetch->phase != HeaderFetchState::Phase::running ||
+                        fetch->active_round != round)
+                    {
+                        co_return;
+                    }
+                    progress_events =
+                        it->second.progress.journal.replay(wait.cursor);
+                    refresh_waiter_locked(it->second, wait);
+                    wait.done_signal = round->signal;
+                }
+
+                for (auto const& event : progress_events)
+                    catl::core::emit_status(format_progress(event));
+
+                if (wake_kind == 1)
+                    continue;
+                break;
+            }
+
+            complete_header_round(round);
+            if (fetch->peers)
+            {
+                for (auto const& endpoint : fetch->round_peers)
+                    fetch->peers->note_ledger_failure(endpoint, ledger_seq);
+            }
+
+            if (round_number + 1 < kMaxRounds)
+            {
+                publish_header_progress(
+                    ledger_seq,
+                    ProgressKind::switch_peer,
+                    static_cast<std::uint8_t>(round_number + 2),
+                    kMaxRounds);
+            }
         }
 
         catl::core::emit_status(
             "header seq=" + std::to_string(ledger_seq) + " — giving up after " +
-            std::to_string(total_peers_tried) + " peers across " +
-            std::to_string(round_number + 1) + " round(s)");
+            std::to_string(fetch->total_peers_tried) + " peers across " +
+            std::to_string(kMaxRounds) + " round(s)");
         publish_header_progress(
             ledger_seq,
             ProgressKind::give_up,
-            static_cast<uint8_t>(total_peers_tried),
-            static_cast<uint8_t>(kHeaderFanOut * kMaxRounds));
-        abandon_header_fetch(owned_signal);
-        cleanup.dismiss();
-        throw PeerClientException(Error::Timeout);
+            static_cast<std::uint8_t>(fetch->total_peers_tried),
+            static_cast<std::uint8_t>(kHeaderFanOut * kMaxRounds));
+        finish_header_fetch(ledger_seq, fetch);
+    }
+    catch (...)
+    {
+        finish_header_fetch(ledger_seq, fetch);
     }
 }
 
@@ -1938,12 +2450,12 @@ NodeCache::bytes() const
 }
 
 void
-NodeCache::clear()
+NodeCache::clear_nodes()
 {
-    std::vector<std::shared_ptr<asio::steady_timer>> signals;
+    std::vector<std::shared_ptr<SerializedTimerSignal>> signals;
     {
         std::lock_guard lock(mutex_);
-        signals.reserve(store_.size() * 2 + header_cache_.size() * 3);
+        signals.reserve(store_.size() * 2);
         for (auto const& [_, entry] : store_)
         {
             if (entry.signal)
@@ -1951,26 +2463,225 @@ NodeCache::clear()
             if (entry.progress.signal)
                 signals.push_back(entry.progress.signal);
         }
-        for (auto const& [_, entry] : header_cache_)
-        {
-            if (entry.signal)
-                signals.push_back(entry.signal);
-            if (entry.active_round_signal)
-                signals.push_back(entry.active_round_signal);
-            if (entry.progress.signal)
-                signals.push_back(entry.progress.signal);
-        }
 
         store_.clear();
-        header_cache_.clear();
         lru_.clear();
         lru_map_.clear();
-        header_lru_.clear();
-        header_lru_map_.clear();
     }
 
     for (auto const& signal : signals)
         complete_timer_noexcept(signal);
+}
+
+asio::awaitable<void>
+NodeCache::co_clear_headers()
+{
+    if (!header_state_strand_.running_in_this_thread())
+    {
+        auto self = shared_from_this();
+        auto state_executor = catl::core::ContextExecutor(
+            header_state_strand_, catl::core::retain_current_request());
+        co_return co_await asio::co_spawn(
+            std::move(state_executor),
+            [self]() -> asio::awaitable<void> {
+                co_await self->co_clear_headers();
+            },
+            asio::use_awaitable);
+    }
+
+    auto clear = header_clear_state_;
+    if (!clear)
+    {
+        //@@authority transition=node_cache.open_header_clear owner=node_cache
+        // commit=header-state-strand
+        clear = std::make_shared<HeaderClearState>();
+        clear->completion_signal = SerializedTimerSignal::create(
+            io_, asio::steady_timer::time_point::max());
+        header_clear_state_ = clear;
+
+        try
+        {
+            auto self = shared_from_this();
+            asio::co_spawn(
+                header_state_strand_,
+                [self, clear]() -> asio::awaitable<void> {
+                    co_await self->drive_header_clear(clear);
+                },
+                [self, clear](std::exception_ptr error) {
+                    if (error)
+                    {
+                        clear->failure = error;
+                        clear->phase = HeaderClearState::Phase::failed;
+                        // Failure after the boundary committed stays closed.
+                    }
+                    else
+                    {
+                        clear->phase = HeaderClearState::Phase::succeeded;
+                        if (self->header_clear_state_ == clear)
+                            self->header_clear_state_.reset();
+                    }
+                    clear->completion_signal->complete();
+                });
+        }
+        catch (...)
+        {
+            // Launch failed before drive_header_clear could commit the epoch or
+            // touch an entry, so this is a genuine owner-local rollback.
+            clear->failure = std::current_exception();
+            clear->phase = HeaderClearState::Phase::failed;
+            if (header_clear_state_ == clear)
+                header_clear_state_.reset();
+            clear->completion_signal->complete();
+        }
+    }
+
+    for (;;)
+    {
+        (void)co_await clear->completion_signal->wait();
+        auto const cancel_state =
+            co_await asio::this_coro::cancellation_state;
+        if (cancel_state.cancelled() != asio::cancellation_type::none)
+            throw boost::system::system_error(asio::error::operation_aborted);
+        if (clear->phase != HeaderClearState::Phase::running)
+            break;
+    }
+
+    if (clear->failure)
+        std::rethrow_exception(clear->failure);
+}
+
+asio::awaitable<void>
+NodeCache::drive_header_clear(std::shared_ptr<HeaderClearState> clear)
+{
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::disable_cancellation());
+
+    struct DrainItem
+    {
+        std::shared_ptr<HeaderFetchState> fetch;
+        std::shared_ptr<HeaderRound> round;
+        std::shared_ptr<SerializedTimerSignal> progress_signal;
+        PeerGenerationPin initial_pin;
+        PeerSessionPtr unmanaged_owner;
+    };
+
+    if (header_clear_state_ != clear)
+        co_return;
+    if (header_epoch_ == std::numeric_limits<std::uint64_t>::max())
+        throw PeerClientException(
+            Error::ResourceExhausted, "ledger-header epoch exhausted");
+
+    std::vector<DrainItem> drains;
+    drains.reserve(active_header_fetches_.size());
+    for (auto const& [_, fetch] : active_header_fetches_)
+        drains.push_back(DrainItem{.fetch = fetch});
+
+    // The active-operation registry, not the cache map, is the exhaustive
+    // predecessor census. Terminal cache entries may already have released
+    // HeaderEntry::fetch while their servants are still unwinding.
+    //@@authority transition=node_cache.commit_header_clear owner=node_cache
+    // commit=header-state-strand
+    ++header_epoch_;
+    {
+        std::lock_guard lock(mutex_);
+        for (auto& drain : drains)
+        {
+            auto& fetch = drain.fetch;
+            if (fetch->phase == HeaderFetchState::Phase::running)
+                fetch->phase = HeaderFetchState::Phase::cleared;
+            fetch->cancel->store(true, std::memory_order_release);
+            drain.round = std::move(fetch->active_round);
+            drain.initial_pin = std::move(fetch->initial_pin);
+            drain.unmanaged_owner = std::move(fetch->unmanaged_owner);
+        }
+        for (auto const& [_, entry] : header_cache_)
+        {
+            if (entry.progress.signal)
+            {
+                // Store one retained signal on its owning operation when
+                // possible; otherwise complete it immediately below.
+                auto const fetch = entry.fetch;
+                if (fetch)
+                {
+                    auto const found = std::find_if(
+                        drains.begin(),
+                        drains.end(),
+                        [&fetch](DrainItem const& drain) {
+                            return drain.fetch == fetch;
+                        });
+                    if (found != drains.end())
+                        found->progress_signal = entry.progress.signal;
+                    else
+                        complete_timer_noexcept(entry.progress.signal);
+                }
+                else
+                {
+                    complete_timer_noexcept(entry.progress.signal);
+                }
+            }
+        }
+
+        header_cache_.clear();
+        header_lru_.clear();
+        header_lru_map_.clear();
+        refresh_header_entries_projection_locked();
+    }
+
+    // Commit precedes every wake. Crucially, the clear servant must not retain
+    // moved pins while awaiting the frame acknowledgements.
+    for (auto& drain : drains)
+    {
+        complete_header_round(drain.round);
+        complete_timer_noexcept(drain.fetch->completion_signal);
+        complete_timer_noexcept(drain.fetch->deadline_signal);
+        complete_timer_noexcept(drain.progress_signal);
+        drain.initial_pin.reset();
+        drain.unmanaged_owner.reset();
+        drain.round.reset();
+    }
+
+    for (auto const& drain : drains)
+    {
+        if (drain.fetch->driver_done_signal)
+            (void)co_await drain.fetch->driver_done_signal->wait();
+        if (drain.fetch->deadline_done_signal)
+            (void)co_await drain.fetch->deadline_done_signal->wait();
+    }
+
+    // Every pin destructor has now emitted its release command. Receipt the
+    // actual owner PeerSets after those commands, once each.
+    std::vector<std::shared_ptr<PeerSet>> peer_sets;
+    peer_sets.reserve(drains.size());
+    for (auto const& drain : drains)
+    {
+        for (auto const& peers : drain.fetch->release_owners)
+        {
+            if (peers &&
+                std::find(peer_sets.begin(), peer_sets.end(), peers) ==
+                    peer_sets.end())
+            {
+                peer_sets.push_back(peers);
+            }
+        }
+    }
+    for (auto const& peers : peer_sets)
+        co_await peers->co_generation_pin_release_barrier();
+
+    if (!header_state_strand_.running_in_this_thread())
+        co_await asio::post(header_state_strand_, asio::use_awaitable);
+
+    //@@authority transition=node_cache.complete_header_clear_drain
+    // owner=node_cache commit=header-state-strand
+    for (auto const& drain : drains)
+    {
+        auto const it =
+            active_header_fetches_.find(drain.fetch->operation_id);
+        if (it != active_header_fetches_.end() &&
+            it->second == drain.fetch)
+        {
+            active_header_fetches_.erase(it);
+        }
+    }
 }
 
 NodeCache::Stats
@@ -1986,7 +2697,8 @@ NodeCache::stats() const
     return {
         .entries = store_.size(),
         .resident_entries = resident_entries,
-        .header_entries = header_cache_.size(),
+        .header_entries =
+            header_entries_projection_.load(std::memory_order_acquire),
         .max_entries = max_entries_,
         .hits = hits_,
         .misses = misses_,
@@ -1995,6 +2707,13 @@ NodeCache::stats() const
         .hash_mismatches = hash_mismatches_,
         .waiter_wakeups = waiter_wakeups_,
     };
+}
+
+void
+NodeCache::refresh_header_entries_projection_locked() noexcept
+{
+    header_entries_projection_.store(
+        header_cache_.size(), std::memory_order_release);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2079,7 +2798,7 @@ NodeCache::evict_headers_if_needed()
         auto it = header_cache_.find(victim);
         if (it != header_cache_.end())
         {
-            if (!it->second.present && it->second.signal)
+            if (!it->second.present && it->second.fetch)
             {
                 header_lru_.splice(
                     header_lru_.begin(),
@@ -2089,6 +2808,7 @@ NodeCache::evict_headers_if_needed()
             }
             PLOGD(log_, "  evict header: seq=", victim);
             header_cache_.erase(it);
+            refresh_header_entries_projection_locked();
         }
         header_lru_map_.erase(victim);
         header_lru_.pop_back();

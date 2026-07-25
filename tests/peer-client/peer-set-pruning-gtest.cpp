@@ -469,7 +469,7 @@ TEST(PeerSetPruning, TimedOutWaitForPeerClearsWantedLedger)
             try
             {
                 auto client = co_await peers->wait_for_peer(wanted_ledger, 0);
-                EXPECT_EQ(client, nullptr);
+                EXPECT_FALSE(client);
             }
             catch (std::exception const& e)
             {
@@ -513,7 +513,7 @@ TEST(PeerSetPruning, CancelledWaitForPeerClearsWantedLedger)
             {
                 auto client =
                     co_await peers->wait_for_peer(wanted_ledger, 30, cancel);
-                EXPECT_EQ(client, nullptr);
+                EXPECT_FALSE(client);
             }
             catch (std::exception const& e)
             {
@@ -672,7 +672,7 @@ TEST(PeerSetPruning, TimedOutWaitRevokesQueuedReplacementProbe)
         endpoint,
         {.first_seq = 400, .last_seq = 600, .current_seq = 600});
 
-    PeerSessionPtr result;
+    PeerGenerationPin result;
     asio::co_spawn(
         io,
         [&]() -> asio::awaitable<void> {
@@ -681,7 +681,7 @@ TEST(PeerSetPruning, TimedOutWaitRevokesQueuedReplacementProbe)
         asio::detached);
     io.run();
 
-    EXPECT_EQ(result, nullptr);
+    EXPECT_FALSE(result);
     io.restart();
     EXPECT_FALSE(PeerSetTestAccess::is_targeted_connect(io, peers, endpoint));
     EXPECT_FALSE(PeerSetTestAccess::has_wanted_ledger(io, peers, ledger_seq));
