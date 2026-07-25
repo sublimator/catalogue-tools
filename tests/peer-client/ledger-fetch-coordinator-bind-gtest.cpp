@@ -307,6 +307,7 @@ TEST(LedgerFetchCoordinatorBind, LostCompletionPostIsRecoveredByTheBindDeadline)
     EXPECT_EQ(row->phase, Phase::publishable)
         << "the deadline had to re-bind, or this row is still awaiting_bind";
     EXPECT_GE(row->bind_attempts, 2u);
+    ASSERT_TRUE(row->sealed.has_value()) << "dereferenced below";
     EXPECT_EQ(row->sealed->attempt_id(), row->intent.attempt_id())
         << "recovery must re-bind the SAME attempt, not mint a new one";
 
@@ -1074,4 +1075,53 @@ TEST(LedgerFetchCoordinatorBind, FenceDeliveryBuffersNeverReallocate)
     EXPECT_EQ(capacity_after, capacity_before)
         << "a changed capacity means an allocation happened on a path that must "
            "never allocate";
+}
+
+/// 29. The unobserved-projection residue saturates ABSORBINGLY.
+///
+/// The previous version was not absorbing and mutation 14 was not evidence for it:
+/// that mutation exercises underflow, a different branch. At the ceiling,
+/// `note_projection_opened` marked accounting broken and returned WITHOUT counting
+/// the new projection, while `note_projection_observed` still decremented from the
+/// ceiling — so the residue drained back down, and with enough observations would
+/// have reported zero while uncounted work was outstanding. A false zero reached
+/// from the opposite direction to the wrap it was written to prevent.
+///
+/// Driven directly to the ceiling through the seam, exactly like the
+/// sender-generation ceiling control, because reaching it honestly needs 2^64
+/// lost completions.
+TEST(LedgerFetchCoordinatorBind, ProjectionResidueSaturatesAbsorbingly)
+{
+    CoordFixture f;
+    constexpr auto kCeiling = LedgerFetchCoordinator::kMaxOutstandingProjections;
+
+    // One below: a normal open still counts, and nothing is broken yet.
+    Access::set_outstanding_projections(f.coord, kCeiling - 1);
+    Access::note_projection_opened(f.coord);
+    EXPECT_EQ(f.coord->outstanding_bind_projections(), kCeiling);
+    EXPECT_FALSE(f.coord->accounting_broken());
+
+    // At the ceiling: the next open cannot be counted, so it saturates.
+    Access::note_projection_opened(f.coord);
+    EXPECT_TRUE(f.coord->accounting_broken())
+        << "an uncountable projection is an accounting failure, not a no-op";
+    EXPECT_EQ(f.coord->outstanding_bind_projections(), kCeiling);
+
+    // THE point: observations must not drain it. Ten of them, because the old
+    // behaviour decremented once per observation and would have looked fine after
+    // one.
+    for (int i = 0; i < 10; ++i)
+    {
+        Access::note_projection_observed(f.coord);
+        ASSERT_EQ(f.coord->outstanding_bind_projections(), kCeiling)
+            << "residue drained at observation " << i
+            << "; saturation must be absorbing, not merely recorded";
+    }
+    EXPECT_NE(f.coord->outstanding_bind_projections(), 0u)
+        << "a saturated residue must never report zero — that is the one answer "
+           "this diagnostic exists to make impossible";
+
+    // The fixture destructor asserts !accounting_broken(), which this control
+    // deliberately violates, so clear the expectation it is checking.
+    Access::clear_accounting_broken(f.coord);
 }

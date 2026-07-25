@@ -128,6 +128,41 @@ public:
         return Coordinator::allocate_sender_generation();
     }
 
+    /// Drive the accounting transitions directly. Reaching the projection ceiling
+    /// honestly would need 2^64 lost completions, so the ceiling control forces it
+    /// the same way the sender-generation ceiling control does.
+    static void
+    note_projection_opened(std::shared_ptr<Coordinator> const& c)
+    {
+        c->note_projection_opened();
+    }
+
+    static void
+    note_projection_observed(std::shared_ptr<Coordinator> const& c)
+    {
+        c->note_projection_observed();
+    }
+
+    /// For the ONE control that deliberately breaks an invariant to prove the
+    /// guard fires. Clearing it lets the fixture destructor still mean something
+    /// for every other control.
+    static void
+    clear_accounting_broken(std::shared_ptr<Coordinator> const& c)
+    {
+        c->accounting_broken_.store(false, std::memory_order_release);
+        c->projection_residue_saturated_.store(false, std::memory_order_release);
+        c->outstanding_projections_.store(0, std::memory_order_release);
+    }
+
+    /// Drive the unobserved-projection residue near its absorbing ceiling.
+    static void
+    set_outstanding_projections(
+        std::shared_ptr<Coordinator> const& c,
+        std::uint64_t value)
+    {
+        c->outstanding_projections_.store(value, std::memory_order_release);
+    }
+
     /// Drive the attempt-ID space to its ceiling.
     static void
     set_next_attempt(std::shared_ptr<Coordinator> const& c, std::uint64_t value)

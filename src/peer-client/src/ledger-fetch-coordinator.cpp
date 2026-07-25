@@ -187,7 +187,7 @@ LedgerFetchCoordinator::bind_bounds_spent(OutboxRow const& row) noexcept
         std::chrono::steady_clock::now() >= row.absolute_deadline;
 }
 
-//@@audit-ack unannotated_authority_candidate reason="conservative wrapper around timer cancellation; owns no state and is only ever reached from inside a commit section that carries its own directive" ref=2026-07-25-206113a-coordinator-review-reject
+//@@audit-ack unannotated_authority_candidate reason="internal sub-operation dominated exclusively by the annotated settle_bind and terminalize_row commit transitions; it does mutate owned timer state, so it is not inert, but it has no reachable caller outside those two" ref=2026-07-25-b074165-coordinator-review-final-closure
 void
 LedgerFetchCoordinator::cancel_quietly(OutboxRow& row) noexcept
 {
@@ -483,6 +483,13 @@ LedgerFetchCoordinator::release_work() noexcept
         {
             // Underflow means one unit was released twice, which is the
             // conservation failure this single projection exists to prevent.
+            //
+            // The public contract says ANY conserved quantity, and the work
+            // projection is one of them. This was log-only while the fence permit
+            // and projection counters were sticky — an inconsistency that would
+            // have let a control pass over a work-unit breach exactly the way one
+            // passed over three permit underflows.
+            accounting_broken_.store(true, std::memory_order_release);
             PLOGE(log_, "work projection underflow; a permit was released twice");
             return;
         }
@@ -543,6 +550,11 @@ LedgerFetchCoordinator::note_projection_opened() noexcept
     {
         if (current >= kMaxOutstandingProjections)
         {
+            // ABSORBING, not merely recorded. This branch used to return without
+            // counting the projection while observations kept decrementing, so the
+            // residue drained back toward zero with uncounted work outstanding.
+            // The flag now makes the public residue permanently nonzero.
+            projection_residue_saturated_.store(true, std::memory_order_release);
             accounting_broken_.store(true, std::memory_order_release);
             PLOGE(
                 log_,
@@ -566,6 +578,12 @@ LedgerFetchCoordinator::note_projection_opened() noexcept
 void
 LedgerFetchCoordinator::note_projection_observed() noexcept
 {
+    if (projection_residue_saturated_.load(std::memory_order_acquire))
+    {
+        // Absorbing: past the ceiling the count is meaningless, so draining it
+        // would manufacture a false zero from the other direction.
+        return;
+    }
     auto current = outstanding_projections_.load(std::memory_order_relaxed);
     for (;;)
     {

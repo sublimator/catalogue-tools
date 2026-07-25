@@ -239,6 +239,16 @@ public:
     std::size_t
     outstanding_bind_projections() const noexcept
     {
+        // Saturation is ABSORBING here, not merely marked. The previous version
+        // set a flag at the ceiling and returned without counting the new
+        // projection, so the next observation decremented from the ceiling and the
+        // value could drain all the way to zero while uncounted work remained —
+        // the exact false zero the ceiling exists to prevent, reached by a
+        // different route.
+        if (projection_residue_saturated_.load(std::memory_order_acquire))
+        {
+            return static_cast<std::size_t>(kMaxOutstandingProjections);
+        }
         return static_cast<std::size_t>(
             outstanding_projections_.load(std::memory_order_acquire));
     }
@@ -428,11 +438,20 @@ private:
     /// actually accepted a projection; decremented only when one is observed.
     ///
     /// Lost completions accumulate monotonically and are never reclaimed, so this
-    /// can only grow over a long-lived process. It saturates at
-    /// kMaxOutstandingProjections and STAYS there, marking accounting broken — a
-    /// wrapping counter would eventually report a false zero, which is the one
-    /// answer this diagnostic must never give.
+    /// can only grow over a long-lived process. A wrapping counter would
+    /// eventually report a false zero, which is the one answer this diagnostic
+    /// must never give.
+    ///
+    /// Read through `outstanding_bind_projections()`, never directly: past the
+    /// ceiling this value is meaningless and the saturation flag is authoritative.
     std::atomic<std::uint64_t> outstanding_projections_{0};
+
+    /// Absorbing. Once set, the public residue reports the ceiling forever and no
+    /// observation can drain it. A flag that merely RECORDED reaching the ceiling
+    /// was not absorbing at all: opens past it were uncounted while observations
+    /// still decremented, so the residue drained back toward zero with real work
+    /// outstanding.
+    std::atomic<bool> projection_residue_saturated_{false};
 
     /// Sticky, and shared by every conservation invariant in this class. Set on an
     /// observation with nothing open, a permit released that was never taken, or a
