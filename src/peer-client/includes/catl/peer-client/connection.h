@@ -308,6 +308,32 @@ private:
     bool admission_closed_ = false;
     bool close_ran_ = false;
 
+    /// How this connection ends, committed the moment a cause is OBSERVED and
+    /// honored by whichever frame later wins `close_ran_`.
+    ///
+    /// This exists because `fire_disconnect` used to be transition authority held
+    /// only in a stack argument. A handler reacting to a fatal write could call
+    /// close(), whose `settle_and_close(operation_aborted, false)` won the shared
+    /// latch with the WEAKER disposition — the socket closed and the disconnect
+    /// export, the sole commit that moves PeerClient to Failed and publishes
+    /// PeerTerminalReason, was consumed without firing. Authority for a
+    /// world-changing transition has to live in an owned row, not on a stack.
+    ///
+    /// First commit wins, which is sufficient because every path commits its
+    /// disposition before running external code.
+    struct CloseDisposition
+    {
+        boost::system::error_code cause;
+        bool fire_disconnect;
+    };
+    std::optional<CloseDisposition> close_disposition_;
+
+    /// Commit the terminal disposition if none is committed yet. Idempotent.
+    void
+    select_close_disposition(
+        boost::system::error_code cause,
+        bool fire_disconnect);
+
     // Redirect IPs from 503 response
     std::set<std::string> redirect_ips_;
 
@@ -351,16 +377,6 @@ private:
 
     void
     on_write_complete(boost::system::error_code ec);
-
-    /// Move every owed logical terminal out of the queue and the active row,
-    /// WITHOUT invoking any of them. The active row's packet is deliberately left
-    /// in place — Asio still owns those bytes until completion.
-    ///
-    /// Collection is separated from delivery so owner-local settlement can finish
-    /// before any external callback runs. A handler that throws then cannot leave
-    /// the socket open or the remaining terminals undelivered.
-    std::vector<std::function<void(boost::system::error_code)>>
-    take_write_terminals();
 
     /// Invoke one external terminal, exactly once, containing any exception.
     /// The handler type is not `noexcept` and no contract forbids throws, so an

@@ -1204,6 +1204,11 @@ peer_connection::on_write_complete(boost::system::error_code ec)
         // below: admission and settlement are separate facts precisely so this
         // ordering is expressible.
         admission_closed_ = true;
+        // Commit the failure disposition too, not just the gate. Otherwise a
+        // handler that calls close() wins close_ran_ with (operation_aborted,
+        // fire_disconnect=false) and the connection's sole terminal export is
+        // consumed without firing.
+        select_close_disposition(ec, /*fire_disconnect=*/true);
         note_connect_failure("packet write", ec);
         PLOGW(
             log_,
@@ -1222,6 +1227,13 @@ peer_connection::on_write_complete(boost::system::error_code ec)
 
     if (fatal)
     {
+        // The exposure above deliberately precedes this settlement: the write's
+        // own terminal must arrive before the disconnect export, or PeerClient
+        // drains the request as disconnected and then receives its terminal too.
+        // Safe because the failure DISPOSITION is already committed to an owned
+        // row above, so a re-entrant close() inside that handler cannot downgrade
+        // it — which is the second of the two shapes the reviewer allowed.
+        //@@audit-ack callback_exposed_before_settlement reason="disposition committed to close_disposition_ before exposure; re-entrant close honors it" ref=2026-07-25-e33cc5a-verdict-B1
         fail_and_close(ec);  // settles: terminals, socket, disconnect
         return;
     }
@@ -1235,39 +1247,6 @@ peer_connection::on_write_complete(boost::system::error_code ec)
     // attempt. Returning instead would leave them parked until some later
     // async_send_packet happened to pump them.
     do_write();
-}
-
-std::vector<std::function<void(boost::system::error_code)>>
-peer_connection::take_write_terminals()
-{
-    std::vector<std::function<void(boost::system::error_code)>> owed;
-
-    // Uninitiated successors: no Asio operation ever saw these buffers, so
-    // destroying the rows now is safe.
-    while (!write_queue_.empty())
-    {
-        auto entry = std::move(write_queue_.front());
-        write_queue_.pop_front();
-        if (entry.handler)
-            owed.push_back(std::move(entry.handler));
-    }
-
-    // The active write is different in kind. Asio owns its buffer until the
-    // composed operation completes, so only its LOGICAL terminal is taken here;
-    // the packet stays put. The original defect was moving the whole entry out of
-    // the queue, which carried the vector's allocation into a loop-local that died
-    // that same iteration and freed memory Asio was still reading.
-    if (active_write_)
-    {
-        if (active_write_->handler)
-            owed.push_back(std::move(active_write_->handler));
-        active_write_->handler = nullptr;  // consumption IS the move
-    }
-
-    // NB: the in-flight latch is deliberately NOT cleared here. It is
-    // `active_write_` itself, and clearing it while Asio still owns the buffer is
-    // precisely the bug. It clears in on_write_complete().
-    return owed;
 }
 
 //@@callback-funnel
@@ -1718,11 +1697,16 @@ peer_connection::close()
     close_impl();
 }
 
+//@@settlement
 void
 peer_connection::settle_and_close(
     boost::system::error_code terminal_ec,
     bool fire_disconnect)
 {
+    // Commit the disposition BEFORE the latch check, so a frame that loses the
+    // race still records its cause if none was recorded yet.
+    select_close_disposition(terminal_ec, fire_disconnect);
+
     if (close_ran_)
         return;
     close_ran_ = true;
@@ -1737,11 +1721,26 @@ peer_connection::settle_and_close(
     // this is the catch-all for every teardown path (eviction + errors).
     release_inbound_charge();
 
-    // Collect the owed terminals but do NOT invoke them yet. Everything below up
-    // to the delivery loop is owner-local settlement; a handler that throws (the
-    // type is not noexcept and no contract forbids it) must not be able to leave
-    // the socket open or the remaining terminals undelivered.
-    auto owed = take_write_terminals();
+    // Take the owed terminals but do NOT invoke them yet. Everything up to the
+    // delivery loop is owner-local settlement; a handler that throws (the type is
+    // not noexcept and no contract forbids it) must not be able to leave the
+    // socket open or the remaining terminals undelivered.
+    //
+    // Both moves are non-allocating, which is deliberate: an earlier version grew
+    // a std::vector with push_back AFTER latching close_ran_, so an allocation
+    // failure unwound with the idempotency flag already committed, rows already
+    // popped, the socket still open, and every later close returning immediately.
+    // Moving the deque wholesale removes the fallible preparation instead of
+    // merely ordering it.
+    auto pending = std::move(write_queue_);
+    write_queue_.clear();
+    std::function<void(boost::system::error_code)> active_terminal;
+    if (active_write_)
+    {
+        active_terminal = std::move(active_write_->handler);
+        active_write_->handler = nullptr;  // consumption IS the move
+        // NB: the active PACKET stays put. Asio owns those bytes until completion.
+    }
 
     if (socket_ && socket_->lowest_layer().is_open())
     {
@@ -1764,14 +1763,28 @@ peer_connection::settle_and_close(
     disconnect_handler_ = nullptr;
 
     // Settlement is complete and consistent. External callbacks only from here,
-    // each individually contained.
-    for (auto& handler : owed)
+    // each individually contained, and carrying the COMMITTED disposition rather
+    // than this frame's arguments.
+    auto const disposition = *close_disposition_;
+    for (auto& entry : pending)
     {
-        deliver_terminal(handler, terminal_ec);
+        deliver_terminal(entry.handler, disposition.cause);
     }
-    if (fire_disconnect)
+    deliver_terminal(active_terminal, disposition.cause);
+    if (disposition.fire_disconnect)
     {
-        deliver_terminal(disconnect, terminal_ec);
+        deliver_terminal(disconnect, disposition.cause);
+    }
+}
+
+void
+peer_connection::select_close_disposition(
+    boost::system::error_code cause,
+    bool fire_disconnect)
+{
+    if (!close_disposition_)
+    {
+        close_disposition_ = CloseDisposition{cause, fire_disconnect};
     }
 }
 
@@ -1781,6 +1794,7 @@ peer_connection::close_impl()
     settle_and_close(asio::error::operation_aborted, /*fire_disconnect=*/false);
 }
 
+//@@settlement
 void
 peer_connection::fail_and_close(boost::system::error_code ec)
 {

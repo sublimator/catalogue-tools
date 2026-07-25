@@ -52,6 +52,8 @@ struct WriteHarness
 {
     asio::io_context io;
     asio::ssl::context ssl{asio::ssl::context::tlsv12_client};
+    asio::strand<asio::io_context::executor_type> strand{
+        asio::make_strand(io.get_executor())};
     std::shared_ptr<peer_connection> conn;
 
     /// Captured completions for writes that were "initiated" but not finished.
@@ -81,8 +83,7 @@ struct WriteHarness
     WriteHarness()
     {
         peer_config config;
-        conn = std::make_shared<peer_connection>(
-            asio::make_strand(io.get_executor()), ssl, std::move(config));
+        conn = std::make_shared<peer_connection>(strand, ssl, std::move(config));
         // Open the socket so "reaches closed state" assertions are not vacuous:
         // on a never-opened socket is_open() is false before teardown too.
         boost::system::error_code ec;
@@ -121,6 +122,22 @@ struct WriteHarness
                 if (reenter)
                     reenter();
             });
+    }
+
+    /// Fire a captured completion FROM the connection's strand.
+    ///
+    /// Load-bearing, not cosmetic: `close()` runs `close_impl()` inline only when
+    /// `strand_.running_in_this_thread()`. Completing from the test body instead
+    /// makes a re-entrant `close()` merely POST, which silently defuses every
+    /// synchronous re-entrancy this file claims to force. A control caught exactly
+    /// that — the disposition test passed with the fix reverted.
+    void
+    complete_on_strand(std::size_t i, boost::system::error_code ec)
+    {
+        auto fn = in_flight[i].complete;
+        asio::post(strand, [fn, ec] { fn(ec); });
+        io.restart();
+        io.run();
     }
 
     bool
@@ -573,4 +590,69 @@ TEST(ConnectionWriteLifecycle, ThrowingSuccessHandlerStillPumpsSuccessor)
     EXPECT_TRUE(h.active_payload_intact(0x32));
     EXPECT_EQ(h.queued(), 0u);
     EXPECT_TRUE(h.socket_open());  // a throwing handler is not a transport fault
+}
+
+// ─── terminal disposition is owned, not a stack argument ────────────────────
+//
+// The disconnect export is the connection's SOLE terminal export: in production
+// it is the only commit that moves PeerClient to Failed, drains pending work as
+// disconnected, and publishes PeerTerminalReason to PeerSet. Losing it leaves the
+// client logically live and the generation unremoved after the transport is
+// physically closed.
+
+TEST(ConnectionWriteLifecycle, ReentrantCloseCannotDowngradeFatalDisposition)
+{
+    WriteHarness h;
+
+    int disconnects = 0;
+    boost::system::error_code disconnect_ec;
+    h.conn->set_disconnect_handler(
+        [&](boost::system::error_code ec) {
+            ++disconnects;
+            disconnect_ec = ec;
+        });
+
+    // The write's own terminal handler reacts to failure by closing — which is
+    // exactly what a real PeerClient callback does.
+    h.send(0x51, [&h] { h.conn->close(); });
+    ASSERT_EQ(h.in_flight.size(), 1u);
+    ASSERT_TRUE(h.socket_open());
+
+    // Completed ON THE STRAND, so the handler's close() runs close_impl inline
+    // and genuinely races settle_and_close, which is the reviewed sequence.
+    h.complete_on_strand(0, asio::error::broken_pipe);
+
+    // Before the disposition became an owned row, the re-entrant close() won
+    // close_ran_ with (operation_aborted, fire_disconnect=false): the socket
+    // closed and this export was consumed WITHOUT firing, so the count was 0.
+    ASSERT_EQ(disconnects, 1) << "the connection's sole terminal export was lost";
+    EXPECT_EQ(disconnect_ec, asio::error::broken_pipe)
+        << "exported the re-entrant close's cause instead of the observed failure";
+
+    EXPECT_FALSE(h.socket_open());
+    ASSERT_EQ(h.handler_calls.size(), 1u);
+    EXPECT_EQ(h.handler_calls[0], asio::error::broken_pipe);
+    EXPECT_EQ(h.queued(), 0u);
+}
+
+TEST(ConnectionWriteLifecycle, DeliberateCloseKeepsItsOwnQuietDisposition)
+{
+    // The complement: a plain close() with no observed failure must NOT invent a
+    // disconnect export. Without this, "always fire" would pass the test above
+    // while breaking eviction.
+    WriteHarness h;
+    int disconnects = 0;
+    h.conn->set_disconnect_handler(
+        [&](boost::system::error_code) { ++disconnects; });
+
+    h.send(0x52);
+    ASSERT_EQ(h.in_flight.size(), 1u);
+
+    h.conn->close();
+    h.io.run();
+
+    EXPECT_EQ(disconnects, 0);
+    EXPECT_FALSE(h.socket_open());
+    ASSERT_EQ(h.handler_calls.size(), 1u);
+    EXPECT_EQ(h.handler_calls[0], asio::error::operation_aborted);
 }
