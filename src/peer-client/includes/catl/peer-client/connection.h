@@ -295,7 +295,18 @@ private:
 
     // Disconnect handler
     disconnect_handler disconnect_handler_;
-    bool closing_ = false;  // idempotent shutdown guard
+
+    // Two facts, previously one bool called `closing_`. They were split because
+    // the correct teardown ordering was INEXPRESSIBLE while they shared storage:
+    // closing admission early (so a callback cannot send onto a dead transport)
+    // also tripped the settlement guard, which then skipped the physical close.
+    //
+    //   admission_closed_  the gate. Commits BEFORE any external callback runs,
+    //                      on every teardown path.
+    //   close_ran_         settlement idempotency: socket cancelled/closed and
+    //                      terminals collected exactly once.
+    bool admission_closed_ = false;
+    bool close_ran_ = false;
 
     // Redirect IPs from 503 response
     std::set<std::string> redirect_ips_;
@@ -327,7 +338,7 @@ private:
     //                      close can terminalize the handler without freeing the
     //                      bytes: the two live in the same row but are consumed
     //                      by different owners at different times.
-    //   closing_           admission gate. Refuse before queue mutation.
+    //   admission_closed_  admission gate. Refuse before queue mutation.
     std::deque<PendingWrite> write_queue_;
     std::optional<PendingWrite> active_write_;
 
@@ -341,11 +352,34 @@ private:
     void
     on_write_complete(boost::system::error_code ec);
 
+    /// Move every owed logical terminal out of the queue and the active row,
+    /// WITHOUT invoking any of them. The active row's packet is deliberately left
+    /// in place — Asio still owns those bytes until completion.
+    ///
+    /// Collection is separated from delivery so owner-local settlement can finish
+    /// before any external callback runs. A handler that throws then cannot leave
+    /// the socket open or the remaining terminals undelivered.
+    std::vector<std::function<void(boost::system::error_code)>>
+    take_write_terminals();
+
+    /// Invoke one external terminal, exactly once, containing any exception.
+    /// The handler type is not `noexcept` and no contract forbids throws, so an
+    /// escaping exception would otherwise abort whatever settlement loop is
+    /// running. Consumes `handler`.
     void
-    fail_queued_writes(boost::system::error_code ec);
+    deliver_terminal(
+        std::function<void(boost::system::error_code)>& handler,
+        boost::system::error_code ec) noexcept;
+
+    /// Strand-only: the single teardown transition. Commits closed admission,
+    /// completes owner-local settlement (collect terminals, cancel and close the
+    /// socket), and only then exposes external callbacks.
+    /// Idempotent — guarded by close_ran_.
+    void
+    settle_and_close(boost::system::error_code terminal_ec, bool fire_disconnect);
 
     /// Strand-only: close socket and fail queued writes.
-    /// Idempotent — guarded by closing_.
+    /// Idempotent — guarded by close_ran_.
     void
     close_impl();
 

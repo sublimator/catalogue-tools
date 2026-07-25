@@ -1063,10 +1063,9 @@ peer_connection::async_send_packet(
     // invoking the handler — a permanently stranded caller. Refuse here and
     // terminalize exactly once, so no committed queue entry can outlive the
     // close that was supposed to drain it.
-    if (closing_)
+    if (admission_closed_)
     {
-        if (handler)
-            handler(asio::error::operation_aborted);
+        deliver_terminal(handler, asio::error::operation_aborted);
         return;
     }
 
@@ -1096,9 +1095,12 @@ peer_connection::async_send_packet(
             " write queue full (",
             kMaxWriteQueue,
             "), closing");
-        if (handler)
-            handler(boost::asio::error::no_buffer_space);
+        // Commit the failure transition FIRST. Delivering this caller's
+        // callback before teardown let a handler that retries synchronously see
+        // a still-full queue and an open gate, so it could recurse through
+        // queue-full refusal without bound.
         fail_and_close(boost::asio::error::no_buffer_space);
+        deliver_terminal(handler, boost::asio::error::no_buffer_space);
         return;
     }
 
@@ -1128,18 +1130,22 @@ peer_connection::do_write()
             " write initiation failed (",
             why,
             "), rolling back active slot");
-        if (entry.handler)
-        {
-            entry.handler(
-                boost::system::errc::make_error_code(
-                    boost::system::errc::io_error));
-        }
+        deliver_terminal(
+            entry.handler,
+            boost::system::errc::make_error_code(
+                boost::system::errc::io_error));
     };
 
     // Loop rather than recurse: a persistently throwing initiation must still
     // terminalize every queued handler exactly once, and the queue shrinks each
     // iteration so this terminates.
-    while (!write_queue_.empty())
+    // `!active_write_` is re-tested every iteration, not just on entry. The
+    // rollback below invokes an external handler synchronously; that handler may
+    // re-enter async_send_packet -> do_write and install an active row. Without
+    // this guard the outer frame resumed and assigned over an ENGAGED optional,
+    // destroying the live buffer and the undelivered terminal of the row the
+    // nested frame had just initiated.
+    while (!active_write_ && !write_queue_.empty())
     {
         active_write_ = std::move(write_queue_.front());
         write_queue_.pop_front();
@@ -1189,19 +1195,15 @@ peer_connection::on_write_complete(boost::system::error_code ec)
     auto entry = std::move(*active_write_);
     active_write_.reset();
 
-    // Logical terminal exactly once. No flag is consulted: if a close already
-    // delivered it, close MOVED the handler out and this row holds an empty one,
-    // so a second delivery is unrepresentable rather than merely guarded.
-    if (entry.handler)
+    bool const fatal = ec && ec != asio::error::operation_aborted;
+    if (fatal && !close_ran_)
     {
-        entry.handler(ec);
-    }
-
-    if (closing_)
-        return;  // successors were drained by the close path
-
-    if (ec && ec != asio::error::operation_aborted)
-    {
+        // Close admission BEFORE this handler runs. Otherwise a broken-pipe
+        // handler could synchronously enqueue AND physically initiate another
+        // write on a transport already known dead. Settlement still happens
+        // below: admission and settlement are separate facts precisely so this
+        // ordering is expressible.
+        admission_closed_ = true;
         note_connect_failure("packet write", ec);
         PLOGW(
             log_,
@@ -1211,9 +1213,21 @@ peer_connection::on_write_complete(boost::system::error_code ec)
             " (val=",
             ec.value(),
             ")");
-        fail_and_close(ec);  // drains the uninitiated successors
+    }
+
+    // Logical terminal exactly once, exception-contained. No flag is consulted:
+    // if a teardown already delivered it, that teardown MOVED the handler out and
+    // this row holds an empty one, so a second delivery is unrepresentable.
+    deliver_terminal(entry.handler, ec);
+
+    if (fatal)
+    {
+        fail_and_close(ec);  // settles: terminals, socket, disconnect
         return;
     }
+
+    if (admission_closed_)
+        return;  // teardown owns the remaining terminals
 
     // Successor-pump state, named explicitly because nothing else owns it.
     // Reached on success AND on a cancellation that arrived without a close: the
@@ -1223,39 +1237,65 @@ peer_connection::on_write_complete(boost::system::error_code ec)
     do_write();
 }
 
-void
-peer_connection::fail_queued_writes(boost::system::error_code ec)
+std::vector<std::function<void(boost::system::error_code)>>
+peer_connection::take_write_terminals()
 {
+    std::vector<std::function<void(boost::system::error_code)>> owed;
+
     // Uninitiated successors: no Asio operation ever saw these buffers, so
-    // destroying them now is safe.
+    // destroying the rows now is safe.
     while (!write_queue_.empty())
     {
         auto entry = std::move(write_queue_.front());
         write_queue_.pop_front();
         if (entry.handler)
-        {
-            entry.handler(ec);
-        }
+            owed.push_back(std::move(entry.handler));
     }
 
     // The active write is different in kind. Asio owns its buffer until the
-    // composed operation completes, so only its LOGICAL terminal is consumed
-    // here; the packet stays put. The original defect was moving the whole entry
-    // out of the queue, which carried the vector's allocation into a loop-local
-    // that died that same iteration and freed memory Asio was still reading.
+    // composed operation completes, so only its LOGICAL terminal is taken here;
+    // the packet stays put. The original defect was moving the whole entry out of
+    // the queue, which carried the vector's allocation into a loop-local that died
+    // that same iteration and freed memory Asio was still reading.
     if (active_write_)
     {
-        auto handler = std::move(active_write_->handler);
+        if (active_write_->handler)
+            owed.push_back(std::move(active_write_->handler));
         active_write_->handler = nullptr;  // consumption IS the move
-        if (handler)
-        {
-            handler(ec);
-        }
     }
 
     // NB: the in-flight latch is deliberately NOT cleared here. It is
     // `active_write_` itself, and clearing it while Asio still owns the buffer is
     // precisely the bug. It clears in on_write_complete().
+    return owed;
+}
+
+//@@callback-funnel
+// Every caller-supplied write terminal is delivered here and nowhere else, so
+// "settle before you notify" and "contain what the notification throws" are
+// properties of ONE function instead of properties of every call site.
+// `callback-boundary-audit.py` enforces the funnel.
+void
+peer_connection::deliver_terminal(
+    std::function<void(boost::system::error_code)>& handler,
+    boost::system::error_code ec) noexcept
+{
+    if (!handler)
+        return;
+    auto owned = std::move(handler);
+    handler = nullptr;
+    try
+    {
+        owned(ec);
+    }
+    catch (std::exception const& exc)
+    {
+        PLOGW(log_, "write terminal handler threw: ", exc.what());
+    }
+    catch (...)
+    {
+        PLOGW(log_, "write terminal handler threw a non-exception");
+    }
 }
 
 void
@@ -1679,19 +1719,29 @@ peer_connection::close()
 }
 
 void
-peer_connection::close_impl()
+peer_connection::settle_and_close(
+    boost::system::error_code terminal_ec,
+    bool fire_disconnect)
 {
-    if (closing_)
+    if (close_ran_)
         return;
-    closing_ = true;
+    close_ran_ = true;
+
+    // Admission closes as part of the same commit, before any external callback.
+    // It may already be closed — the failing-write path commits it earlier so its
+    // own handler cannot send onto a dead transport.
+    admission_closed_ = true;
     connected_ = false;
 
     // Return any in-flight frame's bytes to the inbound budget (sec #0055);
     // this is the catch-all for every teardown path (eviction + errors).
     release_inbound_charge();
 
-    // Drain queued writes so no handlers are left stranded
-    fail_queued_writes(asio::error::operation_aborted);
+    // Collect the owed terminals but do NOT invoke them yet. Everything below up
+    // to the delivery loop is owner-local settlement; a handler that throws (the
+    // type is not noexcept and no contract forbids it) must not be able to leave
+    // the socket open or the remaining terminals undelivered.
+    auto owed = take_write_terminals();
 
     if (socket_ && socket_->lowest_layer().is_open())
     {
@@ -1707,30 +1757,42 @@ peer_connection::close_impl()
 
     // Break shared_ptr cycles: packet_handler_ and disconnect_handler_
     // capture shared_ptr<PeerClient> which holds shared_ptr<peer_connection>.
-    // fail_and_close() moves disconnect_handler_ out before calling it,
-    // but close() (used by eviction) never fires it — clear both here.
+    // Taken by move so the cycle is broken before the callback runs, and so a
+    // re-entrant teardown cannot fire the same disconnect twice.
     packet_handler_ = nullptr;
+    auto disconnect = std::move(disconnect_handler_);
     disconnect_handler_ = nullptr;
+
+    // Settlement is complete and consistent. External callbacks only from here,
+    // each individually contained.
+    for (auto& handler : owed)
+    {
+        deliver_terminal(handler, terminal_ec);
+    }
+    if (fire_disconnect)
+    {
+        deliver_terminal(disconnect, terminal_ec);
+    }
+}
+
+void
+peer_connection::close_impl()
+{
+    settle_and_close(asio::error::operation_aborted, /*fire_disconnect=*/false);
 }
 
 void
 peer_connection::fail_and_close(boost::system::error_code ec)
 {
-    if (closing_)
+    if (close_ran_)
         return;
 
     PLOGD(log_, "fail_and_close: ", ec.message());
 
-    // Save disconnect handler BEFORE close_impl() clears it.
-    auto handler = std::move(disconnect_handler_);
-
-    fail_queued_writes(ec);
-    close_impl();
-
-    if (handler)
-    {
-        handler(ec);
-    }
+    // One transition. The old shape drained handlers (external callbacks) while
+    // admission was still open and only flipped the flag afterwards inside
+    // close_impl, so a drained handler could submit new rows mid-teardown.
+    settle_and_close(ec, /*fire_disconnect=*/true);
 }
 
 }  // namespace catl::peer_client

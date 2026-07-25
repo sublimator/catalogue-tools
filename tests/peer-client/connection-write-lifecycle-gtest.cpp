@@ -66,20 +66,37 @@ struct WriteHarness
     /// Handler outcomes, in delivery order, for exactly-once assertions.
     std::vector<boost::system::error_code> handler_calls;
 
+    /// The fill byte of the send each terminal belongs to, parallel to
+    /// `handler_calls`. Lets a test attribute a refusal to the send that caused
+    /// it rather than to a position in the delivery order.
+    std::vector<std::uint8_t> handler_fills;
+
     /// When set, initiation throws instead of capturing (blocker 2).
     bool throw_on_initiation = false;
+
+    /// Number of remaining initiations that should throw, counted down. Lets a
+    /// test fail exactly one initiation and let the next succeed.
+    int initiation_throws = 0;
 
     WriteHarness()
     {
         peer_config config;
         conn = std::make_shared<peer_connection>(
             asio::make_strand(io.get_executor()), ssl, std::move(config));
+        // Open the socket so "reaches closed state" assertions are not vacuous:
+        // on a never-opened socket is_open() is false before teardown too.
+        boost::system::error_code ec;
+        conn->socket().lowest_layer().open(boost::asio::ip::tcp::v4(), ec);
         conn->set_write_initiator_for_test(
             [this](
                 asio::const_buffer buf,
                 peer_connection::test_write_completion complete) {
-                if (throw_on_initiation)
+                if (throw_on_initiation || initiation_throws > 0)
+                {
+                    if (initiation_throws > 0)
+                        --initiation_throws;
                     throw std::runtime_error("forced initiation failure");
+                }
                 in_flight.push_back(
                     {buf.data(), buf.size(), std::move(complete)});
             });
@@ -87,14 +104,29 @@ struct WriteHarness
 
     /// Enqueue a packet whose payload is a recognizable repeated byte, so a
     /// freed-and-reused buffer is detectable by content and not only by address.
+    /// `reenter` runs INSIDE the completion handler, which is how the
+    /// callback-boundary interleavings are forced.
     void
-    send(std::uint8_t fill, std::size_t payload = 64)
+    send(std::uint8_t fill,
+         std::function<void()> reenter = {},
+         std::size_t payload = 64)
     {
         std::vector<std::uint8_t> data(payload, fill);
         conn->async_send_packet(
-            packet_type::ping, data, [this](boost::system::error_code ec) {
+            packet_type::ping,
+            data,
+            [this, reenter, fill](boost::system::error_code ec) {
                 handler_calls.push_back(ec);
+                handler_fills.push_back(fill);
+                if (reenter)
+                    reenter();
             });
+    }
+
+    bool
+    socket_open() const
+    {
+        return conn->socket().lowest_layer().is_open();
     }
 
     /// Bytes of the write currently retained as active, as the connection sees it.
@@ -354,4 +386,191 @@ TEST(ConnectionWriteLifecycle, LateCompletionAfterCloseIsInert)
     // Firing it twice must also stay inert: the slot is already released.
     h.in_flight[0].complete({});
     EXPECT_EQ(h.handler_calls.size(), 1u);
+}
+
+// ─── callback-boundary blockers (review of f78c785) ─────────────────────────
+//
+// All three arise from the same cause: an external handler ran before the
+// owner-local transition was structurally complete. They are grouped here
+// because the repair is one rule, not three patches — commit the transition,
+// then expose callbacks, and contain what the callbacks do.
+
+// B1: rollback's synchronous handler re-enters and installs an active write.
+
+TEST(ConnectionWriteLifecycle, RollbackCallbackReentryDoesNotClobberActiveWrite)
+{
+    WriteHarness h;
+
+    // A active; B, C queued. B's initiation will throw; B's handler then sends D.
+    h.send(0xA0);
+    ASSERT_EQ(h.in_flight.size(), 1u);
+    h.send(0xB0, [&h] { h.send(0xD0); });
+    h.send(0xC0);
+    ASSERT_EQ(h.queued(), 2u);
+
+    h.initiation_throws = 1;      // exactly B fails to initiate
+    h.in_flight[0].complete({});  // A succeeds -> pump selects B -> throws
+
+    // The nested frame (from B's handler) initiated C. C must still be the
+    // active physical row: before the loop guard, the outer frame resumed and
+    // assigned D over the engaged optional, destroying C's live buffer and its
+    // undelivered terminal.
+    ASSERT_EQ(h.in_flight.size(), 2u);
+    auto const [c_ptr, c_len] = h.active_storage();
+    ASSERT_NE(c_ptr, nullptr);
+    EXPECT_EQ(c_ptr, h.in_flight[1].data);
+    EXPECT_TRUE(h.active_payload_intact(0xC0));
+
+    // D is queued, not active, and is pumped only by C's completion.
+    EXPECT_EQ(h.queued(), 1u);
+    h.in_flight[1].complete({});
+    ASSERT_EQ(h.in_flight.size(), 3u);
+    EXPECT_TRUE(h.active_payload_intact(0xD0));
+
+    // A ok, B io_error from rollback, C ok — each exactly once.
+    ASSERT_EQ(h.handler_calls.size(), 3u);
+    EXPECT_FALSE(h.handler_calls[0]);
+    EXPECT_EQ(h.handler_calls[1], boost::system::errc::io_error);
+    EXPECT_FALSE(h.handler_calls[2]);
+}
+
+// B2.1: a failing write's own handler must not be admitted onto a dead transport.
+
+TEST(ConnectionWriteLifecycle, FailedWriteHandlerCannotInitiateOnDeadTransport)
+{
+    WriteHarness h;
+    h.send(0xE0, [&h] { h.send(0xE9); });
+    ASSERT_EQ(h.in_flight.size(), 1u);
+
+    h.in_flight[0].complete(asio::error::broken_pipe);
+
+    // Admission committed before the handler ran, so the re-entrant send is
+    // refused and no second transport initiation happened.
+    EXPECT_EQ(h.in_flight.size(), 1u);
+    EXPECT_EQ(h.queued(), 0u);
+    ASSERT_EQ(h.handler_calls.size(), 2u);
+    EXPECT_EQ(h.handler_calls[0], asio::error::broken_pipe);
+    EXPECT_EQ(h.handler_calls[1], asio::error::operation_aborted);
+    EXPECT_FALSE(h.socket_open());
+}
+
+// B2.2: a queue-full refusal whose handler retries must not recurse.
+
+TEST(ConnectionWriteLifecycle, QueueFullRefusalDoesNotRecurse)
+{
+    WriteHarness h;
+    // One fill for the whole setup, deliberately NOT 0xFE or 0xFF: the
+    // assertions below attribute refusals by fill byte, and an earlier version
+    // filled these 0x00..0xFF, so a setup send collided with the retry marker and
+    // was scored as a retry.
+    for (int i = 0; i < 257; ++i)
+        h.send(0x01);
+
+    ASSERT_EQ(h.in_flight.size(), 1u);
+    auto const queued_before = h.queued();
+    auto const calls_before = h.handler_calls.size();
+
+    // This send trips the cap. Its handler retries synchronously, and each retry
+    // carries the retry lambda too, so the recursion can genuinely deepen — an
+    // earlier version passed a non-retrying handler, which made this test pass
+    // whichever order the production code used. A negative control caught it.
+    int retries = 0;
+    std::function<void()> retry;
+    retry = [&h, &retries, &retry] {
+        if (++retries < 4)
+            h.send(0xFE, retry);
+    };
+    h.send(0xFF, retry);
+
+    // The discriminator is WHICH refusal path each retry takes, attributed by
+    // send rather than by position — `fail_and_close` legitimately drains all the
+    // already-queued terminals with no_buffer_space first, so position tells you
+    // nothing. Every RETRY (0xFE) must be refused by the ADMISSION gate, because
+    // the failure transition committed before this caller's callback ran. With
+    // the callback exposed first, the retries re-enter the cap check while
+    // admission is still open and get no_buffer_space instead.
+    ASSERT_EQ(h.handler_fills.size(), h.handler_calls.size());
+    int retry_refusals = 0;
+    for (std::size_t i = calls_before; i < h.handler_calls.size(); ++i)
+    {
+        if (h.handler_fills[i] != 0xFE)
+            continue;
+        ++retry_refusals;
+        EXPECT_EQ(h.handler_calls[i], asio::error::operation_aborted)
+            << "retry " << retry_refusals << " took the cap path, not the gate";
+    }
+    EXPECT_GT(retry_refusals, 0);
+
+    // Bounded, and no row admitted or initiated by any retry.
+    EXPECT_LE(h.queued(), queued_before);
+    EXPECT_EQ(h.in_flight.size(), 1u);
+    EXPECT_FALSE(h.socket_open());
+}
+
+// B3.1: a throwing drained handler must not abort settlement.
+
+TEST(ConnectionWriteLifecycle, ThrowingDrainedHandlerStillSettlesEverything)
+{
+    WriteHarness h;
+    h.send(0xF1);  // active
+    ASSERT_EQ(h.in_flight.size(), 1u);
+    h.send(0xF2, [] { throw std::runtime_error("handler blew up"); });
+    h.send(0xF3);
+    ASSERT_EQ(h.queued(), 2u);
+    ASSERT_TRUE(h.socket_open());
+
+    h.conn->close();
+    h.io.run();
+
+    // Every terminal delivered despite the throw, socket physically closed, and
+    // the active packet still retained for its pending completion.
+    EXPECT_EQ(h.handler_calls.size(), 3u);
+    EXPECT_FALSE(h.socket_open());
+    EXPECT_EQ(h.queued(), 0u);
+    ASSERT_NE(h.active_storage().first, nullptr);
+    EXPECT_TRUE(h.active_payload_intact(0xF1));
+
+    h.in_flight[0].complete(asio::error::operation_aborted);
+    EXPECT_EQ(h.active_storage().first, nullptr);
+    EXPECT_EQ(h.handler_calls.size(), 3u);
+}
+
+// B3.2: a throwing rollback handler must not park the successors.
+
+TEST(ConnectionWriteLifecycle, ThrowingRollbackHandlerStillPumpsSuccessors)
+{
+    WriteHarness h;
+    h.send(0x21);
+    ASSERT_EQ(h.in_flight.size(), 1u);
+    h.send(0x22, [] { throw std::runtime_error("rollback handler blew up"); });
+    h.send(0x23);
+    ASSERT_EQ(h.queued(), 2u);
+
+    h.initiation_throws = 1;      // 0x22 fails to initiate
+    h.in_flight[0].complete({});  // pump -> 0x22 throws -> handler throws
+
+    // Containment held and the loop kept going: 0x23 is active.
+    ASSERT_EQ(h.in_flight.size(), 2u);
+    EXPECT_TRUE(h.active_payload_intact(0x23));
+    EXPECT_EQ(h.queued(), 0u);
+    ASSERT_EQ(h.handler_calls.size(), 2u);
+    EXPECT_EQ(h.handler_calls[1], boost::system::errc::io_error);
+}
+
+// B3.3: a throwing successful handler must not stop the pump.
+
+TEST(ConnectionWriteLifecycle, ThrowingSuccessHandlerStillPumpsSuccessor)
+{
+    WriteHarness h;
+    h.send(0x31, [] { throw std::runtime_error("success handler blew up"); });
+    ASSERT_EQ(h.in_flight.size(), 1u);
+    h.send(0x32);
+    ASSERT_EQ(h.queued(), 1u);
+
+    h.in_flight[0].complete({});
+
+    ASSERT_EQ(h.in_flight.size(), 2u);
+    EXPECT_TRUE(h.active_payload_intact(0x32));
+    EXPECT_EQ(h.queued(), 0u);
+    EXPECT_TRUE(h.socket_open());  // a throwing handler is not a transport fault
 }
