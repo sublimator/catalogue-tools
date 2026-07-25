@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 namespace xprv {
@@ -194,6 +195,40 @@ public:
         deadline_publish_hook_for_test_ = std::move(hook);
     }
 
+    void
+    set_quorum_wait_resume_hook_for_test(std::function<void(bool)> hook)
+    {
+        quorum_wait_resume_hook_for_test_ = std::move(hook);
+    }
+
+    void
+    set_quorum_deadline_arm_hook_for_test(std::function<void()> hook)
+    {
+        quorum_deadline_arm_hook_for_test_ = std::move(hook);
+    }
+
+    boost::asio::strand<boost::asio::io_context::executor_type>&
+    owner_strand_for_test() noexcept
+    {
+        return strand_;
+    }
+
+    void
+    set_next_pending_id_for_test(std::uint64_t value)
+    {
+        if (!strand_.running_in_this_thread())
+            throw std::logic_error("pending identity test seed off owner strand");
+        next_pending_id_ = value;
+    }
+
+    std::uint64_t
+    next_pending_id_for_test() const
+    {
+        if (!strand_.running_in_this_thread())
+            throw std::logic_error("pending identity test read off owner strand");
+        return next_pending_id_;
+    }
+
     bool
     publication_gate_available_for_test()
     {
@@ -262,6 +297,11 @@ private:
 
     std::optional<QuorumEntry>
     latest_quorum_locked(ValidationCollector::QuorumMode mode) const;
+
+    boost::asio::awaitable<QuorumCollectResult>
+    co_wait_best_quorum_on_strand(
+        std::chrono::seconds timeout,
+        std::optional<uint32_t> expected_vl_sequence);
 
     bool
     has_newer_ledger_locked(
@@ -337,6 +377,8 @@ private:
     std::function<void()> validation_publish_hook_for_test_;
     std::function<void()> unl_admission_hook_for_test_;
     std::function<void()> deadline_publish_hook_for_test_;
+    std::function<void(bool)> quorum_wait_resume_hook_for_test_;
+    std::function<void()> quorum_deadline_arm_hook_for_test_;
 #endif
 
     std::deque<QuorumEntry> recent_quorums_;

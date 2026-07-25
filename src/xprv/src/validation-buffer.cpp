@@ -4,13 +4,16 @@
 #include <catl/crypto/sha512-half-hasher.h>
 #include <catl/peer-client/connection-types.h>
 
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
+#include <limits>
 #include <pthread.h>
+#include <stdexcept>
 #include <system_error>
 #include <utility>
 
@@ -1282,20 +1285,36 @@ ValidationBuffer::co_wait_best_quorum(
     std::chrono::seconds timeout,
     std::optional<uint32_t> expected_vl_sequence)
 {
+    // Dynamic execution under strand_ does not prove this coroutine was born
+    // there: a caller can arrive during a one-time post and later resume on its
+    // original executor. Always create a distinct owner coroutine. Awaiting it
+    // returns the result through the caller's associated executor.
+    auto self = shared_from_this();
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self, timeout, expected_vl_sequence]()
+            -> asio::awaitable<QuorumCollectResult> {
+            co_return co_await self->co_wait_best_quorum_on_strand(
+                timeout, expected_vl_sequence);
+        },
+        asio::use_awaitable);
+}
+
+asio::awaitable<QuorumCollectResult>
+ValidationBuffer::co_wait_best_quorum_on_strand(
+    std::chrono::seconds timeout,
+    std::optional<uint32_t> expected_vl_sequence)
+{
+    if (!strand_.running_in_this_thread())
+        throw std::logic_error("quorum waiter entered off owner strand");
+
     static constexpr auto mode = ValidationCollector::QuorumMode::proof;
-    // Save caller's executor so we can hop back before returning.
-    // Without this, co_return resumes the caller on strand_, which
-    // serializes all subsequent work (anchor fetch, tree walks) behind
-    // validation packet processing — causing 16-45s delays.
-    auto caller_ex = co_await asio::this_coro::executor;
-    PLOGI(log_, "[", net_label_, "] co_wait_best_quorum: BEFORE strand hop");
-    co_await asio::post(strand_, asio::use_awaitable);
-    PLOGI(log_, "[", net_label_, "] co_wait_best_quorum: AFTER strand hop");
 
     auto signal = std::make_shared<asio::steady_timer>(
         strand_, asio::steady_timer::time_point::max());
     auto result = std::make_shared<std::optional<QuorumCollectResult>>();
     auto const deadline = std::chrono::steady_clock::now() + timeout;
+    std::shared_ptr<asio::steady_timer> deadline_timer;
     std::optional<QuorumCollectResult> immediate;
     uint64_t pending_id = 0;
 
@@ -1390,6 +1409,12 @@ ValidationBuffer::co_wait_best_quorum(
 
         if (!immediate)
         {
+            // Allocate every object needed to service the pending row before
+            // publishing it. Once the row is visible, only async_wait
+            // initiation remains fallible and is guarded by exact-ID rollback.
+            deadline_timer =
+                std::make_shared<asio::steady_timer>(strand_, deadline);
+
             uint32_t seed_seq = 0;
             Hash256 seed_hash;
             std::vector<ValidationCollector::Entry> seed_validations;
@@ -1421,7 +1446,13 @@ ValidationBuffer::co_wait_best_quorum(
                     "] co_wait_best_quorum: waiting for initial quorum...");
             }
 
-            pending_id = next_pending_id_++;
+            if (next_pending_id_ ==
+                std::numeric_limits<std::uint64_t>::max())
+            {
+                throw std::overflow_error(
+                    "ValidationBuffer pending identity exhausted");
+            }
+            pending_id = ++next_pending_id_;
             pending_.push_back(PendingQuorum{
                 .id = pending_id,
                 .ledger_seq = seed_seq,
@@ -1442,38 +1473,62 @@ ValidationBuffer::co_wait_best_quorum(
     }
 
     if (immediate)
-    {
-        co_await asio::post(caller_ex, asio::use_awaitable);
         co_return std::move(*immediate);
-    }
 
     // Start a deadline timer so resolve_pending() fires even if no
     // validations arrive (e.g. cold start with 0s timeout).
-    auto deadline_timer =
-        std::make_shared<asio::steady_timer>(strand_, deadline);
-    deadline_timer->async_wait([weak = weak_from_this(),
-                                deadline_timer](boost::system::error_code ec) {
-        if (ec)
-            return;
-        if (auto self = weak.lock())
-        {
-            std::lock_guard publication_lock(self->publication_mutex_);
+    try
+    {
 #ifdef XPRV_TESTING
-            if (self->deadline_publish_hook_for_test_)
-                self->deadline_publish_hook_for_test_();
+        if (quorum_deadline_arm_hook_for_test_)
+            quorum_deadline_arm_hook_for_test_();
 #endif
-            {
-                std::lock_guard admission_lock(self->admission_mutex_);
-                if (self->pending_unl_updates_ != 0)
+        deadline_timer->async_wait(
+            [weak = weak_from_this(),
+             deadline_timer](boost::system::error_code ec) {
+                if (ec)
                     return;
+                if (auto self = weak.lock())
+                {
+                    std::lock_guard publication_lock(
+                        self->publication_mutex_);
+#ifdef XPRV_TESTING
+                    if (self->deadline_publish_hook_for_test_)
+                        self->deadline_publish_hook_for_test_();
+#endif
+                    {
+                        std::lock_guard admission_lock(
+                            self->admission_mutex_);
+                        if (self->pending_unl_updates_ != 0)
+                            return;
+                    }
+                    self->resolve_pending();
+                }
+            });
+    }
+    catch (...)
+    {
+        // The row was committed but no deadline owner exists. Consume that
+        // exact obligation before propagating the setup failure.
+        for (auto it = pending_.begin(); it != pending_.end(); ++it)
+        {
+            if (it->id == pending_id)
+            {
+                pending_.erase(it);
+                break;
             }
-            self->resolve_pending();
         }
-    });
+        throw;
+    }
 
     // One single co_await — woken by the callback cancelling the timer
     boost::system::error_code ec;
     co_await signal->async_wait(asio::redirect_error(asio::use_awaitable, ec));
+
+#ifdef XPRV_TESTING
+    if (quorum_wait_resume_hook_for_test_)
+        quorum_wait_resume_hook_for_test_(strand_.running_in_this_thread());
+#endif
 
     // Cancel deadline timer if we resolved early (quorum arrived)
     deadline_timer->cancel();
@@ -1489,10 +1544,7 @@ ValidationBuffer::co_wait_best_quorum(
         }
     }
 
-    // Re-hop to caller's executor before returning — don't leave
-    // the caller running on the validation buffer's strand.
     auto const active_vl_sequence = vl_sequence_.value_or(0);
-    co_await asio::post(caller_ex, asio::use_awaitable);
 
     if (result->has_value())
     {

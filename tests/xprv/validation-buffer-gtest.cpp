@@ -26,8 +26,10 @@
 #include <chrono>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -273,6 +275,244 @@ TEST(ValidationBuffer, BestQuorumCancelledWaiterIsRemoved)
     EXPECT_TRUE(done);
     EXPECT_TRUE(cancel_branch_won);
     EXPECT_EQ(stats.pending_callbacks, 0u);
+}
+
+TEST(ValidationBuffer, BestQuorumCleanupStaysOnOwnerStrand)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto caller_strand = asio::make_strand(io);
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    std::atomic<bool> resumed_on_owner{false};
+    std::atomic<bool> returned_on_caller{false};
+    std::promise<void> done;
+    auto done_future = done.get_future();
+
+    buffer->set_quorum_wait_resume_hook_for_test(
+        [&resumed_on_owner](bool on_owner) {
+            resumed_on_owner.store(on_owner, std::memory_order_release);
+        });
+
+    asio::co_spawn(
+        caller_strand,
+        [buffer, caller_strand, &returned_on_caller, &done]()
+            -> asio::awaitable<void> {
+            try
+            {
+                (void)co_await buffer->co_wait_best_quorum(30s);
+                returned_on_caller.store(
+                    caller_strand.running_in_this_thread(),
+                    std::memory_order_release);
+                done.set_value();
+            }
+            catch (...)
+            {
+                done.set_exception(std::current_exception());
+            }
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        io,
+        [buffer]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            while ((co_await buffer->co_stats()).pending_callbacks == 0)
+                co_await asio::post(ex, asio::use_awaitable);
+            buffer->stop();
+        },
+        asio::detached);
+
+    std::thread first_runner([&]() { io.run(); });
+    std::thread second_runner([&]() { io.run(); });
+
+    auto const status = done_future.wait_for(2s);
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status == std::future_status::ready)
+    {
+        try
+        {
+            done_future.get();
+        }
+        catch (std::exception const& e)
+        {
+            ADD_FAILURE() << "quorum waiter failed: " << e.what();
+        }
+        catch (...)
+        {
+            ADD_FAILURE() << "quorum waiter failed with unknown exception";
+        }
+    }
+
+    EXPECT_TRUE(resumed_on_owner.load(std::memory_order_acquire));
+    EXPECT_TRUE(returned_on_caller.load(std::memory_order_acquire));
+
+    work.reset();
+    io.stop();
+    first_runner.join();
+    second_runner.join();
+}
+
+TEST(ValidationBuffer, TransientOwnerHopStillUsesOwnerCoroutine)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    std::atomic<bool> entered_during_owner_dispatch{false};
+    std::atomic<bool> cleanup_on_owner{false};
+    std::promise<void> done;
+    auto done_future = done.get_future();
+
+    buffer->set_quorum_wait_resume_hook_for_test(
+        [&cleanup_on_owner](bool on_owner) {
+            cleanup_on_owner.store(on_owner, std::memory_order_release);
+        });
+
+    asio::co_spawn(
+        io,
+        [buffer,
+         &entered_during_owner_dispatch,
+         &done]() -> asio::awaitable<void> {
+            try
+            {
+                // The outer coroutine was born on raw io, but calls the public
+                // method during a one-time owner-strand dispatch. Dynamic
+                // running_in_this_thread() must not admit it as owner-born.
+                co_await asio::post(
+                    buffer->owner_strand_for_test(), asio::use_awaitable);
+                entered_during_owner_dispatch.store(
+                    buffer->owner_strand_for_test().running_in_this_thread(),
+                    std::memory_order_release);
+
+                (void)co_await buffer->co_wait_best_quorum(30s);
+                done.set_value();
+            }
+            catch (...)
+            {
+                done.set_exception(std::current_exception());
+            }
+        },
+        asio::detached);
+
+    asio::co_spawn(
+        io,
+        [buffer]() -> asio::awaitable<void> {
+            auto ex = co_await asio::this_coro::executor;
+            while ((co_await buffer->co_stats()).pending_callbacks == 0)
+                co_await asio::post(ex, asio::use_awaitable);
+            buffer->stop();
+        },
+        asio::detached);
+
+    std::thread first_runner([&]() { io.run(); });
+    std::thread second_runner([&]() { io.run(); });
+
+    auto const status = done_future.wait_for(2s);
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status == std::future_status::ready)
+        EXPECT_NO_THROW(done_future.get());
+    EXPECT_TRUE(
+        entered_during_owner_dispatch.load(std::memory_order_acquire));
+    EXPECT_TRUE(cleanup_on_owner.load(std::memory_order_acquire));
+
+    work.reset();
+    io.stop();
+    first_runner.join();
+    second_runner.join();
+}
+
+TEST(ValidationBuffer, PendingIdentityExhaustionRefusesBeforeMutation)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto caller_strand = asio::make_strand(io);
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    bool saw_overflow = false;
+    bool returned_on_caller = false;
+    std::size_t pending_after = 1;
+    std::uint64_t identity_after = 0;
+
+    asio::co_spawn(
+        caller_strand,
+        [&, buffer, caller_strand]() -> asio::awaitable<void> {
+            co_await asio::co_spawn(
+                buffer->owner_strand_for_test(),
+                [buffer]() -> asio::awaitable<void> {
+                    buffer->set_next_pending_id_for_test(
+                        std::numeric_limits<std::uint64_t>::max());
+                    co_return;
+                },
+                asio::use_awaitable);
+
+            try
+            {
+                (void)co_await buffer->co_wait_best_quorum(30s);
+            }
+            catch (std::overflow_error const&)
+            {
+                saw_overflow = true;
+            }
+
+            pending_after = (co_await buffer->co_stats()).pending_callbacks;
+            identity_after = co_await asio::co_spawn(
+                buffer->owner_strand_for_test(),
+                [buffer]() -> asio::awaitable<std::uint64_t> {
+                    co_return buffer->next_pending_id_for_test();
+                },
+                asio::use_awaitable);
+            returned_on_caller = caller_strand.running_in_this_thread();
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(saw_overflow);
+    EXPECT_EQ(pending_after, 0u);
+    EXPECT_EQ(
+        identity_after, std::numeric_limits<std::uint64_t>::max());
+    EXPECT_TRUE(returned_on_caller);
+}
+
+TEST(ValidationBuffer, DeadlineArmFailureRollsBackExactPendingRow)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto caller_strand = asio::make_strand(io);
+    auto buffer = xprv::ValidationBuffer::create(io, test_protocol(), 0);
+    bool saw_failure = false;
+    bool returned_on_caller = false;
+    std::size_t pending_after = 1;
+
+    buffer->set_quorum_deadline_arm_hook_for_test([]() {
+        throw std::runtime_error("forced deadline arm failure");
+    });
+
+    asio::co_spawn(
+        caller_strand,
+        [&, buffer, caller_strand]() -> asio::awaitable<void> {
+            try
+            {
+                (void)co_await buffer->co_wait_best_quorum(30s);
+            }
+            catch (std::runtime_error const&)
+            {
+                saw_failure = true;
+            }
+            pending_after = (co_await buffer->co_stats()).pending_callbacks;
+            returned_on_caller = caller_strand.running_in_this_thread();
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(saw_failure);
+    EXPECT_EQ(pending_after, 0u);
+    EXPECT_TRUE(returned_on_caller);
 }
 
 TEST(ValidationBuffer, ListChangeCancelsMismatchedProofWaiter)
