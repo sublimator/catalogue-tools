@@ -12,6 +12,7 @@
 #include <cassert>
 #include <cctype>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 // Diagnose PeerSet state access outside its strand. Live regression runs can
@@ -2553,6 +2554,8 @@ PeerSet::seal_node_batch_command(
     // nothing was queued, so the failure is reported rather than swallowed.
     try
     {
+        if (fail_seal_projection_for_test_)
+            throw std::runtime_error("injected seal projection failure");
         asio::post(
             strand_,
             [self = shared_from_this(),

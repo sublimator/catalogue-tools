@@ -201,11 +201,42 @@ struct BindFixture
     /// One intent, minted through the only route a test has: the declared
     /// friend seam. A test cannot construct NodeBatchIntent directly, and that
     /// is the point.
+    /// Distinctive, non-default values throughout. A default-valued intent
+    /// cannot detect substitution: every field has to differ from what a
+    /// careless bind would produce.
+    static constexpr std::uint64_t kAttempt = 0x51;
+    static constexpr std::uint64_t kSenderGeneration = 0x77;
+
+    static Hash256
+    distinctive_ledger_hash()
+    {
+        Hash256 h{};
+        h.data()[0] = 0xAB;
+        h.data()[31] = 0xCD;
+        return h;
+    }
+
+    static std::vector<SHAMapNodeID>
+    distinctive_nodes()
+    {
+        SHAMapNodeID a{};
+        a.depth = 7;
+        a.id.data()[0] = 0x11;
+        SHAMapNodeID b{};
+        b.depth = 13;
+        b.id.data()[0] = 0x22;
+        return {a, b};
+    }
+
     static NodeBatchIntent
-    intent(std::uint64_t attempt = 1)
+    intent(std::uint64_t attempt = kAttempt)
     {
         return PeerClientTestAccess::node_batch_intent(
-            attempt, /*sender_generation=*/1);
+            attempt,
+            kSenderGeneration,
+            distinctive_ledger_hash(),
+            NodeTree::account_state,
+            distinctive_nodes());
     }
 
     /// Drive to quiescence, then leave the context RUNNABLE.
@@ -236,6 +267,11 @@ struct SealResult
     bool sealed = false;            // a command was produced
     std::uint64_t peer_generation = 0;
     bool on_peer_set_strand = true;  // must end up false
+    /// The whole sealed command is retained, not a summary. Keeping only
+    /// peer_generation made "seals the original intent" unfalsifiable: the bind
+    /// could have replaced the attempt, sender generation, ledger hash, tree,
+    /// node IDs or digest and the control would still have passed.
+    std::optional<NodeBatchCommand> command;
 };
 
 SealResult
@@ -256,6 +292,7 @@ seal(BindFixture& f, PeerGenerationPin pin, NodeBatchIntent intent)
             {
                 out.sealed = true;
                 out.peer_generation = command->peer_generation().value();
+                out.command = std::move(command);
             }
         });
     f.settle();
@@ -266,28 +303,99 @@ seal(BindFixture& f, PeerGenerationPin pin, NodeBatchIntent intent)
 
 /// 1. The current exact pin seals the intent against the authoritative
 ///    generation — and reports the generation PeerSet holds, not one supplied.
-TEST(PeerSetNodeBatchBind, ExactPinSealsAgainstAuthoritativeGeneration)
+TEST(PeerSetNodeBatchBind, ExactPinSealsTheOriginalIntentUnaltered)
 {
     BindFixture f;
+    auto const expected = BindFixture::intent();
     auto r = seal(f, f.pin(), BindFixture::intent());
     EXPECT_TRUE(r.projected);
     EXPECT_TRUE(r.completed);
     ASSERT_TRUE(r.sealed);
+    ASSERT_TRUE(r.command.has_value());
+
+    // Every observable field of the intent must survive the seal untouched.
+    EXPECT_EQ(r.command->attempt_id(), expected.attempt_id());
+    EXPECT_EQ(r.command->sender_generation(), expected.sender_generation());
+    EXPECT_EQ(r.command->ledger_hash(), expected.ledger_hash());
+    EXPECT_EQ(r.command->tree(), expected.tree());
+    EXPECT_EQ(r.command->node_ids().size(), expected.node_ids().size());
+    ASSERT_EQ(r.command->node_ids().size(), 2u);
+    EXPECT_EQ(r.command->node_ids()[0].depth, 7);
+    EXPECT_EQ(r.command->node_ids()[1].depth, 13);
+    EXPECT_EQ(r.command->payload_digest(), expected.payload_digest());
+
+    // And the generation must be the one PeerSet holds, not one supplied.
     EXPECT_EQ(r.peer_generation, f.generation);
 }
 
-/// 2. A pin minted by a DIFFERENT PeerSet names a generation this owner never
-///    admitted, so it can never authorise a seal here.
-TEST(PeerSetNodeBatchBind, ForeignPeerSetPinRefuses)
+/// 2. THE authority-boundary negative control: a foreign pin whose every
+///    downstream field collides with a legitimate local one, so the ONLY thing
+///    that can cause refusal is the source-owner check.
+///
+///    The previous version was vacuous. `mine` had no pin row and the foreign
+///    fixture used a different endpoint, so deleting
+///    `pin.release_owner().get() != this` still refused — just later, on absent
+///    or mismatched active_peer_pins_. Here both PeerSets admit the SAME session
+///    on one io_context and each mints its first generation and first pin id, so
+///    session pointer, endpoint, connection generation and pin id all agree.
+TEST(PeerSetNodeBatchBind, ForeignPeerSetPinRefusesOnOwnerAlone)
 {
-    BindFixture mine;
-    BindFixture theirs("198.51.100.4:51235");
-    auto foreign = theirs.pin();
+    asio::io_context io;
+    auto options = PeerSetOptions{
+        .network_id = 0,
+        .max_in_flight_connects = 0,
+        .max_in_flight_crawls = 0,
+    };
+    auto a = PeerSet::create(io, options);
+    auto b = PeerSet::create(io, options);
+
+    auto session = std::make_shared<BindSession>("203.0.113.11:51235");
+    session->attach_strand(io);
+
+    // Same session admitted into both; each mints its own first generation.
+    auto const gen_a =
+        PeerSetTestAccess::insert_ready_peer_with_generation(io, a, session);
+    auto const gen_b =
+        PeerSetTestAccess::insert_ready_peer_with_generation(io, b, session);
+
+    // A holds its own pin, so A's active row exists at the same pin id B will
+    // mint. Without this, refusal could come from a missing row instead.
+    auto local = PeerSetTestAccess::make_peer_pin_for_session(io, a, session);
+    auto foreign = PeerSetTestAccess::make_peer_pin_for_session(io, b, session);
+    ASSERT_TRUE(static_cast<bool>(local));
     ASSERT_TRUE(static_cast<bool>(foreign));
 
-    auto r = seal(mine, std::move(foreign), BindFixture::intent());
-    EXPECT_TRUE(r.completed);
-    EXPECT_FALSE(r.sealed) << "a foreign PeerSet's pin must not seal here";
+    // Every field a downstream guard could key on is identical.
+    ASSERT_EQ(gen_a, gen_b);
+    ASSERT_EQ(local.pin_id(), foreign.pin_id());
+    ASSERT_EQ(local.endpoint(), foreign.endpoint());
+    ASSERT_EQ(local.connection_generation(), foreign.connection_generation());
+    ASSERT_EQ(local.get(), foreign.get());
+    ASSERT_NE(local.release_owner().get(), foreign.release_owner().get())
+        << "only the source owner may differ, or this control proves nothing";
+
+    bool completed = false;
+    bool sealed = false;
+    ASSERT_TRUE(a->seal_node_batch_command(
+        BindFixture::intent(),
+        std::move(foreign),
+        io.get_executor(),
+        [&](std::optional<NodeBatchCommand> command) {
+            completed = true;
+            sealed = command.has_value();
+        }));
+    for (int i = 0; i < 64; ++i)
+    {
+        io.restart();
+        if (io.poll() == 0)
+            break;
+    }
+    io.restart();
+
+    EXPECT_TRUE(completed);
+    EXPECT_FALSE(sealed)
+        << "a pin minted by another PeerSet must not authorise a seal here, "
+           "even when every other field agrees";
 }
 
 /// 3. A replaced generation refuses, and critically does NOT retarget the
@@ -398,10 +506,10 @@ TEST(PeerSetNodeBatchBind, ThrowingCompletionIsContainedAtExecutionTime)
     EXPECT_TRUE(again.sealed) << "a throwing consumer must not poison PeerSet";
 }
 
-/// 9. Initial projection failure is visible. A void API could not distinguish
-///    "accepted, await completion" from "nothing queued", so a caller would
-///    wait forever on silence.
-TEST(PeerSetNodeBatchBind, InitialProjectionFailureReturnsFalse)
+/// 9a. Unusable inputs return false at the opening precondition. Useful, but
+///     renamed: it never reaches the try or asio::post, so it is NOT the
+///     post-initiation failure control.
+TEST(PeerSetNodeBatchBind, InvalidProjectionInputsReturnFalse)
 {
     BindFixture f;
     // No completion handler is an unusable projection.
@@ -413,6 +521,34 @@ TEST(PeerSetNodeBatchBind, InitialProjectionFailureReturnsFalse)
         f.pin(),
         asio::any_io_executor{},
         [](std::optional<NodeBatchCommand>) {}));
+}
+
+/// 9b. THE post-initiation control: valid handler and executor, but the
+///     projection itself fails inside the try. Must return false, and no
+///     owner-strand seal or completion may subsequently run — otherwise a
+///     caller told "nothing queued" could still be raced by a late seal.
+TEST(PeerSetNodeBatchBind, PostInitiationProjectionFailureReturnsFalse)
+{
+    BindFixture f;
+    PeerSetTestAccess::set_seal_projection_failure(f.peers, true);
+
+    bool completed = false;
+    auto const projected = f.peers->seal_node_batch_command(
+        BindFixture::intent(),
+        f.pin(),
+        f.io.get_executor(),
+        [&completed](std::optional<NodeBatchCommand>) { completed = true; });
+
+    EXPECT_FALSE(projected) << "a failed projection must be visible to the caller";
+    f.settle();
+    EXPECT_FALSE(completed)
+        << "nothing may run after the caller was told nothing was queued";
+
+    // Disarmed, the same call succeeds — so the false above was the failpoint,
+    // not a broken fixture.
+    PeerSetTestAccess::set_seal_projection_failure(f.peers, false);
+    auto again = seal(f, f.pin(), BindFixture::intent());
+    EXPECT_TRUE(again.sealed);
 }
 
 /// 10. An unpinned handle cannot seal: there is no generation to bind to.

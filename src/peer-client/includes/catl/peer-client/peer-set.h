@@ -443,6 +443,13 @@ private:
     PeerGenerationPin
     make_peer_pin(PeerSessionPtr const& expected_session);
 
+    /// Default-inert initiation failpoint, settable only through the declared
+    /// test seam. Proving that a failed projection returns false requires a
+    /// deterministic throw inside the public function's try, immediately before
+    /// asio::post. A stopped io_context is not a substitute: Asio may accept
+    /// work that never runs, which tests liveness rather than initiation.
+    bool fail_seal_projection_for_test_ = false;
+
     /// The single delivery point for a seal result. Marked //@@callback-funnel
     /// in the implementation: consumer code runs on its own executor, so
     /// containment and ordering are properties of one function.

@@ -920,6 +920,17 @@ public:
         return total;
     }
 
+    /// Arm the initiation failpoint. Narrow and default-inert: it makes the
+    /// post-initiation failure path deterministic without a second production
+    /// code path.
+    static void
+    set_seal_projection_failure(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        bool fail)
+    {
+        peers->fail_seal_projection_for_test_ = fail;
+    }
+
     /// Is the calling thread PeerSet's owner strand? Used to assert that a
     /// completion was delivered OFF that strand, which is what makes callback
     /// containment structural rather than promised.
