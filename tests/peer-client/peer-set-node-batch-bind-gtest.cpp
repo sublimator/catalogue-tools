@@ -8,6 +8,7 @@
 /// No sleeps. The io_context is driven to quiescence with poll(); every refusal
 /// is produced deliberately rather than waited for.
 
+#include "node-batch-test-session.h"
 #include "peer-client-test-access.h"
 #include "peer-set-test-access.h"
 
@@ -29,146 +30,11 @@ namespace asio = boost::asio;
 
 namespace {
 
-/// A session that is ready by default and can be made not-ready on demand.
-class BindSession : public PeerSession,
-                    public std::enable_shared_from_this<BindSession>
-{
-public:
-    explicit BindSession(std::string endpoint) : endpoint_(std::move(endpoint))
-    {
-    }
-
-    std::string const&
-    endpoint() const override
-    {
-        return endpoint_;
-    }
-    bool
-    is_ready() const override
-    {
-        return ready;
-    }
-    std::uint32_t
-    peer_ledger_seq() const override
-    {
-        return 100;
-    }
-    std::uint32_t
-    peer_first_seq() const override
-    {
-        return 1;
-    }
-    std::uint32_t
-    peer_last_seq() const override
-    {
-        return 100;
-    }
-
-    bool
-    submit_node_batch(NodeBatchCommand, NodeBatchWriteHandler) override
-    {
-        return false;  // publication is not under test here
-    }
-    bool
-    acknowledge_node_batch_receipt(NodeBatchReceiptAck) override
-    {
-        return false;
-    }
-
-    // --- remainder of the interface: inert. The bind never calls these, and a
-    // fake that quietly did something here would make the controls ambiguous.
-    std::size_t
-    pending_count() const override
-    {
-        return 0;
-    }
-    void
-    disconnect() override
-    {
-    }
-    boost::asio::strand<boost::asio::io_context::executor_type>&
-    strand() override
-    {
-        return *strand_;
-    }
-    void
-    set_unsolicited_handler(UnsolicitedHandler) override
-    {
-    }
-    void
-    set_node_response_handler(NodeResponseHandler) override
-    {
-    }
-    void
-    get_ledger_header(uint32_t, Callback<LedgerHeaderResult>, RequestOptions)
-        override
-    {
-    }
-    void
-    get_ledger_header(
-        Hash256 const&,
-        Callback<LedgerHeaderResult>,
-        RequestOptions) override
-    {
-    }
-    void
-    get_state_nodes(
-        Hash256 const&,
-        std::vector<SHAMapNodeID> const&,
-        Callback<LedgerNodesResult>,
-        RequestOptions) override
-    {
-    }
-    void
-    get_tx_nodes(
-        Hash256 const&,
-        std::vector<SHAMapNodeID> const&,
-        Callback<LedgerNodesResult>,
-        RequestOptions) override
-    {
-    }
-    void
-    get_tx_proof_path(
-        Hash256 const&,
-        Hash256 const&,
-        Callback<ProofPathResult>,
-        RequestOptions) override
-    {
-    }
-    void
-    get_state_proof_path(
-        Hash256 const&,
-        Hash256 const&,
-        Callback<ProofPathResult>,
-        RequestOptions) override
-    {
-    }
-    void
-    ping(Callback<PingResult>, RequestOptions) override
-    {
-    }
-    void
-    send_get_nodes(
-        Hash256 const&,
-        int,
-        std::vector<SHAMapNodeID> const&,
-        std::function<void(boost::system::error_code)>) override
-    {
-    }
-
-    void
-    attach_strand(boost::asio::io_context& io)
-    {
-        strand_.emplace(boost::asio::make_strand(io));
-    }
-
-    bool ready = true;
-
-private:
-    std::string endpoint_;
-    std::optional<boost::asio::strand<boost::asio::io_context::executor_type>>
-        strand_;
-};
+/// The shared ready-by-default session fake. Extracted to
+/// node-batch-test-session.h when the coordinator suite needed the same one; two
+/// divergent fakes of one interface is how a control ends up proving something
+/// about its fixture.
+using BindSession = NodeBatchTestSession;
 
 struct BindFixture
 {
@@ -523,11 +389,11 @@ TEST(PeerSetNodeBatchBind, InvalidProjectionInputsReturnFalse)
         [](std::optional<NodeBatchCommand>) {}));
 }
 
-/// 9b. THE post-initiation control: valid handler and executor, but the
+/// 9b. THE initiation-failure control: valid handler and executor, but the
 ///     projection itself fails inside the try. Must return false, and no
 ///     owner-strand seal or completion may subsequently run — otherwise a
 ///     caller told "nothing queued" could still be raced by a late seal.
-TEST(PeerSetNodeBatchBind, PostInitiationProjectionFailureReturnsFalse)
+TEST(PeerSetNodeBatchBind, ProjectionInitiationFailureReturnsFalse)
 {
     BindFixture f;
     PeerSetTestAccess::set_seal_projection_failure(f.peers, true);

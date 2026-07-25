@@ -49,6 +49,11 @@ add_executable(peer-set-node-batch-bind-gtest
 target_link_libraries(peer-set-node-batch-bind-gtest
                       PRIVATE catl::peer-client GTest::gtest_main)
 
+add_executable(ledger-fetch-coordinator-bind-gtest
+               ledger-fetch-coordinator-bind-gtest.cpp)
+target_link_libraries(ledger-fetch-coordinator-bind-gtest
+                      PRIVATE catl::peer-client GTest::gtest_main)
+
 add_executable(peer-set-strand-discipline-gtest
                peer-set-strand-discipline-gtest.cpp)
 target_link_libraries(peer-set-strand-discipline-gtest
@@ -73,6 +78,7 @@ include(GoogleTest)
 set(CATL_PEER_CLIENT_TEST_TARGETS
     peer-set-strand-discipline-gtest
     peer-set-node-batch-bind-gtest
+    ledger-fetch-coordinator-bind-gtest
     connection-write-lifecycle-gtest
     peer-client-gtest
     peer-endpoint-cache-gtest
