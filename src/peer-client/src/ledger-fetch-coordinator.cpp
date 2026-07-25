@@ -578,12 +578,6 @@ LedgerFetchCoordinator::note_projection_opened() noexcept
 void
 LedgerFetchCoordinator::note_projection_observed() noexcept
 {
-    if (projection_residue_saturated_.load(std::memory_order_acquire))
-    {
-        // Absorbing: past the ceiling the count is meaningless, so draining it
-        // would manufacture a false zero from the other direction.
-        return;
-    }
     auto current = outstanding_projections_.load(std::memory_order_relaxed);
     for (;;)
     {
@@ -592,11 +586,22 @@ LedgerFetchCoordinator::note_projection_observed() noexcept
             // A completion for a projection that was never counted. Recorded, not
             // clamped: clamping produced a residue that read zero while real work
             // was still open, which is indistinguishable from healthy.
-            accounting_broken_.store(true, std::memory_order_release);
-            PLOGE(
-                log_,
-                "projection accounting violated: observed a completion with no "
-                "open projection");
+            //
+            // Silent once saturated, because past the ceiling this counter is
+            // already meaningless and every further observation would log the same
+            // violation. Note it does NOT return early on saturation: absorbing is
+            // spelled ONCE, in outstanding_bind_projections(). Guarding it here too
+            // made each guard individually sufficient, so deleting either one alone
+            // changed nothing a control could see and both mutations survived —
+            // the same defect as a bound written out twice.
+            if (!projection_residue_saturated_.load(std::memory_order_acquire))
+            {
+                accounting_broken_.store(true, std::memory_order_release);
+                PLOGE(
+                    log_,
+                    "projection accounting violated: observed a completion with "
+                    "no open projection");
+            }
             return;
         }
         if (outstanding_projections_.compare_exchange_weak(
