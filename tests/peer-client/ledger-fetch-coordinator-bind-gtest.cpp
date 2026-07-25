@@ -41,7 +41,6 @@ using Ingress = LedgerFetchCoordinator::Ingress;
 using Phase = LedgerFetchCoordinator::Phase;
 using Lifecycle = LedgerFetchCoordinator::Lifecycle;
 using Fence = LedgerFetchCoordinator::Fence;
-using FenceOutcome = LedgerFetchCoordinator::FenceOutcome;
 namespace asio = boost::asio;
 
 namespace {
@@ -454,10 +453,7 @@ TEST(LedgerFetchCoordinatorBind, FenceDuringQueuedIngressCompletesExactlyOnce)
 
     int fenced = 0;
     ASSERT_EQ(
-        f.coord->fence([&fenced](FenceOutcome o) {
-            EXPECT_EQ(o, FenceOutcome::fenced);
-            ++fenced;
-        }),
+        f.coord->fence([&fenced]() { ++fenced; }),
         Fence::drain_queued);
     EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fencing);
     f.settle();
@@ -472,10 +468,7 @@ TEST(LedgerFetchCoordinatorBind, FenceDuringQueuedIngressCompletesExactlyOnce)
     EXPECT_EQ(f.submit(), Ingress::ingress_sealed);
     int again = 0;
     ASSERT_EQ(
-        f.coord->fence([&again](FenceOutcome o) {
-            EXPECT_EQ(o, FenceOutcome::fenced);
-            ++again;
-        }),
+        f.coord->fence([&again]() { ++again; }),
         Fence::drain_queued);
     f.settle();
     EXPECT_EQ(again, 1);
@@ -497,10 +490,7 @@ TEST(LedgerFetchCoordinatorBind, FenceDuringOpenBindCompletesExactlyOnce)
 
     int fenced = 0;
     ASSERT_EQ(
-        f.coord->fence([&fenced](FenceOutcome o) {
-            EXPECT_EQ(o, FenceOutcome::fenced);
-            ++fenced;
-        }),
+        f.coord->fence([&fenced]() { ++fenced; }),
         Fence::drain_queued);
 
     // Step until the fence is reported. Stepping rather than settling is what
@@ -586,7 +576,7 @@ TEST(LedgerFetchCoordinatorBind, ThrowingFenceHandlerIsContainedAtTheFunnel)
 
     bool ran = false;
     ASSERT_EQ(
-        f.coord->fence([&ran](FenceOutcome) {
+        f.coord->fence([&ran]() {
             ran = true;
             throw std::runtime_error("fence handler throws");
         }),
@@ -601,7 +591,7 @@ TEST(LedgerFetchCoordinatorBind, ThrowingFenceHandlerIsContainedAtTheFunnel)
     // fence still owes exactly one delivery.
     int again = 0;
     ASSERT_EQ(
-        f.coord->fence([&again](FenceOutcome) { ++again; }),
+        f.coord->fence([&again]() { ++again; }),
         Fence::drain_queued);
     f.settle();
     EXPECT_EQ(again, 1);
@@ -716,10 +706,7 @@ TEST(LedgerFetchCoordinatorBind, RowCommitFailureWhileFencingStillCompletes)
 
     int fenced = 0;
     ASSERT_EQ(
-        f.coord->fence([&fenced](FenceOutcome o) {
-            EXPECT_EQ(o, FenceOutcome::fenced);
-            ++fenced;
-        }),
+        f.coord->fence([&fenced]() { ++fenced; }),
         Fence::drain_queued);
     EXPECT_NO_THROW(f.settle());
     EXPECT_EQ(fenced, 1);
@@ -772,7 +759,7 @@ TEST(LedgerFetchCoordinatorBind, FenceProjectionFailureIsObservableAndRecoverabl
     Access::set_fence_projection_failure(f.coord, true);
     int fenced = 0;
     EXPECT_EQ(
-        f.coord->fence([&fenced](FenceOutcome) { ++fenced; }),
+        f.coord->fence([&fenced]() { ++fenced; }),
         Fence::projection_failed)
         << "a caller told nothing about this would be wedged with no way to know";
 
@@ -788,10 +775,7 @@ TEST(LedgerFetchCoordinatorBind, FenceProjectionFailureIsObservableAndRecoverabl
     // Recovery: fence() is idempotent, so a retry re-posts the drain.
     Access::set_fence_projection_failure(f.coord, false);
     EXPECT_EQ(
-        f.coord->fence([&fenced](FenceOutcome o) {
-            EXPECT_EQ(o, FenceOutcome::fenced);
-            ++fenced;
-        }),
+        f.coord->fence([&fenced]() { ++fenced; }),
         Fence::drain_queued);
     f.settle();
     EXPECT_EQ(fenced, 1);
@@ -813,25 +797,22 @@ TEST(LedgerFetchCoordinatorBind, EveryFenceWaiterGetsItsOwnDisposition)
     int second = 0;
     int third = 0;
 
-    // Waiters only COEXIST while the fence cannot complete, so a permit is left
-    // uncommitted. Three plain fence() calls do not test the overwrite at all: the
-    // first body completes the fence and the other two are answered on arrival, so
-    // each still gets exactly one disposition even if the container is clobbered on
-    // every insert. A probe that cleared the vector before each push changed
-    // nothing in that version — the control was vacuous and said so.
+    // Waiters only COEXIST while the fence cannot complete, and a single-threaded
+    // caller cannot produce that: submit() posts its commit BEFORE any fence()
+    // does, so the commit releases the last work unit and the fence completes in
+    // its first body, leaving the rest to be answered on arrival. Each then gets
+    // exactly one notification even if the container is clobbered on every insert,
+    // which is why a probe that cleared the vector before each push changed nothing
+    // and this control reported itself vacuous.
+    //
+    // In production the state comes from a submit on another thread. Running the
+    // bodies directly forces that ordering. The PUBLIC bound on how many
+    // projections can be queued is a different property, tested through fence()
+    // itself in FenceProjectionBudgetBoundsThePublicBoundary.
     ASSERT_EQ(f.coord->fence(), Fence::drain_queued);
-    Access::begin_fence(f.coord, [&first](FenceOutcome o) {
-        EXPECT_EQ(o, FenceOutcome::fenced);
-        ++first;
-    });
-    Access::begin_fence(f.coord, [&second](FenceOutcome o) {
-        EXPECT_EQ(o, FenceOutcome::fenced);
-        ++second;
-    });
-    Access::begin_fence(f.coord, [&third](FenceOutcome o) {
-        EXPECT_EQ(o, FenceOutcome::fenced);
-        ++third;
-    });
+    Access::begin_fence(f.coord, [&first]() { ++first; });
+    Access::begin_fence(f.coord, [&second]() { ++second; });
+    Access::begin_fence(f.coord, [&third]() { ++third; });
     ASSERT_EQ(first + second + third, 0) << "all three are retained, not answered";
 
     f.settle();
@@ -841,58 +822,61 @@ TEST(LedgerFetchCoordinatorBind, EveryFenceWaiterGetsItsOwnDisposition)
     EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fenced);
 }
 
-/// 23. Fence waiters are BOUNDED, and the caller past the bound is told so rather
-///     than left waiting on a notification that can never arrive.
+/// 23. The fence budget bounds the PUBLIC boundary, not just retained waiters.
 ///
-/// Waiters only accumulate while the fence CANNOT complete — that is, while a
-/// granted ingress permit is still uncommitted. Going through `fence()` nine times
-/// does not produce that state in a single-threaded harness: the first body
-/// terminalizes every row, work reaches zero, the fence completes, and the other
-/// eight are answered immediately. I wrote that version first and it reported nine
-/// acceptances and zero refusals — the cap was unreachable, which would have made
-/// `waiter_capacity_exhausted` decoration.
-///
-/// The reachable production route is a submit on ANOTHER thread: it CASes a permit
-/// before the seal lands, and its commit post arrives after the fence bodies. This
-/// control forces exactly that ordering by running the fence bodies directly while
-/// a submitted permit is still queued.
-TEST(LedgerFetchCoordinatorBind, FenceWaiterCapacityRefusesWithADisposition)
+/// The previous version applied the cap only when a fence body reached the strand,
+/// so `fence()` could post arbitrarily many lambdas onto the io_context first and
+/// the bound was decorative — and the control proved it via TestAccess, bypassing
+/// the very API that was unbounded. A permit is now taken synchronously, before
+/// anything is posted, so this control goes through `fence()` with the strand not
+/// yet run at all.
+TEST(LedgerFetchCoordinatorBind, FenceProjectionBudgetBoundsThePublicBoundary)
 {
     CoordFixture f;
-    ASSERT_EQ(f.submit(), Ingress::reserved);
-    ASSERT_EQ(f.coord->work_outstanding(), 1u) << "uncommitted, so the fence waits";
-    ASSERT_EQ(Access::row_count(f.coord), 0u);
+    int notified = 0;
+    int refused_never_called = 0;
 
-    int accepted = 0;
-    int refused = 0;
-    auto handler = [&accepted, &refused](FenceOutcome o) {
-        if (o == FenceOutcome::fenced)
-        {
-            ++accepted;
-        }
-        else
-        {
-            ++refused;
-        }
-    };
-
-    // Seal ingress the way fence() does, then run one body past the cap.
-    ASSERT_EQ(f.coord->fence(), Fence::drain_queued);
-    for (std::size_t i = 0; i < LedgerFetchCoordinator::kMaxFenceWaiters + 1; ++i)
+    // Nothing is polled in this block: every permit below is taken by the public
+    // call itself, which is the property under test.
+    for (std::size_t i = 0; i < LedgerFetchCoordinator::kMaxFenceWaiters; ++i)
     {
-        Access::begin_fence(f.coord, handler);
+        ASSERT_EQ(
+            f.coord->fence([&notified]() { ++notified; }),
+            Fence::drain_queued)
+            << "at i=" << i;
     }
-    EXPECT_EQ(refused, 1) << "the caller past the bound must learn why, at once";
-    EXPECT_EQ(accepted, 0) << "and the ones within it are still waiting";
+    EXPECT_EQ(
+        f.coord->fence([&refused_never_called]() { ++refused_never_called; }),
+        Fence::capacity_exhausted)
+        << "one past the budget must be refused BEFORE anything is queued";
+    EXPECT_EQ(notified, 0) << "and none of this has run yet";
+    EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fencing)
+        << "asserted BEFORE anything that can poll — see below";
 
-    // The queued commit releases the permit, and every retained waiter is served.
+    // Ingress is sealed even for the refused caller: sealing happens first and is
+    // idempotent, so a refusal cannot leave the actor admitting new work.
+    //
+    // NOTE this call is not passive. submit() mints a pin through
+    // PeerSetTestAccess, whose run_on_strand busy-waits while POLLING the
+    // io_context, so it runs queued fence bodies as a side effect. The lifecycle
+    // assertion above was originally after this line and failed reporting `fenced`
+    // — the assertion had advanced the very state it was checking.
+    EXPECT_EQ(f.submit(), Ingress::ingress_sealed);
+
     f.settle();
     EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fenced);
-    EXPECT_EQ(accepted, static_cast<int>(LedgerFetchCoordinator::kMaxFenceWaiters));
-    EXPECT_EQ(
-        accepted + refused,
-        static_cast<int>(LedgerFetchCoordinator::kMaxFenceWaiters + 1))
-        << "every caller is owed exactly one disposition, bounded or not";
+    EXPECT_EQ(notified, static_cast<int>(LedgerFetchCoordinator::kMaxFenceWaiters))
+        << "every accepted caller is notified exactly once";
+    EXPECT_EQ(refused_never_called, 0)
+        << "a caller told capacity_exhausted must NEVER be called back; that is "
+           "what makes the synchronous refusal safe";
+
+    // The budget is a live bound, not a one-shot: permits are released with their
+    // dispositions, so a later caller is accepted again.
+    int late = 0;
+    EXPECT_EQ(f.coord->fence([&late]() { ++late; }), Fence::drain_queued);
+    f.settle();
+    EXPECT_EQ(late, 1);
 }
 
 /// 24. A caller who fences an ALREADY fenced coordinator is answered, not queued.
@@ -905,10 +889,7 @@ TEST(LedgerFetchCoordinatorBind, FencingAnAlreadyFencedCoordinatorAnswersAtOnce)
 
     int late = 0;
     ASSERT_EQ(
-        f.coord->fence([&late](FenceOutcome o) {
-            EXPECT_EQ(o, FenceOutcome::fenced);
-            ++late;
-        }),
+        f.coord->fence([&late]() { ++late; }),
         Fence::drain_queued);
     f.settle();
     EXPECT_EQ(late, 1);
@@ -936,7 +917,7 @@ TEST(LedgerFetchCoordinatorBind, SealArrivingAfterIngressSealIsDropped)
     // Seal ingress with the completion already queued ahead of the fence body.
     int fenced = 0;
     ASSERT_EQ(
-        f.coord->fence([&fenced](FenceOutcome) { ++fenced; }),
+        f.coord->fence([&fenced]() { ++fenced; }),
         Fence::drain_queued);
 
     // ONE handler: the completion. Asserting here rather than after settling is
@@ -962,4 +943,107 @@ TEST(LedgerFetchCoordinatorBind, SealArrivingAfterIngressSealIsDropped)
     f.settle();
     EXPECT_EQ(fenced, 1);
     EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fenced);
+}
+
+/// 26. Projection accounting cannot be masked by failed initiations.
+///
+/// THE control Codex asked for, and it fails on the previous pin. The bind
+/// initiation failpoint throws BEFORE PeerSet accepts anything, yet the catch
+/// decremented a completion counter anyway. Two failed attempts gave
+/// completed=2, projected=0, and the residue — computed as a saturating
+/// difference — reported zero. A later REAL open projection then stayed masked
+/// until projected caught up, which is the worst possible failure for a number
+/// whose only job is to say "work is still outstanding".
+///
+/// So: exhaust initiation failures first, disarm, open a real projection, and
+/// require it to be reported.
+TEST(LedgerFetchCoordinatorBind, FailedInitiationsCannotMaskALaterOpenProjection)
+{
+    CoordFixture f;
+    Access::set_max_bind_attempts(f.coord, 2);
+    Access::set_bind_initiation_failure(f.coord, true);
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+
+    // Two attempts, both failing before PeerSet saw anything.
+    auto const first = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_EQ(Access::find_any(f.coord, *first)->bind_attempts, 2u);
+    EXPECT_EQ(f.coord->outstanding_bind_projections(), 0u)
+        << "nothing was ever accepted, so nothing is outstanding";
+    EXPECT_FALSE(f.coord->projection_accounting_broken())
+        << "and no violation: a projection that never opened must not be settled";
+
+    // Now a REAL projection, left pending by not letting its completion run.
+    Access::set_bind_initiation_failure(f.coord, false);
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    ASSERT_EQ(f.step(), 1u);  // commit + open bind; completion still queued
+
+    EXPECT_EQ(f.coord->outstanding_bind_projections(), 1u)
+        << "a real open projection MUST be visible; on the previous pin the "
+           "earlier failed initiations had pushed the count negative and it "
+           "reported zero here";
+    EXPECT_FALSE(f.coord->projection_accounting_broken());
+
+    f.settle();
+    EXPECT_EQ(f.coord->outstanding_bind_projections(), 0u)
+        << "and returns to zero once observed";
+    EXPECT_FALSE(f.coord->projection_accounting_broken());
+}
+
+/// 27. A refused projection is not counted as outstanding either.
+TEST(LedgerFetchCoordinatorBind, RefusedProjectionsAreNotCountedAsOutstanding)
+{
+    CoordFixture f;
+    Access::set_max_bind_attempts(f.coord, 2);
+    PeerSetTestAccess::set_seal_projection_failure(f.peers, true);
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+    EXPECT_EQ(f.coord->outstanding_bind_projections(), 0u)
+        << "PeerSet returned false, so it holds no projection to complete";
+    EXPECT_FALSE(f.coord->projection_accounting_broken());
+}
+
+/// 28. The fence delivery buffers never reallocate, so nothing fallible happens
+///     after the terminal fence commit.
+///
+/// The previous version cleared and RESERVED after storing `fenced_` — an
+/// allocation past the point of no return. Had it thrown, every detached waiter
+/// would have been destroyed without notification and the exception would have
+/// escaped the strand handler. Delivery now swaps two preallocated buffers, which
+/// `static_assert(noexcept(...))` proves cannot throw; this control proves the
+/// capacity is genuinely stable across repeated fence cycles, so the swap is never
+/// standing in for a hidden reallocation.
+TEST(LedgerFetchCoordinatorBind, FenceDeliveryBuffersNeverReallocate)
+{
+    CoordFixture f;
+    auto const capacity_before = Access::fence_buffer_capacities(f.coord);
+    EXPECT_GE(capacity_before.first, LedgerFetchCoordinator::kMaxFenceWaiters);
+    EXPECT_GE(capacity_before.second, LedgerFetchCoordinator::kMaxFenceWaiters);
+
+    // Fill the budget, complete the fence, then do it again. If either buffer
+    // reallocated, the capacity would move.
+    int notified = 0;
+    for (std::size_t i = 0; i < LedgerFetchCoordinator::kMaxFenceWaiters; ++i)
+    {
+        ASSERT_EQ(
+            f.coord->fence([&notified]() { ++notified; }), Fence::drain_queued);
+    }
+    f.settle();
+    ASSERT_EQ(notified, static_cast<int>(LedgerFetchCoordinator::kMaxFenceWaiters));
+
+    for (std::size_t i = 0; i < LedgerFetchCoordinator::kMaxFenceWaiters; ++i)
+    {
+        ASSERT_EQ(
+            f.coord->fence([&notified]() { ++notified; }), Fence::drain_queued);
+    }
+    f.settle();
+    EXPECT_EQ(notified, static_cast<int>(LedgerFetchCoordinator::kMaxFenceWaiters) * 2);
+
+    auto const capacity_after = Access::fence_buffer_capacities(f.coord);
+    EXPECT_EQ(capacity_after, capacity_before)
+        << "a changed capacity means an allocation happened on a path that must "
+           "never allocate";
 }

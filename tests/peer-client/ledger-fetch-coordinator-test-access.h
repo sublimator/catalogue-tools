@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
 
 /// Direct, non-hopping access to coordinator state.
 ///
@@ -212,6 +213,14 @@ public:
     completions_sealed(std::shared_ptr<Coordinator> const& c)
     {
         return c->completions_sealed_;
+    }
+
+    /// Both fence buffers' capacities. Stability across fence cycles is what
+    /// proves delivery never allocates after the terminal commit.
+    static std::pair<std::size_t, std::size_t>
+    fence_buffer_capacities(std::shared_ptr<Coordinator> const& c)
+    {
+        return {c->fence_waiters_.capacity(), c->fence_delivery_.capacity()};
     }
 
     /// Run the fence body directly on the caller's thread.

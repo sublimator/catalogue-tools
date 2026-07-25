@@ -115,22 +115,32 @@ public:
     /// What `fence()` learned synchronously. Same discipline as `Ingress`: it can
     /// only report whether the projection was queued, because everything else is
     /// the strand's to decide.
+    ///
+    /// The refusals are load-bearing: `drain_queued` is the ONLY value that
+    /// promises the handler will be called. Anything else means it will not be,
+    /// so a caller can never be left waiting on a notification that cannot come.
     enum class Fence : std::uint8_t {
         drain_queued,
         /// The drain could not be queued. Ingress STAYS sealed — un-sealing would
         /// resurrect an actor whose callers have already been refused — so this is
         /// reported instead of hidden, and `fence()` is idempotent: call it again.
         projection_failed,
+        /// The bounded fence projection budget is spent. Refused BEFORE anything
+        /// is posted, which is the point: the cap has to bound the public
+        /// boundary, not just the retained waiter list, or a caller can queue
+        /// unbounded work onto the io_context and the bound is decorative.
+        ///
+        /// Safe to refuse, because ingress is already sealed and the projections
+        /// already queued will terminalize every row. The fence WILL happen; this
+        /// caller just does not get a notification unless it calls again.
+        capacity_exhausted,
     };
 
-    /// Exactly-once disposition handed to every fence waiter. A waiter that
-    /// cannot be registered still learns why, rather than waiting forever.
-    enum class FenceOutcome : std::uint8_t {
-        fenced,
-        waiter_capacity_exhausted,
-    };
-
-    using FenceHandler = std::function<void(FenceOutcome)>;
+    /// Called exactly once, on the coordinator strand, through the one callback
+    /// funnel — and only when `fence()` returned `drain_queued`. There is no
+    /// outcome parameter because there is only one outcome: every other
+    /// disposition is reported synchronously by `fence()` itself.
+    using FenceHandler = std::function<void()>;
 
     /// Where one transport attempt's bind has got to.
     enum class Phase : std::uint8_t {
@@ -202,14 +212,36 @@ public:
     /// Seal projections accepted by PeerSet whose completion has not been seen.
     ///
     /// This is the residue that makes `fence()` a logical fence rather than a
-    /// drain. Nonzero after `Lifecycle::fenced` means completions — and the pin
-    /// shares they carry — may still land. Public so the gap is countable.
+    /// drain. Nonzero after `Lifecycle::fenced` means bind completion work is
+    /// still unobserved.
+    ///
+    /// It is NOT a count of physical pin shares: PeerSet consumes the share in its
+    /// own owner-strand handler and releases it there, before the completion is
+    /// posted, so the completion carries a command and no retention. The residue
+    /// is unobserved completion/receipt work.
+    ///
+    /// ONE value, not a projected/completed pair. A pair cannot be read
+    /// consistently — read P=5, C=4; another projection completes to P=6, C=5;
+    /// read C=5 and report zero while the original projection is still open — and
+    /// a pair whose halves can be incremented independently saturates to a false
+    /// zero the moment they disagree.
     std::size_t
     outstanding_bind_projections() const noexcept
     {
-        auto const projected = binds_projected_.load(std::memory_order_acquire);
-        auto const completed = binds_completed_.load(std::memory_order_acquire);
-        return projected >= completed ? projected - completed : 0;
+        return static_cast<std::size_t>(
+            outstanding_projections_.load(std::memory_order_acquire));
+    }
+
+    /// Has projection accounting been violated? Set when a completion was
+    /// observed for a projection that was never counted.
+    ///
+    /// Public and sticky rather than logged, because the failure mode it guards is
+    /// a residue that reads as zero while work is still open — which is
+    /// indistinguishable from healthy unless the violation itself is observable.
+    bool
+    projection_accounting_broken() const noexcept
+    {
+        return projection_accounting_broken_.load(std::memory_order_acquire);
     }
 
     SenderGenerationId
@@ -319,9 +351,26 @@ private:
     void
     check_fenced_on_strand();
 
-    /// The ONE place a caller-supplied fence disposition is delivered.
+    /// One projection accepted by PeerSet. Counted only when PeerSet actually
+    /// accepted it, so a refusal or a throw before that point counts nothing.
     void
-    deliver_fence_outcome(FenceHandler const& handler, FenceOutcome outcome) noexcept;
+    note_projection_opened() noexcept;
+
+    /// One projection observed. Never saturates: observing one that was never
+    /// counted is an accounting violation and is recorded as one.
+    void
+    note_projection_observed() noexcept;
+
+    /// Take one bounded fence projection permit. False when the budget is spent.
+    bool
+    acquire_fence_permit() noexcept;
+
+    void
+    release_fence_permit() noexcept;
+
+    /// The ONE place a caller-supplied fence notification is delivered.
+    void
+    deliver_fence_notification(FenceHandler const& handler) noexcept;
 
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     std::shared_ptr<PeerSet> peers_;
@@ -330,7 +379,14 @@ private:
     // Strand-owned. No other executor may read or write these.
     std::uint64_t next_attempt_ = 0;
     std::vector<OutboxRow> rows_;
+    /// Double-buffered on purpose. Delivery swaps these two — `swap` cannot
+    /// allocate and cannot throw — so nothing fallible happens after the terminal
+    /// fence commit. The previous version cleared and RESERVED after storing
+    /// `fenced_`, which is an allocation past the point of no return: had it
+    /// thrown, every detached waiter would have been destroyed without
+    /// notification and the exception would have escaped the strand handler.
     std::vector<FenceHandler> fence_waiters_;
+    std::vector<FenceHandler> fence_delivery_;
     std::uint64_t completions_seen_ = 0;
     std::uint64_t completions_sealed_ = 0;
 
@@ -354,10 +410,20 @@ private:
     std::atomic<std::uint64_t> work_{0};
     std::atomic<bool> fenced_{false};
 
-    /// Atomic so the residue is readable off-strand by whoever has to decide that
-    /// this actor is NOT quiescent.
-    std::atomic<std::uint64_t> binds_projected_{0};
-    std::atomic<std::uint64_t> binds_completed_{0};
+    /// ONE value, atomic so the residue is readable off-strand by whoever has to
+    /// decide that this actor is NOT quiescent. Incremented only when PeerSet has
+    /// actually accepted a projection; decremented only when one is observed.
+    std::atomic<std::uint64_t> outstanding_projections_{0};
+
+    /// Sticky. Set when a completion is observed for a projection that was never
+    /// counted — the failure mode that otherwise reads as a healthy zero.
+    std::atomic<bool> projection_accounting_broken_{false};
+
+    /// Queued fence projections plus retained fence waiters, as ONE budget
+    /// bounded by kMaxFenceWaiters. Taken before the post and released when the
+    /// caller's disposition is settled, so the bound applies to the PUBLIC
+    /// boundary rather than only to whatever survived to the strand.
+    std::atomic<std::uint64_t> fence_permits_{0};
 };
 
 }  // namespace catl::peer_client

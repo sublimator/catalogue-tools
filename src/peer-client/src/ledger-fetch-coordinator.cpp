@@ -79,7 +79,11 @@ LedgerFetchCoordinator::LedgerFetchCoordinator(
     // Allocated once for the life of the actor, so appending a row or a fence
     // waiter later cannot allocate and therefore cannot throw.
     rows_.reserve(kMaxWork);
+    // Both fence buffers, so delivery can swap between them forever without ever
+    // allocating again — including after the terminal fence commit, where an
+    // allocation that threw would strand every detached waiter.
     fence_waiters_.reserve(kMaxFenceWaiters);
+    fence_delivery_.reserve(kMaxFenceWaiters);
 }
 
 //@@authority transition=ledger_fetch_coordinator.reserve_ingress
@@ -329,14 +333,13 @@ LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
                     attempt, revision, std::nullopt, /*timed_out=*/true);
             });
 
-        binds_projected_.fetch_add(1, std::memory_order_acq_rel);
         projected = peers_->seal_node_batch_command(
             row->intent,       // copied: the row keeps the original for its life
             row->pin.share(),  // and keeps the retention it owns
             strand_,
             [self = shared_from_this(), attempt, revision](
                 std::optional<NodeBatchCommand> sealed) {
-                self->binds_completed_.fetch_add(1, std::memory_order_acq_rel);
+                self->note_projection_observed();
                 ++self->completions_seen_;
                 if (sealed)
                 {
@@ -357,9 +360,18 @@ LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
                 // with a losing completion would never report.
                 self->check_fenced_on_strand();
             });
-        if (!projected)
+        if (projected)
         {
-            binds_completed_.fetch_add(1, std::memory_order_acq_rel);
+            // Counted ONLY once PeerSet has accepted it. Counting before the call
+            // — or settling a counter in the catch below — makes the residue lie:
+            // the failpoint throws before the projection exists, so an
+            // unconditional decrement produced observed-without-opened, and a
+            // relation that can go negative was being clamped to a false zero
+            // that masked later real work.
+            //
+            // Safe to count after the call: the completion is posted to this
+            // strand and we are on it, so it cannot run before we return.
+            note_projection_opened();
         }
     }
     catch (...)
@@ -367,8 +379,11 @@ LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
         // Initiation threw after the revision was opened. Falling through to the
         // ordinary settle path is what guarantees an accepted permit can never sit
         // in awaiting_bind with nothing in flight.
+        //
+        // Nothing is decremented here. Either PeerSet accepted the projection
+        // before the throw — in which case its completion will account for it — or
+        // it did not, and there is nothing to account for.
         PLOGE(log_, "bind initiation threw; settling as a failed bind");
-        binds_completed_.fetch_add(1, std::memory_order_acq_rel);
     }
 
     // `projected` is false on every throwing path as well as on refusal, so ONE
@@ -486,7 +501,7 @@ LedgerFetchCoordinator::release_work() noexcept
     }
 }
 
-/// Deliver one fence disposition. Containment lives HERE, not at the call sites,
+/// Deliver one fence notification. Containment lives HERE, not at the call sites,
 /// so ordering and exception behaviour are properties of one function.
 ///
 /// Delivered inline rather than posted, deliberately. This runs only after the
@@ -497,9 +512,8 @@ LedgerFetchCoordinator::release_work() noexcept
 /// exception, and that is contained below.
 //@@callback-funnel
 void
-LedgerFetchCoordinator::deliver_fence_outcome(
-    FenceHandler const& handler,
-    FenceOutcome outcome) noexcept
+LedgerFetchCoordinator::deliver_fence_notification(
+    FenceHandler const& handler) noexcept
 {
     if (!handler)
     {
@@ -507,7 +521,7 @@ LedgerFetchCoordinator::deliver_fence_outcome(
     }
     try
     {
-        handler(outcome);
+        handler();
     }
     catch (std::exception const& e)
     {
@@ -519,12 +533,108 @@ LedgerFetchCoordinator::deliver_fence_outcome(
     }
 }
 
+void
+LedgerFetchCoordinator::note_projection_opened() noexcept
+{
+    outstanding_projections_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void
+LedgerFetchCoordinator::note_projection_observed() noexcept
+{
+    auto current = outstanding_projections_.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        if (current == 0)
+        {
+            // A completion for a projection that was never counted. Recorded, not
+            // clamped: clamping produced a residue that read zero while real work
+            // was still open, which is indistinguishable from healthy.
+            projection_accounting_broken_.store(true, std::memory_order_release);
+            PLOGE(
+                log_,
+                "projection accounting violated: observed a completion with no "
+                "open projection");
+            return;
+        }
+        if (outstanding_projections_.compare_exchange_weak(
+                current,
+                current - 1,
+                std::memory_order_acq_rel,
+                std::memory_order_relaxed))
+        {
+            return;
+        }
+    }
+}
+
+bool
+LedgerFetchCoordinator::acquire_fence_permit() noexcept
+{
+    // Bounds the PUBLIC boundary, not merely the retained waiter list. A permit is
+    // held from before the post until the caller's disposition is settled, so
+    // queued-but-unrun projections and retained waiters share one budget and
+    // neither can grow without the other shrinking.
+    auto current = fence_permits_.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        if (current >= kMaxFenceWaiters)
+        {
+            return false;
+        }
+        if (fence_permits_.compare_exchange_weak(
+                current,
+                current + 1,
+                std::memory_order_acq_rel,
+                std::memory_order_relaxed))
+        {
+            return true;
+        }
+    }
+}
+
+void
+LedgerFetchCoordinator::release_fence_permit() noexcept
+{
+    auto current = fence_permits_.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        if (current == 0)
+        {
+            PLOGE(log_, "fence permit underflow; one was released twice");
+            return;
+        }
+        if (fence_permits_.compare_exchange_weak(
+                current,
+                current - 1,
+                std::memory_order_acq_rel,
+                std::memory_order_relaxed))
+        {
+            return;
+        }
+    }
+}
+
 //@@authority transition=ledger_fetch_coordinator.seal_ingress
 // owner=ledger_fetch_coordinator commit=atomic
 LedgerFetchCoordinator::Fence
 LedgerFetchCoordinator::fence(FenceHandler on_fenced)
 {
+    // Seal FIRST and unconditionally. It is idempotent, allocates nothing, and is
+    // the part that must happen even if everything below is refused.
     work_.fetch_or(kIngressSealedBit, std::memory_order_acq_rel);
+
+    if (!acquire_fence_permit())
+    {
+        // Refused BEFORE posting: the cap has to bound what the public API can
+        // queue onto the io_context, or a caller can enqueue unbounded lambdas and
+        // the bound only ever applied to what survived to the strand.
+        //
+        // Safe: ingress is sealed and kMaxFenceWaiters projections are already
+        // queued, so rows WILL be terminalized. This caller simply gets no
+        // notification unless it calls again.
+        return Fence::capacity_exhausted;
+    }
     try
     {
         if (fail_fence_projection_for_test_)
@@ -546,6 +656,7 @@ LedgerFetchCoordinator::fence(FenceHandler on_fenced)
         // re-posts the drain rather than leaving the actor wedged with ingress
         // closed and nobody terminalizing rows.
         PLOGE(log_, "fence projection failed; ingress sealed, retry fence()");
+        release_fence_permit();  // nothing was queued, so nothing will settle it
         return Fence::projection_failed;
     }
     return Fence::drain_queued;
@@ -556,25 +667,23 @@ LedgerFetchCoordinator::begin_fence_on_strand(FenceHandler on_fenced)
 {
     if (fenced_.load(std::memory_order_acquire))
     {
-        // Already fenced; this caller is still owed exactly one disposition.
-        deliver_fence_outcome(on_fenced, FenceOutcome::fenced);
+        // Already fenced; this caller is still owed exactly one notification.
+        deliver_fence_notification(on_fenced);
+        release_fence_permit();
         return;
     }
     if (on_fenced)
     {
-        if (fence_waiters_.size() >= kMaxFenceWaiters)
-        {
-            // Bounded, and refused with a reason. Silently dropping a waiter
-            // would leave a caller waiting on a notification that can never come.
-            deliver_fence_outcome(
-                on_fenced, FenceOutcome::waiter_capacity_exhausted);
-        }
-        else
-        {
-            // Cannot allocate: reserved once in the constructor. Each waiter is
-            // retained separately, so a second caller never overwrites the first.
-            fence_waiters_.push_back(std::move(on_fenced));
-        }
+        // Cannot allocate and cannot overflow: capacity was reserved once in the
+        // constructor, and a permit is held for every retained waiter, so the
+        // permit bound IS the size bound. Each waiter is retained separately, so a
+        // second caller never overwrites the first.
+        fence_waiters_.push_back(std::move(on_fenced));
+    }
+    else
+    {
+        // No handler, nothing to retain: settle the permit now.
+        release_fence_permit();
     }
     // Terminalize eagerly rather than waiting on outstanding seal completions.
     // PeerSet does not promise a completion per accepted projection, so a fence
@@ -617,15 +726,24 @@ LedgerFetchCoordinator::check_fenced_on_strand()
     }
 
     fenced_.store(true, std::memory_order_release);
-    // Detach the waiters BEFORE delivering, so the transition is complete and a
-    // re-entrant caller cannot be handed any of them twice.
-    auto waiters = std::move(fence_waiters_);
-    fence_waiters_.clear();
-    fence_waiters_.reserve(kMaxFenceWaiters);
-    for (auto const& waiter : waiters)
+
+    // Detach by SWAP, so nothing fallible happens after the terminal commit.
+    // `vector::swap` exchanges buffers and cannot allocate or throw; the previous
+    // version cleared and then RESERVED here, an allocation past the point of no
+    // return which, on throwing, would have destroyed every detached waiter
+    // without notifying it AND escaped this strand handler.
+    static_assert(
+        noexcept(fence_waiters_.swap(fence_delivery_)),
+        "detaching waiters after the fence commit must not be able to throw");
+    fence_waiters_.swap(fence_delivery_);
+    for (auto const& waiter : fence_delivery_)
     {
-        deliver_fence_outcome(waiter, FenceOutcome::fenced);
+        deliver_fence_notification(waiter);
+        release_fence_permit();
     }
+    // Destroys the handlers and keeps the capacity, so the buffers stay allocated
+    // for the life of the actor and this path never allocates again.
+    fence_delivery_.clear();
 }
 
 }  // namespace catl::peer_client
