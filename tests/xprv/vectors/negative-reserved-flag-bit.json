@@ -1,0 +1,18 @@
+{
+  "name": "reserved-flag-bit",
+  "violates": "spec \u00a73.1/\u00a73.8: reserved flag bits MUST be zero",
+  "mutations": [
+    {
+      "at": 5,
+      "set_hex": "02"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "flag"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary proof: reserved flag bits are set (flags=0x02)"
+  }
+}

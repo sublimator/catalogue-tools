@@ -4,10 +4,14 @@
 //
 // File layout:
 //   [magic: 4 bytes "XPRV"]
-//   [version: 1 byte, currently 0x04]
+//   [version: 1 byte, XPRV_FORMAT_VERSION — see src/xprv/VERSION]
 //   [flags: 1 byte]
 //     bit 0: zlib compressed body
-//   [network_id: 4 bytes LE]  (added in v2)
+//   [network_id: 4 bytes big-endian]  (added in v2)
+//
+// Endianness: every multi-byte integer in the binary form is big-endian,
+// matching XRPL canonical serialization (spec §3.1). The comment previously
+// said LE; the code has always used read_u32_be.
 //   [body: concatenated TLV records]
 //
 // TLV record: [type: 1 byte][length: LEB128 varint][payload]
@@ -25,7 +29,9 @@
 //   [0x02 header]            ← authenticates tree roots
 //   [0x03/0x04 map proofs]   ← proves data exists in the ledger
 //   [0x02 header] ...        ← skip list hops (if historical)
-//   [0x05 anchor UNL]        ← LAST: only needed if verifier has no cached UNL
+//   [0x05 anchor UNL]        ← LAST and OPTIONAL: omitted when the verifier
+//                            already holds trust for this publisher (cached
+//                            UNL, or an anchor pinned on-chain). See spec §3.3.
 //
 // This ordering enables streaming/progressive verification:
 //   - For animated QR codes, the first few frames carry the payment data
@@ -50,6 +56,8 @@
 
 #include "proof-chain.h"
 
+#include <catl/xdata/protocol.h>
+
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -64,6 +72,13 @@ struct BinaryOptions
 {
     bool compress = false;   // zlib compress the TLV body
     int compress_level = 9;  // 1=fast, 9=best, 0=none (zlib levels)
+
+    /// Required only to serialize a chain whose tries exist as JSON but not as
+    /// binary — i.e. one decoded with from_json() rather than produced by the
+    /// builder. Leaf bytes must be re-serialized through the XRPL codec, which
+    /// needs the protocol definitions. Null is fine for builder-produced chains,
+    /// which already carry trie_binary.
+    catl::xdata::Protocol const* protocol = nullptr;
 };
 
 /// Serialize a ProofChain to binary format with file header.

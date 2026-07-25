@@ -1,0 +1,18 @@
+{
+  "name": "bad-magic",
+  "violates": "spec \u00a73.1: magic identifies the binary container",
+  "mutations": [
+    {
+      "at": 0,
+      "set_hex": "59"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "codec"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xaa in position 11: invalid start byte"
+  }
+}

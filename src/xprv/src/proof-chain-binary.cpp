@@ -17,6 +17,7 @@
 #include <boost/iostreams/filtering_stream.hpp>
 #include <boost/json.hpp>
 
+#include <array>
 #include <cstring>
 #include <set>
 #include <sstream>
@@ -551,8 +552,18 @@ write_tlv(
 /// A verifier with a cached UNL can verify after reading (1) + (2),
 /// without ever touching (3). For QR codes this means the customer
 /// can pull the phone away after the first few frames.
+// Defined below, next to the binary trie reader it inverts.
+static void
+encode_trie_json_node(
+    std::vector<uint8_t>& out,
+    boost::json::value const& node,
+    bool is_tx,
+    catl::xdata::Protocol const& protocol);
+
 static std::vector<uint8_t>
-encode_tlv_body(ProofChain const& chain)
+encode_tlv_body(
+    ProofChain const& chain,
+    catl::xdata::Protocol const* protocol)
 {
     std::vector<uint8_t> out;
     std::vector<uint8_t> unl_tail;  // UNL TLV(s), appended at end
@@ -586,11 +597,25 @@ encode_tlv_body(ProofChain const& chain)
                     {
                         write_tlv(out, type_byte, data.trie_binary);
                     }
+                    else if (!data.trie_json.is_null() && protocol)
+                    {
+                        std::vector<uint8_t> encoded;
+                        encode_trie_json_node(
+                            encoded,
+                            data.trie_json,
+                            data.tree == TrieData::TreeType::tx,
+                            *protocol);
+                        write_tlv(out, type_byte, encoded);
+                    }
                     else
                     {
                         throw std::runtime_error(
-                            "to_binary: TrieData has no trie_binary — "
-                            "build proof with binary trie enabled");
+                            data.trie_json.is_null()
+                                ? "to_binary: TrieData has neither a binary "
+                                  "nor a JSON trie"
+                                : "to_binary: chain has JSON-only tries; pass "
+                                  "BinaryOptions::protocol so leaves can be "
+                                  "re-serialized to canonical bytes");
                     }
                 }
             },
@@ -610,7 +635,7 @@ encode_tlv_body(ProofChain const& chain)
 std::vector<uint8_t>
 to_binary(ProofChain const& chain, BinaryOptions const& opts)
 {
-    auto body = encode_tlv_body(chain);
+    auto body = encode_tlv_body(chain, opts.protocol);
 
     std::vector<uint8_t> out;
     out.reserve(10 + body.size());
@@ -924,7 +949,137 @@ decode_tlv_body(std::span<const uint8_t> data)
         }
     }
 
+    // NB: the "exactly one anchor" rule (spec §1, §3.8) is enforced by the
+    // verifier, not here. This function is a codec: it decodes whatever TLV
+    // records are present, and unit tests legitimately round-trip partial
+    // chains (a lone header, a lone trie) through it. Asserting proof structure
+    // at this layer conflated framing with validity and broke exactly those
+    // round-trips. The 0x05 anchor UNL is separately OPTIONAL by design — see
+    // §3.3: omitting it is how a verifier with cached or on-chain-pinned trust
+    // avoids shipping the ~15KB VL blob.
     return chain;
+}
+
+
+//------------------------------------------------------------------------------
+// JSON trie -> binary trie
+//------------------------------------------------------------------------------
+
+// Inverse of the binary trie reader (§3.7). Needed because TrieData carries two
+// independent representations and only the builder fills both: a chain decoded
+// with from_json() has trie_json but no trie_binary, so to_binary() could not
+// serialize it. That made the canonical binary encoding producible only at
+// prove time, with live peers — which blocked offline test-vector generation and
+// left spec §8's "both forms verify identically" untestable in one direction.
+//
+// JSON node discrimination per §2.3:
+//   string (64 hex) -> pruned subtree hash   -> 2-bit code 11
+//   object ("0".."F") -> inner node          -> 2-bit code 10
+//   array [key, data] -> leaf                -> 2-bit code 01
+//   absent branch                            -> 2-bit code 00
+static void
+encode_trie_json_node(
+    std::vector<uint8_t>& out,
+    boost::json::value const& node,
+    bool is_tx,
+    catl::xdata::Protocol const& protocol)
+{
+    if (!node.is_object())
+        throw std::runtime_error(
+            "to_binary: JSON trie inner node must be an object");
+    auto const& obj = node.as_object();
+
+    // 2 bits per branch, 4 branches per byte, low bits first.
+    std::array<uint8_t, 4> header{0, 0, 0, 0};
+    std::array<boost::json::value const*, 16> children{};
+
+    for (int i = 0; i < 16; ++i)
+    {
+        static constexpr char const* kNibble = "0123456789ABCDEF";
+        std::string key(1, kNibble[i]);
+        // Uppercase only (spec §2.3). The previous uppercase-then-lowercase
+        // fallback made this encoder non-injective: with both spellings present
+        // the shadowed leaf was silently dropped, so a JSON proof that verified
+        // became binary bytes that did not.
+        auto it = obj.find(key);
+        if (it == obj.end())
+            continue;
+
+        boost::json::value const& child = it->value();
+        uint8_t code = 0;
+        if (child.is_string())
+            code = 0b11;
+        else if (child.is_object())
+            code = 0b10;
+        else if (child.is_array())
+            code = 0b01;
+        else
+            throw std::runtime_error(
+                "to_binary: JSON trie branch has unsupported type");
+
+        header[static_cast<size_t>(i) / 4] |=
+            static_cast<uint8_t>(code << (2 * (i % 4)));
+        children[static_cast<size_t>(i)] = &child;
+    }
+
+    out.insert(out.end(), header.begin(), header.end());
+
+    for (int i = 0; i < 16; ++i)
+    {
+        if (children[static_cast<size_t>(i)] == nullptr)
+            continue;
+        boost::json::value const& child = *children[static_cast<size_t>(i)];
+
+        if (child.is_string())
+        {
+            auto h = hash_from_hex(std::string(child.as_string()));
+            out.insert(out.end(), h.data(), h.data() + 32);
+        }
+        else if (child.is_object())
+        {
+            encode_trie_json_node(out, child, is_tx, protocol);
+        }
+        else
+        {
+            auto const& arr = child.as_array();
+            if (arr.size() != 2 || !arr[0].is_string())
+                throw std::runtime_error(
+                    "to_binary: JSON trie leaf must be [key, data]");
+
+            auto key = hash_from_hex(std::string(arr[0].as_string()));
+            out.insert(out.end(), key.data(), key.data() + 32);
+
+            // Raw form is already exactly the hashed bytes (§2.3); decoded form
+            // must round-trip back through the codec.
+            std::vector<uint8_t> data;
+            if (arr[1].is_string())
+            {
+                data = from_hex(std::string(arr[1].as_string()));
+            }
+            else if (arr[1].is_object())
+            {
+                // Encode from the DECODED content, deliberately ignoring any
+                // sibling `blob`. Sourcing the bytes from `blob` would make the
+                // hashed datum something other than the JSON a reader sees, so
+                // the legible form and the authenticated form could diverge
+                // while the proof still verified. Re-serialising is what keeps
+                // "what you see is what you hash" true. A leaf whose decoded
+                // form cannot round-trip belongs in raw form (a hex string),
+                // where nothing legible is claimed in the first place.
+                data = is_tx
+                    ? catl::xdata::serialize_transaction(
+                          arr[1].as_object(), protocol)
+                    : catl::xdata::serialize_leaf(arr[1].as_object(), protocol);
+            }
+            else
+                throw std::runtime_error(
+                    "to_binary: JSON trie leaf data must be an object or hex "
+                    "string");
+
+            leb128_encode(out, data.size());
+            out.insert(out.end(), data.begin(), data.end());
+        }
+    }
 }
 
 //------------------------------------------------------------------------------

@@ -1,0 +1,17 @@
+{
+  "name": "truncated-body",
+  "violates": "spec \u00a73.8: a TLV length exceeding the remaining bytes",
+  "mutations": [
+    {
+      "truncate_to": 34824
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "exceeds"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary proof: TLV length exceeds remaining body bytes"
+  }
+}

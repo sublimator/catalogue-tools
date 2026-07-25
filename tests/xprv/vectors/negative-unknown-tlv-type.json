@@ -1,0 +1,18 @@
+{
+  "name": "unknown-tlv-type",
+  "violates": "spec \u00a73.2/\u00a73.8: unknown TLV types MUST be rejected",
+  "mutations": [
+    {
+      "at": 10,
+      "set_hex": "7F"
+    }
+  ],
+  "expect": {
+    "verdict": "reject",
+    "reason_contains": "TLV"
+  },
+  "base": "positive-tx-skiplist",
+  "observed": {
+    "python_reason": "ValueError: binary proof: unknown TLV type 127"
+  }
+}

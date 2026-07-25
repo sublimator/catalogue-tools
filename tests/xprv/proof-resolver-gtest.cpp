@@ -7,6 +7,7 @@
 #include <catl/xdata/serialize.h>
 
 #include <boost/json.hpp>
+#include <cctype>
 #include <gtest/gtest.h>
 
 #include <string_view>
@@ -59,7 +60,8 @@ make_state_link_proof(
     uint32_t child_seq,
     uint32_t last_ledger_seq,
     bool binary,
-    bool candidate_under_ignored_member = false)
+    bool candidate_under_ignored_member = false,
+    bool candidate_under_duplicate_nibble = false)
 {
     xprv::HeaderData child;
     child.seq = child_seq;
@@ -79,21 +81,30 @@ make_state_link_proof(
     boost::json::array candidate_leaf;
     candidate_leaf.emplace_back(leaf_key_hex);
     candidate_leaf.emplace_back(sle);
+    bool const smuggling =
+        candidate_under_ignored_member || candidate_under_duplicate_nibble;
+
     boost::json::object trie;
     trie["__depth__"] = 0;
-    if (candidate_under_ignored_member)
+    auto const branch = leaf_key_hex.substr(0, 1);
+    if (smuggling)
     {
+        // Authenticated content only. The smuggled member is injected AFTER the
+        // root is computed, which is what the attack actually looks like: take a
+        // trie with a genuine root, then append something the hash walk skips.
+        // (Previously the malformed trie was fed to from_trie_json to obtain its
+        // root, which no longer reconstructs at all now that ambiguity is
+        // refused rather than skipped.)
         auto authenticated_sle = sle;
         authenticated_sle["LedgerEntryType"] = "AccountRoot";
         boost::json::array authenticated_leaf;
         authenticated_leaf.emplace_back(leaf_key_hex);
         authenticated_leaf.emplace_back(std::move(authenticated_sle));
-        trie[leaf_key_hex.substr(0, 1)] = std::move(authenticated_leaf);
-        trie["ignored-member"] = std::move(candidate_leaf);
+        trie[branch] = std::move(authenticated_leaf);
     }
     else
     {
-        trie[leaf_key_hex.substr(0, 1)] = std::move(candidate_leaf);
+        trie[branch] = std::move(candidate_leaf);
     }
 
     using AbbrevMap =
@@ -110,10 +121,34 @@ make_state_link_proof(
                 OwnedItem::create(key, Slice(bytes.data(), bytes.size())));
         });
 
+    // Root of the CLEAN trie — the value a real header would carry.
+    auto const clean_root = reconstructed.get_hash();
+
+    if (candidate_under_ignored_member)
+    {
+        // A member the hash walk skips entirely.
+        trie["ignored-member"] = candidate_leaf;
+    }
+    else if (candidate_under_duplicate_nibble)
+    {
+        // The severe variant: a SECOND member for the same branch, differing
+        // only in hex case. Both are single valid nibbles, so a walk that
+        // filters on "is it a nibble" admits both; one assignment into a
+        // 16-slot array keeps the last writer while a member-iterating leaf
+        // collector keeps both. Root unchanged, forged leaf collected.
+        auto dup = branch;
+        dup[0] = static_cast<char>(
+            std::islower(static_cast<unsigned char>(dup[0]))
+                ? std::toupper(static_cast<unsigned char>(dup[0]))
+                : std::tolower(static_cast<unsigned char>(dup[0])));
+        if (dup != branch)
+            trie[dup] = candidate_leaf;
+    }
+
     xprv::HeaderData containing;
     containing.seq = containing_seq;
     containing.drops = 1;
-    containing.account_hash = reconstructed.get_hash();
+    containing.account_hash = clean_root;
     containing.close_time_resolution = 10;
 
     xprv::AnchorData anchor;
@@ -210,6 +245,28 @@ TEST(ProofResolver, RejectsLedgerHashesUnderIgnoredJsonMember)
         1000,
         900,
         999,
+        false,
+        true);
+    EXPECT_FALSE(resolve(proof, protocol));
+}
+
+// The duplicate-nibble variant of the ignored-member attack. The 2026-07-14
+// hardening filtered out members that are not nibbles; it could not help when
+// BOTH members are valid nibbles differing only in case. A forged LedgerHashes
+// leaf smuggled this way authenticated a fabricated header, and through it a
+// transaction that never existed, with both reference verifiers reporting
+// success on a real anchor and a real UNL.
+TEST(ProofResolver, RejectsLedgerHashesUnderDuplicateNibbleMember)
+{
+    auto const protocol = catl::xdata::Protocol::load_embedded_xrpl_protocol();
+    auto const proof = make_state_link_proof(
+        protocol,
+        "LedgerHashes",
+        xprv::skip_list_key(),
+        1000,
+        900,
+        999,
+        false,
         false,
         true);
     EXPECT_FALSE(resolve(proof, protocol));

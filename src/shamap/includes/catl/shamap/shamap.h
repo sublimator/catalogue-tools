@@ -447,18 +447,57 @@ public:
                 }
                 else if (node.is_object())
                 {
-                    // Inner node — recurse into children
+                    // Inner node — recurse into children.
+                    //
+                    // SOUNDNESS-CRITICAL: branch keys are normalized to a
+                    // nibble, and a duplicate or non-branch member is REFUSED
+                    // rather than skipped. `"A"` and `"a"` are both valid single
+                    // nibbles, so a permissive walk let
+                    // `{"A": <real>, "a": <forged>}` hash to the real root while
+                    // a second walk collected BOTH leaves — feeding a forged
+                    // LedgerHashes leaf to the skip-list resolver, which
+                    // authenticated a fabricated header and through it a
+                    // transaction that never existed. Refusing ambiguity is the
+                    // fix: an inner node with two members for one branch has no
+                    // single meaning, so there is no correct winner to choose.
                     auto const& obj = node.as_object();
+                    bool seen[16] = {};
                     for (auto const& kv : obj)
                     {
                         if (kv.key() == "__depth__")
                             continue;
                         if (kv.key().size() != 1)
-                            continue;
+                            throw std::runtime_error(
+                                "json trie: inner node has non-branch member '" +
+                                std::string(kv.key()) +
+                                "' — a member the hash walk ignores is a place "
+                                "to hide unauthenticated data");
 
-                        int nibble = nibble_from_char(kv.key()[0]);
+                        // Uppercase only (spec §2.3). Lowercase is not a branch
+                        // key: allowing both spellings puts two members on one
+                        // branch, and only one of them is hashed into the root.
+                        char const bc = kv.key()[0];
+                        if (bc >= 'a' && bc <= 'f')
+                            throw std::runtime_error(
+                                "json trie: lowercase branch key '" +
+                                std::string(kv.key()) +
+                                "' — branch keys are uppercase 0-9A-F");
+
+                        int nibble = nibble_from_char(bc);
+                        if (nibble >= 0)
+                        {
+                            if (seen[nibble])
+                                throw std::runtime_error(
+                                    "json trie: duplicate branch for nibble '" +
+                                    std::string(kv.key()) +
+                                    "' — ambiguous after normalization");
+                            seen[nibble] = true;
+                        }
                         if (nibble < 0)
-                            continue;
+                            throw std::runtime_error(
+                                "json trie: inner node member '" +
+                                std::string(kv.key()) +
+                                "' is not a hex branch");
 
                         // Set nibble in path at current depth
                         uint8_t child_path[32];

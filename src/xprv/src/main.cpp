@@ -8,7 +8,12 @@
 #include <catl/xdata/protocol.h>
 #include <xprv/network-config.h>
 
+#include "xprv/proof-chain-binary.h"
+#include "xprv/proof-chain-json.h"
+
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -248,6 +253,8 @@ print_usage()
         << "Usage:\n"
         << "  xprv prove <tx_hash> [options]    build a proof chain\n"
         << "  xprv verify <proof_file> [key]    verify a proof chain\n"
+        << "  xprv convert <in> <out>           JSON <-> binary, form "
+           "auto-detected\n"
         << "  xprv serve [options]              run HTTP proof server\n"
         << "  xprv ping <peer:port>             peer protocol ping\n"
         << "  xprv header <peer:port> <seq>     fetch ledger header\n"
@@ -280,6 +287,9 @@ print_usage()
         << "  --log <name=level>      override a partition level\n"
         << "  --log <prefix*=level>   override matching partition prefix\n"
         << "  --list-log-partitions   print registered partitions and exit\n"
+        << "\n"
+        << "Options for convert:\n"
+        << "  --gzip              zlib-compress the binary body\n"
         << "\n"
         << "By default, prove outputs both proof.json and proof.bin.\n"
         << "Verify auto-detects JSON vs binary format.\n"
@@ -487,6 +497,85 @@ main(int argc, char* argv[])
         auto protocol = net_config.load_protocol();
         return cmd_verify(
             proof_path, trusted_key, verify_network_id, protocol);
+    }
+
+    // Offline form conversion. Exists so the two representations can be
+    // cross-checked without live peers: `prove` needs a network, but spec §8
+    // requires both forms to verify identically, and test vectors (Appendix B)
+    // need a canonical binary encoding of a captured JSON proof. C++ owns
+    // to_binary(), so conversion lives here rather than being reimplemented.
+    if (command == "convert" && command_args.size() >= 2)
+    {
+        std::string const in_path = command_args[0];
+        std::string const out_path = command_args[1];
+        bool compress = false;
+        for (std::size_t i = 2; i < command_args.size(); ++i)
+        {
+            if (command_args[i] == "--gzip")
+                compress = true;
+        }
+
+        std::ifstream in(in_path, std::ios::binary);
+        if (!in)
+        {
+            std::cerr << "convert: cannot open " << in_path << "\n";
+            return 1;
+        }
+        // Parenthesise the first argument: without it this is the most-vexing
+        // parse and declares a function rather than reading the file.
+        std::vector<uint8_t> raw(
+            (std::istreambuf_iterator<char>(in)),
+            std::istreambuf_iterator<char>());
+        if (raw.empty())
+        {
+            std::cerr << "convert: " << in_path << " is empty\n";
+            return 1;
+        }
+
+        bool const in_is_binary = raw.size() >= 4 &&
+            std::memcmp(raw.data(), xprv::XPRV_MAGIC, 4) == 0;
+
+        try
+        {
+            xprv::ProofChain chain = in_is_binary
+                ? xprv::from_binary(raw)
+                : xprv::from_json(boost::json::parse(std::string(
+                      reinterpret_cast<char const*>(raw.data()), raw.size())));
+
+            std::ofstream out(out_path, std::ios::binary);
+            if (!out)
+            {
+                std::cerr << "convert: cannot write " << out_path << "\n";
+                return 1;
+            }
+            if (in_is_binary)
+            {
+                out << boost::json::serialize(xprv::to_json(chain)) << "\n";
+                std::cout << "convert: binary -> JSON " << out_path << "\n";
+            }
+            else
+            {
+                // JSON tries carry decoded leaves, so re-serializing them to
+                // canonical bytes needs the protocol definitions.
+                auto net_cfg =
+                    xprv::NetworkConfig::for_network(chain.network_id);
+                auto protocol = net_cfg.load_protocol();
+                auto bin = xprv::to_binary(
+                    chain, {.compress = compress, .protocol = &protocol});
+                out.write(
+                    reinterpret_cast<char const*>(bin.data()),
+                    static_cast<std::streamsize>(bin.size()));
+                std::cout << "convert: JSON -> binary " << out_path << " ("
+                          << bin.size() << " bytes"
+                          << (compress ? ", zlib" : "") << ")\n";
+            }
+        }
+        catch (std::exception const& e)
+        {
+            std::cerr << "convert: " << e.what() << "\n";
+            return 1;
+        }
+        return 0;
     }
 
     if (command == "serve")

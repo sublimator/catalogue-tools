@@ -226,6 +226,20 @@ extract_trie_leaf(boost::json::value const& trie)
         {
             if (kv.key() == "__depth__")
                 continue;
+            // Only real branches. This walk feeds the human-readable narrative
+            // (tx type, account), and it previously visited EVERY member — so a
+            // member the hash walk ignored could still be displayed as the
+            // proof's content. What is reported must be what was authenticated.
+            if (kv.key().size() != 1)
+                continue;
+            // Uppercase only (spec §2.3), matching the hash walk. If this walk
+            // admitted a spelling the hash walk refuses, it could report content
+            // that was never authenticated.
+            char const c = kv.key()[0];
+            bool const is_branch =
+                (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
+            if (!is_branch)
+                continue;
             auto result = extract_trie_leaf(kv.value());
             if (result)
                 return result;
@@ -296,6 +310,41 @@ resolve_proof_chain_impl(
     PLOGI(
         verify_log,
         "═══════════════════════════════════════════════════════════════");
+
+    // Spec §1: exactly one logical anchor, and it precedes every other step.
+    // Checked explicitly rather than left to fall out of the capability model.
+    // Without an anchor the first header simply finds no trusted hash and fails,
+    // which reports as "unsupported header" — true but misleading, and it makes
+    // a structurally nonsensical proof look like a cryptographic failure.
+    {
+        size_t anchors = 0;
+        size_t first_anchor_at = 0;
+        for (size_t i = 0; i < chain.steps.size(); ++i)
+        {
+            if (std::holds_alternative<AnchorData>(chain.steps[i]))
+            {
+                if (anchors == 0)
+                    first_anchor_at = i;
+                ++anchors;
+            }
+        }
+        if (anchors != 1)
+        {
+            PLOGE(
+                verify_log,
+                "  Structure: expected exactly one anchor step, found ",
+                anchors);
+            return false;
+        }
+        if (first_anchor_at != 0)
+        {
+            PLOGE(
+                verify_log,
+                "  Structure: anchor must be the first step, found at index ",
+                first_anchor_at);
+            return false;
+        }
+    }
 
     int step_num = 0;
     bool all_ok = true;

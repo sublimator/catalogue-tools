@@ -203,6 +203,10 @@ class ResolvedLedgerHashesSupport:
 
 ZERO_HASH: Hash256 = b"\x00" * 32
 HEX_BRANCH = set("0123456789abcdefABCDEF")
+# Branch keys are uppercase only (spec §2.3). No case normalization:
+# accepting both `a` and `A` puts two members on one branch, and only
+# one of them gets hashed into the root.
+BRANCH_KEYS = set("0123456789ABCDEF")
 
 # Hash prefixes (XRPL protocol)
 PREFIX_HEADER = b"LWR\x00"  # ledger header
@@ -330,11 +334,79 @@ def serialize_leaf(leaf_json: dict[str, Any], *, is_tx: bool) -> bytes:
         meta_bytes = bytes.fromhex(encode(leaf_json["meta"]))
         return vl_encode(tx_bytes) + vl_encode(meta_bytes)
     else:
-        clean = {k: v for k, v in leaf_json.items() if k not in ("index",)}
+        # Hash the DECODED content, not a sibling `blob`. What you see must be
+        # what you hash: if the verifier hashed `blob` instead, then `blob` would
+        # be the authenticated datum and the decoded members displayed to a human
+        # would be unauthenticated assertions that could disagree with it while
+        # the proof still verified. Re-serialising is what binds the legible form
+        # to the authenticated one.
+        #
+        # `index`/`hash` duplicate the trie leaf key and `blob` duplicates these
+        # very bytes; none are XRPL fields, so they are dropped before encoding.
+        # Passing them through was the KeyError('blob') that made every
+        # hybrid-leaf proof fail here while its binary form verified.
+        clean = {
+            k: v
+            for k, v in leaf_json.items()
+            if k not in ("index", "blob", "hash")
+        }
         return bytes.fromhex(encode(clean))
 
 
-def hash_trie(node: TrieNode, *, is_tx: bool) -> Hash256:
+def trie_branches(node: dict[str, Any], depth: int) -> dict[int, Any]:
+    """Parse an inner node's branches ONCE, strictly. Shared by every consumer.
+
+    SOUNDNESS-CRITICAL. This exists because two walks over the same JSON
+    disagreed about which members were real:
+
+        hash_trie:            children[int(k,16)] = ...   -> last writer wins
+        collect_json_leaves:  iterates members            -> keeps them all
+
+    `"A"` and `"a"` are both single valid nibbles and both survived the
+    len/charset filter, so `{"A": <real leaf>, "a": <forged leaf>}` hashed to the
+    same root as the real trie while the leaf collector returned BOTH — handing a
+    forged LedgerHashes leaf to the skip-list resolver. That authenticated a
+    fabricated header, whose fabricated transaction_hash authenticated a
+    transaction that never existed. Both reference verifiers returned exit 0 on a
+    forged ~1e9 XRP Payment.
+
+    Two rules close it. Normalize the nibble (spec §2: verifiers MAY accept
+    lowercase but MUST normalize before comparing), and REFUSE a duplicate rather
+    than picking a winner — an ambiguous trie has no single meaning, so there is
+    no correct winner to pick. Unknown members are refused for the same reason:
+    a member no consumer agrees about is exactly the hiding place.
+
+    `depth` is this node's nesting depth, 0 at the root. `__depth__`, where present,
+    MUST equal it (spec §2.3). Nothing hashes a depth, so a `__depth__` that
+    disagrees with the structure it describes is either a producer bug or a trap for
+    a reader that believes it over the nesting.
+    """
+    branches: dict[int, Any] = {}
+    for k, v in node.items():
+        if k == "__depth__":
+            # bool is an int in Python and True == 1, so exclude it explicitly.
+            if isinstance(v, bool) or not isinstance(v, int) or v != depth:
+                raise ValueError(
+                    f"trie inner node __depth__ is {v!r} but its nesting depth is "
+                    f"{depth} (spec §2.3)"
+                )
+            continue
+        if len(k) != 1 or k not in BRANCH_KEYS:
+            raise ValueError(
+                f"trie inner node has non-branch member {k!r} — branch keys are "
+                f"uppercase 0-9A-F (spec §2.3)"
+            )
+        idx = int(k, 16)
+        if idx in branches:
+            raise ValueError(
+                f"trie inner node has duplicate branch {idx:X} (member {k!r}) — "
+                f"ambiguous after nibble normalization"
+            )
+        branches[idx] = v
+    return branches
+
+
+def hash_trie(node: TrieNode, *, is_tx: bool, depth: int = 0) -> Hash256:
     """Recursively hash a JSON trie node (placeholder / leaf / inner)."""
     if isinstance(node, str):
         return bytes.fromhex(node)
@@ -343,25 +415,10 @@ def hash_trie(node: TrieNode, *, is_tx: bool) -> Hash256:
         return hash_leaf(key_hex, serialize_leaf(node[1], is_tx=is_tx), is_tx=is_tx)
     if isinstance(node, dict):
         children: list[Hash256] = [ZERO_HASH] * 16
-        for k, v in node.items():
-            if len(k) == 1 and k in HEX_BRANCH:
-                children[int(k, 16)] = hash_trie(v, is_tx=is_tx)
+        for idx, v in trie_branches(node, depth).items():
+            children[idx] = hash_trie(v, is_tx=is_tx, depth=depth + 1)
         return hash_inner(children)
     raise ValueError(f"unexpected trie node: {type(node)}")
-
-
-def find_leaf(node: TrieNode) -> list[Any] | None:
-    """Find the first leaf (array) in a trie."""
-    if isinstance(node, list):
-        return node
-    if isinstance(node, dict):
-        for k, v in node.items():
-            if k == "__depth__":
-                continue
-            r = find_leaf(v)
-            if r is not None:
-                return r
-    return None
 
 
 def count_nodes(node: TrieNode, depth: int = 0) -> TrieStats:
@@ -372,9 +429,10 @@ def count_nodes(node: TrieNode, depth: int = 0) -> TrieStats:
         return TrieStats(leaves=1, max_depth=depth)
     if isinstance(node, dict):
         s = TrieStats(inners=1, max_depth=depth)
-        for k, v in node.items():
-            if len(k) != 1 or k not in HEX_BRANCH:
-                continue
+        # Diagnostic, but routed through the strict parse: spec §2.3 requires the
+        # branch set be derived once and used for every purpose, display included.
+        # Reported shape must describe the trie that was hashed, not a laxer reading.
+        for _idx, v in trie_branches(node, depth).items():
             c = count_nodes(v, depth + 1)
             s.inners += c.inners
             s.leaves += c.leaves
@@ -400,7 +458,7 @@ def collect_json_leaves(node: Any) -> list[tuple[str, dict[str, Any]]]:
     """Collect all leaves from a JSON trie."""
     leaves: list[tuple[str, dict[str, Any]]] = []
 
-    def walk(cur: Any) -> None:
+    def walk(cur: Any, depth: int) -> None:
         if isinstance(cur, list) and len(cur) >= 2:
             key_hex = cur[0]
             leaf_data = cur[1]
@@ -408,13 +466,12 @@ def collect_json_leaves(node: Any) -> list[tuple[str, dict[str, Any]]]:
                 leaves.append((key_hex, leaf_data))
             return
         if isinstance(cur, dict):
-            for k, v in cur.items():
-                if k == "__depth__":
-                    continue
-                if len(k) == 1 and k in HEX_BRANCH:
-                    walk(v)
+            # Same strict parse as the hash walk: if the two disagree about which
+            # members exist, a leaf can be collected without being hashed.
+            for _idx, v in sorted(trie_branches(cur, depth).items()):
+                walk(v, depth + 1)
 
-    walk(node)
+    walk(node, 0)
     return leaves
 
 
@@ -759,7 +816,7 @@ def verify_anchor(anchor: dict[str, Any], trusted_key: str) -> AnchorResult:
 
 
 def verify(
-    proof: dict[str, Any] | list[Any], trusted_key: str | None = None
+    proof: Proof | dict[str, Any] | list[Any], trusted_key: str | None = None
 ) -> VerifyResult:
     """Verify a proof DAG serialized as a parent-first step list."""
     if isinstance(proof, list):
@@ -1092,23 +1149,65 @@ def parse_binary_header(data: bytes) -> tuple[int, int, int, int]:
     if version != FORMAT_VERSION:
         raise ValueError(
             f"binary proof: version {version} != expected {FORMAT_VERSION}")
+    # Spec §3.1/§3.8: flag bits 1-7 are reserved and MUST be zero; a verifier
+    # MUST reject a proof with any of them set. This check was missing, so a
+    # proof with reserved bits set was accepted here while the C++ verifier
+    # rejected it — a silent divergence between the two reference verifiers.
+    if flags & ~FLAG_ZLIB:
+        raise ValueError(
+            f"binary proof: reserved flag bits are set (flags=0x{flags:02X})")
     if len(data) < 10:
         raise ValueError("binary proof: header too short")
     net = struct.unpack_from(">I", data, 6)[0]
     return version, flags, net, 10
 
 
+KNOWN_TLV_TYPES = frozenset(
+    {TLV_ANCHOR, TLV_HEADER, TLV_MAP_TX, TLV_MAP_STATE, TLV_UNL}
+)
+
+
 def parse_tlv_records(body: bytes) -> list[tuple[int, bytes]]:
-    """Parse TLV body into list of (type, payload)."""
+    """Parse TLV body into list of (type, payload), enforcing spec §3.8.
+
+    Previously this accepted anything: an unknown type byte was returned and
+    then silently ignored by binary_to_proof's if/elif chain, and a length
+    exceeding the remaining bytes was quietly truncated by Python's forgiving
+    slice. Both are MUST-reject conditions, and both were rejected by the C++
+    parser — so a malformed proof could verify here and fail there.
+    """
     records: list[tuple[int, bytes]] = []
     pos = 0
+    seen_anchor = False
+    seen_unl = False
     while pos < len(body):
+        if seen_unl:
+            raise ValueError("binary proof: record found after anchor UNL")
         tlv_type = body[pos]
         pos += 1
         length, pos = leb128_read(body, pos)
+        # Subtraction form: pos + length could overflow on a hostile varint.
+        if length > len(body) - pos:
+            raise ValueError(
+                "binary proof: TLV length exceeds remaining body bytes")
+        if tlv_type not in KNOWN_TLV_TYPES:
+            raise ValueError(f"binary proof: unknown TLV type {tlv_type}")
+        if tlv_type == TLV_ANCHOR:
+            if seen_anchor:
+                raise ValueError("binary proof: duplicate anchor core")
+            seen_anchor = True
+        if tlv_type == TLV_UNL:
+            if not seen_anchor:
+                raise ValueError("binary proof: anchor UNL precedes anchor core")
+            seen_unl = True
         payload = body[pos : pos + length]
         pos += length
         records.append((tlv_type, payload))
+
+    # 0x01 is required; 0x05 is OPTIONAL as of format v6 (spec §3.3) — omitting
+    # it is how a verifier with cached or on-chain-pinned trust avoids the blob.
+    if not seen_anchor:
+        raise ValueError("binary proof: missing anchor core record")
     return records
 
 
@@ -1289,54 +1388,11 @@ def hash_binary_trie(data: bytes, pos: int, *, is_tx: bool) -> tuple[Hash256, in
     return hash_inner(children), pos
 
 
-def find_binary_trie_leaf(data: bytes, *, is_tx: bool) -> dict[str, Any] | None:
-    """Find and decode the first leaf in a binary trie. Returns decoded JSON or None."""
-    try:
-        return _scan_binary_trie_leaf(data, 0, is_tx=is_tx)[0]
-    except Exception:
-        return None
-
-
-def _scan_binary_trie_leaf(
-    data: bytes, pos: int, *, is_tx: bool
-) -> tuple[dict[str, Any] | None, int]:
-    """Recursively scan a binary trie for the first leaf."""
-    header = struct.unpack_from("<I", data, pos)[0]
-    pos += 4
-    for branch in range(16):
-        btype = (header >> (branch * 2)) & 0x03
-        if btype == BR_EMPTY:
-            continue
-        elif btype == BR_LEAF:
-            _key = data[pos : pos + 32]
-            pos += 32
-            data_len, pos = leb128_read(data, pos)
-            leaf_bytes = data[pos : pos + data_len]
-            pos += data_len
-            # Decode the canonical binary leaf data
-            try:
-                if is_tx:
-                    # TX leaf: vl_encode(tx_bytes) + vl_encode(meta_bytes)
-                    lpos = 0
-                    tx_len, lpos = _vl_decode(leaf_bytes, lpos)
-                    tx_hex = hexlify(leaf_bytes[lpos : lpos + tx_len]).decode()
-                    lpos += tx_len
-                    meta_len, lpos = _vl_decode(leaf_bytes, lpos)
-                    meta_hex = hexlify(leaf_bytes[lpos : lpos + meta_len]).decode()
-                    return {"tx": decode(tx_hex), "meta": decode(meta_hex)}, pos
-                else:
-                    # State leaf: raw SLE binary
-                    sle_hex = hexlify(leaf_bytes).decode()
-                    return decode(sle_hex), pos
-            except Exception:
-                return None, pos
-        elif btype == BR_INNER:
-            found, pos = _scan_binary_trie_leaf(data, pos, is_tx=is_tx)
-            if found is not None:
-                return found, pos
-        elif btype == BR_HASH:
-            pos += 32
-    return None, pos
+# NB: a `find_binary_trie_leaf` / `_scan_binary_trie_leaf` pair used to live here —
+# a third walk over the binary trie, for display, with no call site. Deleted rather
+# than kept: an independent display walk that disagrees with the hash walk about
+# which nodes exist is exactly the shape the JSON forgery exploited (see
+# trie_branches). Leaf enumeration goes through collect_binary_leaves only.
 
 
 def _vl_decode(data: bytes, pos: int) -> tuple[int, int]:
