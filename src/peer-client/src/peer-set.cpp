@@ -2532,8 +2532,10 @@ PeerSet::try_candidates_for(
     return queued;
 }
 
-//@@authority transition=peer_set.seal_node_batch_command owner=peer_set
-// commit=strand
+/// Projection into PeerSet's owner strand. This function mints nothing: the
+/// authority-bearing seal lives in seal_node_batch_command_on_strand, which is
+/// where the directive belongs. authority-coverage.py's capability-mint rule
+/// proved the marker was on this wrapper while the mint was in the helper.
 void
 PeerSet::seal_node_batch_command(
     NodeBatchIntent intent,
@@ -2555,6 +2557,8 @@ PeerSet::seal_node_batch_command(
         });
 }
 
+//@@authority transition=peer_set.seal_node_batch_command owner=peer_set
+// commit=strand
 std::optional<NodeBatchCommand>
 PeerSet::seal_node_batch_command_on_strand(
     NodeBatchIntent const& intent,
