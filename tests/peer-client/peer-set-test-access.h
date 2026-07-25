@@ -920,6 +920,31 @@ public:
         return total;
     }
 
+    /// Is the calling thread PeerSet's owner strand? Used to assert that a
+    /// completion was delivered OFF that strand, which is what makes callback
+    /// containment structural rather than promised.
+    static bool
+    running_on_owner_strand(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        return peers->strand_.running_in_this_thread();
+    }
+
+    /// Release one pin row by its exact (pin_id, connection_generation), so a
+    /// test can produce a handle whose fields still look correct while the
+    /// authoritative row is gone.
+    static void
+    release_peer_pin_for_test(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::uint64_t pin_id,
+        std::uint64_t connection_generation)
+    {
+        run_on_strand(io, peers, [pin_id, connection_generation](auto& set) {
+            set.release_peer_pin(pin_id, connection_generation);
+        });
+    }
+
     /// NEGATIVE CONTROL ONLY — never a route to production behaviour.
     ///
     /// Calls an ASSERT_ON_STRAND()-guarded method directly on the caller's

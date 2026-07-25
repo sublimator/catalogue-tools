@@ -44,6 +44,11 @@ add_executable(connection-write-lifecycle-gtest
 target_link_libraries(connection-write-lifecycle-gtest
                       PRIVATE catl::peer-client GTest::gtest_main)
 
+add_executable(peer-set-node-batch-bind-gtest
+               peer-set-node-batch-bind-gtest.cpp)
+target_link_libraries(peer-set-node-batch-bind-gtest
+                      PRIVATE catl::peer-client GTest::gtest_main)
+
 add_executable(peer-set-strand-discipline-gtest
                peer-set-strand-discipline-gtest.cpp)
 target_link_libraries(peer-set-strand-discipline-gtest
@@ -67,6 +72,7 @@ include(GoogleTest)
 # cannot silently be added without this environment.
 set(CATL_PEER_CLIENT_TEST_TARGETS
     peer-set-strand-discipline-gtest
+    peer-set-node-batch-bind-gtest
     connection-write-lifecycle-gtest
     peer-client-gtest
     peer-endpoint-cache-gtest
