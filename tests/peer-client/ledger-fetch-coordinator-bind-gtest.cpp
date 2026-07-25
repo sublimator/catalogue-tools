@@ -938,18 +938,28 @@ TEST(LedgerFetchCoordinatorBind, SealArrivingAfterIngressSealIsDropped)
     ASSERT_EQ(
         f.coord->fence([&fenced](FenceOutcome) { ++fenced; }),
         Fence::drain_queued);
-    f.settle();
 
-    EXPECT_EQ(Access::completions_sealed(f.coord), 1u)
+    // ONE handler: the completion. Asserting here rather than after settling is
+    // the whole point. The fence body terminalizes any live row, so by the end
+    // the row is terminal and unsealed whether or not the completion dropped the
+    // command — a probe of the guard changed nothing an end-state assertion could
+    // see, and reported this control as vacuous. The difference exists only in
+    // this window.
+    ASSERT_EQ(f.step(), 1u);
+    ASSERT_EQ(Access::completions_sealed(f.coord), 1u)
         << "PeerSet did produce a command, or nothing was dropped";
     auto* row = Access::find_any(f.coord, *attempt);
     ASSERT_TRUE(row != nullptr);
     EXPECT_EQ(row->phase, Phase::terminal)
-        << "a command that can never be published must terminalize the row";
+        << "a command that can never be published must terminalize the row AS IT "
+           "ARRIVES, not wait for the fence body to tidy up";
     EXPECT_FALSE(row->sealed.has_value())
-        << "and must not be retained past the fence";
+        << "and must not be retained even briefly past the seal";
     EXPECT_EQ(f.coord->work_outstanding(), 0u)
-        << "a retained command would hold its work unit and hang the fence";
+        << "a retained command holds its work unit, which is what would hang the "
+           "fence if a later row were still to arrive";
+
+    f.settle();
     EXPECT_EQ(fenced, 1);
     EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fenced);
 }
