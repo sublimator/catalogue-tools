@@ -106,6 +106,46 @@ public:
         return true;
     }
 
+    static void
+    set_acknowledgement_failure(
+        std::shared_ptr<Coordinator> const& c,
+        bool fail)
+    {
+        c->fail_acknowledgement_for_test_ = fail;
+    }
+
+    static void
+    set_publish_initiation_failure(
+        std::shared_ptr<Coordinator> const& c,
+        bool fail)
+    {
+        c->fail_publish_initiation_for_test_ = fail;
+    }
+
+    static void
+    set_max_publish_attempts(
+        std::shared_ptr<Coordinator> const& c,
+        std::uint32_t attempts)
+    {
+        c->max_publish_attempts_ = attempts;
+    }
+
+    static void
+    set_max_ack_attempts(
+        std::shared_ptr<Coordinator> const& c,
+        std::uint32_t attempts)
+    {
+        c->max_ack_attempts_ = attempts;
+    }
+
+    static void
+    set_publish_deadline(
+        std::shared_ptr<Coordinator> const& c,
+        std::chrono::milliseconds deadline)
+    {
+        c->publish_deadline_ = deadline;
+    }
+
     /// Drive the PROCESS-WIDE sender generation counter. Static, so a control
     /// must restore it or it would poison every later coordinator in the run.
     static void

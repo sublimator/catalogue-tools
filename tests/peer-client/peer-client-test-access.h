@@ -199,6 +199,19 @@ public:
         client.next_callback_incarnation_ = callback;
     }
 
+    /// Fill the receiver's bounded node-batch ingress so every further public
+    /// submission or acknowledgement is refused before reaching the strand.
+    ///
+    /// Used by the coordinator controls to force the acknowledgement-refused retry
+    /// path, which is otherwise unreachable: it is the receiver's own bound, and a
+    /// sender-side simulation of it would prove nothing about the real boundary.
+    static void
+    seed_node_batch_ingress_saturated(PeerClient& client)
+    {
+        client.node_batch_ingress_projections_.store(
+            kMaxNodeBatchIngressProjections, std::memory_order_release);
+    }
+
     static void
     seed_open_connection(PeerClient& client, asio::ssl::context& ssl_context)
     {

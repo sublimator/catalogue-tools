@@ -273,6 +273,7 @@ LedgerFetchCoordinator::commit_row_on_strand(
         auto& row = rows_.back();
         row.deadline = std::move(timer);
         row.max_bind_attempts = max_bind_attempts_;
+        row.max_publish_attempts = max_publish_attempts_;
         row.absolute_deadline =
             std::chrono::steady_clock::now() + absolute_bind_deadline_;
         next_attempt_ = attempt.value();
@@ -421,8 +422,9 @@ LedgerFetchCoordinator::settle_bind_on_strand(
     {
         row->sealed = std::move(sealed);
         row->phase = Phase::publishable;
-        // Publication is the next slice. The row, its original intent and its
-        // original pin stay held, and so does its work unit.
+        // Straight into publication. The row, its original intent and its original
+        // pin stay held throughout, and so does its work unit.
+        begin_publish_on_strand(attempt);
         return true;
     }
     if (sealed)
@@ -448,6 +450,223 @@ LedgerFetchCoordinator::settle_bind_on_strand(
     return true;
 }
 
+//@@authority transition=ledger_fetch_coordinator.publish_command
+// owner=ledger_fetch_coordinator commit=strand
+void
+LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
+{
+    auto* row = find_row(attempt);
+    if (row == nullptr || row->phase != Phase::publishable || row->publish_open)
+    {
+        return;
+    }
+    if (ingress_sealed())
+    {
+        terminalize_on_strand(*row, "ingress sealed before publication");
+        return;
+    }
+    if (!row->sealed)
+    {
+        terminalize_on_strand(*row, "publishable without a sealed command");
+        return;
+    }
+    if (row->publish_attempts >= row->max_publish_attempts)
+    {
+        terminalize_on_strand(*row, "publication attempts exhausted");
+        return;
+    }
+
+    auto* session = row->pin.get();
+    if (session == nullptr)
+    {
+        // The retention this row owns is gone, so there is nothing to publish on.
+        terminalize_on_strand(*row, "pin no longer holds a session");
+        return;
+    }
+
+    ++row->publish_revision;
+    ++row->publish_attempts;
+    row->publish_open = true;
+    row->phase = Phase::awaiting_receipt;
+    auto const revision = row->publish_revision;
+
+    bool accepted = false;
+    try
+    {
+        if (fail_publish_initiation_for_test_)
+        {
+            throw std::runtime_error("publish initiation failpoint");
+        }
+        // Armed BEFORE publishing, and it is not belt-and-braces. An accepted
+        // publication does NOT promise a receipt: PeerClient's duplicate-waiter
+        // capacity path returns without ever invoking the handler and expects the
+        // sender to replay. Without this deadline such a row waits forever.
+        row->deadline->expires_after(publish_deadline_);
+        row->deadline->async_wait(
+            [self = shared_from_this(), attempt, revision](
+                boost::system::error_code const& ec) {
+                if (ec == asio::error::operation_aborted)
+                {
+                    return;
+                }
+                self->settle_publication_on_strand(
+                    attempt, revision, std::nullopt, /*timed_out=*/true);
+            });
+
+        // REPLAY, not re-mint: the same sealed command, same attempt identity. A
+        // second identity for one payload is exactly what the receiver's
+        // identity_conflict refusal exists to catch.
+        accepted = session->submit_node_batch(
+            *row->sealed,
+            [self = shared_from_this(), attempt, revision](
+                NodeBatchWriteReceipt receipt) {
+                // Delivered on the RECEIVER's strand. Hop to ours before touching
+                // any row: the receipt is the receiver's fact, the row is ours.
+                asio::post(
+                    self->strand_,
+                    [self, attempt, revision, receipt]() mutable {
+                        self->settle_publication_on_strand(
+                            attempt, revision, std::move(receipt), false);
+                    });
+            });
+    }
+    catch (...)
+    {
+        PLOGE(log_, "publish initiation threw; settling as a refused publication");
+    }
+
+    if (!accepted)
+    {
+        // Refused or threw. Bounded replay, or terminal, under coordinator bounds.
+        settle_publication_on_strand(attempt, revision, std::nullopt, false);
+    }
+}
+
+//@@authority transition=ledger_fetch_coordinator.settle_publication
+// owner=ledger_fetch_coordinator commit=strand
+bool
+LedgerFetchCoordinator::settle_publication_on_strand(
+    TransportAttemptId attempt,
+    std::uint32_t revision,
+    std::optional<NodeBatchWriteReceipt> receipt,
+    bool timed_out)
+{
+    auto* row = find_row(attempt);
+    if (row == nullptr)
+    {
+        return false;
+    }
+    if (!row->publish_open || row->publish_revision != revision)
+    {
+        return false;
+    }
+    row->publish_open = false;
+    cancel_quietly(*row);
+
+    if (receipt)
+    {
+        // THE ordering rule from the canonical cut: stop projecting the command
+        // BEFORE consuming its receipt and posting the acknowledgement. Every
+        // permitted pre-ack replay is therefore already consumed, and a post-ack
+        // replay is forbidden at its source — here — rather than defended against
+        // by an unbounded tombstone set on the receiver.
+        row->phase = Phase::acknowledging;
+        row->receipt = std::move(receipt);
+
+        if (row->receipt->receiver_commit_sequence() == 0)
+        {
+            // An admission refusal names no retained receiver row, and PeerClient
+            // rejects an acknowledgement for one. There is nothing to retire.
+            terminalize_on_strand(*row, "terminal receipt with no retained row");
+            return true;
+        }
+        acknowledge_on_strand(attempt);
+        return true;
+    }
+
+    if (row->publish_attempts >= row->max_publish_attempts)
+    {
+        terminalize_on_strand(
+            *row,
+            timed_out ? "no receipt within the publication deadline"
+                      : "publication refused");
+        return true;
+    }
+
+    // Back to publishable and replay directly, for the same reason the bind retry
+    // is direct: a posted retry can fail to queue and orphan the row with nothing
+    // in flight and its deadline already cancelled.
+    row->phase = Phase::publishable;
+    begin_publish_on_strand(attempt);
+    return true;
+}
+
+//@@authority transition=ledger_fetch_coordinator.acknowledge_receipt
+// owner=ledger_fetch_coordinator commit=strand
+void
+LedgerFetchCoordinator::acknowledge_on_strand(TransportAttemptId attempt)
+{
+    auto* row = find_row(attempt);
+    if (row == nullptr || row->phase != Phase::acknowledging || !row->receipt)
+    {
+        return;
+    }
+
+    auto* session = row->pin.get();
+    if (session == nullptr)
+    {
+        // The receiver row outlives our retention, so it is unretired and counted.
+        unacked_receiver_rows_.fetch_add(1, std::memory_order_acq_rel);
+        terminalize_on_strand(*row, "pin gone before acknowledgement");
+        return;
+    }
+
+    ++row->ack_attempts;
+    bool queued = false;
+    try
+    {
+        // Minted here and nowhere else: NodeBatchReceiptAck names this coordinator
+        // as its only friend, and it retires the exact receiver row this exact
+        // receipt identifies.
+        if (fail_acknowledgement_for_test_)
+        {
+            queued = false;
+        }
+        else
+        {
+            queued = session->acknowledge_node_batch_receipt(
+                NodeBatchReceiptAck{*row->receipt});
+        }
+    }
+    catch (...)
+    {
+        PLOGE(log_, "acknowledgement threw; treated as not queued");
+    }
+
+    if (queued)
+    {
+        terminalize_on_strand(*row, "acknowledged");
+        return;
+    }
+    if (row->ack_attempts >= max_ack_attempts_)
+    {
+        // Bounded. The receiver keeps its row until its incarnation dies, and that
+        // is precisely the residue unacked_receiver_rows() exists to expose rather
+        // than let a caller infer a clean shutdown from silence.
+        unacked_receiver_rows_.fetch_add(1, std::memory_order_acq_rel);
+        PLOGE(
+            log_,
+            "acknowledgement refused ",
+            row->ack_attempts,
+            " time(s); receiver row left retained for attempt ",
+            attempt.value());
+        terminalize_on_strand(*row, "acknowledgement attempts exhausted");
+        return;
+    }
+    // Direct retry, same reasoning as every other retry here.
+    acknowledge_on_strand(attempt);
+}
+
 //@@authority transition=ledger_fetch_coordinator.terminalize_row
 // owner=ledger_fetch_coordinator commit=strand
 void
@@ -463,6 +682,7 @@ LedgerFetchCoordinator::terminalize_on_strand(OutboxRow& row, char const* why)
         why);
     row.phase = Phase::terminal;
     row.bind_open = false;
+    row.publish_open = false;
     row.sealed.reset();
     cancel_quietly(row);
     row.pin.reset();  // the retention this row owned, released here and nowhere else

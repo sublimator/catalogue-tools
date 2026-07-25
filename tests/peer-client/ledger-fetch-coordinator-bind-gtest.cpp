@@ -19,6 +19,7 @@
 
 #include "ledger-fetch-coordinator-test-access.h"
 #include "node-batch-test-session.h"
+#include "peer-client-test-access.h"
 #include "peer-set-test-access.h"
 
 #include <catl/peer-client/ledger-fetch-coordinator.h>
@@ -220,7 +221,12 @@ TEST(LedgerFetchCoordinatorBind, ExactBindReachesPublishableRetainingIntentAndPi
     auto* row = Access::find_any(f.coord, *attempt);
     ASSERT_TRUE(row != nullptr);
 
-    EXPECT_EQ(row->phase, Phase::publishable);
+    // A successful bind now flows straight into publication, so the row is past
+    // `publishable` by the time this observes it. The fake accepts and never
+    // answers, which is PeerClient's real duplicate-waiter behaviour, so it parks
+    // in awaiting_receipt with its deadline armed.
+    EXPECT_EQ(row->phase, Phase::awaiting_receipt);
+    EXPECT_EQ(row->publish_attempts, 1u);
     EXPECT_FALSE(row->bind_open);
     EXPECT_EQ(row->bind_attempts, 1u);
     EXPECT_EQ(row->bind_revision, 1u);
@@ -304,8 +310,9 @@ TEST(LedgerFetchCoordinatorBind, LostCompletionPostIsRecoveredByTheBindDeadline)
 
     auto* row = Access::find_any(f.coord, *attempt);
     ASSERT_TRUE(row != nullptr);
-    EXPECT_EQ(row->phase, Phase::publishable)
-        << "the deadline had to re-bind, or this row is still awaiting_bind";
+    EXPECT_EQ(row->phase, Phase::awaiting_receipt)
+        << "the deadline had to re-bind and the retry had to publish, or this row "
+           "is still awaiting_bind";
     EXPECT_GE(row->bind_attempts, 2u);
     ASSERT_TRUE(row->sealed.has_value()) << "dereferenced below";
     EXPECT_EQ(row->sealed->attempt_id(), row->intent.attempt_id())
@@ -330,7 +337,7 @@ TEST(LedgerFetchCoordinatorBind, CompletionBeforeTimeoutSettlesOnce)
     ASSERT_TRUE(attempt.has_value());
     auto* row = Access::find_any(f.coord, *attempt);
     ASSERT_TRUE(row != nullptr);
-    EXPECT_EQ(row->phase, Phase::publishable);
+    EXPECT_EQ(row->phase, Phase::awaiting_receipt);
     EXPECT_EQ(row->bind_attempts, 1u);
     EXPECT_EQ(Access::completions_seen(f.coord), 1u);
 
@@ -338,7 +345,7 @@ TEST(LedgerFetchCoordinatorBind, CompletionBeforeTimeoutSettlesOnce)
     // polling cannot produce a second outcome.
     f.settle();
     EXPECT_EQ(row->bind_attempts, 1u);
-    EXPECT_EQ(row->phase, Phase::publishable);
+    EXPECT_EQ(row->phase, Phase::awaiting_receipt);
 }
 
 /// 7. Timeout before completion: the timeout commits, and the sealed completion
@@ -1124,4 +1131,284 @@ TEST(LedgerFetchCoordinatorBind, ProjectionResidueSaturatesAbsorbingly)
     // The fixture destructor asserts !accounting_broken(), which this control
     // deliberately violates, so clear the expectation it is checking.
     Access::clear_accounting_broken(f.coord);
+}
+
+// ---------------------------------------------------------------------------
+// Publication and receipt disposition.
+//
+// These publish across the EXACT production boundary: the pinned session is a
+// real PeerClient, and the receipts are real receipts it minted. That is not
+// thoroughness for its own sake — `NodeBatchWriteReceipt`'s only friend is
+// PeerClient, deliberately, and unlike every sibling capability not even
+// PeerClientTestAccess can mint one. A fake session therefore CANNOT deliver a
+// receipt, and the alternative would have been widening that friendship to a test
+// seam, which the canonical cut lists among its refusals.
+//
+// One thing these controls have to align by hand, and it is the documented open
+// boundary rather than a fixture convenience: PeerSet mints the peer generation
+// and PeerClient holds its own `connection_generation_`, and publication is
+// refused unless they are equal. The canonical cut names exactly this as "an
+// unnamed PeerSet-to-PeerClient construction boundary" and says not to rename the
+// bare token into apparent exactness. So the fixture makes them equal explicitly
+// and says why, rather than implying the production path already guarantees it.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct PublishFixture
+{
+    asio::io_context io;
+    std::shared_ptr<PeerSet> peers;
+    std::shared_ptr<PeerClient> client;
+    std::shared_ptr<LedgerFetchCoordinator> coord;
+    std::uint64_t generation = 0;
+
+    /// `client_generation` is what makes or breaks publication: PeerClient refuses
+    /// any command whose peer generation is not its own. Default 1 matches what a
+    /// fresh PeerSet mints; pass anything else to exercise the refusal.
+    /// A connection is required for the write to be ADMITTED rather than refused.
+    /// Without one the receiver answers `disconnected` with commit sequence zero,
+    /// which never reaches the acknowledgement path at all — so the controls that
+    /// matter most would have been exercising nothing.
+    std::optional<asio::ssl::context> ssl;
+
+    explicit PublishFixture(
+        std::uint64_t client_generation = 1,
+        bool with_connection = false)
+    {
+        peers = PeerSet::create(
+            io,
+            PeerSetOptions{
+                .network_id = 0,
+                .max_in_flight_connects = 0,
+                .max_in_flight_crawls = 0,
+            });
+        // A fresh PeerSet mints generation 1 first, so the client is built to
+        // match. See the note above: this equality is the open construction
+        // boundary, made explicit here.
+        client = PeerClientTestAccess::make(io, State::Ready, client_generation);
+        if (with_connection)
+        {
+            ssl.emplace(asio::ssl::context::tlsv12_client);
+            PeerClientTestAccess::seed_open_connection(*client, *ssl);
+        }
+        generation =
+            PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, client);
+        coord = LedgerFetchCoordinator::create(io, peers);
+    }
+
+    Ingress
+    submit()
+    {
+        return coord->submit_node_batch_on_pin(
+            CoordFixture::ledger_hash(),
+            NodeTree::account_state,
+            CoordFixture::nodes(),
+            PeerSetTestAccess::make_peer_pin_for_session(io, peers, client));
+    }
+
+    void
+    settle()
+    {
+        for (int i = 0; i < 256; ++i)
+        {
+            io.restart();
+            if (io.poll() == 0)
+            {
+                break;
+            }
+        }
+        io.restart();
+    }
+
+    ~PublishFixture()
+    {
+        EXPECT_FALSE(coord && coord->accounting_broken())
+            << "a conserved quantity was violated during this control";
+    }
+};
+
+}  // namespace
+
+/// 30. The generations agree, so publication is accepted and a real receipt comes
+///     back to the coordinator strand.
+TEST(LedgerFetchCoordinatorPublish, AlignedGenerationPublishesAndReceiptReturns)
+{
+    PublishFixture f;
+    ASSERT_EQ(f.generation, 1u) << "the fixture's whole premise";
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+
+    EXPECT_GE(row->publish_attempts, 1u) << "publication was actually attempted";
+    ASSERT_TRUE(row->receipt.has_value())
+        << "a real PeerClient must have produced a terminal receipt";
+    EXPECT_EQ(row->receipt->attempt_id(), row->intent.attempt_id())
+        << "the receipt names OUR attempt, not one derived downstream";
+    EXPECT_EQ(row->receipt->sender_generation(), f.coord->sender_generation());
+    EXPECT_EQ(row->receipt->peer_generation().value(), f.generation);
+    EXPECT_EQ(row->receipt->payload_digest(), row->intent.payload_digest());
+    EXPECT_FALSE(row->publish_open) << "the disposition is committed exactly once";
+}
+
+/// 31. A receipt naming no retained receiver row is NOT acknowledged.
+///
+/// PeerClient rejects any ack whose receiver_commit_sequence is zero, and an
+/// admission refusal carries exactly that. Attempting one would be a sender
+/// claiming to retire receiver state that never existed.
+TEST(LedgerFetchCoordinatorPublish, ReceiptWithoutARetainedRowIsNotAcknowledged)
+{
+    // A client whose connection generation is NOT the one PeerSet minted. It is
+    // still Ready, so PeerSet pins it — a non-ready session cannot be pinned at
+    // all, which is why that route to a refusal does not exist. The receiver then
+    // refuses on exact generation, producing a terminal receipt with sequence zero
+    // and nothing to retire.
+    //
+    // This is the unnamed PeerSet-to-PeerClient construction boundary being
+    // ENFORCED rather than assumed: nothing in the production path guarantees the
+    // two generations agree, and when they do not, publication is refused exactly.
+    PublishFixture f{99};
+    ASSERT_NE(f.generation, 99u) << "the mismatch is the premise";
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+
+    ASSERT_TRUE(row->receipt.has_value());
+    EXPECT_EQ(row->receipt->receiver_commit_sequence(), 0u)
+        << "an admission refusal names no retained row";
+    EXPECT_EQ(row->receipt->outcome(), NodeBatchWriteOutcome::generation_mismatch)
+        << "refused on exact generation by the receiver that owns that fact";
+    EXPECT_EQ(row->ack_attempts, 0u)
+        << "nothing may be acknowledged for a row that was never retained";
+    EXPECT_EQ(row->phase, Phase::terminal);
+    EXPECT_EQ(f.coord->unacked_receiver_rows(), 0u)
+        << "and it is NOT counted as unretired receiver state, because there is "
+           "none";
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
+}
+
+/// 32. The row stops projecting BEFORE the acknowledgement — the canonical
+///     ordering rule, asserted rather than asserted-about.
+///
+/// "One coordinator executor must stop projecting a command before consuming its
+/// receipt and posting the acknowledgement... a post-ack replay is forbidden at
+/// its source." Source-forbidden means the row is not in a publishable or
+/// awaiting_receipt phase at the moment the ack is minted, so no code path can
+/// republish it.
+TEST(LedgerFetchCoordinatorPublish, ProjectionStopsBeforeAcknowledgement)
+{
+    PublishFixture f;
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+
+    // Whatever the outcome, publication is closed and the sealed command has been
+    // released, so there is nothing left to project.
+    EXPECT_FALSE(row->publish_open);
+    EXPECT_NE(row->phase, Phase::publishable);
+    EXPECT_NE(row->phase, Phase::awaiting_receipt);
+    EXPECT_FALSE(row->sealed.has_value())
+        << "a retained command is a republication waiting to happen; terminal rows "
+           "must not hold one";
+}
+
+/// 33. Publication refused at initiation is a bounded coordinator retry.
+TEST(LedgerFetchCoordinatorPublish, RefusedPublicationRetriesThenTerminalizes)
+{
+    PublishFixture f;
+    Access::set_publish_initiation_failure(f.coord, true);
+    Access::set_max_publish_attempts(f.coord, 2);
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    EXPECT_NO_THROW(f.settle());
+
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+
+    EXPECT_EQ(row->publish_attempts, 2u) << "exactly the budget, no spinning";
+    EXPECT_EQ(row->phase, Phase::terminal);
+    EXPECT_FALSE(row->receipt.has_value());
+    EXPECT_FALSE(static_cast<bool>(row->pin)) << "terminal releases the retention";
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
+}
+
+/// 34. THE control for this slice: an ADMITTED write yields a receipt naming a
+///     retained receiver row, and the coordinator retires it with an ack.
+///
+/// Everything before this exercised refusals, whose receipts carry commit sequence
+/// zero and are terminal with nothing to retire — so none of them reached
+/// `acknowledge_on_strand` at all. Without a real connection the receiver answers
+/// `disconnected` and the acknowledgement path, which is the entire point of the
+/// slice, would have been dead code behind green tests.
+TEST(LedgerFetchCoordinatorPublish, AdmittedWriteIsAcknowledgedAndRetiresTheRow)
+{
+    PublishFixture f{1, /*with_connection=*/true};
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+    ASSERT_TRUE(row->receipt.has_value());
+
+    EXPECT_NE(row->receipt->receiver_commit_sequence(), 0u)
+        << "an admitted write must name a RETAINED receiver row, or there is "
+           "nothing for an acknowledgement to retire";
+    EXPECT_NE(row->receipt->receiver_instance_id(), 0u);
+    EXPECT_EQ(row->ack_attempts, 1u)
+        << "exactly one acknowledgement, accepted first time";
+    EXPECT_EQ(row->phase, Phase::terminal);
+    EXPECT_EQ(f.coord->unacked_receiver_rows(), 0u)
+        << "the receiver row was retired, so no residue";
+
+    // Terminal releases everything the row owned.
+    EXPECT_FALSE(static_cast<bool>(row->pin));
+    EXPECT_FALSE(row->sealed.has_value());
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
+    EXPECT_FALSE(f.coord->accounting_broken());
+}
+
+/// 35. An acknowledgement that cannot be queued is retried, and its exhaustion
+///     leaves the receiver row COUNTABLE rather than silently orphaned.
+TEST(LedgerFetchCoordinatorPublish, ExhaustedAcknowledgementCountsTheOrphanedRow)
+{
+    PublishFixture f{1, /*with_connection=*/true};
+    Access::set_max_ack_attempts(f.coord, 2);
+    // Forced on OUR side, deliberately. The receiver's ingress projection gates
+    // publication and acknowledgement with one bound, so saturating it refuses the
+    // write and the row never reaches an acknowledgement to refuse. And a false
+    // return is the whole observable here — no callback, no receiver state change —
+    // so this is faithful in a way the sender-side lost-completion simulation was
+    // not.
+    Access::set_acknowledgement_failure(f.coord, true);
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+
+    EXPECT_EQ(f.coord->unacked_receiver_rows(), 1u)
+        << "a receiver row we could not retire must be countable; the canonical "
+           "cut is explicit that the receiver will not grow a tombstone set to "
+           "repair a sender that broke this";
+    EXPECT_EQ(row->phase, Phase::terminal);
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
 }

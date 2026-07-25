@@ -56,12 +56,21 @@ public:
         return 100;
     }
 
+    /// Accepts publication and NEVER invokes the handler.
+    ///
+    /// That is not a convenience — it is PeerClient's duplicate-waiter-capacity
+    /// behaviour exactly: admission succeeds, no receipt is ever delivered, and the
+    /// sender is expected to replay once the original terminal receipt exists. A
+    /// fake could not deliver a receipt anyway, since NodeBatchWriteReceipt's only
+    /// friend is PeerClient. Controls that need a REAL receipt publish to a real
+    /// PeerClient instead.
     bool
     submit_node_batch(
         catl::peer_client::NodeBatchCommand,
         catl::peer_client::NodeBatchWriteHandler) override
     {
-        return false;  // publication is not under test in either suite
+        ++publish_calls;
+        return publish_accepts;
     }
     bool
     acknowledge_node_batch_receipt(
@@ -160,6 +169,8 @@ public:
     }
 
     bool ready = true;
+    bool publish_accepts = true;
+    std::size_t publish_calls = 0;
 
 private:
     std::string endpoint_;

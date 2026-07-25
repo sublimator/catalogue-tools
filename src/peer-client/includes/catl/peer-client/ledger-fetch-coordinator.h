@@ -106,6 +106,21 @@ public:
     static constexpr std::uint64_t kMaxOutstandingProjections =
         std::numeric_limits<std::uint64_t>::max() - 1;
 
+    /// Publication bounds. A receipt is NOT guaranteed by an accepted publication:
+    /// PeerClient's duplicate-waiter path returns without invoking the handler at
+    /// all, and tells the sender to replay once the original terminal receipt is
+    /// available. So publication needs its own deadline for exactly the reason the
+    /// bind did, and its recovery is REPLAY of the same command — never a new
+    /// attempt, because a second identity for one payload is what the receiver's
+    /// identity_conflict refusal exists to catch.
+    static constexpr std::uint32_t kMaxPublishAttempts = 3;
+    static constexpr std::chrono::milliseconds kPublishDeadline{250};
+
+    /// Acknowledgement bounds. `acknowledge_node_batch_receipt` returns false when
+    /// the receiver's bounded ingress is momentarily full, which is a retry input
+    /// rather than a terminal fact.
+    static constexpr std::uint32_t kMaxAckAttempts = 3;
+
     /// Bind bounds. Retry is limited by an attempt budget AND an absolute
     /// deadline; exhausting either terminalizes identically.
     static constexpr std::uint32_t kMaxBindAttempts = 3;
@@ -153,11 +168,13 @@ public:
     /// disposition is reported synchronously by `fence()` itself.
     using FenceHandler = std::function<void()>;
 
-    /// Where one transport attempt's bind has got to.
+    /// Where one transport attempt has got to.
     enum class Phase : std::uint8_t {
-        awaiting_bind,  ///< committed; a bind is open or about to be opened
-        publishable,    ///< sealed command held; publication is a later slice
-        terminal,       ///< bind bounds exhausted, refused, or fenced
+        awaiting_bind,     ///< committed; a bind is open or about to be opened
+        publishable,       ///< sealed command held, not yet published
+        awaiting_receipt,  ///< publication accepted; a receipt may or may not come
+        acknowledging,     ///< receipt retained, NO LONGER PROJECTING, ack in flight
+        terminal,          ///< bounds exhausted, refused, acknowledged, or fenced
     };
 
     enum class Lifecycle : std::uint8_t { running, fencing, fenced };
@@ -268,6 +285,21 @@ public:
         return accounting_broken_.load(std::memory_order_acquire);
     }
 
+    /// Receipts seen naming a RETAINED receiver row that this coordinator failed to
+    /// acknowledge. An exact, knowable residue: the receiver keeps that row until
+    /// its incarnation dies, and the canonical cut is explicit that it will not grow
+    /// an unbounded tombstone set to repair a sender that broke this. So a sender
+    /// that breaks it must at least make it countable.
+    ///
+    /// Distinct from `outstanding_bind_projections()`, which counts seal completions
+    /// never observed. This counts receiver state never retired.
+    std::size_t
+    unacked_receiver_rows() const noexcept
+    {
+        return static_cast<std::size_t>(
+            unacked_receiver_rows_.load(std::memory_order_acquire));
+    }
+
     SenderGenerationId
     sender_generation() const noexcept
     {
@@ -326,6 +358,20 @@ private:
         /// of whatever the actor's setting happens to be when it is consulted.
         std::uint32_t max_bind_attempts = kMaxBindAttempts;
 
+        /// Publication, same exactly-once shape as the bind: an event must match
+        /// the open revision AND find publication still open to commit anything.
+        std::uint32_t publish_revision = 0;
+        std::uint32_t publish_attempts = 0;
+        bool publish_open = false;
+        std::uint32_t max_publish_attempts = kMaxPublishAttempts;
+
+        /// The exact terminal receipt, retained. A receipt whose
+        /// receiver_commit_sequence is zero identifies NO retained receiver row —
+        /// PeerClient refuses to accept an acknowledgement for one — so it is a
+        /// terminal fact with nothing to retire.
+        std::optional<NodeBatchWriteReceipt> receipt;
+        std::uint32_t ack_attempts = 0;
+
         std::shared_ptr<boost::asio::steady_timer> deadline;
         std::chrono::steady_clock::time_point absolute_deadline{};
         bool retired = false;
@@ -343,6 +389,23 @@ private:
 
     void
     begin_bind_on_strand(TransportAttemptId attempt);
+
+    /// Publish, or REPLAY, the row's sealed command on its retained pin.
+    void
+    begin_publish_on_strand(TransportAttemptId attempt);
+
+    /// Commit one publication outcome. Returns false when the event is stale.
+    bool
+    settle_publication_on_strand(
+        TransportAttemptId attempt,
+        std::uint32_t revision,
+        std::optional<NodeBatchWriteReceipt> receipt,
+        bool timed_out);
+
+    /// Retire the receiver's retained row for this receipt. Called ONLY after the
+    /// row has stopped projecting the command.
+    void
+    acknowledge_on_strand(TransportAttemptId attempt);
 
     /// Commit one bind outcome. Returns false when the event is stale — the row
     /// is gone, the revision has moved on, or the bind is already closed — in
@@ -414,8 +477,13 @@ private:
     std::uint64_t completions_seen_ = 0;
     std::uint64_t completions_sealed_ = 0;
 
+    std::atomic<std::uint64_t> unacked_receiver_rows_{0};
+
     /// Bounds as members so a control can force each one independently. They
     /// start at the constants above and production never changes them.
+    std::uint32_t max_publish_attempts_ = kMaxPublishAttempts;
+    std::chrono::milliseconds publish_deadline_ = kPublishDeadline;
+    std::uint32_t max_ack_attempts_ = kMaxAckAttempts;
     std::uint32_t max_bind_attempts_ = kMaxBindAttempts;
     std::chrono::milliseconds bind_deadline_ = kBindDeadline;
     std::chrono::milliseconds absolute_bind_deadline_ = kAbsoluteBindDeadline;
@@ -426,6 +494,22 @@ private:
     bool fail_row_commit_for_test_ = false;
     bool fail_bind_initiation_for_test_ = false;
     bool fail_fence_projection_for_test_ = false;
+    bool fail_publish_initiation_for_test_ = false;
+
+    /// Force the acknowledgement to be observed as NOT queued.
+    ///
+    /// A sender-side failpoint is faithful HERE, unlike the lost-completion case
+    /// where one was not. `acknowledge_node_batch_receipt` returning false is the
+    /// entire observable: there is no callback and no receiver state change to
+    /// simulate away, so a coordinator cannot distinguish this from the receiver
+    /// refusing on its own bound. The lost completion was different — simulating it
+    /// on this side still ran our own callback, which settled our accounting and
+    /// made the residue lie.
+    ///
+    /// It cannot be forced through the real bound either: the receiver's node-batch
+    /// ingress projection gates publication and acknowledgement alike, so
+    /// saturating it refuses the write and the row never reaches an ack at all.
+    bool fail_acknowledgement_for_test_ = false;
 
     /// Granted ingress + committed rows, plus the seal bit. Reserved before the
     /// projection is queued, released on refusal or row retirement, never
