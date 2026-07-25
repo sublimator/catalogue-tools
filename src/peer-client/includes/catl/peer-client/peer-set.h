@@ -10,6 +10,7 @@
 // coroutines keep PeerSet alive by capturing shared_ptr<PeerSet>.
 
 #include "endpoint-tracker.h"
+#include "node-transport.h"
 #include "peer-crawl-client.h"
 #include "peer-endpoint-cache.h"
 #include "peer-generation-pin.h"
@@ -128,6 +129,25 @@ public:
     /// most promising archival candidates first.
     void
     prioritize_ledger(uint32_t ledger_seq);
+
+    /// Seal one coordinator intent onto the exact admitted peer generation the
+    /// supplied pin share names, on this PeerSet's owner strand.
+    ///
+    /// PeerSet is the sole minter of `PeerConnectionGenerationId` and
+    /// `NodeBatchCommand`; this is that authority's only entry point. The seal
+    /// commits only when the pin still names the CURRENT admitted
+    /// `(session, connection_generation)` at its endpoint and that session is
+    /// still ready. A stale, replaced, or foreign pin yields `std::nullopt` —
+    /// it never silently retargets the intent at whatever peer is admitted now.
+    ///
+    /// `pin_share` is an explicit `share()`, so validation cannot be performed
+    /// against a handle the caller has since dropped, and the caller's outbox
+    /// keeps owning the retention.
+    void
+    seal_node_batch_command(
+        NodeBatchIntent intent,
+        PeerGenerationPin pin_share,
+        std::function<void(std::optional<NodeBatchCommand>)> on_sealed);
 
     /// Synchronous check: any connected peer with this ledger?
     /// Returns nullptr if none found.
@@ -411,6 +431,12 @@ private:
     // commit=strand
     PeerGenerationPin
     make_peer_pin(PeerSessionPtr const& expected_session);
+
+    /// Owner-strand half of seal_node_batch_command.
+    std::optional<NodeBatchCommand>
+    seal_node_batch_command_on_strand(
+        NodeBatchIntent const& intent,
+        PeerGenerationPin const& pin);
 
     //@@authority transition=peer_set.release_generation_pin owner=peer_set
     // commit=strand

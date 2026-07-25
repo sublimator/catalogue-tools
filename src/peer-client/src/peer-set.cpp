@@ -2532,6 +2532,70 @@ PeerSet::try_candidates_for(
     return queued;
 }
 
+//@@authority transition=peer_set.seal_node_batch_command owner=peer_set
+// commit=strand
+void
+PeerSet::seal_node_batch_command(
+    NodeBatchIntent intent,
+    PeerGenerationPin pin_share,
+    std::function<void(std::optional<NodeBatchCommand>)> on_sealed)
+{
+    if (!on_sealed)
+        return;
+
+    // Sealing is owner-strand authority, so enter it rather than validating
+    // against connections_ from the coordinator's executor.
+    asio::post(
+        strand_,
+        [self = shared_from_this(),
+         intent = std::move(intent),
+         pin = std::move(pin_share),
+         on_sealed = std::move(on_sealed)]() mutable {
+            on_sealed(self->seal_node_batch_command_on_strand(intent, pin));
+        });
+}
+
+std::optional<NodeBatchCommand>
+PeerSet::seal_node_batch_command_on_strand(
+    NodeBatchIntent const& intent,
+    PeerGenerationPin const& pin)
+{
+    ASSERT_ON_STRAND();
+    if (!strand_.running_in_this_thread() || !pin)
+        return std::nullopt;
+
+    // The pin must have been minted by THIS PeerSet. A pin from another
+    // instance names a generation this owner never admitted, so it can never
+    // authorize a seal here.
+    if (pin.release_owner().get() != this)
+        return std::nullopt;
+
+    // Its pin row must still be active. A released or pruned pin no longer
+    // holds the eviction veto the seal depends on, even if the connection map
+    // still happens to agree.
+    auto const active = active_peer_pins_.find(pin.pin_id());
+    if (active == active_peer_pins_.end() ||
+        active->second.connection_generation != pin.connection_generation())
+    {
+        return std::nullopt;
+    }
+
+    // Exactness, mirroring make_peer_pin: the SAME session object, still
+    // admitted at that endpoint, still in the generation the pin names, still
+    // ready. Anything else is a refusal, never a retarget.
+    auto const connection = connections_.find(pin.endpoint());
+    if (connection == connections_.end() || !connection->second.session ||
+        connection->second.session.get() != pin.get() ||
+        connection->second.generation != pin.connection_generation() ||
+        !connection->second.session->is_ready())
+    {
+        return std::nullopt;
+    }
+
+    return NodeBatchCommand{
+        intent, PeerConnectionGenerationId{connection->second.generation}};
+}
+
 PeerGenerationPin
 PeerSet::make_peer_pin(PeerSessionPtr const& expected_session)
 {
