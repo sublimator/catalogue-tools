@@ -2595,6 +2595,21 @@ PeerSet::deliver_seal_result(
     // If the completion cannot be queued the capability is DROPPED rather than
     // delivered from the wrong executor: an unsealed row is retryable, whereas a
     // command delivered onto PeerSet's strand is an authority leak.
+    if (drop_seal_completions_for_test_ > 0)
+    {
+        --drop_seal_completions_for_test_;
+        // Default-inert failpoint AT THE REAL BOUNDARY. It reproduces a lost
+        // completion post exactly: the command is destroyed here and the consumer
+        // is never invoked, so a sender that only reacts to callbacks learns
+        // nothing, ever. There is deliberately no way to report this to the
+        // caller — a void delivery path has nobody to report to — which is the
+        // reason the coordinator owns a bind deadline.
+        PLOGE(
+            log_,
+            "seal completion dropped by failpoint; capability destroyed and no "
+            "consumer will run");
+        return;
+    }
     try
     {
         asio::post(

@@ -931,6 +931,20 @@ public:
         peers->fail_seal_projection_for_test_ = fail;
     }
 
+    /// Drop the next `count` seal COMPLETIONS: each seal succeeds and its
+    /// completion is never posted. The only faithful way to test a lost completion
+    /// post, because a sender-side simulation still runs the sender's own callback.
+    ///
+    /// A count rather than a flag so "lose exactly the first one, then behave" is
+    /// expressible without disarming mid-flight.
+    static void
+    drop_next_seal_completions(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::uint32_t count)
+    {
+        peers->drop_seal_completions_for_test_ = count;
+    }
+
     /// Is the calling thread PeerSet's owner strand? Used to assert that a
     /// completion was delivered OFF that strand, which is what makes callback
     /// containment structural rather than promised.

@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -43,19 +44,22 @@ class PeerSet;
  * Read this before using `fence()` for anything that needs a drain.
  *
  * `fence()` seals ingress and terminalizes every row. It does NOT wait for
- * outstanding seal projections, and therefore does not wait for the pin shares
- * those projections carry. That is deliberate: PeerSet does not promise one
+ * outstanding seal projections. That is deliberate: PeerSet does not promise one
  * completion per accepted projection — a lost completion post is the exact
  * failure this actor recovers from — so a fence that waited on one would inherit
  * the liveness bug it exists to fix.
  *
  * The consequence is stated rather than implied: after `Lifecycle::fenced`,
- * `outstanding_bind_projections()` may be nonzero, and each one may still deliver
- * a completion carrying a pin share. **A fenced coordinator must not be treated as
- * quiescent, and `fenced` may not satisfy a cutover or shutdown-quiescence
- * requirement.** Proving quiescence needs an owned receipt/cancellation path
- * against PeerSet, which this slice does not have. The counter is public
- * precisely so the missing work is countable instead of assumed away.
+ * `outstanding_bind_projections()` may be nonzero, meaning bind completion work is
+ * still unobserved. **A fenced coordinator must not be treated as quiescent, and
+ * `fenced` may not satisfy a cutover or shutdown-quiescence requirement.** Proving
+ * quiescence needs an owned receipt/cancellation path against PeerSet, which this
+ * slice does not have. The counter is public precisely so the missing work is
+ * countable instead of assumed away.
+ *
+ * The residue is NOT a count of physical pin shares. PeerSet consumes the share in
+ * its own owner-strand handler and releases it there, before the completion is
+ * posted, so a completion carries a command and no retention.
  *
  * ## Design points earlier rejected versions got wrong
  *
@@ -94,6 +98,13 @@ public:
     /// Bounded fence waiters. Beyond this a caller is refused with a disposition
     /// rather than silently dropped.
     static constexpr std::size_t kMaxFenceWaiters = 8;
+
+    /// Absorbing ceiling for the unobserved-projection residue. Reaching it means
+    /// something is losing completions at scale; saturating there is a bounded,
+    /// visible failure, whereas wrapping would silently report "nothing
+    /// outstanding" after enough losses.
+    static constexpr std::uint64_t kMaxOutstandingProjections =
+        std::numeric_limits<std::uint64_t>::max() - 1;
 
     /// Bind bounds. Retry is limited by an attempt budget AND an absolute
     /// deadline; exhausting either terminalizes identically.
@@ -232,16 +243,19 @@ public:
             outstanding_projections_.load(std::memory_order_acquire));
     }
 
-    /// Has projection accounting been violated? Set when a completion was
-    /// observed for a projection that was never counted.
+    /// Has ANY conserved quantity been violated — a projection observed that was
+    /// never opened, a fence permit released that was never taken, or a counter
+    /// driven to saturation?
     ///
-    /// Public and sticky rather than logged, because the failure mode it guards is
-    /// a residue that reads as zero while work is still open — which is
-    /// indistinguishable from healthy unless the violation itself is observable.
+    /// Public and sticky rather than log-only. A log line does not fail a test: a
+    /// control passed over three real `fence permit underflow` errors because the
+    /// release path logged and returned, and the assertions could not see it.
+    /// Every control now asserts this is false, so an invariant breach cannot be
+    /// walked past again.
     bool
-    projection_accounting_broken() const noexcept
+    accounting_broken() const noexcept
     {
-        return projection_accounting_broken_.load(std::memory_order_acquire);
+        return accounting_broken_.load(std::memory_order_acquire);
     }
 
     SenderGenerationId
@@ -402,7 +416,6 @@ private:
     bool fail_row_commit_for_test_ = false;
     bool fail_bind_initiation_for_test_ = false;
     bool fail_fence_projection_for_test_ = false;
-    std::uint32_t drop_bind_completion_revision_ = 0;
 
     /// Granted ingress + committed rows, plus the seal bit. Reserved before the
     /// projection is queued, released on refusal or row retirement, never
@@ -413,11 +426,18 @@ private:
     /// ONE value, atomic so the residue is readable off-strand by whoever has to
     /// decide that this actor is NOT quiescent. Incremented only when PeerSet has
     /// actually accepted a projection; decremented only when one is observed.
+    ///
+    /// Lost completions accumulate monotonically and are never reclaimed, so this
+    /// can only grow over a long-lived process. It saturates at
+    /// kMaxOutstandingProjections and STAYS there, marking accounting broken — a
+    /// wrapping counter would eventually report a false zero, which is the one
+    /// answer this diagnostic must never give.
     std::atomic<std::uint64_t> outstanding_projections_{0};
 
-    /// Sticky. Set when a completion is observed for a projection that was never
-    /// counted — the failure mode that otherwise reads as a healthy zero.
-    std::atomic<bool> projection_accounting_broken_{false};
+    /// Sticky, and shared by every conservation invariant in this class. Set on an
+    /// observation with nothing open, a permit released that was never taken, or a
+    /// counter reaching its absorbing ceiling.
+    std::atomic<bool> accounting_broken_{false};
 
     /// Queued fence projections plus retained fence waiters, as ONE budget
     /// bounded by kMaxFenceWaiters. Taken before the post and released when the

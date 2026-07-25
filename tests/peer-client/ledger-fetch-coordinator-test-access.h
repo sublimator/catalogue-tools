@@ -64,16 +64,6 @@ public:
         c->fail_fence_projection_for_test_ = fail;
     }
 
-    /// Drop the completion for exactly this bind revision, reproducing a lost
-    /// completion post. Revisions start at 1, so 0 disarms.
-    static void
-    set_drop_bind_completion_revision(
-        std::shared_ptr<Coordinator> const& c,
-        std::uint32_t revision)
-    {
-        c->drop_bind_completion_revision_ = revision;
-    }
-
     // --- bounds, so each can be forced independently ----------------------
 
     static void
@@ -231,12 +221,25 @@ public:
     /// — the permit is CAS'd before the seal lands, and its commit post arrives
     /// after the fence bodies. Without this, the waiter-capacity bound would be
     /// unreachable from a test and its refusal would be decoration.
-    static void
+    /// Acquires a permit through the SAME canonical function the public API uses,
+    /// then forces the body. Without that acquisition this seam was a second
+    /// minter: it created retained waiters holding no permits, and delivery then
+    /// logged three real `fence permit underflow` errors that the assertions could
+    /// not see. A test seam that mints authority the production path bounds is not
+    /// a seam, it is a hole.
+    ///
+    /// Returns false when the budget is spent, exactly as `fence()` would refuse.
+    [[nodiscard]] static bool
     begin_fence(
         std::shared_ptr<Coordinator> const& c,
         Coordinator::FenceHandler handler)
     {
+        if (!c->acquire_fence_permit())
+        {
+            return false;
+        }
         c->begin_fence_on_strand(std::move(handler));
+        return true;
     }
 
     /// Drive one bind outcome directly, exactly as a late callback would. Used to

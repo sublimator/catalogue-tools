@@ -450,6 +450,24 @@ private:
     /// work that never runs, which tests liveness rather than initiation.
     bool fail_seal_projection_for_test_ = false;
 
+    /// Drop the seal COMPLETION post, reproducing the one failure this class
+    /// deliberately does not recover from: the capability is sealed and then the
+    /// completion cannot be queued, so the caller is never told anything.
+    ///
+    /// Distinct from fail_seal_projection_for_test_, which fails initiation and IS
+    /// reported through the bool return. This one is unreportable by construction
+    /// — that is the whole point, and it is why the coordinator needs a deadline.
+    /// A coordinator-side simulation could not stand in for it: the coordinator's
+    /// own callback would still run, so its accounting would still settle, and a
+    /// real loss leaves the projection permanently unobserved.
+    ///
+    /// A COUNT, not a flag, and one-shot by default in tests. A sticky flag has to
+    /// be disarmed mid-flight, and with a zero bind deadline the retry races the
+    /// timer, so "drop exactly the first completion" is not expressible by
+    /// stepping — the first attempt to write that control burned the whole retry
+    /// budget with the flag still armed.
+    std::uint32_t drop_seal_completions_for_test_ = 0;
+
     /// The single delivery point for a seal result. Marked //@@callback-funnel
     /// in the implementation: consumer code runs on its own executor, so
     /// containment and ordering are properties of one function.

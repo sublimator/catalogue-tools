@@ -49,6 +49,9 @@ LedgerFetchCoordinator::allocate_sender_generation() noexcept
     }
 }
 
+// The ack must be ONE line: the resolver matches reason="..." on the same line as
+// the marker, so a wrapped continuation reads as a missing reason.
+//@@audit-ack unannotated_authority_candidate reason="factory; the only authority it exercises is the sender-generation mint, which carries its own directive at the mint site" ref=2026-07-25-206113a-coordinator-review-reject
 std::shared_ptr<LedgerFetchCoordinator>
 LedgerFetchCoordinator::create(
     asio::io_context& io,
@@ -184,6 +187,7 @@ LedgerFetchCoordinator::bind_bounds_spent(OutboxRow const& row) noexcept
         std::chrono::steady_clock::now() >= row.absolute_deadline;
 }
 
+//@@audit-ack unannotated_authority_candidate reason="conservative wrapper around timer cancellation; owns no state and is only ever reached from inside a commit section that carries its own directive" ref=2026-07-25-206113a-coordinator-review-reject
 void
 LedgerFetchCoordinator::cancel_quietly(OutboxRow& row) noexcept
 {
@@ -344,14 +348,6 @@ LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
                 if (sealed)
                 {
                     ++self->completions_sealed_;
-                }
-                if (revision == self->drop_bind_completion_revision_)
-                {
-                    // Failpoint: behave exactly as a lost completion post does —
-                    // the capability is dropped and the row is left for its
-                    // deadline to recover.
-                    self->check_fenced_on_strand();
-                    return;
                 }
                 self->settle_bind_on_strand(
                     attempt, revision, std::move(sealed), /*timed_out=*/false);
@@ -533,12 +529,40 @@ LedgerFetchCoordinator::deliver_fence_notification(
     }
 }
 
+//@@authority transition=ledger_fetch_coordinator.open_bind_projection
+// owner=ledger_fetch_coordinator commit=atomic
 void
 LedgerFetchCoordinator::note_projection_opened() noexcept
 {
-    outstanding_projections_.fetch_add(1, std::memory_order_acq_rel);
+    // CAS to an ABSORBING ceiling, not fetch_add. Lost completions are never
+    // reclaimed, so this only grows over a long-lived process; a wrapping counter
+    // would eventually report zero outstanding while work was permanently
+    // unobserved, which is the single answer this diagnostic must never give.
+    auto current = outstanding_projections_.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        if (current >= kMaxOutstandingProjections)
+        {
+            accounting_broken_.store(true, std::memory_order_release);
+            PLOGE(
+                log_,
+                "outstanding projection count saturated; completions are being "
+                "lost at scale");
+            return;
+        }
+        if (outstanding_projections_.compare_exchange_weak(
+                current,
+                current + 1,
+                std::memory_order_acq_rel,
+                std::memory_order_relaxed))
+        {
+            return;
+        }
+    }
 }
 
+//@@authority transition=ledger_fetch_coordinator.observe_bind_projection
+// owner=ledger_fetch_coordinator commit=atomic
 void
 LedgerFetchCoordinator::note_projection_observed() noexcept
 {
@@ -550,7 +574,7 @@ LedgerFetchCoordinator::note_projection_observed() noexcept
             // A completion for a projection that was never counted. Recorded, not
             // clamped: clamping produced a residue that read zero while real work
             // was still open, which is indistinguishable from healthy.
-            projection_accounting_broken_.store(true, std::memory_order_release);
+            accounting_broken_.store(true, std::memory_order_release);
             PLOGE(
                 log_,
                 "projection accounting violated: observed a completion with no "
@@ -568,6 +592,8 @@ LedgerFetchCoordinator::note_projection_observed() noexcept
     }
 }
 
+//@@authority transition=ledger_fetch_coordinator.acquire_fence_permit
+// owner=ledger_fetch_coordinator commit=atomic
 bool
 LedgerFetchCoordinator::acquire_fence_permit() noexcept
 {
@@ -593,6 +619,8 @@ LedgerFetchCoordinator::acquire_fence_permit() noexcept
     }
 }
 
+//@@authority transition=ledger_fetch_coordinator.release_fence_permit
+// owner=ledger_fetch_coordinator commit=atomic
 void
 LedgerFetchCoordinator::release_fence_permit() noexcept
 {
@@ -601,6 +629,11 @@ LedgerFetchCoordinator::release_fence_permit() noexcept
     {
         if (current == 0)
         {
+            // Sticky, not log-only. A control passed over three of these because
+            // this path logged and returned: the waiters were delivered, the
+            // assertions were satisfied, and the invariant breach was visible
+            // only to whoever read the test output.
+            accounting_broken_.store(true, std::memory_order_release);
             PLOGE(log_, "fence permit underflow; one was released twice");
             return;
         }
@@ -662,6 +695,8 @@ LedgerFetchCoordinator::fence(FenceHandler on_fenced)
     return Fence::drain_queued;
 }
 
+//@@authority transition=ledger_fetch_coordinator.register_fence_waiter
+// owner=ledger_fetch_coordinator commit=strand
 void
 LedgerFetchCoordinator::begin_fence_on_strand(FenceHandler on_fenced)
 {

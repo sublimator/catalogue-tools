@@ -69,6 +69,21 @@ struct CoordFixture
         coord = LedgerFetchCoordinator::create(io, peers);
     }
 
+    /// EVERY control checks the conservation invariant, without having to remember
+    /// to. Three retained fence waiters were once delivered while holding no
+    /// permits: the release path logged an underflow and returned, the assertions
+    /// were all satisfied, and the breach was visible only to whoever read the
+    /// test output. A per-test assertion would have to be added by hand to each new
+    /// control; a destructor cannot be forgotten.
+    ///
+    /// EXPECT rather than ASSERT: ASSERT_* expands to `return`, which is
+    /// ill-formed in a destructor.
+    ~CoordFixture()
+    {
+        EXPECT_FALSE(coord && coord->accounting_broken())
+            << "a conserved quantity was violated during this control";
+    }
+
     PeerGenerationPin
     pin()
     {
@@ -262,35 +277,44 @@ TEST(LedgerFetchCoordinatorBind, RefusedProjectionRetriesThenTerminalizes)
     EXPECT_EQ(Access::find_any(f.coord, *attempt)->bind_attempts, 2u);
 }
 
-/// 5. THE control this whole slice exists for: a LOST completion is recovered by
-///    the coordinator's bind deadline.
+/// 5. THE control this whole slice exists for: a LOST completion post is
+///    recovered by the coordinator's bind deadline.
 ///
-/// PeerSet drops the capability when it cannot post a completion, so from the
-/// sender's side the bind simply never answers. Without the deadline the row
-/// would sit in awaiting_bind forever.
-TEST(LedgerFetchCoordinatorBind, LostCompletionIsRecoveredByTheBindDeadline)
+/// Forced at the REAL boundary, in PeerSet's `deliver_seal_result`, which drops the
+/// capability and posts nothing. That distinction is the whole control: the
+/// previous version used a coordinator-side failpoint that swallowed the callback
+/// AFTER it had already run, so the coordinator's own accounting settled and the
+/// residue returned to zero. A real loss never invokes the callback at all, so the
+/// projection stays permanently unobserved — and claiming the sender-side
+/// simulation reproduced it was simply false.
+TEST(LedgerFetchCoordinatorBind, LostCompletionPostIsRecoveredByTheBindDeadline)
 {
     CoordFixture f;
     Access::set_bind_deadline(f.coord, std::chrono::milliseconds{0});
-    Access::set_drop_bind_completion_revision(f.coord, 1);
+    // Exactly ONE completion is lost. No disarming, so no race with the retry.
+    PeerSetTestAccess::drop_next_seal_completions(f.peers, 1);
 
     ASSERT_EQ(f.submit(), Ingress::reserved);
     f.settle();
 
     auto const attempt = Access::attempt_at(f.coord, 0);
     ASSERT_TRUE(attempt.has_value());
+    EXPECT_EQ(Access::completions_seen(f.coord), 1u)
+        << "the LOST completion never reaches the consumer; the retry's does";
+
     auto* row = Access::find_any(f.coord, *attempt);
     ASSERT_TRUE(row != nullptr);
-
-    EXPECT_EQ(Access::completions_seen(f.coord), 2u)
-        << "revision 1's completion arrived and was dropped; revision 2 answered";
-    EXPECT_EQ(row->bind_revision, 2u);
-    EXPECT_EQ(row->bind_attempts, 2u);
     EXPECT_EQ(row->phase, Phase::publishable)
         << "the deadline had to re-bind, or this row is still awaiting_bind";
-    ASSERT_TRUE(row->sealed.has_value());
+    EXPECT_GE(row->bind_attempts, 2u);
     EXPECT_EQ(row->sealed->attempt_id(), row->intent.attempt_id())
         << "recovery must re-bind the SAME attempt, not mint a new one";
+
+    // The lost projection stays countable forever. That is the honest residue and
+    // the reason `fenced` is not quiescence.
+    EXPECT_EQ(f.coord->outstanding_bind_projections(), 1u)
+        << "the retry was observed; the LOST one never will be";
+    EXPECT_FALSE(f.coord->accounting_broken());
 }
 
 /// 6. Completion before timeout: the ordinary path settles once and the deadline
@@ -420,7 +444,7 @@ TEST(LedgerFetchCoordinatorBind, AbsoluteDeadlineTerminalizesWithBudgetRemaining
     // 1000-attempt budget inside the first handler and the absolute deadline
     // never gets a turn — which is how this control first failed.
     Access::set_bind_deadline(f.coord, std::chrono::milliseconds{0});
-    Access::set_drop_bind_completion_revision(f.coord, 1);
+    PeerSetTestAccess::drop_next_seal_completions(f.peers, 1);
 
     ASSERT_EQ(f.submit(), Ingress::reserved);
     ASSERT_EQ(f.step(), 1u);  // commit + one real bind opened
@@ -810,9 +834,9 @@ TEST(LedgerFetchCoordinatorBind, EveryFenceWaiterGetsItsOwnDisposition)
     // projections can be queued is a different property, tested through fence()
     // itself in FenceProjectionBudgetBoundsThePublicBoundary.
     ASSERT_EQ(f.coord->fence(), Fence::drain_queued);
-    Access::begin_fence(f.coord, [&first]() { ++first; });
-    Access::begin_fence(f.coord, [&second]() { ++second; });
-    Access::begin_fence(f.coord, [&third]() { ++third; });
+    ASSERT_TRUE(Access::begin_fence(f.coord, [&first]() { ++first; }));
+    ASSERT_TRUE(Access::begin_fence(f.coord, [&second]() { ++second; }));
+    ASSERT_TRUE(Access::begin_fence(f.coord, [&third]() { ++third; }));
     ASSERT_EQ(first + second + third, 0) << "all three are retained, not answered";
 
     f.settle();
@@ -820,6 +844,10 @@ TEST(LedgerFetchCoordinatorBind, EveryFenceWaiterGetsItsOwnDisposition)
     EXPECT_EQ(second, 1);
     EXPECT_EQ(third, 1);
     EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fenced);
+    EXPECT_FALSE(f.coord->accounting_broken())
+        << "three waiters were delivered while holding no permits, and the "
+           "underflow was only a log line; this assertion is what stops a control "
+           "passing over an invariant breach";
 }
 
 /// 23. The fence budget bounds the PUBLIC boundary, not just retained waiters.
@@ -972,7 +1000,7 @@ TEST(LedgerFetchCoordinatorBind, FailedInitiationsCannotMaskALaterOpenProjection
     ASSERT_EQ(Access::find_any(f.coord, *first)->bind_attempts, 2u);
     EXPECT_EQ(f.coord->outstanding_bind_projections(), 0u)
         << "nothing was ever accepted, so nothing is outstanding";
-    EXPECT_FALSE(f.coord->projection_accounting_broken())
+    EXPECT_FALSE(f.coord->accounting_broken())
         << "and no violation: a projection that never opened must not be settled";
 
     // Now a REAL projection, left pending by not letting its completion run.
@@ -984,12 +1012,12 @@ TEST(LedgerFetchCoordinatorBind, FailedInitiationsCannotMaskALaterOpenProjection
         << "a real open projection MUST be visible; on the previous pin the "
            "earlier failed initiations had pushed the count negative and it "
            "reported zero here";
-    EXPECT_FALSE(f.coord->projection_accounting_broken());
+    EXPECT_FALSE(f.coord->accounting_broken());
 
     f.settle();
     EXPECT_EQ(f.coord->outstanding_bind_projections(), 0u)
         << "and returns to zero once observed";
-    EXPECT_FALSE(f.coord->projection_accounting_broken());
+    EXPECT_FALSE(f.coord->accounting_broken());
 }
 
 /// 27. A refused projection is not counted as outstanding either.
@@ -1003,7 +1031,7 @@ TEST(LedgerFetchCoordinatorBind, RefusedProjectionsAreNotCountedAsOutstanding)
     f.settle();
     EXPECT_EQ(f.coord->outstanding_bind_projections(), 0u)
         << "PeerSet returned false, so it holds no projection to complete";
-    EXPECT_FALSE(f.coord->projection_accounting_broken());
+    EXPECT_FALSE(f.coord->accounting_broken());
 }
 
 /// 28. The fence delivery buffers never reallocate, so nothing fallible happens
