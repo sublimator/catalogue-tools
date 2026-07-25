@@ -49,7 +49,7 @@ NodeBatchIntent::NodeBatchIntent(
 
 NodeBatchCommand::NodeBatchCommand(
     NodeBatchIntent intent,
-    PeerConnectionGenerationId peer_generation)
+    PeerConnectionGenerationId peer_generation) noexcept
     : intent_(std::move(intent)), peer_generation_(peer_generation)
 {
 }

@@ -12,6 +12,7 @@
 #include <cassert>
 #include <cctype>
 #include <limits>
+#include <utility>
 
 // Diagnose PeerSet state access outside its strand. Live regression runs can
 // opt into fail-fast behavior so a violation cannot be hidden in noisy logs.
@@ -2597,15 +2598,36 @@ PeerSet::deliver_seal_result(
             std::move(completion_executor),
             [on_sealed = std::move(on_sealed),
              sealed = std::move(sealed)]() mutable {
-                on_sealed(std::move(sealed));
+                // Containment must be INSIDE the posted lambda. The try around
+                // asio::post covers initiation only and has already returned by
+                // the time this body runs on the completion executor, so a
+                // throwing consumer would otherwise escape that executor's
+                // io_context::run(). Codex found this by fixing the auditor's
+                // containment search, which had been crossing the lambda
+                // boundary while looking for a lexical try.
+                try
+                {
+                    on_sealed(std::move(sealed));
+                }
+                catch (...)
+                {
+                    PLOGE(
+                        log_,
+                        "seal completion consumer threw; contained at the "
+                        "callback boundary");
+                }
             });
     }
     catch (...)
     {
+        // Initiation failure only. The capability is dropped rather than
+        // delivered from the wrong executor. Making this loss sender-VISIBLE
+        // needs the coordinator's retained awaiting_bind state and a bounded
+        // retry; it is deliberately not a second retry owner inside PeerSet.
         PLOGE(
             log_,
-            "seal completion could not be queued; capability dropped, "
-            "caller must retry");
+            "seal completion could not be queued; capability dropped. "
+            "Recovery is the coordinator's bounded bind retry, not PeerSet's");
     }
 }
 
@@ -2651,9 +2673,24 @@ PeerSet::seal_node_batch_command_on_strand(
         return std::nullopt;
     }
 
-    // Commit section: move, never copy. NodeBatchIntent holds a vector, so a
-    // copy here could allocate and throw after every guard had passed.
-    static_assert(std::is_nothrow_move_constructible_v<NodeBatchIntent>);
+    // Commit section: move, never copy, and prove the WHOLE expression cannot
+    // throw — not merely that the intent's move cannot. The narrowest useful
+    // assertion is over the construction itself; asserting only
+    // is_nothrow_move_constructible_v<NodeBatchIntent> left the unqualified
+    // constructor potentially-throwing in the type system.
+    // std::is_nothrow_constructible_v is the wrong instrument here: the trait is
+    // evaluated as if in a context unrelated to the type, so PeerSet's
+    // friendship is invisible to it and a private constructor reads as not
+    // constructible at all. The noexcept operator is evaluated HERE, where the
+    // friendship holds, so it actually tests the expression we commit with.
+    static_assert(
+        noexcept(NodeBatchCommand{
+            std::declval<NodeBatchIntent>(),
+            std::declval<PeerConnectionGenerationId>()}),
+        "sealing runs in an owner-strand commit section after every guard has "
+        "passed; the mint must not be able to throw");
+    // The optional return moves the command, so that move must be nothrow too.
+    static_assert(std::is_nothrow_move_constructible_v<NodeBatchCommand>);
     return NodeBatchCommand{
         std::move(intent),
         PeerConnectionGenerationId{connection->second.generation}};

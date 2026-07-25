@@ -226,9 +226,14 @@ private:
     friend class PeerClientTestAccess;
     friend class PeerSet;
 
+    /// noexcept is load-bearing, not decoration. PeerSet seals a command inside
+    /// its owner-strand commit section, after every guard has passed. Proving
+    /// the intent's move is nothrow does not prove this expression: an
+    /// unqualified constructor stays potentially-throwing in the type system
+    /// even when its body only moves and stores a scalar.
     NodeBatchCommand(
         NodeBatchIntent intent,
-        PeerConnectionGenerationId peer_generation);
+        PeerConnectionGenerationId peer_generation) noexcept;
 
     NodeBatchIntent intent_;
     PeerConnectionGenerationId peer_generation_;
