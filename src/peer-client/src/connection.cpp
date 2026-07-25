@@ -1057,6 +1057,19 @@ peer_connection::async_send_packet(
     std::vector<std::uint8_t> const& data,
     std::function<void(boost::system::error_code)> handler)
 {
+    // Closed admission, refused BEFORE any queue mutation. Without this gate a
+    // send after close_impl() was queued against a dead transport, and its
+    // completion then returned on `closing_` without popping the row or
+    // invoking the handler — a permanently stranded caller. Refuse here and
+    // terminalize exactly once, so no committed queue entry can outlive the
+    // close that was supposed to drain it.
+    if (closing_)
+    {
+        if (handler)
+            handler(asio::error::operation_aborted);
+        return;
+    }
+
     // Build the wire packet: header(6) + payload
     std::vector<std::uint8_t> packet;
     packet.reserve(6 + data.size());
@@ -1091,65 +1104,130 @@ peer_connection::async_send_packet(
 
     // Enqueue and pump — only one async_write in flight at a time
     write_queue_.push_back({std::move(packet), std::move(handler)});
-    if (!write_in_progress_)
-    {
-        do_write();
-    }
+    do_write();
 }
 
 void
 peer_connection::do_write()
 {
-    if (write_queue_.empty())
+    // `active_write_` is the in-flight latch. A separate bool could claim "idle"
+    // while Asio still owned a buffer, which is how the queue got wedged.
+    if (active_write_)
+        return;
+
+    // Rollback for a throwing initiation. The composed operation never started,
+    // so no Asio operation owns these bytes and destroying them here is safe —
+    // but it MUST happen, or the slot latches forever and every later write
+    // enqueues behind a write that will never complete.
+    auto rollback = [this](char const* why) {
+        auto entry = std::move(*active_write_);
+        active_write_.reset();
+        PLOGW(
+            log_,
+            remote_endpoint(),
+            " write initiation failed (",
+            why,
+            "), rolling back active slot");
+        if (entry.handler)
+        {
+            entry.handler(
+                boost::system::errc::make_error_code(
+                    boost::system::errc::io_error));
+        }
+    };
+
+    // Loop rather than recurse: a persistently throwing initiation must still
+    // terminalize every queued handler exactly once, and the queue shrinks each
+    // iteration so this terminates.
+    while (!write_queue_.empty())
     {
-        write_in_progress_ = false;
+        active_write_ = std::move(write_queue_.front());
+        write_queue_.pop_front();
+
+        try
+        {
+            if (write_initiator_for_test_)
+            {
+                write_initiator_for_test_(
+                    asio::buffer(active_write_->packet),
+                    [self = shared_from_this()](
+                        boost::system::error_code ec) {
+                        self->on_write_complete(ec);
+                    });
+            }
+            else
+            {
+                asio::async_write(
+                    *socket_,
+                    asio::buffer(active_write_->packet),
+                    [self = shared_from_this()](
+                        boost::system::error_code ec, std::size_t) {
+                        self->on_write_complete(ec);
+                    });
+            }
+            return;  // initiated — the completion owns the rest
+        }
+        catch (std::exception const& exc)
+        {
+            rollback(exc.what());
+        }
+        catch (...)
+        {
+            rollback("unknown exception");
+        }
+    }
+}
+
+void
+peer_connection::on_write_complete(boost::system::error_code ec)
+{
+    if (!active_write_)
+        return;  // defensive: nothing completes without a slot
+
+    // First moment the active packet's memory may be released. Physical lifetime
+    // ends here and only here — this is what close() must not do early.
+    auto entry = std::move(*active_write_);
+    active_write_.reset();
+
+    // Logical terminal exactly once. No flag is consulted: if a close already
+    // delivered it, close MOVED the handler out and this row holds an empty one,
+    // so a second delivery is unrepresentable rather than merely guarded.
+    if (entry.handler)
+    {
+        entry.handler(ec);
+    }
+
+    if (closing_)
+        return;  // successors were drained by the close path
+
+    if (ec && ec != asio::error::operation_aborted)
+    {
+        note_connect_failure("packet write", ec);
+        PLOGW(
+            log_,
+            remote_endpoint(),
+            " connection lost during write: ",
+            ec.message(),
+            " (val=",
+            ec.value(),
+            ")");
+        fail_and_close(ec);  // drains the uninitiated successors
         return;
     }
-    write_in_progress_ = true;
 
-    auto& front = write_queue_.front();
-    asio::async_write(
-        *socket_,
-        asio::buffer(front.packet),
-        [self = shared_from_this()](boost::system::error_code ec, std::size_t) {
-            // If closing_ is set, fail_and_close already drained the
-            // queue. The front entry we were writing is gone.
-            if (self->closing_)
-                return;
-
-            auto entry = std::move(self->write_queue_.front());
-            self->write_queue_.pop_front();
-
-            if (entry.handler)
-            {
-                entry.handler(ec);
-            }
-
-            if (ec)
-            {
-                if (ec != asio::error::operation_aborted)
-                {
-                    self->note_connect_failure("packet write", ec);
-                    PLOGW(
-                        log_,
-                        self->remote_endpoint(),
-                        " connection lost during write: ",
-                        ec.message(),
-                        " (val=",
-                        ec.value(),
-                        ")");
-                    self->fail_and_close(ec);
-                }
-                return;
-            }
-
-            self->do_write();
-        });
+    // Successor-pump state, named explicitly because nothing else owns it.
+    // Reached on success AND on a cancellation that arrived without a close: the
+    // transport is still open there, so queued successors are still owed an
+    // attempt. Returning instead would leave them parked until some later
+    // async_send_packet happened to pump them.
+    do_write();
 }
 
 void
 peer_connection::fail_queued_writes(boost::system::error_code ec)
 {
+    // Uninitiated successors: no Asio operation ever saw these buffers, so
+    // destroying them now is safe.
     while (!write_queue_.empty())
     {
         auto entry = std::move(write_queue_.front());
@@ -1159,7 +1237,25 @@ peer_connection::fail_queued_writes(boost::system::error_code ec)
             entry.handler(ec);
         }
     }
-    write_in_progress_ = false;
+
+    // The active write is different in kind. Asio owns its buffer until the
+    // composed operation completes, so only its LOGICAL terminal is consumed
+    // here; the packet stays put. The original defect was moving the whole entry
+    // out of the queue, which carried the vector's allocation into a loop-local
+    // that died that same iteration and freed memory Asio was still reading.
+    if (active_write_)
+    {
+        auto handler = std::move(active_write_->handler);
+        active_write_->handler = nullptr;  // consumption IS the move
+        if (handler)
+        {
+            handler(ec);
+        }
+    }
+
+    // NB: the in-flight latch is deliberately NOT cleared here. It is
+    // `active_write_` itself, and clearing it while Asio still owns the buffer is
+    // precisely the bug. It clears in on_write_complete().
 }
 
 void

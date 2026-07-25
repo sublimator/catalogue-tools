@@ -39,7 +39,13 @@ add_executable(inbound-budget-gtest inbound-budget-gtest.cpp)
 target_link_libraries(inbound-budget-gtest
                       PRIVATE catl::peer-client GTest::gtest_main)
 
+add_executable(connection-write-lifecycle-gtest
+               connection-write-lifecycle-gtest.cpp)
+target_link_libraries(connection-write-lifecycle-gtest
+                      PRIVATE catl::peer-client GTest::gtest_main)
+
 include(GoogleTest)
+gtest_discover_tests(connection-write-lifecycle-gtest DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(peer-client-gtest DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(peer-endpoint-cache-gtest DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(tree-walk-state-gtest DISCOVERY_TIMEOUT 30)

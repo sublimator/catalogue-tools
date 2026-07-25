@@ -11,7 +11,9 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
+#include <utility>
 #include <vector>
 
 namespace catl::peer_client {
@@ -133,6 +135,49 @@ public:
     /// Human-readable summary of the most recent connect/upgrade failure.
     std::string
     connect_failure_detail() const;
+
+    /// Completion of a substituted transport write.
+    using test_write_completion = std::function<void(boost::system::error_code)>;
+
+    /// Test seam: substitute transport initiation only.
+    ///
+    /// When set, `do_write()` calls this instead of `asio::async_write` and hands
+    /// over the completion, so a test can fire it at an exact point instead of
+    /// racing a socket. Everything the correction is about stays on the
+    /// production path: slot ownership, physical buffer lifetime, terminal
+    /// selection, drain, and the successor pump. An initiator that throws also
+    /// forces the initiation-exception rollback, so this one seam covers both.
+    ///
+    /// What it does NOT prove: that Asio itself reads the buffer after close.
+    /// That is Asio's documented contract, not this class's behavior; the
+    /// testable obligation here is that the bytes are still alive and unmoved
+    /// when the completion runs.
+    void
+    set_write_initiator_for_test(
+        std::function<void(boost::asio::const_buffer, test_write_completion)>
+            initiator)
+    {
+        write_initiator_for_test_ = std::move(initiator);
+    }
+
+    /// Test observation: the retained backing store of the write currently in
+    /// flight, or `{nullptr, 0}` when none is. Lets a test assert that a close
+    /// did not free bytes Asio still owns (blocker 1) without relying on ASan or
+    /// on a race.
+    std::pair<void const*, std::size_t>
+    active_write_storage_for_test() const
+    {
+        if (!active_write_)
+            return {nullptr, 0};
+        return {active_write_->packet.data(), active_write_->packet.size()};
+    }
+
+    /// Test observation: count of uninitiated successors still queued.
+    std::size_t
+    queued_write_count_for_test() const
+    {
+        return write_queue_.size();
+    }
 
 private:
     void
@@ -263,11 +308,38 @@ private:
         std::vector<std::uint8_t> packet;
         std::function<void(boost::system::error_code)> handler;
     };
+    // Four distinct things, deliberately not collapsed into flags:
+    //
+    //   write_queue_       uninitiated successors. No Asio operation has ever
+    //                      seen these buffers, so teardown may destroy them.
+    //   active_write_      the one composed write in flight. Asio owns its
+    //                      buffer until completion, so its PHYSICAL storage
+    //                      must outlive close. This optional IS the
+    //                      write-in-flight latch: a separate bool could
+    //                      disagree with the slot, and a bool that said "idle"
+    //                      while a buffer was still owned by Asio is what
+    //                      stranded the queue.
+    //   active_write_->handler
+    //                      the LOGICAL terminal, held as a linear capability.
+    //                      Whoever delivers it MOVES it out, so possession is
+    //                      the exactly-once proof and a second delivery is
+    //                      unrepresentable rather than flag-guarded. This is why
+    //                      close can terminalize the handler without freeing the
+    //                      bytes: the two live in the same row but are consumed
+    //                      by different owners at different times.
+    //   closing_           admission gate. Refuse before queue mutation.
     std::deque<PendingWrite> write_queue_;
-    bool write_in_progress_ = false;
+    std::optional<PendingWrite> active_write_;
+
+    /// Never set in production. See set_write_initiator_for_test().
+    std::function<void(boost::asio::const_buffer, test_write_completion)>
+        write_initiator_for_test_;
 
     void
     do_write();
+
+    void
+    on_write_complete(boost::system::error_code ec);
 
     void
     fail_queued_writes(boost::system::error_code ec);
