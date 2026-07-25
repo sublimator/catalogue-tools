@@ -1780,7 +1780,7 @@ peer_connection::settle_and_close(
 void
 peer_connection::select_close_disposition(
     boost::system::error_code cause,
-    bool fire_disconnect)
+    bool fire_disconnect) noexcept
 {
     if (!close_disposition_)
     {

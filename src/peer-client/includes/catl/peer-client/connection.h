@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -332,7 +333,7 @@ private:
     void
     select_close_disposition(
         boost::system::error_code cause,
-        bool fire_disconnect);
+        bool fire_disconnect) noexcept;
 
     // Redirect IPs from 503 response
     std::set<std::string> redirect_ips_;
@@ -367,6 +368,23 @@ private:
     //   admission_closed_  admission gate. Refuse before queue mutation.
     std::deque<PendingWrite> write_queue_;
     std::optional<PendingWrite> active_write_;
+
+    // settle_and_close() moves the queue and one handler INSIDE its commit
+    // section, after close_ran_ has latched. That is only safe while those moves
+    // cannot throw: a throwing move would unwind with the idempotency flag
+    // already set, the socket still open, and every later close returning
+    // immediately — the exact shape that was removed from this function. Asserted
+    // beside the types so a later container or allocator change cannot silently
+    // invalidate the commit section.
+    static_assert(
+        std::is_nothrow_move_constructible_v<std::deque<PendingWrite>>,
+        "settle_and_close moves write_queue_ after latching close_ran_");
+    static_assert(
+        std::is_nothrow_move_constructible_v<
+            std::function<void(boost::system::error_code)>> &&
+            std::is_nothrow_move_assignable_v<
+                std::function<void(boost::system::error_code)>>,
+        "settle_and_close moves the active terminal after latching close_ran_");
 
     /// Never set in production. See set_write_initiator_for_test().
     std::function<void(boost::asio::const_buffer, test_write_completion)>
