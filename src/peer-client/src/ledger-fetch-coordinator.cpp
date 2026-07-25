@@ -168,6 +168,18 @@ LedgerFetchCoordinator::find_row(TransportAttemptId attempt) noexcept
     return found == rows_.end() ? nullptr : &*found;
 }
 
+bool
+LedgerFetchCoordinator::bind_bounds_spent(OutboxRow const& row) noexcept
+{
+    // ONE place, deliberately. This was written out twice — once before opening a
+    // bind and once when deciding whether to retry — and a probe that removed the
+    // absolute-deadline term from one copy changed no observable behaviour,
+    // because the other copy still caught it. Two spellings of one bound means
+    // neither is really the bound.
+    return row.bind_attempts >= row.max_bind_attempts ||
+        std::chrono::steady_clock::now() >= row.absolute_deadline;
+}
+
 void
 LedgerFetchCoordinator::cancel_quietly(OutboxRow& row) noexcept
 {
@@ -252,6 +264,7 @@ LedgerFetchCoordinator::commit_row_on_strand(
         rows_.emplace_back(std::move(intent), std::move(pin));
         auto& row = rows_.back();
         row.deadline = std::move(timer);
+        row.max_bind_attempts = max_bind_attempts_;
         row.absolute_deadline =
             std::chrono::steady_clock::now() + absolute_bind_deadline_;
         next_attempt_ = attempt.value();
@@ -283,8 +296,7 @@ LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
         terminalize_on_strand(*row, "ingress sealed");
         return;
     }
-    if (row->bind_attempts >= max_bind_attempts_ ||
-        std::chrono::steady_clock::now() >= row->absolute_deadline)
+    if (bind_bounds_spent(*row))
     {
         terminalize_on_strand(*row, "bind bounds exhausted");
         return;
@@ -296,7 +308,6 @@ LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
     auto const revision = row->bind_revision;
 
     bool projected = false;
-    bool initiation_failed = false;
     try
     {
         if (fail_bind_initiation_for_test_)
@@ -358,10 +369,12 @@ LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
         // in awaiting_bind with nothing in flight.
         PLOGE(log_, "bind initiation threw; settling as a failed bind");
         binds_completed_.fetch_add(1, std::memory_order_acq_rel);
-        initiation_failed = true;
     }
 
-    if (initiation_failed || !projected)
+    // `projected` is false on every throwing path as well as on refusal, so ONE
+    // condition covers both. A separate `initiation_failed` flag was here and was
+    // provably redundant: deleting it changed nothing a control could see.
+    if (!projected)
     {
         // A refused or failed projection is a coordinator retry input, not a
         // caller error.
@@ -408,8 +421,7 @@ LedgerFetchCoordinator::settle_bind_on_strand(
         terminalize_on_strand(*row, "sealed after ingress seal");
         return true;
     }
-    if (row->bind_attempts >= max_bind_attempts_ ||
-        std::chrono::steady_clock::now() >= row->absolute_deadline)
+    if (bind_bounds_spent(*row))
     {
         terminalize_on_strand(
             *row, timed_out ? "bind deadline exhausted" : "bind refused");

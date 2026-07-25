@@ -266,6 +266,9 @@ private:
         std::uint32_t bind_revision = 0;
         std::uint32_t bind_attempts = 0;
         bool bind_open = false;
+        /// Snapshotted per row so the bound is a property of the row rather than
+        /// of whatever the actor's setting happens to be when it is consulted.
+        std::uint32_t max_bind_attempts = kMaxBindAttempts;
 
         std::shared_ptr<boost::asio::steady_timer> deadline;
         std::chrono::steady_clock::time_point absolute_deadline{};
@@ -297,6 +300,10 @@ private:
 
     void
     terminalize_on_strand(OutboxRow& row, char const* why);
+
+    /// Is either bind bound spent? The single spelling of that question.
+    static bool
+    bind_bounds_spent(OutboxRow const& row) noexcept;
 
     /// Non-throwing timer cancellation. A throwing cancel inside a commit section
     /// would abandon the transition half-applied.

@@ -807,34 +807,35 @@ TEST(LedgerFetchCoordinatorBind, EveryFenceWaiterGetsItsOwnDisposition)
 {
     CoordFixture f;
     ASSERT_EQ(f.submit(), Ingress::reserved);
-    f.settle();
+    ASSERT_EQ(f.coord->work_outstanding(), 1u) << "uncommitted, so the fence waits";
 
     int first = 0;
     int second = 0;
     int third = 0;
-    // All three registered before any fence body runs, so they compete for the
-    // same slot the first cut had.
-    ASSERT_EQ(
-        f.coord->fence([&first](FenceOutcome o) {
-            EXPECT_EQ(o, FenceOutcome::fenced);
-            ++first;
-        }),
-        Fence::drain_queued);
-    ASSERT_EQ(
-        f.coord->fence([&second](FenceOutcome o) {
-            EXPECT_EQ(o, FenceOutcome::fenced);
-            ++second;
-        }),
-        Fence::drain_queued);
-    ASSERT_EQ(
-        f.coord->fence([&third](FenceOutcome o) {
-            EXPECT_EQ(o, FenceOutcome::fenced);
-            ++third;
-        }),
-        Fence::drain_queued);
-    f.settle();
 
-    EXPECT_EQ(first, 1);
+    // Waiters only COEXIST while the fence cannot complete, so a permit is left
+    // uncommitted. Three plain fence() calls do not test the overwrite at all: the
+    // first body completes the fence and the other two are answered on arrival, so
+    // each still gets exactly one disposition even if the container is clobbered on
+    // every insert. A probe that cleared the vector before each push changed
+    // nothing in that version — the control was vacuous and said so.
+    ASSERT_EQ(f.coord->fence(), Fence::drain_queued);
+    Access::begin_fence(f.coord, [&first](FenceOutcome o) {
+        EXPECT_EQ(o, FenceOutcome::fenced);
+        ++first;
+    });
+    Access::begin_fence(f.coord, [&second](FenceOutcome o) {
+        EXPECT_EQ(o, FenceOutcome::fenced);
+        ++second;
+    });
+    Access::begin_fence(f.coord, [&third](FenceOutcome o) {
+        EXPECT_EQ(o, FenceOutcome::fenced);
+        ++third;
+    });
+    ASSERT_EQ(first + second + third, 0) << "all three are retained, not answered";
+
+    f.settle();
+    EXPECT_EQ(first, 1) << "the earliest waiter must not have been overwritten";
     EXPECT_EQ(second, 1);
     EXPECT_EQ(third, 1);
     EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fenced);
@@ -911,4 +912,44 @@ TEST(LedgerFetchCoordinatorBind, FencingAnAlreadyFencedCoordinatorAnswersAtOnce)
         Fence::drain_queued);
     f.settle();
     EXPECT_EQ(late, 1);
+}
+
+/// 25. A command sealed while ingress is already sealed is DROPPED.
+///
+/// This branch is only reachable when the completion arrives BEFORE the fence
+/// body — the row is still live and ingress is already sealed. Control 11 arranges
+/// the opposite order, so it never entered here: a probe that removed the
+/// `!ingress_sealed()` term changed nothing it could see. Reaching the branch means
+/// letting PeerSet's seal handler run first, so the completion is queued ahead of
+/// the fence body.
+TEST(LedgerFetchCoordinatorBind, SealArrivingAfterIngressSealIsDropped)
+{
+    CoordFixture f;
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    ASSERT_EQ(f.step(), 1u);  // commit + bind opened; seal queued on PeerSet
+    ASSERT_EQ(f.step(), 1u);  // PeerSet seals; the completion is now queued on us
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    ASSERT_EQ(Access::completions_seen(f.coord), 0u) << "queued, not yet run";
+    ASSERT_TRUE(Access::find_any(f.coord, *attempt)->bind_open);
+
+    // Seal ingress with the completion already queued ahead of the fence body.
+    int fenced = 0;
+    ASSERT_EQ(
+        f.coord->fence([&fenced](FenceOutcome) { ++fenced; }),
+        Fence::drain_queued);
+    f.settle();
+
+    EXPECT_EQ(Access::completions_sealed(f.coord), 1u)
+        << "PeerSet did produce a command, or nothing was dropped";
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+    EXPECT_EQ(row->phase, Phase::terminal)
+        << "a command that can never be published must terminalize the row";
+    EXPECT_FALSE(row->sealed.has_value())
+        << "and must not be retained past the fence";
+    EXPECT_EQ(f.coord->work_outstanding(), 0u)
+        << "a retained command would hold its work unit and hang the fence";
+    EXPECT_EQ(fenced, 1);
+    EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fenced);
 }
