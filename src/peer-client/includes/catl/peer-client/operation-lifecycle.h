@@ -73,24 +73,29 @@
 // construction here, and exactly the guard that must keep working once operations can
 // be minted, which is why it is strand-serialized rather than merely flagged.
 //
-// KNOWN DEFECT AT THIS PIN, under repair
-// --------------------------------------
-// `root_open_` still carries two meanings: the owner's internal CLAIM on the
-// transition, and the externally readable COMMITTED projection. The claiming
-// compare-exchange publishes it before the identity is assigned, so an off-strand
-// reader of `control_root_open()` can observe an open root with no identity behind
-// it. The claim-before-mint repair MOVED the split commit rather than removing it.
+// CLAIM AND PROJECTION ARE SEPARATE STATE
+// ---------------------------------------
+// Two earlier versions failed here in the same way. The first loaded, minted, then
+// stored. The second claimed with a compare-exchange first — which merely MOVED the
+// split commit, because the claimed bit was also the externally readable projection,
+// so an off-strand reader could observe an open root with no identity behind it.
 //
-// The shape that removes it, and the one being implemented next:
+// One bit cannot be both the owner's internal claim on a transition and the committed
+// fact the world reads. They are now different state:
 //
-//   owner-local phase: closed -> opening        (NOT externally readable)
-//   mint identity
-//   commit identity + externally visible open snapshot   (no-throw)
-//   phase: opening -> open
+//   phase_            owner-local, strand-confined: closed -> opening -> open
+//   open_projection_  externally readable, published ONLY at the commit
 //
-// A re-entrant open while `opening` is refused; a re-entrant close while `opening`
-// gets a named non-success disposition, because it cannot consume a root that has not
-// committed. The external projection stays closed until the commit.
+//   closed -> opening          claim, not published
+//   mint identity              may still refuse; rolls the phase back
+//   commit: identity, then publish the projection      (no-throw)
+//   opening -> open
+//
+// A re-entrant open while `opening` is refused as `open_in_progress`, distinct from
+// `already_open` because the root does not exist yet. A re-entrant close while
+// `opening` is refused for the same reason: it cannot consume a root that has not
+// committed. Close retracts the projection BEFORE clearing the identity, or the
+// symmetric window opens on the way out.
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
@@ -163,6 +168,10 @@ public:
     {
         opened,
         already_open,
+        /// A transition is in flight on this strand: claimed, not yet committed.
+        /// Distinct from `already_open` because there is no root to be already open
+        /// — reporting that would name a fact that does not exist yet.
+        open_in_progress,
         /// The root minter reached its ceiling. Absorbing: once exhausted it stays
         /// exhausted, and it never wraps back through the reserved zero.
         root_exhausted,
@@ -175,6 +184,9 @@ public:
         /// No root to close. Distinct from a second success on purpose: closing
         /// something that never opened is a caller error, closing twice is a race.
         not_open,
+        /// An open is claimed but not committed. A close cannot consume a root that
+        /// does not exist yet, and saying `not_open` would be a different claim.
+        open_in_progress,
         /// S31.zero / S35.zero is violated. The whole point of the empty lifecycle
         /// is that this guard is what makes closing legitimate.
         operations_outstanding,
@@ -234,12 +246,25 @@ private:
 
     asio::strand<asio::io_context::executor_type> strand_;
 
+    /// Owner-local transition phase. NOT externally readable: this is the claim,
+    /// and publishing a claim is what the last two versions did wrong.
+    enum class Phase : std::uint8_t
+    {
+        closed,
+        opening,
+        open,
+    };
+    Phase phase_ = Phase::closed;
+
     ControlRootId root_;
 
     /// One conserved word: the count of live operation homes. Increment 1 never
     /// raises it, and the guard that reads it is the thing this slice is proving.
     std::atomic<std::uint64_t> operations_{0};
-    std::atomic<bool> root_open_{false};
+    /// The COMMITTED projection, and the only thing `control_root_open()` reads.
+    /// Released at the commit, after the identity exists; acquired by readers, so a
+    /// reader that sees true also sees the identity behind it.
+    std::atomic<bool> open_projection_{false};
     std::atomic<bool> accounting_broken_{false};
 
     /// Default-inert failpoint fired inside `open_control_root()` AFTER the claim and

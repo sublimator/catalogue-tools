@@ -50,14 +50,17 @@ OperationLifecycle::open_control_root()
 {
     ASSERT_ON_STRAND();
 
-    // CLAIM the transition with ONE compare-exchange before anything else, so a
-    // second caller arriving mid-transition is refused rather than minting too.
-    bool expected = false;
-    if (!root_open_.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel, std::memory_order_acquire))
+    // CLAIM the transition in owner-local state. Strand-confined, so a plain read
+    // and write are correct here and, crucially, INVISIBLE to projection readers.
+    if (phase_ == Phase::opening)
+    {
+        return Open::open_in_progress;
+    }
+    if (phase_ == Phase::open)
     {
         return Open::already_open;
     }
+    phase_ = Phase::opening;
 
     // A CAS below the ceiling, never fetch_add. An unconditional increment keeps
     // walking past the first refusal and wraps through zero, which would hand out
@@ -69,9 +72,10 @@ OperationLifecycle::open_control_root()
         if (current == std::numeric_limits<std::uint64_t>::max())
         {
             PLOGE(log_, "control root minter exhausted; refusing to open");
-            // ROLL BACK the claim, or a refused mint wedges the lifecycle open with
-            // no identity — trading a race for a deadlock, which is worse.
-            root_open_.store(false, std::memory_order_release);
+            // ROLL BACK the claim, or a refused mint wedges the lifecycle in
+            // `opening` forever — trading a race for a deadlock, which is worse.
+            // Nothing was published, so there is no projection to retract.
+            phase_ = Phase::closed;
             return Open::root_exhausted;
         }
         if (next_root_id_.compare_exchange_weak(
@@ -85,12 +89,20 @@ OperationLifecycle::open_control_root()
         }
     }
 
-    // No second store: the claim above already published it, and storing again is
-    // the split commit this repair removes.
+    // The failpoint fires HERE: identity assigned, projection NOT yet published.
+    // That is the exact window both previous versions got wrong, so this is where a
+    // control has to stand to see it. A hook placed after the commit would assert
+    // "if open then an identity exists" and be true by placement rather than by the
+    // code — which is how the last control passed while the defect was live.
     if (before_commit_for_test_)
     {
         before_commit_for_test_();
     }
+
+    // COMMIT. Identity first, then publish: a reader that acquires `true` is
+    // guaranteed to see the identity written before it.
+    open_projection_.store(true, std::memory_order_release);
+    phase_ = Phase::open;
     PLOGD(log_, "control root ", root_.value(), " open");
     return Open::opened;
 }
@@ -106,7 +118,12 @@ OperationLifecycle::close_control_root()
 {
     ASSERT_ON_STRAND();
 
-    if (!root_open_.load(std::memory_order_acquire))
+    if (phase_ == Phase::opening)
+    {
+        // Refused, not deferred, and named: there is no committed root to consume.
+        return Close::open_in_progress;
+    }
+    if (phase_ != Phase::open)
     {
         return Close::not_open;
     }
@@ -130,15 +147,21 @@ OperationLifecycle::close_control_root()
     }
 
     PLOGD(log_, "control root ", root_.value(), " closed");
+    // Retract the projection BEFORE clearing the identity. The reverse order opens
+    // the symmetric window on the way out: a reader seeing `open` with the identity
+    // already gone.
+    open_projection_.store(false, std::memory_order_release);
     root_ = ControlRootId{};
-    root_open_.store(false, std::memory_order_release);
+    phase_ = Phase::closed;
     return Close::closed;
 }
 
 bool
 OperationLifecycle::control_root_open() const noexcept
 {
-    return root_open_.load(std::memory_order_acquire);
+    // Reads the COMMITTED projection only. It stays false for the whole of an
+    // in-flight open, which is the property the previous pin violated.
+    return open_projection_.load(std::memory_order_acquire);
 }
 
 std::uint64_t

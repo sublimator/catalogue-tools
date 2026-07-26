@@ -118,7 +118,13 @@ TEST(OperationLifecycle, ReentrantOpenDuringTheTransitionFindsOneWinner)
 
     Open nested = Open::opened;
     int nested_calls = 0;
+    bool projection_during = true;
     Access::set_before_commit(f.ldc, [&] {
+        // THE assertion the previous pin could not make. The hook now stands where
+        // the identity exists but the commit has not happened, so a projection that
+        // reads open here means the claim is being published as a committed fact —
+        // the defect that survived two repairs.
+        projection_during = f.ldc->control_root_open();
         // ONE-SHOT. Under a split commit the nested call also passes the check and
         // re-enters the failpoint, so an unguarded hook recurses until the stack is
         // gone — and a stack overflow is a crash, not an assertion, so the control
@@ -134,45 +140,63 @@ TEST(OperationLifecycle, ReentrantOpenDuringTheTransitionFindsOneWinner)
     ASSERT_EQ(f.open(), Open::opened) << "the first caller wins";
     ASSERT_EQ(nested_calls, 1) << "the failpoint fired, so this control is not vacuous";
 
-    EXPECT_EQ(nested, Open::already_open)
-        << "a second open arriving mid-transition must be refused, not granted";
+    EXPECT_EQ(nested, Open::open_in_progress)
+        << "a second open arriving mid-transition must be refused, and named for what "
+           "is true: claimed but not committed, so there is no root to be ALREADY open";
+    EXPECT_FALSE(projection_during)
+        << "the committed projection must stay CLOSED for the whole in-flight open; "
+           "an off-strand reader must never see an open root before it is committed";
     EXPECT_EQ(Access::next_root_id(), minted_before + 1)
         << "EXACTLY ONE identity was minted; two winners would consume two";
     EXPECT_NE(Access::root_id(f.ldc), 0u);
-    EXPECT_TRUE(f.ldc->control_root_open());
+    EXPECT_TRUE(f.ldc->control_root_open()) << "and it IS published once committed";
 }
 
-/// 4. CLOSE VERSUS OPEN ordering, per review. A close arriving mid-open must not
-///    observe a split projection — an open flag with no identity behind it, or an
-///    identity with the flag not yet published.
-TEST(OperationLifecycle, CloseDuringTheOpenTransitionSeesNoSplitProjection)
+/// 4. CLOSE BEFORE COMMIT is a named REFUSAL, not a success.
+///
+///    The previous version of this control let the nested close WIN, and then let the
+///    outer open return `opened` while the final state was closed. That is not a
+///    truthful disposition for a public operation: the caller is told its open
+///    succeeded when nothing is open. A close arriving before the commit cannot
+///    consume a root that does not exist yet.
+TEST(OperationLifecycle, CloseBeforeTheCommitIsRefusedAndTheOpenStillWins)
 {
     Fixture f;
     Close nested = Close::closed;
     int nested_calls = 0;
     Access::set_before_commit(f.ldc, [&] {
-        ++nested_calls;
-        // Whatever this observes, it must be self-consistent: if the root reads
-        // open, an identity must already stand behind it.
-        if (f.ldc->control_root_open())
+        if (nested_calls++ > 0)
         {
-            EXPECT_NE(Access::root_id(f.ldc), 0u)
-                << "open was published before the identity existed: a split commit";
+            return;
         }
         nested = f.ldc->close_control_root();
     });
 
-    ASSERT_EQ(f.open(), Open::opened);
+    ASSERT_EQ(f.open(), Open::opened) << "the open completes and says so truthfully";
     ASSERT_EQ(nested_calls, 1);
 
-    // The nested close ran inside the transition and legitimately succeeds: it is on
-    // the same strand, the identity exists, and no operations are outstanding. What
-    // must NOT happen is a half-state afterwards.
-    EXPECT_EQ(nested, Close::closed);
-    EXPECT_FALSE(f.ldc->control_root_open())
-        << "the close won and the outer open must not resurrect the flag";
+    EXPECT_EQ(nested, Close::open_in_progress)
+        << "a close during an uncommitted open must be refused BY NAME; it cannot "
+           "consume a root that has not committed";
+    EXPECT_TRUE(f.ldc->control_root_open())
+        << "and the refusal left the committed open intact";
+    EXPECT_NE(Access::root_id(f.ldc), 0u);
+}
+
+/// 5. CLOSE AFTER COMMIT is an ordinary later transition — the other half of the
+///    ordering pair, so the refusal above cannot be mistaken for "close never works
+///    near an open".
+TEST(OperationLifecycle, CloseAfterTheCommitIsAnOrdinaryTransition)
+{
+    Fixture f;
+    ASSERT_EQ(f.open(), Open::opened);
+    ASSERT_TRUE(f.ldc->control_root_open());
+
+    EXPECT_EQ(f.close(), Close::closed);
+    EXPECT_FALSE(f.ldc->control_root_open());
     EXPECT_EQ(Access::root_id(f.ldc), 0u)
-        << "identity and flag agree; neither is left behind by the other";
+        << "the projection is retracted BEFORE the identity is cleared, so no reader "
+           "sees an open root whose identity has already gone";
 }
 
 /// 5. Duplicate close is not a second success.
