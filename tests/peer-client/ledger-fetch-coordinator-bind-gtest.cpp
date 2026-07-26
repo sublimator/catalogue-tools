@@ -2085,6 +2085,16 @@ TEST(LedgerFetchCoordinatorBind, ObligationHoldsWhileParkedInPublishable)
         << "a public diagnostic must not read zero because execution parked in a "
            "phase that is not one of the owing ones; the obligation is a FACT about "
            "the receiver, not about where this row happens to be";
+
+    // THE assertion that makes the derivation testable. The public value is a stored
+    // snapshot, so swapping the predicate is invisible unless a refresh happens to
+    // land in a phase the two definitions disagree about — which no control can
+    // reliably arrange. Comparing the stored number against one computed fresh from
+    // the rows tests the property directly: the number the world sees is the number
+    // the rows say, whatever phase execution is in.
+    EXPECT_EQ(f.coord->receipt_obligations(), Access::computed_obligations(f.coord))
+        << "the stored projection disagrees with the rows it claims to count";
+
     EXPECT_EQ(f.coord->work_outstanding(), 1u);
     EXPECT_FALSE(f.coord->accounting_broken());
 }

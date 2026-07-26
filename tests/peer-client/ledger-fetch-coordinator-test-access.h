@@ -313,6 +313,29 @@ public:
         return nullptr;
     }
 
+    /// The obligation count computed FRESH from owned rows, for comparison against
+    /// the stored projection.
+    ///
+    /// This is what makes the derivation testable. The public value is a stored
+    /// snapshot refreshed at transitions, so swapping the predicate is invisible
+    /// unless a refresh happens to land in a phase the two definitions disagree
+    /// about — which no control could reliably arrange. Comparing stored against
+    /// freshly-derived tests the actual property: that the number the world sees is
+    /// the number the rows say.
+    static std::size_t
+    computed_obligations(std::shared_ptr<Coordinator> const& c)
+    {
+        std::size_t owing = 0;
+        for (auto const& row : c->rows_)
+        {
+            if (!row.retired && row.may_have_reached_receiver)
+            {
+                ++owing;
+            }
+        }
+        return owing;
+    }
+
     static std::size_t
     row_count(std::shared_ptr<Coordinator> const& c)
     {
