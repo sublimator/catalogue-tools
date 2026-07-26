@@ -2045,3 +2045,56 @@ TEST(LedgerFetchCoordinatorBind, RetryArmFailureDoesNotRecurse)
         << "so no false fence completion is possible";
     EXPECT_FALSE(f.coord->accounting_broken());
 }
+
+/// 49. The obligation reads ONE at every step of a repair round, including the
+///     `publishable` window in the middle of it.
+///
+/// This is where a phase-derived projection was false-empty: a repair round passes
+/// through `publishable`, which is not one of the owing phases, so the public
+/// diagnostic dropped to zero mid-round while the historical obligation was live.
+/// Deriving from the sticky fact makes the answer independent of where execution
+/// happens to be.
+TEST(LedgerFetchCoordinatorBind, ObligationHoldsThroughEveryStepOfARepairRound)
+{
+    CoordFixture f;
+    Access::set_publish_deadline(f.coord, std::chrono::milliseconds{0});
+    Access::set_max_publish_attempts(f.coord, 1);
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
+    Access::set_repair_backoff(f.coord, std::chrono::milliseconds{60000});
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+    ASSERT_EQ(row->phase, Phase::unsettled);
+    ASSERT_EQ(f.coord->receipt_obligations(), 1u);
+
+    // Drive a repair round ONE handler at a time and check the projection after each.
+    // The row passes through publishable and awaiting_receipt on the way.
+    Access::repair(f.coord, *attempt);
+    bool saw_publishable_or_awaiting = false;
+    for (int i = 0; i < 12; ++i)
+    {
+        if (row->phase == Phase::publishable ||
+            row->phase == Phase::awaiting_receipt)
+        {
+            saw_publishable_or_awaiting = true;
+        }
+        ASSERT_EQ(f.coord->receipt_obligations(), 1u)
+            << "read zero at step " << i << " with phase "
+            << static_cast<int>(row->phase)
+            << "; a public diagnostic must not go false-empty because execution "
+               "moved through a non-owing phase";
+        if (f.step() == 0)
+        {
+            break;
+        }
+    }
+    EXPECT_TRUE(saw_publishable_or_awaiting)
+        << "the round has to actually pass through a non-owing phase, or this "
+           "control proves nothing about the derivation";
+    EXPECT_EQ(f.coord->receipt_obligations(), 1u);
+    EXPECT_TRUE(row->may_have_reached_receiver);
+}
