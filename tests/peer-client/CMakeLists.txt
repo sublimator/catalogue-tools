@@ -102,3 +102,95 @@ foreach(catl_test IN LISTS CATL_PEER_CLIENT_TEST_TARGETS)
     DISCOVERY_TIMEOUT 30
     PROPERTIES ENVIRONMENT "XPRV_STRAND_FAIL_FAST=1")
 endforeach()
+
+
+# ---------------------------------------------------------------------------
+# Folded in from the former tests/provider-lab module (2026-07-26).
+#
+# Target-stack pre-cutover verification cells. TEST-ONLY by construction: nothing
+# under tests/ is reachable from a production link root. They live here rather than
+# in their own module because authority decomposition does not determine package
+# decomposition — these cells have distinct model owners, not distinct packages.
+#
+# Discovery deliberately does NOT set XPRV_STRAND_FAIL_FAST for these targets: they
+# ran without it in the lab, and adding it would be a behaviour change smuggled into
+# a mechanical move.
+# ---------------------------------------------------------------------------
+
+add_executable(deterministic-scheduler-gtest deterministic-scheduler-gtest.cpp)
+target_link_libraries(deterministic-scheduler-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+
+gtest_discover_tests(deterministic-scheduler-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(operation-ledger-gtest operation-ledger-gtest.cpp)
+target_link_libraries(operation-ledger-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(operation-ledger-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(lifecycle-waiters-gtest lifecycle-waiters-gtest.cpp)
+target_link_libraries(lifecycle-waiters-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(lifecycle-waiters-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(object-store-gtest object-store-gtest.cpp)
+target_link_libraries(object-store-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(object-store-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(header-store-gtest header-store-gtest.cpp)
+target_link_libraries(header-store-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(header-store-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(coordinator-partition-gtest coordinator-partition-gtest.cpp)
+target_link_libraries(coordinator-partition-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(coordinator-partition-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(c01-dispatch-cell-gtest c01-dispatch-cell-gtest.cpp)
+target_link_libraries(c01-dispatch-cell-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(c01-dispatch-cell-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(interest-registry-gtest interest-registry-gtest.cpp)
+target_link_libraries(interest-registry-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(interest-registry-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(participant-cell-gtest participant-cell-gtest.cpp)
+target_link_libraries(participant-cell-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(participant-cell-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(coordinator-seams-gtest coordinator-seams-gtest.cpp)
+target_link_libraries(coordinator-seams-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(coordinator-seams-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(c02-close-gtest c02-close-gtest.cpp)
+target_link_libraries(c02-close-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(c02-close-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(c09-transport-terminal-gtest c09-transport-terminal-gtest.cpp)
+target_link_libraries(c09-transport-terminal-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(c09-transport-terminal-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(c09-terminal-inbox-gtest c09-terminal-inbox-gtest.cpp)
+target_link_libraries(c09-terminal-inbox-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(c09-terminal-inbox-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(c10-inbound-generation-fence-gtest
+               c10-inbound-generation-fence-gtest.cpp)
+target_link_libraries(c10-inbound-generation-fence-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(c10-inbound-generation-fence-gtest DISCOVERY_TIMEOUT 30)
+
+add_executable(c11-peer-generation-close-gtest
+               c11-peer-generation-close-gtest.cpp)
+target_link_libraries(c11-peer-generation-close-gtest
+                      PRIVATE Boost::boost GTest::gtest_main)
+gtest_discover_tests(c11-peer-generation-close-gtest DISCOVERY_TIMEOUT 30)
