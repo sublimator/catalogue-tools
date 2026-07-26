@@ -37,11 +37,24 @@
 //
 // WHAT THIS SLICE DELIBERATELY DOES NOT CLAIM, and why
 // ----------------------------------------------------
-// S35, S21 and S22 are all owned by `peer_set` (authgraph.py show S35/S21/S22).
-// T54 consumes S35 and requires S21.zero and S22.zero. So the full four-transition
-// lifecycle spans THREE owners — ledger_data_control, operation_admission_cell, and
-// peer_set — and a slice with no PeerSet participant cannot mint peer_set's homes
-// without fabricating the authority this cut exists to refuse.
+// There are TWO runtime owners in the future protocol, not three:
+//
+//   ledger_data_control  owns S30 and S31
+//   peer_set             owns S35, S21 and S22
+//
+// An earlier version of this comment named `operation_admission_cell` as a third
+// owner because canonical lists it as T54's owner. Independent audit established it
+// is a model WART, not an executor: canonical's registry declares the Control and
+// PeerSet executors and not that cell, later reconciliation says to remove it because
+// it names a SEAM rather than an executor, and it is already an `unregistered_owner`
+// baseline blocker. It is not memorialized here as an actor.
+//
+// The raw T51/T53/T54/T52 family is therefore mixed-owner model debt and needs a
+// staged split before any of it can be implemented as written.
+//
+// S35 is not an open choice: it must wait for the PeerSet-owned lease protocol. A
+// slice with no PeerSet participant cannot mint peer_set's homes without fabricating
+// the authority this cut exists to refuse.
 //
 // This primitive is therefore explicitly UNBOUND: it carries no `v4=` reference and
 // is NOT an implementation of T50/T52. It represents none of S01/S04/S10, publishes
@@ -52,15 +65,32 @@
 // becomes them only when the required homes, witnesses and cross-owner boundary
 // exist.
 //
-// T53 and T54 are shaped for but not implemented: T53 and T54 are shaped for but not implemented:
-// they are absent, not stubbed, because a stub that returns success is a fabricated
-// fact and a stub that returns failure is a control that can never go green.
+// T53 and T54 are absent, not stubbed, because a stub that returns success is a
+// fabricated fact and a stub that returns failure is a control that can never go
+// green.
 //
-// The open question, put to review with this pin: whether the admission home S35 may
-// be represented at all before a PeerSet participant exists, or whether T53/T54 must
-// wait for one. Until that is answered, `close_control_root()` requires the operation
-// count to be zero — true by construction here, and exactly the guard that must keep
-// working once operations can be minted.
+// `close_control_root()` requires the operation count to be zero — true by
+// construction here, and exactly the guard that must keep working once operations can
+// be minted, which is why it is strand-serialized rather than merely flagged.
+//
+// KNOWN DEFECT AT THIS PIN, under repair
+// --------------------------------------
+// `root_open_` still carries two meanings: the owner's internal CLAIM on the
+// transition, and the externally readable COMMITTED projection. The claiming
+// compare-exchange publishes it before the identity is assigned, so an off-strand
+// reader of `control_root_open()` can observe an open root with no identity behind
+// it. The claim-before-mint repair MOVED the split commit rather than removing it.
+//
+// The shape that removes it, and the one being implemented next:
+//
+//   owner-local phase: closed -> opening        (NOT externally readable)
+//   mint identity
+//   commit identity + externally visible open snapshot   (no-throw)
+//   phase: opening -> open
+//
+// A re-entrant open while `opening` is refused; a re-entrant close while `opening`
+// gets a named non-success disposition, because it cannot consume a root that has not
+// committed. The external projection stays closed until the commit.
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
