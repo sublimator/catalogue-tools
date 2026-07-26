@@ -603,6 +603,12 @@ TEST(LedgerFetchCoordinatorBind, PublishableRowsHoldTheirWorkUnitUntilTheCap)
 TEST(LedgerFetchCoordinatorBind, ThrowingFenceHandlerIsContainedAtTheFunnel)
 {
     CoordFixture f;
+    // Publication refused, so the row terminalizes and owes the receiver nothing.
+    // With publication ACCEPTED and unanswered the row would owe a receipt
+    // settlement and the fence would correctly wait on it — which is the subject of
+    // its own controls, not of this one.
+    f.session->publish_accepts = false;
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
     ASSERT_EQ(f.submit(), Ingress::reserved);
     f.settle();
 
@@ -784,6 +790,12 @@ TEST(LedgerFetchCoordinatorBind, BindInitiationFailureDoesNotOrphanTheRow)
 TEST(LedgerFetchCoordinatorBind, FenceProjectionFailureIsObservableAndRecoverable)
 {
     CoordFixture f;
+    // This control needs a row that is LIVE but owes the receiver nothing, so the
+    // fence has something to terminalize and its own backpressure does not enter
+    // into it. Publication refused, with a backoff long enough that the retry stays
+    // pending: the row sits in `publishable`, which owes no receipt settlement.
+    f.session->publish_accepts = false;
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{60000});
     ASSERT_EQ(f.submit(), Ingress::reserved);
     f.settle();
     ASSERT_EQ(Access::live_row_count(f.coord), 1u);
@@ -1297,9 +1309,8 @@ TEST(LedgerFetchCoordinatorPublish, ReceiptWithoutARetainedRowIsNotAcknowledged)
     EXPECT_EQ(row->ack_attempts, 0u)
         << "nothing may be acknowledged for a row that was never retained";
     EXPECT_EQ(row->phase, Phase::terminal);
-    EXPECT_EQ(f.coord->unacked_receiver_rows(), 0u)
-        << "and it is NOT counted as unretired receiver state, because there is "
-           "none";
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u)
+        << "and no obligation is retained, because the receiver holds nothing";
     EXPECT_EQ(f.coord->work_outstanding(), 0u);
 }
 
@@ -1338,6 +1349,9 @@ TEST(LedgerFetchCoordinatorPublish, RefusedPublicationRetriesThenTerminalizes)
     PublishFixture f;
     Access::set_publish_initiation_failure(f.coord, true);
     Access::set_max_publish_attempts(f.coord, 2);
+    // Retry is deferred on an owned timer now, so a poll-driven control needs a
+    // zero backoff for it to fire at all.
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
 
     ASSERT_EQ(f.submit(), Ingress::reserved);
     EXPECT_NO_THROW(f.settle());
@@ -1381,8 +1395,8 @@ TEST(LedgerFetchCoordinatorPublish, AdmittedWriteIsAcknowledgedAndRetiresTheRow)
     EXPECT_EQ(row->ack_attempts, 1u)
         << "exactly one acknowledgement, accepted first time";
     EXPECT_EQ(row->phase, Phase::terminal);
-    EXPECT_EQ(f.coord->unacked_receiver_rows(), 0u)
-        << "the receiver row was retired, so no residue";
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u)
+        << "the receiver row was retired, so nothing is still owed";
 
     // Terminal releases everything the row owned.
     EXPECT_FALSE(static_cast<bool>(row->pin));
@@ -1397,13 +1411,16 @@ TEST(LedgerFetchCoordinatorPublish, ExhaustedAcknowledgementCountsTheOrphanedRow
 {
     PublishFixture f{1, /*with_connection=*/true};
     Access::set_max_ack_attempts(f.coord, 2);
+    // Zero backoff, because the acknowledgement retry is now deferred on the row's
+    // owned timer and a poll-driven control advances no clock.
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
     // Forced on OUR side, deliberately. The receiver's ingress projection gates
     // publication and acknowledgement with one bound, so saturating it refuses the
     // write and the row never reaches an acknowledgement to refuse. And a false
     // return is the whole observable here — no callback, no receiver state change —
     // so this is faithful in a way the sender-side lost-completion simulation was
     // not.
-    Access::set_acknowledgement_failure(f.coord, true);
+    Access::fail_next_acknowledgements(f.coord, 99);
 
     ASSERT_EQ(f.submit(), Ingress::reserved);
     f.settle();
@@ -1413,12 +1430,20 @@ TEST(LedgerFetchCoordinatorPublish, ExhaustedAcknowledgementCountsTheOrphanedRow
     auto* row = Access::find_any(f.coord, *attempt);
     ASSERT_TRUE(row != nullptr);
 
-    EXPECT_EQ(f.coord->unacked_receiver_rows(), 1u)
-        << "a receiver row we could not retire must be countable; the canonical "
-           "cut is explicit that the receiver will not grow a tombstone set to "
-           "repair a sender that broke this";
-    EXPECT_EQ(row->phase, Phase::terminal);
-    EXPECT_EQ(f.coord->work_outstanding(), 0u);
+    // RETAINED, not counted-and-erased. The previous version bumped a scalar in
+    // the same breath as destroying the row, so the moment it read non-zero the
+    // identity it referred to was already gone — a count of things nobody can name.
+    EXPECT_EQ(row->phase, Phase::unsettled)
+        << "the receiver holds a row only this identity can retire, so this row "
+           "must survive";
+    EXPECT_FALSE(row->retired);
+    EXPECT_EQ(f.coord->receipt_obligations(), 1u)
+        << "and the obligation is visible, backed by that row";
+    EXPECT_TRUE(static_cast<bool>(row->pin))
+        << "a later repair needs the retention, so it is not released";
+    EXPECT_EQ(f.coord->work_outstanding(), 1u)
+        << "the work unit is held, which is what makes a fence backpressure "
+           "instead of reporting a drain it has not performed";
 }
 
 /// 36. The acknowledgement path REFUSES to run on a row that is still projecting.
@@ -1477,4 +1502,220 @@ TEST(LedgerFetchCoordinatorPublish, AcknowledgementRefusesWhileStillProjecting)
     f.settle();
     EXPECT_EQ(row->ack_attempts, 1u);
     EXPECT_EQ(row->phase, Phase::terminal);
+}
+
+// ---------------------------------------------------------------------------
+// Corrections to publication/receipt ownership. Each control below exists
+// because a specific defect was named, not because a shape looked untested.
+// ---------------------------------------------------------------------------
+
+/// 37. A refused PUBLICATION yields to the receiver and a later attempt wins.
+///
+/// Against the REAL receiver bound: its node-batch ingress projection is bounded
+/// before the strand runs, so filling it makes `submit_node_batch` return false.
+/// That is exactly the transient condition the old direct recursion mishandled —
+/// it burned the whole attempt budget before the receiver could drain one item.
+TEST(LedgerFetchCoordinatorPublish, RefusedPublicationYieldsThenSucceeds)
+{
+    PublishFixture f{1, /*with_connection=*/true};
+    Access::set_max_publish_attempts(f.coord, 6);
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
+
+    // Saturate BEFORE submitting, so the receiver refuses admission on its own
+    // bound rather than on anything simulated here.
+    PeerClientTestAccess::seed_node_batch_ingress_saturated(*f.client);
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+
+    // STEPPED, not settled. Settling to quiescence would run every retry the
+    // backoff allows and prove nothing about separation — the property is that one
+    // strand pass makes ONE attempt, which is what direct recursion violated.
+    Access::Row* row = nullptr;
+    std::optional<TransportAttemptId> attempt;
+    for (int i = 0; i < 64; ++i)
+    {
+        if (f.step() == 0)
+        {
+            break;
+        }
+        attempt = Access::attempt_at(f.coord, 0);
+        if (!attempt)
+        {
+            continue;
+        }
+        row = Access::find_any(f.coord, *attempt);
+        if (row != nullptr && row->publish_attempts >= 1)
+        {
+            break;
+        }
+    }
+    ASSERT_TRUE(row != nullptr);
+    ASSERT_EQ(row->publish_attempts, 1u)
+        << "ONE attempt per strand pass. Direct recursion would already have spent "
+           "the whole budget here, which is the defect being corrected";
+    EXPECT_FALSE(row->receipt.has_value()) << "refused by the real receiver bound";
+
+    // Drain the receiver, exactly as its own strand does, and let the owned retry
+    // timer fire.
+    PeerClientTestAccess::drain_node_batch_ingress(*f.client);
+    f.settle();
+
+    ASSERT_TRUE(row->receipt.has_value())
+        << "a later attempt reached the receiver, which is what yielding buys";
+    EXPECT_NE(row->receipt->receiver_commit_sequence(), 0u)
+        << "and was admitted to a retained row";
+    EXPECT_EQ(row->phase, Phase::terminal) << "then acknowledged and retired";
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u);
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
+    EXPECT_FALSE(f.coord->accounting_broken());
+}
+
+/// 38. A refused ACKNOWLEDGEMENT yields between attempts.
+///
+/// Forced with a counted failpoint rather than the real bound, and the reason is
+/// worth stating: the receiver's ingress projection gates publication and
+/// acknowledgement with ONE bound, so saturating it refuses the write and no row
+/// ever reaches an acknowledgement. Control 37 exercises that same real bound where
+/// it IS reachable. Here the observable is only a `false` return — no callback, no
+/// receiver state change — so a counted refusal is faithful.
+///
+/// The property under test is that attempts are SEPARATED, not merely bounded: each
+/// retry is a distinct strand handler on an owned timer, so one step advances the
+/// count by one. Direct recursion advanced it to the budget in a single step.
+TEST(LedgerFetchCoordinatorPublish, RefusedAcknowledgementYieldsBetweenAttempts)
+{
+    PublishFixture f{1, /*with_connection=*/true};
+    Access::set_max_ack_attempts(f.coord, 5);
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
+    Access::fail_next_acknowledgements(f.coord, 2);
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+
+    // Step to the first refused acknowledgement.
+    Access::Row* row = nullptr;
+    std::optional<TransportAttemptId> attempt;
+    for (int i = 0; i < 64; ++i)
+    {
+        if (f.step() == 0)
+        {
+            break;
+        }
+        attempt = Access::attempt_at(f.coord, 0);
+        if (!attempt)
+        {
+            continue;
+        }
+        row = Access::find_any(f.coord, *attempt);
+        if (row != nullptr && row->ack_attempts >= 1)
+        {
+            break;
+        }
+    }
+    ASSERT_TRUE(row != nullptr);
+    ASSERT_EQ(row->ack_attempts, 1u)
+        << "ONE attempt per strand pass. Direct recursion would already have "
+           "spent the whole budget here, which is the defect being corrected";
+    EXPECT_EQ(row->phase, Phase::acknowledging) << "still owed, not terminalized";
+
+    f.settle();
+    EXPECT_EQ(row->ack_attempts, 3u) << "two refused, the third accepted";
+    EXPECT_EQ(row->phase, Phase::terminal);
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u);
+    EXPECT_FALSE(f.coord->accounting_broken());
+}
+
+/// 39. A fence BACKPRESSURES on a retained receipt obligation instead of
+///     reporting a drain it has not performed.
+///
+/// The defect: the fence terminalized every live row. A row whose publication had
+/// been accepted may already have created a replayable receiver row, so erasing it
+/// discarded the only authority able to mint that row's exact acknowledgement — the
+/// receiver retains state nobody can retire. T62 removes S40/S41 only once S42/S44
+/// are empty; T69 drains rather than erases.
+TEST(LedgerFetchCoordinatorPublish, FenceWaitsOnARetainedReceiptObligation)
+{
+    PublishFixture f{1, /*with_connection=*/true};
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
+    Access::set_max_ack_attempts(f.coord, 1);
+    Access::fail_next_acknowledgements(f.coord, 99);
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+    ASSERT_EQ(row->phase, Phase::unsettled) << "the obligation is retained";
+    ASSERT_EQ(f.coord->receipt_obligations(), 1u);
+
+    int fenced = 0;
+    ASSERT_EQ(f.coord->fence([&fenced]() { ++fenced; }), Fence::drain_queued);
+    f.settle();
+
+    EXPECT_EQ(fenced, 0)
+        << "a fence completing here would report a drain it has not performed, "
+           "while the receiver still holds a row only this identity can retire";
+    EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fencing);
+    EXPECT_EQ(row->phase, Phase::unsettled);
+    EXPECT_FALSE(row->retired) << "erasing this was the defect";
+    EXPECT_EQ(row->intent.attempt_id(), *attempt)
+        << "identity-bearing: the row still names the attempt it owes";
+    EXPECT_TRUE(static_cast<bool>(row->pin));
+    EXPECT_EQ(f.coord->work_outstanding(), 1u)
+        << "the held work unit is the mechanism of the backpressure";
+    EXPECT_FALSE(f.coord->accounting_broken());
+}
+
+/// 40. The obligation projection is derived from owned rows, so it cannot be
+///     non-zero without a row behind it, and cannot wrap.
+///
+/// It replaces a counter that was incremented in the same two paths that destroyed
+/// the row — so at the moment it read non-zero, the identity it referred to was
+/// already gone. A count of things nobody can name is not authority.
+TEST(LedgerFetchCoordinatorPublish, ObligationCountIsBackedByNameableRows)
+{
+    PublishFixture f{1, /*with_connection=*/true};
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
+    Access::set_max_ack_attempts(f.coord, 1);
+    // Counted refusal, for the reason given on control 38: the receiver's one
+    // ingress bound gates publication too, so saturating it never reaches an ack.
+    Access::fail_next_acknowledgements(f.coord, 99);
+
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u);
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+
+    auto const obligations = f.coord->receipt_obligations();
+    ASSERT_EQ(obligations, 1u);
+
+    // Every counted obligation is a row that can be named and inspected.
+    std::size_t owing = 0;
+    for (std::size_t i = 0; i < Access::row_count(f.coord); ++i)
+    {
+        auto const at = Access::attempt_at(f.coord, i);
+        ASSERT_TRUE(at.has_value());
+        auto* row = Access::find_any(f.coord, *at);
+        ASSERT_TRUE(row != nullptr);
+        if (row->phase == Phase::awaiting_receipt ||
+            row->phase == Phase::acknowledging || row->phase == Phase::unsettled)
+        {
+            ++owing;
+            EXPECT_NE(row->intent.attempt_id().value(), 0u)
+                << "an obligation must name the attempt it owes";
+        }
+    }
+    EXPECT_EQ(owing, obligations)
+        << "the projection must equal the rows it claims to be counting";
+
+    // Letting the acknowledgement succeed retires it, and the projection returns to
+    // zero without ever having been decremented — it is recomputed from the rows.
+    Access::fail_next_acknowledgements(f.coord, 0);
+    Access::set_max_ack_attempts(f.coord, 8);
+    auto* owed = Access::find_any(f.coord, *Access::attempt_at(f.coord, 0));
+    ASSERT_TRUE(owed != nullptr);
+    Access::set_phase_acknowledging(f.coord, *Access::attempt_at(f.coord, 0));
+    Access::acknowledge(f.coord, *Access::attempt_at(f.coord, 0));
+    f.settle();
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u)
+        << "recomputed from rows, so retiring the row retires the count";
 }

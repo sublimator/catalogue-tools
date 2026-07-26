@@ -212,6 +212,18 @@ public:
             kMaxNodeBatchIngressProjections, std::memory_order_release);
     }
 
+    /// Release the receiver's node-batch ingress, as its own strand does when it
+    /// drains an item. Paired with seed_node_batch_ingress_saturated so a control
+    /// can force a refusal, then prove a later attempt succeeds — which is the
+    /// difference between a retry that yields and one that burns its budget in a
+    /// single strand pass.
+    static void
+    drain_node_batch_ingress(PeerClient& client)
+    {
+        client.node_batch_ingress_projections_.store(
+            0, std::memory_order_release);
+    }
+
     static void
     seed_open_connection(PeerClient& client, asio::ssl::context& ssl_context)
     {

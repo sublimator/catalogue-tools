@@ -24,7 +24,8 @@ namespace catl::peer_client {
 class PeerSet;
 
 /**
- * Coordinator-owned sender half of the NodeBatch protocol — awaiting-bind slice.
+ * Coordinator-owned sender half of the NodeBatch protocol: ingress through to the
+ * acknowledgement that retires the receiver's exact retained row.
  *
  * This actor exists because production has no executor able to own a replayable
  * sender row. `NodeCache` serialises with a mutex plus a header-state strand, and
@@ -32,22 +33,36 @@ class PeerSet;
  * RECEIVER side, so sender authority must not be minted there.
  *
  * Scope of THIS slice: bounded ingress reservation, coordinator-strand row
- * commit, exact-pin seal through PeerSet, and a bounded bind retry. It
- * deliberately stops before publication. The point is to close the one liveness
- * gap PeerSet refused to own: when a seal projection fails, or its completion is
- * lost, somebody must retry, and that somebody is here. Nothing in this class
- * claims node arrival, retry selection across peers, proof membership, C09
- * membership, or generation closure.
+ * commit, exact-pin seal through PeerSet, bounded bind retry, publication of the
+ * sealed command on the retained pin, and consumption of the exact receipt through
+ * to its acknowledgement. Nothing in this class claims node arrival, retry
+ * selection across peers, proof membership, C09 membership, or generation closure.
+ *
+ * The row is OWNED from ingress to acknowledgement. An accepted publication may
+ * already have created a replayable receiver row, and this row is the only
+ * authority able to mint that row's exact acknowledgement — so it is retained
+ * through an unknown disposition rather than erased, and a fence waits on it.
  *
  * ## The fence is LOGICAL, and is not quiescence
  *
  * Read this before using `fence()` for anything that needs a drain.
  *
- * `fence()` seals ingress and terminalizes every row. It does NOT wait for
- * outstanding seal projections. That is deliberate: PeerSet does not promise one
- * completion per accepted projection — a lost completion post is the exact
- * failure this actor recovers from — so a fence that waited on one would inherit
- * the liveness bug it exists to fix.
+ * `fence()` seals ingress and terminalizes every row THAT OWES NOTHING. It does
+ * NOT wait for outstanding seal projections: PeerSet does not promise one
+ * completion per accepted projection — a lost completion post is the exact failure
+ * this actor recovers from — so a fence that waited on one would inherit the
+ * liveness bug it exists to fix.
+ *
+ * It DOES wait on rows that owe the receiver an acknowledgement, and that is not
+ * the same class of promise. The receiver retains those rows, and only this
+ * coordinator's identity can retire them, so a fence that erased them would report
+ * a drain it had not performed and leave receiver state nobody could repair. Such
+ * rows keep their work unit, and that held unit IS the backpressure.
+ *
+ * Retry — of publication and of acknowledgement — is deferred on a timer the row
+ * OWNS: never a direct recursion, never a naked post. A `false` from PeerClient
+ * usually means its bounded ingress is momentarily full, and recursing spent the
+ * whole attempt budget before that strand could drain a single item.
  *
  * The consequence is stated rather than implied: after `Lifecycle::fenced`,
  * `outstanding_bind_projections()` may be nonzero, meaning bind completion work is
@@ -79,13 +94,17 @@ class PeerSet;
  *    preparation — intent construction, timer allocation, timer arming, bind
  *    initiation — is contained, because an escaping exception on the strand would
  *    both leak the permit and take the handler out with it.
- *  * Retry is a DIRECT owner-strand call, not a post. A posted retry can fail to
- *    queue and orphan a row in `awaiting_bind` with nothing in flight.
+ *  * BIND retry is a direct owner-strand call, not a post: a posted retry can fail
+ *    to queue and orphan a row in `awaiting_bind` with nothing in flight.
+ *    PUBLICATION and ACKNOWLEDGEMENT retry is the opposite — deferred on a timer
+ *    the row OWNS — because there the failure is usually the receiver's bounded
+ *    ingress being momentarily full, and an immediate retry spends the whole budget
+ *    without ever yielding to it. Different failure, different remedy.
  *
- * Back-pressure, stated because it looks like a leak and is not: a `publishable`
- * row holds its work unit until publication consumes it, and publication is a
- * later slice. So after `kMaxWork` successful binds this class refuses ingress.
- * That is an unconsumed outbox applying back-pressure, and a control asserts it.
+ * Back-pressure, stated because it looks like a leak and is not: a row holds its
+ * work unit until its receipt obligation is settled. So `kMaxWork` rows awaiting
+ * receipts or acknowledgements refuse further ingress, and a fence waits on them.
+ * Both are asserted by controls rather than left to be discovered.
  */
 class LedgerFetchCoordinator
     : public std::enable_shared_from_this<LedgerFetchCoordinator>
@@ -120,6 +139,15 @@ public:
     /// the receiver's bounded ingress is momentarily full, which is a retry input
     /// rather than a terminal fact.
     static constexpr std::uint32_t kMaxAckAttempts = 3;
+
+    /// Backoff between publication or acknowledgement attempts.
+    ///
+    /// Load-bearing, not politeness. A `false` from PeerClient often means its
+    /// bounded ingress is momentarily full, and retrying by direct recursion burned
+    /// the entire attempt budget before that strand could drain a single item — so
+    /// the bound was spent without the receiver ever getting a chance to accept.
+    /// Retry yields.
+    static constexpr std::chrono::milliseconds kRetryBackoff{5};
 
     /// Bind bounds. Retry is limited by an attempt budget AND an absolute
     /// deadline; exhausting either terminalizes identically.
@@ -174,7 +202,18 @@ public:
         publishable,       ///< sealed command held, not yet published
         awaiting_receipt,  ///< publication accepted; a receipt may or may not come
         acknowledging,     ///< receipt retained, NO LONGER PROJECTING, ack in flight
-        terminal,          ///< bounds exhausted, refused, acknowledged, or fenced
+        /// Accepted publication whose disposition could not be settled within its
+        /// bounds. The row is RETAINED, identity and all, because an accepted
+        /// publication may already have created a replayable receiver row and this
+        /// row is the only authority that can mint its exact acknowledgement.
+        ///
+        /// Erasing it was the defect: the receiver keeps its row while the sender
+        /// discards the one thing able to retire it. The canonical cut is explicit
+        /// — sender-owned outbox stays owned until the receipt is consumed, T62
+        /// removes S40/S41 only once S42/S44 are empty, T69 drains rather than
+        /// erases. A scalar diagnostic is not replacement authority.
+        unsettled,
+        terminal,          ///< bounds exhausted before publication, refused, acked, or fenced
     };
 
     enum class Lifecycle : std::uint8_t { running, fencing, fenced };
@@ -285,19 +324,22 @@ public:
         return accounting_broken_.load(std::memory_order_acquire);
     }
 
-    /// Receipts seen naming a RETAINED receiver row that this coordinator failed to
-    /// acknowledge. An exact, knowable residue: the receiver keeps that row until
-    /// its incarnation dies, and the canonical cut is explicit that it will not grow
-    /// an unbounded tombstone set to repair a sender that broke this. So a sender
-    /// that breaks it must at least make it countable.
+    /// Rows that still owe the receiver an exact acknowledgement, or owe themselves
+    /// the disposition of a publication the receiver may have accepted.
     ///
-    /// Distinct from `outstanding_bind_projections()`, which counts seal completions
-    /// never observed. This counts receiver state never retired.
+    /// A PROJECTION of owned rows, recomputed and STORED on the strand at every
+    /// transition — never incremented. It therefore cannot wrap, and cannot be
+    /// non-zero without a nameable retained row behind it, which is the whole
+    /// difference from the counter this replaces: that one was bumped in the two
+    /// paths that also destroyed the row, so the moment it became non-zero the
+    /// identity it referred to was already gone. A count of things nobody can name
+    /// is not authority.
+    ///
+    /// Bounded by kMaxWork, because each such row holds a work unit.
     std::size_t
-    unacked_receiver_rows() const noexcept
+    receipt_obligations() const noexcept
     {
-        return static_cast<std::size_t>(
-            unacked_receiver_rows_.load(std::memory_order_acquire));
+        return receipt_obligations_.load(std::memory_order_acquire);
     }
 
     SenderGenerationId
@@ -372,9 +414,34 @@ private:
         std::optional<NodeBatchWriteReceipt> receipt;
         std::uint32_t ack_attempts = 0;
 
+        /// Which deferred retry this row owns, if any. A SEPARATE timer from
+        /// `deadline` on purpose: multiplexing one timer between "how long until I
+        /// give up waiting" and "how long until I try again" makes a stale firing
+        /// indistinguishable from a live one, and cancellation ambiguous.
+        enum class Retry : std::uint8_t { none, publish, acknowledge };
+        /// Which deferred attempt this row owns. Identity-bearing in the sense that
+        /// matters: a fired handler re-checks it, so a cancelled retry whose handler
+        /// was already queued cannot act on a row that has moved on.
+        //@@authority state=ledger_fetch_coordinator.row_retry_schedule
+        // owner=ledger_fetch_coordinator
+        Retry retry_kind = Retry::none;
+        std::shared_ptr<boost::asio::steady_timer> retry;
+
         std::shared_ptr<boost::asio::steady_timer> deadline;
         std::chrono::steady_clock::time_point absolute_deadline{};
         bool retired = false;
+
+        /// Does this row still owe the receiver an exact acknowledgement, or owe
+        /// itself the truth about a publication the receiver may have accepted?
+        ///
+        /// This is what a fence must NOT erase and must wait on.
+        bool
+        owes_receipt_settlement() const noexcept
+        {
+            return !retired &&
+                (phase == Phase::awaiting_receipt ||
+                 phase == Phase::acknowledging || phase == Phase::unsettled);
+        }
     };
 
     OutboxRow*
@@ -406,6 +473,26 @@ private:
     /// row has stopped projecting the command.
     void
     acknowledge_on_strand(TransportAttemptId attempt);
+
+    /// Arm this row's OWNED retry timer. Yields to the receiver between attempts,
+    /// and is cancelled explicitly by terminalization and by settlement.
+    void
+    schedule_retry_on_strand(
+        TransportAttemptId attempt,
+        OutboxRow::Retry kind);
+
+    /// Retain a row whose accepted publication has no settled disposition. It keeps
+    /// its identity, its pin and its work unit, so a fence backpressures on it
+    /// instead of reporting a false-empty drain.
+    void
+    mark_unsettled_on_strand(OutboxRow& row, char const* why);
+
+    /// Recompute and store the receipt-obligation projection from owned rows.
+    void
+    refresh_receipt_obligations_on_strand() noexcept;
+
+    static void
+    cancel_retry_quietly(OutboxRow& row) noexcept;
 
     /// Commit one bind outcome. Returns false when the event is stale — the row
     /// is gone, the revision has moved on, or the bind is already closed — in
@@ -465,6 +552,13 @@ private:
 
     // Strand-owned. No other executor may read or write these.
     std::uint64_t next_attempt_ = 0;
+
+    /// The retained sender outbox. Durable and identity-bearing: each row names the
+    /// exact attempt and sender generation it owes, which is what lets it mint the
+    /// receiver's exact acknowledgement. A fence must not erase a row that still
+    /// owes one — the receiver keeps its side, and only this identity retires it.
+    //@@authority state=ledger_fetch_coordinator.sender_outbox
+    // owner=ledger_fetch_coordinator
     std::vector<OutboxRow> rows_;
     /// Double-buffered on purpose. Delivery swaps these two — `swap` cannot
     /// allocate and cannot throw — so nothing fallible happens after the terminal
@@ -477,13 +571,15 @@ private:
     std::uint64_t completions_seen_ = 0;
     std::uint64_t completions_sealed_ = 0;
 
-    std::atomic<std::uint64_t> unacked_receiver_rows_{0};
+    /// Stored, never incremented. See receipt_obligations().
+    std::atomic<std::size_t> receipt_obligations_{0};
 
     /// Bounds as members so a control can force each one independently. They
     /// start at the constants above and production never changes them.
     std::uint32_t max_publish_attempts_ = kMaxPublishAttempts;
     std::chrono::milliseconds publish_deadline_ = kPublishDeadline;
     std::uint32_t max_ack_attempts_ = kMaxAckAttempts;
+    std::chrono::milliseconds retry_backoff_ = kRetryBackoff;
     std::uint32_t max_bind_attempts_ = kMaxBindAttempts;
     std::chrono::milliseconds bind_deadline_ = kBindDeadline;
     std::chrono::milliseconds absolute_bind_deadline_ = kAbsoluteBindDeadline;
@@ -508,8 +604,13 @@ private:
     ///
     /// It cannot be forced through the real bound either: the receiver's node-batch
     /// ingress projection gates publication and acknowledgement alike, so
-    /// saturating it refuses the write and the row never reaches an ack at all.
-    bool fail_acknowledgement_for_test_ = false;
+    /// saturating it refuses the WRITE and the row never reaches an ack at all.
+    /// That bound is exercised against the real receiver on the publication path,
+    /// where it is reachable.
+    ///
+    /// A COUNT, so "refused twice, then accepted" is expressible — which is what
+    /// proves the retry yields rather than burning its budget in one strand pass.
+    std::uint32_t fail_next_acknowledgements_for_test_ = 0;
 
     /// Granted ingress + committed rows, plus the seal bit. Reserved before the
     /// projection is queued, released on refusal or row retirement, never

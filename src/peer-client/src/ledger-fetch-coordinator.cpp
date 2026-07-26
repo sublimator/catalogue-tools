@@ -418,20 +418,22 @@ LedgerFetchCoordinator::settle_bind_on_strand(
     row->bind_open = false;
     cancel_quietly(*row);  // part of THIS commit, not a later cleanup
 
-    if (sealed && !ingress_sealed())
+    if (sealed)
     {
         row->sealed = std::move(sealed);
         row->phase = Phase::publishable;
         // Straight into publication. The row, its original intent and its original
         // pin stay held throughout, and so does its work unit.
+        //
+        // No ingress check here, deliberately. There WAS one — `sealed &&
+        // !ingress_sealed()` with a separate terminalize branch — and adding the
+        // publication gate below made it redundant: a probe that deleted it changed
+        // nothing observable, because begin_publish_on_strand refuses a fenced row
+        // one step later and terminalizes it identically. That regressed a
+        // previously-killed mutation to SURVIVED, which is the "bound spelled
+        // twice" defect arriving in a new place. "No publication after the fence"
+        // is now spelled once, where publication happens.
         begin_publish_on_strand(attempt);
-        return true;
-    }
-    if (sealed)
-    {
-        // Sealed, but the fence has already sealed ingress. Publication will
-        // never happen, so the command is dropped rather than retained.
-        terminalize_on_strand(*row, "sealed after ingress seal");
         return true;
     }
     if (bind_bounds_spent(*row))
@@ -460,9 +462,18 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
     {
         return;
     }
-    if (ingress_sealed())
+    if (ingress_sealed() && row->publish_attempts == 0)
     {
-        terminalize_on_strand(*row, "ingress sealed before publication");
+        // Never published, so the receiver holds nothing for this attempt and there
+        // is nothing to repair. Safe to terminalize.
+        //
+        // The `publish_attempts == 0` qualifier is the correction: a row that HAS
+        // published may already have created a replayable receiver row, and
+        // replaying to learn its disposition is DRAINING an accepted obligation,
+        // not admitting new work. Sealing ingress stops the latter. Refusing the
+        // former is what erased the only authority able to retire the receiver's
+        // row — T69 drains rather than erases.
+        terminalize_on_strand(*row, "ingress sealed before any publication");
         return;
     }
     if (!row->sealed)
@@ -472,15 +483,26 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
     }
     if (row->publish_attempts >= row->max_publish_attempts)
     {
-        terminalize_on_strand(*row, "publication attempts exhausted");
+        // Exhausted with at least one accepted publication behind it, so the
+        // disposition is UNKNOWN rather than known-failed. Retain the identity.
+        mark_unsettled_on_strand(*row, "publication attempts exhausted");
         return;
     }
 
     auto* session = row->pin.get();
     if (session == nullptr)
     {
-        // The retention this row owns is gone, so there is nothing to publish on.
-        terminalize_on_strand(*row, "pin no longer holds a session");
+        // No session to publish on. If nothing was ever published the receiver
+        // holds nothing; if something was, we can no longer learn or repair it, so
+        // the obligation is retained rather than dropped.
+        if (row->publish_attempts == 0)
+        {
+            terminalize_on_strand(*row, "pin no longer holds a session");
+        }
+        else
+        {
+            mark_unsettled_on_strand(*row, "pin gone with a publication in flight");
+        }
         return;
     }
 
@@ -586,18 +608,33 @@ LedgerFetchCoordinator::settle_publication_on_strand(
 
     if (row->publish_attempts >= row->max_publish_attempts)
     {
-        terminalize_on_strand(
-            *row,
-            timed_out ? "no receipt within the publication deadline"
-                      : "publication refused");
+        if (timed_out)
+        {
+            // An accepted publication with no receipt inside the deadline. We do
+            // not know whether the receiver retained a row, so the obligation is
+            // retained rather than erased.
+            mark_unsettled_on_strand(
+                *row, "no receipt within the publication deadline");
+        }
+        else
+        {
+            // Refused at submission every time, so nothing was ever accepted and
+            // the receiver holds nothing.
+            terminalize_on_strand(*row, "publication refused");
+        }
         return true;
     }
 
-    // Back to publishable and replay directly, for the same reason the bind retry
-    // is direct: a posted retry can fail to queue and orphan the row with nothing
-    // in flight and its deadline already cancelled.
+    // Back to publishable, then retry on this row's OWNED timer.
+    //
+    // NOT a direct call. A `false` from PeerClient usually means its bounded
+    // ingress is momentarily full, and recursing immediately burned the whole
+    // attempt budget before that strand could drain one item — the bound was spent
+    // without the receiver ever having a chance to accept. Not a naked post either:
+    // the timer is owned by the row, so terminalization and fencing cancel it
+    // explicitly rather than hoping a queued lambda finds nothing to do.
     row->phase = Phase::publishable;
-    begin_publish_on_strand(attempt);
+    schedule_retry_on_strand(attempt, OutboxRow::Retry::publish);
     return true;
 }
 
@@ -615,9 +652,10 @@ LedgerFetchCoordinator::acknowledge_on_strand(TransportAttemptId attempt)
     auto* session = row->pin.get();
     if (session == nullptr)
     {
-        // The receiver row outlives our retention, so it is unretired and counted.
-        unacked_receiver_rows_.fetch_add(1, std::memory_order_acq_rel);
-        terminalize_on_strand(*row, "pin gone before acknowledgement");
+        // The receiver row outlives our retention and we can no longer reach it.
+        // Retained, not counted-and-erased: the row IS the authority, and a scalar
+        // bumped while destroying the identity it refers to is not a substitute.
+        mark_unsettled_on_strand(*row, "pin gone before acknowledgement");
         return;
     }
 
@@ -628,8 +666,9 @@ LedgerFetchCoordinator::acknowledge_on_strand(TransportAttemptId attempt)
         // Minted here and nowhere else: NodeBatchReceiptAck names this coordinator
         // as its only friend, and it retires the exact receiver row this exact
         // receipt identifies.
-        if (fail_acknowledgement_for_test_)
+        if (fail_next_acknowledgements_for_test_ > 0)
         {
+            --fail_next_acknowledgements_for_test_;
             queued = false;
         }
         else
@@ -650,21 +689,155 @@ LedgerFetchCoordinator::acknowledge_on_strand(TransportAttemptId attempt)
     }
     if (row->ack_attempts >= max_ack_attempts_)
     {
-        // Bounded. The receiver keeps its row until its incarnation dies, and that
-        // is precisely the residue unacked_receiver_rows() exists to expose rather
-        // than let a caller infer a clean shutdown from silence.
-        unacked_receiver_rows_.fetch_add(1, std::memory_order_acq_rel);
+        // Bounded, and the row is KEPT. The receiver holds a retained row that only
+        // this identity can retire, so discarding it here would leave the receiver
+        // permanently unable to be repaired — which is exactly what the canonical
+        // cut refuses to defend against with a tombstone set.
         PLOGE(
             log_,
             "acknowledgement refused ",
             row->ack_attempts,
-            " time(s); receiver row left retained for attempt ",
+            " time(s); retaining the sender row for attempt ",
             attempt.value());
-        terminalize_on_strand(*row, "acknowledgement attempts exhausted");
+        mark_unsettled_on_strand(*row, "acknowledgement attempts exhausted");
         return;
     }
-    // Direct retry, same reasoning as every other retry here.
-    acknowledge_on_strand(attempt);
+    // Deferred on the row's OWNED timer, yielding to the receiver. A false return
+    // usually means its bounded ingress is momentarily full, and recursing here
+    // spent all three attempts before that strand could drain a single item.
+    schedule_retry_on_strand(attempt, OutboxRow::Retry::acknowledge);
+}
+
+//@@audit-ack unannotated_authority_candidate reason="cancels the retry schedule this row owns, so it is NOT inert, but it is reached only from the annotated terminalize_row and retain_unsettled_row commits and is dominated by them" ref=2026-07-26-0832-annotations-are-in-scope-for-current-slice
+void
+LedgerFetchCoordinator::cancel_retry_quietly(OutboxRow& row) noexcept
+{
+    row.retry_kind = OutboxRow::Retry::none;
+    if (!row.retry)
+    {
+        return;
+    }
+    // Contained for the same reason as the deadline cancel: this build defines
+    // BOOST_ASIO_NO_DEPRECATED, so plain cancel() routes its error through
+    // throw_error, and a throw inside a commit section abandons the transition.
+    try
+    {
+        row.retry->cancel();
+    }
+    catch (std::exception const& e)
+    {
+        PLOGE(log_, "retry cancel threw: ", e.what());
+    }
+    catch (...)
+    {
+        PLOGE(log_, "retry cancel threw a non-exception");
+    }
+}
+
+//@@authority transition=ledger_fetch_coordinator.schedule_retry
+// owner=ledger_fetch_coordinator commit=strand
+void
+LedgerFetchCoordinator::schedule_retry_on_strand(
+    TransportAttemptId attempt,
+    OutboxRow::Retry kind)
+{
+    auto* row = find_row(attempt);
+    if (row == nullptr || kind == OutboxRow::Retry::none)
+    {
+        return;
+    }
+    if (!row->retry)
+    {
+        try
+        {
+            row->retry = std::make_shared<asio::steady_timer>(strand_);
+        }
+        catch (...)
+        {
+            // No timer means no owned way to yield. Retain the obligation rather
+            // than fall back to an immediate recursion, which is the behaviour this
+            // whole mechanism replaces.
+            PLOGE(log_, "cannot allocate a retry timer; retaining the obligation");
+            mark_unsettled_on_strand(*row, "no retry timer");
+            return;
+        }
+    }
+
+    row->retry_kind = kind;
+    try
+    {
+        row->retry->expires_after(retry_backoff_);
+        row->retry->async_wait(
+            [self = shared_from_this(), attempt, kind](
+                boost::system::error_code const& ec) {
+                if (ec == asio::error::operation_aborted)
+                {
+                    return;
+                }
+                auto* row = self->find_row(attempt);
+                // The kind check is what makes a stale firing inert: a cancelled
+                // retry whose handler was already queued finds a row that either
+                // moved on or now owns a different retry.
+                if (row == nullptr || row->retry_kind != kind)
+                {
+                    return;
+                }
+                row->retry_kind = OutboxRow::Retry::none;
+                if (kind == OutboxRow::Retry::publish)
+                {
+                    self->begin_publish_on_strand(attempt);
+                }
+                else
+                {
+                    self->acknowledge_on_strand(attempt);
+                }
+            });
+    }
+    catch (...)
+    {
+        PLOGE(log_, "cannot arm the retry timer; retaining the obligation");
+        mark_unsettled_on_strand(*row, "retry timer would not arm");
+    }
+}
+
+//@@authority transition=ledger_fetch_coordinator.retain_unsettled_row
+// owner=ledger_fetch_coordinator commit=strand
+void
+LedgerFetchCoordinator::mark_unsettled_on_strand(OutboxRow& row, char const* why)
+{
+    PLOGE(
+        log_,
+        "attempt ",
+        row.intent.attempt_id().value(),
+        " retained UNSETTLED: ",
+        why,
+        "; the receiver may hold a row only this identity can retire");
+    row.phase = Phase::unsettled;
+    row.publish_open = false;
+    cancel_quietly(row);
+    cancel_retry_quietly(row);
+    // Deliberately NOT released: not the pin, not the work unit, not the row. The
+    // work unit is what makes a fence backpressure on this obligation instead of
+    // reporting a false-empty drain, and the pin is what a later repair would need.
+    refresh_receipt_obligations_on_strand();
+    check_fenced_on_strand();
+}
+
+//@@audit-ack unannotated_authority_candidate reason="recomputes a DERIVED diagnostic projection from owned rows and stores it; it mutates no owned state of its own and is reached only from annotated commit transitions" ref=2026-07-26-0832-annotations-are-in-scope-for-current-slice
+void
+LedgerFetchCoordinator::refresh_receipt_obligations_on_strand() noexcept
+{
+    // STORED, never incremented, so it cannot wrap and cannot be non-zero without
+    // a nameable row behind it.
+    std::size_t obligations = 0;
+    for (auto const& row : rows_)
+    {
+        if (row.owes_receipt_settlement())
+        {
+            ++obligations;
+        }
+    }
+    receipt_obligations_.store(obligations, std::memory_order_release);
 }
 
 //@@authority transition=ledger_fetch_coordinator.terminalize_row
@@ -685,9 +858,11 @@ LedgerFetchCoordinator::terminalize_on_strand(OutboxRow& row, char const* why)
     row.publish_open = false;
     row.sealed.reset();
     cancel_quietly(row);
+    cancel_retry_quietly(row);  // both timers, explicitly, or a retry outlives the row
     row.pin.reset();  // the retention this row owned, released here and nowhere else
     row.retired = true;
     release_work();
+    refresh_receipt_obligations_on_strand();
     check_fenced_on_strand();
 }
 
@@ -969,11 +1144,27 @@ LedgerFetchCoordinator::begin_fence_on_strand(FenceHandler on_fenced)
     // fix. This is why the fence is LOGICAL: see outstanding_bind_projections().
     for (auto& row : rows_)
     {
-        if (!row.retired)
+        if (row.retired)
         {
-            terminalize_on_strand(row, "fencing");
+            continue;
         }
+        if (row.owes_receipt_settlement())
+        {
+            // RETAINED. An accepted publication may already have created a
+            // replayable receiver row, and this row is the only authority able to
+            // mint its exact acknowledgement. Erasing it here left the receiver
+            // holding state nobody could retire — the defect this correction fixes.
+            //
+            // Its work unit stays held, so check_fenced_on_strand backpressures on
+            // the obligation rather than reporting a drain that has not happened.
+            // Replay and acknowledgement continue to run while fencing: sealing
+            // ingress stops NEW work, and draining an accepted obligation is not
+            // new work.
+            continue;
+        }
+        terminalize_on_strand(row, "fencing");
     }
+    refresh_receipt_obligations_on_strand();
     check_fenced_on_strand();
 }
 
@@ -989,8 +1180,21 @@ LedgerFetchCoordinator::check_fenced_on_strand()
     // The fence is reached when every work unit is accounted for. Outstanding
     // seal projections are deliberately NOT part of this condition, and that is
     // the whole reason this state is named `fenced` rather than `stopped`.
+    //
+    // Rows owing a receipt settlement hold their work units, so this single
+    // condition also makes the fence backpressure on them. That is intended: a
+    // fence that completed while the receiver still held a row only this
+    // coordinator could retire would be reporting a drain it had not performed.
     if (work_outstanding() != 0)
     {
+        if (receipt_obligations() != 0)
+        {
+            PLOGD(
+                log_,
+                "fence waiting on ",
+                receipt_obligations(),
+                " retained receipt obligation(s)");
+        }
         return;
     }
     auto const live = std::any_of(

@@ -106,6 +106,20 @@ public:
         return true;
     }
 
+    /// Return an unsettled row to `acknowledging` so a control can prove the
+    /// obligation is REPAIRABLE — the whole reason the row is retained rather than
+    /// erased. Production reaches this through replay; this is the direct seam.
+    static void
+    set_phase_acknowledging(
+        std::shared_ptr<Coordinator> const& c,
+        catl::peer_client::TransportAttemptId attempt)
+    {
+        if (auto* row = find_any(c, attempt); row != nullptr)
+        {
+            row->phase = Coordinator::Phase::acknowledging;
+        }
+    }
+
     /// Drive the acknowledgement path directly, to prove it declines a row that
     /// has not stopped projecting.
     static void
@@ -116,12 +130,13 @@ public:
         c->acknowledge_on_strand(attempt);
     }
 
+    /// Refuse the next `count` acknowledgements, then behave.
     static void
-    set_acknowledgement_failure(
+    fail_next_acknowledgements(
         std::shared_ptr<Coordinator> const& c,
-        bool fail)
+        std::uint32_t count)
     {
-        c->fail_acknowledgement_for_test_ = fail;
+        c->fail_next_acknowledgements_for_test_ = count;
     }
 
     static void
@@ -146,6 +161,17 @@ public:
         std::uint32_t attempts)
     {
         c->max_ack_attempts_ = attempts;
+    }
+
+    /// Zero for controls that need a deferred retry to fire. The production backoff
+    /// yields real milliseconds, and a poll-driven control advances no clock, so a
+    /// non-zero backoff simply never fires inside settle().
+    static void
+    set_retry_backoff(
+        std::shared_ptr<Coordinator> const& c,
+        std::chrono::milliseconds backoff)
+    {
+        c->retry_backoff_ = backoff;
     }
 
     static void
