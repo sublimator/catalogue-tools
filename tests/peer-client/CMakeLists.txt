@@ -2,10 +2,6 @@ add_executable(peer-client-gtest peer-client-gtest.cpp)
 target_link_libraries(peer-client-gtest PRIVATE catl::peer-client
                                                 GTest::gtest_main)
 
-add_executable(operation-lifecycle-gtest operation-lifecycle-gtest.cpp)
-target_link_libraries(operation-lifecycle-gtest
-                      PRIVATE catl::peer-client GTest::gtest_main)
-
 add_executable(peer-endpoint-cache-gtest peer-endpoint-cache-gtest.cpp)
 target_link_libraries(peer-endpoint-cache-gtest
                       PRIVATE catl::peer-client GTest::gtest_main)
@@ -93,8 +89,7 @@ set(CATL_PEER_CLIENT_TEST_TARGETS
     peer-session-interface-gtest
     node-credentials-gtest
     session-signature-gtest
-    inbound-budget-gtest
-    operation-lifecycle-gtest)
+    inbound-budget-gtest)
 
 foreach(catl_test IN LISTS CATL_PEER_CLIENT_TEST_TARGETS)
   gtest_discover_tests(

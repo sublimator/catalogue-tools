@@ -21,7 +21,6 @@ add_library(
   src/endpoint-tracker.cpp
   src/ledger-fetch-coordinator.cpp
   src/node-identity.cpp
-  src/operation-lifecycle.cpp
   src/node-transport.cpp
   src/peer-endpoint-cache.cpp
   src/peer-selector.cpp
