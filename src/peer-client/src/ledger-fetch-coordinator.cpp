@@ -497,16 +497,27 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
     auto* session = row->pin.get();
     if (session == nullptr)
     {
-        // No session to publish on. If nothing was ever published the receiver
-        // holds nothing; if something was, we can no longer learn or repair it, so
-        // the obligation is retained rather than dropped.
-        if (row->publish_attempts == 0)
+        // No session to publish on. If nothing ever reached the receiver it holds
+        // nothing; if something may have, we can no longer learn or repair it here,
+        // so the obligation is retained rather than dropped.
+        //
+        // Keys on the STICKY fact, never on `publish_attempts`. This branch was the
+        // last instance of the authority bug that was fixed at the ingress-seal
+        // gate above: a repair round resets the per-round counter to zero, so
+        // reading zero as "never published" would terminalize a row whose accepted
+        // projection is still unresolved. Ordinary sequencing makes the combination
+        // hard to reach today — repair checks the pin immediately before resetting
+        // the counter and calls this synchronously — but C11's generation-close and
+        // session-invalidation transition is exactly what makes a session die
+        // between those two points, and it would have inherited the bug.
+        if (!row->may_have_reached_receiver)
         {
-            terminalize_on_strand(*row, "pin no longer holds a session");
+            terminalize_on_strand(*row, "no session and nothing ever published");
         }
         else
         {
-            mark_unsettled_on_strand(*row, "pin gone with a publication in flight");
+            mark_unsettled_on_strand(
+                *row, "no session with an unresolved publication");
         }
         return;
     }

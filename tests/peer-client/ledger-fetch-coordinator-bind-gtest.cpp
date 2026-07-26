@@ -2113,3 +2113,65 @@ TEST(LedgerFetchCoordinatorBind, ObligationHoldsWhileParkedInPublishable)
     EXPECT_EQ(f.coord->work_outstanding(), 1u);
     EXPECT_FALSE(f.coord->accounting_broken());
 }
+
+/// 50. The LAST branch that read `publish_attempts` as history.
+///
+/// Codex's residual finding on `0924e27`: the null-session branch of
+/// `begin_publish_on_strand` still asked "was anything ever published?" by testing
+/// a per-round counter that a repair round resets to zero. The ingress-seal gate
+/// above it had already been moved onto the sticky fact, and the comments claimed
+/// the sticky fact was the sole historical source — while this branch could still
+/// terminalize a row holding an unresolved accepted projection.
+///
+/// The state is CONSTRUCTED rather than driven, because ordinary sequencing cannot
+/// produce it today: repair checks the pin, then resets the counter, then enters
+/// publication synchronously, so the session cannot die in between. C11's
+/// generation-close/session-invalidation transition is precisely what opens that
+/// window, which is why the branch had to be corrected before that slice rather
+/// than after it inherited the bug.
+///
+/// Mutating the predicate back to `row->publish_attempts == 0` must kill this.
+TEST(LedgerFetchCoordinatorPublish, ResetCounterWithNoSessionKeepsTheObligation)
+{
+    CoordFixture f;
+    ASSERT_TRUE(f.session->publish_accepts) << "accepted, and never answered";
+    Access::set_publish_deadline(f.coord, std::chrono::milliseconds{0});
+    Access::set_max_publish_attempts(f.coord, 1);
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+    ASSERT_TRUE(row->may_have_reached_receiver)
+        << "an accepted projection whose disposition never arrived";
+
+    // Exactly the four conditions of the finding. The first two are what a repair
+    // round leaves behind; the third is a receiver incarnation dying inside the
+    // window C11 will open.
+    row->publish_attempts = 0;
+    row->phase = Phase::publishable;
+    Access::release_row_pin(f.coord, *attempt);
+    ASSERT_EQ(row->publish_attempts, 0u);
+    ASSERT_EQ(row->phase, Phase::publishable);
+    ASSERT_TRUE(row->may_have_reached_receiver) << "and the history survived both";
+
+    Access::begin_publish(f.coord, *attempt);
+
+    EXPECT_NE(row->phase, Phase::terminal)
+        << "a zero per-round counter is not evidence that nothing reached the "
+           "receiver; only the sticky fact answers that";
+    EXPECT_EQ(row->phase, Phase::unsettled)
+        << "retained for repair, which is what an unknown disposition owes";
+    EXPECT_FALSE(row->retired) << "still named";
+    EXPECT_TRUE(row->may_have_reached_receiver) << "and still historical";
+    EXPECT_EQ(f.coord->receipt_obligations(), 1u) << "and still owing";
+    EXPECT_EQ(Access::computed_obligations(f.coord), 1u)
+        << "the stored projection agrees with the rows";
+    EXPECT_EQ(f.coord->work_outstanding(), 1u)
+        << "so the work unit is held and no fence can complete on this row";
+    EXPECT_FALSE(f.coord->accounting_broken());
+}

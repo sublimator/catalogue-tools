@@ -194,6 +194,22 @@ public:
         c->repair_unsettled_on_strand(attempt);
     }
 
+    /// Drive publication directly, so a control can construct the row state a
+    /// repair round produces and then enter the function under test.
+    ///
+    /// Needed because `repair_unsettled_on_strand` checks the pin and calls
+    /// begin_publish synchronously, which makes "counter reset, sticky fact set, no
+    /// session" unreachable through the ordinary route today. That combination is
+    /// what C11's session invalidation will make reachable, so the control has to
+    /// build it rather than wait for it.
+    static void
+    begin_publish(
+        std::shared_ptr<Coordinator> const& c,
+        catl::peer_client::TransportAttemptId attempt)
+    {
+        c->begin_publish_on_strand(attempt);
+    }
+
     /// Drop the retention a row holds, which is what a dead receiver incarnation
     /// looks like from the coordinator's side.
     static void
