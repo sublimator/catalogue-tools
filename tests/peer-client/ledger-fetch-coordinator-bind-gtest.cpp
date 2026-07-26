@@ -1719,3 +1719,42 @@ TEST(LedgerFetchCoordinatorPublish, ObligationCountIsBackedByNameableRows)
     EXPECT_EQ(f.coord->receipt_obligations(), 0u)
         << "recomputed from rows, so retiring the row retires the count";
 }
+
+/// 41. An accepted publication with NO receipt inside its deadline retains the row.
+///
+/// The deadline path reaches `unsettled` by a different route than the
+/// acknowledgement path, and control 39 only covers the latter — a probe that
+/// swapped this branch back to `terminalize` changed nothing control 39 could see.
+///
+/// The fake session accepts publication and never answers, which is exactly
+/// PeerClient's duplicate-waiter behaviour: admitted, no receipt, replay expected.
+/// So the disposition is genuinely UNKNOWN — the receiver may hold a row — and
+/// erasing the sender identity here is the defect.
+TEST(LedgerFetchCoordinatorBind, UnknownPublicationDispositionRetainsTheRow)
+{
+    CoordFixture f;
+    ASSERT_TRUE(f.session->publish_accepts) << "accepted, and never answered";
+    Access::set_publish_deadline(f.coord, std::chrono::milliseconds{0});
+    Access::set_max_publish_attempts(f.coord, 1);
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+
+    EXPECT_GE(f.session->publish_calls, 1u) << "the publication was accepted";
+    EXPECT_FALSE(row->receipt.has_value()) << "and never answered";
+    EXPECT_EQ(row->phase, Phase::unsettled)
+        << "an UNKNOWN disposition must retain the row: the receiver may hold a "
+           "replayable row only this identity can retire";
+    EXPECT_FALSE(row->retired);
+    EXPECT_TRUE(static_cast<bool>(row->pin)) << "and the retention a repair needs";
+    EXPECT_EQ(f.coord->receipt_obligations(), 1u);
+    EXPECT_EQ(f.coord->work_outstanding(), 1u)
+        << "held, so a fence backpressures rather than reporting a false drain";
+    EXPECT_FALSE(f.coord->accounting_broken());
+}
