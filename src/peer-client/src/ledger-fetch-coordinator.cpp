@@ -31,6 +31,7 @@ LedgerFetchCoordinator::allocate_sender_generation() noexcept
     // out the no-generation sentinel and then re-issue every value it had already
     // issued — the worst possible failure for an identity whose only job is to be
     // distinct across incarnations.
+    //@@mutation-site generation-allocation-cases-below-ceiling
     auto current = next_sender_generation_.load(std::memory_order_relaxed);
     for (;;)
     {
@@ -47,6 +48,7 @@ LedgerFetchCoordinator::allocate_sender_generation() noexcept
             return SenderGenerationId{current + 1};
         }
     }
+    //@@mutation-end generation-allocation-cases-below-ceiling
 }
 
 // The ack must be ONE line: the resolver matches reason="..." on the same line as
@@ -115,10 +117,12 @@ LedgerFetchCoordinator::submit_node_batch_on_pin(
     auto current = work_.load(std::memory_order_relaxed);
     for (;;)
     {
+        //@@mutation-site ingress-refuses-once-sealed
         if ((current & kIngressSealedBit) != 0)
         {
             return Ingress::ingress_sealed;
         }
+        //@@mutation-end ingress-refuses-once-sealed
         if ((current & kWorkMask) >= kMaxWork)
         {
             return Ingress::work_budget_exhausted;
@@ -158,9 +162,11 @@ LedgerFetchCoordinator::submit_node_batch_on_pin(
     }
     catch (...)
     {
+        //@@mutation-site conserved-permit-released-when-projection
         // The permit must not survive a projection that never queued.
         release_work();
         return Ingress::projection_failed;
+        //@@mutation-end conserved-permit-released-when-projection
     }
     return Ingress::reserved;
 }
@@ -183,8 +189,10 @@ LedgerFetchCoordinator::bind_bounds_spent(OutboxRow const& row) noexcept
     // absolute-deadline term from one copy changed no observable behaviour,
     // because the other copy still caught it. Two spellings of one bound means
     // neither is really the bound.
+    //@@mutation-site absolute-deadline-bounds-retry-independently
     return row.bind_attempts >= row.max_bind_attempts ||
         std::chrono::steady_clock::now() >= row.absolute_deadline;
+    //@@mutation-end absolute-deadline-bounds-retry-independently
 }
 
 //@@audit-ack unannotated_authority_candidate reason="internal sub-operation dominated exclusively by the annotated settle_bind and terminalize_row commit transitions; it does mutate owned timer state, so it is not inert, but it has no reachable caller outside those two" ref=2026-07-25-b074165-coordinator-review-final-closure
@@ -234,7 +242,9 @@ LedgerFetchCoordinator::commit_row_on_strand(
         check_fenced_on_strand();
         return;
     }
+    //@@mutation-site attempt-id-ceiling-refuses-without
     if (next_attempt_ == std::numeric_limits<std::uint64_t>::max())
+    //@@mutation-end attempt-id-ceiling-refuses-without
     {
         // Refuse at the ceiling with no partial row. A wrapped attempt ID could
         // be matched by a late event belonging to a retired attempt.
@@ -279,15 +289,19 @@ LedgerFetchCoordinator::commit_row_on_strand(
         row.deadline = std::move(timer);
         row.retry = std::move(retry_timer);
         row.max_bind_attempts = max_bind_attempts_;
+        //@@mutation-site publication-budget-property-row
         row.max_publish_attempts = max_publish_attempts_;
+        //@@mutation-end publication-budget-property-row
         row.absolute_deadline =
             std::chrono::steady_clock::now() + absolute_bind_deadline_;
         next_attempt_ = attempt.value();
     }
     catch (...)
     {
+        //@@mutation-site failed-row-commit-releases-permit
         PLOGE(log_, "row commit failed; releasing the accepted ingress permit");
         release_work();
+        //@@mutation-end failed-row-commit-releases-permit
         check_fenced_on_strand();
         return;
     }
@@ -332,6 +346,7 @@ LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
         // The deadline is the recovery path for a LOST completion — the exact
         // liveness gap PeerSet refused to own. Armed BEFORE the projection, so a
         // projection that never completes is still bounded.
+        //@@mutation-site bind-deadline-what-recovers-lost
         row->deadline->expires_after(bind_deadline_);
         row->deadline->async_wait(
             [self = shared_from_this(), attempt, revision](
@@ -343,6 +358,7 @@ LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
                 self->settle_bind_on_strand(
                     attempt, revision, std::nullopt, /*timed_out=*/true);
             });
+        //@@mutation-end bind-deadline-what-recovers-lost
 
         projected = peers_->seal_node_batch_command(
             row->intent,       // copied: the row keeps the original for its life
@@ -386,18 +402,22 @@ LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
         // Nothing is decremented here. Either PeerSet accepted the projection
         // before the throw — in which case its completion will account for it — or
         // it did not, and there is nothing to account for.
+        //@@mutation-site projection-settled-only-if-actually
         PLOGE(log_, "bind initiation threw; settling as a failed bind");
     }
+        //@@mutation-end projection-settled-only-if-actually
 
     // `projected` is false on every throwing path as well as on refusal, so ONE
     // condition covers both. A separate `initiation_failed` flag was here and was
     // provably redundant: deleting it changed nothing a control could see.
+    //@@mutation-site bind-initiation-throws-orphan-row
     if (!projected)
     {
         // A refused or failed projection is a coordinator retry input, not a
         // caller error.
         settle_bind_on_strand(attempt, revision, std::nullopt, false);
     }
+    //@@mutation-end bind-initiation-throws-orphan-row
 }
 
 //@@authority transition=ledger_fetch_coordinator.settle_bind
@@ -417,10 +437,12 @@ LedgerFetchCoordinator::settle_bind_on_strand(
     // Exactly-once between completion and timeout: whichever event matches the
     // open revision commits, and closing the bind makes the loser inert. A
     // completion from revision N therefore cannot settle revision N + 1.
+    //@@mutation-site exactly-once-event-match-open
     if (!row->bind_open || row->bind_revision != revision)
     {
         return false;
     }
+    //@@mutation-end exactly-once-event-match-open
     row->bind_open = false;
     cancel_quietly(*row);  // part of THIS commit, not a later cleanup
 
@@ -468,8 +490,10 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
     {
         return;
     }
+    //@@mutation-site command-sealed-after-fence-never
     if (ingress_sealed() && !row->may_have_reached_receiver)
     {
+    //@@mutation-end command-sealed-after-fence-never
         // Never published, so the receiver holds nothing for this attempt and there
         // is nothing to repair. Safe to terminalize.
         //
@@ -510,9 +534,11 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
         // the counter and calls this synchronously — but C11's generation-close and
         // session-invalidation transition is exactly what makes a session die
         // between those two points, and it would have inherited the bug.
+        //@@mutation-site null-session-branch-keys-sticky
         if (!row->may_have_reached_receiver)
         {
             terminalize_on_strand(*row, "no session and nothing ever published");
+        //@@mutation-end null-session-branch-keys-sticky
         }
         else
         {
@@ -617,8 +643,10 @@ LedgerFetchCoordinator::settle_publication_on_strand(
         // permitted pre-ack replay is therefore already consumed, and a post-ack
         // replay is forbidden at its source — here — rather than defended against
         // by an unbounded tombstone set on the receiver.
+        //@@mutation-site row-stops-projecting-before-acknowledgement
         row->phase = Phase::acknowledging;
         row->receipt = std::move(receipt);
+        //@@mutation-end row-stops-projecting-before-acknowledgement
 
         if (row->receipt->receiver_commit_sequence() == 0)
         {
@@ -626,9 +654,11 @@ LedgerFetchCoordinator::settle_publication_on_strand(
             // retained receiver row. This is one of only two things that may clear
             // the sticky fact — the other is a successful acknowledgement. A refused
             // round is not proof of anything.
+            //@@mutation-site receipt-naming-retained-row-never
             row->may_have_reached_receiver = false;
             terminalize_on_strand(*row, "terminal receipt with no retained row");
             return true;
+            //@@mutation-end receipt-naming-retained-row-never
         }
         acknowledge_on_strand(attempt);
         return true;
@@ -641,10 +671,14 @@ LedgerFetchCoordinator::settle_publication_on_strand(
             // An accepted publication with no receipt inside the deadline. We do
             // not know whether the receiver retained a row, so the obligation is
             // retained rather than erased.
+            //@@mutation-site unknown-publication-disposition-retains-row
             mark_unsettled_on_strand(
                 *row, "no receipt within the publication deadline");
+            //@@mutation-end unknown-publication-disposition-retains-row
         }
+        //@@mutation-site refused-round-erase-earlier-accepted
         else if (row->may_have_reached_receiver)
+        //@@mutation-end refused-round-erase-earlier-accepted
         {
             // Refused THIS round, but an earlier projection reached the receiver.
             // A refusal is not proof that nothing is owed, so the obligation stays.
@@ -667,8 +701,10 @@ LedgerFetchCoordinator::settle_publication_on_strand(
     // without the receiver ever having a chance to accept. Not a naked post either:
     // the timer is owned by the row, so terminalization and fencing cancel it
     // explicitly rather than hoping a queued lambda finds nothing to do.
+    //@@mutation-site publication-retry-yields-instead-recursing
     row->phase = Phase::publishable;
     schedule_retry_on_strand(attempt, OutboxRow::Retry::publish);
+    //@@mutation-end publication-retry-yields-instead-recursing
     return true;
 }
 
@@ -736,13 +772,17 @@ LedgerFetchCoordinator::acknowledge_on_strand(TransportAttemptId attempt)
             row->ack_attempts,
             " time(s); retaining the sender row for attempt ",
             attempt.value());
+        //@@mutation-site unretirable-receiver-row-retained-erased
         mark_unsettled_on_strand(*row, "acknowledgement attempts exhausted");
+        //@@mutation-end unretirable-receiver-row-retained-erased
         return;
     }
     // Deferred on the row's OWNED timer, yielding to the receiver. A false return
     // usually means its bounded ingress is momentarily full, and recursing here
     // spent all three attempts before that strand could drain a single item.
+    //@@mutation-site acknowledgement-retry-yields-instead-recursing
     schedule_retry_on_strand(attempt, OutboxRow::Retry::acknowledge);
+    //@@mutation-end acknowledgement-retry-yields-instead-recursing
 }
 
 //@@audit-ack unannotated_authority_candidate reason="cancels the retry schedule this row owns, so it is NOT inert, but it is reached only from the annotated terminalize_row and retain_unsettled_row commits and is dominated by them" ref=2026-07-26-0832-annotations-are-in-scope-for-current-slice
@@ -839,8 +879,10 @@ LedgerFetchCoordinator::schedule_retry_on_strand(
         // retry, which failed again — unbounded synchronous recursion on a persistent
         // failure. The row stays owned and named; nothing reschedules it.
         PLOGE(log_, "cannot arm the retry timer; retaining without rescheduling");
+        //@@mutation-site scheduling-failure-reschedule-itself
         mark_unsettled_on_strand(
             *row, "retry timer would not arm", /*schedule_repair=*/false);
+        //@@mutation-end scheduling-failure-reschedule-itself
     }
 }
 
@@ -971,7 +1013,9 @@ LedgerFetchCoordinator::terminalize_on_strand(OutboxRow& row, char const* why)
     row.sealed.reset();
     cancel_quietly(row);
     cancel_retry_quietly(row);  // both timers, explicitly, or a retry outlives the row
+    //@@mutation-site terminal-row-releases-retention-owned
     row.pin.reset();  // the retention this row owned, released here and nowhere else
+    //@@mutation-end terminal-row-releases-retention-owned
     row.retired = true;
     release_work();
     refresh_receipt_obligations_on_strand();
@@ -1023,6 +1067,7 @@ LedgerFetchCoordinator::release_work() noexcept
 //@@callback-funnel
 void
 LedgerFetchCoordinator::deliver_fence_notification(
+    //@@mutation-site fence-disposition-contained-funnel-a
     FenceHandler const& handler) noexcept
 {
     if (!handler)
@@ -1041,6 +1086,7 @@ LedgerFetchCoordinator::deliver_fence_notification(
     {
         PLOGE(log_, "fence handler threw a non-exception");
     }
+    //@@mutation-end fence-disposition-contained-funnel-a
 }
 
 //@@authority transition=ledger_fetch_coordinator.open_bind_projection
@@ -1187,7 +1233,9 @@ LedgerFetchCoordinator::fence(FenceHandler on_fenced)
     // the part that must happen even if everything below is refused.
     work_.fetch_or(kIngressSealedBit, std::memory_order_acq_rel);
 
+    //@@mutation-site fence-budget-bounds-public-boundary
     if (!acquire_fence_permit())
+    //@@mutation-end fence-budget-bounds-public-boundary
     {
         // Refused BEFORE posting: the cap has to bound what the public API can
         // queue onto the io_context, or a caller can enqueue unbounded lambdas and
@@ -1220,7 +1268,9 @@ LedgerFetchCoordinator::fence(FenceHandler on_fenced)
         // closed and nobody terminalizing rows.
         PLOGE(log_, "fence projection failed; ingress sealed, retry fence()");
         release_fence_permit();  // nothing was queued, so nothing will settle it
+        //@@mutation-site fence-projection-cannot-queued-reported
         return Fence::projection_failed;
+        //@@mutation-end fence-projection-cannot-queued-reported
     }
     return Fence::drain_queued;
 }
@@ -1243,7 +1293,9 @@ LedgerFetchCoordinator::begin_fence_on_strand(FenceHandler on_fenced)
         // constructor, and a permit is held for every retained waiter, so the
         // permit bound IS the size bound. Each waiter is retained separately, so a
         // second caller never overwrites the first.
+        //@@mutation-site one-fence-caller-never-overwrites
         fence_waiters_.push_back(std::move(on_fenced));
+        //@@mutation-end one-fence-caller-never-overwrites
     }
     else
     {
@@ -1260,6 +1312,7 @@ LedgerFetchCoordinator::begin_fence_on_strand(FenceHandler on_fenced)
         {
             continue;
         }
+        //@@mutation-site fence-retains-owing-row
         if (row.owes_receipt_settlement())
         {
             // RETAINED. An accepted publication may already have created a
@@ -1274,6 +1327,7 @@ LedgerFetchCoordinator::begin_fence_on_strand(FenceHandler on_fenced)
             // new work.
             continue;
         }
+        //@@mutation-end fence-retains-owing-row
         terminalize_on_strand(row, "fencing");
     }
     refresh_receipt_obligations_on_strand();

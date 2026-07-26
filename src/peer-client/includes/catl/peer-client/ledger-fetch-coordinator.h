@@ -311,11 +311,13 @@ public:
         // value could drain all the way to zero while uncounted work remained —
         // the exact false zero the ceiling exists to prevent, reached by a
         // different route.
+        //@@mutation-site projection-saturation-absorbing-merely-recorded
         if (projection_residue_saturated_.load(std::memory_order_acquire))
         {
             return static_cast<std::size_t>(kMaxOutstandingProjections);
         }
         return static_cast<std::size_t>(
+        //@@mutation-end projection-saturation-absorbing-merely-recorded
             outstanding_projections_.load(std::memory_order_acquire));
     }
 
@@ -474,7 +476,9 @@ private:
         bool
         owes_receipt_settlement() const noexcept
         {
+            //@@mutation-site obligation-derived-from-sticky-fact
             return !retired && may_have_reached_receiver;
+            //@@mutation-end obligation-derived-from-sticky-fact
         }
     };
 
@@ -589,7 +593,9 @@ private:
 
     /// The ONE place a caller-supplied fence notification is delivered.
     void
+    //@@mutation-site fence-disposition-contained-funnel-b
     deliver_fence_notification(FenceHandler const& handler) noexcept;
+    //@@mutation-end fence-disposition-contained-funnel-b
 
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     std::shared_ptr<PeerSet> peers_;
