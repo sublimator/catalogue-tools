@@ -1677,6 +1677,11 @@ TEST(LedgerFetchCoordinatorPublish, ObligationCountIsBackedByNameableRows)
     PublishFixture f{1, /*with_connection=*/true};
     Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
     Access::set_max_ack_attempts(f.coord, 1);
+    // A LONG repair backoff, deliberately. Repair rounds are unbounded, so a zero
+    // backoff makes settle() run the whole loop to success — correct in production
+    // and useless here, where the point is to observe the count while an obligation
+    // is outstanding. Parked, then one round is driven explicitly below.
+    Access::set_repair_backoff(f.coord, std::chrono::milliseconds{60000});
     // Counted refusal, for the reason given on control 38: the receiver's one
     // ingress bound gates publication too, so saturating it never reaches an ack.
     Access::fail_next_acknowledgements(f.coord, 99);
@@ -1707,14 +1712,12 @@ TEST(LedgerFetchCoordinatorPublish, ObligationCountIsBackedByNameableRows)
     EXPECT_EQ(owing, obligations)
         << "the projection must equal the rows it claims to be counting";
 
-    // Letting the acknowledgement succeed retires it, and the projection returns to
-    // zero without ever having been decremented — it is recomputed from the rows.
+    // Let the acknowledgement succeed and let the actor's OWN repair round retire
+    // it — no phase driven from outside. The projection returns to zero without ever
+    // having been decremented, because it is recomputed from the rows.
     Access::fail_next_acknowledgements(f.coord, 0);
     Access::set_max_ack_attempts(f.coord, 8);
-    auto* owed = Access::find_any(f.coord, *Access::attempt_at(f.coord, 0));
-    ASSERT_TRUE(owed != nullptr);
-    Access::set_phase_acknowledging(f.coord, *Access::attempt_at(f.coord, 0));
-    Access::acknowledge(f.coord, *Access::attempt_at(f.coord, 0));
+    Access::repair(f.coord, *Access::attempt_at(f.coord, 0));
     f.settle();
     EXPECT_EQ(f.coord->receipt_obligations(), 0u)
         << "recomputed from rows, so retiring the row retires the count";
@@ -1756,5 +1759,88 @@ TEST(LedgerFetchCoordinatorBind, UnknownPublicationDispositionRetainsTheRow)
     EXPECT_EQ(f.coord->receipt_obligations(), 1u);
     EXPECT_EQ(f.coord->work_outstanding(), 1u)
         << "held, so a fence backpressures rather than reporting a false drain";
+    EXPECT_FALSE(f.coord->accounting_broken());
+}
+
+/// 42. A retained obligation is REPAIRED when the receiver recovers, and the
+///     obligation count reaches zero for real.
+///
+/// This is the control that closes a gap I put there myself: before the repair
+/// round existed, exactly one code path wrote `unsettled` and none read it. The row
+/// held its work unit forever and the fence could never complete — trading "erases
+/// the repair authority" for "wedges the actor", which is arguably worse. Control 40
+/// only reached zero by driving the phase back with a test seam, so nothing proved
+/// the actor could do it on its own.
+///
+/// Repair rounds are unbounded on purpose: the receiver keeps its retained row until
+/// its incarnation dies, so the duty does not expire. What bounds the system is the
+/// NUMBER of such rows, each holding one of kMaxWork units.
+TEST(LedgerFetchCoordinatorPublish, RetainedObligationIsRepairedWhenReceiverRecovers)
+{
+    PublishFixture f{1, /*with_connection=*/true};
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
+    Access::set_repair_backoff(f.coord, std::chrono::milliseconds{0});
+    Access::set_max_ack_attempts(f.coord, 1);
+    // Refuse exactly twice: the first attempt and the first repair round's attempt.
+    // Then behave, so a later round succeeds without the test touching any phase.
+    Access::fail_next_acknowledgements(f.coord, 2);
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+
+    EXPECT_EQ(row->phase, Phase::terminal)
+        << "a repair round re-acknowledged it without anything driving the phase "
+           "from outside";
+    EXPECT_GE(row->ack_attempts, 1u);
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u)
+        << "the obligation reached zero for real, which is what the canonical cut "
+           "means by draining rather than erasing";
+    EXPECT_EQ(f.coord->work_outstanding(), 0u)
+        << "and the work unit came back, so the actor is not permanently reduced";
+    EXPECT_FALSE(f.coord->accounting_broken());
+}
+
+/// 43. A retained obligation whose RECEIVER INCARNATION is gone is released.
+///
+/// The principled terminal condition, and the only one: not an attempt budget
+/// expiring, but the obligation itself ceasing to exist. The receiver's retained row
+/// dies with its incarnation, so there is nothing left to retire and holding a work
+/// unit for it forever would be a leak dressed as diligence.
+TEST(LedgerFetchCoordinatorPublish, ObligationIsReleasedWhenTheReceiverIsGone)
+{
+    PublishFixture f{1, /*with_connection=*/true};
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
+    Access::set_repair_backoff(f.coord, std::chrono::milliseconds{0});
+    Access::set_max_ack_attempts(f.coord, 1);
+    Access::fail_next_acknowledgements(f.coord, 99);
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    // One refused acknowledgement, then the repair loop would spin forever.
+    for (int i = 0; i < 8; ++i)
+    {
+        f.step();
+    }
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+    ASSERT_FALSE(row->retired) << "still owed at this point";
+
+    // The receiver incarnation goes away: release the retention the row holds, which
+    // is what a dead session looks like from here.
+    Access::release_row_pin(f.coord, *attempt);
+    f.settle();
+
+    EXPECT_EQ(row->phase, Phase::terminal)
+        << "nothing left to retire, so the obligation is released rather than held "
+           "forever";
+    EXPECT_TRUE(row->retired);
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u);
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
     EXPECT_FALSE(f.coord->accounting_broken());
 }

@@ -149,6 +149,16 @@ public:
     /// Retry yields.
     static constexpr std::chrono::milliseconds kRetryBackoff{5};
 
+    /// Backoff between REPAIR rounds for a row whose disposition never settled.
+    ///
+    /// Repair rounds are UNBOUNDED, and that is deliberate. The receiver keeps its
+    /// retained row until its incarnation dies, so the duty to retire it does not
+    /// expire — giving up would erase the only authority able to do it, which is the
+    /// defect this whole correction exists to fix. What IS bounded is the number of
+    /// such rows: each holds a work unit out of kMaxWork, so ingress refuses and a
+    /// fence waits. Back-pressure is the bound, not a countdown.
+    static constexpr std::chrono::milliseconds kRepairBackoff{250};
+
     /// Bind bounds. Retry is limited by an attempt budget AND an absolute
     /// deadline; exhausting either terminalizes identically.
     static constexpr std::uint32_t kMaxBindAttempts = 3;
@@ -418,7 +428,7 @@ private:
         /// `deadline` on purpose: multiplexing one timer between "how long until I
         /// give up waiting" and "how long until I try again" makes a stale firing
         /// indistinguishable from a live one, and cancellation ambiguous.
-        enum class Retry : std::uint8_t { none, publish, acknowledge };
+        enum class Retry : std::uint8_t { none, publish, acknowledge, repair };
         /// Which deferred attempt this row owns. Identity-bearing in the sense that
         /// matters: a fired handler re-checks it, so a cancelled retry whose handler
         /// was already queued cannot act on a row that has moved on.
@@ -486,6 +496,11 @@ private:
     /// instead of reporting a false-empty drain.
     void
     mark_unsettled_on_strand(OutboxRow& row, char const* why);
+
+    /// One repair round for a retained row: re-acknowledge if the receipt is in
+    /// hand, otherwise replay publication to learn a disposition we never got.
+    void
+    repair_unsettled_on_strand(TransportAttemptId attempt);
 
     /// Recompute and store the receipt-obligation projection from owned rows.
     void
@@ -580,6 +595,7 @@ private:
     std::chrono::milliseconds publish_deadline_ = kPublishDeadline;
     std::uint32_t max_ack_attempts_ = kMaxAckAttempts;
     std::chrono::milliseconds retry_backoff_ = kRetryBackoff;
+    std::chrono::milliseconds repair_backoff_ = kRepairBackoff;
     std::uint32_t max_bind_attempts_ = kMaxBindAttempts;
     std::chrono::milliseconds bind_deadline_ = kBindDeadline;
     std::chrono::milliseconds absolute_bind_deadline_ = kAbsoluteBindDeadline;

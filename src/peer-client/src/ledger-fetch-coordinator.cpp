@@ -766,7 +766,8 @@ LedgerFetchCoordinator::schedule_retry_on_strand(
     row->retry_kind = kind;
     try
     {
-        row->retry->expires_after(retry_backoff_);
+        row->retry->expires_after(
+            kind == OutboxRow::Retry::repair ? repair_backoff_ : retry_backoff_);
         row->retry->async_wait(
             [self = shared_from_this(), attempt, kind](
                 boost::system::error_code const& ec) {
@@ -786,6 +787,10 @@ LedgerFetchCoordinator::schedule_retry_on_strand(
                 if (kind == OutboxRow::Retry::publish)
                 {
                     self->begin_publish_on_strand(attempt);
+                }
+                else if (kind == OutboxRow::Retry::repair)
+                {
+                    self->repair_unsettled_on_strand(attempt);
                 }
                 else
                 {
@@ -816,6 +821,11 @@ LedgerFetchCoordinator::mark_unsettled_on_strand(OutboxRow& row, char const* why
     row.publish_open = false;
     cancel_quietly(row);
     cancel_retry_quietly(row);
+    // NOT a dead end. Before this, exactly one code path wrote `unsettled` and none
+    // read it: the row held its work unit forever and the fence could never
+    // complete, which trades "erases the repair authority" for "wedges the actor"
+    // — arguably the worse bug. A repair round is scheduled on the row's own timer.
+    schedule_retry_on_strand(row.intent.attempt_id(), OutboxRow::Retry::repair);
     // Deliberately NOT released: not the pin, not the work unit, not the row. The
     // work unit is what makes a fence backpressure on this obligation instead of
     // reporting a false-empty drain, and the pin is what a later repair would need.
@@ -838,6 +848,51 @@ LedgerFetchCoordinator::refresh_receipt_obligations_on_strand() noexcept
         }
     }
     receipt_obligations_.store(obligations, std::memory_order_release);
+}
+
+//@@authority transition=ledger_fetch_coordinator.repair_unsettled_row
+// owner=ledger_fetch_coordinator commit=strand
+void
+LedgerFetchCoordinator::repair_unsettled_on_strand(TransportAttemptId attempt)
+{
+    auto* row = find_row(attempt);
+    if (row == nullptr || row->phase != Phase::unsettled)
+    {
+        return;
+    }
+    if (row->pin.get() == nullptr)
+    {
+        // The session this row was pinned to is gone, so the receiver incarnation
+        // that held the retained row is gone with it and there is nothing left to
+        // retire. THIS is the principled release: not an attempt budget expiring,
+        // but the obligation itself ceasing to exist.
+        terminalize_on_strand(*row, "receiver incarnation gone; obligation moot");
+        return;
+    }
+
+    // Attempt counters reset per round, which is what makes rounds unbounded while
+    // each round stays bounded.
+    if (row->receipt && row->receipt->receiver_commit_sequence() != 0)
+    {
+        row->ack_attempts = 0;
+        row->phase = Phase::acknowledging;
+        refresh_receipt_obligations_on_strand();
+        acknowledge_on_strand(attempt);
+        return;
+    }
+
+    // No receipt: replay the same sealed command to learn the disposition. If the
+    // receiver retained a row for this identity it replays its terminal receipt,
+    // which is exactly the repair the canonical cut describes.
+    if (!row->sealed)
+    {
+        terminalize_on_strand(*row, "unsettled with no command to replay");
+        return;
+    }
+    row->publish_attempts = 0;
+    row->phase = Phase::publishable;
+    refresh_receipt_obligations_on_strand();
+    begin_publish_on_strand(attempt);
 }
 
 //@@authority transition=ledger_fetch_coordinator.terminalize_row

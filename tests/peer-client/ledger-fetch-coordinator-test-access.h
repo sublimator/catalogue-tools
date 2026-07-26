@@ -174,6 +174,39 @@ public:
         c->retry_backoff_ = backoff;
     }
 
+    /// Force ONE repair round. With a zero repair backoff a poll-driven settle runs
+    /// the loop to completion, which is right for production and useless for
+    /// observing an intermediate state — so a control that needs exactly one round
+    /// drives it, with the backoff left long.
+    static void
+    repair(
+        std::shared_ptr<Coordinator> const& c,
+        catl::peer_client::TransportAttemptId attempt)
+    {
+        c->repair_unsettled_on_strand(attempt);
+    }
+
+    /// Drop the retention a row holds, which is what a dead receiver incarnation
+    /// looks like from the coordinator's side.
+    static void
+    release_row_pin(
+        std::shared_ptr<Coordinator> const& c,
+        catl::peer_client::TransportAttemptId attempt)
+    {
+        if (auto* row = find_any(c, attempt); row != nullptr)
+        {
+            row->pin.reset();
+        }
+    }
+
+    static void
+    set_repair_backoff(
+        std::shared_ptr<Coordinator> const& c,
+        std::chrono::milliseconds backoff)
+    {
+        c->repair_backoff_ = backoff;
+    }
+
     static void
     set_publish_deadline(
         std::shared_ptr<Coordinator> const& c,
