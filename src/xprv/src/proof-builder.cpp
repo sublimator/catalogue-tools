@@ -1044,6 +1044,10 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             Hash256 const& state_root_hash,
             Hash256 const& key,
             PeerGenerationPin peer = {}) -> boost::asio::awaitable<WalkResult> {
+        //@@authority transition=prv.T0007 status=provisional scope=statement
+        // owner=unresolved owner_hypothesis=ledger_fetch_coordinator
+        // commit=unresolved calls=walk_to
+        // label=submit_state_tree_interest_without_interest_identity
         auto result = co_await ctx->node_cache->walk_to(
             state_root_hash,
             key,
@@ -1070,6 +1074,10 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             Hash256 const& tx_root_hash,
             Hash256 const& key,
             PeerGenerationPin peer = {}) -> boost::asio::awaitable<WalkResult> {
+        //@@authority transition=prv.T0008 status=provisional scope=statement
+        // owner=unresolved owner_hypothesis=ledger_fetch_coordinator
+        // commit=unresolved calls=walk_to
+        // label=submit_transaction_tree_interest_without_interest_identity
         auto result = co_await ctx->node_cache->walk_to(
             tx_root_hash,
             key,

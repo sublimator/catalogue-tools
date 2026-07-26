@@ -438,7 +438,7 @@ private:
         std::unordered_set<std::string> excluded,
         std::shared_ptr<std::atomic<bool>> cancel);
 
-    //@@authority transition=peer_set.mint_generation_pin owner=peer_set
+    //@@authority transition=peer_set.mint_generation_pin owner=peer_set bind=catl::peer_client::PeerSet::make_peer_pin@04236598c8359c88
     // commit=strand
     PeerGenerationPin
     make_peer_pin(PeerSessionPtr const& expected_session);
@@ -486,7 +486,7 @@ private:
         NodeBatchIntent intent,
         PeerGenerationPin const& pin);
 
-    //@@authority transition=peer_set.release_generation_pin owner=peer_set
+    //@@authority transition=peer_set.release_generation_pin owner=peer_set bind=catl::peer_client::PeerSet::release_peer_pin@ce1f535e08044301
     // commit=strand
     void
     release_peer_pin(
@@ -501,7 +501,7 @@ private:
 
     /// Remove a peer by PeerSet's own decision (eviction, tests). For
     /// deaths reported by the connection itself, use consume_peer_terminal.
-    //@@authority transition=peer_set.remove_peer owner=peer_set commit=strand
+    //@@authority transition=peer_set.remove_peer owner=peer_set commit=strand bind=catl::peer_client::PeerSet::remove_peer@9c8561b27d00c927
     void
     remove_peer(std::string const& key, bool forget_endpoint = true);
 
@@ -515,7 +515,7 @@ private:
     /// pre-admission connect failures remain owned by the existing
     /// note_connect_failure path. Terminal delivery is NOT ordered by
     /// generation, so no scalar mark may gate consumption.
-    //@@authority transition=peer_set.consume_peer_terminal owner=peer_set
+    //@@authority transition=peer_set.consume_peer_terminal owner=peer_set bind=catl::peer_client::PeerSet::consume_peer_terminal@8bfce9e29581687d
     // commit=strand
     void
     consume_peer_terminal(
@@ -760,18 +760,21 @@ private:
         };
         std::unordered_map<uint32_t, LedgerFailure> failed_ledgers;
     };
+    //@@authority state=prv.S0008 status=provisional scope=field bind=catl::peer_client::PeerSet::endpoint_stats_@9bdf35aba9a4d0ef
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=per_peer_ledger_failure_and_selection_evidence
     std::unordered_map<std::string, EndpointStats> endpoint_stats_;
     std::uint64_t next_selection_ticket_ = 0;
     /// One admitted connection instance: the session plus the generation
     /// minted for it at candidate creation. The generation is PeerSet-owned
     /// instance identity — endpoint strings alone cannot distinguish an old
     /// instance's delayed death from the instance currently admitted.
-    //@@authority state=peer_set.connections v4=S16 owner=peer_set
     struct ConnectionEntry
     {
         PeerSessionPtr session;
         std::uint64_t generation = 0;
     };
+    //@@authority state=peer_set.connections v4=S16 owner=peer_set bind=catl::peer_client::PeerSet::connections_@cd8f1261656861a3
     std::map<std::string, ConnectionEntry> connections_;
     /// Strand-confined mint for connection-instance identity. Non-reused.
     std::uint64_t next_connection_generation_ = 0;
@@ -781,7 +784,7 @@ private:
         std::uint64_t connection_generation = 0;
         std::weak_ptr<void> live_handle;
     };
-    //@@authority state=peer_set.active_generation_pins owner=peer_set
+    //@@authority state=peer_set.active_generation_pins owner=peer_set bind=catl::peer_client::PeerSet::active_peer_pins_@c4866b09e05fda6d
     mutable std::map<std::uint64_t, ActivePeerPin> active_peer_pins_;
     std::uint64_t next_peer_pin_id_ = 0;
     uint64_t total_connects_ = 0;
@@ -797,6 +800,9 @@ private:
     std::set<std::string> in_flight_;  // currently connecting
     std::set<std::string> queued_;
     // Request-scoped authority for queued ledger-specific replacement probes.
+    //@@authority state=prv.S0009 status=provisional scope=field bind=catl::peer_client::PeerSet::targeted_connects_@41d9a4f852dd7280
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=queued_history_targeted_connection_authorities
     std::map<std::string, std::vector<TargetedConnectAuthorizationPtr>>
         targeted_connects_;
     std::vector<std::string> pending_connects_;
@@ -807,7 +813,13 @@ private:
     // Active target ledgers from in-flight wait_for_peer calls.
     // Used by candidate admission and same-pool rotation to prioritize peers
     // that can serve any active target. Counts preserve concurrent waiters.
+    //@@authority state=prv.S0010 status=provisional scope=field bind=catl::peer_client::PeerSet::wanted_ledgers_@e19f417f60e84044
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=reference_counted_active_history_targets
     std::map<uint32_t, std::size_t> wanted_ledgers_;
+    //@@authority state=prv.S0011 status=provisional scope=field bind=catl::peer_client::PeerSet::active_target_authorizations_@c1962ff0c49ed8a4
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=live_history_target_authorization_rows
     std::vector<TargetedConnectAuthorizationPtr> active_target_authorizations_;
     // Persistent one-shot priorities registered through prioritize_ledger().
     std::set<uint32_t> prioritized_ledgers_;

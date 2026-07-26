@@ -176,6 +176,24 @@ public:
         projection_failed,
     };
 
+    /// The one terminal transport fact projected back to an accepted ingress
+    /// caller. This does not claim node arrival.
+    enum class SubmissionOutcome : std::uint8_t {
+        /// A receiver receipt proves the packet left its write queue.
+        written,
+        /// The coordinator proved that no packet was written for this ingress.
+        not_written,
+        /// A publication may have reached the receiver, but its bounded
+        /// disposition did not settle. The sender row remains owned and
+        /// repairs.
+        indeterminate,
+    };
+
+    /// Delivered at most once, on the coordinator strand, for every
+    /// `Ingress::reserved` whose executor continues to make progress. Handler
+    /// failure is contained and cannot weaken coordinator accounting.
+    using SubmissionOutcomeHandler = std::function<void(SubmissionOutcome)>;
+
     /// What `fence()` learned synchronously. Same discipline as `Ingress`: it can
     /// only report whether the projection was queued, because everything else is
     /// the strand's to decide.
@@ -251,7 +269,8 @@ public:
         Hash256 ledger_hash,
         NodeTree tree,
         std::vector<SHAMapNodeID> node_ids,
-        PeerGenerationPin pin);
+        PeerGenerationPin pin,
+        SubmissionOutcomeHandler on_outcome = {});
 
     /// Seal ingress and terminalize every row. A LOGICAL fence — see the class
     /// comment; this is not quiescence and must not be used as if it were.
@@ -385,8 +404,13 @@ private:
 
     struct OutboxRow
     {
-        OutboxRow(NodeBatchIntent intent_, PeerGenerationPin pin_) noexcept
-            : intent(std::move(intent_)), pin(std::move(pin_))
+        OutboxRow(
+            NodeBatchIntent intent_,
+            PeerGenerationPin pin_,
+            SubmissionOutcomeHandler on_outcome_) noexcept
+            : intent(std::move(intent_))
+            , pin(std::move(pin_))
+            , on_outcome(std::move(on_outcome_))
         {
         }
 
@@ -399,6 +423,12 @@ private:
 
         NodeBatchIntent intent;  ///< original, retained for life
         PeerGenerationPin pin;   ///< original; each bind gets a share()
+        //@@authority state=prv.S0019 status=provisional scope=field bind=catl::peer_client::LedgerFetchCoordinator::OutboxRow::on_outcome@13ca41889e935acb
+        // owner=unresolved owner_hypothesis=ledger_fetch_coordinator
+        // observed_home=ledger_fetch_coordinator
+        // label=one_shot_submission_observer_until_publication_disposition
+        SubmissionOutcomeHandler on_outcome;
+        bool outcome_delivered = false;
         std::optional<NodeBatchCommand> sealed;
         Phase phase = Phase::awaiting_bind;
 
@@ -454,7 +484,7 @@ private:
         /// Which deferred attempt this row owns. Identity-bearing in the sense that
         /// matters: a fired handler re-checks it, so a cancelled retry whose handler
         /// was already queued cannot act on a row that has moved on.
-        //@@authority state=ledger_fetch_coordinator.row_retry_schedule
+        //@@authority state=ledger_fetch_coordinator.row_retry_schedule bind=catl::peer_client::LedgerFetchCoordinator::OutboxRow::retry_kind@9c2b2fcf9be96802
         // owner=ledger_fetch_coordinator
         Retry retry_kind = Retry::none;
         std::shared_ptr<boost::asio::steady_timer> retry;
@@ -490,7 +520,8 @@ private:
         Hash256 ledger_hash,
         NodeTree tree,
         std::vector<SHAMapNodeID> node_ids,
-        PeerGenerationPin pin);
+        PeerGenerationPin pin,
+        SubmissionOutcomeHandler on_outcome);
 
     void
     begin_bind_on_strand(TransportAttemptId attempt);
@@ -556,6 +587,16 @@ private:
     void
     terminalize_on_strand(OutboxRow& row, char const* why);
 
+    static void
+    deliver_submission_outcome_noexcept(
+        SubmissionOutcomeHandler& handler,
+        SubmissionOutcome outcome) noexcept;
+
+    void
+    deliver_submission_outcome_on_strand(
+        OutboxRow& row,
+        SubmissionOutcome outcome) noexcept;
+
     /// Is either bind bound spent? The single spelling of that question.
     static bool
     bind_bounds_spent(OutboxRow const& row) noexcept;
@@ -608,7 +649,7 @@ private:
     /// exact attempt and sender generation it owes, which is what lets it mint the
     /// receiver's exact acknowledgement. A fence must not erase a row that still
     /// owes one — the receiver keeps its side, and only this identity retires it.
-    //@@authority state=ledger_fetch_coordinator.sender_outbox
+    //@@authority state=ledger_fetch_coordinator.sender_outbox bind=catl::peer_client::LedgerFetchCoordinator::rows_@723e122d06318285
     // owner=ledger_fetch_coordinator
     std::vector<OutboxRow> rows_;
     /// Double-buffered on purpose. Delivery swaps these two — `swap` cannot

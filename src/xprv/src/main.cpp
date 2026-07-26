@@ -278,6 +278,8 @@ print_usage()
         << "  --bind <addr:port>      listen address (default: "
            "127.0.0.1:8080)\n"
         << "  --threads <N>           I/O threads (default: 1)\n"
+        << "  --ledger-fetch-coordinator\n"
+        << "                          use candidate managed node transport\n"
         << "  --node-credentials <p>  path to persistent node seed file "
            "(or set CATL_NODE_CREDENTIALS; CATL_NODE_SEED env wins)\n"
         << "\n"
@@ -638,6 +640,11 @@ main(int argc, char* argv[])
             else if (arg == "--no-cache")
             {
                 setenv("XPRV_NO_CACHE", "1", 1);
+                ++pos;
+            }
+            else if (arg == "--ledger-fetch-coordinator")
+            {
+                setenv("XPRV_LEDGER_FETCH_COORDINATOR", "1", 1);
                 ++pos;
             }
             else if (arg == "--node-cache-size" && pos + 1 < command_args.size())

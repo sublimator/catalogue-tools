@@ -379,6 +379,8 @@ make_engine(
     engine->set_max_walk_peer_retries(config.max_walk_peer_retries);
     engine->set_fetch_stale_multiplier(config.fetch_stale_multiplier);
     engine->set_rpc_max_concurrent(config.rpc_max_concurrent);
+    engine->set_ledger_fetch_coordinator_enabled(
+        config.ledger_fetch_coordinator);
     return engine;
 }
 

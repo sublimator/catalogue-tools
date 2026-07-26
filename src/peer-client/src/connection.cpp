@@ -1051,7 +1051,7 @@ peer_connection::drain_payload(std::size_t remaining)
         });
 }
 
-//@@authority transition=peer_client.admit_write owner=peer_client commit=strand
+//@@authority transition=peer_client.admit_write owner=peer_client commit=strand bind=catl::peer_client::async_send_packet@aa941b4cfb0ffae8
 // Admission authority. Refuses before any queue mutation once admission closes.
 void
 peer_connection::async_send_packet(
@@ -1111,7 +1111,7 @@ peer_connection::async_send_packet(
     do_write();
 }
 
-//@@authority transition=peer_client.initiate_write owner=peer_client commit=strand
+//@@authority transition=peer_client.initiate_write owner=peer_client commit=strand bind=catl::peer_client::do_write@ed5de5ed7752db65
 // Selects one successor into the active row and hands its bytes to Asio.
 void
 peer_connection::do_write()
@@ -1188,7 +1188,7 @@ peer_connection::do_write()
     }
 }
 
-//@@authority transition=peer_client.complete_write owner=peer_client commit=strand
+//@@authority transition=peer_client.complete_write owner=peer_client commit=strand bind=catl::peer_client::on_write_complete@16dc470ccb9bfcd7
 // The only releaser of the active row's physical bytes.
 void
 peer_connection::on_write_complete(boost::system::error_code ec)
@@ -1703,7 +1703,7 @@ peer_connection::close()
     close_impl();
 }
 
-//@@authority transition=peer_client.settle_connection owner=peer_client commit=strand
+//@@authority transition=peer_client.settle_connection owner=peer_client commit=strand bind=catl::peer_client::settle_and_close@d1f665b00d68defa
 // The single teardown transition: commits admission closed, settles
 // owner-local, then exposes callbacks.
 //@@settlement
@@ -1786,7 +1786,7 @@ peer_connection::settle_and_close(
     }
 }
 
-//@@authority transition=peer_client.select_close_disposition owner=peer_client commit=strand
+//@@authority transition=peer_client.select_close_disposition owner=peer_client commit=strand bind=catl::peer_client::select_close_disposition@089f284025217888
 // Mints the terminal disposition into an owned row before external code runs.
 void
 peer_connection::select_close_disposition(

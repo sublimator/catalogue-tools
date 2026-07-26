@@ -631,6 +631,9 @@ private:
     std::shared_ptr<EndpointTracker> tracker_;
 
     DisconnectCallback on_disconnect_;
+    //@@authority state=prv.S0007 status=provisional scope=field bind=catl::peer_client::PeerClient::node_response_handler_@21740938935a972d
+    // owner=unresolved owner_hypothesis=peer_client observed_home=peer_client
+    // label=singleton_uncorrelated_node_response_sink
     NodeResponseHandler node_response_handler_;
 
     static LogPartition log_;

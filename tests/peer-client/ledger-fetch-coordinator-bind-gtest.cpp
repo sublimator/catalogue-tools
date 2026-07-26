@@ -42,6 +42,7 @@ using Ingress = LedgerFetchCoordinator::Ingress;
 using Phase = LedgerFetchCoordinator::Phase;
 using Lifecycle = LedgerFetchCoordinator::Lifecycle;
 using Fence = LedgerFetchCoordinator::Fence;
+using SubmissionOutcome = LedgerFetchCoordinator::SubmissionOutcome;
 namespace asio = boost::asio;
 
 namespace {
@@ -116,10 +117,14 @@ struct CoordFixture
     }
 
     Ingress
-    submit()
+    submit(LedgerFetchCoordinator::SubmissionOutcomeHandler on_outcome = {})
     {
         return coord->submit_node_batch_on_pin(
-            ledger_hash(), NodeTree::account_state, nodes(), pin());
+            ledger_hash(),
+            NodeTree::account_state,
+            nodes(),
+            pin(),
+            std::move(on_outcome));
     }
 
     /// Run exactly one ready handler. Returns how many ran (0 or 1).
@@ -713,8 +718,13 @@ TEST(LedgerFetchCoordinatorBind, RowCommitFailureReleasesTheGrantedPermit)
 {
     CoordFixture f;
     Access::set_row_commit_failure(f.coord, true);
+    std::vector<SubmissionOutcome> outcomes;
 
-    ASSERT_EQ(f.submit(), Ingress::reserved)
+    ASSERT_EQ(
+        f.submit([&outcomes](SubmissionOutcome outcome) {
+            outcomes.push_back(outcome);
+        }),
+        Ingress::reserved)
         << "the synchronous return only ever claimed reserved ingress";
     EXPECT_EQ(f.coord->work_outstanding(), 1u);
 
@@ -723,6 +733,8 @@ TEST(LedgerFetchCoordinatorBind, RowCommitFailureReleasesTheGrantedPermit)
     EXPECT_EQ(f.coord->work_outstanding(), 0u)
         << "commit-or-release: a failed commit must release the permit";
     EXPECT_EQ(Access::row_count(f.coord), 0u) << "and leave no partial row";
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_EQ(outcomes.front(), SubmissionOutcome::not_written);
 
     // Disarmed, the same submission commits — so the release above was the
     // failpoint, not a fixture that never got started.
@@ -1203,6 +1215,7 @@ struct PublishFixture
         {
             ssl.emplace(asio::ssl::context::tlsv12_client);
             PeerClientTestAccess::seed_open_connection(*client, *ssl);
+            PeerClientTestAccess::seed_successful_packet_writes(*client);
         }
         generation =
             PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, client);
@@ -1210,13 +1223,14 @@ struct PublishFixture
     }
 
     Ingress
-    submit()
+    submit(LedgerFetchCoordinator::SubmissionOutcomeHandler on_outcome = {})
     {
         return coord->submit_node_batch_on_pin(
             CoordFixture::ledger_hash(),
             NodeTree::account_state,
             CoordFixture::nodes(),
-            PeerSetTestAccess::make_peer_pin_for_session(io, peers, client));
+            PeerSetTestAccess::make_peer_pin_for_session(io, peers, client),
+            std::move(on_outcome));
     }
 
     /// Run exactly one ready handler, so a control can observe a row mid-flight.
@@ -1379,7 +1393,12 @@ TEST(LedgerFetchCoordinatorPublish, RefusedPublicationRetriesThenTerminalizes)
 TEST(LedgerFetchCoordinatorPublish, AdmittedWriteIsAcknowledgedAndRetiresTheRow)
 {
     PublishFixture f{1, /*with_connection=*/true};
-    ASSERT_EQ(f.submit(), Ingress::reserved);
+    std::vector<SubmissionOutcome> outcomes;
+    ASSERT_EQ(
+        f.submit([&outcomes](SubmissionOutcome outcome) {
+            outcomes.push_back(outcome);
+        }),
+        Ingress::reserved);
     f.settle();
 
     auto const attempt = Access::attempt_at(f.coord, 0);
@@ -1403,6 +1422,8 @@ TEST(LedgerFetchCoordinatorPublish, AdmittedWriteIsAcknowledgedAndRetiresTheRow)
     EXPECT_FALSE(row->sealed.has_value());
     EXPECT_EQ(f.coord->work_outstanding(), 0u);
     EXPECT_FALSE(f.coord->accounting_broken());
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_EQ(outcomes.front(), SubmissionOutcome::written);
 }
 
 /// 35. An acknowledgement that cannot be queued is retried, and its exhaustion
@@ -1741,7 +1762,12 @@ TEST(LedgerFetchCoordinatorBind, UnknownPublicationDispositionRetainsTheRow)
     Access::set_max_publish_attempts(f.coord, 1);
     Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
 
-    ASSERT_EQ(f.submit(), Ingress::reserved);
+    std::vector<SubmissionOutcome> outcomes;
+    ASSERT_EQ(
+        f.submit([&outcomes](SubmissionOutcome outcome) {
+            outcomes.push_back(outcome);
+        }),
+        Ingress::reserved);
     f.settle();
 
     auto const attempt = Access::attempt_at(f.coord, 0);
@@ -1759,6 +1785,8 @@ TEST(LedgerFetchCoordinatorBind, UnknownPublicationDispositionRetainsTheRow)
     EXPECT_EQ(f.coord->receipt_obligations(), 1u);
     EXPECT_EQ(f.coord->work_outstanding(), 1u)
         << "held, so a fence backpressures rather than reporting a false drain";
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_EQ(outcomes.front(), SubmissionOutcome::indeterminate);
     EXPECT_FALSE(f.coord->accounting_broken());
 }
 

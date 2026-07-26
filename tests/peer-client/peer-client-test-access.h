@@ -234,6 +234,17 @@ public:
         client.connection_->socket().lowest_layer().open(tcp::v4(), ec);
         ASSERT_FALSE(ec);
     }
+
+    static void
+    seed_successful_packet_writes(PeerClient& client)
+    {
+        ASSERT_TRUE(client.connection_);
+        client.connection_->set_write_initiator_for_test(
+            [](asio::const_buffer,
+               peer_connection::test_write_completion complete) {
+                complete({});
+            });
+    }
 };
 
 }  // namespace catl::peer_client

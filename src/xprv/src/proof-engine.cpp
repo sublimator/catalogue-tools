@@ -48,6 +48,10 @@ ProofEngine::create(asio::io_context& io, NetworkConfig config)
 void
 ProofEngine::start()
 {
+    if (start_called_)
+        throw std::logic_error("ProofEngine::start may be called only once");
+    start_called_ = true;
+
     // VL cache
     vl_cache_ = VlCache::create(io_, config_.vl_host, config_.vl_port);
     // Authenticate list contents against the pinned publisher key independently
@@ -74,14 +78,6 @@ ProofEngine::start()
     // Wire VL → validation buffer: when VL loads, push UNL keys
     // We do this via a one-shot fetch, then the refresh will re-push.
     // For now, the VL co_get in prove() handles the initial UNL push.
-
-    // Node cache (content-addressed wire node store)
-    node_cache_ = NodeCache::create(
-        io_,
-        {.max_entries = node_cache_size_,
-         .fetch_timeout = fetch_timeout_,
-         .max_walk_peer_retries = max_walk_peer_retries_,
-         .fetch_stale_multiplier = fetch_stale_multiplier_});
 
     // Shared RPC client with concurrency limiter
     rpc_ = std::make_shared<catl::rpc::RpcClient>(
@@ -112,6 +108,32 @@ ProofEngine::start()
         " crawls=",
         pool.max_in_flight_crawls);
     peers_ = PeerSet::create(io_, peer_opts);
+
+    if (ledger_fetch_coordinator_enabled_)
+    {
+        //@@authority transition=prv.T0044 status=provisional scope=statement
+        // owner=unresolved owner_hypothesis=proof_engine
+        // commit=startup_coroutine calls=create
+        // label=construct_one_ledger_fetch_coordinator_per_peer_set
+        ledger_fetch_coordinator_ = LedgerFetchCoordinator::create(io_, peers_);
+        if (!ledger_fetch_coordinator_)
+            throw std::runtime_error(
+                "failed to create ledger fetch coordinator generation");
+    }
+
+    // Node cache (content-addressed wire node store). The optional coordinator
+    // is selected once here; request callsites do not branch on server mode.
+    //@@authority transition=prv.T0004 status=provisional scope=statement
+    // owner=unresolved owner_hypothesis=ledger_data_provider
+    // commit=startup_coroutine calls=create
+    // label=construct_live_node_cache_with_selected_transport_capability
+    node_cache_ = NodeCache::create(
+        io_,
+        {.max_entries = node_cache_size_,
+         .fetch_timeout = fetch_timeout_,
+         .max_walk_peer_retries = max_walk_peer_retries_,
+         .fetch_stale_multiplier = fetch_stale_multiplier_},
+        ledger_fetch_coordinator_);
 
     // Wire peers → validation buffer: unsolicited validations
     auto vbuf = val_buffer_;
@@ -231,14 +253,35 @@ ProofEngine::stop()
     {
         val_buffer_->stop();
     }
-    // The validator worker is joined above. Peer and heartbeat operations are
-    // quiesced when the owning command stops the io_context.
+    if (ledger_fetch_coordinator_)
+    {
+        // Logical seal only. The owning io_context must keep running to execute
+        // the coordinator's drain; stop() does not pretend this is quiescence.
+        //@@authority transition=prv.T0045 status=provisional scope=statement
+        // owner=unresolved owner_hypothesis=proof_engine commit=atomic
+        // calls=fence label=seal_managed_node_ingress_before_io_context_stop
+        auto const disposition = ledger_fetch_coordinator_->fence();
+        if (disposition != LedgerFetchCoordinator::Fence::drain_queued)
+        {
+            PLOGW(
+                log_,
+                "[",
+                net_label_,
+                "] ledger fetch coordinator fence notification refused");
+        }
+    }
+    // The validator worker is joined above. The owning command halts peer and
+    // heartbeat execution by stopping the io_context; that process-terminal
+    // boundary is not a graceful drain or a reusable-engine quiescence claim.
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // prove() — build a proof chain using shared services
 // ═══════════════════════════════════════════════════════════════════════
 
+//@@authority transition=prv.T0005 status=provisional scope=function
+// owner=unresolved owner_hypothesis=ledger_data_control commit=unresolved
+// label=begin_real_proof_operation_without_authority_identity
 asio::awaitable<ProofEngine::ProveResult>
 ProofEngine::prove(
     std::string const& tx_hash,
@@ -334,6 +377,10 @@ ProofEngine::prove(
         .on_step = std::move(on_step),
     };
 
+    //@@authority transition=prv.T0006 status=provisional scope=statement
+    // owner=unresolved owner_hypothesis=ledger_data_control commit=unresolved
+    // calls=build_proof
+    // label=enter_shared_proof_build_without_operation_identity
     auto result = co_await build_proof(svc, tx_hash);
     result.chain.network_id = config_.network_id;
 
@@ -564,6 +611,23 @@ ProofEngine::co_health()
     if (latest)
         status.latest_quorum_seq = latest->ledger_seq;
     status.validation_buffer = co_await val_buffer_->co_stats();
+
+    if (ledger_fetch_coordinator_)
+    {
+        status.ledger_fetch_coordinator.enabled = true;
+        status.ledger_fetch_coordinator.lifecycle =
+            ledger_fetch_coordinator_->lifecycle();
+        status.ledger_fetch_coordinator.ingress_sealed =
+            ledger_fetch_coordinator_->ingress_sealed();
+        status.ledger_fetch_coordinator.work_outstanding =
+            ledger_fetch_coordinator_->work_outstanding();
+        status.ledger_fetch_coordinator.outstanding_bind_projections =
+            ledger_fetch_coordinator_->outstanding_bind_projections();
+        status.ledger_fetch_coordinator.receipt_obligations =
+            ledger_fetch_coordinator_->receipt_obligations();
+        status.ledger_fetch_coordinator.accounting_broken =
+            ledger_fetch_coordinator_->accounting_broken();
+    }
 
     co_return status;
 }

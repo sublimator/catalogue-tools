@@ -65,6 +65,11 @@ struct Config
     /// this multiplier. A new caller will re-send the request.
     int fetch_stale_multiplier = 2;
 
+    /// Candidate transport cut: managed PeerSet generation pins submit node
+    /// batches through LedgerFetchCoordinator. Default false until the local
+    /// proof/SSE and deterministic-interleaving gates are green.
+    bool ledger_fetch_coordinator = false;
+
     /// Path to the peer endpoint SQLite cache. Empty = platform default
     /// (~/.config/xprv/peer-endpoints.sqlite3).
     std::string peer_cache_path;

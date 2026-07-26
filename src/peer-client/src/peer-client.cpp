@@ -866,6 +866,9 @@ PeerClient::set_tracker(std::shared_ptr<EndpointTracker> tracker)
     tracker_ = std::move(tracker);
 }
 
+//@@authority transition=prv.T0021 status=provisional scope=function bind=catl::peer_client::set_node_response_handler@6ad81a5e64932f0e
+// owner=unresolved owner_hypothesis=peer_client commit=mutex
+// touches=prv.S0007 label=replace_singleton_node_response_sink
 void
 PeerClient::set_node_response_handler(NodeResponseHandler handler)
 {
@@ -924,6 +927,9 @@ PeerClient::send_get_nodes(
         });
 }
 
+//@@authority transition=prv.T0023 status=provisional scope=function bind=catl::peer_client::send_get_nodes_on_strand@2ee51539b2845168
+// owner=unresolved owner_hypothesis=peer_client commit=strand
+// label=legacy_node_packet_write_without_replayable_receipt
 void
 PeerClient::send_get_nodes_on_strand(
     Hash256 ledger_hash,
@@ -1457,7 +1463,7 @@ PeerClient::do_connect(
         // Always notify the observer (PeerSet needs to know). The
         // terminal fact is formed here, once, on the client strand —
         // this is the sole export commit for this instance's death.
-        //@@authority channel=peer_client.terminal_export owner=peer_client
+        //@@authority channel=peer_client.terminal_export owner=peer_client bind=catl::peer_client::do_connect@e37232fc24310fa4
         // commit=client-strand
         if (self->on_disconnect_)
         {
@@ -1911,6 +1917,12 @@ PeerClient::handle_ping(std::vector<uint8_t> const& payload)
     }
 }
 
+//@@authority channel=prv.C0002 status=provisional scope=function bind=catl::peer_client::dispatch_ledger_data@f7d81d9d3abef04f
+// endpoints=peer_client,node_cache channel_semantics=legacy_uncorrelated
+// label=uncorrelated_node_response_delivery_to_singleton_sink
+//@@authority transition=prv.T0022 status=provisional scope=function bind=catl::peer_client::dispatch_ledger_data@f7d81d9d3abef04f
+// owner=unresolved owner_hypothesis=peer_client commit=strand
+// touches=prv.S0007 label=deliver_uncorrelated_node_response_to_shared_sink
 void
 PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
 {
@@ -1966,7 +1978,12 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         }
         if (handler)
         {
-            handler(msg);
+            //@@authority transition=prv.T0041 status=provisional bind=expression_statement@0a62d39eed858ac3
+            //scope=statement
+            // owner=unresolved owner_hypothesis=peer_client commit=strand
+            // touches=prv.S0007
+            // label=invoke_snapshot_of_singleton_uncorrelated_response_sink
+            handler(msg); //@@authority-target ids=prv.T0041
         }
     }
 

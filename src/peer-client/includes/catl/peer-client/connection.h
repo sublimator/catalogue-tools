@@ -366,7 +366,7 @@ private:
     //                      bytes: the two live in the same row but are consumed
     //                      by different owners at different times.
     //   admission_closed_  admission gate. Refuse before queue mutation.
-    //@@authority state=peer_client.connection_write_rows v4=S51 owner=peer_client
+    //@@authority state=peer_client.connection_write_rows v4=S51 owner=peer_client bind=catl::peer_client::peer_connection::write_queue_@dd3d0279829e5b18
     // S51 is PeerClient.PhysicalLifecycle[GenerationId] — "socket, timers, write
     // queue, and callback gates", minted by T31. These rows are the write-queue
     // portion of it. peer_connection is deliberately NOT an owner: it is

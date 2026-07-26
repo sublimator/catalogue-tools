@@ -19,7 +19,7 @@ static LogPartition log_("fetch-coord", LogLevel::INHERIT);
 
 std::atomic<std::uint64_t> LedgerFetchCoordinator::next_sender_generation_{0};
 
-//@@authority transition=ledger_fetch_coordinator.mint_sender_generation
+//@@authority transition=ledger_fetch_coordinator.mint_sender_generation bind=catl::peer_client::allocate_sender_generation@dc4f050892bfb475
 // owner=ledger_fetch_coordinator commit=atomic
 std::optional<SenderGenerationId>
 LedgerFetchCoordinator::allocate_sender_generation() noexcept
@@ -91,14 +91,15 @@ LedgerFetchCoordinator::LedgerFetchCoordinator(
     fence_delivery_.reserve(kMaxFenceWaiters);
 }
 
-//@@authority transition=ledger_fetch_coordinator.reserve_ingress
+//@@authority transition=ledger_fetch_coordinator.reserve_ingress bind=catl::peer_client::submit_node_batch_on_pin@4fc8853fb941b09d
 // owner=ledger_fetch_coordinator commit=atomic
 LedgerFetchCoordinator::Ingress
 LedgerFetchCoordinator::submit_node_batch_on_pin(
     Hash256 ledger_hash,
     NodeTree tree,
     std::vector<SHAMapNodeID> node_ids,
-    PeerGenerationPin pin)
+    PeerGenerationPin pin,
+    SubmissionOutcomeHandler on_outcome)
 {
     if (!pin)
     {
@@ -152,12 +153,14 @@ LedgerFetchCoordinator::submit_node_batch_on_pin(
              ledger_hash = std::move(ledger_hash),
              tree,
              node_ids = std::move(node_ids),
-             pin = std::move(pin)]() mutable {
+             pin = std::move(pin),
+             on_outcome = std::move(on_outcome)]() mutable {
                 self->commit_row_on_strand(
                     std::move(ledger_hash),
                     tree,
                     std::move(node_ids),
-                    std::move(pin));
+                    std::move(pin),
+                    std::move(on_outcome));
             });
     }
     catch (...)
@@ -225,19 +228,22 @@ LedgerFetchCoordinator::cancel_quietly(OutboxRow& row) noexcept
     }
 }
 
-//@@authority transition=ledger_fetch_coordinator.commit_sender_row
+//@@authority transition=ledger_fetch_coordinator.commit_sender_row bind=catl::peer_client::commit_row_on_strand@b0d7ce1b2979e204
 // owner=ledger_fetch_coordinator commit=strand
 void
 LedgerFetchCoordinator::commit_row_on_strand(
     Hash256 ledger_hash,
     NodeTree tree,
     std::vector<SHAMapNodeID> node_ids,
-    PeerGenerationPin pin)
+    PeerGenerationPin pin,
+    SubmissionOutcomeHandler on_outcome)
 {
     if (ingress_sealed())
     {
         // The permit was granted before the seal landed. Releasing it here is
         // what lets the fence complete without waiting on a caller.
+        deliver_submission_outcome_noexcept(
+            on_outcome, SubmissionOutcome::not_written);
         release_work();
         check_fenced_on_strand();
         return;
@@ -249,6 +255,8 @@ LedgerFetchCoordinator::commit_row_on_strand(
         // Refuse at the ceiling with no partial row. A wrapped attempt ID could
         // be matched by a late event belonging to a retired attempt.
         PLOGE(log_, "attempt id exhausted; refusing without mutation");
+        deliver_submission_outcome_noexcept(
+            on_outcome, SubmissionOutcome::not_written);
         release_work();
         check_fenced_on_strand();
         return;
@@ -284,7 +292,8 @@ LedgerFetchCoordinator::commit_row_on_strand(
         // every live row holds a permit, so at most kMaxWork - 1 remain here.
         static_assert(std::is_nothrow_move_constructible_v<OutboxRow>);
         attempt = intent.attempt_id();
-        rows_.emplace_back(std::move(intent), std::move(pin));
+        rows_.emplace_back(
+            std::move(intent), std::move(pin), std::move(on_outcome));
         auto& row = rows_.back();
         row.deadline = std::move(timer);
         row.retry = std::move(retry_timer);
@@ -300,6 +309,8 @@ LedgerFetchCoordinator::commit_row_on_strand(
     {
         //@@mutation-site failed-row-commit-releases-permit
         PLOGE(log_, "row commit failed; releasing the accepted ingress permit");
+        deliver_submission_outcome_noexcept(
+            on_outcome, SubmissionOutcome::not_written);
         release_work();
         //@@mutation-end failed-row-commit-releases-permit
         check_fenced_on_strand();
@@ -309,7 +320,7 @@ LedgerFetchCoordinator::commit_row_on_strand(
     begin_bind_on_strand(attempt);
 }
 
-//@@authority transition=ledger_fetch_coordinator.begin_bind
+//@@authority transition=ledger_fetch_coordinator.begin_bind bind=catl::peer_client::begin_bind_on_strand@ca0fc5d4853038aa
 // owner=ledger_fetch_coordinator commit=strand
 void
 LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
@@ -420,7 +431,7 @@ LedgerFetchCoordinator::begin_bind_on_strand(TransportAttemptId attempt)
     //@@mutation-end bind-initiation-throws-orphan-row
 }
 
-//@@authority transition=ledger_fetch_coordinator.settle_bind
+//@@authority transition=ledger_fetch_coordinator.settle_bind bind=catl::peer_client::settle_bind_on_strand@be442fb60dc4a6a9
 // owner=ledger_fetch_coordinator commit=strand
 bool
 LedgerFetchCoordinator::settle_bind_on_strand(
@@ -480,7 +491,7 @@ LedgerFetchCoordinator::settle_bind_on_strand(
     return true;
 }
 
-//@@authority transition=ledger_fetch_coordinator.publish_command
+//@@authority transition=ledger_fetch_coordinator.publish_command bind=catl::peer_client::begin_publish_on_strand@36aca9cf9aea234f
 // owner=ledger_fetch_coordinator commit=strand
 void
 LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
@@ -578,9 +589,13 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
                     attempt, revision, std::nullopt, /*timed_out=*/true);
             });
 
-        // REPLAY, not re-mint: the same sealed command, same attempt identity. A
-        // second identity for one payload is exactly what the receiver's
+        // REPLAY, not re-mint: the same sealed command, same attempt identity.
+        // A second identity for one payload is exactly what the receiver's
         // identity_conflict refusal exists to catch.
+        //@@authority channel=prv.C0003 status=provisional scope=statement bind=submit_node_batch@c78a495a729a6a5e
+        // endpoints=ledger_fetch_coordinator,peer_client
+        // channel_semantics=command_receipt calls=submit_node_batch
+        // label=candidate_exact_node_batch_write_command_and_receipt_channel
         accepted = session->submit_node_batch(
             *row->sealed,
             [self = shared_from_this(), attempt, revision](
@@ -593,7 +608,7 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
                         self->settle_publication_on_strand(
                             attempt, revision, std::move(receipt), false);
                     });
-            });
+            }); //@@authority-target ids=prv.C0003
     }
     catch (...)
     {
@@ -615,7 +630,7 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
     }
 }
 
-//@@authority transition=ledger_fetch_coordinator.settle_publication
+//@@authority transition=ledger_fetch_coordinator.settle_publication bind=catl::peer_client::settle_publication_on_strand@614c9e537cb57e19
 // owner=ledger_fetch_coordinator commit=strand
 bool
 LedgerFetchCoordinator::settle_publication_on_strand(
@@ -647,6 +662,11 @@ LedgerFetchCoordinator::settle_publication_on_strand(
         row->phase = Phase::acknowledging;
         row->receipt = std::move(receipt);
         //@@mutation-end row-stops-projecting-before-acknowledgement
+        deliver_submission_outcome_on_strand(
+            *row,
+            row->receipt->outcome() == NodeBatchWriteOutcome::written
+                ? SubmissionOutcome::written
+                : SubmissionOutcome::not_written);
 
         if (row->receipt->receiver_commit_sequence() == 0)
         {
@@ -708,7 +728,7 @@ LedgerFetchCoordinator::settle_publication_on_strand(
     return true;
 }
 
-//@@authority transition=ledger_fetch_coordinator.acknowledge_receipt
+//@@authority transition=ledger_fetch_coordinator.acknowledge_receipt bind=catl::peer_client::acknowledge_on_strand@47ce7f9ef93212af
 // owner=ledger_fetch_coordinator commit=strand
 void
 LedgerFetchCoordinator::acknowledge_on_strand(TransportAttemptId attempt)
@@ -811,7 +831,7 @@ LedgerFetchCoordinator::cancel_retry_quietly(OutboxRow& row) noexcept
     }
 }
 
-//@@authority transition=ledger_fetch_coordinator.schedule_retry
+//@@authority transition=ledger_fetch_coordinator.schedule_retry bind=catl::peer_client::schedule_retry_on_strand@6a6991755ceb8a90
 // owner=ledger_fetch_coordinator commit=strand
 void
 LedgerFetchCoordinator::schedule_retry_on_strand(
@@ -886,7 +906,7 @@ LedgerFetchCoordinator::schedule_retry_on_strand(
     }
 }
 
-//@@authority transition=ledger_fetch_coordinator.retain_unsettled_row
+//@@authority transition=ledger_fetch_coordinator.retain_unsettled_row bind=catl::peer_client::mark_unsettled_on_strand@4e198aa3515f20da
 // owner=ledger_fetch_coordinator commit=strand
 void
 LedgerFetchCoordinator::mark_unsettled_on_strand(
@@ -903,6 +923,10 @@ LedgerFetchCoordinator::mark_unsettled_on_strand(
         "; the receiver may hold a row only this identity can retire");
     row.phase = Phase::unsettled;
     row.publish_open = false;
+    deliver_submission_outcome_on_strand(
+        row,
+        row.may_have_reached_receiver ? SubmissionOutcome::indeterminate
+                                      : SubmissionOutcome::not_written);
     cancel_quietly(row);
     cancel_retry_quietly(row);
     // NOT a dead end. Before this, exactly one code path wrote `unsettled` and none
@@ -937,7 +961,7 @@ LedgerFetchCoordinator::refresh_receipt_obligations_on_strand() noexcept
     receipt_obligations_.store(obligations, std::memory_order_release);
 }
 
-//@@authority transition=ledger_fetch_coordinator.repair_unsettled_row
+//@@authority transition=ledger_fetch_coordinator.repair_unsettled_row bind=catl::peer_client::repair_unsettled_on_strand@4b11c689adb951dd
 // owner=ledger_fetch_coordinator commit=strand
 void
 LedgerFetchCoordinator::repair_unsettled_on_strand(TransportAttemptId attempt)
@@ -994,7 +1018,47 @@ LedgerFetchCoordinator::repair_unsettled_on_strand(TransportAttemptId attempt)
     begin_publish_on_strand(attempt);
 }
 
-//@@authority transition=ledger_fetch_coordinator.terminalize_row
+//@@authority transition=prv.T0053 status=provisional scope=function bind=catl::peer_client::deliver_submission_outcome_noexcept@d79177834044413d
+// owner=unresolved owner_hypothesis=ledger_fetch_coordinator commit=strand
+// touches=prv.S0019 label=deliver_submission_observer_exception_contained
+void
+LedgerFetchCoordinator::deliver_submission_outcome_noexcept(
+    SubmissionOutcomeHandler& handler,
+    SubmissionOutcome outcome) noexcept
+{
+    auto delivery = std::move(handler);
+    handler = {};
+    if (!delivery)
+        return;
+    try
+    {
+        delivery(outcome);
+    }
+    catch (std::exception const& e)
+    {
+        PLOGE(log_, "submission outcome handler threw: ", e.what());
+    }
+    catch (...)
+    {
+        PLOGE(log_, "submission outcome handler threw a non-exception");
+    }
+}
+
+//@@authority transition=prv.T0054 status=provisional scope=function bind=catl::peer_client::deliver_submission_outcome_on_strand@b17133adbb84c92c
+// owner=unresolved owner_hypothesis=ledger_fetch_coordinator commit=strand
+// touches=prv.S0019 label=consume_submission_observer_exactly_once
+void
+LedgerFetchCoordinator::deliver_submission_outcome_on_strand(
+    OutboxRow& row,
+    SubmissionOutcome outcome) noexcept
+{
+    if (row.outcome_delivered)
+        return;
+    row.outcome_delivered = true;
+    deliver_submission_outcome_noexcept(row.on_outcome, outcome);
+}
+
+//@@authority transition=ledger_fetch_coordinator.terminalize_row bind=catl::peer_client::terminalize_on_strand@576477a17202fcc9
 // owner=ledger_fetch_coordinator commit=strand
 void
 LedgerFetchCoordinator::terminalize_on_strand(OutboxRow& row, char const* why)
@@ -1007,6 +1071,15 @@ LedgerFetchCoordinator::terminalize_on_strand(OutboxRow& row, char const* why)
         row.bind_attempts,
         " bind attempt(s): ",
         why);
+    if (!row.outcome_delivered)
+    {
+        auto const outcome = row.receipt &&
+                row.receipt->outcome() == NodeBatchWriteOutcome::written
+            ? SubmissionOutcome::written
+            : (row.may_have_reached_receiver ? SubmissionOutcome::indeterminate
+                                             : SubmissionOutcome::not_written);
+        deliver_submission_outcome_on_strand(row, outcome);
+    }
     row.phase = Phase::terminal;
     row.bind_open = false;
     row.publish_open = false;
@@ -1022,7 +1095,7 @@ LedgerFetchCoordinator::terminalize_on_strand(OutboxRow& row, char const* why)
     check_fenced_on_strand();
 }
 
-//@@authority transition=ledger_fetch_coordinator.release_work_unit
+//@@authority transition=ledger_fetch_coordinator.release_work_unit bind=catl::peer_client::release_work@e07911105bcfb257
 // owner=ledger_fetch_coordinator commit=atomic
 void
 LedgerFetchCoordinator::release_work() noexcept
@@ -1089,7 +1162,7 @@ LedgerFetchCoordinator::deliver_fence_notification(
     //@@mutation-end fence-disposition-contained-funnel-a
 }
 
-//@@authority transition=ledger_fetch_coordinator.open_bind_projection
+//@@authority transition=ledger_fetch_coordinator.open_bind_projection bind=catl::peer_client::note_projection_opened@50022b04943c3de2
 // owner=ledger_fetch_coordinator commit=atomic
 void
 LedgerFetchCoordinator::note_projection_opened() noexcept
@@ -1126,7 +1199,7 @@ LedgerFetchCoordinator::note_projection_opened() noexcept
     }
 }
 
-//@@authority transition=ledger_fetch_coordinator.observe_bind_projection
+//@@authority transition=ledger_fetch_coordinator.observe_bind_projection bind=catl::peer_client::note_projection_observed@e956cad960e1efa9
 // owner=ledger_fetch_coordinator commit=atomic
 void
 LedgerFetchCoordinator::note_projection_observed() noexcept
@@ -1168,7 +1241,7 @@ LedgerFetchCoordinator::note_projection_observed() noexcept
     }
 }
 
-//@@authority transition=ledger_fetch_coordinator.acquire_fence_permit
+//@@authority transition=ledger_fetch_coordinator.acquire_fence_permit bind=catl::peer_client::acquire_fence_permit@e66f1190eb6f810a
 // owner=ledger_fetch_coordinator commit=atomic
 bool
 LedgerFetchCoordinator::acquire_fence_permit() noexcept
@@ -1195,7 +1268,7 @@ LedgerFetchCoordinator::acquire_fence_permit() noexcept
     }
 }
 
-//@@authority transition=ledger_fetch_coordinator.release_fence_permit
+//@@authority transition=ledger_fetch_coordinator.release_fence_permit bind=catl::peer_client::release_fence_permit@7d1eb63fce0f3f07
 // owner=ledger_fetch_coordinator commit=atomic
 void
 LedgerFetchCoordinator::release_fence_permit() noexcept
@@ -1224,7 +1297,7 @@ LedgerFetchCoordinator::release_fence_permit() noexcept
     }
 }
 
-//@@authority transition=ledger_fetch_coordinator.seal_ingress
+//@@authority transition=ledger_fetch_coordinator.seal_ingress bind=catl::peer_client::fence@a6c50cd459267e35
 // owner=ledger_fetch_coordinator commit=atomic
 LedgerFetchCoordinator::Fence
 LedgerFetchCoordinator::fence(FenceHandler on_fenced)
@@ -1275,7 +1348,7 @@ LedgerFetchCoordinator::fence(FenceHandler on_fenced)
     return Fence::drain_queued;
 }
 
-//@@authority transition=ledger_fetch_coordinator.register_fence_waiter
+//@@authority transition=ledger_fetch_coordinator.register_fence_waiter bind=catl::peer_client::begin_fence_on_strand@8bc178949b03a157
 // owner=ledger_fetch_coordinator commit=strand
 void
 LedgerFetchCoordinator::begin_fence_on_strand(FenceHandler on_fenced)
@@ -1334,7 +1407,7 @@ LedgerFetchCoordinator::begin_fence_on_strand(FenceHandler on_fenced)
     check_fenced_on_strand();
 }
 
-//@@authority transition=ledger_fetch_coordinator.commit_fence
+//@@authority transition=ledger_fetch_coordinator.commit_fence bind=catl::peer_client::check_fenced_on_strand@a9368b09dd247809
 // owner=ledger_fetch_coordinator commit=strand
 void
 LedgerFetchCoordinator::check_fenced_on_strand()

@@ -17,6 +17,7 @@
 #include "validation-buffer.h"
 #include "vl-cache.h"
 
+#include <catl/peer-client/ledger-fetch-coordinator.h>
 #include <catl/peer-client/node-cache.h>
 #include <catl/peer-client/peer-set.h>
 #include <catl/rpc-client/rpc-client.h>
@@ -31,6 +32,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -103,12 +105,25 @@ public:
     /// service strand to collect a snapshot.
     struct Status
     {
+        struct Coordinator
+        {
+            bool enabled = false;
+            catl::peer_client::LedgerFetchCoordinator::Lifecycle lifecycle =
+                catl::peer_client::LedgerFetchCoordinator::Lifecycle::running;
+            bool ingress_sealed = false;
+            size_t work_outstanding = 0;
+            size_t outstanding_bind_projections = 0;
+            size_t receipt_obligations = 0;
+            bool accounting_broken = false;
+        };
+
         size_t peer_count = 0;
         uint64_t total_connects = 0;
         uint64_t total_disconnects = 0;
         bool vl_loaded = false;
         std::optional<uint32_t> latest_quorum_seq;
         ValidationBuffer::Stats validation_buffer;
+        Coordinator ledger_fetch_coordinator;
     };
     boost::asio::awaitable<Status>
     co_health();
@@ -196,6 +211,19 @@ public:
         rpc_max_concurrent_ = n;
     }
 
+    /// Route managed node-fetch writes through LedgerFetchCoordinator.
+    /// Default-off until deterministic and live proof/SSE gates pass.
+    /// Must be selected before start(). Once selected, a missing generation pin
+    /// or expired coordinator refuses rather than silently using raw transport.
+    void
+    set_ledger_fetch_coordinator_enabled(bool enabled)
+    {
+        if (start_called_)
+            throw std::logic_error(
+                "ledger fetch transport must be selected before start");
+        ledger_fetch_coordinator_enabled_ = enabled;
+    }
+
     /// Set single-shot mode (fewer peers, less crawling).
     /// Must be called before start().
     void
@@ -213,6 +241,11 @@ private:
     catl::xdata::Protocol protocol_;
 
     std::shared_ptr<catl::peer_client::PeerSet> peers_;
+    //@@authority state=prv.S0015 status=provisional scope=field
+    // owner=unresolved owner_hypothesis=proof_engine observed_home=proof_engine
+    // label=proof_engine_owned_ledger_fetch_coordinator_lifecycle
+    std::shared_ptr<catl::peer_client::LedgerFetchCoordinator>
+        ledger_fetch_coordinator_;
     std::shared_ptr<catl::peer_client::NodeCache> node_cache_;
     std::shared_ptr<catl::rpc::RpcClient> rpc_;
     std::shared_ptr<VlCache> vl_cache_;
@@ -233,6 +266,14 @@ private:
     int fetch_stale_multiplier_ = 2;
     int rpc_max_concurrent_ = 8;
     bool single_shot_ = false;
+    //@@authority state=prv.S0016 status=provisional scope=field
+    // owner=unresolved owner_hypothesis=proof_engine observed_home=proof_engine
+    // label=pre_start_managed_node_transport_selection
+    bool ledger_fetch_coordinator_enabled_ = false;
+    //@@authority state=prv.S0017 status=provisional scope=field
+    // owner=unresolved owner_hypothesis=proof_engine observed_home=proof_engine
+    // label=proof_engine_start_once_lifecycle_boundary
+    bool start_called_ = false;
     std::atomic<size_t> cache_hits_{0};
     std::atomic<size_t> cache_misses_{0};
 

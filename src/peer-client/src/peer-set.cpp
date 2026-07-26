@@ -792,6 +792,9 @@ PeerSet::co_size()
         asio::use_awaitable);
 }
 
+//@@authority transition=prv.T0024 status=provisional scope=function bind=catl::peer_client::note_ledger_failure@afbf33599592273c
+// owner=unresolved owner_hypothesis=peer_set commit=strand
+// touches=prv.S0008 label=record_peer_failure_for_exact_ledger
 void
 PeerSet::note_ledger_failure(std::string const& endpoint, uint32_t ledger_seq)
 {
@@ -1907,7 +1910,7 @@ PeerSet::try_connect_on_strand(
         // session's sealed command checks: a death between connect and
         // admission then consumes as a stale instance instead of erasing
         // whichever peer currently owns the key.
-        //@@authority transition=peer_set.mint_connection_generation v4=T31
+        //@@authority transition=peer_set.mint_connection_generation v4=T31 bind=catl::peer_client::try_connect_on_strand@78b31effce858424
         // owner=peer_set commit=strand
         if (next_connection_generation_ ==
             std::numeric_limits<std::uint64_t>::max())
@@ -2358,6 +2361,9 @@ PeerSet::TargetedConnectAuthorization::close(bool revoke_claimed) noexcept
     }
 }
 
+//@@authority transition=prv.T0025 status=provisional scope=function bind=catl::peer_client::acquire_wanted_ledger@14f6aab6caf926b8
+// owner=unresolved owner_hypothesis=peer_set commit=strand
+// touches=prv.S0010 label=register_history_target_interest
 void
 PeerSet::acquire_wanted_ledger(
     uint32_t ledger_seq,
@@ -2369,6 +2375,9 @@ PeerSet::acquire_wanted_ledger(
         active_target_authorizations_.push_back(authorization);
 }
 
+//@@authority transition=prv.T0026 status=provisional scope=function bind=catl::peer_client::release_wanted_ledger@18500505df2f9513
+// owner=unresolved owner_hypothesis=peer_set commit=strand
+// touches=prv.S0010 label=release_history_target_interest
 void
 PeerSet::release_wanted_ledger(
     uint32_t ledger_seq,
@@ -2422,6 +2431,9 @@ PeerSet::finish_targeted_authorization(
     }
 }
 
+//@@authority transition=prv.T0027 status=provisional scope=function bind=catl::peer_client::try_candidates_for@2f8a29b36dd49275
+// owner=unresolved owner_hypothesis=peer_set commit=strand
+// touches=prv.S0009 label=queue_bounded_history_targeted_connections
 std::vector<std::string>
 PeerSet::try_candidates_for(
     TargetedConnectAuthorizationPtr const& authorization,
@@ -2649,7 +2661,7 @@ PeerSet::deliver_seal_result(
     }
 }
 
-//@@authority transition=peer_set.seal_node_batch_command owner=peer_set
+//@@authority transition=peer_set.seal_node_batch_command owner=peer_set bind=catl::peer_client::seal_node_batch_command_on_strand@ff584bc894c3403a
 // commit=strand
 std::optional<NodeBatchCommand>
 PeerSet::seal_node_batch_command_on_strand(
@@ -3013,6 +3025,9 @@ PeerSet::wait_for_peer(
         asio::use_awaitable);
 }
 
+//@@authority transition=prv.T0028 status=provisional scope=function bind=catl::peer_client::wait_for_peer_on_strand@5edf280c99e2fd58
+// owner=unresolved owner_hypothesis=peer_set commit=strand
+// touches=prv.S0011 label=own_history_covered_peer_search_lifecycle
 boost::asio::awaitable<PeerSessionPtr>
 PeerSet::wait_for_peer_on_strand(
     uint32_t ledger_seq,

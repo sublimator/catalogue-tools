@@ -92,6 +92,61 @@ validation_buffer_json(ValidationBuffer::Stats const& stats)
     return result;
 }
 
+static boost::json::object
+node_cache_json(catl::peer_client::NodeCache::Stats const& stats)
+{
+    boost::json::object result;
+    result["entries"] = stats.entries;
+    result["resident_entries"] = stats.resident_entries;
+    result["header_entries"] = stats.header_entries;
+    result["max_entries"] = stats.max_entries;
+    result["hits"] = stats.hits;
+    result["misses"] = stats.misses;
+    result["fetches"] = stats.fetches;
+    result["fetch_errors"] = stats.fetch_errors;
+    result["managed_transport_selected"] = stats.managed_transport_selected;
+    result["raw_fetches_queued"] = stats.raw_fetches_queued;
+    result["managed_fetches_reserved"] = stats.managed_fetches_reserved;
+    result["managed_fetches_refused"] = stats.managed_fetches_refused;
+    result["managed_writes_confirmed"] = stats.managed_writes_confirmed;
+    result["managed_not_written"] = stats.managed_not_written;
+    result["managed_indeterminate"] = stats.managed_indeterminate;
+    result["hash_mismatches"] = stats.hash_mismatches;
+    result["waiter_wakeups"] = stats.waiter_wakeups;
+    return result;
+}
+
+static boost::json::object
+ledger_fetch_coordinator_json(ProofEngine::Status::Coordinator const& status)
+{
+    boost::json::object result;
+    result["enabled"] = status.enabled;
+    char const* lifecycle = "disabled";
+    if (status.enabled)
+    {
+        switch (status.lifecycle)
+        {
+            case catl::peer_client::LedgerFetchCoordinator::Lifecycle::running:
+                lifecycle = "running";
+                break;
+            case catl::peer_client::LedgerFetchCoordinator::Lifecycle::fencing:
+                lifecycle = "fencing";
+                break;
+            case catl::peer_client::LedgerFetchCoordinator::Lifecycle::fenced:
+                lifecycle = "fenced";
+                break;
+        }
+    }
+    result["lifecycle"] = lifecycle;
+    result["ingress_sealed"] = status.ingress_sealed;
+    result["work_outstanding"] = status.work_outstanding;
+    result["outstanding_bind_projections"] =
+        status.outstanding_bind_projections;
+    result["receipt_obligations"] = status.receipt_obligations;
+    result["accounting_broken"] = status.accounting_broken;
+    return result;
+}
+
 static std::pair<std::string, std::string>
 split_target(std::string_view target)
 {
@@ -763,19 +818,11 @@ HttpServer::handle_session(
                     cache["misses"] = cs.misses;
                     body["proof_cache"] = cache;
 
-                    auto ncs = routed_engine->node_cache_stats();
-                    boost::json::object nc;
-                    nc["entries"] = ncs.entries;
-                    nc["resident_entries"] = ncs.resident_entries;
-                    nc["header_entries"] = ncs.header_entries;
-                    nc["max_entries"] = ncs.max_entries;
-                    nc["hits"] = ncs.hits;
-                    nc["misses"] = ncs.misses;
-                    nc["fetches"] = ncs.fetches;
-                    nc["fetch_errors"] = ncs.fetch_errors;
-                    nc["hash_mismatches"] = ncs.hash_mismatches;
-                    nc["waiter_wakeups"] = ncs.waiter_wakeups;
-                    body["node_cache"] = nc;
+                    body["node_cache"] =
+                        node_cache_json(routed_engine->node_cache_stats());
+                    body["ledger_fetch_coordinator"] =
+                        ledger_fetch_coordinator_json(
+                            status.ledger_fetch_coordinator);
 
                     stream.expires_after(opts_.write_timeout);
                     co_await http::async_write(
@@ -813,19 +860,11 @@ HttpServer::handle_session(
                         cache["misses"] = cs.misses;
                         net_body["proof_cache"] = cache;
 
-                        auto ncs = engine->node_cache_stats();
-                        boost::json::object nc;
-                        nc["entries"] = ncs.entries;
-                        nc["resident_entries"] = ncs.resident_entries;
-                        nc["header_entries"] = ncs.header_entries;
-                        nc["max_entries"] = ncs.max_entries;
-                        nc["hits"] = ncs.hits;
-                        nc["misses"] = ncs.misses;
-                        nc["fetches"] = ncs.fetches;
-                        nc["fetch_errors"] = ncs.fetch_errors;
-                        nc["hash_mismatches"] = ncs.hash_mismatches;
-                        nc["waiter_wakeups"] = ncs.waiter_wakeups;
-                        net_body["node_cache"] = nc;
+                        net_body["node_cache"] =
+                            node_cache_json(engine->node_cache_stats());
+                        net_body["ledger_fetch_coordinator"] =
+                            ledger_fetch_coordinator_json(
+                                status.ledger_fetch_coordinator);
 
                         networks[network_slug_for_id(net_id)] =
                             std::move(net_body);
@@ -880,19 +919,11 @@ HttpServer::handle_session(
                         cache["misses"] = cs.misses;
                         body["proof_cache"] = cache;
 
-                        auto ncs = engine->node_cache_stats();
-                        boost::json::object nc;
-                        nc["entries"] = ncs.entries;
-                        nc["resident_entries"] = ncs.resident_entries;
-                        nc["header_entries"] = ncs.header_entries;
-                        nc["max_entries"] = ncs.max_entries;
-                        nc["hits"] = ncs.hits;
-                        nc["misses"] = ncs.misses;
-                        nc["fetches"] = ncs.fetches;
-                        nc["fetch_errors"] = ncs.fetch_errors;
-                        nc["hash_mismatches"] = ncs.hash_mismatches;
-                        nc["waiter_wakeups"] = ncs.waiter_wakeups;
-                        body["node_cache"] = nc;
+                        body["node_cache"] =
+                            node_cache_json(engine->node_cache_stats());
+                        body["ledger_fetch_coordinator"] =
+                            ledger_fetch_coordinator_json(
+                                status.ledger_fetch_coordinator);
                     }
 
                     stream.expires_after(opts_.write_timeout);
@@ -1286,6 +1317,12 @@ HttpServer::handle_session(
                             std::string sse_error;
                             try
                             {
+                                //@@authority transition=prv.T0035
+                                // status=provisional scope=statement
+                                // owner=unresolved
+                                // owner_hypothesis=request_session
+                                // commit=connection_strand calls=prove
+                                // label=submit_sse_proof_without_opaque_operation_id
                                 auto result = co_await engine_sp->prove(
                                     tx_it->second,
                                     cancel_token,
