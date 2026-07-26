@@ -43,9 +43,16 @@
 // peer_set — and a slice with no PeerSet participant cannot mint peer_set's homes
 // without fabricating the authority this cut exists to refuse.
 //
-// Therefore this increment implements the two transitions that are unambiguously
-// ledger_data_control's, T50 and T52, with T52's zero-guard modelled as a real
-// refusal rather than an assumption. T53 and T54 are shaped for but not implemented:
+// This primitive is therefore explicitly UNBOUND: it carries no `v4=` reference and
+// is NOT an implementation of T50/T52. It represents none of S01/S04/S10, publishes
+// neither Q01 witness, and collapses S31 (ledger_data_control) and S35 (peer_set) —
+// two separately owned facts — into one local counter. The first version claimed
+// T50/T52 and the conformance gate stayed green, because that gate verifies declared
+// LABELS, not semantic coverage. It cannot become T50/T52 by later relabelling; it
+// becomes them only when the required homes, witnesses and cross-owner boundary
+// exist.
+//
+// T53 and T54 are shaped for but not implemented: T53 and T54 are shaped for but not implemented:
 // they are absent, not stubbed, because a stub that returns success is a fabricated
 // fact and a stub that returns failure is a control that can never go green.
 //
@@ -60,6 +67,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 /// Declared at GLOBAL scope so the friendships below name THIS class. An
@@ -144,16 +152,33 @@ public:
 
     static std::shared_ptr<OperationLifecycle> create(asio::io_context& io);
 
-    /// T50. Mint the control root. Synchronous disposition on the caller's thread:
-    /// the decision is a pure function of one conserved atomic word, so a caller
-    /// learns the outcome without a hop, and no identity is published by this call.
+    /// Mint the control root. **MUST run on `strand()`**; it asserts, and aborts
+    /// under XPRV_STRAND_FAIL_FAST.
+    ///
+    /// The first version called itself "a pure function of one conserved atomic
+    /// word". It was not: load, mint, store are three operations, so two callers
+    /// could both pass the check, both mint, and race the non-atomic identity write,
+    /// each returning `opened`. That prose was copied from the coordinator's ingress,
+    /// which genuinely IS one word carrying count and seal bit — the mechanism was
+    /// not copied with it. A single compare-exchange now CLAIMS the transition first.
     Open
     open_control_root();
 
-    /// T52. Consume the control root. Refuses while any operation home is
-    /// outstanding, which is the S31.zero / S35.zero requirement.
+    /// Consume the control root. **MUST run on `strand()`.**
+    ///
+    /// Strand confinement, not the flag, is what keeps this correct once T53 can mint
+    /// an operation: the zero-check and the close must be serialized against that
+    /// mint, or the race simply moves one phase later.
     Close
     close_control_root();
+
+    /// The owner executor. Callers enter it; this class never posts on their behalf,
+    /// so there is exactly one place ownership can be violated and it asserts there.
+    asio::strand<asio::io_context::executor_type> const&
+    strand() const noexcept
+    {
+        return strand_;
+    }
 
     bool
     control_root_open() const noexcept;
@@ -186,6 +211,12 @@ private:
     std::atomic<std::uint64_t> operations_{0};
     std::atomic<bool> root_open_{false};
     std::atomic<bool> accounting_broken_{false};
+
+    /// Default-inert failpoint fired inside `open_control_root()` AFTER the claim and
+    /// before it returns. A control re-enters the lifecycle from here, which is the
+    /// deterministic form of "a second caller arrives mid-transition" — no threads,
+    /// no timing, no hoping the scheduler cooperates.
+    std::function<void()> before_commit_for_test_;
 };
 
 }  // namespace catl::peer_client

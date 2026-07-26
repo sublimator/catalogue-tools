@@ -7,6 +7,7 @@
 #include <catl/peer-client/operation-lifecycle.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 class OperationLifecycleTestAccess
@@ -42,6 +43,16 @@ public:
     next_root_id()
     {
         return Lifecycle::next_root_id_.load(std::memory_order_acquire);
+    }
+
+    /// Install the default-inert failpoint fired inside open_control_root() after the
+    /// claim. Re-entering from here is the deterministic form of the interleaving.
+    static void
+    set_before_commit(
+        std::shared_ptr<Lifecycle> const& lifecycle,
+        std::function<void()> hook)
+    {
+        lifecycle->before_commit_for_test_ = std::move(hook);
     }
 
     static std::uint64_t

@@ -2,11 +2,28 @@
 
 #include <catl/core/logger.h>
 
+#include <cstdlib>
 #include <limits>
 
 namespace catl::peer_client {
 
 static LogPartition log_("ldc", LogLevel::INHERIT);
+
+// Same discipline as PeerSet: an off-strand mutation is an OWNERSHIP violation, not a
+// race to paper over. The strand was previously constructed and never used, so the
+// header's ownership claim was aspirational; this is what makes it true.
+#define ASSERT_ON_STRAND()                            \
+    do                                                \
+    {                                                 \
+        if (!strand_.running_in_this_thread())        \
+        {                                             \
+            PLOGE(log_, "OFF-STRAND: ", __func__);    \
+            if (std::getenv("XPRV_STRAND_FAIL_FAST")) \
+            {                                         \
+                std::abort();                         \
+            }                                         \
+        }                                             \
+    } while (0)
 
 std::atomic<std::uint64_t> OperationLifecycle::next_root_id_{0};
 
@@ -21,12 +38,23 @@ OperationLifecycle::OperationLifecycle(asio::io_context& io)
 {
 }
 
-//@@authority transition=ledger_data_control.open_control_root v4=T50
-// owner=ledger_data_control commit=atomic
+// NO v4 REFERENCE, deliberately. The first version claimed v4=T50 and the gate went
+// green anyway, because conformance verifies declared LABELS, not semantic coverage.
+// Canonical T50 requires S01.running + S04.consumed_same_epoch + S10 and retains
+// S04/S10; none of that is represented here. This is a local control-root open and an
+// explicitly unbound primitive — it cannot become T50 by relabelling.
+//@@authority transition=ledger_data_control.open_control_root
+// owner=ledger_data_control commit=strand
 OperationLifecycle::Open
 OperationLifecycle::open_control_root()
 {
-    if (root_open_.load(std::memory_order_acquire))
+    ASSERT_ON_STRAND();
+
+    // CLAIM the transition with ONE compare-exchange before anything else, so a
+    // second caller arriving mid-transition is refused rather than minting too.
+    bool expected = false;
+    if (!root_open_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel, std::memory_order_acquire))
     {
         return Open::already_open;
     }
@@ -41,6 +69,9 @@ OperationLifecycle::open_control_root()
         if (current == std::numeric_limits<std::uint64_t>::max())
         {
             PLOGE(log_, "control root minter exhausted; refusing to open");
+            // ROLL BACK the claim, or a refused mint wedges the lifecycle open with
+            // no identity — trading a race for a deadlock, which is worse.
+            root_open_.store(false, std::memory_order_release);
             return Open::root_exhausted;
         }
         if (next_root_id_.compare_exchange_weak(
@@ -54,16 +85,27 @@ OperationLifecycle::open_control_root()
         }
     }
 
-    root_open_.store(true, std::memory_order_release);
+    // No second store: the claim above already published it, and storing again is
+    // the split commit this repair removes.
+    if (before_commit_for_test_)
+    {
+        before_commit_for_test_();
+    }
     PLOGD(log_, "control root ", root_.value(), " open");
     return Open::opened;
 }
 
-//@@authority transition=ledger_data_control.close_control_root v4=T52
-// owner=ledger_data_control commit=atomic
+// NO v4 REFERENCE — same reason. Canonical T52 requires S31.zero AND S35.zero as two
+// SEPARATELY OWNED facts (S31 ledger_data_control, S35 peer_set) and produces the
+// Q01.operations / Q01.operation_children witnesses. This collapses both zero-checks
+// into one local counter and publishes no witness.
+//@@authority transition=ledger_data_control.close_control_root
+// owner=ledger_data_control commit=strand
 OperationLifecycle::Close
 OperationLifecycle::close_control_root()
 {
+    ASSERT_ON_STRAND();
+
     if (!root_open_.load(std::memory_order_acquire))
     {
         return Close::not_open;
