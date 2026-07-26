@@ -8,24 +8,18 @@
 //
 // The selection algorithm:
 //
-//   1. RANGE MATCH (always, any elapsed time):
+//   1. RANGE MATCH:
 //      Find a ready, non-excluded peer whose advertised range
 //      [first_seq, last_seq] includes the target ledger.
 //      Among matches, prefer the one with the lowest selection_count
 //      (round-robin load balancing).
 //
-//   2. FALLBACK (after fallback_ms without a range match):
-//      Try any ready, non-excluded peer, preferring wider ranges
-//      (last_seq - first_seq descending). Full-history nodes often
-//      report narrow ranges but can still serve old ledger data.
-//      The caller retries with a different peer if it can't serve.
-//
-//   3. WAIT (before fallback_ms, or no peers at all):
-//      No peer selected yet. Caller should sleep and retry.
+//   2. WAIT:
+//      No covering peer is currently available. Caller should sleep and retry.
 //      Discovery (crawl + connect) runs in the background.
 //
-//   4. GIVE UP (elapsed >= timeout_ms):
-//      No peer found within the timeout. Caller should bail.
+//   3. GIVE UP (elapsed >= timeout_ms):
+//      No covering peer was found within the timeout. Caller should bail.
 
 #include <cstdint>
 #include <string>
@@ -41,14 +35,13 @@ struct PeerCandidate
     uint32_t last_seq = 0;
     uint64_t selection_count = 0;
     bool is_ready = false;
-    bool failed_for_target = false;  // true if this peer failed for the target ledger
+    bool failed_for_target =
+        false;  // true if this peer failed for the target ledger
 };
 
-enum class PeerDecision
-{
-    use_range_match,  // peer covers target — best case
-    use_fallback,     // no range match, trying widest peer
-    wait,             // too early for fallback, keep polling
+enum class PeerDecision {
+    use_range_match,  // peer advertises the target ledger
+    wait,             // no covering peer yet, keep polling
     give_up           // exhausted timeout
 };
 
@@ -64,8 +57,6 @@ struct PeerSelection
 /// @param peers         Snapshot of currently connected peers
 /// @param excluded      Peers that already failed for this request
 /// @param elapsed_ms    How long we've been searching (0 on first call)
-/// @param fallback_ms   When to start trying non-range-matched peers
-///                      (0 = never fallback, positive = delay in ms)
 /// @param timeout_ms    Total search budget before giving up
 PeerSelection
 select_peer(
@@ -73,7 +64,6 @@ select_peer(
     std::vector<PeerCandidate> const& peers,
     std::unordered_set<std::string> const& excluded,
     int elapsed_ms,
-    int fallback_ms,
     int timeout_ms);
 
 }  // namespace catl::peer_client

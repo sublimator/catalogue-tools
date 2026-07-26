@@ -29,6 +29,14 @@ LogPartition NodeCache::log_("node-cache", LogLevel::INHERIT);
 
 namespace {
 
+bool
+advertises_ledger(PeerSession const* peer, uint32_t ledger_seq)
+{
+    if (!peer || !peer->is_ready())
+        return false;
+    return peer->advertised_ledger_range().contains(ledger_seq);
+}
+
 void
 complete_timer_noexcept(
     std::shared_ptr<SerializedTimerSignal> const& timer) noexcept
@@ -189,7 +197,7 @@ NodeCache::format_progress(ProgressEvent const& event)
             if (event.depth != kNoDepth)
             {
                 return prefix +
-                    ("timeout depth=" + std::to_string(event.depth) +
+                    ("node unresolved at depth=" + std::to_string(event.depth) +
                      " — retrying same peer " + std::string(peer) + " (" +
                      std::to_string(event.attempt) + "/" +
                      std::to_string(event.max_attempts) + ")");
@@ -202,7 +210,7 @@ NodeCache::format_progress(ProgressEvent const& event)
 
         case ProgressKind::retry_covered_peer:
             return prefix +
-                ("timeout depth=" + std::to_string(event.depth) +
+                ("node unresolved at depth=" + std::to_string(event.depth) +
                  " — retrying previously covered peer " + std::string(peer) +
                  " (" + std::to_string(event.attempt) + "/" +
                  std::to_string(event.max_attempts) + ")");
@@ -211,9 +219,10 @@ NodeCache::format_progress(ProgressEvent const& event)
             if (event.depth != kNoDepth)
             {
                 return prefix +
-                    ("timeout depth=" + std::to_string(event.depth) +
-                     " — switching peer (" + std::to_string(event.attempt) +
-                     "/" + std::to_string(event.max_attempts) + ")");
+                    ("node unresolved at depth=" + std::to_string(event.depth) +
+                     " — switching to peer " + std::string(peer) + " (" +
+                     std::to_string(event.attempt) + "/" +
+                     std::to_string(event.max_attempts) + ")");
             }
             return prefix +
                 ("header seq=" + std::to_string(event.ledger_seq) +
@@ -241,9 +250,14 @@ NodeCache::format_progress(ProgressEvent const& event)
                  " — giving up after " + std::to_string(event.attempt) +
                  " retries");
 
-        case ProgressKind::no_peer_available:
+        case ProgressKind::searching_covering_peer:
             return prefix +
-                ("no peer available for ledger " +
+                ("searching for peer advertising ledger " +
+                 std::to_string(event.ledger_seq));
+
+        case ProgressKind::no_covering_peer:
+            return prefix +
+                ("no peer advertising ledger " +
                  std::to_string(event.ledger_seq));
     }
 
@@ -524,18 +538,20 @@ NodeCache::walk_to_impl(
     // This eliminates per-depth strand contention that was causing laggards
     // with 300+ concurrent proves. On failure mid-walk, we retry with a
     // different peer (max retries per walk).
-    auto peer_covers = [](PeerSession const* p, uint32_t seq) {
-        if (!p || !p->is_ready())
-            return false;
-        auto first = p->peer_first_seq();
-        auto last = p->peer_last_seq();
-        return first != 0 && last != 0 && seq >= first && seq <= last;
-    };
-
-    if (!peer_covers(peer, ledger_seq))
+    if (!advertises_ledger(peer, ledger_seq))
     {
         if (peers)
         {
+            catl::core::emit_status(
+                "searching for peer advertising ledger " +
+                std::to_string(ledger_seq));
+            publish_node_progress(
+                cursor,
+                ProgressKind::searching_covering_peer,
+                ledger_seq,
+                0,
+                0,
+                0);
             PLOGD(
                 log_,
                 "walk_to: peer ",
@@ -544,22 +560,26 @@ NodeCache::walk_to_impl(
                 ledger_seq,
                 " — acquiring one");
             //@@authority transition=prv.T0010 status=provisional
-            // bind=wait_for_peer@db2cede63330d449
+            // bind=wait_for_covering_peer@457892fbcb90b171
             // scope=statement
             // owner=unresolved owner_hypothesis=peer_set commit=strand
-            // calls=wait_for_peer
+            // calls=wait_for_covering_peer
             // label=request_history_covered_peer_generation_for_walk
-            peer_pin = co_await peers->wait_for_peer(
-                ledger_seq, 10, cancel); //@@authority-target ids=prv.T0010
+            peer_pin = co_await peers->wait_for_covering_peer(
+                ledger_seq,
+                std::max(0, peer_refresh_timeout_secs_),
+                cancel); //@@authority-target ids=prv.T0010
             peer = peer_pin.get();
         }
-        if (!peer || !peer->is_ready())
+        if (cancel && cancel->load(std::memory_order_relaxed))
+            co_return result;
+        if (!advertises_ledger(peer, ledger_seq))
         {
-            PLOGW(log_, "walk_to: no peer available for ledger ", ledger_seq);
+            PLOGW(log_, "walk_to: no peer advertising ledger ", ledger_seq);
             catl::core::emit_status(
-                "no peer available for ledger " + std::to_string(ledger_seq));
+                "no peer advertising ledger " + std::to_string(ledger_seq));
             publish_node_progress(
-                cursor, ProgressKind::no_peer_available, ledger_seq, 0, 0, 0);
+                cursor, ProgressKind::no_covering_peer, ledger_seq, 0, 0, 0);
             //@@authority transition=prv.T0037 status=provisional
             // bind=co_return_statement@e868903f6c11abd4
             // scope=statement
@@ -665,42 +685,62 @@ NodeCache::walk_to_impl(
                 peer = nullptr;
 
                 //@@authority transition=prv.T0030 status=provisional
-                // bind=co_select_peers_for@f2b23bb4d7236db5
+                // bind=co_select_covering_peers_for@14785979cb4c63c6
                 // scope=statement
                 // owner=unresolved owner_hypothesis=peer_set commit=strand
-                // calls=co_select_peers_for
+                // calls=co_select_covering_peers_for
                 // label=select_distinct_history_covered_retry_generation
                 bool retrying_covered_peer =
                     false; //@@authority-target ids=prv.T0030
-                auto alternatives = co_await peers->co_select_peers_for(
-                    ledger_seq, 1, failed_peers);
+                auto alternatives =
+                    co_await peers->co_select_covering_peers_for(
+                        ledger_seq, 1, failed_peers);
                 if (alternatives.empty() && !waited_for_new_peer)
                 {
                     waited_for_new_peer = true;
+                    catl::core::emit_status(
+                        "searching for peer advertising ledger " +
+                        std::to_string(ledger_seq));
+                    publish_node_progress(
+                        cursor,
+                        ProgressKind::searching_covering_peer,
+                        ledger_seq,
+                        static_cast<uint16_t>(depth),
+                        static_cast<uint8_t>(total_retries),
+                        static_cast<uint8_t>(max_retries));
                     //@@authority transition=prv.T0031 status=provisional
-                    // bind=wait_for_peer@c0d523ca288cc259
+                    // bind=wait_for_covering_peer@c6e61740f71a3a7c
                     // scope=statement
                     // owner=unresolved owner_hypothesis=peer_set commit=strand
-                    // calls=wait_for_peer
+                    // calls=wait_for_covering_peer
                     // label=trigger_bounded_history_targeted_replacement_search
-                    auto new_peer = co_await peers->wait_for_peer(
+                    auto new_peer = co_await peers->wait_for_covering_peer(
                         ledger_seq,
                         peer_refresh_timeout_secs_,
                         failed_peers,
                         cancel); //@@authority-target ids=prv.T0031
-                    if (new_peer && new_peer->is_ready())
+                    if (advertises_ledger(new_peer.get(), ledger_seq))
                         alternatives.push_back(std::move(new_peer));
                 }
+                std::erase_if(
+                    alternatives, [ledger_seq](auto const& candidate) {
+                        return !advertises_ledger(candidate.get(), ledger_seq);
+                    });
                 if (alternatives.empty())
                 {
                     // The distinct set is exhausted. Reacquire through
                     // PeerSet instead of retaining an old pin across
                     // replacement search. PeerSet's ledger-failure evidence
-                    // still filters confirmed written timeouts; this fallback
-                    // is therefore available only for unblamed/unknown
-                    // publication or a recovered selection.
-                    alternatives =
-                        co_await peers->co_select_peers_for(ledger_seq, 1, {});
+                    // still filters confirmed written misses; this repeat is
+                    // available only for unblamed/unknown publication or a
+                    // recovered selection.
+                    alternatives = co_await peers->co_select_covering_peers_for(
+                        ledger_seq, 1, {});
+                    std::erase_if(
+                        alternatives, [ledger_seq](auto const& candidate) {
+                            return !advertises_ledger(
+                                candidate.get(), ledger_seq);
+                        });
                     retrying_covered_peer = !alternatives.empty();
                 }
                 if (!alternatives.empty())
@@ -723,7 +763,7 @@ NodeCache::walk_to_impl(
                         "), excluded=",
                         failed_peers.size());
                     catl::core::emit_status(
-                        "timeout depth=" + std::to_string(depth) +
+                        "node unresolved at depth=" + std::to_string(depth) +
                         (retrying_covered_peer
                              ? " — retrying previously covered peer "
                              : " — switching peer ") +
@@ -737,7 +777,8 @@ NodeCache::walk_to_impl(
                         ledger_seq,
                         static_cast<uint16_t>(depth),
                         static_cast<uint8_t>(total_retries),
-                        static_cast<uint8_t>(max_retries));
+                        static_cast<uint8_t>(max_retries),
+                        peer->endpoint());
                     catl::core::emit_status(
                         "acquired peer " + peer->endpoint());
                     publish_node_progress(
@@ -756,8 +797,8 @@ NodeCache::walk_to_impl(
             // A small pool may have been covered completely by the first
             // fan-out. Preserve a bounded resend for packet loss after there
             // are no distinct or newly connected candidates left.
-            if (total_retries < max_retries && !peers && peer &&
-                peer->is_ready())
+            if (total_retries < max_retries && !peers &&
+                advertises_ledger(peer, ledger_seq))
             {
                 ++total_retries;
                 PLOGW(
@@ -772,7 +813,7 @@ NodeCache::walk_to_impl(
                     max_retries,
                     ")");
                 catl::core::emit_status(
-                    "timeout depth=" + std::to_string(depth) +
+                    "node unresolved at depth=" + std::to_string(depth) +
                     " — retrying peer " + peer->endpoint() + " (" +
                     std::to_string(total_retries) + "/" +
                     std::to_string(max_retries) + ")");
@@ -1191,11 +1232,13 @@ NodeCache::ensure_present(
                 expected_hash, send_signal); //@@authority-target ids=prv.T0046
         };
 
-        if (!peer || !peer->is_ready())
+        if (!advertises_ledger(peer, ledger_seq))
         {
             PLOGW(
                 log_,
-                "  ensure: peer not ready for hash=",
+                "  ensure: peer no longer advertises ledger ",
+                ledger_seq,
+                " for hash=",
                 expected_hash.hex().substr(0, 16));
             fetch_errors_++;
             abandon_exact_send_round();
@@ -1236,7 +1279,7 @@ NodeCache::ensure_present(
         try
         {
             //@@authority transition=prv.T0002 status=provisional
-            // bind=send_fetch@20ce0e296674258d
+            // bind=send_fetch@97e6d2664ee0d5d0
             // scope=statement owner=unresolved
             // owner_hypothesis=node_cache commit=unresolved
             // calls=send_fetch
@@ -1248,35 +1291,18 @@ NodeCache::ensure_present(
                 position,
                 target_key,
                 speculative_depth,
+                ledger_seq,
                 *peer,
                 peer_pin ? peer_pin.share() : PeerGenerationPin{},
                 send_round); //@@authority-target ids=prv.T0002
             transport_owns_round =
-                submission != NodeFetchSubmission::managed_refused;
-            if (submission == NodeFetchSubmission::raw_queued)
+                submission != NodeFetchSubmission::not_submitted;
+            if (submission == NodeFetchSubmission::raw_projected)
             {
                 if (initiated_fetch)
                     *initiated_fetch = true;
                 if (attempted_peers)
                     attempted_peers->insert(peer->endpoint());
-                // Content-addressed late responses remain useful even if this
-                // exact round was concurrently retired. Coordinator ingress
-                // is not publication evidence, so only raw submission records
-                // this legacy peer-attempt fact.
-                std::lock_guard lock(mutex_);
-                auto const it = store_.find(expected_hash);
-                if (it != store_.end() && !it->second.present)
-                {
-                    auto& last_fetch = it->second.last_fetch_at;
-                    auto const now = std::chrono::steady_clock::now();
-                    //@@authority transition=prv.T0032 status=provisional
-                    // bind=expression_statement@1dd391cdc59969e6
-                    // scope=statement
-                    // owner=unresolved owner_hypothesis=object_store
-                    // commit=mutex touches=prv.S0006
-                    // label=record_raw_content_addressed_dispatch
-                    last_fetch = now; //@@authority-target ids=prv.T0032
-                }
             }
         }
         catch (...)
@@ -1288,6 +1314,8 @@ NodeCache::ensure_present(
         {
             if (managed_transport)
                 close_managed_submissions(expected_hash, send_round);
+            else
+                close_raw_submissions(expected_hash, send_round);
             if (!transport_owns_round)
                 retire_unowned_round();
             co_return nullptr;
@@ -1307,19 +1335,19 @@ NodeCache::ensure_present(
                     : std::unordered_set<std::string>{};
                 exclude_set.insert(peer->endpoint());
                 //@@authority transition=prv.T0033 status=provisional
-                // bind=co_select_peers_for@3529bb9ceb7113ae
+                // bind=co_select_covering_peers_for@9067bfc556ec9ac1
                 // scope=statement
                 // owner=unresolved owner_hypothesis=peer_set commit=strand
-                // calls=co_select_peers_for
+                // calls=co_select_covering_peers_for
                 // label=select_history_covered_fanout_generations
-                auto fanout_pins = co_await peers->co_select_peers_for(
+                auto fanout_pins = co_await peers->co_select_covering_peers_for(
                     ledger_seq,
                     2,
                     std::move(exclude_set)); //@@authority-target ids=prv.T0033
 
                 for (auto& extra : fanout_pins)
                 {
-                    if (extra && extra->is_ready())
+                    if (advertises_ledger(extra.get(), ledger_seq))
                     {
                         if (!retain_node_fanout_pin(
                                 expected_hash, send_round, extra.share()))
@@ -1337,22 +1365,18 @@ NodeCache::ensure_present(
                             position,
                             target_key,
                             speculative_depth,
+                            ledger_seq,
                             *extra,
                             extra.share(),
                             send_round);
-                        if (submission != NodeFetchSubmission::managed_refused)
+                        if (submission != NodeFetchSubmission::not_submitted)
                             transport_owns_round = true;
-                        if (submission == NodeFetchSubmission::raw_queued)
+                        if (submission == NodeFetchSubmission::raw_projected)
                         {
                             if (initiated_fetch)
                                 *initiated_fetch = true;
                             if (attempted_peers)
                                 attempted_peers->insert(extra->endpoint());
-                            std::lock_guard lock(mutex_);
-                            auto const it = store_.find(expected_hash);
-                            if (it != store_.end() && !it->second.present)
-                                it->second.last_fetch_at =
-                                    std::chrono::steady_clock::now();
                         }
                         extra.reset();
                     }
@@ -1363,11 +1387,15 @@ NodeCache::ensure_present(
         {
             if (managed_transport)
                 close_managed_submissions(expected_hash, send_round);
+            else
+                close_raw_submissions(expected_hash, send_round);
             throw;
         }
 
         if (managed_transport)
             close_managed_submissions(expected_hash, send_round);
+        else
+            close_raw_submissions(expected_hash, send_round);
 
         if (!transport_owns_round)
         {
@@ -1911,33 +1939,157 @@ NodeCache::reconcile_managed_round(
         retire_node_fetch_round(hash, response_signal);
 }
 
-void
-NodeCache::record_raw_submission(
+//@@authority transition=prv.T0064 status=provisional scope=function bind=catl::peer_client::register_raw_submission@e3c7330f5d8d49ee
+// owner=unresolved owner_hypothesis=node_cache commit=mutex
+// touches=prv.S0018
+// label=preinstall_raw_write_completion_slot
+std::optional<std::size_t>
+NodeCache::register_raw_submission(
     Hash256 const& hash,
     std::shared_ptr<NodeFetchRound> const& round,
-    std::string_view endpoint) noexcept
+    std::string_view endpoint)
 {
+    std::lock_guard lock(mutex_);
+    auto const it = store_.find(hash);
+    if (!round || it == store_.end() || it->second.present ||
+        it->second.round != round || !it->second.signal ||
+        round->phase != NodeFetchRound::Phase::response ||
+        round->submissions_closed ||
+        round->dispatch_count == round->dispatches.size())
+    {
+        return std::nullopt;
+    }
+
+    auto const slot = round->dispatch_count++;
+    round->dispatches[slot].endpoint = endpoint;
+    round->dispatches[slot].state = NodeFetchRound::DispatchState::submitting;
+    return slot;
+}
+
+//@@authority transition=prv.T0065 status=provisional scope=function bind=catl::peer_client::settle_raw_submission@99bdf78ccc432ed4
+// owner=unresolved owner_hypothesis=node_cache commit=mutex
+// touches=prv.S0018,prv.S0006
+// label=consume_raw_write_completion_into_exact_dispatch_slot
+void
+NodeCache::settle_raw_submission(
+    Hash256 const& hash,
+    std::shared_ptr<NodeFetchRound> const& round,
+    std::size_t slot,
+    boost::system::error_code ec) noexcept
+{
+    try
+    {
+        std::lock_guard lock(mutex_);
+        if (!round || slot >= round->dispatch_count)
+            return;
+
+        auto& dispatch = round->dispatches[slot];
+        if (dispatch.state != NodeFetchRound::DispatchState::submitting)
+            return;
+
+        dispatch.state = ec ? NodeFetchRound::DispatchState::not_written
+                            : NodeFetchRound::DispatchState::written;
+        if (ec)
+        {
+            raw_not_written_++;
+        }
+        else
+        {
+            raw_writes_confirmed_++;
+            round->response_possible = true;
+            auto const it = store_.find(hash);
+            if (it != store_.end() && !it->second.present &&
+                it->second.round == round)
+            {
+                //@@authority transition=prv.T0032 status=provisional bind=expression_statement@d318fee4b7edaf1d
+                // scope=statement
+                // owner=unresolved owner_hypothesis=object_store
+                // commit=mutex touches=prv.S0006
+                // label=record_confirmed_raw_content_addressed_dispatch
+                it->second.last_fetch_at =
+                    std::chrono::steady_clock::now(); //@@authority-target ids=prv.T0032
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+    reconcile_raw_round(hash, round);
+}
+
+//@@authority transition=prv.T0066 status=provisional scope=function bind=catl::peer_client::close_raw_submissions@168e4aef17b8e267
+// owner=unresolved owner_hypothesis=node_cache commit=mutex
+// touches=prv.S0018
+// label=seal_raw_projection_set_before_retirement_decision
+void
+NodeCache::close_raw_submissions(
+    Hash256 const& hash,
+    std::shared_ptr<NodeFetchRound> const& round) noexcept
+{
+    try
+    {
+        std::lock_guard lock(mutex_);
+        if (!round)
+            return;
+        round->submissions_closed = true;
+    }
+    catch (...)
+    {
+    }
+    reconcile_raw_round(hash, round);
+}
+
+//@@authority transition=prv.T0067 status=provisional scope=function bind=catl::peer_client::reconcile_raw_round@e1b960994bce19b2
+// owner=unresolved owner_hypothesis=node_cache commit=mutex
+// touches=prv.S0018,prv.S0002
+// label=retire_closed_raw_round_when_every_write_is_terminally_not_written
+void
+NodeCache::reconcile_raw_round(
+    Hash256 const& hash,
+    std::shared_ptr<NodeFetchRound> const& round) noexcept
+{
+    std::shared_ptr<SerializedTimerSignal> retire_signal;
     try
     {
         std::lock_guard lock(mutex_);
         auto const it = store_.find(hash);
         if (!round || it == store_.end() || it->second.present ||
             it->second.round != round || !it->second.signal ||
-            round->dispatch_count == round->dispatches.size())
+            round->phase != NodeFetchRound::Phase::response ||
+            !round->submissions_closed || round->response_possible)
         {
             return;
         }
-        auto& slot = round->dispatches[round->dispatch_count++];
-        slot.endpoint = endpoint;
-        slot.state = NodeFetchRound::DispatchState::written;
-        round->response_possible = true;
-        it->second.last_fetch_at = std::chrono::steady_clock::now();
+
+        for (std::size_t i = 0; i < round->dispatch_count; ++i)
+        {
+            if (round->dispatches[i].state ==
+                NodeFetchRound::DispatchState::submitting)
+            {
+                return;
+            }
+            if (round->dispatches[i].state !=
+                NodeFetchRound::DispatchState::not_written)
+            {
+                return;
+            }
+        }
+        retire_signal = it->second.signal;
     }
     catch (...)
     {
+        return;
     }
+
+    if (retire_signal)
+        retire_node_fetch_round(hash, retire_signal);
 }
 
+//@@authority transition=prv.T0061 status=provisional scope=function
+//bind=catl::peer_client::send_fetch@a3c31883e13f0fce
+// owner=unresolved owner_hypothesis=node_cache commit=local
+// touches=prv.S0021
+// label=preflight_refuse_node_projection_without_advertised_coverage
 NodeCache::NodeFetchSubmission
 NodeCache::send_fetch(
     Hash256 expected_hash,
@@ -1946,15 +2098,19 @@ NodeCache::send_fetch(
     SHAMapNodeID position,
     Hash256 const& target_key,
     int speculative_depth,
+    uint32_t ledger_seq,
     PeerSession& peer,
     PeerGenerationPin peer_pin,
     std::shared_ptr<NodeFetchRound> round)
 {
+    if (!advertises_ledger(&peer, ledger_seq))
+        return NodeFetchSubmission::not_submitted;
+
     fetches_++;
 
     // Ensure the response handler is installed on this peer
     //@@authority transition=prv.T0016 status=provisional scope=statement
-    // bind=ensure_response_handler@3eb6121101418a73
+    // bind=ensure_response_handler@d481ff57458c3a34
     // owner=unresolved owner_hypothesis=node_cache
     // commit=unresolved calls=ensure_response_handler
     // label=install_shared_response_route_on_selected_peer
@@ -1996,7 +2152,7 @@ NodeCache::send_fetch(
     auto const refuse_managed = [&](char const* reason) {
         managed_fetches_refused_++;
         //@@authority transition=prv.T0043 status=provisional scope=statement
-        // bind=expression_statement@0f736171e08fa72e
+        // bind=expression_statement@121b8c91da52ae8e
         // owner=unresolved owner_hypothesis=node_cache
         // commit=node_cache_observation
         // label=report_managed_ingress_refusal_without_raw_fallback
@@ -2009,7 +2165,7 @@ NodeCache::send_fetch(
             " hash=",
             expected_hash.hex().substr(
                 0, 16)); //@@authority-target ids=prv.T0043
-        return NodeFetchSubmission::managed_refused;
+        return NodeFetchSubmission::not_submitted;
     };
 
     if (node_fetch_coordinator_)
@@ -2035,7 +2191,7 @@ NodeCache::send_fetch(
         }
 
         //@@authority transition=prv.T0042 status=provisional scope=statement
-        // bind=submit_node_batch_on_pin@8ee303c673d32fec
+        // bind=submit_node_batch_on_pin@ca579a1e5605a221
         // owner=unresolved owner_hypothesis=ledger_fetch_coordinator
         // commit=atomic calls=submit_node_batch_on_pin
         // label=route_existing_managed_generation_through_coordinator_ingress
@@ -2054,6 +2210,7 @@ NodeCache::send_fetch(
         std::weak_ptr<NodeFetchRound> weak_round = round;
         auto const ingress = coordinator->submit_node_batch_on_pin(
             ledger_hash,
+            ledger_seq,
             *tree,
             std::move(node_ids),
             std::move(peer_pin),
@@ -2122,33 +2279,65 @@ NodeCache::send_fetch(
     // Explicit raw compatibility mode: the NodeCache was constructed without a
     // coordinator capability. Managed mode never reaches this branch merely
     // because its pin or lifecycle owner is missing.
-    raw_fetches_queued_++;
     auto endpoint = peer.endpoint();
-    if (round)
-        record_raw_submission(expected_hash, round, endpoint);
-    //@@authority channel=prv.C0001 status=provisional scope=statement
-    // bind=send_get_nodes@b9d7d090869dcd1b
-    // endpoints=node_cache,peer_client
-    // channel_semantics=legacy_uncorrelated calls=send_get_nodes
-    // label=legacy_node_request_response_channel_without_local_correlation
-    //@@authority transition=prv.T0003 status=provisional scope=statement
-    // bind=send_get_nodes@b9d7d090869dcd1b
-    // owner=unresolved owner_hypothesis=peer_client commit=strand
-    // calls=send_get_nodes
-    // label=queue_raw_compatibility_node_fetch_without_receipt
-    peer.send_get_nodes(
-        ledger_hash,
-        tree_type,
-        node_ids,
-        [endpoint = std::move(endpoint)](boost::system::error_code ec) {
-            PLOGD(
-                log_,
-                "  send_fetch write failed for ",
-                endpoint,
-                ": ",
-                ec.message());
-        }); //@@authority-target ids=prv.C0001,prv.T0003
-    return NodeFetchSubmission::raw_queued;
+    auto const slot = round
+        ? register_raw_submission(expected_hash, round, endpoint)
+        : std::optional<std::size_t>{};
+    if (round && !slot)
+        return NodeFetchSubmission::not_submitted;
+
+    auto weak = weak_from_this();
+    std::weak_ptr<NodeFetchRound> weak_round = round;
+    try
+    {
+        //@@authority channel=prv.C0001 status=provisional scope=statement
+        // bind=send_get_nodes@4a535f79f16a486b
+        // endpoints=node_cache,peer_client
+        // channel_semantics=command_receipt calls=send_get_nodes
+        // label=raw_node_projection_and_write_completion_channel
+        //@@authority transition=prv.T0003 status=provisional scope=statement
+        // bind=send_get_nodes@4a535f79f16a486b
+        // owner=unresolved owner_hypothesis=peer_client commit=strand
+        // calls=send_get_nodes
+        // label=project_raw_node_fetch_with_correlated_write_completion_onto_peer_owner
+        peer.send_get_nodes(
+            ledger_hash,
+            ledger_seq,
+            tree_type,
+            node_ids,
+            [weak,
+             expected_hash,
+             weak_round,
+             slot,
+             endpoint = std::move(endpoint)](boost::system::error_code ec) {
+                if (ec)
+                {
+                    PLOGD(
+                        log_,
+                        "  send_fetch write failed for ",
+                        endpoint,
+                        ": ",
+                        ec.message());
+                }
+                auto self = weak.lock();
+                auto round = weak_round.lock();
+                if (self && round && slot)
+                    self->settle_raw_submission(
+                        expected_hash, round, *slot, ec);
+            }); //@@authority-target ids=prv.C0001,prv.T0003
+    }
+    catch (...)
+    {
+        if (round && slot)
+            settle_raw_submission(
+                expected_hash,
+                round,
+                *slot,
+                boost::asio::error::operation_aborted);
+        return NodeFetchSubmission::not_submitted;
+    }
+    raw_fetches_projected_++;
+    return NodeFetchSubmission::raw_projected;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3170,7 +3359,7 @@ NodeCache::drive_header_fetch(
                         PeerSession* session,
                         PeerGenerationPin pin,
                         std::shared_ptr<HeaderRound> const& round) {
-        if (!session || !session->is_ready() || !round_is_active(round))
+        if (!advertises_ledger(session, ledger_seq) || !round_is_active(round))
             return false;
 
         auto const endpoint = session->endpoint();
@@ -3221,7 +3410,7 @@ NodeCache::drive_header_fetch(
 
         if (fetch->peers && sent < kHeaderFanOut && round_is_active(round))
         {
-            auto extras = co_await fetch->peers->co_select_peers_for(
+            auto extras = co_await fetch->peers->co_select_covering_peers_for(
                 ledger_seq, kHeaderFanOut - sent, fetch->tried_peers);
             for (auto& extra : extras)
             {
@@ -3239,7 +3428,15 @@ NodeCache::drive_header_fetch(
         if (sent == 0 && fetch->peers && fetch->total_peers_tried == 0 &&
             round_is_active(round))
         {
-            auto fallback = co_await fetch->peers->wait_for_peer(
+            catl::core::emit_status(
+                "searching for peer advertising ledger " +
+                std::to_string(ledger_seq));
+            publish_header_progress(
+                ledger_seq,
+                ProgressKind::searching_covering_peer,
+                static_cast<uint8_t>(fetch->total_peers_tried),
+                static_cast<uint8_t>(max_walk_peer_retries_));
+            auto fallback = co_await fetch->peers->wait_for_covering_peer(
                 ledger_seq,
                 std::max(0, peer_refresh_timeout_secs_),
                 fetch->tried_peers,
@@ -3311,10 +3508,11 @@ NodeCache::drive_header_fetch(
             {
                 catl::core::emit_status(
                     "header seq=" + std::to_string(ledger_seq) +
-                    " — no peers available");
+                    " — no peer advertising ledger " +
+                    std::to_string(ledger_seq));
                 publish_header_progress(
                     ledger_seq,
-                    ProgressKind::no_peer_available,
+                    ProgressKind::no_covering_peer,
                     0,
                     static_cast<std::uint8_t>(kHeaderFanOut));
                 finish_header_fetch(ledger_seq, fetch);
@@ -3717,7 +3915,9 @@ NodeCache::stats() const
         .fetches = fetches_,
         .fetch_errors = fetch_errors_,
         .managed_transport_selected = node_fetch_coordinator_.has_value(),
-        .raw_fetches_queued = raw_fetches_queued_,
+        .raw_fetches_projected = raw_fetches_projected_,
+        .raw_writes_confirmed = raw_writes_confirmed_,
+        .raw_not_written = raw_not_written_,
         .managed_fetches_reserved = managed_fetches_reserved_,
         .managed_fetches_refused = managed_fetches_refused_,
         .managed_writes_confirmed = managed_writes_confirmed_,

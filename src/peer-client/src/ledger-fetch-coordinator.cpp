@@ -91,11 +91,12 @@ LedgerFetchCoordinator::LedgerFetchCoordinator(
     fence_delivery_.reserve(kMaxFenceWaiters);
 }
 
-//@@authority transition=ledger_fetch_coordinator.reserve_ingress bind=catl::peer_client::submit_node_batch_on_pin@4fc8853fb941b09d
+//@@authority transition=ledger_fetch_coordinator.reserve_ingress bind=catl::peer_client::submit_node_batch_on_pin@6d8e36c291566c87
 // owner=ledger_fetch_coordinator commit=atomic
 LedgerFetchCoordinator::Ingress
 LedgerFetchCoordinator::submit_node_batch_on_pin(
     Hash256 ledger_hash,
+    std::uint32_t ledger_seq,
     NodeTree tree,
     std::vector<SHAMapNodeID> node_ids,
     PeerGenerationPin pin,
@@ -151,12 +152,14 @@ LedgerFetchCoordinator::submit_node_batch_on_pin(
             strand_,
             [self = shared_from_this(),
              ledger_hash = std::move(ledger_hash),
+             ledger_seq,
              tree,
              node_ids = std::move(node_ids),
              pin = std::move(pin),
              on_outcome = std::move(on_outcome)]() mutable {
                 self->commit_row_on_strand(
                     std::move(ledger_hash),
+                    ledger_seq,
                     tree,
                     std::move(node_ids),
                     std::move(pin),
@@ -228,11 +231,12 @@ LedgerFetchCoordinator::cancel_quietly(OutboxRow& row) noexcept
     }
 }
 
-//@@authority transition=ledger_fetch_coordinator.commit_sender_row bind=catl::peer_client::commit_row_on_strand@b0d7ce1b2979e204
+//@@authority transition=ledger_fetch_coordinator.commit_sender_row bind=catl::peer_client::commit_row_on_strand@59b9f100d71287e7
 // owner=ledger_fetch_coordinator commit=strand
 void
 LedgerFetchCoordinator::commit_row_on_strand(
     Hash256 ledger_hash,
+    std::uint32_t ledger_seq,
     NodeTree tree,
     std::vector<SHAMapNodeID> node_ids,
     PeerGenerationPin pin,
@@ -279,6 +283,7 @@ LedgerFetchCoordinator::commit_row_on_strand(
             TransportAttemptId{next_attempt_ + 1},
             sender_generation_,
             std::move(ledger_hash),
+            ledger_seq,
             tree,
             std::move(node_ids)};
         auto timer = std::make_shared<asio::steady_timer>(strand_);

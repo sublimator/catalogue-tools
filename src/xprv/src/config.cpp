@@ -140,9 +140,6 @@ load_config_file(std::string const& path, uint32_t network_id_hint)
         {
             if (auto v = (*s)["archival_range_threshold"].value<int64_t>())
                 config.archival_range_threshold = static_cast<uint32_t>(*v);
-            if (auto v = (*s)["peer_fallback_ms"].value<int64_t>())
-                config.peer_fallback = std::chrono::milliseconds(*v);
-
             // Helper to load a PeerPool from a TOML sub-table
             auto load_pool = [](toml::table const& t, Config::PeerPool& pool) {
                 if (auto v = t["max_hub_peers"].value<int64_t>())

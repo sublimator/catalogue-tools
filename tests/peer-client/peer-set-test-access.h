@@ -28,10 +28,9 @@ public:
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         std::string endpoint)
     {
-        run_on_strand(
-            io, peers, [endpoint = std::move(endpoint)](auto& set) {
-                set.tracker_->add_discovered(endpoint);
-            });
+        run_on_strand(io, peers, [endpoint = std::move(endpoint)](auto& set) {
+            set.tracker_->add_discovered(endpoint);
+        });
     }
 
     static void
@@ -40,11 +39,10 @@ public:
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         std::vector<std::string> endpoints)
     {
-        run_on_strand(
-            io, peers, [endpoints = std::move(endpoints)](auto& set) {
-                for (auto const& endpoint : endpoints)
-                    set.tracker_->add_discovered(endpoint);
-            });
+        run_on_strand(io, peers, [endpoints = std::move(endpoints)](auto& set) {
+            for (auto const& endpoint : endpoints)
+                set.tracker_->add_discovered(endpoint);
+        });
     }
 
     static void
@@ -53,10 +51,9 @@ public:
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         std::string endpoint)
     {
-        run_on_strand(
-            io, peers, [endpoint = std::move(endpoint)](auto& set) {
-                set.queued_.insert(endpoint);
-            });
+        run_on_strand(io, peers, [endpoint = std::move(endpoint)](auto& set) {
+            set.queued_.insert(endpoint);
+        });
     }
 
     static void
@@ -90,7 +87,8 @@ public:
         boost::asio::io_context& io,
         std::shared_ptr<catl::peer_client::PeerSet> const& peers)
     {
-        run_on_strand(io, peers, [](auto& set) { set.prune_discovery_state(); });
+        run_on_strand(
+            io, peers, [](auto& set) { set.prune_discovery_state(); });
     }
 
     static bool
@@ -101,9 +99,7 @@ public:
     {
         bool found = false;
         run_on_strand(
-            io,
-            peers,
-            [&found, endpoint = std::move(endpoint)](auto& set) {
+            io, peers, [&found, endpoint = std::move(endpoint)](auto& set) {
                 found = set.crawled_.count(endpoint) > 0;
             });
         return found;
@@ -117,9 +113,7 @@ public:
     {
         bool found = false;
         run_on_strand(
-            io,
-            peers,
-            [&found, endpoint = std::move(endpoint)](auto& set) {
+            io, peers, [&found, endpoint = std::move(endpoint)](auto& set) {
                 found = set.failed_at_.count(endpoint) > 0;
             });
         return found;
@@ -188,11 +182,10 @@ public:
         run_on_strand(
             io,
             peers,
-            [&authorization,
-             ledger_seq,
-             excluded = std::move(excluded)](auto& set) mutable {
-                authorization = std::make_shared<catl::peer_client::PeerSet::
-                                                     TargetedConnectAuthorization>(
+            [&authorization, ledger_seq, excluded = std::move(excluded)](
+                auto& set) mutable {
+                authorization = std::make_shared<
+                    catl::peer_client::PeerSet::TargetedConnectAuthorization>(
                     ledger_seq, std::move(excluded));
                 set.acquire_wanted_ledger(ledger_seq, authorization);
             });
@@ -207,9 +200,7 @@ public:
             authorization)
     {
         run_on_strand(
-            io,
-            peers,
-            [authorization = std::move(authorization)](auto& set) {
+            io, peers, [authorization = std::move(authorization)](auto& set) {
                 if (!authorization)
                     return;
                 auto const ledger_seq = authorization->ledger_seq;
@@ -282,17 +273,17 @@ public:
                     admission_leases.push_back(authorization->claim());
                 }
                 auto const key = peer->endpoint();
-                admitted = set.make_room_for_peer(
-                    key, peer, admission_leases);
+                admitted = set.make_room_for_peer(key, peer, admission_leases);
                 if (!admitted)
                     return;
                 set.connections_[key] =
                     catl::peer_client::PeerSet::ConnectionEntry{
                         peer, ++set.next_connection_generation_};
+                auto const range = peer->advertised_ledger_range();
                 set.note_connect_success(
                     key,
-                    {.first_seq = peer->peer_first_seq(),
-                     .last_seq = peer->peer_last_seq(),
+                    {.first_seq = range.first_seq,
+                     .last_seq = range.last_seq,
                      .current_seq = peer->peer_ledger_seq()});
                 set.notify_waiters();
             });
@@ -317,14 +308,13 @@ public:
              ledger_seq,
              excluded = std::move(excluded),
              revoke_claimed](auto& set) mutable {
-                auto authorization =
-                    std::make_shared<catl::peer_client::PeerSet::
-                                         TargetedConnectAuthorization>(
-                        ledger_seq, std::move(excluded));
+                auto authorization = std::make_shared<
+                    catl::peer_client::PeerSet::TargetedConnectAuthorization>(
+                    ledger_seq, std::move(excluded));
                 auto lease = authorization->claim();
                 authorization->close(revoke_claimed);
-                std::vector<catl::peer_client::PeerSet::
-                                TargetedAdmissionLeasePtr>
+                std::vector<
+                    catl::peer_client::PeerSet::TargetedAdmissionLeasePtr>
                     leases;
                 leases.push_back(std::move(lease));
 
@@ -332,8 +322,8 @@ public:
                 admitted = set.make_room_for_peer(key, peer, leases);
                 if (admitted)
                     set.connections_[key] =
-                    catl::peer_client::PeerSet::ConnectionEntry{
-                        peer, ++set.next_connection_generation_};
+                        catl::peer_client::PeerSet::ConnectionEntry{
+                            peer, ++set.next_connection_generation_};
             });
         return admitted;
     }
@@ -479,8 +469,7 @@ public:
         std::string endpoint)
     {
         boost::asio::post(
-            peers->strand_,
-            [peers, endpoint = std::move(endpoint)]() mutable {
+            peers->strand_, [peers, endpoint = std::move(endpoint)]() mutable {
                 peers->note_discovered(endpoint);
             });
     }
@@ -506,9 +495,7 @@ public:
         catl::peer_client::PeerStatus status)
     {
         run_on_strand(
-            io,
-            peers,
-            [endpoint = std::move(endpoint), status](auto& set) {
+            io, peers, [endpoint = std::move(endpoint), status](auto& set) {
                 set.note_connect_success(endpoint, status);
             });
     }
@@ -524,9 +511,7 @@ public:
             io,
             peers,
             [endpoint = std::move(endpoint), headers = std::move(headers)](
-                auto& set) {
-                set.note_peer_headers(endpoint, headers);
-            });
+                auto& set) { set.note_peer_headers(endpoint, headers); });
     }
 
     static void
@@ -537,9 +522,7 @@ public:
         std::chrono::steady_clock::time_point until)
     {
         run_on_strand(
-            io,
-            peers,
-            [endpoint = std::move(endpoint), until](auto& set) {
+            io, peers, [endpoint = std::move(endpoint), until](auto& set) {
                 set.endpoint_stats_[catl::peer_client::EndpointTracker::
                                         canonical_endpoint(endpoint)]
                     .crawl_private_until = until;
@@ -552,10 +535,9 @@ public:
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         std::string endpoint)
     {
-        run_on_strand(
-            io, peers, [endpoint = std::move(endpoint)](auto& set) {
-                set.queue_crawl(endpoint);
-            });
+        run_on_strand(io, peers, [endpoint = std::move(endpoint)](auto& set) {
+            set.queue_crawl(endpoint);
+        });
     }
 
     static void
@@ -568,8 +550,8 @@ public:
         run_on_strand(
             io,
             peers,
-            [endpoint = std::move(endpoint), detail = std::move(detail)](
-                auto& set) mutable {
+            [endpoint = std::move(endpoint),
+             detail = std::move(detail)](auto& set) mutable {
                 set.note_connect_failure(endpoint, std::move(detail));
             });
     }
@@ -594,9 +576,7 @@ public:
     {
         std::chrono::steady_clock::duration backoff{};
         run_on_strand(
-            io,
-            peers,
-            [&backoff, endpoint = std::move(endpoint)](auto& set) {
+            io, peers, [&backoff, endpoint = std::move(endpoint)](auto& set) {
                 backoff = set.retry_backoff_for(endpoint);
             });
         return backoff;
@@ -608,11 +588,10 @@ public:
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         std::string endpoint)
     {
-        run_on_strand(
-            io, peers, [endpoint = std::move(endpoint)](auto& set) {
-                set.pending_connects_.push_back(endpoint);
-                set.queued_.insert(endpoint);
-            });
+        run_on_strand(io, peers, [endpoint = std::move(endpoint)](auto& set) {
+            set.pending_connects_.push_back(endpoint);
+            set.queued_.insert(endpoint);
+        });
     }
 
     static void
@@ -631,9 +610,7 @@ public:
     {
         bool found = false;
         run_on_strand(
-            io,
-            peers,
-            [&found, endpoint = std::move(endpoint)](auto& set) {
+            io, peers, [&found, endpoint = std::move(endpoint)](auto& set) {
                 found = set.in_flight_.count(endpoint) > 0;
             });
         return found;
@@ -662,19 +639,18 @@ public:
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         catl::peer_client::PeerSessionPtr peer)
     {
-        run_on_strand(
-            io, peers, [peer = std::move(peer)](auto& set) {
-                auto const key = peer->endpoint();
-                set.connections_[key] =
-                    catl::peer_client::PeerSet::ConnectionEntry{
-                        peer, ++set.next_connection_generation_};
-                set.note_connect_success(
-                    key,
-                    {.first_seq = peer->peer_first_seq(),
-                     .last_seq = peer->peer_last_seq(),
-                     .current_seq = peer->peer_ledger_seq()});
-                set.notify_waiters();
-            });
+        run_on_strand(io, peers, [peer = std::move(peer)](auto& set) {
+            auto const key = peer->endpoint();
+            set.connections_[key] = catl::peer_client::PeerSet::ConnectionEntry{
+                peer, ++set.next_connection_generation_};
+            auto const range = peer->advertised_ledger_range();
+            set.note_connect_success(
+                key,
+                {.first_seq = range.first_seq,
+                 .last_seq = range.last_seq,
+                 .current_seq = peer->peer_ledger_seq()});
+            set.notify_waiters();
+        });
     }
 
     static void
@@ -683,21 +659,19 @@ public:
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         catl::peer_client::PeerSessionPtr peer)
     {
-        run_on_strand(
-            io, peers, [peer = std::move(peer)](auto& set) {
-                auto const key = peer->endpoint();
-                set.connections_[key] =
-                    catl::peer_client::PeerSet::ConnectionEntry{
-                        peer, ++set.next_connection_generation_};
-                set.note_connect_success(
-                    key,
-                    {.first_seq = peer->peer_first_seq(),
-                     .last_seq = peer->peer_last_seq(),
-                     .current_seq = peer->peer_ledger_seq()});
-                set.remove_peer(key);
-            });
+        run_on_strand(io, peers, [peer = std::move(peer)](auto& set) {
+            auto const key = peer->endpoint();
+            set.connections_[key] = catl::peer_client::PeerSet::ConnectionEntry{
+                peer, ++set.next_connection_generation_};
+            auto const range = peer->advertised_ledger_range();
+            set.note_connect_success(
+                key,
+                {.first_seq = range.first_seq,
+                 .last_seq = range.last_seq,
+                 .current_seq = peer->peer_ledger_seq()});
+            set.remove_peer(key);
+        });
     }
-
 
     /// Insert a ready session as an admitted instance, minting its
     /// generation exactly as production admission does. Returns the minted
@@ -716,10 +690,11 @@ public:
                 set.connections_[key] =
                     catl::peer_client::PeerSet::ConnectionEntry{
                         peer, generation};
+                auto const range = peer->advertised_ledger_range();
                 set.note_connect_success(
                     key,
-                    {.first_seq = peer->peer_first_seq(),
-                     .last_seq = peer->peer_last_seq(),
+                    {.first_seq = range.first_seq,
+                     .last_seq = range.last_seq,
                      .current_seq = peer->peer_ledger_seq()});
                 set.notify_waiters();
             });
@@ -754,9 +729,8 @@ public:
         std::uint64_t generation = 0;
         run_on_strand(io, peers, [&generation, key](auto& set) {
             auto it = set.connections_.find(key);
-            generation = it != set.connections_.end()
-                ? it->second.generation
-                : 0;
+            generation =
+                it != set.connections_.end() ? it->second.generation : 0;
         });
         return generation;
     }
@@ -808,8 +782,7 @@ public:
         std::shared_future<void> release)
     {
         boost::asio::post(
-            peers->strand_,
-            [&entered, release = std::move(release)]() mutable {
+            peers->strand_, [&entered, release = std::move(release)]() mutable {
                 entered.set_value();
                 release.wait();
             });
@@ -837,9 +810,8 @@ public:
         std::uint64_t count = 0;
         run_on_strand(io, peers, [&count, key](auto& set) {
             auto it = set.endpoint_stats_.find(key);
-            count = it != set.endpoint_stats_.end()
-                ? it->second.failure_count
-                : 0;
+            count =
+                it != set.endpoint_stats_.end() ? it->second.failure_count : 0;
         });
         return count;
     }
@@ -889,8 +861,7 @@ public:
             peers->strand_,
             [peers, host = std::move(host), port]()
                 -> boost::asio::awaitable<catl::peer_client::PeerSessionPtr> {
-                co_return co_await peers->try_connect_on_strand(
-                    host, port, {});
+                co_return co_await peers->try_connect_on_strand(host, port, {});
             },
             [&done](
                 std::exception_ptr ep,
@@ -932,11 +903,12 @@ public:
     }
 
     /// Drop the next `count` seal COMPLETIONS: each seal succeeds and its
-    /// completion is never posted. The only faithful way to test a lost completion
-    /// post, because a sender-side simulation still runs the sender's own callback.
+    /// completion is never posted. The only faithful way to test a lost
+    /// completion post, because a sender-side simulation still runs the
+    /// sender's own callback.
     ///
-    /// A count rather than a flag so "lose exactly the first one, then behave" is
-    /// expressible without disarming mid-flight.
+    /// A count rather than a flag so "lose exactly the first one, then behave"
+    /// is expressible without disarming mid-flight.
     static void
     drop_next_seal_completions(
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
@@ -1000,7 +972,10 @@ private:
 
         boost::asio::post(
             peers->strand_,
-            [failure, fn = std::forward<Fn>(fn), peers, done = std::move(done)]() mutable {
+            [failure,
+             fn = std::forward<Fn>(fn),
+             peers,
+             done = std::move(done)]() mutable {
                 try
                 {
                     fn(*peers);
@@ -1013,7 +988,7 @@ private:
             });
 
         while (fut.wait_for(std::chrono::milliseconds(1)) !=
-            std::future_status::ready)
+               std::future_status::ready)
         {
             io.poll();
             std::this_thread::sleep_for(std::chrono::milliseconds(1));

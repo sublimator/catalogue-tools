@@ -7,6 +7,7 @@
 #include <boost/asio/strand.hpp>
 #include <boost/system/error_code.hpp>
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -32,6 +33,48 @@ struct PeerTerminalReason
     std::string detail;
 };
 
+/// One coherent TMStatusChange ledger-range publication.
+///
+/// The endpoints are packed into one atomic word by real PeerClient. Readers
+/// must consume this value as a unit: separately published `first` and `last`
+/// values can synthesize a range that the peer never advertised.
+struct AdvertisedLedgerRange
+{
+    std::uint32_t first_seq = 0;
+    std::uint32_t last_seq = 0;
+
+    [[nodiscard]] constexpr bool
+    valid() const noexcept
+    {
+        return first_seq != 0 && last_seq != 0 && first_seq <= last_seq;
+    }
+
+    [[nodiscard]] constexpr bool
+    contains(std::uint32_t ledger_seq) const noexcept
+    {
+        return valid() && first_seq <= ledger_seq && ledger_seq <= last_seq;
+    }
+
+    [[nodiscard]] constexpr std::uint64_t
+    packed() const noexcept
+    {
+        return (static_cast<std::uint64_t>(first_seq) << 32) | last_seq;
+    }
+
+    [[nodiscard]] static constexpr AdvertisedLedgerRange
+    from_packed(std::uint64_t value) noexcept
+    {
+        return {
+            .first_seq = static_cast<std::uint32_t>(value >> 32),
+            .last_seq = static_cast<std::uint32_t>(value),
+        };
+    }
+
+    friend constexpr bool
+    operator==(AdvertisedLedgerRange const&, AdvertisedLedgerRange const&) =
+        default;
+};
+
 class PeerSession
 {
 public:
@@ -49,11 +92,8 @@ public:
     virtual uint32_t
     peer_ledger_seq() const = 0;
 
-    virtual uint32_t
-    peer_first_seq() const = 0;
-
-    virtual uint32_t
-    peer_last_seq() const = 0;
+    virtual AdvertisedLedgerRange
+    advertised_ledger_range() const = 0;
 
     virtual std::map<std::string, std::string>
     peer_headers() const
@@ -122,9 +162,10 @@ public:
     virtual void
     send_get_nodes(
         Hash256 const& ledger_hash,
+        uint32_t ledger_seq,
         int type,
         std::vector<SHAMapNodeID> const& node_ids,
-        std::function<void(boost::system::error_code)> on_error = nullptr) = 0;
+        std::function<void(boost::system::error_code)> on_write = nullptr) = 0;
 
     /// Publish one sealed node-batch projection. A true return means the
     /// projection was queued for owner-strand admission; the sender must retain

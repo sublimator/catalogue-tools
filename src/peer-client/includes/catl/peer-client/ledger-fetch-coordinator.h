@@ -267,6 +267,7 @@ public:
     [[nodiscard]] Ingress
     submit_node_batch_on_pin(
         Hash256 ledger_hash,
+        std::uint32_t ledger_seq,
         NodeTree tree,
         std::vector<SHAMapNodeID> node_ids,
         PeerGenerationPin pin,
@@ -518,6 +519,7 @@ private:
     void
     commit_row_on_strand(
         Hash256 ledger_hash,
+        std::uint32_t ledger_seq,
         NodeTree tree,
         std::vector<SHAMapNodeID> node_ids,
         PeerGenerationPin pin,

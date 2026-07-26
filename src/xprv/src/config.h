@@ -92,10 +92,6 @@ struct Config
     /// Shared between server and CLI modes.
     uint32_t archival_range_threshold = 1'000'000;
 
-    /// After this duration without finding a range-matching peer,
-    /// fall back to any ready peer. 0ms = disable. Default 1000ms.
-    std::chrono::milliseconds peer_fallback{1000};
-
     /// File descriptor soft limit for serve mode. 0 = don't touch.
     unsigned int fd_limit = 8192;
 

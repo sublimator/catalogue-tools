@@ -38,6 +38,9 @@ public:
         auto client = std::shared_ptr<PeerClient>(new PeerClient(io));
         client->state_ = state;
         client->connection_generation_ = connection_generation;
+        client->publish_advertised_ledger_range(
+            {.first_seq = 1,
+             .last_seq = std::numeric_limits<std::uint32_t>::max()});
         return client;
     }
 
@@ -51,12 +54,14 @@ public:
         std::uint64_t sender_generation = 1,
         Hash256 ledger_hash = {},
         NodeTree tree = NodeTree::account_state,
-        std::vector<SHAMapNodeID> node_ids = {SHAMapNodeID{}})
+        std::vector<SHAMapNodeID> node_ids = {SHAMapNodeID{}},
+        std::uint32_t ledger_seq = 1)
     {
         return NodeBatchIntent{
             TransportAttemptId{attempt_id},
             SenderGenerationId{sender_generation},
             std::move(ledger_hash),
+            ledger_seq,
             tree,
             std::move(node_ids)};
     }
@@ -68,17 +73,18 @@ public:
         Hash256 ledger_hash = {},
         NodeTree tree = NodeTree::transaction,
         std::vector<SHAMapNodeID> node_ids = {SHAMapNodeID{}},
-        std::uint64_t sender_generation = 1)
+        std::uint64_t sender_generation = 1,
+        std::uint32_t ledger_seq = 1)
     {
         NodeBatchIntent intent{
             TransportAttemptId{attempt_id},
             SenderGenerationId{sender_generation},
             std::move(ledger_hash),
+            ledger_seq,
             tree,
             std::move(node_ids)};
         return NodeBatchCommand{
-            std::move(intent),
-            PeerConnectionGenerationId{peer_generation}};
+            std::move(intent), PeerConnectionGenerationId{peer_generation}};
     }
 
     static void
@@ -139,9 +145,7 @@ public:
     }
 
     static void
-    seed_receipt_sequence(
-        PeerClient& client,
-        std::uint64_t next_sequence)
+    seed_receipt_sequence(PeerClient& client, std::uint64_t next_sequence)
     {
         client.next_node_batch_receipt_sequence_ = next_sequence;
     }
@@ -175,9 +179,7 @@ public:
     }
 
     static void
-    defer(
-        PeerClient& client,
-        PeerClient::DeferredRequest request)
+    defer(PeerClient& client, PeerClient::DeferredRequest request)
     {
         client.defer_request(std::move(request));
     }
@@ -202,9 +204,10 @@ public:
     /// Fill the receiver's bounded node-batch ingress so every further public
     /// submission or acknowledgement is refused before reaching the strand.
     ///
-    /// Used by the coordinator controls to force the acknowledgement-refused retry
-    /// path, which is otherwise unreachable: it is the receiver's own bound, and a
-    /// sender-side simulation of it would prove nothing about the real boundary.
+    /// Used by the coordinator controls to force the acknowledgement-refused
+    /// retry path, which is otherwise unreachable: it is the receiver's own
+    /// bound, and a sender-side simulation of it would prove nothing about the
+    /// real boundary.
     static void
     seed_node_batch_ingress_saturated(PeerClient& client)
     {
@@ -212,11 +215,11 @@ public:
             kMaxNodeBatchIngressProjections, std::memory_order_release);
     }
 
-    /// Release the receiver's node-batch ingress, as its own strand does when it
-    /// drains an item. Paired with seed_node_batch_ingress_saturated so a control
-    /// can force a refusal, then prove a later attempt succeeds — which is the
-    /// difference between a retry that yields and one that burns its budget in a
-    /// single strand pass.
+    /// Release the receiver's node-batch ingress, as its own strand does when
+    /// it drains an item. Paired with seed_node_batch_ingress_saturated so a
+    /// control can force a refusal, then prove a later attempt succeeds — which
+    /// is the difference between a retry that yields and one that burns its
+    /// budget in a single strand pass.
     static void
     drain_node_batch_ingress(PeerClient& client)
     {
@@ -233,6 +236,14 @@ public:
         boost::system::error_code ec;
         client.connection_->socket().lowest_layer().open(tcp::v4(), ec);
         ASSERT_FALSE(ec);
+    }
+
+    static void
+    publish_advertised_ledger_range(
+        PeerClient& client,
+        AdvertisedLedgerRange range)
+    {
+        client.publish_advertised_ledger_range(range);
     }
 
     static void

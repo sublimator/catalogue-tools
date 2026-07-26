@@ -237,16 +237,11 @@ public:
     set_tracker(std::shared_ptr<EndpointTracker> tracker);
 
     /// Peer's advertised ledger range (from TMStatusChange).
-    uint32_t
-    peer_first_seq() const override
+    AdvertisedLedgerRange
+    advertised_ledger_range() const override
     {
-        return peer_first_seq_;
-    }
-
-    uint32_t
-    peer_last_seq() const override
-    {
-        return peer_last_seq_;
+        return AdvertisedLedgerRange::from_packed(
+            advertised_ledger_range_.load(std::memory_order_acquire));
     }
 
     std::map<std::string, std::string>
@@ -266,15 +261,16 @@ public:
     /// in pending_nodes. The response will be delivered via the
     /// node_response_handler (if set) and then through normal dispatch.
     /// Thread-safe: submission first enters the PeerClient/connection strand.
-    /// Optional on_error callback fires if the async write fails (e.g.
-    /// broken pipe) — use this to cancel signal timers immediately
-    /// instead of waiting for the full fetch timeout.
+    /// Optional on_write callback fires exactly once: with an error if the
+    /// owner strand refuses the request or the async write fails, and with
+    /// success only after the async write completes.
     void
     send_get_nodes(
         Hash256 const& ledger_hash,
+        uint32_t ledger_seq,
         int type,  // liTX_NODE or liAS_NODE
         std::vector<SHAMapNodeID> const& node_ids,
-        std::function<void(boost::system::error_code)> on_error =
+        std::function<void(boost::system::error_code)> on_write =
             nullptr) override;
 
     bool
@@ -351,6 +347,9 @@ private:
     void
     handle_status_change(std::vector<uint8_t> const& payload);
 
+    AdvertisedLedgerRange
+    publish_advertised_ledger_range(AdvertisedLedgerRange range) noexcept;
+
     void
     handle_endpoints(std::vector<uint8_t> const& payload);
 
@@ -383,9 +382,10 @@ private:
     void
     send_get_nodes_on_strand(
         Hash256 ledger_hash,
+        uint32_t ledger_seq,
         int type,
         std::vector<SHAMapNodeID> node_ids,
-        std::function<void(boost::system::error_code)> on_error);
+        std::function<void(boost::system::error_code)> on_write);
 
     bool
     submit_node_batch_on_strand(
@@ -401,8 +401,7 @@ private:
             NodeBatchWriteOutcome::written) noexcept;
 
     void
-    acknowledge_node_batch_receipt_on_strand(
-        NodeBatchReceiptAck ack) noexcept;
+    acknowledge_node_batch_receipt_on_strand(NodeBatchReceiptAck ack) noexcept;
 
     void
     get_ledger_header_on_strand(
@@ -588,10 +587,8 @@ private:
         std::size_t waiter_count = 0;
         std::optional<NodeBatchWriteReceipt> terminal_receipt;
     };
-    static_assert(
-        std::is_nothrow_move_constructible_v<NodeBatchWriteRecord>);
-    static_assert(
-        std::is_nothrow_move_assignable_v<NodeBatchWriteRecord>);
+    static_assert(std::is_nothrow_move_constructible_v<NodeBatchWriteRecord>);
+    static_assert(std::is_nothrow_move_assignable_v<NodeBatchWriteRecord>);
     std::vector<NodeBatchWriteRecord> node_batch_write_records_;
     std::atomic<std::size_t> node_batch_ingress_projections_{0};
     std::atomic<std::size_t> node_batch_work_projection_{0};
@@ -620,8 +617,12 @@ private:
 
     std::atomic<State> state_{State::Disconnected};
     std::atomic<uint32_t> peer_ledger_seq_{0};
-    std::atomic<uint32_t> peer_first_seq_{0};
-    std::atomic<uint32_t> peer_last_seq_{0};
+    //@@authority state=prv.S0021 status=provisional scope=field
+    //bind=catl::peer_client::PeerClient::advertised_ledger_range_@f4cbfc77b30d3841
+    // owner=unresolved owner_hypothesis=peer_client
+    // observed_home=peer_client
+    // label=coherent_advertised_ledger_range_snapshot
+    std::atomic<std::uint64_t> advertised_ledger_range_{0};
     std::string net_label_;
     std::string endpoint_str_;  // "host:port" for tracker
     std::uint64_t receiver_instance_id_ = 0;
@@ -631,7 +632,8 @@ private:
     std::shared_ptr<EndpointTracker> tracker_;
 
     DisconnectCallback on_disconnect_;
-    //@@authority state=prv.S0007 status=provisional scope=field bind=catl::peer_client::PeerClient::node_response_handler_@21740938935a972d
+    //@@authority state=prv.S0007 status=provisional scope=field
+    // bind=catl::peer_client::PeerClient::node_response_handler_@21740938935a972d
     // owner=unresolved owner_hypothesis=peer_client observed_home=peer_client
     // label=singleton_uncorrelated_node_response_sink
     NodeResponseHandler node_response_handler_;

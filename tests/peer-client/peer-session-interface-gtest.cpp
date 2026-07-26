@@ -68,8 +68,8 @@ public:
         , endpoint_(std::move(endpoint))
         , ready_(ready)
         , current_seq_(current_seq)
-        , first_seq_(first_seq)
-        , last_seq_(last_seq)
+        , advertised_ledger_range_(
+              AdvertisedLedgerRange{first_seq, last_seq}.packed())
     {
     }
 
@@ -91,16 +91,11 @@ public:
         return current_seq_.load(std::memory_order_relaxed);
     }
 
-    uint32_t
-    peer_first_seq() const override
+    AdvertisedLedgerRange
+    advertised_ledger_range() const override
     {
-        return first_seq_.load(std::memory_order_relaxed);
-    }
-
-    uint32_t
-    peer_last_seq() const override
-    {
-        return last_seq_.load(std::memory_order_relaxed);
+        return AdvertisedLedgerRange::from_packed(
+            advertised_ledger_range_.load(std::memory_order_acquire));
     }
 
     size_t
@@ -242,9 +237,10 @@ public:
     void
     send_get_nodes(
         Hash256 const& ledger_hash,
+        std::uint32_t,
         int type,
         std::vector<SHAMapNodeID> const& node_ids,
-        std::function<void(boost::system::error_code)> on_error) override
+        std::function<void(boost::system::error_code)> on_write) override
     {
         SendGetNodesHandler handler;
         {
@@ -252,21 +248,31 @@ public:
             handler = send_get_nodes_handler_;
         }
 
+        auto completed = std::make_shared<std::atomic<bool>>(false);
+        auto complete =
+            [completed, on_write = std::move(on_write)](
+                boost::system::error_code ec) mutable {
+                if (!completed->exchange(true) && on_write)
+                    on_write(ec);
+            };
         asio::post(
             strand_,
             [handler = std::move(handler),
              ledger_hash,
              type,
              node_ids,
-             on_error = std::move(on_error)]() mutable {
+             complete = std::move(complete)]() mutable {
                 if (handler)
                 {
-                    handler(ledger_hash, type, node_ids, std::move(on_error));
+                    handler(ledger_hash, type, node_ids, complete);
+                    // Test handlers model packet processing, not the socket
+                    // completion machinery. Unless a handler synchronously
+                    // refuses, returning means its fake write completed.
+                    complete({});
                     return;
                 }
 
-                if (on_error)
-                    on_error({});
+                complete({});
             });
     }
 
@@ -345,6 +351,14 @@ public:
         ready_.store(ready, std::memory_order_relaxed);
     }
 
+    void
+    set_advertised_ledger_range(uint32_t first_seq, uint32_t last_seq)
+    {
+        advertised_ledger_range_.store(
+            AdvertisedLedgerRange{first_seq, last_seq}.packed(),
+            std::memory_order_release);
+    }
+
 private:
     template <class Result>
     void
@@ -366,8 +380,7 @@ private:
     std::string endpoint_;
     std::atomic<bool> ready_{false};
     std::atomic<uint32_t> current_seq_{0};
-    std::atomic<uint32_t> first_seq_{0};
-    std::atomic<uint32_t> last_seq_{0};
+    std::atomic<std::uint64_t> advertised_ledger_range_{0};
     std::atomic<size_t> pending_{0};
     std::atomic<bool> node_batch_accepts_{false};
     std::atomic<std::size_t> node_batch_submissions_{0};
@@ -662,9 +675,57 @@ public:
             SHAMapNodeID::root(),
             target_key,
             1,
+            5500,
             peer,
             std::move(pin),
             nullptr);
+    }
+
+    static bool
+    project_raw_round(NodeCache& cache, PeerSession& peer)
+    {
+        auto round = std::make_shared<NodeCache::NodeFetchRound>();
+        round->phase = NodeCache::NodeFetchRound::Phase::response;
+        {
+            std::lock_guard lock(cache.mutex_);
+            auto& entry = cache.store_[Hash256{}];
+            entry.round = round;
+            entry.signal =
+                SerializedTimerSignal::create(cache.io_, std::chrono::hours(1));
+            entry.round_opened_at = std::chrono::steady_clock::now();
+        }
+
+        auto const submission = cache.send_fetch(
+            Hash256{},
+            Hash256{},
+            1,
+            SHAMapNodeID::root(),
+            Hash256{},
+            1,
+            5500,
+            peer,
+            {},
+            round);
+        cache.close_raw_submissions(Hash256{}, round);
+        return submission == NodeCache::NodeFetchSubmission::raw_projected;
+    }
+
+    static bool
+    raw_refusal_retired_without_write_evidence(NodeCache& cache)
+    {
+        std::lock_guard lock(cache.mutex_);
+        auto const it = cache.store_.find(Hash256{});
+        if (it == cache.store_.end() || !it->second.round)
+            return false;
+        auto const& round = *it->second.round;
+        return !it->second.signal &&
+            it->second.last_fetch_at ==
+            std::chrono::steady_clock::time_point{} &&
+            round.phase == NodeCache::NodeFetchRound::Phase::retired &&
+            round.submissions_closed && !round.response_possible &&
+            round.dispatch_count == 1 &&
+            round.dispatches[0].state ==
+            NodeCache::NodeFetchRound::DispatchState::not_written;
     }
 
     static asio::awaitable<std::shared_ptr<std::vector<uint8_t>>>
@@ -792,7 +853,7 @@ TEST(PeerSessionInterface, NodeCacheRoutesOnlyManagedPinsThroughCoordinator)
     auto after_unpinned = cache->stats();
     EXPECT_EQ(after_unpinned.managed_fetches_reserved, 1u);
     EXPECT_EQ(after_unpinned.managed_fetches_refused, 2u);
-    EXPECT_EQ(after_unpinned.raw_fetches_queued, 0u);
+    EXPECT_EQ(after_unpinned.raw_fetches_projected, 0u);
     EXPECT_EQ(raw_writes.load(), 0u);
 
     // Raw transport remains available only when selected at construction.
@@ -805,10 +866,58 @@ TEST(PeerSessionInterface, NodeCacheRoutesOnlyManagedPinsThroughCoordinator)
     }
 
     auto after_raw = raw_cache->stats();
-    EXPECT_EQ(after_raw.raw_fetches_queued, 1u);
+    EXPECT_EQ(after_raw.raw_fetches_projected, 1u);
     EXPECT_EQ(after_raw.managed_fetches_reserved, 0u);
     EXPECT_EQ(after_raw.managed_fetches_refused, 0u);
     EXPECT_EQ(raw_writes.load(), 1u);
+}
+
+TEST(
+    PeerSessionInterface,
+    RawCoverageRevocationRetiresWithoutFalseWriteEvidence)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+    PeerClientTestAccess::publish_advertised_ledger_range(
+        *client, {.first_seq = 5'400, .last_seq = 5'600});
+
+    std::size_t writes = 0;
+    client->raw_connection().set_write_initiator_for_test(
+        [&writes](
+            asio::const_buffer,
+            peer_connection::test_write_completion complete) {
+            ++writes;
+            complete({});
+        });
+
+    // NodeCache's preflight sees coverage, but the peer-owner strand consumes
+    // this revocation before the projected write. The completion must retire
+    // the exact shared round rather than manufacturing write evidence and
+    // waiting for its response deadline.
+    asio::post(client->strand(), [client] {
+        PeerClientTestAccess::publish_advertised_ledger_range(
+            *client, {.first_seq = 6'000, .last_seq = 7'000});
+    });
+
+    auto cache = NodeCache::create(io, {});
+    ASSERT_TRUE(NodeCacheTestAccess::project_raw_round(*cache, *client));
+    auto const projected = cache->stats();
+    EXPECT_EQ(projected.raw_fetches_projected, 1u);
+    EXPECT_EQ(projected.raw_writes_confirmed, 0u);
+    EXPECT_EQ(projected.raw_not_written, 0u);
+
+    io.run();
+
+    EXPECT_EQ(writes, 0u);
+    EXPECT_TRUE(
+        NodeCacheTestAccess::raw_refusal_retired_without_write_evidence(
+            *cache));
+    auto const refused = cache->stats();
+    EXPECT_EQ(refused.raw_fetches_projected, 1u);
+    EXPECT_EQ(refused.raw_writes_confirmed, 0u);
+    EXPECT_EQ(refused.raw_not_written, 1u);
 }
 
 TEST(PeerSessionInterface, ManagedOutcomeMayBeatTheReservedReturn)
@@ -888,7 +997,7 @@ TEST(PeerSessionInterface, NodeResponseHandlerDoesNotOwnManagedCacheGraph)
     NodeCacheTestAccess::submit_node_fetch(*cache, *session, std::move(pin));
     auto stats = cache->stats();
     EXPECT_EQ(stats.managed_fetches_refused, 1u);
-    EXPECT_EQ(stats.raw_fetches_queued, 0u);
+    EXPECT_EQ(stats.raw_fetches_projected, 0u);
     EXPECT_EQ(raw_writes.load(), 0u);
 
     cache.reset();
@@ -908,6 +1017,8 @@ TEST(PeerSessionInterface, ManagedWriteStartsASeparateResponseDeadline)
             .max_in_flight_crawls = 0,
         });
     auto client = PeerClientTestAccess::make(io, State::Ready, 1);
+    PeerClientTestAccess::publish_advertised_ledger_range(
+        *client, {.first_seq = 5400, .last_seq = 5600});
     asio::ssl::context ssl{asio::ssl::context::tlsv12_client};
     PeerClientTestAccess::seed_open_connection(*client, ssl);
     PeerClientTestAccess::seed_successful_packet_writes(*client);
@@ -954,7 +1065,7 @@ TEST(PeerSessionInterface, ManagedWriteStartsASeparateResponseDeadline)
     EXPECT_EQ(reserved.count(client->endpoint()), 1u);
     EXPECT_EQ(written.count(client->endpoint()), 1u);
     EXPECT_EQ(cache->stats().managed_fetches_reserved, 1u);
-    EXPECT_EQ(cache->stats().raw_fetches_queued, 0u);
+    EXPECT_EQ(cache->stats().raw_fetches_projected, 0u);
 }
 
 TEST(PeerSessionInterface, ManagedNotWrittenRetiresWithoutWaitingForADeadline)
@@ -970,6 +1081,8 @@ TEST(PeerSessionInterface, ManagedNotWrittenRetiresWithoutWaitingForADeadline)
             .max_in_flight_crawls = 0,
         });
     auto client = PeerClientTestAccess::make(io, State::Ready, 1);
+    PeerClientTestAccess::publish_advertised_ledger_range(
+        *client, {.first_seq = 5400, .last_seq = 5600});
     PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, client);
     auto coordinator = LedgerFetchCoordinator::create(io, peers);
     auto cache = NodeCache::create(
@@ -1403,6 +1516,10 @@ TEST(PeerSessionInterface, ManagedFanoutUsesTheStableRoundIdentity)
         sessions[i]->set_node_batch_accepts(true);
         PeerSetTestAccess::insert_connected_peer(io, peers, sessions[i]);
     }
+    auto noncovering = std::make_shared<FakePeerSession>(
+        io, "managed-fanout-noncovering:1", true, 9000, 8900, 9100);
+    noncovering->set_node_batch_accepts(true);
+    PeerSetTestAccess::insert_connected_peer(io, peers, noncovering);
 
     auto coordinator = LedgerFetchCoordinator::create(io, peers);
     auto cache = NodeCache::create(
@@ -1444,6 +1561,7 @@ TEST(PeerSessionInterface, ManagedFanoutUsesTheStableRoundIdentity)
         submissions += session->node_batch_submissions();
     EXPECT_EQ(submissions, 3u);
     EXPECT_EQ(sessions.front()->node_batch_submissions(), 1u);
+    EXPECT_EQ(noncovering->node_batch_submissions(), 0u);
 }
 
 TEST(PeerSessionInterface, ManagedUnknownPublicationConsumesCoveredPeerRetry)
@@ -1471,6 +1589,10 @@ TEST(PeerSessionInterface, ManagedUnknownPublicationConsumesCoveredPeerRetry)
         sessions[i]->set_node_batch_accepts(true);
         PeerSetTestAccess::insert_connected_peer(io, peers, sessions[i]);
     }
+    auto noncovering = std::make_shared<FakePeerSession>(
+        io, "managed-retry-noncovering:1", true, 9000, 8900, 9100);
+    noncovering->set_node_batch_accepts(true);
+    PeerSetTestAccess::insert_connected_peer(io, peers, noncovering);
 
     auto coordinator = LedgerFetchCoordinator::create(io, peers);
     auto cache = NodeCache::create(
@@ -1510,6 +1632,7 @@ TEST(PeerSessionInterface, ManagedUnknownPublicationConsumesCoveredPeerRetry)
         submissions += session->node_batch_submissions();
     EXPECT_GE(submissions, 3u)
         << "coordinator publication repair may retransmit each reserved row";
+    EXPECT_EQ(noncovering->node_batch_submissions(), 0u);
 }
 
 TEST(PeerSessionInterface, ManagedFanoutExceptionClosesSubmissionSet)
@@ -1668,6 +1791,146 @@ TEST(PeerSessionInterface, WaitForAnyPeerWakesOnReadyFake)
     runner.join();
 }
 
+TEST(PeerSessionInterface, CoveringSelectionNeverReturnsUnknownOrOutOfRangePeer)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+
+    constexpr uint32_t wanted = 500;
+    auto unknown = std::make_shared<FakePeerSession>(
+        io, "fake-unknown-range:1", true, 500, 0, 0);
+    auto out_of_range = std::make_shared<FakePeerSession>(
+        io, "fake-out-of-range:1", true, 900, 800, 950);
+    auto covering = std::make_shared<FakePeerSession>(
+        io, "fake-explicit-cover:1", true, 520, 450, 650);
+    PeerSetTestAccess::insert_connected_peer(io, peers, unknown);
+    PeerSetTestAccess::insert_connected_peer(io, peers, out_of_range);
+    PeerSetTestAccess::insert_connected_peer(io, peers, covering);
+
+    auto selected = asio::co_spawn(
+        io,
+        peers->co_select_covering_peers_for(wanted, 3, {}),
+        asio::use_future);
+    io.run();
+    auto pins = selected.get();
+    ASSERT_EQ(pins.size(), 1u);
+    EXPECT_EQ(pins.front()->endpoint(), covering->endpoint());
+
+    io.restart();
+    std::unordered_set<std::string> excluded{covering->endpoint()};
+    auto waited = asio::co_spawn(
+        io,
+        peers->wait_for_covering_peer(wanted, 0, excluded),
+        asio::use_future);
+    io.run();
+    EXPECT_FALSE(waited.get())
+        << "ledger-specific waits must not fall back to merely ready peers";
+}
+
+TEST(PeerSessionInterface, NodeDispatchRechecksRangeAfterPreCommitSeam)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .fetch_timeout = std::chrono::milliseconds(50),
+        });
+    auto peer = std::make_shared<FakePeerSession>(
+        io, "range-changes-before-send:1", true, 5500, 5400, 5600);
+    std::atomic<unsigned> sends = 0;
+    peer->set_send_get_nodes_handler(
+        [&sends](
+            Hash256 const&,
+            int,
+            std::vector<SHAMapNodeID> const&,
+            std::function<void(boost::system::error_code)>) {
+            sends.fetch_add(1, std::memory_order_relaxed);
+        });
+    NodeCacheTestAccess::set_node_round_hooks(
+        *cache, [peer] { peer->set_advertised_ledger_range(7000, 7100); }, {});
+
+    bool completed = false;
+    bool initiated = false;
+    std::unordered_set<std::string> attempted;
+    asio::co_spawn(
+        io,
+        [&, cache, peer]() -> asio::awaitable<void> {
+            auto wire = co_await NodeCacheTestAccess::ensure_node(
+                *cache, *peer, {}, &attempted, &initiated);
+            EXPECT_FALSE(wire);
+            completed = true;
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(completed);
+    EXPECT_FALSE(initiated);
+    EXPECT_TRUE(attempted.empty());
+    EXPECT_EQ(sends.load(std::memory_order_relaxed), 0u);
+    EXPECT_EQ(cache->stats().raw_fetches_projected, 0u);
+}
+
+TEST(PeerSessionInterface, NodeWalkSseReportsCoveringPeerSearchAndExhaustion)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_targeted_connect_attempts = 0,
+        });
+    auto noncovering = std::make_shared<FakePeerSession>(
+        io, "fake-sse-noncovering:1", true, 900, 800, 950);
+    PeerSetTestAccess::insert_connected_peer(io, peers, noncovering);
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .peer_refresh_timeout_secs = 0,
+        });
+
+    auto request = std::make_shared<catl::core::RequestContext>(
+        "history-search", "transaction", std::chrono::steady_clock::now());
+    auto request_executor =
+        catl::core::ContextExecutor(asio::make_strand(io), request);
+    bool completed = false;
+    asio::co_spawn(
+        request_executor,
+        [&, cache, peers]() -> asio::awaitable<void> {
+            auto result = co_await cache->walk_to(
+                hash_with_byte(0x81),
+                hash_with_byte(0x82),
+                hash_with_byte(0x83),
+                500,
+                1,
+                peers,
+                PeerGenerationPin{});
+            EXPECT_FALSE(result.found);
+            completed = true;
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(completed);
+    auto const events = request->drain();
+    EXPECT_TRUE(
+        std::any_of(events.begin(), events.end(), [](std::string const& event) {
+            return event == "searching for peer advertising ledger 500";
+        }));
+    EXPECT_TRUE(
+        std::any_of(events.begin(), events.end(), [](std::string const& event) {
+            return event == "no peer advertising ledger 500";
+        }));
+}
+
 TEST(PeerSessionInterface, WaitForPeerIgnoresUnsuitableThenSelectsCovering)
 {
     asio::io_context io;
@@ -1688,7 +1951,8 @@ TEST(PeerSessionInterface, WaitForPeerIgnoresUnsuitableThenSelectsCovering)
         [peers, &promise]() -> asio::awaitable<void> {
             try
             {
-                promise.set_value(co_await peers->wait_for_peer(wanted, 2));
+                promise.set_value(
+                    co_await peers->wait_for_covering_peer(wanted, 2));
             }
             catch (...)
             {
@@ -1741,7 +2005,8 @@ TEST(PeerSessionInterface, WaitForPeerContinuesAfterDisconnectWake)
         [peers, &promise]() -> asio::awaitable<void> {
             try
             {
-                promise.set_value(co_await peers->wait_for_peer(wanted, 3));
+                promise.set_value(
+                    co_await peers->wait_for_covering_peer(wanted, 3));
             }
             catch (...)
             {
@@ -2087,7 +2352,8 @@ TEST(PeerSessionInterface, NodeCacheWalkFailureExcludesEveryAttemptedPeer)
                     1,
                     peers,
                     first);
-                auto remaining = co_await peers->wait_for_peer(ledger_seq, 0);
+                auto remaining =
+                    co_await peers->wait_for_covering_peer(ledger_seq, 0);
                 promise.set_value({std::move(result), std::move(remaining)});
             }
             catch (...)
@@ -2241,17 +2507,13 @@ TEST(PeerSessionInterface, NodeCacheFanoutSurvivesOneWriteFailure)
         io, "z-fake-delayed-response:1", true, ledger_seq, 4900, 5100);
 
     failing->set_send_get_nodes_handler(
-        [&io](
+        [](
             Hash256 const&,
             int,
             std::vector<SHAMapNodeID> const&,
             std::function<void(boost::system::error_code)> on_error) {
-            auto timer = std::make_shared<asio::steady_timer>(io, 5ms);
-            timer->async_wait([timer, on_error = std::move(on_error)](
-                                  boost::system::error_code ec) mutable {
-                if (!ec && on_error)
-                    on_error(asio::error::connection_reset);
-            });
+            if (on_error)
+                on_error(asio::error::connection_reset);
         });
     responding->set_send_get_nodes_handler(
         [&io, cache, root_hash, wire](
@@ -3293,7 +3555,7 @@ TEST(PeerSessionInterface, LateHeaderFailureCannotCancelNewRound)
             .header_timeout_floor = 50ms,
         });
     auto work = asio::make_work_guard(io);
-    constexpr uint32_t ledger_seq = 6000;
+    static constexpr uint32_t ledger_seq = 6000;
 
     auto old_round = std::make_shared<FakePeerSession>(
         io, "old-header-round:1", true, ledger_seq, 5900, 6100);
@@ -3642,6 +3904,130 @@ TEST(PeerSessionInterface, ManagedHeaderSuccessReleasesGenerationPin)
     EXPECT_TRUE(completed);
     io.restart();
     EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 0u);
+}
+
+TEST(PeerSessionInterface, HeaderDispatchRejectsNonCoveringCallerPin)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = std::chrono::milliseconds(10),
+            .peer_refresh_timeout_secs = 0,
+            .header_timeout_floor = std::chrono::milliseconds(50),
+        });
+    constexpr uint32_t ledger_seq = 6000;
+
+    auto out_of_range = std::make_shared<FakePeerSession>(
+        io, "out-of-range-header:1", true, 7000, 6900, 7100);
+    auto unknown_range = std::make_shared<FakePeerSession>(
+        io, "unknown-range-header:1", true, 0, 0, 0);
+    auto covering = std::make_shared<FakePeerSession>(
+        io, "covering-header:1", true, ledger_seq, 5900, 6100);
+
+    std::atomic<unsigned> out_of_range_sends = 0;
+    std::atomic<unsigned> unknown_range_sends = 0;
+    std::atomic<unsigned> covering_sends = 0;
+    out_of_range->set_get_ledger_header_handler(
+        [&out_of_range_sends](uint32_t, Callback<LedgerHeaderResult>) {
+            out_of_range_sends.fetch_add(1, std::memory_order_relaxed);
+        });
+    unknown_range->set_get_ledger_header_handler(
+        [&unknown_range_sends](uint32_t, Callback<LedgerHeaderResult>) {
+            unknown_range_sends.fetch_add(1, std::memory_order_relaxed);
+        });
+    covering->set_invoke_header_handler_inline(true);
+    covering->set_get_ledger_header_handler(
+        [&covering_sends](uint32_t, Callback<LedgerHeaderResult> callback) {
+            covering_sends.fetch_add(1, std::memory_order_relaxed);
+            callback(Error::Success, LedgerHeaderResult{});
+        });
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, out_of_range);
+    PeerSetTestAccess::insert_connected_peer(io, peers, unknown_range);
+    PeerSetTestAccess::insert_connected_peer(io, peers, covering);
+    auto pin =
+        PeerSetTestAccess::make_peer_pin(io, peers, out_of_range->endpoint());
+    ASSERT_TRUE(pin);
+
+    bool completed = false;
+    asio::co_spawn(
+        io,
+        [&, cache, peers, pin = std::move(pin)]() mutable
+        -> asio::awaitable<void> {
+            (void)co_await cache->get_header(ledger_seq, peers, std::move(pin));
+            completed = true;
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(completed);
+    EXPECT_EQ(out_of_range_sends.load(std::memory_order_relaxed), 0u);
+    EXPECT_EQ(unknown_range_sends.load(std::memory_order_relaxed), 0u);
+    EXPECT_EQ(covering_sends.load(std::memory_order_relaxed), 1u);
+}
+
+TEST(PeerSessionInterface, HeaderDispatchFailsWithoutAdvertisedCoverage)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = std::chrono::milliseconds(10),
+            .peer_refresh_timeout_secs = 0,
+            .header_timeout_floor = std::chrono::milliseconds(50),
+        });
+    static constexpr uint32_t ledger_seq = 6000;
+    auto out_of_range = std::make_shared<FakePeerSession>(
+        io, "only-noncovering-header:1", true, 7000, 6900, 7100);
+    std::atomic<unsigned> sends = 0;
+    out_of_range->set_get_ledger_header_handler(
+        [&sends](uint32_t, Callback<LedgerHeaderResult>) {
+            sends.fetch_add(1, std::memory_order_relaxed);
+        });
+
+    PeerSetTestAccess::insert_connected_peer(io, peers, out_of_range);
+    auto pin =
+        PeerSetTestAccess::make_peer_pin(io, peers, out_of_range->endpoint());
+    ASSERT_TRUE(pin);
+
+    std::optional<Error> observed;
+    asio::co_spawn(
+        io,
+        [cache, peers, pin = std::move(pin), &observed]() mutable
+        -> asio::awaitable<void> {
+            try
+            {
+                (void)co_await cache->get_header(
+                    ledger_seq, peers, std::move(pin));
+            }
+            catch (PeerClientException const& e)
+            {
+                observed = e.error;
+            }
+        },
+        asio::detached);
+    io.run();
+
+    ASSERT_TRUE(observed);
+    EXPECT_EQ(*observed, Error::Timeout);
+    EXPECT_EQ(sends.load(std::memory_order_relaxed), 0u);
 }
 
 TEST(PeerSessionInterface, ManagedHeaderPinRefusesForeignSelectionPeerSet)
@@ -4004,7 +4390,7 @@ TEST(PeerSessionInterface, ClearFencesLateHeaderCallbackFromReplacement)
             try
             {
                 auto selected =
-                    co_await peers->co_select_peers_for(6000, 1, {});
+                    co_await peers->co_select_covering_peers_for(6000, 1, {});
                 if (selected.empty())
                 {
                     replacement_done.set_value(false);
@@ -4264,7 +4650,7 @@ TEST(PeerSessionInterface, UntargetedCandidateCannotRotateFullPool)
     PeerSetTestAccess::release_wanted_ledger(io, peers, target);
 }
 
-TEST(PeerSessionInterface, NonCoveringProbeNeedsKnownBadVictim)
+TEST(PeerSessionInterface, NonCoveringProbeCannotReplaceUntriedVictim)
 {
     asio::io_context io;
     auto peers = PeerSet::create(
@@ -4290,7 +4676,7 @@ TEST(PeerSessionInterface, NonCoveringProbeNeedsKnownBadVictim)
         PeerSetTestAccess::has_connection(io, peers, existing->endpoint()));
 }
 
-TEST(PeerSessionInterface, NonCoveringProbeCanReplaceFailedVictim)
+TEST(PeerSessionInterface, NonCoveringProbeCannotSpendTargetedAdmission)
 {
     asio::io_context io;
     auto peers = PeerSet::create(
@@ -4312,11 +4698,11 @@ TEST(PeerSessionInterface, NonCoveringProbeCanReplaceFailedVictim)
     PeerSetTestAccess::insert_connected_peer(io, peers, failed);
     PeerSetTestAccess::note_ledger_failure(
         io, peers, failed->endpoint(), target);
-    EXPECT_TRUE(
-        PeerSetTestAccess::admit_connected_peer(io, peers, candidate, target));
     EXPECT_FALSE(
-        PeerSetTestAccess::has_connection(io, peers, failed->endpoint()));
+        PeerSetTestAccess::admit_connected_peer(io, peers, candidate, target));
     EXPECT_TRUE(
+        PeerSetTestAccess::has_connection(io, peers, failed->endpoint()));
+    EXPECT_FALSE(
         PeerSetTestAccess::has_connection(io, peers, candidate->endpoint()));
 }
 
@@ -4610,13 +4996,13 @@ TEST(PeerSessionInterface, UnavailableCandidateCannotRotatePool)
         PeerSetTestAccess::has_connection(io, peers, existing->endpoint()));
 }
 
-TEST(PeerSessionInterface, ClaimedProbeSurvivesFallbackButNotCancellation)
+TEST(PeerSessionInterface, ClaimedProbeSurvivesNormalCloseButNotCancellation)
 {
     constexpr uint32_t target = 500;
 
-    asio::io_context fallback_io;
-    auto fallback_peers = PeerSet::create(
-        fallback_io,
+    asio::io_context completed_io;
+    auto completed_peers = PeerSet::create(
+        completed_io,
         PeerSetOptions{
             .network_id = 42,
             .max_in_flight_connects = 0,
@@ -4625,19 +5011,19 @@ TEST(PeerSessionInterface, ClaimedProbeSurvivesFallbackButNotCancellation)
             .max_archival_peers = 0,
             .archival_range_threshold = 1000,
         });
-    auto fallback_existing = std::make_shared<FakePeerSession>(
-        fallback_io, "fallback-existing:1", true, 900, 800, 900);
-    auto fallback_candidate = std::make_shared<FakePeerSession>(
-        fallback_io, "fallback-candidate:1", true, 600, 400, 600);
+    auto completed_existing = std::make_shared<FakePeerSession>(
+        completed_io, "completed-existing:1", true, 900, 800, 900);
+    auto completed_candidate = std::make_shared<FakePeerSession>(
+        completed_io, "completed-candidate:1", true, 600, 400, 600);
     PeerSetTestAccess::insert_connected_peer(
-        fallback_io, fallback_peers, fallback_existing);
+        completed_io, completed_peers, completed_existing);
 
     EXPECT_TRUE(PeerSetTestAccess::admit_connected_peer_after_wait_finishes(
-        fallback_io,
-        fallback_peers,
-        fallback_candidate,
+        completed_io,
+        completed_peers,
+        completed_candidate,
         target,
-        {fallback_existing->endpoint()},
+        {completed_existing->endpoint()},
         false));
 
     asio::io_context canceled_io;

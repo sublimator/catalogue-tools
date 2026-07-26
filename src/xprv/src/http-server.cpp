@@ -105,7 +105,9 @@ node_cache_json(catl::peer_client::NodeCache::Stats const& stats)
     result["fetches"] = stats.fetches;
     result["fetch_errors"] = stats.fetch_errors;
     result["managed_transport_selected"] = stats.managed_transport_selected;
-    result["raw_fetches_queued"] = stats.raw_fetches_queued;
+    result["raw_fetches_projected"] = stats.raw_fetches_projected;
+    result["raw_writes_confirmed"] = stats.raw_writes_confirmed;
+    result["raw_not_written"] = stats.raw_not_written;
     result["managed_fetches_reserved"] = stats.managed_fetches_reserved;
     result["managed_fetches_refused"] = stats.managed_fetches_refused;
     result["managed_writes_confirmed"] = stats.managed_writes_confirmed;

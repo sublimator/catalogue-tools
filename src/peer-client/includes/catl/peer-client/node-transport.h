@@ -106,11 +106,14 @@ private:
     std::uint64_t value_ = 0;
 };
 
-/// Pure digest of the wire-relevant node request payload. It deliberately
-/// excludes local attempt identity.
+/// Pure digest of the semantic node request payload. The ledger sequence is a
+/// local dispatch precondition rather than a wire field, but it is still part
+/// of command identity: changing it must not join an existing command.
+/// Local attempt identity is deliberately excluded.
 Hash256
 node_batch_payload_digest(
     Hash256 const& ledger_hash,
+    std::uint32_t ledger_seq,
     NodeTree tree,
     std::vector<SHAMapNodeID> const& node_ids);
 
@@ -135,6 +138,12 @@ public:
     ledger_hash() const noexcept
     {
         return ledger_hash_;
+    }
+
+    std::uint32_t
+    ledger_seq() const noexcept
+    {
+        return ledger_seq_;
     }
 
     NodeTree
@@ -163,12 +172,18 @@ private:
         TransportAttemptId attempt_id,
         SenderGenerationId sender_generation,
         Hash256 ledger_hash,
+        std::uint32_t ledger_seq,
         NodeTree tree,
         std::vector<SHAMapNodeID> node_ids);
 
     TransportAttemptId attempt_id_;
     SenderGenerationId sender_generation_;
     Hash256 ledger_hash_;
+    //@@authority state=prv.S0022 status=provisional scope=field bind=catl::peer_client::NodeBatchIntent::ledger_seq_@622e2f0b3daa88c8
+    // owner=unresolved owner_hypothesis=ledger_fetch_coordinator
+    // observed_home=node_batch_intent
+    // label=required_ledger_sequence_carried_to_packet_commit
+    std::uint32_t ledger_seq_ = 0;
     NodeTree tree_ = NodeTree::transaction;
     std::vector<SHAMapNodeID> node_ids_;
     Hash256 payload_digest_;
@@ -202,6 +217,12 @@ public:
     ledger_hash() const noexcept
     {
         return intent_.ledger_hash();
+    }
+
+    std::uint32_t
+    ledger_seq() const noexcept
+    {
+        return intent_.ledger_seq();
     }
 
     NodeTree
@@ -246,6 +267,7 @@ enum class NodeBatchWriteOutcome : std::uint8_t {
     identity_conflict,
     receipt_capacity_exhausted,
     receipt_sequence_exhausted,
+    ledger_not_advertised,
     write_failed,
     disconnected,
     cancelled,

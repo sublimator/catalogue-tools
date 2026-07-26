@@ -33,6 +33,14 @@ namespace xprv {
 
 static LogPartition log_("xprv", LogLevel::INFO);
 
+static bool
+advertises_ledger(PeerSession const* peer, uint32_t ledger_seq)
+{
+    if (!peer || !peer->is_ready())
+        return false;
+    return peer->advertised_ledger_range().contains(ledger_seq);
+}
+
 /// Build a proof-format on_leaf callback for trie_json.
 static catl::shamap::LeafJsonCallback
 make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree)
@@ -61,13 +69,14 @@ make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree)
                        .json_opts = {.ascii_hints = false}});
 
             // A leaf carries decoded XRPL content and nothing else (spec §2.3).
-            // The xdata parsers add convenience members for their other callers:
-            // `index`/`hash` duplicate the trie key, `blob` duplicates the very
-            // bytes being hashed. Emitting them here would mean the JSON a reader
-            // sees is not exactly the JSON the verifier re-serializes and hashes,
-            // so a displayed field could disagree with the authenticated one
-            // while the proof still verified. They are also not XRPL fields, so
-            // every verifier has to strip them before encoding anyway.
+            // The xdata parsers add convenience members for their other
+            // callers: `index`/`hash` duplicate the trie key, `blob` duplicates
+            // the very bytes being hashed. Emitting them here would mean the
+            // JSON a reader sees is not exactly the JSON the verifier
+            // re-serializes and hashes, so a displayed field could disagree
+            // with the authenticated one while the proof still verified. They
+            // are also not XRPL fields, so every verifier has to strip them
+            // before encoding anyway.
             if (auto* obj = decoded.if_object())
             {
                 obj->erase("index");
@@ -303,16 +312,6 @@ build_proof_DEAD(
     std::unordered_map<std::string, std::chrono::steady_clock::time_point>
         peer_cooldowns;
 
-    auto peer_covers_ledger = [](PeerGenerationPin const& peer,
-                                 uint32_t ledger_seq) {
-        if (!peer || !peer->is_ready())
-            return false;
-        auto const first = peer->peer_first_seq();
-        auto const last = peer->peer_last_seq();
-        return first != 0 && last != 0 && ledger_seq >= first &&
-            ledger_seq <= last;
-    };
-
     auto collect_excluded_peers = [&]() {
         std::unordered_set<std::string> excluded;
         auto const now = std::chrono::steady_clock::now();
@@ -333,74 +332,63 @@ build_proof_DEAD(
                             std::optional<uint32_t> required_ledger,
                             std::string const& purpose)
         -> boost::asio::awaitable<PeerSessionPtr> {
-        for (;;)
+        auto excluded = collect_excluded_peers();
+        // Merge in per-ledger failures from peer history.
+        if (required_ledger)
         {
-            auto excluded = collect_excluded_peers();
-            // Merge in per-ledger failures from peer history
-            if (required_ledger)
-            {
-                auto ledger_excluded = ctx->excluded_for(*required_ledger);
-                excluded.insert(
-                    ledger_excluded.begin(), ledger_excluded.end());
-            }
-
-            if (current && current->is_ready() &&
-                !excluded.count(current->endpoint()) &&
-                (!required_ledger ||
-                 peer_covers_ledger(current, *required_ledger)))
-            {
-                co_return current.session();
-            }
-
-            PeerGenerationPin found;
-            if (required_ledger)
-            {
-                found = co_await peers->wait_for_peer(
-                    *required_ledger,
-                    peer_retry_policy.wait_timeout_secs,
-                    excluded);
-            }
-            else
-            {
-                found = co_await peers->wait_for_any_peer(
-                    peer_retry_policy.wait_timeout_secs, excluded);
-            }
-
-            if (found)
-            {
-                current = std::move(found);
-                if (!current->endpoint().empty())
-                {
-                    peer_retry_counts[current->endpoint()] = 0;
-                }
-                PLOGI(
-                    log_, "Using peer ", current->endpoint(), " for ", purpose);
-                co_return current.session();
-            }
-
-            if (required_ledger)
-            {
-                PLOGI(
-                    log_,
-                    "Still waiting for a peer with ledger ",
-                    *required_ledger,
-                    " for ",
-                    purpose,
-                    " (",
-                    excluded.size(),
-                    " peers cooled down)");
-            }
-            else
-            {
-                PLOGI(
-                    log_,
-                    "Still waiting for a ready peer for ",
-                    purpose,
-                    " (",
-                    excluded.size(),
-                    " peers cooled down)");
-            }
+            auto ledger_excluded = ctx->excluded_for(*required_ledger);
+            excluded.insert(ledger_excluded.begin(), ledger_excluded.end());
         }
+
+        if (current && current->is_ready() &&
+            !excluded.count(current->endpoint()) &&
+            (!required_ledger ||
+             advertises_ledger(current.get(), *required_ledger)))
+        {
+            co_return current.session();
+        }
+
+        PeerGenerationPin found;
+        if (required_ledger)
+        {
+            catl::core::emit_status(
+                "searching for peer advertising ledger " +
+                std::to_string(*required_ledger));
+            found = co_await peers->wait_for_covering_peer(
+                *required_ledger,
+                peer_retry_policy.wait_timeout_secs,
+                excluded);
+        }
+        else
+        {
+            found = co_await peers->wait_for_any_peer(
+                peer_retry_policy.wait_timeout_secs, excluded);
+        }
+
+        if (found &&
+            (!required_ledger ||
+             advertises_ledger(found.get(), *required_ledger)))
+        {
+            current = std::move(found);
+            if (!current->endpoint().empty())
+                peer_retry_counts[current->endpoint()] = 0;
+            PLOGI(
+                log_, "Using peer ", current->endpoint(), " for ", purpose);
+            co_return current.session();
+        }
+
+        if (required_ledger)
+        {
+            auto const message =
+                "no peer advertising ledger " +
+                std::to_string(*required_ledger) + " while trying to " + purpose;
+            catl::core::emit_status(message);
+            throw PeerClientException(Error::NoLedger, message);
+        }
+
+        auto const message = "no ready peer while trying to " + purpose;
+        catl::core::emit_status(message);
+        throw PeerClientException(Error::Disconnected, message);
     };
 
     auto is_retryable_peer_error = [](PeerClientException const& e) {
@@ -1208,7 +1196,10 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             throw PeerClientException(Error::Cancelled);
         }
 
-        auto peer = co_await ctx->peers->wait_for_peer(
+        catl::core::emit_status(
+            "searching for peer advertising ledger " +
+            std::to_string(required_ledger));
+        auto peer = co_await ctx->peers->wait_for_covering_peer(
             required_ledger, 15, ctx->cancel_token);
 
         if (ctx->cancel_token &&
@@ -1216,11 +1207,11 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         {
             throw PeerClientException(Error::Cancelled);
         }
-        if (!peer)
+        if (!advertises_ledger(peer.get(), required_ledger))
         {
             throw PeerClientException(
                 Error::NoLedger,
-                "no peer available for ledger " +
+                "no peer advertising ledger " +
                     std::to_string(required_ledger) + " while trying to " +
                     purpose);
         }
@@ -1239,7 +1230,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
 
     // Don't call prioritize_ledger() — with concurrent prove() calls,
     // it would retune peer discovery away from other requests' targets.
-    // wait_for_peer(seq) already searches by the specific seq needed.
+    // wait_for_covering_peer(seq) already searches by the specific seq needed.
 
     // ── Helpers for streaming steps as they become available ──
     ProofChain proof_chain;

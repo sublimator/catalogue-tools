@@ -121,6 +121,7 @@ struct CoordFixture
     {
         return coord->submit_node_batch_on_pin(
             ledger_hash(),
+            5'500,
             NodeTree::account_state,
             nodes(),
             pin(),
@@ -186,6 +187,7 @@ TEST(LedgerFetchCoordinatorBind, ArgumentRefusalsTakeNoPermit)
     EXPECT_EQ(
         f.coord->submit_node_batch_on_pin(
             CoordFixture::ledger_hash(),
+            5'500,
             NodeTree::account_state,
             CoordFixture::nodes(),
             PeerGenerationPin{}),
@@ -193,6 +195,7 @@ TEST(LedgerFetchCoordinatorBind, ArgumentRefusalsTakeNoPermit)
     EXPECT_EQ(
         f.coord->submit_node_batch_on_pin(
             CoordFixture::ledger_hash(),
+            5'500,
             NodeTree::account_state,
             {},
             f.pin()),
@@ -200,6 +203,7 @@ TEST(LedgerFetchCoordinatorBind, ArgumentRefusalsTakeNoPermit)
     EXPECT_EQ(
         f.coord->submit_node_batch_on_pin(
             CoordFixture::ledger_hash(),
+            5'500,
             NodeTree::account_state,
             std::vector<SHAMapNodeID>(kMaxNodeBatchRequestNodes + 1),
             f.pin()),
@@ -1227,6 +1231,7 @@ struct PublishFixture
     {
         return coord->submit_node_batch_on_pin(
             CoordFixture::ledger_hash(),
+            5'500,
             NodeTree::account_state,
             CoordFixture::nodes(),
             PeerSetTestAccess::make_peer_pin_for_session(io, peers, client),

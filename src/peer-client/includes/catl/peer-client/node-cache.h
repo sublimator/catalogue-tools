@@ -339,7 +339,9 @@ public:
         size_t fetches = 0;
         size_t fetch_errors = 0;
         bool managed_transport_selected = false;
-        size_t raw_fetches_queued = 0;
+        size_t raw_fetches_projected = 0;
+        size_t raw_writes_confirmed = 0;
+        size_t raw_not_written = 0;
         size_t managed_fetches_reserved = 0;
         size_t managed_fetches_refused = 0;
         size_t managed_writes_confirmed = 0;
@@ -402,7 +404,8 @@ private:
         switch_peer,
         acquired_peer,
         give_up,
-        no_peer_available,
+        searching_covering_peer,
+        no_covering_peer,
     };
 
     struct ProgressEvent
@@ -576,17 +579,17 @@ private:
         // observed_home=node_cache label=exact_round_admission_time
         std::chrono::steady_clock::time_point round_opened_at{};
 
-        // Hash-level evidence that at least one raw TMGetLedger write was
-        // queued. Coordinator reservation is deliberately weaker: it owns
-        // ingress but does not prove publication. Unlike round_opened_at, this
-        // may outlive exact round retirement because a late
-        // content-addressed response remains useful. It justifies waiting
-        // without a currently usable peer.
+        // Hash-level evidence that at least one raw TMGetLedger write completed
+        // successfully. Projecting work onto PeerClient's strand is
+        // deliberately weaker and does not update this value. Unlike
+        // round_opened_at, confirmed write evidence may outlive exact round
+        // retirement because a late content-addressed response remains useful.
+        // It justifies waiting without a currently usable peer.
         //@@authority state=prv.S0006 status=provisional scope=field
         // bind=catl::peer_client::NodeCache::Entry::last_fetch_at@c630d439bcf3126a
         // owner=unresolved owner_hypothesis=node_cache
         // observed_home=node_cache
-        // label=raw_dispatch_evidence_outliving_exact_round
+        // label=confirmed_raw_write_evidence_outliving_exact_round
         std::chrono::steady_clock::time_point last_fetch_at{};
     };
 
@@ -712,9 +715,9 @@ private:
     /// The response arrives asynchronously via on_node_response →
     /// insert_and_notify which wakes all waiters.
     enum class NodeFetchSubmission : std::uint8_t {
-        raw_queued,
+        raw_projected,
         managed_reserved,
-        managed_refused,
+        not_submitted,
     };
 
     enum class ManagedSubmissionOutcome : std::uint8_t {
@@ -731,6 +734,7 @@ private:
         SHAMapNodeID position,
         Hash256 const& target_key,
         int speculative_depth,
+        uint32_t ledger_seq,
         PeerSession& peer,
         PeerGenerationPin peer_pin,
         std::shared_ptr<NodeFetchRound> round);
@@ -783,11 +787,28 @@ private:
         std::shared_ptr<SerializedTimerSignal> const& waited_signal,
         WaitRegistration& wait) noexcept;
 
-    void
-    record_raw_submission(
+    std::optional<std::size_t>
+    register_raw_submission(
         Hash256 const& hash,
         std::shared_ptr<NodeFetchRound> const& round,
-        std::string_view endpoint) noexcept;
+        std::string_view endpoint);
+
+    void
+    settle_raw_submission(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round,
+        std::size_t slot,
+        boost::system::error_code ec) noexcept;
+
+    void
+    close_raw_submissions(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round) noexcept;
+
+    void
+    reconcile_raw_round(
+        Hash256 const& hash,
+        std::shared_ptr<NodeFetchRound> const& round) noexcept;
 
     /// Send a header request to a single peer (fire-and-forget).
     /// On success: populate header_cache_ entry and wake all callers.
@@ -1030,7 +1051,9 @@ private:
     mutable std::atomic<size_t> misses_{0};
     std::atomic<size_t> fetches_{0};
     std::atomic<size_t> fetch_errors_{0};
-    std::atomic<size_t> raw_fetches_queued_{0};
+    std::atomic<size_t> raw_fetches_projected_{0};
+    std::atomic<size_t> raw_writes_confirmed_{0};
+    std::atomic<size_t> raw_not_written_{0};
     std::atomic<size_t> managed_fetches_reserved_{0};
     std::atomic<size_t> managed_fetches_refused_{0};
     std::atomic<size_t> managed_writes_confirmed_{0};

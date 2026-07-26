@@ -4,7 +4,7 @@
 //
 // Wraps EndpointTracker (knows ranges) with live PeerClient connections.
 // bootstrap() and try_undiscovered() launch background connection attempts,
-// while wait_for_any_peer()/wait_for_peer() wait for usable results.
+// while wait_for_any_peer()/wait_for_covering_peer() wait for usable results.
 //
 // PeerSet-owned state is serialized through its strand. Detached connect
 // coroutines keep PeerSet alive by capturing shared_ptr<PeerSet>.
@@ -68,12 +68,6 @@ struct PeerSetOptions
     /// A peer is considered "archival" if its ledger range span exceeds
     /// this threshold. Default 1M ledgers (~40 days of history).
     uint32_t archival_range_threshold = 1'000'000;
-
-    /// After this duration without finding a peer whose advertised range
-    /// covers the target ledger, fall back to any ready peer. Many
-    /// full-history nodes report narrow ranges but can still serve old
-    /// data. 0ms = disable fallback. Default 1000ms.
-    std::chrono::milliseconds peer_fallback{1000};
 
     /// Maximum new endpoints one ledger-specific wait may probe. Existing
     /// connected peers are handled separately by the node/header fan-out.
@@ -180,16 +174,15 @@ public:
         int timeout_secs,
         std::unordered_set<std::string> const& excluded);
 
-    /// Wait until a peer with the given ledger is available.
-    /// Returns nullptr on timeout.
+    /// Wait only for a ready peer whose advertised range covers the ledger.
     boost::asio::awaitable<PeerGenerationPin>
-    wait_for_peer(
+    wait_for_covering_peer(
         uint32_t ledger_seq,
         int timeout_secs = 300,
         std::shared_ptr<std::atomic<bool>> cancel = nullptr);
 
     boost::asio::awaitable<PeerGenerationPin>
-    wait_for_peer(
+    wait_for_covering_peer(
         uint32_t ledger_seq,
         int timeout_secs,
         std::unordered_set<std::string> const& excluded,
@@ -291,17 +284,16 @@ public:
     size_t
     connected_count() const;
 
-    /// Get up to N peers for a ledger, for fan-out requests.
-    /// Synchronous version — must be called on strand.
+    /// Strict fan-out selection. Every returned peer explicitly advertises the
+    /// target ledger; unknown and non-covering ranges are excluded.
     std::vector<PeerGenerationPin>
-    select_peers_for(
+    select_covering_peers_for(
         uint32_t ledger_seq,
         int max_count,
         std::unordered_set<std::string> const& excluded);
 
-    /// Awaitable version — hops to strand internally.
     boost::asio::awaitable<std::vector<PeerGenerationPin>>
-    co_select_peers_for(
+    co_select_covering_peers_for(
         uint32_t ledger_seq,
         int max_count,
         std::unordered_set<std::string> excluded);
@@ -413,7 +405,6 @@ private:
     {
         uint32_t ledger_seq = 0;
         std::unordered_set<std::string> excluded;
-        bool candidate_covers = false;
         std::string candidate_key;
         uint32_t candidate_first_seq = 0;
         uint32_t candidate_last_seq = 0;
@@ -432,13 +423,14 @@ private:
         std::unordered_set<std::string> excluded);
 
     boost::asio::awaitable<PeerSessionPtr>
-    wait_for_peer_on_strand(
+    wait_for_covering_peer_on_strand(
         uint32_t ledger_seq,
         int timeout_secs,
         std::unordered_set<std::string> excluded,
         std::shared_ptr<std::atomic<bool>> cancel);
 
-    //@@authority transition=peer_set.mint_generation_pin owner=peer_set bind=catl::peer_client::PeerSet::make_peer_pin@04236598c8359c88
+    //@@authority transition=peer_set.mint_generation_pin owner=peer_set
+    // bind=catl::peer_client::PeerSet::make_peer_pin@04236598c8359c88
     // commit=strand
     PeerGenerationPin
     make_peer_pin(PeerSessionPtr const& expected_session);
@@ -451,21 +443,22 @@ private:
     bool fail_seal_projection_for_test_ = false;
 
     /// Drop the seal COMPLETION post, reproducing the one failure this class
-    /// deliberately does not recover from: the capability is sealed and then the
-    /// completion cannot be queued, so the caller is never told anything.
+    /// deliberately does not recover from: the capability is sealed and then
+    /// the completion cannot be queued, so the caller is never told anything.
     ///
-    /// Distinct from fail_seal_projection_for_test_, which fails initiation and IS
-    /// reported through the bool return. This one is unreportable by construction
-    /// — that is the whole point, and it is why the coordinator needs a deadline.
-    /// A coordinator-side simulation could not stand in for it: the coordinator's
-    /// own callback would still run, so its accounting would still settle, and a
-    /// real loss leaves the projection permanently unobserved.
+    /// Distinct from fail_seal_projection_for_test_, which fails initiation and
+    /// IS reported through the bool return. This one is unreportable by
+    /// construction — that is the whole point, and it is why the coordinator
+    /// needs a deadline. A coordinator-side simulation could not stand in for
+    /// it: the coordinator's own callback would still run, so its accounting
+    /// would still settle, and a real loss leaves the projection permanently
+    /// unobserved.
     ///
-    /// A COUNT, not a flag, and one-shot by default in tests. A sticky flag has to
-    /// be disarmed mid-flight, and with a zero bind deadline the retry races the
-    /// timer, so "drop exactly the first completion" is not expressible by
-    /// stepping — the first attempt to write that control burned the whole retry
-    /// budget with the flag still armed.
+    /// A COUNT, not a flag, and one-shot by default in tests. A sticky flag has
+    /// to be disarmed mid-flight, and with a zero bind deadline the retry races
+    /// the timer, so "drop exactly the first completion" is not expressible by
+    /// stepping — the first attempt to write that control burned the whole
+    /// retry budget with the flag still armed.
     std::uint32_t drop_seal_completions_for_test_ = 0;
 
     /// The single delivery point for a seal result. Marked //@@callback-funnel
@@ -480,13 +473,15 @@ private:
     /// Owner-strand half of seal_node_batch_command. Takes the intent BY VALUE
     /// so the capability can be constructed with a move: a copy here would
     /// allocate on the owner strand after every guard had already passed, which
-    /// is precisely the throwing commit section the prepare/commit rule forbids.
+    /// is precisely the throwing commit section the prepare/commit rule
+    /// forbids.
     std::optional<NodeBatchCommand>
     seal_node_batch_command_on_strand(
         NodeBatchIntent intent,
         PeerGenerationPin const& pin);
 
-    //@@authority transition=peer_set.release_generation_pin owner=peer_set bind=catl::peer_client::PeerSet::release_peer_pin@ce1f535e08044301
+    //@@authority transition=peer_set.release_generation_pin owner=peer_set
+    // bind=catl::peer_client::PeerSet::release_peer_pin@ce1f535e08044301
     // commit=strand
     void
     release_peer_pin(
@@ -501,7 +496,8 @@ private:
 
     /// Remove a peer by PeerSet's own decision (eviction, tests). For
     /// deaths reported by the connection itself, use consume_peer_terminal.
-    //@@authority transition=peer_set.remove_peer owner=peer_set commit=strand bind=catl::peer_client::PeerSet::remove_peer@9c8561b27d00c927
+    //@@authority transition=peer_set.remove_peer owner=peer_set commit=strand
+    // bind=catl::peer_client::PeerSet::remove_peer@9c8561b27d00c927
     void
     remove_peer(std::string const& key, bool forget_endpoint = true);
 
@@ -515,7 +511,8 @@ private:
     /// pre-admission connect failures remain owned by the existing
     /// note_connect_failure path. Terminal delivery is NOT ordered by
     /// generation, so no scalar mark may gate consumption.
-    //@@authority transition=peer_set.consume_peer_terminal owner=peer_set bind=catl::peer_client::PeerSet::consume_peer_terminal@8bfce9e29581687d
+    //@@authority transition=peer_set.consume_peer_terminal owner=peer_set
+    // bind=catl::peer_client::PeerSet::consume_peer_terminal@8bfce9e29581687d
     // commit=strand
     void
     consume_peer_terminal(
@@ -760,7 +757,8 @@ private:
         };
         std::unordered_map<uint32_t, LedgerFailure> failed_ledgers;
     };
-    //@@authority state=prv.S0008 status=provisional scope=field bind=catl::peer_client::PeerSet::endpoint_stats_@9bdf35aba9a4d0ef
+    //@@authority state=prv.S0008 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::endpoint_stats_@9bdf35aba9a4d0ef
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=per_peer_ledger_failure_and_selection_evidence
     std::unordered_map<std::string, EndpointStats> endpoint_stats_;
@@ -774,7 +772,8 @@ private:
         PeerSessionPtr session;
         std::uint64_t generation = 0;
     };
-    //@@authority state=peer_set.connections v4=S16 owner=peer_set bind=catl::peer_client::PeerSet::connections_@cd8f1261656861a3
+    //@@authority state=peer_set.connections v4=S16 owner=peer_set
+    // bind=catl::peer_client::PeerSet::connections_@cd8f1261656861a3
     std::map<std::string, ConnectionEntry> connections_;
     /// Strand-confined mint for connection-instance identity. Non-reused.
     std::uint64_t next_connection_generation_ = 0;
@@ -784,7 +783,8 @@ private:
         std::uint64_t connection_generation = 0;
         std::weak_ptr<void> live_handle;
     };
-    //@@authority state=peer_set.active_generation_pins owner=peer_set bind=catl::peer_client::PeerSet::active_peer_pins_@c4866b09e05fda6d
+    //@@authority state=peer_set.active_generation_pins owner=peer_set
+    // bind=catl::peer_client::PeerSet::active_peer_pins_@c4866b09e05fda6d
     mutable std::map<std::uint64_t, ActivePeerPin> active_peer_pins_;
     std::uint64_t next_peer_pin_id_ = 0;
     uint64_t total_connects_ = 0;
@@ -800,7 +800,8 @@ private:
     std::set<std::string> in_flight_;  // currently connecting
     std::set<std::string> queued_;
     // Request-scoped authority for queued ledger-specific replacement probes.
-    //@@authority state=prv.S0009 status=provisional scope=field bind=catl::peer_client::PeerSet::targeted_connects_@41d9a4f852dd7280
+    //@@authority state=prv.S0009 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::targeted_connects_@41d9a4f852dd7280
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=queued_history_targeted_connection_authorities
     std::map<std::string, std::vector<TargetedConnectAuthorizationPtr>>
@@ -810,14 +811,16 @@ private:
     std::set<std::string> crawl_queued_;
     std::map<std::string, std::chrono::steady_clock::time_point> crawled_;
     std::vector<std::string> pending_crawls_;
-    // Active target ledgers from in-flight wait_for_peer calls.
+    // Active target ledgers from in-flight wait_for_covering_peer calls.
     // Used by candidate admission and same-pool rotation to prioritize peers
     // that can serve any active target. Counts preserve concurrent waiters.
-    //@@authority state=prv.S0010 status=provisional scope=field bind=catl::peer_client::PeerSet::wanted_ledgers_@e19f417f60e84044
+    //@@authority state=prv.S0010 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::wanted_ledgers_@e19f417f60e84044
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=reference_counted_active_history_targets
     std::map<uint32_t, std::size_t> wanted_ledgers_;
-    //@@authority state=prv.S0011 status=provisional scope=field bind=catl::peer_client::PeerSet::active_target_authorizations_@c1962ff0c49ed8a4
+    //@@authority state=prv.S0011 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::active_target_authorizations_@c1962ff0c49ed8a4
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=live_history_target_authorization_rows
     std::vector<TargetedConnectAuthorizationPtr> active_target_authorizations_;

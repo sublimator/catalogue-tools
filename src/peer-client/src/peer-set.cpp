@@ -661,8 +661,12 @@ PeerSet::notify_waiters()
         wake->cancel();
 }
 
+//@@authority transition=prv.T0057 status=provisional scope=function
+// bind=catl::peer_client::select_covering_peers_for@066b9356328fef15
+// owner=unresolved owner_hypothesis=peer_set commit=strand
+// label=mint_only_generations_advertising_target_ledger
 std::vector<PeerGenerationPin>
-PeerSet::select_peers_for(
+PeerSet::select_covering_peers_for(
     uint32_t ledger_seq,
     int max_count,
     std::unordered_set<std::string> const& excluded)
@@ -697,25 +701,18 @@ PeerSet::select_peers_for(
             continue;
 
         uint64_t span = 0;
-        auto f = client->peer_first_seq();
-        auto l = client->peer_last_seq();
-        if (l > f)
-            span = static_cast<uint64_t>(l - f);
+        auto const range = client->advertised_ledger_range();
+        if (!range.contains(ledger_seq))
+            continue;
+        if (range.last_seq > range.first_seq)
+            span = static_cast<uint64_t>(range.last_seq - range.first_seq);
         candidates.push_back({key, span, client});
     }
 
-    // Sort: range-matched first, then by span descending
+    // All candidates cover the target. Prefer the widest advertised range.
     std::sort(
-        candidates.begin(),
-        candidates.end(),
-        [ledger_seq](auto const& a, auto const& b) {
-            bool a_covers = a.client->peer_first_seq() <= ledger_seq &&
-                ledger_seq <= a.client->peer_last_seq();
-            bool b_covers = b.client->peer_first_seq() <= ledger_seq &&
-                ledger_seq <= b.client->peer_last_seq();
-            if (a_covers != b_covers)
-                return a_covers > b_covers;  // range-matched first
-            return a.span > b.span;          // wider range preferred
+        candidates.begin(), candidates.end(), [](auto const& a, auto const& b) {
+            return a.span > b.span;
         });
 
     std::vector<PeerGenerationPin> result;
@@ -730,8 +727,12 @@ PeerSet::select_peers_for(
     return result;
 }
 
+//@@authority transition=prv.T0058 status=provisional scope=function
+// bind=catl::peer_client::co_select_covering_peers_for@b0dbba65438ae8e1
+// owner=unresolved owner_hypothesis=peer_set commit=strand
+// label=project_strict_covering_selection_to_caller_executor
 boost::asio::awaitable<std::vector<PeerGenerationPin>>
-PeerSet::co_select_peers_for(
+PeerSet::co_select_covering_peers_for(
     uint32_t ledger_seq,
     int max_count,
     std::unordered_set<std::string> excluded)
@@ -741,7 +742,8 @@ PeerSet::co_select_peers_for(
         strand_,
         [self, ledger_seq, max_count, excluded = std::move(excluded)]() mutable
         -> asio::awaitable<std::vector<PeerGenerationPin>> {
-            co_return self->select_peers_for(ledger_seq, max_count, excluded);
+            co_return self->select_covering_peers_for(
+                ledger_seq, max_count, excluded);
         },
         asio::use_awaitable);
 }
@@ -792,7 +794,8 @@ PeerSet::co_size()
         asio::use_awaitable);
 }
 
-//@@authority transition=prv.T0024 status=provisional scope=function bind=catl::peer_client::note_ledger_failure@afbf33599592273c
+//@@authority transition=prv.T0024 status=provisional scope=function
+// bind=catl::peer_client::note_ledger_failure@afbf33599592273c
 // owner=unresolved owner_hypothesis=peer_set commit=strand
 // touches=prv.S0008 label=record_peer_failure_for_exact_ledger
 void
@@ -914,12 +917,11 @@ PeerSet::choose_peer_for(
         if (!client || !client->is_ready())
             continue;
 
-        auto first = client->peer_first_seq();
-        auto last = client->peer_last_seq();
-        if (first == 0 || last == 0 || ledger_seq < first || ledger_seq > last)
+        auto const range = client->advertised_ledger_range();
+        if (!range.contains(ledger_seq))
             continue;
 
-        auto const span = last - first;
+        auto const span = range.last_seq - range.first_seq;
         if (!best)
         {
             best = client;
@@ -1910,7 +1912,8 @@ PeerSet::try_connect_on_strand(
         // session's sealed command checks: a death between connect and
         // admission then consumes as a stale instance instead of erasing
         // whichever peer currently owns the key.
-        //@@authority transition=peer_set.mint_connection_generation v4=T31 bind=catl::peer_client::try_connect_on_strand@78b31effce858424
+        //@@authority transition=peer_set.mint_connection_generation v4=T31
+        // bind=catl::peer_client::try_connect_on_strand@78b31effce858424
         // owner=peer_set commit=strand
         if (next_connection_generation_ ==
             std::numeric_limits<std::uint64_t>::max())
@@ -1992,10 +1995,11 @@ PeerSet::try_connect_on_strand(
         connections_[key] = ConnectionEntry{client, generation};
         ++total_connects_;
         failed_at_.erase(key);
+        auto const advertised_range = client->advertised_ledger_range();
         note_connect_success(
             key,
-            {.first_seq = client->peer_first_seq(),
-             .last_seq = client->peer_last_seq(),
+            {.first_seq = advertised_range.first_seq,
+             .last_seq = advertised_range.last_seq,
              .current_seq = client->peer_ledger_seq()});
         note_peer_headers(key, client->peer_headers());
         if (endpoint_cache_)
@@ -2005,8 +2009,8 @@ PeerSet::try_connect_on_strand(
                 endpoint_cache_->remember_connect_success(
                     network_id_,
                     key,
-                    {.first_seq = client->peer_first_seq(),
-                     .last_seq = client->peer_last_seq(),
+                    {.first_seq = advertised_range.first_seq,
+                     .last_seq = advertised_range.last_seq,
                      .current_seq = client->peer_ledger_seq()});
             }
             catch (std::exception const& e)
@@ -2028,9 +2032,9 @@ PeerSet::try_connect_on_strand(
             "] Connected to ",
             key,
             " (range: ",
-            client->peer_first_seq(),
+            advertised_range.first_seq,
             "-",
-            client->peer_last_seq(),
+            advertised_range.last_seq,
             ")");
         co_return client;
     }
@@ -2361,7 +2365,8 @@ PeerSet::TargetedConnectAuthorization::close(bool revoke_claimed) noexcept
     }
 }
 
-//@@authority transition=prv.T0025 status=provisional scope=function bind=catl::peer_client::acquire_wanted_ledger@14f6aab6caf926b8
+//@@authority transition=prv.T0025 status=provisional scope=function
+// bind=catl::peer_client::acquire_wanted_ledger@14f6aab6caf926b8
 // owner=unresolved owner_hypothesis=peer_set commit=strand
 // touches=prv.S0010 label=register_history_target_interest
 void
@@ -2375,7 +2380,8 @@ PeerSet::acquire_wanted_ledger(
         active_target_authorizations_.push_back(authorization);
 }
 
-//@@authority transition=prv.T0026 status=provisional scope=function bind=catl::peer_client::release_wanted_ledger@18500505df2f9513
+//@@authority transition=prv.T0026 status=provisional scope=function
+// bind=catl::peer_client::release_wanted_ledger@18500505df2f9513
 // owner=unresolved owner_hypothesis=peer_set commit=strand
 // touches=prv.S0010 label=release_history_target_interest
 void
@@ -2431,7 +2437,8 @@ PeerSet::finish_targeted_authorization(
     }
 }
 
-//@@authority transition=prv.T0027 status=provisional scope=function bind=catl::peer_client::try_candidates_for@2f8a29b36dd49275
+//@@authority transition=prv.T0027 status=provisional scope=function
+// bind=catl::peer_client::try_candidates_for@2f8a29b36dd49275
 // owner=unresolved owner_hypothesis=peer_set commit=strand
 // touches=prv.S0009 label=queue_bounded_history_targeted_connections
 std::vector<std::string>
@@ -2605,17 +2612,17 @@ PeerSet::deliver_seal_result(
     // wrong tool here.
     //
     // If the completion cannot be queued the capability is DROPPED rather than
-    // delivered from the wrong executor: an unsealed row is retryable, whereas a
-    // command delivered onto PeerSet's strand is an authority leak.
+    // delivered from the wrong executor: an unsealed row is retryable, whereas
+    // a command delivered onto PeerSet's strand is an authority leak.
     if (drop_seal_completions_for_test_ > 0)
     {
         --drop_seal_completions_for_test_;
         // Default-inert failpoint AT THE REAL BOUNDARY. It reproduces a lost
-        // completion post exactly: the command is destroyed here and the consumer
-        // is never invoked, so a sender that only reacts to callbacks learns
-        // nothing, ever. There is deliberately no way to report this to the
-        // caller — a void delivery path has nobody to report to — which is the
-        // reason the coordinator owns a bind deadline.
+        // completion post exactly: the command is destroyed here and the
+        // consumer is never invoked, so a sender that only reacts to callbacks
+        // learns nothing, ever. There is deliberately no way to report this to
+        // the caller — a void delivery path has nobody to report to — which is
+        // the reason the coordinator owns a bind deadline.
         PLOGE(
             log_,
             "seal completion dropped by failpoint; capability destroyed and no "
@@ -2661,7 +2668,8 @@ PeerSet::deliver_seal_result(
     }
 }
 
-//@@authority transition=peer_set.seal_node_batch_command owner=peer_set bind=catl::peer_client::seal_node_batch_command_on_strand@ff584bc894c3403a
+//@@authority transition=peer_set.seal_node_batch_command owner=peer_set
+// bind=catl::peer_client::seal_node_batch_command_on_strand@ff584bc894c3403a
 // commit=strand
 std::optional<NodeBatchCommand>
 PeerSet::seal_node_batch_command_on_strand(
@@ -2708,8 +2716,8 @@ PeerSet::seal_node_batch_command_on_strand(
     // assertion is over the construction itself; asserting only
     // is_nothrow_move_constructible_v<NodeBatchIntent> left the unqualified
     // constructor potentially-throwing in the type system.
-    // std::is_nothrow_constructible_v is the wrong instrument here: the trait is
-    // evaluated as if in a context unrelated to the type, so PeerSet's
+    // std::is_nothrow_constructible_v is the wrong instrument here: the trait
+    // is evaluated as if in a context unrelated to the type, so PeerSet's
     // friendship is invisible to it and a private constructor reads as not
     // constructible at all. The noexcept operator is evaluated HERE, where the
     // friendship holds, so it actually tests the expression we commit with.
@@ -2851,9 +2859,7 @@ PeerSet::peer_for(
             continue;
         if (!client || !client->is_ready())
             continue;
-        if (client->peer_first_seq() != 0 &&
-            ledger_seq >= client->peer_first_seq() &&
-            ledger_seq <= client->peer_last_seq())
+        if (client->advertised_ledger_range().contains(ledger_seq))
         {
             if (!best || candidate_better(key, best_key))
             {
@@ -2988,17 +2994,22 @@ PeerSet::wait_for_any_peer_on_strand(
 }
 
 boost::asio::awaitable<PeerGenerationPin>
-PeerSet::wait_for_peer(
+PeerSet::wait_for_covering_peer(
     uint32_t ledger_seq,
     int timeout_secs,
     std::shared_ptr<std::atomic<bool>> cancel)
 {
     static std::unordered_set<std::string> const empty;
-    co_return co_await wait_for_peer(ledger_seq, timeout_secs, empty, cancel);
+    co_return co_await wait_for_covering_peer(
+        ledger_seq, timeout_secs, empty, std::move(cancel));
 }
 
+//@@authority transition=prv.T0059 status=provisional scope=function
+// bind=catl::peer_client::wait_for_covering_peer@7e749a32a465f363
+// owner=unresolved owner_hypothesis=peer_set commit=strand
+// label=mint_covering_generation_after_targeted_search
 boost::asio::awaitable<PeerGenerationPin>
-PeerSet::wait_for_peer(
+PeerSet::wait_for_covering_peer(
     uint32_t ledger_seq,
     int timeout_secs,
     std::unordered_set<std::string> const& excluded,
@@ -3013,23 +3024,26 @@ PeerSet::wait_for_peer(
          excluded,
          cancel = std::move(
              cancel)]() mutable -> asio::awaitable<PeerGenerationPin> {
-            auto client = co_await self->wait_for_peer_on_strand(
+            auto client = co_await self->wait_for_covering_peer_on_strand(
                 ledger_seq,
                 timeout_secs,
                 std::move(excluded),
                 std::move(cancel));
             if (!client)
                 co_return PeerGenerationPin{};
+            if (!client->advertised_ledger_range().contains(ledger_seq))
+                co_return PeerGenerationPin{};
             co_return self->make_peer_pin(client);
         },
         asio::use_awaitable);
 }
 
-//@@authority transition=prv.T0028 status=provisional scope=function bind=catl::peer_client::wait_for_peer_on_strand@5edf280c99e2fd58
+//@@authority transition=prv.T0028 status=provisional scope=function
+// bind=catl::peer_client::wait_for_covering_peer_on_strand@94275c1f11b606ec
 // owner=unresolved owner_hypothesis=peer_set commit=strand
 // touches=prv.S0011 label=own_history_covered_peer_search_lifecycle
 boost::asio::awaitable<PeerSessionPtr>
-PeerSet::wait_for_peer_on_strand(
+PeerSet::wait_for_covering_peer_on_strand(
     uint32_t ledger_seq,
     int timeout_secs,
     std::unordered_set<std::string> excluded,
@@ -3052,14 +3066,13 @@ PeerSet::wait_for_peer_on_strand(
         bool active = true;
 
         void
-        clean_now(bool preserve_claimed = false)
+        clean_now()
         {
             if (!active)
                 return;
             if (auto locked = self.lock())
             {
-                locked->finish_targeted_authorization(
-                    authorization, !preserve_claimed);
+                locked->finish_targeted_authorization(authorization, true);
                 locked->release_wanted_ledger(ledger_seq, authorization);
             }
             active = false;
@@ -3112,7 +3125,6 @@ PeerSet::wait_for_peer_on_strand(
     // concurrent requests for the same ledger cannot clear each other.
     acquire_wanted_ledger(ledger_seq, authorization);
 
-    auto const fallback_ms = static_cast<int>(options_.peer_fallback.count());
     auto const timeout_ms = timeout_secs * 1000;
 
     auto snapshot_peers = [&]() -> std::vector<PeerCandidate> {
@@ -3135,10 +3147,11 @@ PeerSet::wait_for_peer_on_strand(
                 else
                     stats.failed_ledgers.erase(it);  // expired, clean up
             }
+            auto const range = client->advertised_ledger_range();
             candidates.push_back(
                 {key,
-                 client->peer_first_seq(),
-                 client->peer_last_seq(),
+                 range.first_seq,
+                 range.last_seq,
                  stats.selection_count,
                  client->is_ready(),
                  failed});
@@ -3161,10 +3174,9 @@ PeerSet::wait_for_peer_on_strand(
 
     // Initial check before entering the poll loop
     {
-        auto sel = select_peer(
-            ledger_seq, snapshot_peers(), excluded, 0, fallback_ms, timeout_ms);
-        if (sel.decision == PeerDecision::use_range_match ||
-            sel.decision == PeerDecision::use_fallback)
+        auto sel =
+            select_peer(ledger_seq, snapshot_peers(), excluded, 0, timeout_ms);
+        if (sel.decision == PeerDecision::use_range_match)
         {
             auto it = connections_.find(sel.endpoint);
             if (it != connections_.end() && it->second.session)
@@ -3174,14 +3186,12 @@ PeerSet::wait_for_peer_on_strand(
                     "[",
                     net_label_,
                     "] ",
-                    sel.decision == PeerDecision::use_range_match
-                        ? "Range match: "
-                        : "Fallback: ",
+                    "Range match: ",
                     sel.endpoint,
                     " for ledger ",
                     ledger_seq);
                 note_peer_selected(sel.endpoint);
-                cleanup.clean_now(sel.decision == PeerDecision::use_fallback);
+                cleanup.clean_now();
                 co_return it->second.session;
             }
         }
@@ -3219,7 +3229,7 @@ PeerSet::wait_for_peer_on_strand(
                 log_,
                 "[",
                 net_label_,
-                "] wait_for_peer canceled for ledger ",
+                "] wait_for_covering_peer canceled for ledger ",
                 ledger_seq);
             co_return nullptr;
         }
@@ -3243,45 +3253,38 @@ PeerSet::wait_for_peer_on_strand(
                 log_,
                 "[",
                 net_label_,
-                "] wait_for_peer canceled for ledger ",
+                "] wait_for_covering_peer canceled for ledger ",
                 ledger_seq);
             co_return nullptr;
         }
 
         auto sel = select_peer(
-            ledger_seq,
-            snapshot_peers(),
-            excluded,
-            elapsed_ms,
-            fallback_ms,
-            timeout_ms);
+            ledger_seq, snapshot_peers(), excluded, elapsed_ms, timeout_ms);
 
         switch (sel.decision)
         {
-            case PeerDecision::use_range_match:
-            case PeerDecision::use_fallback: {
+            case PeerDecision::use_range_match: {
                 auto it = connections_.find(sel.endpoint);
                 if (it != connections_.end() && it->second.session)
                 {
+                    auto const range =
+                        it->second.session->advertised_ledger_range();
                     PLOGI(
                         log_,
                         "[",
                         net_label_,
                         "] ",
-                        sel.decision == PeerDecision::use_range_match
-                            ? "Found peer: "
-                            : "Fallback peer: ",
+                        "Found covering peer: ",
                         sel.endpoint,
                         " for ledger ",
                         ledger_seq,
                         " (range ",
-                        it->second.session->peer_first_seq(),
+                        range.first_seq,
                         "-",
-                        it->second.session->peer_last_seq(),
+                        range.last_seq,
                         ")");
                     note_peer_selected(sel.endpoint);
-                    cleanup.clean_now(
-                        sel.decision == PeerDecision::use_fallback);
+                    cleanup.clean_now();
                     co_return it->second.session;
                 }
                 break;  // selected peer vanished, keep polling
@@ -3292,7 +3295,7 @@ PeerSet::wait_for_peer_on_strand(
                     log_,
                     "[",
                     net_label_,
-                    "] No peer found with ledger ",
+                    "] No peer advertising ledger ",
                     ledger_seq,
                     " after ",
                     timeout_secs,
@@ -3342,7 +3345,7 @@ PeerSet::wait_for_peer_on_strand(
                 log_,
                 "[",
                 net_label_,
-                "] wait_for_peer canceled for ledger ",
+                "] wait_for_covering_peer canceled for ledger ",
                 ledger_seq);
             co_return nullptr;
         }
@@ -3353,7 +3356,7 @@ PeerSet::wait_for_peer_on_strand(
         log_,
         "[",
         net_label_,
-        "] No peer found with ledger ",
+        "] No peer advertising ledger ",
         ledger_seq,
         " after ",
         timeout_secs,
@@ -3469,10 +3472,10 @@ PeerSet::archival_peer_count() const
         auto const& client = client_entry.session;
         if (!client || !client->is_ready())
             continue;
-        auto first = client->peer_first_seq();
-        auto last = client->peer_last_seq();
-        if (first != 0 && last != 0 &&
-            (last - first) > options_.archival_range_threshold)
+        auto const range = client->advertised_ledger_range();
+        if (range.valid() &&
+            (range.last_seq - range.first_seq) >
+                options_.archival_range_threshold)
         {
             count++;
         }
@@ -3486,10 +3489,9 @@ PeerSet::peer_is_archival(PeerSessionPtr const& peer) const
     ASSERT_ON_STRAND();
     if (!peer || !peer->is_ready())
         return false;
-    auto const first = peer->peer_first_seq();
-    auto const last = peer->peer_last_seq();
-    return first != 0 && last > first &&
-        (last - first) > options_.archival_range_threshold;
+    auto const range = peer->advertised_ledger_range();
+    return range.valid() && range.last_seq > range.first_seq &&
+        (range.last_seq - range.first_seq) > options_.archival_range_threshold;
 }
 
 bool
@@ -3506,10 +3508,8 @@ PeerSet::has_usable_covering_peer(
             continue;
         if (excluded.count(key))
             continue;
-        auto const first = peer->peer_first_seq();
-        auto const last = peer->peer_last_seq();
-        if (first != 0 && last != 0 && ledger_seq >= first &&
-            ledger_seq <= last && !peer_failed_for_ledger(key, ledger_seq, now))
+        if (peer->advertised_ledger_range().contains(ledger_seq) &&
+            !peer_failed_for_ledger(key, ledger_seq, now))
         {
             return true;
         }
@@ -3531,10 +3531,7 @@ PeerSet::would_drop_wanted_coverage(
     auto covers = [](PeerSessionPtr const& peer, uint32_t ledger_seq) {
         if (!peer || !peer->is_ready())
             return false;
-        auto const first = peer->peer_first_seq();
-        auto const last = peer->peer_last_seq();
-        return first != 0 && last != 0 && ledger_seq >= first &&
-            ledger_seq <= last;
+        return peer->advertised_ledger_range().contains(ledger_seq);
     };
     auto usable = [&](std::string const& key,
                       PeerSessionPtr const& peer,
@@ -3604,35 +3601,16 @@ PeerSet::rotation_target_for(
     if (!candidate || !candidate->is_ready())
         return std::nullopt;
 
-    auto const first = candidate->peer_first_seq();
-    auto const last = candidate->peer_last_seq();
-    auto const candidate_archival = peer_is_archival(candidate);
+    auto const range = candidate->advertised_ledger_range();
 
-    auto candidate_covers = [&](uint32_t ledger_seq) {
-        return first != 0 && last != 0 && ledger_seq >= first &&
-            ledger_seq <= last;
-    };
-    auto has_known_bad_victim = [&](TargetedConnectAuthorization const& auth) {
-        auto const now = std::chrono::steady_clock::now();
-        for (auto const& [key, peer_entry] : connections_)
-        {
-            auto const& peer = peer_entry.session;
-            if (!peer || !peer->is_ready() ||
-                generation_has_active_pin(peer_entry.generation) ||
-                peer_is_archival(peer) != candidate_archival)
-            {
-                continue;
-            }
-            if (auth.excluded.count(key) ||
-                peer_failed_for_ledger(key, auth.ledger_seq, now))
-            {
-                return true;
-            }
-        }
-        return false;
+    auto const candidate_covers = [&](uint32_t ledger_seq) {
+        return range.contains(ledger_seq);
     };
 
-    // Prefer a candidate that explicitly advertises the requested ledger.
+    // Targeted admission authority may only be spent on a peer that explicitly
+    // advertises the requested ledger. Ordinary discovery can still admit a
+    // non-covering peer when the relevant pool has spare capacity; it cannot
+    // evict an established peer on behalf of a ledger it does not advertise.
     for (auto const& lease : admission_leases)
     {
         auto const authorization = lease ? lease->authorization : nullptr;
@@ -3646,33 +3624,9 @@ PeerSet::rotation_target_for(
         return RotationTarget{
             .ledger_seq = authorization->ledger_seq,
             .excluded = authorization->excluded,
-            .candidate_covers = true,
             .candidate_key = candidate_key,
-            .candidate_first_seq = first,
-            .candidate_last_seq = last,
-            .lease = lease,
-        };
-    }
-
-    // Advertised ranges can be incomplete. A bounded targeted probe may still
-    // replace a peer already known to be unusable for this operation.
-    for (auto const& lease : admission_leases)
-    {
-        auto const authorization = lease ? lease->authorization : nullptr;
-        if (!lease || !lease->is_available() || !authorization ||
-            has_usable_covering_peer(
-                authorization->ledger_seq, authorization->excluded) ||
-            !has_known_bad_victim(*authorization))
-        {
-            continue;
-        }
-        return RotationTarget{
-            .ledger_seq = authorization->ledger_seq,
-            .excluded = authorization->excluded,
-            .candidate_covers = false,
-            .candidate_key = candidate_key,
-            .candidate_first_seq = first,
-            .candidate_last_seq = last,
+            .candidate_first_seq = range.first_seq,
+            .candidate_last_seq = range.last_seq,
             .lease = lease,
         };
     }
@@ -3878,21 +3832,18 @@ PeerSet::evict_hub_for(RotationTarget const& target)
         if (generation_has_active_pin(client_entry.generation))
             continue;
 
-        auto const first = client->peer_first_seq();
-        auto const last = client->peer_last_seq();
-        auto const covers = target.ledger_seq != 0 && first != 0 && last != 0 &&
-            target.ledger_seq >= first && target.ledger_seq <= last;
+        auto const range = client->advertised_ledger_range();
+        auto const covers =
+            target.ledger_seq != 0 && range.contains(target.ledger_seq);
         auto const failed = peer_failed_for_ledger(key, target.ledger_seq, now);
         auto const excluded = target.excluded.count(key) > 0;
         if (covers && !failed && !excluded)
             continue;
         auto const known_bad = failed || excluded;
-        if (!target.candidate_covers && !known_bad)
-            continue;
         if (would_drop_wanted_coverage(key, client, target, now))
             continue;
 
-        auto const span = last > first ? last - first : 0;
+        auto const span = range.valid() ? range.last_seq - range.first_seq : 0;
         auto const failures = endpoint_stats_[key].ledger_failure_count;
         if (worst_key.empty() || (known_bad && !worst_known_bad) ||
             (known_bad == worst_known_bad && failures > worst_failure_count) ||
@@ -3947,21 +3898,18 @@ PeerSet::evict_archival_for(RotationTarget const& target)
             continue;
         }
 
-        auto const first = client->peer_first_seq();
-        auto const last = client->peer_last_seq();
-        auto const covers = target.ledger_seq != 0 && first != 0 && last != 0 &&
-            target.ledger_seq >= first && target.ledger_seq <= last;
+        auto const range = client->advertised_ledger_range();
+        auto const covers =
+            target.ledger_seq != 0 && range.contains(target.ledger_seq);
         auto const failed = peer_failed_for_ledger(key, target.ledger_seq, now);
         auto const excluded = target.excluded.count(key) > 0;
         if (covers && !failed && !excluded)
             continue;
         auto const known_bad = failed || excluded;
-        if (!target.candidate_covers && !known_bad)
-            continue;
         if (would_drop_wanted_coverage(key, client, target, now))
             continue;
 
-        auto const span = last > first ? last - first : 0;
+        auto const span = range.valid() ? range.last_seq - range.first_seq : 0;
         auto const failures = endpoint_stats_[key].ledger_failure_count;
         if (worst_key.empty() || (known_bad && !worst_known_bad) ||
             (known_bad == worst_known_bad && failures > worst_failure_count) ||

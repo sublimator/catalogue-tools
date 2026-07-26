@@ -97,10 +97,7 @@ try_acquire_node_batch_ingress(
         if (work >= max_work)
             return false;
     } while (!work_count.compare_exchange_weak(
-        work,
-        work + 1,
-        std::memory_order_acq_rel,
-        std::memory_order_relaxed));
+        work, work + 1, std::memory_order_acq_rel, std::memory_order_relaxed));
 
     auto ingress = ingress_count.load(std::memory_order_relaxed);
     do
@@ -426,8 +423,7 @@ PeerClient::register_callback(
         next_pending_incarnation_ ==
             std::numeric_limits<std::uint64_t>::max() ||
         next_callback_incarnation_ == 0 ||
-        next_callback_incarnation_ ==
-            std::numeric_limits<std::uint64_t>::max())
+        next_callback_incarnation_ == std::numeric_limits<std::uint64_t>::max())
     {
         PLOGE(
             log_,
@@ -866,7 +862,8 @@ PeerClient::set_tracker(std::shared_ptr<EndpointTracker> tracker)
     tracker_ = std::move(tracker);
 }
 
-//@@authority transition=prv.T0021 status=provisional scope=function bind=catl::peer_client::set_node_response_handler@6ad81a5e64932f0e
+//@@authority transition=prv.T0021 status=provisional scope=function
+// bind=catl::peer_client::set_node_response_handler@6ad81a5e64932f0e
 // owner=unresolved owner_hypothesis=peer_client commit=mutex
 // touches=prv.S0007 label=replace_singleton_node_response_sink
 void
@@ -910,39 +907,60 @@ PeerClient::disconnect_on_strand()
 void
 PeerClient::send_get_nodes(
     Hash256 const& ledger_hash,
+    uint32_t ledger_seq,
     int type,
     std::vector<SHAMapNodeID> const& node_ids,
-    std::function<void(boost::system::error_code)> on_error)
+    std::function<void(boost::system::error_code)> on_write)
 {
     auto self = shared_from_this();
     asio::dispatch(
         strand_,
         [self,
          ledger_hash,
+         ledger_seq,
          type,
          node_ids,
-         on_error = std::move(on_error)]() mutable {
+         on_write = std::move(on_write)]() mutable {
             self->send_get_nodes_on_strand(
-                ledger_hash, type, std::move(node_ids), std::move(on_error));
+                ledger_hash,
+                ledger_seq,
+                type,
+                std::move(node_ids),
+                std::move(on_write));
         });
 }
 
-//@@authority transition=prv.T0023 status=provisional scope=function bind=catl::peer_client::send_get_nodes_on_strand@2ee51539b2845168
+//@@authority transition=prv.T0023 status=provisional scope=function
+// bind=catl::peer_client::send_get_nodes_on_strand@3d429aee34d810d3
 // owner=unresolved owner_hypothesis=peer_client commit=strand
-// label=legacy_node_packet_write_without_replayable_receipt
+// touches=prv.S0021
+// label=raw_node_packet_commit_requires_current_advertised_coverage
 void
 PeerClient::send_get_nodes_on_strand(
     Hash256 ledger_hash,
+    uint32_t ledger_seq,
     int type,
     std::vector<SHAMapNodeID> node_ids,
-    std::function<void(boost::system::error_code)> on_error)
+    std::function<void(boost::system::error_code)> on_write)
 {
     assert(strand_.running_in_this_thread());
     if (state_ != State::Ready)
     {
         PLOGD(log_, "send_get_nodes: not ready, dropping");
-        if (on_error)
-            on_error(boost::asio::error::connection_aborted);
+        if (on_write)
+            on_write(boost::asio::error::connection_aborted);
+        return;
+    }
+
+    if (!advertised_ledger_range().contains(ledger_seq))
+    {
+        PLOGD(
+            log_,
+            "send_get_nodes: ledger ",
+            ledger_seq,
+            " no longer advertised, refusing before write");
+        if (on_write)
+            on_write(boost::asio::error::operation_aborted);
         return;
     }
 
@@ -969,14 +987,14 @@ PeerClient::send_get_nodes_on_strand(
     connection_->async_send_packet(
         packet_type::get_ledger,
         data,
-        [on_error = std::move(on_error)](boost::system::error_code ec) {
+        [on_write = std::move(on_write)](boost::system::error_code ec) {
             if (ec)
             {
                 PLOGE(
                     PeerClient::log_, "send_get_nodes failed: ", ec.message());
-                if (on_error)
-                    on_error(ec);
             }
+            if (on_write)
+                on_write(ec);
         });
 }
 
@@ -987,7 +1005,7 @@ PeerClient::submit_node_batch(
 {
     if (!on_receipt || command.attempt_id().value() == 0 ||
         command.sender_generation().value() == 0 ||
-        command.peer_generation().value() == 0 ||
+        command.peer_generation().value() == 0 || command.ledger_seq() == 0 ||
         command.node_ids().empty() ||
         command.node_ids().size() > kMaxNodeBatchRequestNodes ||
         (command.tree() != NodeTree::transaction &&
@@ -1048,8 +1066,7 @@ PeerClient::submit_node_batch(
         {
             node_batch_ingress_projections_.fetch_sub(
                 1, std::memory_order_acq_rel);
-            node_batch_work_projection_.fetch_sub(
-                1, std::memory_order_acq_rel);
+            node_batch_work_projection_.fetch_sub(1, std::memory_order_acq_rel);
         }
         return false;
     }
@@ -1058,10 +1075,8 @@ PeerClient::submit_node_batch(
 bool
 PeerClient::acknowledge_node_batch_receipt(NodeBatchReceiptAck ack)
 {
-    if (ack.attempt_id().value() == 0 ||
-        ack.sender_generation().value() == 0 ||
-        ack.peer_generation().value() == 0 ||
-        ack.receiver_instance_id() == 0 ||
+    if (ack.attempt_id().value() == 0 || ack.sender_generation().value() == 0 ||
+        ack.peer_generation().value() == 0 || ack.receiver_instance_id() == 0 ||
         ack.receiver_commit_sequence() == 0)
     {
         return false;
@@ -1093,8 +1108,7 @@ PeerClient::acknowledge_node_batch_receipt(NodeBatchReceiptAck ack)
         {
             node_batch_ingress_projections_.fetch_sub(
                 1, std::memory_order_acq_rel);
-            node_batch_work_projection_.fetch_sub(
-                1, std::memory_order_acq_rel);
+            node_batch_work_projection_.fetch_sub(1, std::memory_order_acq_rel);
         }
         return false;
     }
@@ -1209,13 +1223,25 @@ PeerClient::submit_node_batch_on_strand(
         return false;
     }
 
+    // The command crossed executors after PeerSet admitted its pin. Status
+    // changes are serialized by this same strand, so this is the authoritative
+    // dispatch-time coverage decision. Earlier selector checks are advisory.
+    //@@authority transition=prv.T0062 status=provisional scope=statement bind=if_statement@71ecdc0da9d7dc10
+    // owner=unresolved owner_hypothesis=peer_client commit=strand
+    // touches=prv.S0021,prv.S0022
+    // label=managed_node_packet_commit_requires_current_advertised_coverage
+    if (!advertised_ledger_range().contains(command.ledger_seq()))
+    {
+        refuse(NodeBatchWriteOutcome::ledger_not_advertised);
+        return false;
+    } //@@authority-target ids=prv.T0062
+
     if (node_batch_write_records_.size() >= kMaxNodeBatchReceiptRows)
     {
         refuse(NodeBatchWriteOutcome::receipt_capacity_exhausted);
         return false;
     }
-    if (node_batch_write_records_.capacity() <
-        kMaxNodeBatchReceiptRows)
+    if (node_batch_write_records_.capacity() < kMaxNodeBatchReceiptRows)
     {
         try
         {
@@ -1230,8 +1256,7 @@ PeerClient::submit_node_batch_on_strand(
     auto const remaining_receipt_sequences =
         std::numeric_limits<std::uint64_t>::max() -
         next_node_batch_receipt_sequence_;
-    if (reserved_node_batch_receipt_sequences_ >=
-        remaining_receipt_sequences)
+    if (reserved_node_batch_receipt_sequences_ >= remaining_receipt_sequences)
     {
         refuse(NodeBatchWriteOutcome::receipt_sequence_exhausted);
         return false;
@@ -1333,8 +1358,7 @@ PeerClient::complete_node_batch_write(
             return record.sender_generation == sender_generation &&
                 record.attempt_id == attempt_id;
         });
-    if (found == node_batch_write_records_.end() ||
-        !found->pending_command)
+    if (found == node_batch_write_records_.end() || !found->pending_command)
     {
         return;
     }
@@ -1344,15 +1368,13 @@ PeerClient::complete_node_batch_write(
         ? NodeBatchWriteOutcome::write_failed
         : terminal_override;
     assert(reserved_node_batch_receipt_sequences_ != 0);
-    auto const receiver_commit_sequence =
-        next_node_batch_receipt_sequence_ + 1;
-    found->terminal_receipt =
-        NodeBatchWriteReceipt{
-            *found->pending_command,
-            outcome,
-            receiver_instance_id_,
-            receiver_commit_sequence,
-            ec};
+    auto const receiver_commit_sequence = next_node_batch_receipt_sequence_ + 1;
+    found->terminal_receipt = NodeBatchWriteReceipt{
+        *found->pending_command,
+        outcome,
+        receiver_instance_id_,
+        receiver_commit_sequence,
+        ec};
     found->pending_command.reset();
     --reserved_node_batch_receipt_sequences_;
     next_node_batch_receipt_sequence_ = receiver_commit_sequence;
@@ -1397,8 +1419,7 @@ PeerClient::acknowledge_node_batch_receipt_on_strand(
             return record.sender_generation == ack.sender_generation() &&
                 record.attempt_id == ack.attempt_id();
         });
-    if (found == node_batch_write_records_.end() ||
-        !found->terminal_receipt ||
+    if (found == node_batch_write_records_.end() || !found->terminal_receipt ||
         found->payload_digest != ack.payload_digest() ||
         found->terminal_receipt->receiver_commit_sequence() !=
             ack.receiver_commit_sequence())
@@ -1463,7 +1484,8 @@ PeerClient::do_connect(
         // Always notify the observer (PeerSet needs to know). The
         // terminal fact is formed here, once, on the client strand —
         // this is the sole export commit for this instance's death.
-        //@@authority channel=peer_client.terminal_export owner=peer_client bind=catl::peer_client::do_connect@e37232fc24310fa4
+        //@@authority channel=peer_client.terminal_export owner=peer_client
+        // bind=catl::peer_client::do_connect@e37232fc24310fa4
         // commit=client-strand
         if (self->on_disconnect_)
         {
@@ -1661,6 +1683,21 @@ PeerClient::send_initial_probe_ping()
     PLOGD(log_, "[", net_label_, "] Sent initial probe ping seq=", seq);
 }
 
+//@@authority transition=prv.T0060 status=provisional scope=function
+//bind=catl::peer_client::publish_advertised_ledger_range@7067c13e402f7a68
+// owner=unresolved owner_hypothesis=peer_client commit=atomic
+// touches=prv.S0021
+// label=publish_one_coherent_advertised_ledger_range
+AdvertisedLedgerRange
+PeerClient::publish_advertised_ledger_range(
+    AdvertisedLedgerRange range) noexcept
+{
+    if (!range.valid())
+        range = {};
+    advertised_ledger_range_.store(range.packed(), std::memory_order_release);
+    return range;
+}
+
 void
 PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
 {
@@ -1680,20 +1717,14 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
 
     if (status.has_firstseq() && status.has_lastseq())
     {
-        auto old_first = peer_first_seq_.load();
-        auto old_last = peer_last_seq_.load();
-        peer_first_seq_.store(status.firstseq());
-        peer_last_seq_.store(status.lastseq());
-        if (peer_last_seq_.load() < peer_first_seq_.load() ||
-            peer_first_seq_.load() == 0 || peer_last_seq_.load() == 0)
-        {
-            peer_first_seq_ = 0;
-            peer_last_seq_ = 0;
-        }
-        else if (old_first != peer_first_seq_ || old_last != peer_last_seq_)
+        auto const old_range = advertised_ledger_range();
+        auto const next_range = publish_advertised_ledger_range(
+            {.first_seq = status.firstseq(), .last_seq = status.lastseq()});
+
+        if (next_range.valid() && old_range != next_range)
         {
             // Only log when range actually changes
-            if (old_first == 0)
+            if (!old_range.valid())
             {
                 PLOGI(
                     log_,
@@ -1702,9 +1733,9 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
                     "] [",
                     endpoint_str_,
                     "] range: ",
-                    peer_first_seq_,
+                    next_range.first_seq,
                     " - ",
-                    peer_last_seq_);
+                    next_range.last_seq);
             }
             else
             {
@@ -1715,9 +1746,9 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
                     "] [",
                     endpoint_str_,
                     "] range: ",
-                    peer_first_seq_,
+                    next_range.first_seq,
                     " - ",
-                    peer_last_seq_);
+                    next_range.last_seq);
             }
         }
 
@@ -1731,8 +1762,8 @@ PeerClient::handle_status_change(std::vector<uint8_t> const& payload)
         {
             tracker->update(
                 endpoint_str_,
-                {.first_seq = peer_first_seq_,
-                 .last_seq = peer_last_seq_,
+                {.first_seq = next_range.first_seq,
+                 .last_seq = next_range.last_seq,
                  .current_seq = peer_ledger_seq_});
         }
     }
@@ -1917,10 +1948,12 @@ PeerClient::handle_ping(std::vector<uint8_t> const& payload)
     }
 }
 
-//@@authority channel=prv.C0002 status=provisional scope=function bind=catl::peer_client::dispatch_ledger_data@f7d81d9d3abef04f
+//@@authority channel=prv.C0002 status=provisional scope=function
+// bind=catl::peer_client::dispatch_ledger_data@f7d81d9d3abef04f
 // endpoints=peer_client,node_cache channel_semantics=legacy_uncorrelated
 // label=uncorrelated_node_response_delivery_to_singleton_sink
-//@@authority transition=prv.T0022 status=provisional scope=function bind=catl::peer_client::dispatch_ledger_data@f7d81d9d3abef04f
+//@@authority transition=prv.T0022 status=provisional scope=function
+// bind=catl::peer_client::dispatch_ledger_data@f7d81d9d3abef04f
 // owner=unresolved owner_hypothesis=peer_client commit=strand
 // touches=prv.S0007 label=deliver_uncorrelated_node_response_to_shared_sink
 void
@@ -1978,8 +2011,8 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         }
         if (handler)
         {
-            //@@authority transition=prv.T0041 status=provisional bind=expression_statement@0a62d39eed858ac3
-            //scope=statement
+            //@@authority transition=prv.T0041 status=provisional
+            // bind=expression_statement@0a62d39eed858ac3 scope=statement
             // owner=unresolved owner_hypothesis=peer_client commit=strand
             // touches=prv.S0007
             // label=invoke_snapshot_of_singleton_uncorrelated_response_sink
@@ -2299,6 +2332,10 @@ PeerClient::get_ledger_header(
         });
 }
 
+//@@authority transition=prv.T0063 status=provisional scope=function bind=catl::peer_client::get_ledger_header_on_strand@7a7c058436449b49
+// owner=unresolved owner_hypothesis=peer_client commit=strand
+// touches=prv.S0021
+// label=header_packet_commit_requires_current_advertised_coverage
 void
 PeerClient::get_ledger_header_on_strand(
     uint32_t ledger_seq,
@@ -2326,6 +2363,14 @@ PeerClient::get_ledger_header_on_strand(
             complete_callback_noexcept(
                 log_, std::move(callback), terminal_request_error(state));
         }
+        return;
+    }
+
+    // Selection happened before this request crossed onto our strand. A queued
+    // status update may have revoked coverage in between.
+    if (!advertised_ledger_range().contains(ledger_seq))
+    {
+        complete_callback_noexcept(log_, std::move(callback), Error::NoLedger);
         return;
     }
 
