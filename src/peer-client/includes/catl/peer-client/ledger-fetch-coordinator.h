@@ -417,6 +417,22 @@ private:
         bool publish_open = false;
         std::uint32_t max_publish_attempts = kMaxPublishAttempts;
 
+        /// STICKY: a projection of this identity may have reached the receiver, so a
+        /// replayable receiver row may exist that only this row can retire.
+        ///
+        /// Separate from `publish_attempts` because that counts attempts in the
+        /// CURRENT bounded round and is reset per round — and overloading it with
+        /// this fact was a real defect: a repair round reset it to zero,
+        /// `begin_publish_on_strand` read zero as "never published", and under a
+        /// fence the first repair tick terminalized the very row being retained.
+        ///
+        /// Set the moment a publication is ACCEPTED. Cleared only by proof that
+        /// nothing is owed: an exact terminal receipt naming no receiver row, or a
+        /// successful acknowledgement. A later refused round is not proof of
+        /// anything and must not clear it. A generation-close witness would also
+        /// qualify and does not exist until the C11 slice.
+        bool may_have_reached_receiver = false;
+
         /// The exact terminal receipt, retained. A receipt whose
         /// receiver_commit_sequence is zero identifies NO retained receiver row —
         /// PeerClient refuses to accept an acknowledgement for one — so it is a
@@ -428,6 +444,10 @@ private:
         /// `deadline` on purpose: multiplexing one timer between "how long until I
         /// give up waiting" and "how long until I try again" makes a stale firing
         /// indistinguishable from a live one, and cancellation ambiguous.
+        /// Allocated during row commit alongside `deadline`, never lazily. A lazy
+        /// allocation that failed called mark_unsettled, which scheduled a retry,
+        /// which failed again — unbounded synchronous recursion on a persistent
+        /// allocation failure.
         enum class Retry : std::uint8_t { none, publish, acknowledge, repair };
         /// Which deferred attempt this row owns. Identity-bearing in the sense that
         /// matters: a fired handler re-checks it, so a cancelled retry whose handler
@@ -445,12 +465,16 @@ private:
         /// itself the truth about a publication the receiver may have accepted?
         ///
         /// This is what a fence must NOT erase and must wait on.
+        /// Derived from the STICKY fact, not from transient execution phase.
+        ///
+        /// Phase-derived was wrong and reported false-empty: initial publication
+        /// enters `awaiting_receipt` without a refresh, and a repair round passes
+        /// through `publishable` — so a public diagnostic could read zero while the
+        /// historical obligation was live.
         bool
         owes_receipt_settlement() const noexcept
         {
-            return !retired &&
-                (phase == Phase::awaiting_receipt ||
-                 phase == Phase::acknowledging || phase == Phase::unsettled);
+            return !retired && may_have_reached_receiver;
         }
     };
 
@@ -494,8 +518,14 @@ private:
     /// Retain a row whose accepted publication has no settled disposition. It keeps
     /// its identity, its pin and its work unit, so a fence backpressures on it
     /// instead of reporting a false-empty drain.
+    /// `schedule_repair = false` when the caller IS a failed scheduling attempt.
+    /// Otherwise retaining a row would schedule a repair, whose failure would retain
+    /// it again, forever, on the stack.
     void
-    mark_unsettled_on_strand(OutboxRow& row, char const* why);
+    mark_unsettled_on_strand(
+        OutboxRow& row,
+        char const* why,
+        bool schedule_repair = true);
 
     /// One repair round for a retained row: re-acknowledge if the receipt is in
     /// hand, otherwise replay publication to learn a disposition we never got.
@@ -607,6 +637,9 @@ private:
     bool fail_bind_initiation_for_test_ = false;
     bool fail_fence_projection_for_test_ = false;
     bool fail_publish_initiation_for_test_ = false;
+    /// Refuse to arm the retry timer, to prove a scheduling failure leaves one named
+    /// owned obligation and does not recurse.
+    bool fail_retry_arm_for_test_ = false;
 
     /// Force the acknowledgement to be observed as NOT queued.
     ///

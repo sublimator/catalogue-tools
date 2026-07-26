@@ -1805,42 +1805,243 @@ TEST(LedgerFetchCoordinatorPublish, RetainedObligationIsRepairedWhenReceiverReco
     EXPECT_FALSE(f.coord->accounting_broken());
 }
 
-/// 43. A retained obligation whose RECEIVER INCARNATION is gone is released.
+/// 43. A row that holds no session RETAINS its obligation. It is not released.
 ///
-/// The principled terminal condition, and the only one: not an attempt budget
-/// expiring, but the obligation itself ceasing to exist. The receiver's retained row
-/// dies with its incarnation, so there is nothing left to retire and holding a work
-/// unit for it forever would be a leak dressed as diligence.
-TEST(LedgerFetchCoordinatorPublish, ObligationIsReleasedWhenTheReceiverIsGone)
+/// This control previously asserted the opposite, and Codex was right that the claim
+/// was fiction. `PeerGenerationPin::State` owns a `PeerSessionPtr`, and neither
+/// disconnect nor PeerSet removal nulls it — so `get() == nullptr` means only that
+/// OUR retention was dropped, which nothing in production does while a row is live.
+/// Calling that "the receiver incarnation is gone" dressed a test seam up as a
+/// terminal witness.
+///
+/// A real terminal witness is a generation close, which does not exist until the C11
+/// slice. Until then the honest behaviour is to keep the obligation and say so.
+TEST(LedgerFetchCoordinatorPublish, RowWithoutASessionRetainsTheObligation)
 {
     PublishFixture f{1, /*with_connection=*/true};
     Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
-    Access::set_repair_backoff(f.coord, std::chrono::milliseconds{0});
+    Access::set_repair_backoff(f.coord, std::chrono::milliseconds{60000});
     Access::set_max_ack_attempts(f.coord, 1);
     Access::fail_next_acknowledgements(f.coord, 99);
 
     ASSERT_EQ(f.submit(), Ingress::reserved);
-    // One refused acknowledgement, then the repair loop would spin forever.
-    for (int i = 0; i < 8; ++i)
-    {
-        f.step();
-    }
+    f.settle();
+
     auto const attempt = Access::attempt_at(f.coord, 0);
     ASSERT_TRUE(attempt.has_value());
     auto* row = Access::find_any(f.coord, *attempt);
     ASSERT_TRUE(row != nullptr);
-    ASSERT_FALSE(row->retired) << "still owed at this point";
+    ASSERT_EQ(row->phase, Phase::unsettled);
 
-    // The receiver incarnation goes away: release the retention the row holds, which
-    // is what a dead session looks like from here.
+    // Drop the retention and force a repair round.
     Access::release_row_pin(f.coord, *attempt);
+    Access::repair(f.coord, *attempt);
+    f.settle();
+
+    EXPECT_EQ(row->phase, Phase::unsettled)
+        << "no session is not proof that the receiver row is gone, so the obligation "
+           "is retained rather than released on a pointer being null";
+    EXPECT_FALSE(row->retired);
+    EXPECT_TRUE(row->may_have_reached_receiver)
+        << "the sticky fact survives: only exact settlement or a real close witness "
+           "may clear it";
+    EXPECT_EQ(f.coord->receipt_obligations(), 1u);
+    EXPECT_EQ(f.coord->work_outstanding(), 1u);
+    EXPECT_FALSE(f.coord->accounting_broken());
+}
+
+/// 44. A retained receiver row survives a REAL transport close, and the exact
+///     acknowledgement still retires it.
+///
+/// The receiver retains terminal node-batch rows across ordinary transport death by
+/// design, so a disconnect is not a licence for the sender to forget. This exercises
+/// a real `PeerClient::disconnect()` rather than synthesising a witness from pointer
+/// nullness.
+TEST(LedgerFetchCoordinatorPublish, RetainedRowSurvivesRealDisconnectAndStillAcks)
+{
+    PublishFixture f{1, /*with_connection=*/true};
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
+    Access::set_repair_backoff(f.coord, std::chrono::milliseconds{60000});
+    Access::set_max_ack_attempts(f.coord, 1);
+    Access::fail_next_acknowledgements(f.coord, 1);
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+    ASSERT_EQ(row->phase, Phase::unsettled) << "one refused ack, obligation retained";
+    ASSERT_TRUE(row->receipt.has_value());
+    ASSERT_NE(row->receipt->receiver_commit_sequence(), 0u)
+        << "a RETAINED receiver row, which is what must survive the close";
+
+    // A real transport close on the real receiver.
+    f.client->disconnect();
+    f.settle();
+
+    // The retained row is still there to retire, and the acknowledgement still works.
+    Access::repair(f.coord, *attempt);
     f.settle();
 
     EXPECT_EQ(row->phase, Phase::terminal)
-        << "nothing left to retire, so the obligation is released rather than held "
-           "forever";
-    EXPECT_TRUE(row->retired);
+        << "the receiver retains terminal rows across transport death, so the exact "
+           "acknowledgement still retires one after a close";
+    EXPECT_FALSE(row->may_have_reached_receiver) << "settled, so the fact is cleared";
     EXPECT_EQ(f.coord->receipt_obligations(), 0u);
     EXPECT_EQ(f.coord->work_outstanding(), 0u);
+    EXPECT_FALSE(f.coord->accounting_broken());
+}
+
+/// 45. Accepted projection, lost receipt, FENCE, repair tick: the row stays owned
+///     and the fence stays pending.
+///
+/// The exact defect Codex found. `publish_attempts` carried two facts — attempts in
+/// the current round, and whether anything ever reached the receiver — and a repair
+/// round reset it. `begin_publish_on_strand` then read zero as "never published", so
+/// with ingress sealed the FIRST repair tick terminalized the very row being
+/// retained. The obligation was erased by the mechanism meant to preserve it.
+TEST(LedgerFetchCoordinatorBind, RepairUnderAFenceKeepsTheAcceptedObligation)
+{
+    CoordFixture f;
+    // Accepted and never answered, so the disposition is unknown: PeerClient's
+    // duplicate-waiter shape.
+    ASSERT_TRUE(f.session->publish_accepts);
+    Access::set_publish_deadline(f.coord, std::chrono::milliseconds{0});
+    Access::set_max_publish_attempts(f.coord, 1);
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
+    Access::set_repair_backoff(f.coord, std::chrono::milliseconds{60000});
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+    ASSERT_EQ(row->phase, Phase::unsettled);
+    ASSERT_TRUE(row->may_have_reached_receiver) << "the sticky fact is set";
+
+    // Fence, then force a repair tick.
+    int fenced = 0;
+    ASSERT_EQ(f.coord->fence([&fenced]() { ++fenced; }), Fence::drain_queued);
+    f.settle();
+    Access::repair(f.coord, *attempt);
+    f.settle();
+
+    EXPECT_FALSE(row->retired)
+        << "the first repair tick under a fence must NOT terminalize the retained "
+           "row; keying the ingress gate on a per-round counter did exactly that";
+    EXPECT_TRUE(row->may_have_reached_receiver);
+    EXPECT_EQ(f.coord->receipt_obligations(), 1u)
+        << "and the public projection must not read zero while it is live";
+    EXPECT_EQ(fenced, 0) << "the fence stays pending until exact settlement";
+    EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fencing);
+    EXPECT_FALSE(f.coord->accounting_broken());
+}
+
+/// 46. Accepted projection, lost receipt, then a WHOLE repair round of synchronous
+///     refusals: the old obligation is still owned.
+///
+/// A refusal is not proof that nothing is owed. The previous code terminalized on
+/// "publication refused" regardless of whether an earlier projection had been
+/// accepted.
+TEST(LedgerFetchCoordinatorBind, RefusedRepairRoundKeepsTheOldObligation)
+{
+    CoordFixture f;
+    Access::set_publish_deadline(f.coord, std::chrono::milliseconds{0});
+    Access::set_max_publish_attempts(f.coord, 1);
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
+    Access::set_repair_backoff(f.coord, std::chrono::milliseconds{60000});
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+    ASSERT_EQ(row->phase, Phase::unsettled);
+
+    // Now the session refuses every submission, so the whole repair round fails.
+    f.session->publish_accepts = false;
+    Access::repair(f.coord, *attempt);
+    f.settle();
+
+    EXPECT_FALSE(row->retired)
+        << "a refused round is not proof that the receiver holds nothing";
+    EXPECT_EQ(row->phase, Phase::unsettled);
+    EXPECT_TRUE(row->may_have_reached_receiver) << "sticky across the refused round";
+    EXPECT_EQ(f.coord->receipt_obligations(), 1u);
+    EXPECT_EQ(f.coord->work_outstanding(), 1u);
+    EXPECT_FALSE(f.coord->accounting_broken());
+}
+
+/// 47. After either path, an exact receipt and acknowledgement retire the row and
+///     release the fence.
+TEST(LedgerFetchCoordinatorPublish, ExactSettlementRetiresTheRowAndReleasesTheFence)
+{
+    PublishFixture f{1, /*with_connection=*/true};
+    Access::set_retry_backoff(f.coord, std::chrono::milliseconds{0});
+    Access::set_repair_backoff(f.coord, std::chrono::milliseconds{60000});
+    Access::set_max_ack_attempts(f.coord, 1);
+    Access::fail_next_acknowledgements(f.coord, 1);
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    f.settle();
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+    ASSERT_EQ(row->phase, Phase::unsettled);
+
+    int fenced = 0;
+    ASSERT_EQ(f.coord->fence([&fenced]() { ++fenced; }), Fence::drain_queued);
+    f.settle();
+    ASSERT_EQ(fenced, 0) << "pending on the obligation";
+
+    // Exact settlement: the acknowledgement is accepted this time.
+    Access::set_max_ack_attempts(f.coord, 8);
+    Access::repair(f.coord, *attempt);
+    f.settle();
+
+    EXPECT_EQ(row->phase, Phase::terminal);
+    EXPECT_FALSE(row->may_have_reached_receiver)
+        << "exact settlement is one of only two things that may clear the fact";
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u);
+    EXPECT_EQ(fenced, 1) << "and the fence is released by settlement, not by a budget";
+    EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fenced);
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
+}
+
+/// 48. A retry that cannot be armed leaves ONE named owned obligation and does not
+///     recurse.
+///
+/// Both timer-allocation and timer-arm failure used to call `mark_unsettled`, which
+/// scheduled a retry, which failed again: unbounded synchronous recursion on a
+/// persistent failure. The timer is now allocated during row commit, and a scheduling
+/// failure retains the row WITHOUT rescheduling.
+TEST(LedgerFetchCoordinatorBind, RetryArmFailureDoesNotRecurse)
+{
+    CoordFixture f;
+    Access::set_publish_deadline(f.coord, std::chrono::milliseconds{0});
+    Access::set_max_publish_attempts(f.coord, 1);
+    Access::set_retry_arm_failure(f.coord, true);
+
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+    // If this recursed, it would exhaust the stack rather than return.
+    EXPECT_NO_THROW(f.settle());
+
+    auto const attempt = Access::attempt_at(f.coord, 0);
+    ASSERT_TRUE(attempt.has_value());
+    auto* row = Access::find_any(f.coord, *attempt);
+    ASSERT_TRUE(row != nullptr);
+
+    EXPECT_EQ(row->phase, Phase::unsettled) << "one named owned obligation";
+    EXPECT_EQ(row->retry_kind, Access::Row::Retry::none)
+        << "and nothing scheduled, or the failure would arm the failure again";
+    EXPECT_EQ(f.coord->receipt_obligations(), 1u) << "identity not lost";
+    EXPECT_EQ(f.coord->work_outstanding(), 1u)
+        << "so no false fence completion is possible";
     EXPECT_FALSE(f.coord->accounting_broken());
 }

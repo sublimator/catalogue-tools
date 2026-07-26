@@ -139,6 +139,14 @@ public:
         c->fail_next_acknowledgements_for_test_ = count;
     }
 
+    /// Refuse to arm the retry timer, proving a scheduling failure leaves one named
+    /// obligation and does not recurse.
+    static void
+    set_retry_arm_failure(std::shared_ptr<Coordinator> const& c, bool fail)
+    {
+        c->fail_retry_arm_for_test_ = fail;
+    }
+
     static void
     set_publish_initiation_failure(
         std::shared_ptr<Coordinator> const& c,

@@ -264,6 +264,11 @@ LedgerFetchCoordinator::commit_row_on_strand(
             tree,
             std::move(node_ids)};
         auto timer = std::make_shared<asio::steady_timer>(strand_);
+        // Both timers up front, in the fallible prepare. Allocating the retry timer
+        // lazily meant a failure called mark_unsettled, which scheduled a retry,
+        // which failed again — unbounded synchronous recursion under a persistent
+        // allocation failure.
+        auto retry_timer = std::make_shared<asio::steady_timer>(strand_);
 
         // The append cannot allocate: rows_ was reserved once to kMaxWork, and
         // every live row holds a permit, so at most kMaxWork - 1 remain here.
@@ -272,6 +277,7 @@ LedgerFetchCoordinator::commit_row_on_strand(
         rows_.emplace_back(std::move(intent), std::move(pin));
         auto& row = rows_.back();
         row.deadline = std::move(timer);
+        row.retry = std::move(retry_timer);
         row.max_bind_attempts = max_bind_attempts_;
         row.max_publish_attempts = max_publish_attempts_;
         row.absolute_deadline =
@@ -462,17 +468,16 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
     {
         return;
     }
-    if (ingress_sealed() && row->publish_attempts == 0)
+    if (ingress_sealed() && !row->may_have_reached_receiver)
     {
         // Never published, so the receiver holds nothing for this attempt and there
         // is nothing to repair. Safe to terminalize.
         //
-        // The `publish_attempts == 0` qualifier is the correction: a row that HAS
-        // published may already have created a replayable receiver row, and
-        // replaying to learn its disposition is DRAINING an accepted obligation,
-        // not admitting new work. Sealing ingress stops the latter. Refusing the
-        // former is what erased the only authority able to retire the receiver's
-        // row — T69 drains rather than erases.
+        // The qualifier reads the STICKY fact, not `publish_attempts`. A repair
+        // round resets that counter, so keying on it meant the first repair tick
+        // under a fence saw "never published" and terminalized the very row being
+        // retained. Replaying to learn a disposition is DRAINING an accepted
+        // obligation, not admitting new work — T69 drains rather than erases.
         terminalize_on_strand(*row, "ingress sealed before any publication");
         return;
     }
@@ -510,6 +515,7 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
     ++row->publish_attempts;
     row->publish_open = true;
     row->phase = Phase::awaiting_receipt;
+    refresh_receipt_obligations_on_strand();
     auto const revision = row->publish_revision;
 
     bool accepted = false;
@@ -557,6 +563,14 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
         PLOGE(log_, "publish initiation threw; settling as a refused publication");
     }
 
+    if (accepted)
+    {
+        // STICKY from here. A projection of this identity has reached the receiver,
+        // so a replayable row may exist that only this row can retire.
+        row->may_have_reached_receiver = true;
+        refresh_receipt_obligations_on_strand();
+    }
+
     if (!accepted)
     {
         // Refused or threw. Bounded replay, or terminal, under coordinator bounds.
@@ -597,8 +611,11 @@ LedgerFetchCoordinator::settle_publication_on_strand(
 
         if (row->receipt->receiver_commit_sequence() == 0)
         {
-            // An admission refusal names no retained receiver row, and PeerClient
-            // rejects an acknowledgement for one. There is nothing to retire.
+            // PROOF that nothing is owed: an exact terminal receipt naming no
+            // retained receiver row. This is one of only two things that may clear
+            // the sticky fact — the other is a successful acknowledgement. A refused
+            // round is not proof of anything.
+            row->may_have_reached_receiver = false;
             terminalize_on_strand(*row, "terminal receipt with no retained row");
             return true;
         }
@@ -616,11 +633,17 @@ LedgerFetchCoordinator::settle_publication_on_strand(
             mark_unsettled_on_strand(
                 *row, "no receipt within the publication deadline");
         }
+        else if (row->may_have_reached_receiver)
+        {
+            // Refused THIS round, but an earlier projection reached the receiver.
+            // A refusal is not proof that nothing is owed, so the obligation stays.
+            mark_unsettled_on_strand(
+                *row, "round refused with an earlier accepted projection");
+        }
         else
         {
-            // Refused at submission every time, so nothing was ever accepted and
-            // the receiver holds nothing.
-            terminalize_on_strand(*row, "publication refused");
+            // Never accepted by the receiver, so it holds nothing for this identity.
+            terminalize_on_strand(*row, "publication refused, never accepted");
         }
         return true;
     }
@@ -684,6 +707,9 @@ LedgerFetchCoordinator::acknowledge_on_strand(TransportAttemptId attempt)
 
     if (queued)
     {
+        // PROOF that nothing is owed: the receiver accepted the exact acknowledgement
+        // for the exact row this receipt names.
+        row->may_have_reached_receiver = false;
         terminalize_on_strand(*row, "acknowledged");
         return;
     }
@@ -748,24 +774,21 @@ LedgerFetchCoordinator::schedule_retry_on_strand(
     }
     if (!row->retry)
     {
-        try
-        {
-            row->retry = std::make_shared<asio::steady_timer>(strand_);
-        }
-        catch (...)
-        {
-            // No timer means no owned way to yield. Retain the obligation rather
-            // than fall back to an immediate recursion, which is the behaviour this
-            // whole mechanism replaces.
-            PLOGE(log_, "cannot allocate a retry timer; retaining the obligation");
-            mark_unsettled_on_strand(*row, "no retry timer");
-            return;
-        }
+        // Allocated during commit preparation, so this is an invariant breach rather
+        // than an allocation failure. Retain WITHOUT scheduling.
+        accounting_broken_.store(true, std::memory_order_release);
+        PLOGE(log_, "row has no retry timer; retaining without scheduling");
+        mark_unsettled_on_strand(*row, "no retry timer", /*schedule_repair=*/false);
+        return;
     }
 
     row->retry_kind = kind;
     try
     {
+        if (fail_retry_arm_for_test_)
+        {
+            throw std::runtime_error("retry arm failpoint");
+        }
         row->retry->expires_after(
             kind == OutboxRow::Retry::repair ? repair_backoff_ : retry_backoff_);
         row->retry->async_wait(
@@ -800,15 +823,23 @@ LedgerFetchCoordinator::schedule_retry_on_strand(
     }
     catch (...)
     {
-        PLOGE(log_, "cannot arm the retry timer; retaining the obligation");
-        mark_unsettled_on_strand(*row, "retry timer would not arm");
+        // schedule_repair=false is load-bearing. mark_unsettled used to schedule a
+        // repair unconditionally, so an arm failure retained the row, which armed a
+        // retry, which failed again — unbounded synchronous recursion on a persistent
+        // failure. The row stays owned and named; nothing reschedules it.
+        PLOGE(log_, "cannot arm the retry timer; retaining without rescheduling");
+        mark_unsettled_on_strand(
+            *row, "retry timer would not arm", /*schedule_repair=*/false);
     }
 }
 
 //@@authority transition=ledger_fetch_coordinator.retain_unsettled_row
 // owner=ledger_fetch_coordinator commit=strand
 void
-LedgerFetchCoordinator::mark_unsettled_on_strand(OutboxRow& row, char const* why)
+LedgerFetchCoordinator::mark_unsettled_on_strand(
+    OutboxRow& row,
+    char const* why,
+    bool schedule_repair)
 {
     PLOGE(
         log_,
@@ -825,7 +856,10 @@ LedgerFetchCoordinator::mark_unsettled_on_strand(OutboxRow& row, char const* why
     // read it: the row held its work unit forever and the fence could never
     // complete, which trades "erases the repair authority" for "wedges the actor"
     // — arguably the worse bug. A repair round is scheduled on the row's own timer.
-    schedule_retry_on_strand(row.intent.attempt_id(), OutboxRow::Retry::repair);
+    if (schedule_repair)
+    {
+        schedule_retry_on_strand(row.intent.attempt_id(), OutboxRow::Retry::repair);
+    }
     // Deliberately NOT released: not the pin, not the work unit, not the row. The
     // work unit is what makes a fence backpressure on this obligation instead of
     // reporting a false-empty drain, and the pin is what a later repair would need.
@@ -862,16 +896,28 @@ LedgerFetchCoordinator::repair_unsettled_on_strand(TransportAttemptId attempt)
     }
     if (row->pin.get() == nullptr)
     {
-        // The session this row was pinned to is gone, so the receiver incarnation
-        // that held the retained row is gone with it and there is nothing left to
-        // retire. THIS is the principled release: not an attempt budget expiring,
-        // but the obligation itself ceasing to exist.
-        terminalize_on_strand(*row, "receiver incarnation gone; obligation moot");
+        // NOT "the receiver incarnation is gone". PeerGenerationPin::State owns a
+        // PeerSessionPtr and neither disconnect nor PeerSet removal nulls it, so this
+        // condition means only that OUR retention was dropped — which nothing in
+        // production does while a row is live. Claiming it proved the receiver row
+        // was moot was fiction dressed as a terminal witness.
+        //
+        // A real terminal witness is a generation close, which does not exist until
+        // the C11 slice. Until then the obligation is retained and reported, not
+        // released.
+        PLOGE(
+            log_,
+            "attempt ",
+            attempt.value(),
+            " cannot be repaired: this row holds no session. Retained; release "
+            "awaits a real generation-close witness");
         return;
     }
 
     // Attempt counters reset per round, which is what makes rounds unbounded while
     // each round stays bounded.
+    // Per-round counters only. The sticky fact survives every round, which is the
+    // whole point: resetting it made begin_publish read "never published".
     if (row->receipt && row->receipt->receiver_commit_sequence() != 0)
     {
         row->ack_attempts = 0;
