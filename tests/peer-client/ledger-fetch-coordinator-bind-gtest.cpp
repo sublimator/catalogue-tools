@@ -2095,6 +2095,21 @@ TEST(LedgerFetchCoordinatorBind, ObligationHoldsWhileParkedInPublishable)
     EXPECT_EQ(f.coord->receipt_obligations(), Access::computed_obligations(f.coord))
         << "the stored projection disagrees with the rows it claims to count";
 
+    // THE consequence that matters, and the one a probe can see. The obligation
+    // predicate has a second caller besides the diagnostic: the fence uses it to
+    // decide what it may erase. A phase-derived predicate does not count a row
+    // parked in `publishable`, so the fence deletes a row whose accepted projection
+    // is still unresolved — the original defect, reachable by a different route.
+    int fenced = 0;
+    ASSERT_EQ(f.coord->fence([&fenced]() { ++fenced; }), Fence::drain_queued);
+    f.settle();
+
+    EXPECT_FALSE(row->retired)
+        << "a row parked mid-retry with an unresolved accepted projection must "
+           "survive the fence; deciding that from execution phase rather than from "
+           "the sticky fact is what erased it";
+    EXPECT_TRUE(row->may_have_reached_receiver);
+    EXPECT_EQ(fenced, 0) << "and the fence waits on it";
     EXPECT_EQ(f.coord->work_outstanding(), 1u);
     EXPECT_FALSE(f.coord->accounting_broken());
 }
