@@ -1129,8 +1129,15 @@ HttpServer::handle_session(
                             sse_executor, 1);
                         auto watcher_done = std::make_shared<CompletionChannel>(
                             sse_executor, 1);
+                        auto proof_cancel = std::make_shared<CompletionChannel>(
+                            sse_executor, 1);
                         auto writer_failed =
                             std::make_shared<std::atomic<bool>>(false);
+                        auto request_proof_cancel = [cancel_token,
+                                                     proof_cancel]() noexcept {
+                            cancel_token->store(true);
+                            proof_cancel->try_send(boost::system::error_code{});
+                        };
 
                         // One coroutine owns every composed write operation.
                         // Producers only enqueue complete frames, so status and
@@ -1141,7 +1148,7 @@ HttpServer::handle_session(
                              frames,
                              writer_done,
                              writer_failed,
-                             cancel_token,
+                             request_proof_cancel,
                              write_timeout = opts_.write_timeout]()
                                 -> asio::awaitable<void> {
                                 try
@@ -1175,7 +1182,7 @@ HttpServer::handle_session(
                                                 "SSE write stopped: ",
                                                 wec.message());
                                             writer_failed->store(true);
-                                            cancel_token->store(true);
+                                            request_proof_cancel();
                                         }
                                     }
                                 }
@@ -1184,7 +1191,7 @@ HttpServer::handle_session(
                                     PLOGE(
                                         log_, "SSE writer failed: ", e.what());
                                     writer_failed->store(true);
-                                    cancel_token->store(true);
+                                    request_proof_cancel();
                                     frames->cancel();
                                     frames->close();
                                 }
@@ -1213,7 +1220,7 @@ HttpServer::handle_session(
                         asio::co_spawn(
                             sse_executor,
                             [&stream,
-                             cancel_token,
+                             request_proof_cancel,
                              stop_watcher,
                              watcher_done]() -> asio::awaitable<void> {
                                 boost::system::error_code wec;
@@ -1224,7 +1231,7 @@ HttpServer::handle_session(
                                         asio::redirect_error(
                                             asio::use_awaitable, wec));
                                 if (!stop_watcher->load())
-                                    cancel_token->store(true);
+                                    request_proof_cancel();
                                 watcher_done->try_send(
                                     boost::system::error_code{});
                             },
@@ -1241,7 +1248,7 @@ HttpServer::handle_session(
                             if (!(co_await enqueue_sse(
                                     boost::json::serialize(ev))))
                             {
-                                cancel_token->store(true);
+                                request_proof_cancel();
                                 throw std::runtime_error("SSE queue stopped");
                             }
                         };
@@ -1267,7 +1274,7 @@ HttpServer::handle_session(
                              drain_ctx,
                              enqueue_sse,
                              status_done,
-                             cancel_token]() -> asio::awaitable<void> {
+                             request_proof_cancel]() -> asio::awaitable<void> {
                                 try
                                 {
                                     bool queue_open = true;
@@ -1291,7 +1298,7 @@ HttpServer::handle_session(
                                                 boost::json::serialize(ev));
                                             if (!queue_open)
                                             {
-                                                cancel_token->store(true);
+                                                request_proof_cancel();
                                                 break;
                                             }
                                         }
@@ -1303,7 +1310,7 @@ HttpServer::handle_session(
                                         log_,
                                         "SSE status drain failed: ",
                                         e.what());
-                                    cancel_token->store(true);
+                                    request_proof_cancel();
                                 }
                                 status_done->try_send(
                                     boost::system::error_code{});
@@ -1319,19 +1326,58 @@ HttpServer::handle_session(
                             std::string sse_error;
                             try
                             {
-                                //@@authority transition=prv.T0035
+                                //@@authority transition=prv.T0035 bind=prove@6957e43c61f3d36d
                                 // status=provisional scope=statement
                                 // owner=unresolved
                                 // owner_hypothesis=request_session
                                 // commit=connection_strand calls=prove
                                 // label=submit_sse_proof_without_opaque_operation_id
-                                auto result = co_await engine_sp->prove(
-                                    tx_it->second,
-                                    cancel_token,
-                                    ledger_seq_hint,
-                                    max_anchor_age,
-                                    std::move(on_step));
-                                done_network_id = result.chain.network_id;
+                                auto ex = co_await asio::this_coro::executor; //@@authority-target ids=prv.T0035
+                                auto [order, prove_exception, result, cancel_exception] =
+                                    co_await asio::experimental::make_parallel_group(
+                                        asio::co_spawn(
+                                            ex,
+                                            engine_sp->prove(
+                                                tx_it->second,
+                                                cancel_token,
+                                                ledger_seq_hint,
+                                                max_anchor_age,
+                                                std::move(on_step)),
+                                            asio::deferred),
+                                        asio::co_spawn(
+                                            ex,
+                                            [proof_cancel]()
+                                                -> asio::awaitable<void> {
+                                                co_await asio::this_coro::
+                                                    reset_cancellation_state(
+                                                        asio::
+                                                            enable_total_cancellation());
+                                                boost::system::error_code
+                                                    cancel_ec;
+                                                co_await proof_cancel
+                                                    ->async_receive(
+                                                        asio::redirect_error(
+                                                            asio::use_awaitable,
+                                                            cancel_ec));
+                                            },
+                                            asio::deferred))
+                                        .async_wait(
+                                            asio::experimental::wait_for_one(),
+                                            asio::use_awaitable);
+
+                                if (order[0] == 0)
+                                {
+                                    if (prove_exception)
+                                        std::rethrow_exception(prove_exception);
+                                    done_network_id = result.chain.network_id;
+                                }
+                                else
+                                {
+                                    PLOGD(
+                                        log_,
+                                        "SSE client disconnected during "
+                                        "prove");
+                                }
                             }
                             catch (std::exception const& e)
                             {
