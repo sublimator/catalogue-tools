@@ -39,6 +39,104 @@
 
 namespace xprv {
 
+class HttpServer;
+class ProofEngine;
+class RequestDrainBinding;
+class RequestDrainTestAccess;
+
+/// Identity shared by one HTTP admission owner and the exact engines whose
+/// request frames it owns. The epoch advances whenever that owner starts a new
+/// admission lifecycle, invalidating receipts from every prior lifecycle.
+class RequestDrainAuthority final
+{
+private:
+    friend class HttpServer;
+    friend class ProofEngine;
+    friend class RequestDrainReceipt;
+    friend class RequestDrainTestAccess;
+
+    std::atomic<std::uint64_t> current_epoch_{0};
+};
+
+/// Unforgeable evidence that an HttpServer has sealed request admission and
+/// joined every admitted session frame for one exact admission authority and
+/// lifecycle epoch. One receipt may authorize draining each ProofEngine bound
+/// to that same service.
+class RequestDrainReceipt
+{
+public:
+    RequestDrainReceipt(RequestDrainReceipt const&) = delete;
+    RequestDrainReceipt&
+    operator=(RequestDrainReceipt const&) = delete;
+    RequestDrainReceipt(RequestDrainReceipt&&) noexcept = default;
+    RequestDrainReceipt&
+    operator=(RequestDrainReceipt&&) noexcept = default;
+
+private:
+    friend class HttpServer;
+    friend class ProofEngine;
+    friend class RequestDrainBinding;
+    friend class RequestDrainTestAccess;
+
+    RequestDrainReceipt(
+        std::shared_ptr<RequestDrainAuthority const> authority,
+        std::uint64_t epoch) noexcept
+        : authority_(std::move(authority)), epoch_(epoch)
+    {
+    }
+
+    bool
+    matches(std::shared_ptr<RequestDrainAuthority const> const& authority)
+        const noexcept
+    {
+        return authority_ && authority && authority_.get() == authority.get() &&
+            epoch_ != 0 &&
+            authority_->current_epoch_.load(std::memory_order_acquire) ==
+            epoch_;
+    }
+
+    std::shared_ptr<RequestDrainAuthority const> authority_;
+    std::uint64_t epoch_ = 0;
+};
+
+/// Engine-owned binding to its one live HTTP admission authority.
+///
+/// A second server cannot silently share an engine while a first server or
+/// one of its receipts still retains the original authority.
+class RequestDrainBinding final
+{
+private:
+    friend class HttpServer;
+    friend class ProofEngine;
+    friend class RequestDrainTestAccess;
+
+    void
+    bind(std::shared_ptr<RequestDrainAuthority const> authority)
+    {
+        if (!authority)
+            throw std::invalid_argument("request-drain authority is required");
+
+        std::lock_guard lock(mutex_);
+        if (auto const current = authority_.lock();
+            current && current.get() != authority.get())
+        {
+            throw std::logic_error(
+                "ProofEngine already has a different HTTP admission owner");
+        }
+        authority_ = std::move(authority);
+    }
+
+    bool
+    accepts(RequestDrainReceipt const& receipt) const noexcept
+    {
+        std::lock_guard lock(mutex_);
+        return receipt.matches(authority_.lock());
+    }
+
+    mutable std::mutex mutex_;
+    std::weak_ptr<RequestDrainAuthority const> authority_;
+};
+
 struct VerifyResult
 {
     bool ok = false;
@@ -60,6 +158,15 @@ public:
     /// Does not drain in-flight prove() calls — those complete or timeout.
     void
     stop();
+
+    /// Consume the engine-owned service lifecycle after its request-admission
+    /// owner has stopped and all prove() frames have completed.
+    ///
+    /// Drains NodeCache node-operation and header servants, fences and
+    /// reconciles managed transport, then awaits PeerSet's physical
+    /// session/servant receipt.
+    boost::asio::awaitable<void>
+    co_stop(RequestDrainReceipt const& request_drain);
 
     /// Result from prove() — chain + metadata the caller needs.
     struct ProveResult
@@ -233,7 +340,13 @@ public:
     }
 
 private:
+    friend class HttpServer;
+
     ProofEngine(boost::asio::io_context& io, NetworkConfig config);
+
+    void
+    bind_request_drain_authority(
+        std::shared_ptr<RequestDrainAuthority const> authority);
 
     boost::asio::io_context& io_;
     NetworkConfig config_;
@@ -274,6 +387,7 @@ private:
     // owner=unresolved owner_hypothesis=proof_engine observed_home=proof_engine
     // label=proof_engine_start_once_lifecycle_boundary
     bool start_called_ = false;
+    RequestDrainBinding request_drain_binding_;
     std::atomic<size_t> cache_hits_{0};
     std::atomic<size_t> cache_misses_{0};
 

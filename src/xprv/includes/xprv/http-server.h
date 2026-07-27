@@ -19,12 +19,17 @@
 #include "proof-engine.h"
 
 #include <atomic>
+#include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/beast/http.hpp>
 #include <chrono>
+#include <exception>
+#include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace catl::core {
@@ -32,6 +37,8 @@ struct RequestContext;
 }
 
 namespace xprv {
+
+class HttpServerTestAccess;
 
 struct HttpServerOptions
 {
@@ -45,6 +52,8 @@ struct HttpServerOptions
 
 class HttpServer : public std::enable_shared_from_this<HttpServer>
 {
+    friend class HttpServerTestAccess;
+
 public:
     /// Single-engine constructor (backwards compat).
     static std::shared_ptr<HttpServer>
@@ -69,13 +78,23 @@ public:
     void
     stop();
 
+    /// Stop admission, cancel every registered session on its connection
+    /// strand, and wait until the accept loop and all session frames have
+    /// completed. This is the HTTP boundary receipt only; it makes no claim
+    /// about ProofEngine or peer-service quiescence.
+    boost::asio::awaitable<RequestDrainReceipt>
+    co_stop();
+
     bool
     is_stopping() const
     {
-        return !accepting_;
+        return stopping_.load(std::memory_order_acquire);
     }
 
 private:
+    struct SessionControl;
+    struct LifecycleState;
+
     HttpServer(
         boost::asio::io_context& io,
         std::map<uint32_t, std::shared_ptr<ProofEngine>> engines,
@@ -87,8 +106,22 @@ private:
 
     boost::asio::awaitable<void>
     handle_session(
-        boost::asio::ip::tcp::socket socket,
+        std::shared_ptr<SessionControl> session,
         std::shared_ptr<catl::core::RequestContext> req_ctx);
+
+    void
+    begin_stop_on_control();
+
+    void
+    note_session_finished(
+        std::uint64_t session_id,
+        std::exception_ptr failure) noexcept;
+
+    void
+    try_complete_stop_on_control() noexcept;
+
+    void
+    complete_accept_loop(std::exception_ptr failure) noexcept;
 
     /// Add X-XPRV metadata header to any response.
     template <typename Body>
@@ -117,14 +150,29 @@ private:
     std::map<uint32_t, std::shared_ptr<ProofEngine>> engines_;
     uint32_t default_network_id_ = 0;
     HttpServerOptions opts_;
+    boost::asio::strand<boost::asio::io_context::executor_type> control_strand_;
     boost::asio::ip::tcp::acceptor acceptor_;
-    bool accepting_ = false;
+    std::shared_ptr<RequestDrainAuthority> request_drain_authority_;
+    std::shared_ptr<LifecycleState> lifecycle_;
+    // start() is a synchronous, one-shot boundary invoked before the service
+    // io_context normally runs. This mutex also serializes an accidental
+    // concurrent co_stop() entry with its fallible bind/listen transaction.
+    mutable std::mutex lifecycle_entry_mutex_;
+    bool start_claimed_ = false;
+    bool start_committed_ = false;
+    std::atomic<bool> stopping_{false};
     std::string xprv_header_;  // pre-built X-XPRV header value
 
     // Request stats
     std::atomic<uint64_t> total_requests_{0};
     std::atomic<uint64_t> total_proofs_{0};
     std::atomic<uint32_t> active_proofs_{0};
+
+    // Default-inert deterministic scheduling seams. Test access installs
+    // these before start(); production code cannot mutate them.
+    std::function<void()> test_before_regular_race_;
+    std::function<boost::asio::awaitable<void>()>
+        test_before_regular_watcher_receipt_;
 };
 
 }  // namespace xprv

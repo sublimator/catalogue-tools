@@ -5,6 +5,7 @@ add_executable(xprv_gtest ${XPROOF_TEST_SOURCES})
 target_include_directories(xprv_gtest
                            PRIVATE ${CMAKE_SOURCE_DIR}/src/xprv/includes
                                    ${CMAKE_SOURCE_DIR}/src/xprv/src
+                                   ${CMAKE_BINARY_DIR}/src/xprv
                                    ${CMAKE_SOURCE_DIR}/src/peer-client/includes)
 
 target_link_libraries(
@@ -12,6 +13,7 @@ target_link_libraries(
   PRIVATE catl::xdata
           catl::crypto
           catl::peer-client
+          catl::rpc-client
           protobuf::libprotobuf
           catl::vl-client
           catl::shamap_headers
@@ -30,14 +32,20 @@ target_sources(
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/network-config.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/node-identity-resolver.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-binary.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-builder.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-engine.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/http-server.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/peer-json.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/anchor-verifier.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/manifest-utils.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-json.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-resolver.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-steps.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/vl-cache.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-buffer.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-collector.cpp)
+
+add_dependencies(xprv_gtest xprv_web_assets)
 
 # Share format version with the xprv target
 file(READ ${CMAKE_SOURCE_DIR}/src/xprv/VERSION XPRV_FORMAT_VERSION)

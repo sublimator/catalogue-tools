@@ -46,6 +46,13 @@ ProofEngine::create(asio::io_context& io, NetworkConfig config)
 }
 
 void
+ProofEngine::bind_request_drain_authority(
+    std::shared_ptr<RequestDrainAuthority const> authority)
+{
+    request_drain_binding_.bind(std::move(authority));
+}
+
+void
 ProofEngine::start()
 {
     if (start_called_)
@@ -155,39 +162,9 @@ ProofEngine::start()
         vbuf->set_unl(vl.validators, vl.sequence);
     });
 
-    // Try the configured initial peer
-    auto self = shared_from_this();
-    asio::co_spawn(
-        io_,
-        [self]() -> asio::awaitable<void> {
-            auto client = co_await self->peers_->try_connect(
-                self->config_.peer_host, self->config_.peer_port);
-            if (client)
-            {
-                PLOGI(
-                    log_,
-                    "[",
-                    self->net_label_,
-                    "] Initial peer connected: ",
-                    client->endpoint(),
-                    " (ledger ",
-                    client->peer_ledger_seq(),
-                    ")");
-            }
-            else
-            {
-                PLOGW(
-                    log_,
-                    "[",
-                    self->net_label_,
-                    "] Initial peer ",
-                    self->config_.peer_host,
-                    ":",
-                    self->config_.peer_port,
-                    " failed — using bootstrap discovery");
-            }
-        },
-        asio::detached);
+    // The configured endpoint uses PeerSet's owned background census. A
+    // detached try_connect caller would be invisible to PeerSet::co_stop().
+    peers_->start_connect(config_.peer_host, config_.peer_port);
 
     // Pre-resolve RPC hostname so concurrent proves don't hammer DNS.
     // RPC host doesn't change at runtime — resolve once, use IP forever.
@@ -273,6 +250,63 @@ ProofEngine::stop()
     // The validator worker is joined above. The owning command halts peer and
     // heartbeat execution by stopping the io_context; that process-terminal
     // boundary is not a graceful drain or a reusable-engine quiescence claim.
+}
+
+asio::awaitable<void>
+ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
+{
+    if (!request_drain_binding_.accepts(request_drain))
+        throw std::invalid_argument(
+            "request-drain receipt does not authorize this engine");
+
+    // This is shared service lifecycle work. A canceled signal waiter must not
+    // abandon the drain between components and leave later joiners observing a
+    // half-sealed engine.
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::disable_cancellation());
+
+    PLOGI(log_, "[", net_label_, "] Engine draining...");
+
+    // The HTTP admission owner has already drained every request frame before
+    // entering here, so no new cache operation can be minted by this service.
+    if (vl_cache_)
+        co_await vl_cache_->co_stop();
+    if (val_buffer_)
+        val_buffer_->stop();
+
+    if (node_cache_)
+    {
+        co_await node_cache_->co_stop_nodes();
+        co_await node_cache_->co_clear_headers();
+    }
+
+    if (ledger_fetch_coordinator_)
+    {
+        co_await ledger_fetch_coordinator_->co_fence();
+
+        // A PeerSet seal handler can enqueue its pin release behind the first
+        // barrier. The second pass consumes those causally generated releases.
+        co_await peers_->co_generation_pin_release_barrier();
+        co_await peers_->co_generation_pin_release_barrier();
+
+        auto const lost = co_await ledger_fetch_coordinator_
+                              ->co_reconcile_shutdown_projection_residue();
+        if (lost != 0)
+        {
+            PLOGW(
+                log_,
+                "[",
+                net_label_,
+                "] reconciled ",
+                lost,
+                " lost coordinator bind completion(s) at shutdown");
+        }
+    }
+
+    if (peers_)
+        co_await peers_->co_stop();
+
+    PLOGI(log_, "[", net_label_, "] Engine drained");
 }
 
 // ═══════════════════════════════════════════════════════════════════════

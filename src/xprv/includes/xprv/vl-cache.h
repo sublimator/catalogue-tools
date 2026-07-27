@@ -30,6 +30,8 @@ namespace xprv {
 
 class VlCache : public std::enable_shared_from_this<VlCache>
 {
+    friend class VlCacheTestAccess;
+
 public:
     static std::shared_ptr<VlCache>
     create(
@@ -46,9 +48,15 @@ public:
     void
     start();
 
-    /// Cancel refresh timer. Existing fetch completes but no new ones start.
+    /// Request stop without waiting for an already-running fetch. Process-exit
+    /// compatibility only; service shutdown must use co_stop().
     void
     stop();
+
+    /// Seal refresh/retry admission and wait until an already-running fetch
+    /// has delivered its terminal callback on this cache's strand.
+    boost::asio::awaitable<void>
+    co_stop();
 
     /// Awaitable: returns a copy of the cached VL.
     /// Blocks until the first fetch completes. Hops to strand internally.
@@ -106,6 +114,12 @@ private:
     void
     wake_waiters();
 
+    void
+    begin_stop_on_strand();
+
+    void
+    try_finish_stop_on_strand();
+
     boost::asio::io_context& io_;
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     std::string vl_host_;
@@ -114,11 +128,31 @@ private:
     // Strand-owned state:
     std::optional<catl::vl::ValidatorList> vl_;
     boost::asio::steady_timer refresh_;  // periodic refresh
+    //@@authority state=prv.S0026 status=provisional scope=field
+    // bind=xprv::VlCache::stop_progress_@b7a23fd626ede29a
+    // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
+    // label=shared_validator_list_stopped_receipt_latch
+    boost::asio::steady_timer stop_progress_;
     std::vector<std::shared_ptr<boost::asio::steady_timer>> waiters_;
     std::chrono::seconds refresh_interval_{900};  // 15 minutes
     std::chrono::seconds initial_retry_{2};       // first retry delay
     std::chrono::seconds initial_retry_cap_{
         60};  // max retry delay before first success
+    enum class Phase : std::uint8_t { running, stopping, stopped };
+    //@@authority state=prv.S0023 status=provisional scope=field
+    // bind=xprv::VlCache::phase_@bf94d68e5d8364ff
+    // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
+    // label=validator_list_cache_lifecycle
+    Phase phase_ = Phase::running;
+    //@@authority state=prv.S0024 status=provisional scope=field
+    // bind=xprv::VlCache::refresh_wait_outstanding_@95b5b1bc66e67146
+    // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
+    // label=armed_refresh_or_retry_handler_obligation
+    std::size_t refresh_wait_outstanding_ = 0;
+    //@@authority state=prv.S0025 status=provisional scope=field
+    // bind=xprv::VlCache::fetch_in_progress_@2e2b24112b573817
+    // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
+    // label=in_flight_validator_list_fetch_obligation
     bool fetch_in_progress_ = false;
     uint64_t fetch_generation_ = 0;
     bool last_fetch_ok_ = false;
@@ -126,6 +160,9 @@ private:
     ValidatorManifestHistory validator_manifest_history_;
     RefreshCallback on_refresh_;
     VerifyCallback verify_;
+
+    /// Deterministic test seam. Production constructs VlClient directly.
+    std::function<void(catl::vl::VlCallback)> fetch_for_test_;
 
     static LogPartition log_;
 };

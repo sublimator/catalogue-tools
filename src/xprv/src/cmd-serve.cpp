@@ -6,13 +6,13 @@
 
 #include <catl/core/logger.h>
 
+#include <atomic>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <atomic>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -117,9 +117,7 @@ struct LoggedStatusState
 };
 
 bool
-same_trigger(
-    LoggedNetworkTrigger const& lhs,
-    LoggedNetworkTrigger const& rhs)
+same_trigger(LoggedNetworkTrigger const& lhs, LoggedNetworkTrigger const& rhs)
 {
     return lhs.known_endpoints_bucket == rhs.known_endpoints_bucket &&
         lhs.tracked_endpoints_bucket == rhs.tracked_endpoints_bucket &&
@@ -129,25 +127,23 @@ same_trigger(
         lhs.queued_connects == rhs.queued_connects &&
         lhs.crawl_in_flight == rhs.crawl_in_flight &&
         lhs.queued_crawls == rhs.queued_crawls &&
-        lhs.vl_loaded == rhs.vl_loaded &&
-        lhs.has_quorum == rhs.has_quorum &&
+        lhs.vl_loaded == rhs.vl_loaded && lhs.has_quorum == rhs.has_quorum &&
         lhs.latest_quorum_bucket == rhs.latest_quorum_bucket &&
         lhs.validation_waiters == rhs.validation_waiters &&
         lhs.recent_quorums == rhs.recent_quorums &&
         lhs.collector_ledgers_bucket == rhs.collector_ledgers_bucket &&
-        lhs.collector_validations_bucket ==
-            rhs.collector_validations_bucket &&
+        lhs.collector_validations_bucket == rhs.collector_validations_bucket &&
         lhs.queued_validations_bucket == rhs.queued_validations_bucket &&
         lhs.validation_packets_deduplicated_bucket ==
-            rhs.validation_packets_deduplicated_bucket &&
+        rhs.validation_packets_deduplicated_bucket &&
         lhs.validation_packets_dropped_bucket ==
-            rhs.validation_packets_dropped_bucket &&
+        rhs.validation_packets_dropped_bucket &&
         lhs.proof_cache_entries_bucket == rhs.proof_cache_entries_bucket &&
         lhs.node_cache_entries_bucket == rhs.node_cache_entries_bucket &&
         lhs.node_cache_resident_entries_bucket ==
-            rhs.node_cache_resident_entries_bucket &&
+        rhs.node_cache_resident_entries_bucket &&
         lhs.node_cache_header_entries_bucket ==
-            rhs.node_cache_header_entries_bucket &&
+        rhs.node_cache_header_entries_bucket &&
         lhs.recent_failures == rhs.recent_failures &&
         lhs.top_failing_endpoints == rhs.top_failing_endpoints;
 }
@@ -191,20 +187,18 @@ format_network_status(LoggedNetworkStatus const& status)
 {
     std::ostringstream out;
     out << '[' << status.label << " peers=" << status.ready_peers << '/'
-        << status.connected_peers << " dial=q" << status.queued_connects
-        << "/f" << status.in_flight_connects << " crawl=q"
-        << status.queued_crawls << "/f" << status.crawl_in_flight
-        << " known=" << status.known_endpoints
+        << status.connected_peers << " dial=q" << status.queued_connects << "/f"
+        << status.in_flight_connects << " crawl=q" << status.queued_crawls
+        << "/f" << status.crawl_in_flight << " known=" << status.known_endpoints
         << " tracked=" << status.tracked_endpoints << " quorum=";
     if (status.has_quorum)
         out << status.latest_quorum_seq;
     else
         out << "none";
-    out << " vl=" << (status.vl_loaded ? "loaded" : "empty")
-        << " valbuf=w" << status.validation_waiters << "/q"
-        << status.recent_quorums << "/l" << status.collector_ledgers
-        << "/v" << status.collector_validations << "/in"
-        << status.queued_validations << "/dup"
+    out << " vl=" << (status.vl_loaded ? "loaded" : "empty") << " valbuf=w"
+        << status.validation_waiters << "/q" << status.recent_quorums << "/l"
+        << status.collector_ledgers << "/v" << status.collector_validations
+        << "/in" << status.queued_validations << "/dup"
         << status.validation_packets_deduplicated << "/drop"
         << status.validation_packets_dropped
         << " proofs=" << status.proof_cache_entries << " node_cache=e"
@@ -229,8 +223,7 @@ log_status_if_changed(
     std::map<uint32_t, LoggedNetworkStatus> const& networks,
     LoggedStatusState& previous)
 {
-    auto const rss_mb =
-        static_cast<int>(rss_bytes / (1024 * 1024));
+    auto const rss_mb = static_cast<int>(rss_bytes / (1024 * 1024));
     auto const rss_bucket = rss_mb / 10;
 
     std::map<uint32_t, LoggedNetworkTrigger> current;
@@ -239,8 +232,7 @@ log_status_if_changed(
         current.emplace(
             network_id,
             LoggedNetworkTrigger{
-                .known_endpoints_bucket =
-                    bucketize(status.known_endpoints, 32),
+                .known_endpoints_bucket = bucketize(status.known_endpoints, 32),
                 .tracked_endpoints_bucket =
                     bucketize(status.tracked_endpoints, 32),
                 .connected_peers = status.connected_peers,
@@ -261,8 +253,8 @@ log_status_if_changed(
                     bucketize(status.collector_validations, 32),
                 .queued_validations_bucket =
                     bucketize(status.queued_validations, 32),
-                .validation_packets_deduplicated_bucket = bucketize(
-                    status.validation_packets_deduplicated, 128),
+                .validation_packets_deduplicated_bucket =
+                    bucketize(status.validation_packets_deduplicated, 128),
                 .validation_packets_dropped_bucket =
                     bucketize(status.validation_packets_dropped, 32),
                 .proof_cache_entries_bucket =
@@ -320,8 +312,10 @@ get_rss_bytes()
     mach_task_basic_info_data_t info{};
     mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
     if (task_info(
-            mach_task_self(), MACH_TASK_BASIC_INFO,
-            reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS)
+            mach_task_self(),
+            MACH_TASK_BASIC_INFO,
+            reinterpret_cast<task_info_t>(&info),
+            &count) == KERN_SUCCESS)
     {
         return info.resident_size;
     }
@@ -445,10 +439,8 @@ cmd_serve()
 #endif
 
     auto server = (engines.size() == 1)
-        ? xprv::HttpServer::create(
-              io, engines.begin()->second, http_opts)
-        : xprv::HttpServer::create(
-              io, engines, config.network_id, http_opts);
+        ? xprv::HttpServer::create(io, engines.begin()->second, http_opts)
+        : xprv::HttpServer::create(io, engines, config.network_id, http_opts);
     server->start();
 
     log_memory("startup");
@@ -457,165 +449,191 @@ cmd_serve()
     auto status_timer = std::make_shared<boost::asio::steady_timer>(io);
     auto status_state = std::make_shared<LoggedStatusState>();
     std::function<void()> schedule_status_report;
-    schedule_status_report =
-        [&io,
-         &engines,
-         shutting_down,
-         status_timer,
-         status_state,
-         &schedule_status_report]() {
-            if (shutting_down->load())
+    schedule_status_report = [&io,
+                              &engines,
+                              shutting_down,
+                              status_timer,
+                              status_state,
+                              &schedule_status_report]() {
+        if (shutting_down->load())
+            return;
+
+        status_timer->expires_after(std::chrono::seconds(60));
+        status_timer->async_wait([&io,
+                                  &engines,
+                                  shutting_down,
+                                  status_timer,
+                                  status_state,
+                                  &schedule_status_report](
+                                     boost::system::error_code ec) {
+            if (ec || shutting_down->load())
                 return;
 
-            status_timer->expires_after(std::chrono::seconds(60));
-            status_timer->async_wait(
-                [&io,
-                 &engines,
+            boost::asio::co_spawn(
+                io,
+                [&engines,
                  shutting_down,
-                 status_timer,
                  status_state,
-                 &schedule_status_report](boost::system::error_code ec) {
-                    if (ec || shutting_down->load())
-                        return;
-
-                    boost::asio::co_spawn(
-                        io,
-                        [&engines,
-                         shutting_down,
-                         status_state,
-                         &schedule_status_report]()
-                            -> boost::asio::awaitable<void> {
-                            try
+                 &schedule_status_report]() -> boost::asio::awaitable<void> {
+                    try
+                    {
+                        if (!shutting_down->load())
+                        {
+                            auto const rss = get_rss_bytes();
+                            if (rss != 0)
                             {
-                                if (!shutting_down->load())
+                                std::map<uint32_t, LoggedNetworkStatus>
+                                    networks;
+                                for (auto const& [network_id, engine] : engines)
                                 {
-                                    auto const rss = get_rss_bytes();
-                                    if (rss != 0)
-                                    {
-                                        std::map<uint32_t, LoggedNetworkStatus>
-                                            networks;
-                                        for (auto const& [network_id, engine] :
-                                             engines)
-                                        {
-                                            auto peer_snapshot =
-                                                co_await engine->peers()
-                                                    ->co_snapshot();
-                                            auto health =
-                                                co_await engine->co_health();
-                                            auto proof_cache =
-                                                engine->cache_stats();
-                                            auto node_cache =
-                                                engine->node_cache_stats();
+                                    auto peer_snapshot =
+                                        co_await engine->peers()->co_snapshot();
+                                    auto health = co_await engine->co_health();
+                                    auto proof_cache = engine->cache_stats();
+                                    auto node_cache =
+                                        engine->node_cache_stats();
 
-                                            LoggedNetworkStatus status;
-                                            status.label =
-                                                network_label_for_id(
-                                                    network_id);
-                                            status.known_endpoints =
-                                                peer_snapshot.known_endpoints;
-                                            status.tracked_endpoints =
-                                                peer_snapshot.tracked_endpoints;
-                                            status.connected_peers =
-                                                peer_snapshot.connected_peers;
-                                            status.ready_peers =
-                                                peer_snapshot.ready_peers;
-                                            status.in_flight_connects =
-                                                peer_snapshot
-                                                    .in_flight_connects;
-                                            status.queued_connects =
-                                                peer_snapshot.queued_connects;
-                                            status.crawl_in_flight =
-                                                peer_snapshot.crawl_in_flight;
-                                            status.queued_crawls =
-                                                peer_snapshot.queued_crawls;
-                                            status.vl_loaded = health.vl_loaded;
-                                            status.has_quorum =
-                                                health.latest_quorum_seq
-                                                    .has_value();
-                                            status.latest_quorum_seq =
-                                                health.latest_quorum_seq
-                                                    .value_or(0);
-                                            status.validation_waiters =
-                                                health.validation_buffer
-                                                    .pending_callbacks;
-                                            status.recent_quorums =
-                                                health.validation_buffer
-                                                    .recent_quorums;
-                                            status.collector_ledgers =
-                                                health.validation_buffer
-                                                    .collector_ledgers;
-                                            status.collector_validations =
-                                                health.validation_buffer
-                                                    .collector_validations;
-                                            status.queued_validations =
-                                                health.validation_buffer
-                                                    .queued_validations;
-                                            status
-                                                .validation_packets_deduplicated =
-                                                health.validation_buffer
-                                                    .validation_packets_deduplicated;
-                                            status.validation_packets_dropped =
-                                                health.validation_buffer
-                                                    .validation_packets_dropped;
-                                            status.proof_cache_entries =
-                                                proof_cache.entries;
-                                            status.node_cache_entries =
-                                                node_cache.entries;
-                                            status.node_cache_resident_entries =
-                                                node_cache.resident_entries;
-                                            status.node_cache_header_entries =
-                                                node_cache.header_entries;
-                                            status.crawled_size =
-                                                peer_snapshot.crawled_size;
-                                            status.failed_at_size =
-                                                peer_snapshot.failed_at_size;
-                                            status.recent_failures =
-                                                format_failure_buckets(
-                                                    peer_snapshot
-                                                        .recent_failures);
-                                            status.top_failing_endpoints =
-                                                format_failure_endpoints(
-                                                    peer_snapshot
-                                                        .top_failing_endpoints);
-                                            networks.emplace(
-                                                network_id, std::move(status));
-                                        }
-
-                                        log_status_if_changed(
-                                            rss, networks, *status_state);
-                                    }
+                                    LoggedNetworkStatus status;
+                                    status.label =
+                                        network_label_for_id(network_id);
+                                    status.known_endpoints =
+                                        peer_snapshot.known_endpoints;
+                                    status.tracked_endpoints =
+                                        peer_snapshot.tracked_endpoints;
+                                    status.connected_peers =
+                                        peer_snapshot.connected_peers;
+                                    status.ready_peers =
+                                        peer_snapshot.ready_peers;
+                                    status.in_flight_connects =
+                                        peer_snapshot.in_flight_connects;
+                                    status.queued_connects =
+                                        peer_snapshot.queued_connects;
+                                    status.crawl_in_flight =
+                                        peer_snapshot.crawl_in_flight;
+                                    status.queued_crawls =
+                                        peer_snapshot.queued_crawls;
+                                    status.vl_loaded = health.vl_loaded;
+                                    status.has_quorum =
+                                        health.latest_quorum_seq.has_value();
+                                    status.latest_quorum_seq =
+                                        health.latest_quorum_seq.value_or(0);
+                                    status.validation_waiters =
+                                        health.validation_buffer
+                                            .pending_callbacks;
+                                    status.recent_quorums =
+                                        health.validation_buffer.recent_quorums;
+                                    status.collector_ledgers =
+                                        health.validation_buffer
+                                            .collector_ledgers;
+                                    status.collector_validations =
+                                        health.validation_buffer
+                                            .collector_validations;
+                                    status.queued_validations =
+                                        health.validation_buffer
+                                            .queued_validations;
+                                    status.validation_packets_deduplicated =
+                                        health.validation_buffer
+                                            .validation_packets_deduplicated;
+                                    status.validation_packets_dropped =
+                                        health.validation_buffer
+                                            .validation_packets_dropped;
+                                    status.proof_cache_entries =
+                                        proof_cache.entries;
+                                    status.node_cache_entries =
+                                        node_cache.entries;
+                                    status.node_cache_resident_entries =
+                                        node_cache.resident_entries;
+                                    status.node_cache_header_entries =
+                                        node_cache.header_entries;
+                                    status.crawled_size =
+                                        peer_snapshot.crawled_size;
+                                    status.failed_at_size =
+                                        peer_snapshot.failed_at_size;
+                                    status.recent_failures =
+                                        format_failure_buckets(
+                                            peer_snapshot.recent_failures);
+                                    status.top_failing_endpoints =
+                                        format_failure_endpoints(
+                                            peer_snapshot
+                                                .top_failing_endpoints);
+                                    networks.emplace(
+                                        network_id, std::move(status));
                                 }
-                            }
-                            catch (std::exception const& e)
-                            {
-                                PLOGW(
-                                    log_,
-                                    "status report failed: ",
-                                    e.what());
-                            }
 
-                            if (!shutting_down->load())
-                                schedule_status_report();
-                            co_return;
-                        },
-                        boost::asio::detached);
-                });
-        };
+                                log_status_if_changed(
+                                    rss, networks, *status_state);
+                            }
+                        }
+                    }
+                    catch (std::exception const& e)
+                    {
+                        PLOGW(log_, "status report failed: ", e.what());
+                    }
+
+                    if (!shutting_down->load())
+                        schedule_status_report();
+                    co_return;
+                },
+                boost::asio::detached);
+        });
+    };
     schedule_status_report();
 
-    // SIGINT/SIGTERM → stop server, stop engines, stop io
+    // SIGINT/SIGTERM → seal admission, await every owned drain, then stop io.
+    // The deadline is a distinct forced-teardown outcome; it never gets logged
+    // as graceful shutdown.
     boost::asio::signal_set signals(io, SIGINT, SIGTERM);
-    signals.async_wait([&](boost::system::error_code, int sig) {
-        shutting_down->store(true);
+    signals.async_wait([&](boost::system::error_code ec, int sig) {
+        if (ec || shutting_down->exchange(true))
+            return;
+
         log_memory("shutdown");
-        PLOGI(log_, "Signal ", sig, " received, shutting down...");
+        PLOGI(log_, "Signal ", sig, " received, draining services...");
         status_timer->cancel();
-        server->stop();
-        for (auto& [net_id, engine] : engines)
-        {
-            engine->stop();
-        }
-        io.stop();
+
+        auto deadline = std::make_shared<boost::asio::steady_timer>(io);
+        deadline->expires_after(std::chrono::seconds(30));
+        deadline->async_wait([&io](boost::system::error_code timer_ec) {
+            if (timer_ec)
+                return;
+            PLOGE(
+                log_,
+                "Graceful shutdown deadline expired; forcing io_context "
+                "teardown");
+            io.stop();
+        });
+
+        boost::asio::co_spawn(
+            io,
+            [server, &engines, deadline, &io]()
+                -> boost::asio::awaitable<void> {
+                try
+                {
+                    auto request_drain = co_await server->co_stop();
+                    for (auto const& [_, engine] : engines)
+                        co_await engine->co_stop(request_drain);
+
+                    deadline->cancel();
+                    PLOGI(log_, "Graceful service drain complete");
+                }
+                catch (std::exception const& e)
+                {
+                    deadline->cancel();
+                    PLOGE(
+                        log_,
+                        "Graceful service drain failed; forcing teardown: ",
+                        e.what());
+                }
+                catch (...)
+                {
+                    deadline->cancel();
+                    PLOGE(
+                        log_,
+                        "Graceful service drain failed; forcing teardown");
+                }
+                io.stop();
+            },
+            boost::asio::detached);
     });
 
     // Run io_context on N threads
