@@ -488,6 +488,56 @@ TEST(ConnectionWriteLifecycle, PhysicalCloseRefusesUnownedListenAcceptDrain)
     EXPECT_THROW(std::rethrow_exception(failure), std::logic_error);
 }
 
+TEST(
+    ConnectionWriteLifecycle,
+    ResolveInitiationFailureReturnsOperationAndResolverBeforeCloseReceipt)
+{
+    asio::io_context io;
+    asio::ssl::context ssl(asio::ssl::context::tlsv12_client);
+    auto strand = asio::make_strand(io);
+    peer_config config;
+    config.host = "resolver-initiation.invalid";
+    config.port = 443;
+    auto conn =
+        std::make_shared<peer_connection>(strand, ssl, std::move(config));
+
+    bool observed_installed_authority = false;
+    conn->set_before_resolve_initiation_for_test([&] {
+        observed_installed_authority = true;
+        EXPECT_EQ(conn->transport_operation_count_for_test(), 1u);
+        EXPECT_TRUE(conn->resolver_installed_for_test());
+        throw std::runtime_error("forced resolver initiation failure");
+    });
+
+    std::vector<boost::system::error_code> outcomes;
+    asio::post(strand, [&] {
+        conn->async_connect(
+            [&](boost::system::error_code ec) { outcomes.push_back(ec); });
+    });
+    io.run();
+
+    ASSERT_TRUE(observed_installed_authority);
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_TRUE(outcomes.front());
+    EXPECT_EQ(conn->transport_operation_count_for_test(), 0u);
+    EXPECT_FALSE(conn->resolver_installed_for_test());
+    EXPECT_FALSE(conn->physical_transport_drained_for_test());
+
+    int joins = 0;
+    asio::co_spawn(
+        strand,
+        [conn]() -> asio::awaitable<void> { co_await conn->co_close(); },
+        [&](std::exception_ptr failure) {
+            EXPECT_EQ(failure, nullptr);
+            ++joins;
+        });
+    io.restart();
+    io.run();
+
+    EXPECT_EQ(joins, 1);
+    EXPECT_TRUE(conn->physical_transport_drained_for_test());
+}
+
 // ─── 2. in-flight plus queued successors, then close ────────────────────────
 
 TEST(ConnectionWriteLifecycle, CloseDrainsSuccessorsButRetainsOnlyActivePacket)

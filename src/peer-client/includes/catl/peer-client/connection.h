@@ -192,6 +192,16 @@ public:
         read_initiator_for_test_ = std::move(initiator);
     }
 
+    /// Test seam: run after both the resolver capability and its exact
+    /// transport-operation row are installed, immediately before Asio
+    /// initiation. Throwing here forces the synchronous initiation-refusal
+    /// rollback without racing DNS or a socket.
+    void
+    set_before_resolve_initiation_for_test(std::function<void()> hook)
+    {
+        before_resolve_initiation_for_test_ = std::move(hook);
+    }
+
     /// Test observation: the retained backing store of the write currently in
     /// flight, or `{nullptr, 0}` when none is. Lets a test assert that a close
     /// did not free bytes Asio still owns (blocker 1) without relying on ASan
@@ -221,6 +231,12 @@ public:
     physical_transport_drained_for_test() const
     {
         return physical_phase_ == PhysicalPhase::drained;
+    }
+
+    bool
+    resolver_installed_for_test() const
+    {
+        return static_cast<bool>(resolver_);
     }
 
 private:
@@ -396,13 +412,13 @@ private:
         Initiator&& initiator)
     {
         //@@authority transition=prv.T0140 status=provisional scope=statement
-        //bind=declaration@27bff81293db626b
+        // bind=declaration@27bff81293db626b
         // owner=unresolved owner_hypothesis=peer_connection
         // commit=connection_strand touches=prv.S0045
         // mutation_class=running_guarded
         // label=reserve_exact_transport_operation_before_fallible_initiation
         auto const id =
-            begin_transport_operation(kind); //@@authority-target ids=prv.T0140
+            begin_transport_operation(kind);  //@@authority-target ids=prv.T0140
         try
         {
             std::invoke(std::forward<Initiator>(initiator), id);
@@ -420,6 +436,10 @@ private:
     complete_transport_operation(TransportOperationId id) noexcept;
 
     void
+    release_resolver_after_non_close_terminal(
+        std::shared_ptr<tcp::resolver> const& resolver) noexcept;
+
+    void
     try_complete_physical_drain() noexcept;
 
     //@@authority state=prv.S0045 status=provisional scope=field
@@ -431,7 +451,8 @@ private:
         transport_operations_;
     TransportOperationId next_transport_operation_id_ = 1;
 
-    //@@authority state=prv.S0048 status=provisional scope=field bind=catl::peer_client::peer_connection::physical_phase_@11427c92d72ac66a
+    //@@authority state=prv.S0048 status=provisional scope=field
+    //bind=catl::peer_client::peer_connection::physical_phase_@11427c92d72ac66a
     // owner=unresolved owner_hypothesis=peer_connection
     // observed_home=peer_connection
     // label=connection_physical_lifecycle_phase
@@ -552,6 +573,9 @@ private:
         boost::asio::mutable_buffer,
         test_read_completion)>
         read_initiator_for_test_;
+    /// Never set in production. See
+    /// set_before_resolve_initiation_for_test().
+    std::function<void()> before_resolve_initiation_for_test_;
 
     void
     do_write();

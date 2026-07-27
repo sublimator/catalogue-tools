@@ -124,16 +124,32 @@ peer_connection::complete_transport_operation(TransportOperationId id) noexcept
     try_complete_physical_drain();
 }
 
+//@@authority transition=prv.T0143 status=provisional scope=function bind=catl::peer_client::release_resolver_after_non_close_terminal@99d6b7b2c13b8bfd
+// owner=unresolved owner_hypothesis=peer_connection commit=connection_strand
+// touches=prv.S0047 mutation_class=terminal_receipt
+// label=release_resolver_after_completion_or_initiation_refusal
+void
+peer_connection::release_resolver_after_non_close_terminal(
+    std::shared_ptr<tcp::resolver> const& resolver) noexcept
+{
+    if (resolver_ != resolver)
+        return;
+
+    resolver_.reset();
+    try_complete_physical_drain();
+}
+
 //@@authority transition=prv.T0138 status=provisional scope=function
 // bind=catl::peer_client::try_complete_physical_drain@a27eb58fffdee9f7
 // owner=unresolved owner_hypothesis=peer_connection commit=connection_strand
-// touches=prv.S0045,prv.S0046,prv.S0048 mutation_class=terminal_receipt
+// touches=prv.S0045,prv.S0046,prv.S0047,prv.S0048
+// mutation_class=terminal_receipt
 // label=publish_connection_physical_drain_receipt_after_zero_census
 void
 peer_connection::try_complete_physical_drain() noexcept
 {
     if (physical_phase_ != PhysicalPhase::closing ||
-        !transport_operations_.empty())
+        !transport_operations_.empty() || resolver_)
     {
         return;
     }
@@ -168,7 +184,7 @@ peer_connection::async_connect(const connection_handler& handler)
 
     // Resolve the host asynchronously
     //@@authority transition=prv.T0141 status=provisional scope=statement
-    //bind=expression_statement@5eb614c89df2ec6b
+    // bind=expression_statement@5eb614c89df2ec6b
     // owner=unresolved owner_hypothesis=peer_connection
     // commit=connection_strand touches=prv.S0047 mutation_class=running_guarded
     // label=install_owned_resolver_cancellation_capability
@@ -181,6 +197,8 @@ peer_connection::async_connect(const connection_handler& handler)
             TransportOperationKind::resolve,
             [self = shared_from_this(), handler, resolver](
                 TransportOperationId resolve_id) {
+                if (self->before_resolve_initiation_for_test_)
+                    self->before_resolve_initiation_for_test_();
                 resolver->async_resolve(
                     self->config_.host,
                     std::to_string(self->config_.port),
@@ -189,18 +207,8 @@ peer_connection::async_connect(const connection_handler& handler)
                         tcp::resolver::results_type endpoints) {
                         TransportOperationCompletion resolve_complete{
                             self.get(), resolve_id};
-                        if (self->resolver_ == resolver)
-                        {
-                            //@@authority transition=prv.T0143
-                            //bind=expression_statement@b939144667457241
-                            // status=provisional scope=statement
-                            // owner=unresolved owner_hypothesis=peer_connection
-                            // commit=connection_strand touches=prv.S0047
-                            // mutation_class=terminal_receipt
-                            // label=release_completed_resolver_capability
-                            self->resolver_
-                                .reset(); //@@authority-target ids=prv.T0143
-                        }
+                        self->release_resolver_after_non_close_terminal(
+                            resolver);
                         if (self->physical_phase_ != PhysicalPhase::open)
                         {
                             handler(boost::asio::error::operation_aborted);
@@ -263,7 +271,10 @@ peer_connection::async_connect(const connection_handler& handler)
     }
     catch (...)
     {
-        resolver_.reset();
+        // initiate_transport_operation() has already returned the exact
+        // operation row. This returns the other installed authority-bearing
+        // fact and re-evaluates the full drain predicate.
+        release_resolver_after_non_close_terminal(resolver);
         auto const start_error = current_exception_error();
         note_connect_failure("resolve initiation", start_error);
         handler(start_error);
@@ -1443,7 +1454,8 @@ peer_connection::handle_read_payload(
 
     // The packet callback is external code and may synchronously close this
     // connection. Recheck the seal before it can rearm the read loop.
-    //@@authority transition=prv.T0144 status=provisional scope=statement bind=if_statement@78b0eb52dc803579
+    //@@authority transition=prv.T0144 status=provisional scope=statement
+    //bind=if_statement@78b0eb52dc803579
     // owner=unresolved owner_hypothesis=peer_connection
     // commit=connection_strand touches=prv.S0048 mutation_class=running_guarded
     // label=refuse_read_rearm_after_reentrant_close
@@ -2292,7 +2304,7 @@ peer_connection::settle_and_close(
         }
     }
     //@@authority transition=prv.T0142 status=provisional scope=statement
-    //bind=if_statement@0434c0733359bdae
+    // bind=if_statement@0434c0733359bdae
     // owner=unresolved owner_hypothesis=peer_connection
     // commit=connection_strand touches=prv.S0047 mutation_class=seal_commit
     // label=cancel_and_release_owned_resolver_capability
