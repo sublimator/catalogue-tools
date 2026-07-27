@@ -6,6 +6,8 @@
 #include <catl/peer-client/peer-client.h>
 #include <catl/peer-client/peer-crawl-client.h>
 #include <catl/peer-client/types.h>
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -419,6 +421,21 @@ TEST(PeerClientLifecycle, CoDisconnectJoinsOnePhysicalReceiptForAllCallers)
 
     launch_join();
     launch_join();
+    asio::cancellation_signal cancellation;
+    bool cancellation_join_done = false;
+    std::exception_ptr cancellation_failure;
+    asio::co_spawn(
+        io,
+        [client]() -> asio::awaitable<void> {
+            co_await client->co_disconnect();
+        },
+        asio::bind_cancellation_slot(
+            cancellation.slot(),
+            [&cancellation_join_done, &cancellation_failure](
+                std::exception_ptr failure) {
+                cancellation_failure = std::move(failure);
+                cancellation_join_done = true;
+            }));
     io.restart();
     io.poll();
 
@@ -433,6 +450,12 @@ TEST(PeerClientLifecycle, CoDisconnectJoinsOnePhysicalReceiptForAllCallers)
     EXPECT_EQ(joins, 0);
     EXPECT_TRUE(failures.empty());
 
+    cancellation.emit(asio::cancellation_type::all);
+    io.restart();
+    io.poll();
+    EXPECT_FALSE(cancellation_join_done)
+        << "caller cancellation must not abandon the physical receipt";
+
     auto completion = std::move(held_completion);
     asio::post(client->strand(), [completion = std::move(completion)] {
         completion(asio::error::operation_aborted);
@@ -445,6 +468,8 @@ TEST(PeerClientLifecycle, CoDisconnectJoinsOnePhysicalReceiptForAllCallers)
     EXPECT_TRUE(client->raw_connection().physical_transport_drained_for_test());
     EXPECT_EQ(joins, 2);
     EXPECT_TRUE(failures.empty());
+    EXPECT_TRUE(cancellation_join_done);
+    EXPECT_EQ(cancellation_failure, nullptr);
 
     launch_join();
     io.restart();
