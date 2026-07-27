@@ -502,10 +502,22 @@ TEST(
         std::make_shared<peer_connection>(strand, ssl, std::move(config));
 
     bool observed_installed_authority = false;
+    bool nested_initiation = false;
+    std::vector<boost::system::error_code> overlapping_outcomes;
     conn->set_before_resolve_initiation_for_test([&] {
+        if (nested_initiation)
+        {
+            throw std::runtime_error(
+                "overlapping resolver initiation was not refused");
+        }
         observed_installed_authority = true;
         EXPECT_EQ(conn->transport_operation_count_for_test(), 1u);
         EXPECT_TRUE(conn->resolver_installed_for_test());
+        nested_initiation = true;
+        conn->async_connect([&](boost::system::error_code ec) {
+            overlapping_outcomes.push_back(ec);
+        });
+        nested_initiation = false;
         throw std::runtime_error("forced resolver initiation failure");
     });
 
@@ -519,6 +531,8 @@ TEST(
     ASSERT_TRUE(observed_installed_authority);
     ASSERT_EQ(outcomes.size(), 1u);
     EXPECT_TRUE(outcomes.front());
+    ASSERT_EQ(overlapping_outcomes.size(), 1u);
+    EXPECT_EQ(overlapping_outcomes.front(), asio::error::already_started);
     EXPECT_EQ(conn->transport_operation_count_for_test(), 0u);
     EXPECT_FALSE(conn->resolver_installed_for_test());
     EXPECT_FALSE(conn->physical_transport_drained_for_test());

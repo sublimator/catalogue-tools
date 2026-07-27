@@ -371,6 +371,68 @@ TEST(PeerClientLifecycle, FailedLogicalStateStillClosesPhysicalTransport)
     EXPECT_FALSE(client->raw_connection().socket().lowest_layer().is_open());
 }
 
+TEST(
+    PeerClientLifecycle,
+    PublicConnectOwnsSynchronousResolveInitiationFailureOnStrand)
+{
+    asio::io_context io;
+    std::shared_ptr<PeerClient> client;
+    bool observed_installed_authority = false;
+    bool completion_on_strand = false;
+    std::vector<boost::system::error_code> completions;
+
+    PeerClient::ConnectOptions opts;
+    opts.on_complete = [&](boost::system::error_code ec, std::uint32_t) {
+        completion_on_strand = client->strand().running_in_this_thread();
+        completions.push_back(ec);
+    };
+
+    // The public entry runs on this ordinary test thread, before io.run().
+    client = PeerClient::connect(
+        io, "resolver-initiation.invalid", 443, std::move(opts));
+    ASSERT_FALSE(client->strand().running_in_this_thread());
+    client->raw_connection().set_before_resolve_initiation_for_test([&] {
+        observed_installed_authority = true;
+        EXPECT_TRUE(client->strand().running_in_this_thread());
+        EXPECT_EQ(
+            client->raw_connection().transport_operation_count_for_test(), 1u);
+        EXPECT_TRUE(client->raw_connection().resolver_installed_for_test());
+        throw std::runtime_error("forced resolver initiation failure");
+    });
+
+    io.run();
+
+    ASSERT_TRUE(observed_installed_authority);
+    ASSERT_EQ(completions.size(), 1u);
+    EXPECT_TRUE(completions.front());
+    EXPECT_TRUE(completion_on_strand);
+    EXPECT_EQ(client->state(), State::Failed);
+    EXPECT_EQ(
+        client->raw_connection().transport_operation_count_for_test(), 0u);
+    EXPECT_FALSE(client->raw_connection().resolver_installed_for_test());
+    EXPECT_FALSE(
+        client->raw_connection().physical_transport_drained_for_test());
+
+    int joins = 0;
+    std::exception_ptr join_failure;
+    asio::co_spawn(
+        io,
+        [client]() -> asio::awaitable<void> {
+            co_await client->co_disconnect();
+        },
+        [&](std::exception_ptr failure) {
+            join_failure = std::move(failure);
+            ++joins;
+        });
+    io.restart();
+    io.run();
+
+    EXPECT_EQ(join_failure, nullptr);
+    EXPECT_EQ(joins, 1);
+    EXPECT_TRUE(
+        client->raw_connection().physical_transport_drained_for_test());
+}
+
 TEST(PeerClientLifecycle, CoDisconnectJoinsOnePhysicalReceiptForAllCallers)
 {
     asio::io_context io;

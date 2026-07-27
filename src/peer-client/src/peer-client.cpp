@@ -1576,38 +1576,55 @@ PeerClient::do_connect(
         self->complete_connect(ec);
     });
 
-    // Connect callback fires on the strand (socket is strand-aware).
-    // One-shot callback — shared_ptr capture is fine here, it completes
-    // promptly and doesn't create a cycle (not stored as a member).
+    // Construction above is exclusive because the client has not escaped.
+    // Physical admission and every fallible Asio initiation below are owner
+    // transitions: mechanically enter the shared PeerClient/connection strand
+    // before either can become observable.
     auto self = shared_from_this();
-    connection_->async_connect([self, on_ready = std::move(on_ready)](
-                                   boost::system::error_code ec) mutable {
-        if (ec)
-        {
-            // Connection failures are routine (503 redirect, timeout,
-            // refused). Only unexpected errors are worth logging loudly.
-            PLOGD(
-                PeerClient::log_,
-                "[",
-                self->net_label_,
-                "] [",
-                self->endpoint_str_,
-                "] Connection failed: ",
-                ec.message());
-            if (!self->commit_failed_on_strand())
-            {
-                self->complete_connect(ec);
-                return;
-            }
-            self->complete_all_pending(Error::Disconnected);
-            self->complete_connect(ec);
-            return;
-        }
-        auto const state = self->state_.load();
-        if (state == State::Disconnected || state == State::Failed)
-            return;
-        self->on_connected(std::move(on_ready));
-    });
+    auto connection = connection_;
+    //@@authority transition=prv.T0148 status=provisional scope=statement
+    // bind=expression_statement@bc5d3718003dd443
+    // owner=unresolved owner_hypothesis=peer_client
+    // commit=peer_client_strand mutation_class=running_guarded
+    // label=enter_owner_strand_before_physical_connection_admission
+    asio::dispatch(
+        strand_,
+        [self,
+         connection = std::move(connection),
+         on_ready = std::move(on_ready)]() mutable {
+            // Connect callback runs on this same strand, including a
+            // synchronous initiation refusal.
+            connection->async_connect(
+                [self, on_ready = std::move(on_ready)](
+                    boost::system::error_code ec) mutable {
+                    if (ec)
+                    {
+                        // Connection failures are routine (503 redirect,
+                        // timeout, refused). Only unexpected errors are worth
+                        // logging loudly.
+                        PLOGD(
+                            PeerClient::log_,
+                            "[",
+                            self->net_label_,
+                            "] [",
+                            self->endpoint_str_,
+                            "] Connection failed: ",
+                            ec.message());
+                        if (!self->commit_failed_on_strand())
+                        {
+                            self->complete_connect(ec);
+                            return;
+                        }
+                        self->complete_all_pending(Error::Disconnected);
+                        self->complete_connect(ec);
+                        return;
+                    }
+                    auto const state = self->state_.load();
+                    if (state == State::Disconnected || state == State::Failed)
+                        return;
+                    self->on_connected(std::move(on_ready));
+                });
+        }); //@@authority-target ids=prv.T0148
 }
 
 void

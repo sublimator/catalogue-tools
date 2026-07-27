@@ -181,6 +181,16 @@ peer_connection::async_connect(const connection_handler& handler)
         handler(boost::asio::error::operation_aborted);
         return;
     }
+    //@@authority transition=prv.T0149 status=provisional scope=statement bind=if_statement@c65a0e313ebc0566
+    // owner=unresolved owner_hypothesis=peer_connection
+    // commit=connection_strand touches=prv.S0047
+    // mutation_class=running_guarded
+    // label=refuse_overlapping_outbound_resolver_capability
+    if (resolver_)
+    {
+        handler(boost::asio::error::already_started);
+        return;
+    } //@@authority-target ids=prv.T0149
 
     // Resolve the host asynchronously
     //@@authority transition=prv.T0141 status=provisional scope=statement
