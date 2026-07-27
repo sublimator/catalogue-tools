@@ -10,10 +10,12 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
+#include <limits>
 #include <openssl/ssl.h>
 #include <sodium.h>
 #include <span>
 #include <sstream>
+#include <stdexcept>
 #include <utility>
 
 namespace catl::peer_client {
@@ -31,6 +33,24 @@ truncate_for_log(std::string const& text, std::size_t limit = 160)
     if (text.size() <= limit)
         return text;
     return text.substr(0, limit) + "...";
+}
+
+boost::system::error_code
+current_exception_error() noexcept
+{
+    try
+    {
+        throw;
+    }
+    catch (boost::system::system_error const& error)
+    {
+        return error.code();
+    }
+    catch (...)
+    {
+        return boost::system::errc::make_error_code(
+            boost::system::errc::io_error);
+    }
 }
 
 }  // namespace
@@ -69,6 +89,66 @@ peer_connection::~peer_connection()
     }
 }
 
+//@@authority transition=prv.T0135 status=provisional scope=function
+// bind=catl::peer_client::begin_transport_operation@6c450ad7a6123f9c
+// owner=unresolved owner_hypothesis=peer_connection commit=connection_strand
+// touches=prv.S0045,prv.S0048 mutation_class=running_guarded
+// label=admit_exact_connection_transport_operation
+peer_connection::TransportOperationId
+peer_connection::begin_transport_operation(TransportOperationKind kind)
+{
+    if (physical_phase_ != PhysicalPhase::open)
+        throw std::logic_error("transport operation admitted after close seal");
+    if (next_transport_operation_id_ ==
+        std::numeric_limits<TransportOperationId>::max())
+    {
+        throw std::overflow_error("transport operation identity exhausted");
+    }
+
+    auto const id = next_transport_operation_id_++;
+    auto const [_, inserted] = transport_operations_.emplace(id, kind);
+    if (!inserted)
+        throw std::logic_error("duplicate transport operation identity");
+    return id;
+}
+
+//@@authority transition=prv.T0136 status=provisional scope=function
+// bind=catl::peer_client::complete_transport_operation@6035c88fee602797
+// owner=unresolved owner_hypothesis=peer_connection commit=connection_strand
+// touches=prv.S0045 mutation_class=terminal_receipt
+// label=consume_exact_connection_transport_operation_receipt
+void
+peer_connection::complete_transport_operation(TransportOperationId id) noexcept
+{
+    transport_operations_.erase(id);
+    try_complete_physical_drain();
+}
+
+//@@authority transition=prv.T0138 status=provisional scope=function
+// bind=catl::peer_client::try_complete_physical_drain@a27eb58fffdee9f7
+// owner=unresolved owner_hypothesis=peer_connection commit=connection_strand
+// touches=prv.S0045,prv.S0046,prv.S0048 mutation_class=terminal_receipt
+// label=publish_connection_physical_drain_receipt_after_zero_census
+void
+peer_connection::try_complete_physical_drain() noexcept
+{
+    if (physical_phase_ != PhysicalPhase::closing ||
+        !transport_operations_.empty())
+    {
+        return;
+    }
+
+    physical_phase_ = PhysicalPhase::drained;
+    auto waiters = std::move(physical_drain_waiters_);
+    physical_drain_waiters_.clear();
+    for (auto const& waiter : waiters)
+    {
+        if (!waiter)
+            continue;
+        waiter->cancel();
+    }
+}
+
 void
 peer_connection::async_connect(const connection_handler& handler)
 {
@@ -80,40 +160,114 @@ peer_connection::async_connect(const connection_handler& handler)
         handler(boost::asio::error::invalid_argument);
         return;
     }
+    if (physical_phase_ != PhysicalPhase::open)
+    {
+        handler(boost::asio::error::operation_aborted);
+        return;
+    }
 
     // Resolve the host asynchronously
-    auto resolver = std::make_shared<tcp::resolver>(strand_);
-    resolver->async_resolve(
-        config_.host,
-        std::to_string(config_.port),
-        [self = shared_from_this(), handler, resolver](
-            boost::system::error_code ec,
-            tcp::resolver::results_type endpoints) {
-            if (ec)
-            {
-                self->note_connect_failure("resolve", ec);
-                handler(ec);
-                return;
-            }
+    //@@authority transition=prv.T0141 status=provisional scope=statement
+    //bind=expression_statement@5eb614c89df2ec6b
+    // owner=unresolved owner_hypothesis=peer_connection
+    // commit=connection_strand touches=prv.S0047 mutation_class=running_guarded
+    // label=install_owned_resolver_cancellation_capability
+    resolver_ = std::make_shared<tcp::resolver>(
+        strand_); //@@authority-target ids=prv.T0141
+    auto const resolver = resolver_;
+    try
+    {
+        initiate_transport_operation(
+            TransportOperationKind::resolve,
+            [self = shared_from_this(), handler, resolver](
+                TransportOperationId resolve_id) {
+                resolver->async_resolve(
+                    self->config_.host,
+                    std::to_string(self->config_.port),
+                    [self, handler, resolver, resolve_id](
+                        boost::system::error_code ec,
+                        tcp::resolver::results_type endpoints) {
+                        TransportOperationCompletion resolve_complete{
+                            self.get(), resolve_id};
+                        if (self->resolver_ == resolver)
+                        {
+                            //@@authority transition=prv.T0143
+                            //bind=expression_statement@b939144667457241
+                            // status=provisional scope=statement
+                            // owner=unresolved owner_hypothesis=peer_connection
+                            // commit=connection_strand touches=prv.S0047
+                            // mutation_class=terminal_receipt
+                            // label=release_completed_resolver_capability
+                            self->resolver_
+                                .reset(); //@@authority-target ids=prv.T0143
+                        }
+                        if (self->physical_phase_ != PhysicalPhase::open)
+                        {
+                            handler(boost::asio::error::operation_aborted);
+                            return;
+                        }
+                        if (ec)
+                        {
+                            self->note_connect_failure("resolve", ec);
+                            handler(ec);
+                            return;
+                        }
 
-            // Connect to the server
-            asio::async_connect(
-                self->socket_->lowest_layer(),
-                endpoints,
-                [self, handler](
-                    boost::system::error_code ec, tcp::endpoint endpoint) {
-                    if (!ec)
-                    {
-                        self->remote_endpoint_ = endpoint;
-                        self->handle_connect(ec, handler);
-                    }
-                    else
-                    {
-                        self->note_connect_failure("tcp connect", ec);
-                        handler(ec);
-                    }
-                });
-        });
+                        try
+                        {
+                            self->initiate_transport_operation(
+                                TransportOperationKind::connect,
+                                [self, handler, endpoints](
+                                    TransportOperationId connect_id) {
+                                    asio::async_connect(
+                                        self->socket_->lowest_layer(),
+                                        endpoints,
+                                        [self, handler, connect_id](
+                                            boost::system::error_code ec,
+                                            tcp::endpoint endpoint) {
+                                            TransportOperationCompletion
+                                                connect_complete{
+                                                    self.get(), connect_id};
+                                            if (self->physical_phase_ !=
+                                                PhysicalPhase::open)
+                                            {
+                                                handler(boost::asio::error::
+                                                            operation_aborted);
+                                                return;
+                                            }
+                                            if (!ec)
+                                            {
+                                                self->remote_endpoint_ =
+                                                    endpoint;
+                                                self->handle_connect(
+                                                    ec, handler);
+                                            }
+                                            else
+                                            {
+                                                self->note_connect_failure(
+                                                    "tcp connect", ec);
+                                                handler(ec);
+                                            }
+                                        });
+                                });
+                        }
+                        catch (...)
+                        {
+                            auto const start_error = current_exception_error();
+                            self->note_connect_failure(
+                                "tcp connect initiation", start_error);
+                            handler(start_error);
+                        }
+                    });
+            });
+    }
+    catch (...)
+    {
+        resolver_.reset();
+        auto const start_error = current_exception_error();
+        note_connect_failure("resolve initiation", start_error);
+        handler(start_error);
+    }
 }
 
 void
@@ -127,21 +281,45 @@ peer_connection::async_accept(
         handler(boost::asio::error::invalid_argument);
         return;
     }
+    if (physical_phase_ != PhysicalPhase::open)
+    {
+        handler(boost::asio::error::operation_aborted);
+        return;
+    }
 
-    acceptor.async_accept(
-        socket_->lowest_layer(),
-        [self = shared_from_this(), handler](boost::system::error_code ec) {
-            if (!ec)
-            {
-                self->remote_endpoint_ =
-                    self->socket_->lowest_layer().remote_endpoint();
-                self->handle_handshake(ec, handler);
-            }
-            else
-            {
-                handler(ec);
-            }
-        });
+    try
+    {
+        initiate_transport_operation(
+            TransportOperationKind::accept,
+            [self = shared_from_this(), &acceptor, handler](
+                TransportOperationId accept_id) {
+                acceptor.async_accept(
+                    self->socket_->lowest_layer(),
+                    [self, handler, accept_id](boost::system::error_code ec) {
+                        TransportOperationCompletion accept_complete{
+                            self.get(), accept_id};
+                        if (self->physical_phase_ != PhysicalPhase::open)
+                        {
+                            handler(boost::asio::error::operation_aborted);
+                            return;
+                        }
+                        if (!ec)
+                        {
+                            self->remote_endpoint_ =
+                                self->socket_->lowest_layer().remote_endpoint();
+                            self->handle_handshake(ec, handler);
+                        }
+                        else
+                        {
+                            handler(ec);
+                        }
+                    });
+            });
+    }
+    catch (...)
+    {
+        handler(current_exception_error());
+    }
 }
 
 void
@@ -149,6 +327,11 @@ peer_connection::handle_connect(
     const boost::system::error_code& ec,
     const connection_handler& handler)
 {
+    if (physical_phase_ != PhysicalPhase::open)
+    {
+        handler(boost::asio::error::operation_aborted);
+        return;
+    }
     if (ec)
     {
         note_connect_failure("tcp connect", ec);
@@ -157,11 +340,33 @@ peer_connection::handle_connect(
     }
 
     // Perform SSL handshake
-    socket_->async_handshake(
-        asio::ssl::stream_base::client,
-        [self = shared_from_this(), handler](boost::system::error_code ec) {
-            self->handle_handshake(ec, handler);
-        });
+    try
+    {
+        initiate_transport_operation(
+            TransportOperationKind::tls_handshake,
+            [self = shared_from_this(),
+             handler](TransportOperationId handshake_id) {
+                self->socket_->async_handshake(
+                    asio::ssl::stream_base::client,
+                    [self, handler, handshake_id](
+                        boost::system::error_code ec) {
+                        TransportOperationCompletion handshake_complete{
+                            self.get(), handshake_id};
+                        if (self->physical_phase_ != PhysicalPhase::open)
+                        {
+                            handler(boost::asio::error::operation_aborted);
+                            return;
+                        }
+                        self->handle_handshake(ec, handler);
+                    });
+            });
+    }
+    catch (...)
+    {
+        auto const start_error = current_exception_error();
+        note_connect_failure("tls handshake initiation", start_error);
+        handler(start_error);
+    }
 }
 
 void
@@ -169,6 +374,11 @@ peer_connection::handle_handshake(
     const boost::system::error_code& ec,
     const connection_handler& handler)
 {
+    if (physical_phase_ != PhysicalPhase::open)
+    {
+        handler(boost::asio::error::operation_aborted);
+        return;
+    }
     if (ec)
     {
         note_connect_failure("tls handshake", ec);
@@ -387,26 +597,55 @@ peer_connection::release_inbound_charge()
 void
 peer_connection::perform_http_upgrade(const connection_handler& handler)
 {
+    if (physical_phase_ != PhysicalPhase::open)
+    {
+        handler(boost::asio::error::operation_aborted);
+        return;
+    }
+
     if (config_.listen_mode)
     {
         // In listen mode, we wait for the client's request first
         auto buffer = std::make_shared<beast::flat_buffer>();
-        http::async_read(
-            *socket_,
-            *buffer,
-            http_request_,
-            [self = shared_from_this(), buffer, handler](
-                boost::system::error_code ec, std::size_t) {
-                if (!ec)
-                {
-                    self->handle_http_request(handler);
-                }
-                else
-                {
-                    self->note_connect_failure("http upgrade request read", ec);
-                    handler(ec);
-                }
-            });
+        try
+        {
+            initiate_transport_operation(
+                TransportOperationKind::http_read,
+                [self = shared_from_this(), buffer, handler](
+                    TransportOperationId read_id) {
+                    http::async_read(
+                        *self->socket_,
+                        *buffer,
+                        self->http_request_,
+                        [self, buffer, handler, read_id](
+                            boost::system::error_code ec, std::size_t) {
+                            TransportOperationCompletion read_complete{
+                                self.get(), read_id};
+                            if (self->physical_phase_ != PhysicalPhase::open)
+                            {
+                                handler(boost::asio::error::operation_aborted);
+                                return;
+                            }
+                            if (!ec)
+                            {
+                                self->handle_http_request(handler);
+                            }
+                            else
+                            {
+                                self->note_connect_failure(
+                                    "http upgrade request read", ec);
+                                handler(ec);
+                            }
+                        });
+                });
+        }
+        catch (...)
+        {
+            auto const start_error = current_exception_error();
+            note_connect_failure(
+                "http upgrade request read initiation", start_error);
+            handler(start_error);
+        }
     }
     else
     {
@@ -418,6 +657,12 @@ peer_connection::perform_http_upgrade(const connection_handler& handler)
 void
 peer_connection::send_http_request(const connection_handler& handler)
 {
+    if (physical_phase_ != PhysicalPhase::open)
+    {
+        handler(boost::asio::error::operation_aborted);
+        return;
+    }
+
     auto req = std::make_shared<http::request<http::string_body>>(
         http::verb::get, "/", 11);
     req->set(http::field::user_agent, "catl-peer-client/0.1");
@@ -438,43 +683,99 @@ peer_connection::send_http_request(const connection_handler& handler)
     req->set("Session-Signature", session_signature_);
     req->set("Public-Key", node_public_key_b58_);
 
-    http::async_write(
-        *socket_,
-        *req,
-        [self = shared_from_this(), req, handler](
-            boost::system::error_code ec, std::size_t) {
-            if (!ec)
-            {
-                // Read the response
-                auto buffer = std::make_shared<beast::flat_buffer>();
-                http::async_read(
+    try
+    {
+        initiate_transport_operation(
+            TransportOperationKind::http_write,
+            [self = shared_from_this(), req, handler](
+                TransportOperationId write_id) {
+                http::async_write(
                     *self->socket_,
-                    *buffer,
-                    self->http_response_,
-                    [self, buffer, handler](
+                    *req,
+                    [self, req, handler, write_id](
                         boost::system::error_code ec, std::size_t) {
-                        if (!ec)
+                        TransportOperationCompletion write_complete{
+                            self.get(), write_id};
+                        if (self->physical_phase_ != PhysicalPhase::open)
                         {
-                            self->handle_http_response(handler);
+                            handler(boost::asio::error::operation_aborted);
+                            return;
                         }
-                        else
+                        if (ec)
                         {
-                            self->note_connect_failure("http upgrade read", ec);
+                            self->note_connect_failure(
+                                "http upgrade write", ec);
                             handler(ec);
+                            return;
+                        }
+
+                        // Read the response before releasing the write receipt,
+                        // so close cannot observe a false zero between stages.
+                        auto buffer = std::make_shared<beast::flat_buffer>();
+                        try
+                        {
+                            self->initiate_transport_operation(
+                                TransportOperationKind::http_read,
+                                [self, buffer, handler](
+                                    TransportOperationId read_id) {
+                                    http::async_read(
+                                        *self->socket_,
+                                        *buffer,
+                                        self->http_response_,
+                                        [self, buffer, handler, read_id](
+                                            boost::system::error_code ec,
+                                            std::size_t) {
+                                            TransportOperationCompletion
+                                                read_complete{
+                                                    self.get(), read_id};
+                                            if (self->physical_phase_ !=
+                                                PhysicalPhase::open)
+                                            {
+                                                handler(boost::asio::error::
+                                                            operation_aborted);
+                                                return;
+                                            }
+                                            if (!ec)
+                                            {
+                                                self->handle_http_response(
+                                                    handler);
+                                            }
+                                            else
+                                            {
+                                                self->note_connect_failure(
+                                                    "http upgrade read", ec);
+                                                handler(ec);
+                                            }
+                                        });
+                                });
+                        }
+                        catch (...)
+                        {
+                            auto const start_error = current_exception_error();
+                            self->note_connect_failure(
+                                "http upgrade read initiation", start_error);
+                            handler(start_error);
                         }
                     });
-            }
-            else
-            {
-                self->note_connect_failure("http upgrade write", ec);
-                handler(ec);
-            }
-        });
+            });
+    }
+    catch (...)
+    {
+        auto const start_error = current_exception_error();
+        note_connect_failure("http upgrade write initiation", start_error);
+        handler(start_error);
+    }
 }
 
 void
 peer_connection::handle_http_request(const connection_handler& handler)
 {
+    if (physical_phase_ != PhysicalPhase::open)
+    {
+        handler(boost::asio::error::operation_aborted);
+        return;
+    }
+
     upgrade_headers_.clear();
     for (auto const& field : http_request_)
         upgrade_headers_[std::string(field.name_string())] =
@@ -504,30 +805,53 @@ peer_connection::handle_http_request(const connection_handler& handler)
     res->set("Public-Key", node_public_key_b58_);
     res->set("Session-Signature", session_signature_);
 
-    http::async_write(
-        *socket_,
-        *res,
-        [self = shared_from_this(), res, handler](
-            boost::system::error_code ec, std::size_t) {
-            if (!ec)
-            {
-                self->http_upgraded_ = true;
-                self->connected_ = true;
+    try
+    {
+        initiate_transport_operation(
+            TransportOperationKind::http_write,
+            [self = shared_from_this(), res, handler](
+                TransportOperationId write_id) {
+                http::async_write(
+                    *self->socket_,
+                    *res,
+                    [self, res, handler, write_id](
+                        boost::system::error_code ec, std::size_t) {
+                        TransportOperationCompletion write_complete{
+                            self.get(), write_id};
+                        if (self->physical_phase_ != PhysicalPhase::open)
+                        {
+                            handler(boost::asio::error::operation_aborted);
+                            return;
+                        }
+                        if (!ec)
+                        {
+                            self->http_upgraded_ = true;
+                            self->connected_ = true;
 
-                // Send initial ping in listen mode
-                if (self->config_.listen_mode)
-                {
-                    self->send_initial_ping();
-                }
+                            // Send initial ping in listen mode
+                            if (self->config_.listen_mode)
+                            {
+                                self->send_initial_ping();
+                            }
 
-                handler(ec);
-            }
-            else
-            {
-                self->note_connect_failure("http upgrade read", ec);
-                handler(ec);
-            }
-        });
+                            handler(ec);
+                        }
+                        else
+                        {
+                            self->note_connect_failure(
+                                "http upgrade response write", ec);
+                            handler(ec);
+                        }
+                    });
+            });
+    }
+    catch (...)
+    {
+        auto const start_error = current_exception_error();
+        note_connect_failure(
+            "http upgrade response write initiation", start_error);
+        handler(start_error);
+    }
 }
 
 void
@@ -747,6 +1071,8 @@ peer_connection::handle_http_response(const connection_handler& handler)
 void
 peer_connection::start_read(packet_handler handler)
 {
+    if (physical_phase_ != PhysicalPhase::open)
+        return;
     packet_handler_ = std::move(handler);
     async_read_header();
 }
@@ -754,18 +1080,53 @@ peer_connection::start_read(packet_handler handler)
 void
 peer_connection::async_read_header()
 {
+    if (physical_phase_ != PhysicalPhase::open)
+        return;
+
     // Read first 6 bytes of header (4 bytes size + 2 bytes type)
-    asio::async_read(
-        *socket_,
-        asio::buffer(header_buffer_.data(), 6),
-        [self = shared_from_this()](
-            boost::system::error_code ec, std::size_t bytes_transferred) {
-            if (!ec)
-            {
-                PLOGT(log_, "Read header: ", bytes_transferred, " bytes");
-            }
-            self->handle_read_header(ec, bytes_transferred);
-        });
+    try
+    {
+        initiate_transport_operation(
+            TransportOperationKind::header_read,
+            [self = shared_from_this()](TransportOperationId read_id) {
+                auto const buffer =
+                    asio::buffer(self->header_buffer_.data(), 6);
+                test_read_completion completion =
+                    [self, read_id](
+                        boost::system::error_code ec,
+                        std::size_t bytes_transferred) {
+                        TransportOperationCompletion read_complete{
+                            self.get(), read_id};
+                        if (self->physical_phase_ != PhysicalPhase::open)
+                            return;
+                        if (!ec)
+                        {
+                            PLOGT(
+                                log_,
+                                "Read header: ",
+                                bytes_transferred,
+                                " bytes");
+                        }
+                        self->handle_read_header(ec, bytes_transferred);
+                    };
+                if (self->read_initiator_for_test_)
+                {
+                    self->read_initiator_for_test_(
+                        test_read_stage::header, buffer, std::move(completion));
+                }
+                else
+                {
+                    asio::async_read(
+                        *self->socket_, buffer, std::move(completion));
+                }
+            });
+    }
+    catch (...)
+    {
+        auto const start_error = current_exception_error();
+        note_connect_failure("packet header read initiation", start_error);
+        fail_and_close(start_error);
+    }
 }
 
 void
@@ -773,6 +1134,9 @@ peer_connection::handle_read_header(
     boost::system::error_code ec,
     std::size_t /*bytes_transferred*/)
 {
+    if (physical_phase_ != PhysicalPhase::open)
+        return;
+
     if (ec)
     {
         // Log exact error code for debugging disconnects
@@ -806,9 +1170,8 @@ peer_connection::handle_read_header(
     current_header_.compressed = (header_buffer_[0] & 0xF0) != 0;
 
     // Extract payload size (masking off compression bits)
-    std::uint32_t payload_size = ((header_buffer_[0] & 0x0F) << 24) |
-        (header_buffer_[1] << 16) | (header_buffer_[2] << 8) |
-        header_buffer_[3];
+    auto const payload_size =
+        catl::common::get_uint32_be(header_buffer_.data()) & 0x0FFF'FFFFu;
 
     if (current_header_.compressed)
     {
@@ -874,57 +1237,82 @@ peer_connection::handle_read_header(
     if (current_header_.compressed)
     {
         // Need to read the additional 4 bytes for uncompressed size
-        asio::async_read(
-            *socket_,
-            asio::buffer(header_buffer_.data() + 6, 4),
-            [self = shared_from_this(), payload_size](
-                boost::system::error_code ec, std::size_t) {
-                if (ec)
-                {
-                    PLOGE(
-                        log_,
-                        "Error reading compressed header extension: ",
-                        ec.message());
-                    if (ec != asio::error::operation_aborted)
-                    {
-                        self->note_connect_failure(
-                            "packet header extension read", ec);
-                        self->fail_and_close(ec);
-                    }
-                    return;
-                }
-                self->current_header_.uncompressed_size =
-                    (static_cast<std::uint32_t>(self->header_buffer_[6])
-                     << 24) |
-                    (static_cast<std::uint32_t>(self->header_buffer_[7])
-                     << 16) |
-                    (static_cast<std::uint32_t>(self->header_buffer_[8]) << 8) |
-                    static_cast<std::uint32_t>(self->header_buffer_[9]);
+        try
+        {
+            initiate_transport_operation(
+                TransportOperationKind::header_extension_read,
+                [self = shared_from_this(),
+                 payload_size](TransportOperationId read_id) {
+                    auto const buffer =
+                        asio::buffer(self->header_buffer_.data() + 6, 4);
+                    test_read_completion completion =
+                        [self, payload_size, read_id](
+                            boost::system::error_code ec, std::size_t) {
+                            TransportOperationCompletion read_complete{
+                                self.get(), read_id};
+                            if (self->physical_phase_ != PhysicalPhase::open)
+                                return;
+                            if (ec)
+                            {
+                                PLOGE(
+                                    log_,
+                                    "Error reading compressed header "
+                                    "extension: ",
+                                    ec.message());
+                                if (ec != asio::error::operation_aborted)
+                                {
+                                    self->note_connect_failure(
+                                        "packet header extension read", ec);
+                                    self->fail_and_close(ec);
+                                }
+                                return;
+                            }
+                            self->current_header_.uncompressed_size =
+                                catl::common::get_uint32_be(
+                                    self->header_buffer_.data() + 6);
 
-                // Cap the attacker-declared post-inflate size too (sec #0058).
-                // The wire frame already passed the budget + payload cap, but a
-                // compressed frame can declare an arbitrary uncompressed_size;
-                // reject it here so the bound is in place before any future
-                // decompress path can honor it (decompression-bomb gap).
-                if (self->current_header_.uncompressed_size >
-                    kMaxFramePayloadSize)
-                {
-                    PLOGW(
-                        log_,
-                        self->remote_endpoint(),
-                        " rejecting frame: uncompressed_size=",
-                        self->current_header_.uncompressed_size,
-                        " > max=",
-                        kMaxFramePayloadSize);
-                    self->note_connect_failure(
-                        "oversized uncompressed frame",
-                        asio::error::message_size);
-                    self->fail_and_close(asio::error::message_size);
-                    return;
-                }
-                self->current_header_.payload_size = payload_size;
-                self->read_or_drain_payload();
-            });
+                            // Cap the attacker-declared post-inflate size too
+                            // (sec #0058).
+                            if (self->current_header_.uncompressed_size >
+                                kMaxFramePayloadSize)
+                            {
+                                PLOGW(
+                                    log_,
+                                    self->remote_endpoint(),
+                                    " rejecting frame: uncompressed_size=",
+                                    self->current_header_.uncompressed_size,
+                                    " > max=",
+                                    kMaxFramePayloadSize);
+                                self->note_connect_failure(
+                                    "oversized uncompressed frame",
+                                    asio::error::message_size);
+                                self->fail_and_close(asio::error::message_size);
+                                return;
+                            }
+                            self->current_header_.payload_size = payload_size;
+                            self->read_or_drain_payload();
+                        };
+                    if (self->read_initiator_for_test_)
+                    {
+                        self->read_initiator_for_test_(
+                            test_read_stage::header_extension,
+                            buffer,
+                            std::move(completion));
+                    }
+                    else
+                    {
+                        asio::async_read(
+                            *self->socket_, buffer, std::move(completion));
+                    }
+                });
+        }
+        catch (...)
+        {
+            auto const start_error = current_exception_error();
+            note_connect_failure(
+                "packet header extension read initiation", start_error);
+            fail_and_close(start_error);
+        }
         return;
     }
 
@@ -935,6 +1323,12 @@ peer_connection::handle_read_header(
 void
 peer_connection::read_or_drain_payload()
 {
+    if (physical_phase_ != PhysicalPhase::open)
+    {
+        release_inbound_charge();
+        return;
+    }
+
     auto const payload_size = current_header_.payload_size;
 
     // Manifest history snapshots are optional for this client. Consume large
@@ -949,13 +1343,42 @@ peer_connection::read_or_drain_payload()
 
     // Read payload
     payload_buffer_.resize(payload_size);
-    asio::async_read(
-        *socket_,
-        asio::buffer(payload_buffer_),
-        [self = shared_from_this()](
-            boost::system::error_code ec, std::size_t bytes_transferred) {
-            self->handle_read_payload(ec, bytes_transferred);
-        });
+    try
+    {
+        initiate_transport_operation(
+            TransportOperationKind::payload_read,
+            [self = shared_from_this()](TransportOperationId read_id) {
+                auto const buffer = asio::buffer(self->payload_buffer_);
+                test_read_completion completion =
+                    [self, read_id](
+                        boost::system::error_code ec,
+                        std::size_t bytes_transferred) {
+                        TransportOperationCompletion read_complete{
+                            self.get(), read_id};
+                        if (self->physical_phase_ != PhysicalPhase::open)
+                            return;
+                        self->handle_read_payload(ec, bytes_transferred);
+                    };
+                if (self->read_initiator_for_test_)
+                {
+                    self->read_initiator_for_test_(
+                        test_read_stage::payload,
+                        buffer,
+                        std::move(completion));
+                }
+                else
+                {
+                    asio::async_read(
+                        *self->socket_, buffer, std::move(completion));
+                }
+            });
+    }
+    catch (...)
+    {
+        auto const start_error = current_exception_error();
+        note_connect_failure("packet payload read initiation", start_error);
+        fail_and_close(start_error);
+    }
 }
 
 void
@@ -963,6 +1386,9 @@ peer_connection::handle_read_payload(
     boost::system::error_code ec,
     std::size_t bytes_read)
 {
+    if (physical_phase_ != PhysicalPhase::open)
+        return;
+
     if (ec)
     {
         PLOGD(
@@ -997,22 +1423,32 @@ peer_connection::handle_read_payload(
         " bytes for packet type ",
         current_header_.type);
 
-    // Call packet handler
-    if (packet_handler_)
+    // Copy the callback capability before exposure. A re-entrant close clears
+    // the stored handler to break its owner cycle; the local copy keeps the
+    // currently executing target alive until this frame returns.
+    try
     {
-        try
-        {
-            packet_handler_(current_header_, payload_buffer_);
-        }
-        catch (std::exception const& e)
-        {
-            PLOGE(log_, "Exception in packet handler: ", e.what());
-        }
+        auto const packet_handler = packet_handler_;
+        if (packet_handler)
+            packet_handler(current_header_, payload_buffer_);
+    }
+    catch (std::exception const& e)
+    {
+        PLOGE(log_, "Exception in packet handler: ", e.what());
     }
 
     // Frame consumed — return its bytes to the inbound budget before the
     // next read (sec #0055).
     release_inbound_charge();
+
+    // The packet callback is external code and may synchronously close this
+    // connection. Recheck the seal before it can rearm the read loop.
+    //@@authority transition=prv.T0144 status=provisional scope=statement bind=if_statement@78b0eb52dc803579
+    // owner=unresolved owner_hypothesis=peer_connection
+    // commit=connection_strand touches=prv.S0048 mutation_class=running_guarded
+    // label=refuse_read_rearm_after_reentrant_close
+    if (physical_phase_ != PhysicalPhase::open)
+        return; //@@authority-target ids=prv.T0144
 
     // Continue reading
     async_read_header();
@@ -1021,6 +1457,9 @@ peer_connection::handle_read_payload(
 void
 peer_connection::drain_payload(std::size_t remaining)
 {
+    if (physical_phase_ != PhysicalPhase::open)
+        return;
+
     if (remaining == 0)
     {
         // Whole frame consumed and discarded — resume the header loop.
@@ -1033,25 +1472,57 @@ peer_connection::drain_payload(std::size_t remaining)
     constexpr std::size_t kDrainChunk = 64u * 1024;
     std::size_t const chunk = remaining < kDrainChunk ? remaining : kDrainChunk;
     payload_buffer_.resize(chunk);
-    asio::async_read(
-        *socket_,
-        asio::buffer(payload_buffer_.data(), chunk),
-        [self = shared_from_this(), remaining](
-            boost::system::error_code ec, std::size_t n) {
-            if (ec)
-            {
-                if (ec != asio::error::operation_aborted)
+    try
+    {
+        initiate_transport_operation(
+            TransportOperationKind::payload_drain,
+            [self = shared_from_this(), remaining, chunk](
+                TransportOperationId read_id) {
+                auto const buffer =
+                    asio::buffer(self->payload_buffer_.data(), chunk);
+                test_read_completion completion =
+                    [self, remaining, read_id](
+                        boost::system::error_code ec, std::size_t n) {
+                        TransportOperationCompletion read_complete{
+                            self.get(), read_id};
+                        if (self->physical_phase_ != PhysicalPhase::open)
+                            return;
+                        if (ec)
+                        {
+                            if (ec != asio::error::operation_aborted)
+                            {
+                                self->note_connect_failure(
+                                    "manifest drain", ec);
+                                self->fail_and_close(ec);
+                            }
+                            return;
+                        }
+                        self->drain_payload(remaining - n);
+                    };
+                if (self->read_initiator_for_test_)
                 {
-                    self->note_connect_failure("manifest drain", ec);
-                    self->fail_and_close(ec);
+                    self->read_initiator_for_test_(
+                        test_read_stage::payload_drain,
+                        buffer,
+                        std::move(completion));
                 }
-                return;
-            }
-            self->drain_payload(remaining - n);
-        });
+                else
+                {
+                    asio::async_read(
+                        *self->socket_, buffer, std::move(completion));
+                }
+            });
+    }
+    catch (...)
+    {
+        auto const start_error = current_exception_error();
+        note_connect_failure("manifest drain initiation", start_error);
+        fail_and_close(start_error);
+    }
 }
 
-//@@authority transition=peer_client.admit_write owner=peer_client commit=strand bind=catl::peer_client::async_send_packet@aa941b4cfb0ffae8
+//@@authority transition=peer_client.admit_write owner=peer_client commit=strand
+// bind=catl::peer_client::async_send_packet@aa941b4cfb0ffae8
 // Admission authority. Refuses before any queue mutation once admission closes.
 void
 peer_connection::async_send_packet(
@@ -1111,13 +1582,15 @@ peer_connection::async_send_packet(
     do_write();
 }
 
-//@@authority transition=peer_client.initiate_write owner=peer_client commit=strand bind=catl::peer_client::do_write@ed5de5ed7752db65
+//@@authority transition=peer_client.initiate_write owner=peer_client
+// commit=strand bind=catl::peer_client::do_write@ed5de5ed7752db65
 // Selects one successor into the active row and hands its bytes to Asio.
 void
 peer_connection::do_write()
 {
-    // `active_write_` is the in-flight latch. A separate bool could claim "idle"
-    // while Asio still owned a buffer, which is how the queue got wedged.
+    // `active_write_` is the in-flight latch. A separate bool could claim
+    // "idle" while Asio still owned a buffer, which is how the queue got
+    // wedged.
     if (active_write_)
         return;
 
@@ -1144,24 +1617,28 @@ peer_connection::do_write()
     // terminalize every queued handler exactly once, and the queue shrinks each
     // iteration so this terminates.
     // `!active_write_` is re-tested every iteration, not just on entry. The
-    // rollback below invokes an external handler synchronously; that handler may
-    // re-enter async_send_packet -> do_write and install an active row. Without
-    // this guard the outer frame resumed and assigned over an ENGAGED optional,
-    // destroying the live buffer and the undelivered terminal of the row the
-    // nested frame had just initiated.
+    // rollback below invokes an external handler synchronously; that handler
+    // may re-enter async_send_packet -> do_write and install an active row.
+    // Without this guard the outer frame resumed and assigned over an ENGAGED
+    // optional, destroying the live buffer and the undelivered terminal of the
+    // row the nested frame had just initiated.
     while (!active_write_ && !write_queue_.empty())
     {
         active_write_ = std::move(write_queue_.front());
         write_queue_.pop_front();
 
+        std::optional<TransportOperationId> operation;
         try
         {
+            operation =
+                begin_transport_operation(TransportOperationKind::packet_write);
             if (write_initiator_for_test_)
             {
                 write_initiator_for_test_(
                     asio::buffer(active_write_->packet),
-                    [self = shared_from_this()](
-                        boost::system::error_code ec) {
+                    [self = shared_from_this(),
+                     id = *operation](boost::system::error_code ec) {
+                        TransportOperationCompletion complete{self.get(), id};
                         self->on_write_complete(ec);
                     });
             }
@@ -1170,8 +1647,9 @@ peer_connection::do_write()
                 asio::async_write(
                     *socket_,
                     asio::buffer(active_write_->packet),
-                    [self = shared_from_this()](
+                    [self = shared_from_this(), id = *operation](
                         boost::system::error_code ec, std::size_t) {
+                        TransportOperationCompletion complete{self.get(), id};
                         self->on_write_complete(ec);
                     });
             }
@@ -1179,16 +1657,21 @@ peer_connection::do_write()
         }
         catch (std::exception const& exc)
         {
+            if (operation)
+                complete_transport_operation(*operation);
             rollback(exc.what());
         }
         catch (...)
         {
+            if (operation)
+                complete_transport_operation(*operation);
             rollback("unknown exception");
         }
     }
 }
 
-//@@authority transition=peer_client.complete_write owner=peer_client commit=strand bind=catl::peer_client::on_write_complete@16dc470ccb9bfcd7
+//@@authority transition=peer_client.complete_write owner=peer_client
+// commit=strand bind=catl::peer_client::on_write_complete@16dc470ccb9bfcd7
 // The only releaser of the active row's physical bytes.
 void
 peer_connection::on_write_complete(boost::system::error_code ec)
@@ -1196,8 +1679,9 @@ peer_connection::on_write_complete(boost::system::error_code ec)
     if (!active_write_)
         return;  // defensive: nothing completes without a slot
 
-    // First moment the active packet's memory may be released. Physical lifetime
-    // ends here and only here — this is what close() must not do early.
+    // First moment the active packet's memory may be released. Physical
+    // lifetime ends here and only here — this is what close() must not do
+    // early.
     auto entry = std::move(*active_write_);
     active_write_.reset();
 
@@ -1227,19 +1711,22 @@ peer_connection::on_write_complete(boost::system::error_code ec)
     }
 
     // Logical terminal exactly once, exception-contained. No flag is consulted:
-    // if a teardown already delivered it, that teardown MOVED the handler out and
-    // this row holds an empty one, so a second delivery is unrepresentable.
+    // if a teardown already delivered it, that teardown MOVED the handler out
+    // and this row holds an empty one, so a second delivery is unrepresentable.
     deliver_terminal(entry.handler, ec);
 
     if (fatal)
     {
         // The exposure above deliberately precedes this settlement: the write's
         // own terminal must arrive before the disconnect export, or PeerClient
-        // drains the request as disconnected and then receives its terminal too.
-        // Safe because the failure DISPOSITION is already committed to an owned
-        // row above, so a re-entrant close() inside that handler cannot downgrade
-        // it — which is the second of the two shapes the reviewer allowed.
-        //@@audit-ack callback_exposed_before_settlement reason="disposition committed to close_disposition_ before exposure; re-entrant close honors it" ref=2026-07-25-e33cc5a-verdict-B1
+        // drains the request as disconnected and then receives its terminal
+        // too. Safe because the failure DISPOSITION is already committed to an
+        // owned row above, so a re-entrant close() inside that handler cannot
+        // downgrade it — which is the second of the two shapes the reviewer
+        // allowed.
+        //@@audit-ack callback_exposed_before_settlement reason="disposition
+        // committed to close_disposition_ before exposure; re-entrant close
+        // honors it" ref=2026-07-25-e33cc5a-verdict-B1
         fail_and_close(ec);  // settles: terminals, socket, disconnect
         return;
     }
@@ -1248,8 +1735,8 @@ peer_connection::on_write_complete(boost::system::error_code ec)
         return;  // teardown owns the remaining terminals
 
     // Successor-pump state, named explicitly because nothing else owns it.
-    // Reached on success AND on a cancellation that arrived without a close: the
-    // transport is still open there, so queued successors are still owed an
+    // Reached on success AND on a cancellation that arrived without a close:
+    // the transport is still open there, so queued successors are still owed an
     // attempt. Returning instead would leave them parked until some later
     // async_send_packet happened to pump them.
     do_write();
@@ -1703,7 +2190,41 @@ peer_connection::close()
     close_impl();
 }
 
-//@@authority transition=peer_client.settle_connection owner=peer_client commit=strand bind=catl::peer_client::settle_and_close@d1f665b00d68defa
+//@@authority transition=prv.T0139 status=provisional scope=function
+// bind=catl::peer_client::co_close@afee3200600f4a6f
+// owner=unresolved owner_hypothesis=connection_rider
+// commit=connection_strand touches=prv.S0046,prv.S0048
+// mutation_class=running_guarded
+// label=join_shared_connection_physical_drain_receipt
+asio::awaitable<void>
+peer_connection::co_close()
+{
+    auto self = shared_from_this();
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::disable_cancellation());
+    co_await asio::post(strand_, asio::use_awaitable);
+
+    if (config_.listen_mode)
+    {
+        throw std::logic_error(
+            "peer_connection::co_close cannot own listen accept drain");
+    }
+
+    close_impl();
+    while (physical_phase_ != PhysicalPhase::drained)
+    {
+        auto signal = std::make_shared<asio::steady_timer>(
+            strand_, asio::steady_timer::time_point::max());
+        physical_drain_waiters_.push_back(signal);
+
+        boost::system::error_code ec;
+        co_await signal->async_wait(
+            asio::redirect_error(asio::use_awaitable, ec));
+    }
+}
+
+//@@authority transition=peer_client.settle_connection owner=peer_client
+// commit=strand bind=catl::peer_client::settle_and_close@d1f665b00d68defa
 // The single teardown transition: commits admission closed, settles
 // owner-local, then exposes callbacks.
 //@@settlement
@@ -1719,10 +2240,17 @@ peer_connection::settle_and_close(
     if (close_ran_)
         return;
     close_ran_ = true;
+    //@@authority transition=prv.T0137 status=provisional scope=statement
+    // bind=expression_statement@561b30655be3bb43
+    // owner=unresolved owner_hypothesis=peer_connection
+    // commit=connection_strand touches=prv.S0048 mutation_class=seal_commit
+    // label=seal_connection_transport_admission
+    physical_phase_ =
+        PhysicalPhase::closing; //@@authority-target ids=prv.T0137
 
-    // Admission closes as part of the same commit, before any external callback.
-    // It may already be closed — the failing-write path commits it earlier so its
-    // own handler cannot send onto a dead transport.
+    // Admission closes as part of the same commit, before any external
+    // callback. It may already be closed — the failing-write path commits it
+    // earlier so its own handler cannot send onto a dead transport.
     admission_closed_ = true;
     connected_ = false;
 
@@ -1731,16 +2259,16 @@ peer_connection::settle_and_close(
     release_inbound_charge();
 
     // Take the owed terminals but do NOT invoke them yet. Everything up to the
-    // delivery loop is owner-local settlement; a handler that throws (the type is
-    // not noexcept and no contract forbids it) must not be able to leave the
+    // delivery loop is owner-local settlement; a handler that throws (the type
+    // is not noexcept and no contract forbids it) must not be able to leave the
     // socket open or the remaining terminals undelivered.
     //
-    // Both moves are non-allocating, which is deliberate: an earlier version grew
-    // a std::vector with push_back AFTER latching close_ran_, so an allocation
-    // failure unwound with the idempotency flag already committed, rows already
-    // popped, the socket still open, and every later close returning immediately.
-    // Moving the deque wholesale removes the fallible preparation instead of
-    // merely ordering it.
+    // Both moves are non-allocating, which is deliberate: an earlier version
+    // grew a std::vector with push_back AFTER latching close_ran_, so an
+    // allocation failure unwound with the idempotency flag already committed,
+    // rows already popped, the socket still open, and every later close
+    // returning immediately. Moving the deque wholesale removes the fallible
+    // preparation instead of merely ordering it.
     auto pending = std::move(write_queue_);
     write_queue_.clear();
     std::function<void(boost::system::error_code)> active_terminal;
@@ -1748,7 +2276,8 @@ peer_connection::settle_and_close(
     {
         active_terminal = std::move(active_write_->handler);
         active_write_->handler = nullptr;  // consumption IS the move
-        // NB: the active PACKET stays put. Asio owns those bytes until completion.
+        // NB: the active PACKET stays put. Asio owns those bytes until
+        // completion.
     }
 
     if (socket_ && socket_->lowest_layer().is_open())
@@ -1762,6 +2291,16 @@ peer_connection::settle_and_close(
             PLOGD(log_, "Error closing socket: ", ec.message());
         }
     }
+    //@@authority transition=prv.T0142 status=provisional scope=statement
+    //bind=if_statement@0434c0733359bdae
+    // owner=unresolved owner_hypothesis=peer_connection
+    // commit=connection_strand touches=prv.S0047 mutation_class=seal_commit
+    // label=cancel_and_release_owned_resolver_capability
+    if (resolver_)
+    {
+        resolver_->cancel();
+        resolver_.reset();
+    } //@@authority-target ids=prv.T0142
 
     // Break shared_ptr cycles: packet_handler_ and disconnect_handler_
     // capture shared_ptr<PeerClient> which holds shared_ptr<peer_connection>.
@@ -1772,8 +2311,8 @@ peer_connection::settle_and_close(
     disconnect_handler_ = nullptr;
 
     // Settlement is complete and consistent. External callbacks only from here,
-    // each individually contained, and carrying the COMMITTED disposition rather
-    // than this frame's arguments.
+    // each individually contained, and carrying the COMMITTED disposition
+    // rather than this frame's arguments.
     auto const disposition = *close_disposition_;
     for (auto& entry : pending)
     {
@@ -1784,9 +2323,16 @@ peer_connection::settle_and_close(
     {
         deliver_terminal(disconnect, disposition.cause);
     }
+
+    // External terminals are part of the close frame. The physical receipt is
+    // not legal until they have returned and every Asio-owned operation has
+    // released its exact census row.
+    try_complete_physical_drain();
 }
 
-//@@authority transition=peer_client.select_close_disposition owner=peer_client commit=strand bind=catl::peer_client::select_close_disposition@089f284025217888
+//@@authority transition=peer_client.select_close_disposition owner=peer_client
+// commit=strand
+// bind=catl::peer_client::select_close_disposition@089f284025217888
 // Mints the terminal disposition into an owned row before external code runs.
 void
 peer_connection::select_close_disposition(
