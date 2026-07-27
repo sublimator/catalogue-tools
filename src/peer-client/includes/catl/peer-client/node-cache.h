@@ -119,6 +119,12 @@ public:
             asio::use_awaitable);
     }
 
+    asio::io_context::executor_type
+    base_executor() const noexcept
+    {
+        return strand_.get_inner_executor();
+    }
+
     TimePoint
     expiry() const
     {
@@ -212,7 +218,7 @@ struct PathNode
 {
     SHAMapNodeID nodeid;  // position in tree
     Hash256 hash;         // content hash
-    std::shared_ptr<std::vector<uint8_t>>
+    std::shared_ptr<std::vector<uint8_t> const>
         wire;  // shared with cache — zero-copy
 };
 
@@ -317,7 +323,7 @@ public:
     has(Hash256 const& hash) const;
 
     /// Get the wire data for a hash. Returns nullptr if not cached/present.
-    std::shared_ptr<std::vector<uint8_t>>
+    std::shared_ptr<std::vector<uint8_t> const>
     get(Hash256 const& hash) const;
 
     /// Legacy compatibility: put by hash.
@@ -382,6 +388,18 @@ public:
     void
     clear_nodes();
 
+    /// Permanently seal node admission and wait until every NodeCache-owned
+    /// deadline servant has ended and every NodeCache-local generation-pin
+    /// share has been destroyed. The driver then crosses every relevant
+    /// PeerSet strand; a later service-level coordinator fence owns final
+    /// release of pin states that still have non-NodeCache aliases.
+    ///
+    /// Precondition: the request-admission owner has stopped and every request
+    /// frame capable of entering NodeCache has completed. Overlapping and later
+    /// calls join the same terminal boundary.
+    asio::awaitable<void>
+    co_stop_nodes();
+
     /// Invalidate every pre-boundary header entry and wait until its detached
     /// drivers have ended and PeerSet has consumed their pin releases.
     /// Overlapping clears join one boundary. New header admissions are refused
@@ -436,6 +454,11 @@ private:
             return ProgressCursor{next_seq};
         }
 
+        //@@authority transition=prv.T0116 status=provisional scope=function
+        // bind=catl::peer_client::NodeCache::ProgressJournal::publish@215045b93c64e480
+        // owner=unresolved owner_hypothesis=node_cache commit=owner_lock
+        // touches=prv.S0004 mutation_class=running_guarded
+        // label=publish_bounded_progress_journal_event
         void
         publish(ProgressEvent event) noexcept
         {
@@ -502,6 +525,15 @@ private:
         };
 
         Phase phase = Phase::response;
+        //@@authority state=prv.S0041 status=provisional scope=field
+        // bind=catl::peer_client::NodeCache::NodeFetchRound::deadline_servants@f5a990307921c287
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=exact_deadline_servant_identities_for_node_operation
+        std::map<std::uint64_t, std::shared_ptr<SerializedTimerSignal>>
+            deadline_servants;
+        std::shared_ptr<SerializedTimerSignal> servants_done_signal;
+        std::uint64_t operation_id = 0;
         // NodeCache fans out to one primary plus at most two additional peers.
         // A fixed table makes the callback/return handshake bounded by shape.
         std::array<DispatchSlot, 3> dispatches;
@@ -520,6 +552,15 @@ private:
         bool response_possible = false;
     };
 
+    struct NodeStopState
+    {
+        enum class Phase : std::uint8_t { running, succeeded, failed };
+
+        std::shared_ptr<SerializedTimerSignal> completion_signal;
+        std::exception_ptr failure;
+        Phase phase = Phase::running;
+    };
+
     // ── Cache entry ─────────────────────────────────────────────
     //
     // Single shared signal per entry. When data arrives via
@@ -535,7 +576,7 @@ private:
     // in-flight entries with non-null signal).
     struct Entry
     {
-        std::shared_ptr<std::vector<uint8_t>> wire_data;
+        std::shared_ptr<std::vector<uint8_t> const> wire_data;
         //@@authority state=prv.S0002 status=provisional scope=field
         // bind=catl::peer_client::NodeCache::Entry::signal@e24590d1aa2b06af
         // owner=unresolved owner_hypothesis=node_cache
@@ -692,7 +733,7 @@ private:
     /// Ensure a node is in the cache. Fetches from peer on miss.
     /// Peer must be pre-acquired by walk_to — no strand hop here.
     /// Returns shared wire data, or nullptr on timeout/error.
-    asio::awaitable<std::shared_ptr<std::vector<uint8_t>>>
+    asio::awaitable<std::shared_ptr<std::vector<uint8_t> const>>
     ensure_present(
         Hash256 expected_hash,
         Hash256 ledger_hash,
@@ -880,6 +921,37 @@ private:
         Hash256 const& hash,
         std::shared_ptr<SerializedTimerSignal> const& signal) noexcept;
 
+    void
+    remember_node_pin_owner_barrier_locked(PeerGenerationPin const& pin);
+
+    std::shared_ptr<SerializedTimerSignal>
+    maybe_complete_node_operation_locked(
+        std::shared_ptr<NodeFetchRound> const& round) noexcept;
+
+    std::shared_ptr<SerializedTimerSignal>
+    terminalize_node_operation_locked(
+        std::shared_ptr<NodeFetchRound> const& round) noexcept;
+
+    void
+    on_node_deadline_servant_done(
+        std::shared_ptr<NodeFetchRound> const& round,
+        std::uint64_t servant_id) noexcept;
+
+    void
+    publish_node_stop_failure_locked(
+        std::shared_ptr<NodeStopState> const& stop,
+        std::exception_ptr failure) noexcept;
+
+    bool
+    node_stop_terminal_predicate_locked(
+        std::shared_ptr<NodeStopState> const& stop,
+        std::vector<std::shared_ptr<NodeFetchRound>> const& operations,
+        bool local_pins_consumed,
+        bool owner_barriers_consumed) const noexcept;
+
+    asio::awaitable<void>
+    drive_node_stop(std::shared_ptr<NodeStopState> stop);
+
     asio::awaitable<WalkResult>
     walk_to_impl(
         Hash256 root_hash,
@@ -989,6 +1061,38 @@ private:
         node_fetch_coordinator_;
 
     mutable std::mutex mutex_;
+    enum class NodeLifecycle : std::uint8_t { running, stopping, stopped };
+    //@@authority state=prv.S0039 status=provisional scope=field
+    // bind=catl::peer_client::NodeCache::node_lifecycle_@25163ae6b3471c09
+    // owner=unresolved owner_hypothesis=node_cache observed_home=node_cache
+    // label=node_admission_and_terminal_lifecycle
+    NodeLifecycle node_lifecycle_ = NodeLifecycle::running;
+    // The node map is not an operation census: a row may disappear while its
+    // deadline servant is still unwinding. This registry owns each exact round
+    // until it is terminal and its exact servant set is empty.
+    //@@authority state=prv.S0040 status=provisional scope=field
+    // bind=catl::peer_client::NodeCache::active_node_operations_@872bc98a5381389e
+    // owner=unresolved owner_hypothesis=node_cache observed_home=node_cache
+    // label=active_node_operations_independent_of_cache_rows
+    std::map<std::uint64_t, std::shared_ptr<NodeFetchRound>>
+        active_node_operations_;
+    std::uint64_t next_node_operation_id_ = 0;
+    std::uint64_t next_node_deadline_servant_id_ = 0;
+    // Destroying a NodeCache-local pin share need not emit a release command:
+    // another component may retain an alias of the same shared pin state.
+    // Retaining each distinct PeerSet here lets node stop cross every relevant
+    // owner strand after destroying its local shares. The later service-level
+    // coordinator fence owns final shared-pin release.
+    //@@authority state=prv.S0043 status=provisional scope=field
+    // bind=catl::peer_client::NodeCache::node_pin_owner_barriers_@dae05b46d99a0a78
+    // owner=unresolved owner_hypothesis=node_cache observed_home=node_cache
+    // label=peer_set_strands_relevant_to_node_pin_destruction
+    std::vector<std::shared_ptr<PeerSet>> node_pin_owner_barriers_;
+    //@@authority state=prv.S0042 status=provisional scope=field
+    // bind=catl::peer_client::NodeCache::node_stop_state_@b492410fc860e0cf
+    // owner=unresolved owner_hypothesis=node_cache observed_home=node_cache
+    // label=shared_terminal_node_stop_receipt
+    std::shared_ptr<NodeStopState> node_stop_state_;
     //@@authority state=prv.S0001 status=provisional scope=field
     // bind=catl::peer_client::NodeCache::store_@6b31857b371de564
     // owner=unresolved owner_hypothesis=mixed observed_home=node_cache
@@ -1041,10 +1145,20 @@ private:
     std::function<void()> before_node_fanout_for_test_;
     std::function<void()> after_managed_slot_registered_for_test_;
     std::function<void()> after_managed_ingress_reconciled_for_test_;
+    std::function<void()> before_node_deadline_launch_for_test_;
     std::function<void()> node_deadline_servant_hook_for_test_;
     std::function<void()> after_node_deadline_wait_for_test_;
     std::function<void()> after_node_deadline_commit_for_test_;
     std::function<void()> node_round_retired_hook_for_test_;
+    std::function<void()> node_stop_sealed_hook_for_test_;
+    std::function<void()> before_node_response_prepare_for_test_;
+    std::function<void()> before_node_response_commit_for_test_;
+    std::function<void()> after_node_response_commit_for_test_;
+    std::function<void()> before_node_primary_pin_commit_for_test_;
+    std::function<void()> before_node_waiter_attach_commit_for_test_;
+    std::function<void()> before_node_stop_driver_launch_for_test_;
+    std::function<void()> node_stop_driver_hook_for_test_;
+    std::function<void()> after_node_local_pins_destroyed_for_test_;
 
     // Stats — atomic for lock-free concurrent access
     mutable std::atomic<size_t> hits_{0};

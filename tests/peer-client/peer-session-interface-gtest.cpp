@@ -7,6 +7,10 @@
 #include <catl/core/context-executor.h>
 #include <catl/core/request-context.h>
 
+#include "ripple.pb.h"
+
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/deferred.hpp>
 #include <boost/asio/detached.hpp>
@@ -115,6 +119,15 @@ public:
     {
         ++co_disconnect_calls;
         disconnect();
+        auto gate = disconnect_receipt_gate_;
+        if (gate)
+        {
+            co_disconnect_waiting.store(true, std::memory_order_release);
+            boost::system::error_code ec;
+            co_await gate->async_wait(
+                asio::redirect_error(asio::use_awaitable, ec));
+            co_disconnect_waiting.store(false, std::memory_order_release);
+        }
         co_return;
     }
 
@@ -125,6 +138,24 @@ public:
     }
 
     std::atomic<std::uint64_t> co_disconnect_calls{0};
+    std::atomic<bool> co_disconnect_waiting{false};
+
+    void
+    hold_disconnect_receipt()
+    {
+        disconnect_receipt_gate_ = std::make_shared<asio::steady_timer>(
+            strand_, asio::steady_timer::time_point::max());
+    }
+
+    void
+    release_disconnect_receipt()
+    {
+        auto gate = disconnect_receipt_gate_;
+        asio::post(strand_, [gate] {
+            if (gate)
+                gate->cancel();
+        });
+    }
 
     void
     set_unsolicited_handler(UnsolicitedHandler handler) override
@@ -138,6 +169,19 @@ public:
     {
         std::lock_guard lock(mutex_);
         node_response_handler_ = std::move(handler);
+    }
+
+    void
+    deliver_node_response(
+        std::shared_ptr<protocol::TMLedgerData> const& message)
+    {
+        NodeResponseHandler handler;
+        {
+            std::lock_guard lock(mutex_);
+            handler = node_response_handler_;
+        }
+        if (handler)
+            handler(message);
     }
 
     void
@@ -396,6 +440,7 @@ private:
     std::atomic<std::size_t> node_batch_submissions_{0};
     std::atomic<std::size_t> node_batch_node_count_{0};
     std::atomic<int> node_batch_tree_{0};
+    std::shared_ptr<asio::steady_timer> disconnect_receipt_gate_;
 
     std::mutex mutex_;
     UnsolicitedHandler unsolicited_handler_;
@@ -409,6 +454,24 @@ private:
 class NodeCacheTestAccess
 {
 public:
+    struct LateSubmissionState
+    {
+        std::shared_ptr<NodeCache::NodeFetchRound> round;
+        std::size_t managed_slot = 0;
+        std::size_t raw_slot = 0;
+    };
+
+    static void
+    register_test_node_operation_locked(
+        NodeCache& cache,
+        std::shared_ptr<NodeCache::NodeFetchRound> const& round)
+    {
+        round->servants_done_signal = SerializedTimerSignal::create(
+            cache.io_, asio::steady_timer::time_point::max());
+        round->operation_id = ++cache.next_node_operation_id_;
+        cache.active_node_operations_.emplace(round->operation_id, round);
+    }
+
     static std::shared_ptr<SerializedTimerSignal>
     signal(NodeCache& cache, Hash256 const& hash)
     {
@@ -450,6 +513,7 @@ public:
         {
             std::lock_guard lock(cache.mutex_);
             auto& entry = cache.store_[Hash256{}];
+            register_test_node_operation_locked(cache, round);
             entry.round = round;
             entry.signal =
                 SerializedTimerSignal::create(cache.io_, std::chrono::hours(1));
@@ -514,6 +578,7 @@ public:
         {
             std::lock_guard lock(cache.mutex_);
             auto& entry = cache.store_[Hash256{}];
+            register_test_node_operation_locked(cache, round);
             entry.round = round;
             entry.signal =
                 SerializedTimerSignal::create(cache.io_, std::chrono::hours(1));
@@ -559,6 +624,7 @@ public:
         {
             std::lock_guard lock(cache.mutex_);
             auto& entry = cache.store_[Hash256{}];
+            register_test_node_operation_locked(cache, round);
             entry.round = round;
             entry.signal =
                 SerializedTimerSignal::create(cache.io_, std::chrono::hours(1));
@@ -651,6 +717,14 @@ public:
     }
 
     static void
+    set_before_node_deadline_launch_hook(
+        NodeCache& cache,
+        std::function<void()> before_launch)
+    {
+        cache.before_node_deadline_launch_for_test_ = std::move(before_launch);
+    }
+
+    static void
     set_managed_ingress_hooks(
         NodeCache& cache,
         std::function<void()> after_slot_registered,
@@ -668,6 +742,96 @@ public:
         std::function<void()> before_fanout)
     {
         cache.before_node_fanout_for_test_ = std::move(before_fanout);
+    }
+
+    static std::pair<std::size_t, std::size_t>
+    node_operation_census(NodeCache& cache)
+    {
+        std::lock_guard lock(cache.mutex_);
+        std::size_t servants = 0;
+        for (auto const& [_, round] : cache.active_node_operations_)
+            servants += round->deadline_servants.size();
+        return {cache.active_node_operations_.size(), servants};
+    }
+
+    static std::size_t
+    node_store_row_count(NodeCache& cache)
+    {
+        std::lock_guard lock(cache.mutex_);
+        return cache.store_.size();
+    }
+
+    static bool
+    node_lifecycle_stopped(NodeCache& cache)
+    {
+        std::lock_guard lock(cache.mutex_);
+        return cache.node_lifecycle_ == NodeCache::NodeLifecycle::stopped;
+    }
+
+    static void
+    set_node_stop_sealed_hook(NodeCache& cache, std::function<void()> hook)
+    {
+        cache.node_stop_sealed_hook_for_test_ = std::move(hook);
+    }
+
+    static void
+    set_node_response_hooks(
+        NodeCache& cache,
+        std::function<void()> before_prepare,
+        std::function<void()> before_commit,
+        std::function<void()> after_commit)
+    {
+        cache.before_node_response_prepare_for_test_ =
+            std::move(before_prepare);
+        cache.before_node_response_commit_for_test_ = std::move(before_commit);
+        cache.after_node_response_commit_for_test_ = std::move(after_commit);
+    }
+
+    static void
+    set_node_split_admission_hooks(
+        NodeCache& cache,
+        std::function<void()> before_primary_pin,
+        std::function<void()> before_waiter_attach)
+    {
+        cache.before_node_primary_pin_commit_for_test_ =
+            std::move(before_primary_pin);
+        cache.before_node_waiter_attach_commit_for_test_ =
+            std::move(before_waiter_attach);
+    }
+
+    static void
+    set_node_stop_driver_hook(NodeCache& cache, std::function<void()> hook)
+    {
+        cache.node_stop_driver_hook_for_test_ = std::move(hook);
+    }
+
+    static void
+    set_node_stop_launch_hook(NodeCache& cache, std::function<void()> hook)
+    {
+        cache.before_node_stop_driver_launch_for_test_ = std::move(hook);
+    }
+
+    static void
+    set_node_local_pins_destroyed_hook(
+        NodeCache& cache,
+        std::function<void()> hook)
+    {
+        cache.after_node_local_pins_destroyed_for_test_ = std::move(hook);
+    }
+
+    static void
+    retain_node_local_pin(NodeCache& cache, PeerGenerationPin pin)
+    {
+        std::lock_guard lock(cache.mutex_);
+        cache.remember_node_pin_owner_barrier_locked(pin);
+        cache.store_[Hash256{}].peer_pins.push_back(std::move(pin));
+    }
+
+    static bool
+    node_lifecycle_running(NodeCache& cache)
+    {
+        std::lock_guard lock(cache.mutex_);
+        return cache.node_lifecycle_ == NodeCache::NodeLifecycle::running;
     }
 
     static void
@@ -738,7 +902,64 @@ public:
             NodeCache::NodeFetchRound::DispatchState::not_written;
     }
 
-    static asio::awaitable<std::shared_ptr<std::vector<uint8_t>>>
+    static LateSubmissionState
+    seed_late_submission_callbacks(NodeCache& cache)
+    {
+        auto round = std::make_shared<NodeCache::NodeFetchRound>();
+        round->phase = NodeCache::NodeFetchRound::Phase::response;
+        {
+            std::lock_guard lock(cache.mutex_);
+            auto& entry = cache.store_[Hash256{}];
+            register_test_node_operation_locked(cache, round);
+            entry.round = round;
+            entry.signal =
+                SerializedTimerSignal::create(cache.io_, std::chrono::hours(1));
+        }
+
+        auto managed = cache.register_managed_submission(
+            Hash256{}, round, "late-managed:1");
+        auto raw =
+            cache.register_raw_submission(Hash256{}, round, "late-raw:1");
+        if (!managed || !raw)
+            throw std::logic_error("failed to seed late submission callbacks");
+        return LateSubmissionState{
+            .round = std::move(round),
+            .managed_slot = *managed,
+            .raw_slot = *raw,
+        };
+    }
+
+    static void
+    deliver_late_submission_callbacks(
+        NodeCache& cache,
+        LateSubmissionState const& state)
+    {
+        cache.settle_managed_submission(
+            Hash256{},
+            state.round,
+            state.managed_slot,
+            NodeCache::ManagedSubmissionOutcome::written);
+        cache.settle_raw_submission(
+            Hash256{}, state.round, state.raw_slot, {});
+    }
+
+    static bool
+    late_submission_callbacks_are_inert(
+        LateSubmissionState const& state)
+    {
+        return state.round->dispatches[state.managed_slot].state ==
+                NodeCache::NodeFetchRound::DispatchState::submitting &&
+            state.round->dispatches[state.raw_slot].state ==
+                NodeCache::NodeFetchRound::DispatchState::submitting;
+    }
+
+    static void
+    install_node_response_handler(NodeCache& cache, PeerSession& peer)
+    {
+        cache.ensure_response_handler(peer);
+    }
+
+    static asio::awaitable<std::shared_ptr<std::vector<uint8_t> const>>
     ensure_node(
         NodeCache& cache,
         PeerSession& peer,
@@ -794,6 +1015,20 @@ wait_for_future(std::future<T>& fut, std::chrono::seconds timeout)
     auto const status = fut.wait_for(timeout);
     EXPECT_EQ(status, std::future_status::ready);
     return fut.get();
+}
+
+template <class Predicate, class Rep, class Period>
+bool
+wait_until(Predicate&& predicate, std::chrono::duration<Rep, Period> timeout)
+{
+    auto const deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (predicate())
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return predicate();
 }
 
 }  // namespace
@@ -3316,6 +3551,1142 @@ TEST(
     stop();
 }
 
+TEST(NodeCacheShutdown, StopJoinsExactServantAndRefusesLateMutation)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .fetch_timeout = 1h,
+            .max_walk_peer_retries = 0,
+        });
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-stop-servant:1", true, 5500, 5400, 5600);
+    PeerSetTestAccess::insert_connected_peer(io, peers, session);
+    auto pin = PeerSetTestAccess::make_peer_pin(io, peers, session->endpoint());
+    ASSERT_TRUE(pin);
+
+    std::promise<void> servant_started;
+    auto servant_started_future = servant_started.get_future();
+    std::promise<void> release_servant;
+    auto release_servant_future = release_servant.get_future().share();
+    std::promise<void> stop_sealed;
+    auto stop_sealed_future = stop_sealed.get_future();
+    std::atomic<bool> servant_reported{false};
+    std::atomic<bool> seal_reported{false};
+
+    NodeCacheTestAccess::set_node_deadline_hooks(
+        *cache,
+        [&]() {
+            if (!servant_reported.exchange(true))
+            {
+                servant_started.set_value();
+                release_servant_future.wait();
+            }
+        },
+        {},
+        {},
+        {});
+    NodeCacheTestAccess::set_node_stop_sealed_hook(*cache, [&]() {
+        if (!seal_reported.exchange(true))
+            stop_sealed.set_value();
+    });
+
+    bool initiated = false;
+    std::unordered_set<std::string> attempted;
+    auto request = asio::co_spawn(
+        io,
+        NodeCacheTestAccess::ensure_node(
+            *cache,
+            *session,
+            std::move(pin),
+            &attempted,
+            &initiated,
+            nullptr,
+            nullptr,
+            peers),
+        asio::use_future);
+
+    std::thread first_runner([&]() { io.run(); });
+    std::thread second_runner([&]() { io.run(); });
+    auto stop_runners = [&]() {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+    };
+
+    auto const servant_status = servant_started_future.wait_for(2s);
+    EXPECT_EQ(servant_status, std::future_status::ready);
+    if (servant_status != std::future_status::ready)
+    {
+        release_servant.set_value();
+        stop_runners();
+        return;
+    }
+    EXPECT_EQ(
+        NodeCacheTestAccess::node_operation_census(*cache),
+        (std::pair{1u, 1u}));
+
+    auto first_stop =
+        asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    auto joined_stop =
+        asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    auto const seal_status = stop_sealed_future.wait_for(2s);
+    EXPECT_EQ(seal_status, std::future_status::ready);
+    if (seal_status != std::future_status::ready)
+    {
+        release_servant.set_value();
+        stop_runners();
+        return;
+    }
+
+    EXPECT_EQ(first_stop.wait_for(0ms), std::future_status::timeout);
+    EXPECT_EQ(joined_stop.wait_for(0ms), std::future_status::timeout);
+    EXPECT_FALSE(cache->insert(Hash256{}, {1, 2, 3}));
+    cache->insert_and_notify(Hash256{}, {4, 5, 6});
+    EXPECT_EQ(cache->size(), 0u);
+
+    release_servant.set_value();
+    auto const first_stop_status = first_stop.wait_for(2s);
+    auto const joined_stop_status = joined_stop.wait_for(2s);
+    EXPECT_EQ(first_stop_status, std::future_status::ready);
+    EXPECT_EQ(joined_stop_status, std::future_status::ready);
+    if (first_stop_status != std::future_status::ready ||
+        joined_stop_status != std::future_status::ready)
+    {
+        stop_runners();
+        return;
+    }
+    EXPECT_NO_THROW(first_stop.get());
+    EXPECT_NO_THROW(joined_stop.get());
+    auto const request_status = request.wait_for(2s);
+    EXPECT_EQ(request_status, std::future_status::ready);
+    if (request_status != std::future_status::ready)
+    {
+        stop_runners();
+        return;
+    }
+    EXPECT_EQ(request.get(), nullptr);
+    EXPECT_TRUE(initiated);
+    EXPECT_EQ(
+        NodeCacheTestAccess::node_operation_census(*cache),
+        (std::pair{0u, 0u}));
+    EXPECT_TRUE(NodeCacheTestAccess::node_lifecycle_stopped(*cache));
+    EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 0u);
+
+    auto later_stop =
+        asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    auto const later_stop_status = later_stop.wait_for(2s);
+    EXPECT_EQ(later_stop_status, std::future_status::ready);
+    if (later_stop_status == std::future_status::ready)
+        EXPECT_NO_THROW(later_stop.get());
+
+    stop_runners();
+}
+
+TEST(NodeCacheShutdown, DeadlineLaunchFailureRollsBackExactReservation)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(io, {});
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-deadline-launch-failure:1", true, 5500, 5400, 5600);
+    NodeCacheTestAccess::set_before_node_deadline_launch_hook(*cache, [] {
+        throw std::runtime_error("forced deadline launch refusal");
+    });
+
+    bool initiated = false;
+    std::unordered_set<std::string> attempted;
+    auto request = asio::co_spawn(
+        io,
+        NodeCacheTestAccess::ensure_node(
+            *cache, *session, {}, &attempted, &initiated),
+        asio::use_future);
+    io.run();
+
+    ASSERT_EQ(
+        request.wait_for(std::chrono::milliseconds(0)),
+        std::future_status::ready);
+    EXPECT_EQ(request.get(), nullptr);
+    EXPECT_FALSE(initiated);
+    EXPECT_TRUE(attempted.empty());
+    EXPECT_EQ(
+        NodeCacheTestAccess::node_operation_census(*cache),
+        (std::pair{0u, 0u}));
+
+    io.restart();
+    auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    io.run();
+    ASSERT_EQ(
+        stopped.wait_for(std::chrono::milliseconds(0)),
+        std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+}
+
+TEST(NodeCacheShutdown, StopCountsOverlappingAdmissionAndResponseServants)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-overlapping-deadlines:1", true, 5500, 5400, 5600);
+    session->set_node_batch_accepts(true);
+    PeerSetTestAccess::insert_connected_peer(io, peers, session);
+    auto coordinator = LedgerFetchCoordinator::create(io, peers);
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .fetch_timeout = 1h,
+            .managed_admission_timeout = 10ms,
+        },
+        coordinator);
+    auto pin = PeerSetTestAccess::make_peer_pin(io, peers, session->endpoint());
+    ASSERT_TRUE(pin);
+
+    std::promise<void> admission_commit_reached;
+    auto admission_commit_reached_future =
+        admission_commit_reached.get_future();
+    std::promise<void> release_admission_servant;
+    auto release_admission_servant_future =
+        release_admission_servant.get_future().share();
+    std::promise<void> stop_sealed;
+    auto stop_sealed_future = stop_sealed.get_future();
+    std::atomic<bool> admission_reported{false};
+    std::atomic<bool> seal_reported{false};
+    NodeCacheTestAccess::set_node_deadline_hooks(
+        *cache,
+        {},
+        {},
+        [&]() {
+            if (!admission_reported.exchange(true))
+            {
+                admission_commit_reached.set_value();
+                release_admission_servant_future.wait();
+            }
+        },
+        {});
+    NodeCacheTestAccess::set_node_stop_sealed_hook(*cache, [&]() {
+        if (!seal_reported.exchange(true))
+            stop_sealed.set_value();
+    });
+
+    bool initiated = false;
+    std::unordered_set<std::string> attempted;
+    auto request = asio::co_spawn(
+        io,
+        NodeCacheTestAccess::ensure_node(
+            *cache,
+            *session,
+            std::move(pin),
+            &attempted,
+            &initiated,
+            nullptr,
+            nullptr,
+            peers),
+        asio::use_future);
+
+    std::thread first_runner([&]() { io.run(); });
+    std::thread second_runner([&]() { io.run(); });
+    auto stop_runners = [&]() {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+    };
+
+    auto const commit_status = admission_commit_reached_future.wait_for(2s);
+    EXPECT_EQ(commit_status, std::future_status::ready);
+    if (commit_status != std::future_status::ready)
+    {
+        release_admission_servant.set_value();
+        stop_runners();
+        return;
+    }
+    EXPECT_EQ(
+        NodeCacheTestAccess::node_operation_census(*cache),
+        (std::pair{1u, 2u}));
+
+    auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    auto const seal_status = stop_sealed_future.wait_for(2s);
+    EXPECT_EQ(seal_status, std::future_status::ready);
+    if (seal_status != std::future_status::ready)
+    {
+        release_admission_servant.set_value();
+        stop_runners();
+        return;
+    }
+    EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout);
+
+    release_admission_servant.set_value();
+    auto const stopped_status = stopped.wait_for(2s);
+    EXPECT_EQ(stopped_status, std::future_status::ready);
+    if (stopped_status != std::future_status::ready)
+    {
+        stop_runners();
+        return;
+    }
+    EXPECT_NO_THROW(stopped.get());
+    auto const request_status = request.wait_for(2s);
+    EXPECT_EQ(request_status, std::future_status::ready);
+    if (request_status == std::future_status::ready)
+        EXPECT_EQ(request.get(), nullptr);
+    EXPECT_EQ(
+        NodeCacheTestAccess::node_operation_census(*cache),
+        (std::pair{0u, 0u}));
+
+    stop_runners();
+}
+
+TEST(NodeCacheShutdown, ResponsePreparationFailurePreservesExactOperation)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .fetch_timeout = 1h,
+            .max_walk_peer_retries = 0,
+        });
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-response-prepare:1", true, 5500, 5400, 5600);
+
+    std::promise<void> servant_started;
+    auto servant_started_future = servant_started.get_future();
+    std::atomic<bool> servant_reported{false};
+    std::atomic<int> failure_phase{1};
+    NodeCacheTestAccess::set_node_deadline_hooks(
+        *cache,
+        [&]() {
+            if (!servant_reported.exchange(true))
+                servant_started.set_value();
+        },
+        {},
+        {},
+        {});
+    NodeCacheTestAccess::set_node_response_hooks(
+        *cache,
+        [&]() {
+            if (failure_phase.load() == 1)
+                throw std::runtime_error("forced response preparation failure");
+        },
+        [&]() {
+            if (failure_phase.load() == 2)
+                throw std::runtime_error("forced final pre-commit failure");
+        },
+        {});
+
+    bool initiated = false;
+    std::unordered_set<std::string> attempted;
+    auto request = asio::co_spawn(
+        io,
+        NodeCacheTestAccess::ensure_node(
+            *cache, *session, {}, &attempted, &initiated),
+        asio::use_future);
+
+    std::thread first_runner([&]() { io.run(); });
+    std::thread second_runner([&]() { io.run(); });
+    auto stop_runners = [&]() {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+    };
+
+    ASSERT_EQ(servant_started_future.wait_for(2s), std::future_status::ready);
+    EXPECT_THROW(cache->insert(Hash256{}, {1, 2, 3}), std::runtime_error);
+    EXPECT_EQ(
+        NodeCacheTestAccess::node_operation_census(*cache),
+        (std::pair{1u, 1u}));
+    EXPECT_EQ(cache->get(Hash256{}), nullptr);
+
+    failure_phase.store(2);
+    EXPECT_THROW(
+        cache->insert_and_notify(Hash256{}, {4, 5, 6}), std::runtime_error);
+    EXPECT_EQ(
+        NodeCacheTestAccess::node_operation_census(*cache),
+        (std::pair{1u, 1u}));
+    EXPECT_EQ(cache->get(Hash256{}), nullptr);
+
+    failure_phase.store(0);
+    auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    ASSERT_EQ(stopped.wait_for(2s), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    ASSERT_EQ(request.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(request.get(), nullptr);
+    EXPECT_EQ(
+        NodeCacheTestAccess::node_operation_census(*cache),
+        (std::pair{0u, 0u}));
+
+    stop_runners();
+}
+
+TEST(NodeCacheShutdown, StopWakesServantWhileResponseFrameIsHeld)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .fetch_timeout = 1h,
+            .max_walk_peer_retries = 0,
+        });
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-response-held:1", true, 5500, 5400, 5600);
+
+    std::promise<void> servant_started;
+    auto servant_started_future = servant_started.get_future();
+    std::promise<void> response_committed;
+    auto response_committed_future = response_committed.get_future();
+    std::promise<void> release_response;
+    auto release_response_future = release_response.get_future().share();
+    std::atomic<bool> servant_reported{false};
+    std::atomic<bool> response_reported{false};
+    NodeCacheTestAccess::set_node_deadline_hooks(
+        *cache,
+        [&]() {
+            if (!servant_reported.exchange(true))
+                servant_started.set_value();
+        },
+        {},
+        {},
+        {});
+    NodeCacheTestAccess::set_node_response_hooks(*cache, {}, {}, [&]() {
+        if (!response_reported.exchange(true))
+        {
+            response_committed.set_value();
+            release_response_future.wait();
+        }
+    });
+
+    bool initiated = false;
+    std::unordered_set<std::string> attempted;
+    auto request = asio::co_spawn(
+        io,
+        NodeCacheTestAccess::ensure_node(
+            *cache, *session, {}, &attempted, &initiated),
+        asio::use_future);
+    std::thread first_runner([&]() { io.run(); });
+    std::thread second_runner([&]() { io.run(); });
+    auto stop_runners = [&]() {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+    };
+
+    ASSERT_EQ(servant_started_future.wait_for(2s), std::future_status::ready);
+    std::thread response(
+        [&]() { cache->insert_and_notify(Hash256{}, {7, 8, 9}); });
+    ASSERT_EQ(
+        response_committed_future.wait_for(2s), std::future_status::ready);
+
+    auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    auto const stop_status = stopped.wait_for(2s);
+    EXPECT_EQ(stop_status, std::future_status::ready);
+
+    release_response.set_value();
+    response.join();
+    if (stop_status == std::future_status::ready)
+        EXPECT_NO_THROW(stopped.get());
+    ASSERT_EQ(request.wait_for(2s), std::future_status::ready);
+    (void)request.get();
+    EXPECT_EQ(
+        NodeCacheTestAccess::node_operation_census(*cache),
+        (std::pair{0u, 0u}));
+
+    stop_runners();
+}
+
+TEST(NodeCacheShutdown, PostCommitDiagnosticFailureCannotSuppressWakes)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .fetch_timeout = 1h,
+            .max_walk_peer_retries = 0,
+        });
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-response-diagnostic:1", true, 5500, 5400, 5600);
+
+    std::promise<void> servant_started;
+    auto servant_started_future = servant_started.get_future();
+    std::atomic<bool> servant_reported{false};
+    std::promise<void> waiter_attached;
+    auto waiter_attached_future = waiter_attached.get_future();
+    std::atomic<bool> waiter_reported{false};
+    NodeCacheTestAccess::set_node_deadline_hooks(
+        *cache,
+        [&]() {
+            if (!servant_reported.exchange(true))
+                servant_started.set_value();
+        },
+        {},
+        {},
+        {});
+    NodeCacheTestAccess::set_node_round_hooks(
+        *cache,
+        {},
+        [&]() {
+            if (!waiter_reported.exchange(true))
+                waiter_attached.set_value();
+        });
+    NodeCacheTestAccess::set_node_response_hooks(
+        *cache,
+        {},
+        {},
+        [] { throw std::runtime_error("forced post-commit diagnostic failure"); });
+
+    bool initiated = false;
+    std::unordered_set<std::string> attempted;
+    auto request = asio::co_spawn(
+        io,
+        NodeCacheTestAccess::ensure_node(
+            *cache, *session, {}, &attempted, &initiated),
+        asio::use_future);
+    std::thread first_runner([&]() { io.run(); });
+    std::thread second_runner([&]() { io.run(); });
+    auto stop_runners = [&]() {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+    };
+
+    ASSERT_EQ(servant_started_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(waiter_attached_future.wait_for(2s), std::future_status::ready);
+    EXPECT_NO_THROW(cache->insert_and_notify(Hash256{}, {10, 11, 12}));
+    EXPECT_TRUE(cache->has(Hash256{}));
+    ASSERT_EQ(request.wait_for(2s), std::future_status::ready);
+    auto data = request.get();
+    if (!data)
+    {
+        stop_runners();
+        FAIL() << "committed response was not projected to its waiter";
+        return;
+    }
+    EXPECT_EQ(*data, (std::vector<uint8_t>{10, 11, 12}));
+    EXPECT_TRUE(wait_until(
+        [&]() {
+            return NodeCacheTestAccess::node_operation_census(*cache) ==
+                std::pair<std::size_t, std::size_t>{0, 0};
+        },
+        2s));
+
+    stop_runners();
+}
+
+TEST(NodeCacheShutdown, StopCrossesActualPeerSetStrandAfterLocalPinDestruction)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-pin-barrier:1", true, 5500, 5400, 5600);
+    PeerSetTestAccess::insert_connected_peer(io, peers, session);
+    auto pin = PeerSetTestAccess::make_peer_pin(io, peers, session->endpoint());
+    ASSERT_TRUE(pin);
+
+    auto cache = NodeCache::create(io, {});
+    NodeCacheTestAccess::retain_node_local_pin(*cache, std::move(pin));
+    std::promise<void> local_pins_destroyed;
+    auto local_pins_destroyed_future = local_pins_destroyed.get_future();
+    NodeCacheTestAccess::set_node_local_pins_destroyed_hook(
+        *cache, [&]() { local_pins_destroyed.set_value(); });
+    auto work = asio::make_work_guard(io);
+    std::promise<void> strand_blocked;
+    auto strand_blocked_future = strand_blocked.get_future();
+    std::promise<void> release_strand;
+    auto release_strand_future = release_strand.get_future().share();
+    PeerSetTestAccess::post_on_owner_strand(peers, [&]() {
+        strand_blocked.set_value();
+        release_strand_future.wait();
+    });
+
+    std::thread first_runner([&]() { io.run(); });
+    std::thread second_runner([&]() { io.run(); });
+    auto stop_runners = [&]() {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+    };
+    ASSERT_EQ(strand_blocked_future.wait_for(2s), std::future_status::ready);
+
+    auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    EXPECT_EQ(
+        local_pins_destroyed_future.wait_for(2s),
+        std::future_status::ready);
+    EXPECT_EQ(stopped.wait_for(50ms), std::future_status::timeout);
+    release_strand.set_value();
+    ASSERT_EQ(stopped.wait_for(2s), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 0u);
+
+    stop_runners();
+}
+
+TEST(NodeCacheShutdown, LocalStopDoesNotClaimFinalSharedPinRelease)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-pin-alias:1", true, 5500, 5400, 5600);
+    PeerSetTestAccess::insert_connected_peer(io, peers, session);
+    auto pin = PeerSetTestAccess::make_peer_pin(io, peers, session->endpoint());
+    ASSERT_TRUE(pin);
+    auto coordinator_alias = pin.share();
+
+    auto cache = NodeCache::create(io, {});
+    NodeCacheTestAccess::retain_node_local_pin(*cache, std::move(pin));
+    auto work = asio::make_work_guard(io);
+    std::thread runner([&]() { io.run(); });
+
+    auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    ASSERT_EQ(stopped.wait_for(2s), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 1u);
+
+    coordinator_alias.reset();
+    auto final_barrier = asio::co_spawn(
+        io, peers->co_generation_pin_release_barrier(), asio::use_future);
+    ASSERT_EQ(final_barrier.wait_for(2s), std::future_status::ready);
+    EXPECT_NO_THROW(final_barrier.get());
+    EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 0u);
+
+    work.reset();
+    io.stop();
+    runner.join();
+}
+
+TEST(NodeCacheShutdown, DriverFailureIsRetainedForAllJoiners)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto cache = NodeCache::create(io, {});
+    std::atomic<unsigned> driver_calls{0};
+    NodeCacheTestAccess::set_node_stop_driver_hook(*cache, [&]() {
+        ++driver_calls;
+        throw std::runtime_error("forced node-stop driver failure");
+    });
+
+    auto first = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    auto second = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    io.run();
+
+    ASSERT_EQ(first.wait_for(0ms), std::future_status::ready);
+    ASSERT_EQ(second.wait_for(0ms), std::future_status::ready);
+    EXPECT_THROW(first.get(), std::runtime_error);
+    EXPECT_THROW(second.get(), std::runtime_error);
+    EXPECT_EQ(driver_calls.load(), 1u);
+    EXPECT_FALSE(NodeCacheTestAccess::node_lifecycle_running(*cache));
+    EXPECT_FALSE(NodeCacheTestAccess::node_lifecycle_stopped(*cache));
+
+    io.restart();
+    auto later = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    io.run();
+    ASSERT_EQ(later.wait_for(0ms), std::future_status::ready);
+    EXPECT_THROW(later.get(), std::runtime_error);
+    EXPECT_EQ(driver_calls.load(), 1u);
+}
+
+TEST(NodeCacheShutdown, SynchronousDriverLaunchFailureIsRetained)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto cache = NodeCache::create(io, {});
+    std::atomic<unsigned> launch_calls{0};
+    NodeCacheTestAccess::set_node_stop_launch_hook(*cache, [&]() {
+        ++launch_calls;
+        throw std::runtime_error("forced node-stop launch failure");
+    });
+
+    auto first = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    auto second = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    io.run();
+
+    ASSERT_EQ(first.wait_for(0ms), std::future_status::ready);
+    ASSERT_EQ(second.wait_for(0ms), std::future_status::ready);
+    EXPECT_THROW(first.get(), std::runtime_error);
+    EXPECT_THROW(second.get(), std::runtime_error);
+    EXPECT_EQ(launch_calls.load(), 1u);
+    EXPECT_FALSE(NodeCacheTestAccess::node_lifecycle_running(*cache));
+    EXPECT_FALSE(NodeCacheTestAccess::node_lifecycle_stopped(*cache));
+
+    io.restart();
+    auto later = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    io.run();
+    ASSERT_EQ(later.wait_for(0ms), std::future_status::ready);
+    EXPECT_THROW(later.get(), std::runtime_error);
+    EXPECT_EQ(launch_calls.load(), 1u);
+}
+
+TEST(NodeCacheShutdown, CancellingInitiatorDoesNotCancelSharedDriver)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-stop-cancel:1", true, 5500, 5400, 5600);
+    PeerSetTestAccess::insert_connected_peer(io, peers, session);
+    auto pin = PeerSetTestAccess::make_peer_pin(io, peers, session->endpoint());
+    ASSERT_TRUE(pin);
+
+    auto cache = NodeCache::create(io, {});
+    NodeCacheTestAccess::retain_node_local_pin(*cache, std::move(pin));
+    std::promise<void> strand_blocked;
+    auto strand_blocked_future = strand_blocked.get_future();
+    std::promise<void> release_strand;
+    auto release_strand_future = release_strand.get_future().share();
+    PeerSetTestAccess::post_on_owner_strand(peers, [&]() {
+        strand_blocked.set_value();
+        release_strand_future.wait();
+    });
+
+    auto work = asio::make_work_guard(io);
+    std::thread first_runner([&]() { io.run(); });
+    std::thread second_runner([&]() { io.run(); });
+    auto stop_runners = [&]() {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+    };
+    ASSERT_EQ(strand_blocked_future.wait_for(2s), std::future_status::ready);
+
+    asio::cancellation_signal cancellation;
+    std::promise<std::exception_ptr> initiator_done;
+    auto initiator_done_future = initiator_done.get_future();
+    std::promise<void> initiator_sealed;
+    auto initiator_sealed_future = initiator_sealed.get_future();
+    std::atomic<bool> seal_reported{false};
+    NodeCacheTestAccess::set_node_stop_sealed_hook(*cache, [&]() {
+        if (!seal_reported.exchange(true))
+            initiator_sealed.set_value();
+    });
+    asio::co_spawn(
+        io,
+        cache->co_stop_nodes(),
+        asio::bind_cancellation_slot(
+            cancellation.slot(), [&initiator_done](std::exception_ptr failure) {
+                initiator_done.set_value(std::move(failure));
+            }));
+    ASSERT_EQ(
+        initiator_sealed_future.wait_for(2s), std::future_status::ready);
+    auto joiner = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+
+    cancellation.emit(asio::cancellation_type::all);
+    ASSERT_EQ(initiator_done_future.wait_for(2s), std::future_status::ready);
+    auto initiator_failure = initiator_done_future.get();
+    ASSERT_TRUE(initiator_failure);
+    try
+    {
+        std::rethrow_exception(initiator_failure);
+        FAIL() << "cancelled initiator unexpectedly succeeded";
+    }
+    catch (boost::system::system_error const& e)
+    {
+        EXPECT_EQ(e.code(), asio::error::operation_aborted);
+    }
+    EXPECT_EQ(joiner.wait_for(0ms), std::future_status::timeout);
+
+    release_strand.set_value();
+    ASSERT_EQ(joiner.wait_for(2s), std::future_status::ready);
+    EXPECT_NO_THROW(joiner.get());
+    auto later = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    ASSERT_EQ(later.wait_for(2s), std::future_status::ready);
+    EXPECT_NO_THROW(later.get());
+
+    stop_runners();
+}
+
+TEST(NodeCacheShutdown, PrimaryPinCommitCannotCrossSeal)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-primary-seal:1", true, 5500, 5400, 5600);
+    PeerSetTestAccess::insert_connected_peer(io, peers, session);
+    auto pin = PeerSetTestAccess::make_peer_pin(io, peers, session->endpoint());
+    ASSERT_TRUE(pin);
+    auto cache = NodeCache::create(io, NodeCache::Options{.fetch_timeout = 1h});
+
+    std::promise<void> primary_ready;
+    auto primary_ready_future = primary_ready.get_future();
+    std::promise<void> release_primary;
+    auto release_primary_future = release_primary.get_future().share();
+    std::atomic<bool> primary_reported{false};
+    NodeCacheTestAccess::set_node_split_admission_hooks(
+        *cache,
+        [&]() {
+            if (!primary_reported.exchange(true))
+            {
+                primary_ready.set_value();
+                release_primary_future.wait();
+            }
+        },
+        {});
+
+    bool initiated = false;
+    std::unordered_set<std::string> attempted;
+    auto request = asio::co_spawn(
+        io,
+        NodeCacheTestAccess::ensure_node(
+            *cache,
+            *session,
+            std::move(pin),
+            &attempted,
+            &initiated,
+            nullptr,
+            nullptr,
+            peers),
+        asio::use_future);
+    auto work = asio::make_work_guard(io);
+    std::thread first_runner([&]() { io.run(); });
+    std::thread second_runner([&]() { io.run(); });
+    auto stop_runners = [&]() {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+    };
+    ASSERT_EQ(primary_ready_future.wait_for(2s), std::future_status::ready);
+
+    auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    ASSERT_TRUE(wait_until(
+        [&]() { return !NodeCacheTestAccess::node_lifecycle_running(*cache); },
+        2s));
+    release_primary.set_value();
+
+    ASSERT_EQ(stopped.wait_for(2s), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    ASSERT_EQ(request.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(request.get(), nullptr);
+    EXPECT_FALSE(initiated);
+    EXPECT_TRUE(attempted.empty());
+    EXPECT_EQ(cache->size(), 0u);
+
+    stop_runners();
+}
+
+TEST(NodeCacheShutdown, WaiterAttachCommitCannotCrossSeal)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-waiter-seal:1", true, 5500, 5400, 5600);
+    auto cache = NodeCache::create(io, NodeCache::Options{.fetch_timeout = 1h});
+
+    std::promise<void> waiter_ready;
+    auto waiter_ready_future = waiter_ready.get_future();
+    std::promise<void> release_waiter;
+    auto release_waiter_future = release_waiter.get_future().share();
+    std::atomic<bool> waiter_reported{false};
+    NodeCacheTestAccess::set_node_split_admission_hooks(*cache, {}, [&]() {
+        if (!waiter_reported.exchange(true))
+        {
+            waiter_ready.set_value();
+            release_waiter_future.wait();
+        }
+    });
+
+    bool initiated = false;
+    std::unordered_set<std::string> attempted;
+    auto request = asio::co_spawn(
+        io,
+        NodeCacheTestAccess::ensure_node(
+            *cache, *session, {}, &attempted, &initiated),
+        asio::use_future);
+    auto work = asio::make_work_guard(io);
+    std::thread first_runner([&]() { io.run(); });
+    std::thread second_runner([&]() { io.run(); });
+    auto stop_runners = [&]() {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+    };
+    ASSERT_EQ(waiter_ready_future.wait_for(2s), std::future_status::ready);
+
+    auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    ASSERT_TRUE(wait_until(
+        [&]() { return !NodeCacheTestAccess::node_lifecycle_running(*cache); },
+        2s));
+    release_waiter.set_value();
+
+    ASSERT_EQ(stopped.wait_for(2s), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    ASSERT_EQ(request.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(request.get(), nullptr);
+    EXPECT_TRUE(initiated);
+    EXPECT_EQ(cache->size(), 0u);
+
+    stop_runners();
+}
+
+TEST(NodeCacheShutdown, LateCallbackClassesCannotRecreateNodeState)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto cache = NodeCache::create(io, {});
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-late-callbacks:1", true, 5500, 5400, 5600);
+    NodeCacheTestAccess::install_node_response_handler(*cache, *session);
+    auto late = NodeCacheTestAccess::seed_late_submission_callbacks(*cache);
+    auto const before = cache->stats();
+
+    auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    io.run();
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+
+    NodeCacheTestAccess::deliver_late_submission_callbacks(*cache, late);
+    auto message = std::make_shared<protocol::TMLedgerData>();
+    message->set_type(protocol::liTX_NODE);
+    auto* node = message->add_nodes();
+    node->set_nodeid(std::string(33, '\0'));
+    auto const wire = make_leaf_wire(hash_with_byte(0xA5));
+    node->set_nodedata(wire.data(), wire.size());
+    session->deliver_node_response(message);
+
+    auto const after = cache->stats();
+    EXPECT_EQ(after.raw_writes_confirmed, before.raw_writes_confirmed);
+    EXPECT_EQ(after.raw_not_written, before.raw_not_written);
+    EXPECT_EQ(after.managed_writes_confirmed, before.managed_writes_confirmed);
+    EXPECT_EQ(after.managed_not_written, before.managed_not_written);
+    EXPECT_TRUE(NodeCacheTestAccess::late_submission_callbacks_are_inert(late));
+    EXPECT_EQ(NodeCacheTestAccess::node_store_row_count(*cache), 0u);
+    EXPECT_EQ(
+        NodeCacheTestAccess::node_operation_census(*cache),
+        (std::pair{0u, 0u}));
+}
+
+TEST(NodeCacheShutdown, ClearFirstKeepsOldServantAndDrainsSuccessor)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto cache = NodeCache::create(
+        io, NodeCache::Options{.fetch_timeout = 1h});
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-clear-first:1", true, 5500, 5400, 5600);
+
+    std::promise<void> old_servant_started;
+    auto old_servant_started_future = old_servant_started.get_future();
+    std::promise<void> release_old_servant;
+    auto release_old_servant_future =
+        release_old_servant.get_future().share();
+    std::atomic<unsigned> servant_calls{0};
+    NodeCacheTestAccess::set_node_deadline_hooks(
+        *cache,
+        [&]() {
+            if (servant_calls.fetch_add(1) == 0)
+            {
+                old_servant_started.set_value();
+                release_old_servant_future.wait();
+            }
+        },
+        {},
+        {},
+        {});
+
+    bool first_initiated = false;
+    bool successor_initiated = false;
+    std::unordered_set<std::string> first_attempted;
+    std::unordered_set<std::string> successor_attempted;
+    auto first_request = asio::co_spawn(
+        io,
+        NodeCacheTestAccess::ensure_node(
+            *cache, *session, {}, &first_attempted, &first_initiated),
+        asio::use_future);
+    std::thread first_runner([&]() { io.run(); });
+    std::thread second_runner([&]() { io.run(); });
+    auto stop_runners = [&]() {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+    };
+    ASSERT_EQ(
+        old_servant_started_future.wait_for(2s), std::future_status::ready);
+
+    cache->clear_nodes();
+    EXPECT_EQ(
+        NodeCacheTestAccess::node_operation_census(*cache),
+        (std::pair{1u, 1u}));
+    auto successor_request = asio::co_spawn(
+        io,
+        NodeCacheTestAccess::ensure_node(
+            *cache,
+            *session,
+            {},
+            &successor_attempted,
+            &successor_initiated),
+        asio::use_future);
+    ASSERT_TRUE(wait_until(
+        [&]() {
+            return NodeCacheTestAccess::node_operation_census(*cache) ==
+                std::pair<std::size_t, std::size_t>{2, 2};
+        },
+        2s));
+
+    auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    EXPECT_EQ(stopped.wait_for(20ms), std::future_status::timeout);
+    release_old_servant.set_value();
+    ASSERT_EQ(stopped.wait_for(2s), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    ASSERT_EQ(first_request.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(successor_request.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(first_request.get(), nullptr);
+    EXPECT_EQ(successor_request.get(), nullptr);
+    EXPECT_TRUE(first_initiated);
+    EXPECT_TRUE(successor_initiated);
+    EXPECT_EQ(
+        NodeCacheTestAccess::node_operation_census(*cache),
+        (std::pair{0u, 0u}));
+
+    stop_runners();
+}
+
+TEST(NodeCacheShutdown, StopFirstMakesCompatibilityClearInert)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    auto cache = NodeCache::create(
+        io, NodeCache::Options{.fetch_timeout = 1h});
+    auto session = std::make_shared<FakePeerSession>(
+        io, "node-stop-first-clear:1", true, 5500, 5400, 5600);
+
+    std::promise<void> servant_started;
+    auto servant_started_future = servant_started.get_future();
+    std::promise<void> release_servant;
+    auto release_servant_future = release_servant.get_future().share();
+    std::promise<void> stop_sealed;
+    auto stop_sealed_future = stop_sealed.get_future();
+    std::promise<void> release_seal_hook;
+    auto release_seal_hook_future = release_seal_hook.get_future().share();
+    std::atomic<bool> servant_reported{false};
+    std::atomic<bool> seal_reported{false};
+    NodeCacheTestAccess::set_node_deadline_hooks(
+        *cache,
+        [&]() {
+            if (!servant_reported.exchange(true))
+            {
+                servant_started.set_value();
+                release_servant_future.wait();
+            }
+        },
+        {},
+        {},
+        {});
+    NodeCacheTestAccess::set_node_stop_sealed_hook(*cache, [&]() {
+        if (!seal_reported.exchange(true))
+        {
+            stop_sealed.set_value();
+            release_seal_hook_future.wait();
+        }
+    });
+
+    bool initiated = false;
+    std::unordered_set<std::string> attempted;
+    auto request = asio::co_spawn(
+        io,
+        NodeCacheTestAccess::ensure_node(
+            *cache, *session, {}, &attempted, &initiated),
+        asio::use_future);
+    std::thread first_runner([&]() { io.run(); });
+    std::thread second_runner([&]() { io.run(); });
+    auto stop_runners = [&]() {
+        work.reset();
+        io.stop();
+        first_runner.join();
+        second_runner.join();
+    };
+    ASSERT_EQ(servant_started_future.wait_for(2s), std::future_status::ready);
+
+    auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
+    ASSERT_EQ(stop_sealed_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(NodeCacheTestAccess::node_store_row_count(*cache), 1u);
+    cache->clear_nodes();
+    EXPECT_EQ(NodeCacheTestAccess::node_store_row_count(*cache), 1u);
+    EXPECT_EQ(
+        NodeCacheTestAccess::node_operation_census(*cache),
+        (std::pair{1u, 1u}));
+
+    release_seal_hook.set_value();
+    EXPECT_EQ(stopped.wait_for(20ms), std::future_status::timeout);
+    release_servant.set_value();
+    ASSERT_EQ(stopped.wait_for(2s), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    ASSERT_EQ(request.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(request.get(), nullptr);
+    EXPECT_EQ(cache->size(), 0u);
+
+    stop_runners();
+}
+
 TEST(
     PeerSessionInterface,
     TimedOutManagedWalkReleasesFullPoolGenerationBeforeReplacementWait)
@@ -5306,4 +6677,232 @@ TEST(PeerTerminalReceipt, NeverAdmittedTerminalCannotAlterConnectFailureStats)
         << "never-admitted terminal must not double-account the failure";
     EXPECT_EQ(PeerSetTestAccess::total_disconnects(io, peers), 0u);
     EXPECT_EQ(PeerSetTestAccess::live_generation(io, peers, key), 0u);
+}
+
+TEST(PeerSetShutdown, IdleAndRepeatedStopsComplete)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    auto first = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    auto joined = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run();
+    EXPECT_NO_THROW(first.get());
+    EXPECT_NO_THROW(joined.get());
+
+    io.restart();
+    auto second = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run();
+    EXPECT_NO_THROW(second.get());
+}
+
+TEST(PeerSetShutdown, AdmittedSessionIsReceiptedlyClosed)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+    auto session = std::make_shared<FakePeerSession>(
+        io, "shutdown-peer:1", true, 500, 400, 600);
+    PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, session);
+
+    auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run();
+    EXPECT_NO_THROW(stopped.get());
+
+    EXPECT_EQ(session->co_disconnect_calls.load(), 1u);
+    EXPECT_FALSE(session->is_ready());
+
+    io.restart();
+    EXPECT_EQ(
+        PeerSetTestAccess::live_generation(io, peers, session->endpoint()), 0u);
+}
+
+TEST(PeerSetShutdown, HeldSessionReceiptDominatesTerminalPeerSetState)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+    auto session = std::make_shared<FakePeerSession>(
+        io, "held-shutdown-peer:1", true, 500, 400, 600);
+    session->hold_disconnect_receipt();
+    PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, session);
+
+    auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    auto joined = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run_for(10ms);
+
+    EXPECT_TRUE(
+        session->co_disconnect_waiting.load(std::memory_order_acquire));
+    EXPECT_GE(session->co_disconnect_calls.load(), 1u);
+    EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout);
+    EXPECT_EQ(joined.wait_for(0ms), std::future_status::timeout);
+
+    io.restart();
+    EXPECT_NE(
+        PeerSetTestAccess::live_generation(io, peers, session->endpoint()), 0u)
+        << "PeerSet may not erase the generation before its physical receipt";
+
+    session->release_disconnect_receipt();
+    io.restart();
+    io.run();
+
+    EXPECT_NO_THROW(stopped.get());
+    EXPECT_NO_THROW(joined.get());
+    EXPECT_FALSE(
+        session->co_disconnect_waiting.load(std::memory_order_acquire));
+    io.restart();
+    EXPECT_EQ(
+        PeerSetTestAccess::live_generation(io, peers, session->endpoint()), 0u);
+
+    io.restart();
+    auto late = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run();
+    EXPECT_NO_THROW(late.get());
+}
+
+TEST(PeerSetShutdown, CallerCancellationCannotAbandonPhysicalReceipt)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+    auto session = std::make_shared<FakePeerSession>(
+        io, "cancelled-shutdown-peer:1", true, 500, 400, 600);
+    session->hold_disconnect_receipt();
+    PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, session);
+
+    asio::cancellation_signal cancellation;
+    std::promise<std::exception_ptr> done;
+    auto done_future = done.get_future();
+    asio::co_spawn(
+        io,
+        peers->co_stop(),
+        asio::bind_cancellation_slot(
+            cancellation.slot(), [&done](std::exception_ptr failure) {
+                done.set_value(std::move(failure));
+            }));
+    io.run_for(10ms);
+
+    ASSERT_TRUE(
+        session->co_disconnect_waiting.load(std::memory_order_acquire));
+    cancellation.emit(asio::cancellation_type::all);
+    io.restart();
+    io.poll();
+
+    EXPECT_EQ(done_future.wait_for(0ms), std::future_status::timeout)
+        << "caller cancellation must not abandon the only stop driver";
+
+    session->release_disconnect_receipt();
+    io.restart();
+    io.run();
+
+    ASSERT_EQ(done_future.wait_for(0ms), std::future_status::ready);
+    EXPECT_EQ(done_future.get(), nullptr);
+    io.restart();
+    EXPECT_EQ(
+        PeerSetTestAccess::live_generation(io, peers, session->endpoint()), 0u);
+}
+
+TEST(PeerSetShutdown, GenerationPinDelaysPhysicalClose)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+    auto session = std::make_shared<FakePeerSession>(
+        io, "pinned-shutdown-peer:1", true, 500, 400, 600);
+    PeerSetTestAccess::insert_ready_peer_with_generation(io, peers, session);
+    auto pin = PeerSetTestAccess::make_peer_pin(io, peers, session->endpoint());
+    ASSERT_TRUE(pin);
+
+    auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run_for(10ms);
+
+    EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout);
+    EXPECT_EQ(session->co_disconnect_calls.load(), 0u)
+        << "a predecessor-owned pin is an eviction veto";
+
+    pin = {};
+    io.restart();
+    io.run();
+    EXPECT_NO_THROW(stopped.get());
+    EXPECT_EQ(session->co_disconnect_calls.load(), 1u);
+}
+
+TEST(PeerSetShutdown, ExpiredPinWithoutReleasePostCannotWedgeStop)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+    auto handle = PeerSetTestAccess::insert_unnotified_peer_pin(
+        io, peers, "unnotified-pin:1", 1);
+    ASSERT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 1u);
+
+    auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run_for(5ms);
+    EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout);
+
+    // Deliberately expire the weak authority without posting the normal
+    // release callback. The finite re-prune is the recovery path under test.
+    handle.reset();
+    io.restart();
+    io.run_for(250ms);
+
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    io.restart();
+    EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 0u);
+}
+
+TEST(PeerSetShutdown, ConnectBodyFailureReceiptsBeforeThrowingDiagnostic)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    auto const result =
+        PeerSetTestAccess::complete_connect_servant_after_body_failure(
+            io, peers, "connect-receipt.test:51235");
+
+    EXPECT_TRUE(result.throwing_diagnostic_ran);
+    EXPECT_TRUE(result.exact_row_consumed);
+    EXPECT_TRUE(result.stop_waiter_woke);
+}
+
+TEST(PeerSetShutdown, CrawlBodyFailureReceiptsBeforeThrowingDiagnostic)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    auto const result =
+        PeerSetTestAccess::complete_crawl_servant_after_body_failure(
+            io, peers, "crawl-receipt.test:51235");
+
+    EXPECT_TRUE(result.throwing_diagnostic_ran);
+    EXPECT_TRUE(result.exact_row_consumed);
+    EXPECT_TRUE(result.stop_waiter_woke);
+}
+
+TEST(PeerSetShutdown, ConnectLaunchFailureConsumesCommittedCensusRow)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    auto const result = PeerSetTestAccess::fail_connect_servant_launch(
+        io, peers, "127.0.0.1:51235");
+
+    EXPECT_TRUE(result.exact_row_consumed);
+    EXPECT_TRUE(result.stop_waiter_woke);
+}
+
+TEST(PeerSetShutdown, CrawlLaunchFailureConsumesCommittedCensusRow)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    auto const result = PeerSetTestAccess::fail_crawl_servant_launch(
+        io, peers, "127.0.0.1:51235");
+
+    EXPECT_TRUE(result.exact_row_consumed);
+    EXPECT_TRUE(result.stop_waiter_woke);
 }

@@ -348,6 +348,401 @@ PeerSet::start()
     configure_tracker_persistence();
 }
 
+//@@authority transition=prv.T0084 status=provisional scope=function
+// bind=catl::peer_client::co_stop@a62dab8774ffc758
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0034,prv.S0035,prv.S0036,prv.S0037,prv.S0038
+// label=seal_and_join_peer_sessions_connects_crawls_and_pins
+asio::awaitable<void>
+PeerSet::co_stop()
+{
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::disable_cancellation());
+
+    // This is the immediate cross-thread admission boundary. Once committed,
+    // no projection failure is allowed to reopen it.
+    shutdown_ingress_sealed_.store(true, std::memory_order_release);
+
+    auto self = shared_from_this();
+    co_await asio::co_spawn(
+        strand_,
+        [self]() -> asio::awaitable<void> {
+            auto progress = std::make_shared<asio::steady_timer>(
+                self->strand_, asio::steady_timer::time_point::max());
+            self->shutdown_waiters_.push_back(progress);
+            self->begin_stop_on_strand();
+
+            // A live generation pin is a predecessor's promise that its exact
+            // admitted session remains usable. Closing first would invalidate
+            // authority that PeerSet has already exported.
+            for (;;)
+            {
+                self->prune_expired_peer_pins();
+                if (self->active_peer_pins_.empty())
+                    break;
+
+                // Release normally posts a notification to this strand. The
+                // weak handle is nevertheless the durable truth: if that post
+                // is lost during executor teardown, periodically re-prune so
+                // an expired row cannot wedge shutdown forever.
+                progress->expires_after(std::chrono::milliseconds(25));
+                self->prune_expired_peer_pins();
+                if (self->active_peer_pins_.empty())
+                    break;
+
+                boost::system::error_code ec;
+                co_await progress->async_wait(
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
+
+            // Consume each physical session lifecycle on its own strand. The
+            // exact-generation check makes a concurrent natural terminal and
+            // this clean shutdown idempotent without misclassifying shutdown
+            // as peer failure.
+            while (!self->connections_.empty())
+            {
+                auto const current = self->connections_.begin();
+                auto const endpoint = current->first;
+                auto const generation = current->second.generation;
+                auto const session = current->second.session;
+
+                if (session)
+                {
+                    //@@authority transition=prv.T0147 status=provisional bind=co_disconnect@fe212b8dead6afae
+                    // scope=statement owner=unresolved
+                    // owner_hypothesis=peer_set commit=peer_set_strand
+                    // touches=prv.S0035,prv.S0046
+                    // mutation_class=stop_driver calls=co_disconnect
+                    // label=join_exact_session_physical_drain_receipt
+                    co_await session
+                        ->co_disconnect(); //@@authority-target ids=prv.T0147
+                }
+                assert(self->strand_.running_in_this_thread());
+
+                auto live = self->connections_.find(endpoint);
+                if (live != self->connections_.end() &&
+                    live->second.generation == generation &&
+                    live->second.session == session)
+                {
+                    self->connections_.erase(live);
+                    ++self->total_disconnects_;
+                    self->tracker_->remove(endpoint);
+                    self->notify_waiters();
+                }
+            }
+
+            // Connect/crawl servants that crossed the seal own their frames
+            // until their bounded operations finish. Their terminal funnels
+            // notify this timer after removing the exact census row.
+            while (!self->shutdown_drained_on_strand())
+            {
+                progress->expires_at(asio::steady_timer::time_point::max());
+                if (self->shutdown_drained_on_strand())
+                    break;
+
+                boost::system::error_code ec;
+                co_await progress->async_wait(
+                    asio::redirect_error(asio::use_awaitable, ec));
+            }
+
+            self->lifecycle_ = Lifecycle::stopped;
+            self->notify_shutdown_progress();
+            try
+            {
+                PLOGI(
+                    log_,
+                    "[",
+                    self->net_label_,
+                    "] PeerSet sessions and servants drained");
+            }
+            catch (...)
+            {
+            }
+        },
+        asio::use_awaitable);
+}
+
+//@@authority transition=prv.T0085 status=provisional scope=function
+// bind=catl::peer_client::begin_stop_on_strand@678597c2eaef130c
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0035,prv.S0037,prv.S0038
+// label=commit_peer_set_stopping_and_clear_queued_admission
+void
+PeerSet::begin_stop_on_strand()
+{
+    ASSERT_ON_STRAND();
+    if (lifecycle_ != Lifecycle::running)
+        return;
+
+    lifecycle_ = Lifecycle::stopping;
+    tracker_->set_discovered_observer({});
+    tracker_->set_status_observer({});
+
+    for (auto const& authorization : active_target_authorizations_)
+    {
+        if (authorization)
+            authorization->invalidate();
+    }
+    active_target_authorizations_.clear();
+    targeted_connects_.clear();
+    wanted_ledgers_.clear();
+    prioritized_ledgers_.clear();
+
+    pending_connects_.clear();
+    queued_.clear();
+    pending_crawls_.clear();
+    crawl_queued_.clear();
+    notify_waiters();
+}
+
+//@@authority transition=prv.T0086 status=provisional scope=function
+// bind=catl::peer_client::notify_shutdown_progress@7558d4b16007c984
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0036 label=wake_joined_peer_set_stop_waiters
+void
+PeerSet::notify_shutdown_progress() noexcept
+{
+    ASSERT_ON_STRAND();
+    for (auto it = shutdown_waiters_.begin(); it != shutdown_waiters_.end();)
+    {
+        if (auto waiter = it->lock())
+        {
+            try
+            {
+                waiter->cancel();
+            }
+            catch (...)
+            {
+            }
+            ++it;
+        }
+        else
+        {
+            it = shutdown_waiters_.erase(it);
+        }
+    }
+}
+
+void
+PeerSet::complete_connect_servant(
+    std::string const& key,
+    std::exception_ptr failure,
+    SuccessorPump successor) noexcept
+{
+    ASSERT_ON_STRAND();
+
+    // The exact census consumption and stop wake are the no-throw receipt
+    // commit. Diagnostics and successor pumping are optional downstream work.
+    //@@authority transition=prv.T0091 status=provisional scope=statement bind=expression_statement@6f2db77abd01a92f
+    // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+    // touches=prv.S0037 label=consume_background_connect_servant_receipt
+    in_flight_.erase(key); //@@authority-target ids=prv.T0091
+    notify_shutdown_progress();
+
+    try
+    {
+        if (connect_completion_diagnostic_hook_for_test_)
+            connect_completion_diagnostic_hook_for_test_();
+    }
+    catch (...)
+    {
+    }
+
+    if (failure)
+    {
+        try
+        {
+            std::rethrow_exception(failure);
+        }
+        catch (std::exception const& e)
+        {
+            try
+            {
+                PLOGE(
+                    log_,
+                    "[",
+                    net_label_,
+                    "] Connect servant failed for ",
+                    key,
+                    ": ",
+                    e.what());
+            }
+            catch (...)
+            {
+            }
+        }
+        catch (...)
+        {
+            try
+            {
+                PLOGE(
+                    log_,
+                    "[",
+                    net_label_,
+                    "] Connect servant failed for ",
+                    key);
+            }
+            catch (...)
+            {
+            }
+        }
+    }
+
+    if (successor == SuccessorPump::run &&
+        !shutdown_ingress_sealed_.load(std::memory_order_acquire))
+    {
+        try
+        {
+            pump_connects();
+        }
+        catch (...)
+        {
+        }
+    }
+}
+
+void
+PeerSet::complete_crawl_servant(
+    std::string const& key,
+    CrawlServantOutcome const& outcome,
+    std::exception_ptr failure,
+    SuccessorPump successor) noexcept
+{
+    ASSERT_ON_STRAND();
+
+    // As above, optional retention and diagnostics cannot sit between census
+    // consumption and the shared stop wake.
+    //@@authority transition=prv.T0092 status=provisional scope=statement bind=expression_statement@660eab6dbbe007d7
+    // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+    // touches=prv.S0038 label=consume_background_crawl_servant_receipt
+    crawl_in_flight_.erase(key); //@@authority-target ids=prv.T0092
+    notify_shutdown_progress();
+
+    try
+    {
+        if (crawl_completion_diagnostic_hook_for_test_)
+            crawl_completion_diagnostic_hook_for_test_();
+    }
+    catch (...)
+    {
+    }
+
+    if (failure)
+    {
+        try
+        {
+            std::string summary = "unknown error";
+            try
+            {
+                std::rethrow_exception(failure);
+            }
+            catch (std::exception const& e)
+            {
+                try
+                {
+                    summary = summarize_crawl_error(e.what());
+                }
+                catch (...)
+                {
+                }
+            }
+            catch (...)
+            {
+            }
+
+            try
+            {
+                note_crawl_failure(key, summary);
+            }
+            catch (...)
+            {
+            }
+            try
+            {
+                PLOGW(
+                    log_,
+                    "[",
+                    net_label_,
+                    "] Crawl failed for ",
+                    key,
+                    ": ",
+                    summary);
+            }
+            catch (...)
+            {
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+    else
+    {
+        try
+        {
+            crawled_[key] = std::chrono::steady_clock::now();
+        }
+        catch (...)
+        {
+        }
+        try
+        {
+            PLOGI(
+                log_,
+                "[",
+                net_label_,
+                "] ",
+                "Crawled ",
+                key,
+                " via ",
+                outcome.used_tls ? "HTTPS" : "HTTP",
+                ": ",
+                outcome.raw,
+                " raw peers, ",
+                outcome.accepted,
+                " accepted public peers, ",
+                outcome.ranged,
+                " with ledger ranges, ",
+                outcome.filtered,
+                " filtered");
+        }
+        catch (...)
+        {
+        }
+    }
+
+    try
+    {
+        if (!shutdown_ingress_sealed_.load(std::memory_order_acquire) &&
+            should_connect_endpoint(key))
+        {
+            queue_connect(key);
+        }
+
+        prune_discovery_state();
+        if (successor == SuccessorPump::run &&
+            !shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        {
+            pump_crawls();
+            pump_connects();
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+bool
+PeerSet::shutdown_drained_on_strand() const noexcept
+{
+    ASSERT_ON_STRAND();
+    return connections_.empty() && active_peer_pins_.empty() &&
+        in_flight_.empty() && queued_.empty() && pending_connects_.empty() &&
+        crawl_in_flight_.empty() && crawl_queued_.empty() &&
+        pending_crawls_.empty() && targeted_connects_.empty() &&
+        active_target_authorizations_.empty() && wanted_ledgers_.empty();
+}
+
 void
 PeerSet::set_unsolicited_handler(UnsolicitedHandler handler)
 {
@@ -411,6 +806,8 @@ PeerSet::update_endpoint_stats(PeerEndpointCache::Entry const& entry)
 void
 PeerSet::note_discovered(std::string const& endpoint, DiscoverySource source)
 {
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        return;
     if (!strand_.running_in_this_thread())
     {
         asio::post(strand_, [self = shared_from_this(), endpoint, source]() {
@@ -451,6 +848,8 @@ PeerSet::note_discovered(std::string const& endpoint, DiscoverySource source)
 void
 PeerSet::note_status(std::string const& endpoint, PeerStatus const& status)
 {
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        return;
     if (!strand_.running_in_this_thread())
     {
         asio::post(strand_, [self = shared_from_this(), endpoint, status]() {
@@ -1298,6 +1697,8 @@ PeerSet::sort_pending_crawls()
 void
 PeerSet::queue_connect(std::string const& endpoint)
 {
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        return;
     if (!strand_.running_in_this_thread())
     {
         asio::post(strand_, [self = shared_from_this(), endpoint]() {
@@ -1330,6 +1731,8 @@ PeerSet::queue_connect(std::string const& endpoint)
 void
 PeerSet::queue_crawl(std::string const& endpoint)
 {
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        return;
     if (!strand_.running_in_this_thread())
     {
         asio::post(strand_, [self = shared_from_this(), endpoint]() {
@@ -1363,9 +1766,16 @@ PeerSet::queue_crawl(std::string const& endpoint)
     sort_pending_crawls();
 }
 
+//@@authority transition=prv.T0087 status=provisional scope=function
+// bind=catl::peer_client::pump_connects@29dc9a52e35a56eb
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0034,prv.S0037
+// label=admit_owned_background_connect_servant
 void
 PeerSet::pump_connects()
 {
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        return;
     if (!strand_.running_in_this_thread())
     {
         asio::post(
@@ -1412,29 +1822,60 @@ PeerSet::pump_connects()
             failed_at_.erase(failed);
         }
 
-        in_flight_.insert(key);
-
         auto self = shared_from_this();
-        boost::asio::co_spawn(
-            strand_,
+        auto servant =
             [self,
              host,
              port,
              key,
              admission_leases = std::move(
                  admission_leases)]() mutable -> boost::asio::awaitable<void> {
+            std::exception_ptr failure;
+            try
+            {
                 co_await self->try_connect_on_strand(
                     host, port, std::move(admission_leases));
-                self->in_flight_.erase(key);
-                self->pump_connects();
-            },
-            boost::asio::detached);
+            }
+            catch (...)
+            {
+                failure = std::current_exception();
+            }
+            self->complete_connect_servant(key, std::move(failure));
+        };
+
+        bool census_committed = false;
+        try
+        {
+            in_flight_.insert(key);
+            census_committed = true;
+            if (fail_connect_servant_launches_for_test_ != 0)
+            {
+                --fail_connect_servant_launches_for_test_;
+                throw std::runtime_error("connect servant launch failpoint");
+            }
+            boost::asio::co_spawn(
+                strand_, std::move(servant), boost::asio::detached);
+        }
+        catch (...)
+        {
+            if (!census_committed)
+                throw;
+            complete_connect_servant(
+                key, std::current_exception(), SuccessorPump::defer);
+        }
     }
 }
 
+//@@authority transition=prv.T0088 status=provisional scope=function
+// bind=catl::peer_client::pump_crawls@98ba9d5913454cfb
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0034,prv.S0038
+// label=admit_owned_background_crawl_servant
 void
 PeerSet::pump_crawls()
 {
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        return;
     if (!strand_.running_in_this_thread())
     {
         asio::post(
@@ -1461,107 +1902,86 @@ PeerSet::pump_crawls()
             continue;
         }
 
-        crawl_in_flight_.insert(key);
-
         auto self = shared_from_this();
-        boost::asio::co_spawn(
-            strand_,
+        auto servant =
             [self, host, port, key]() -> boost::asio::awaitable<void> {
-                try
+            std::exception_ptr failure;
+            CrawlServantOutcome outcome;
+            try
+            {
+                auto response = co_await co_fetch_peer_crawl(host, port);
+
+                outcome.raw = response.peers.size();
+                outcome.used_tls = response.used_tls;
+                for (auto const& peer : response.peers)
                 {
-                    auto response = co_await co_fetch_peer_crawl(host, port);
+                    if (peer.endpoint.empty())
+                        continue;
 
-                    std::size_t accepted = 0;
-                    std::size_t ranged = 0;
-                    std::size_t filtered = 0;
-                    for (auto const& peer : response.peers)
+                    auto normalized =
+                        EndpointTracker::normalize_discovered_endpoint(
+                            peer.endpoint);
+                    if (!normalized)
                     {
-                        if (peer.endpoint.empty())
-                            continue;
+                        ++outcome.filtered;
+                        continue;
+                    }
 
-                        auto normalized =
-                            EndpointTracker::normalize_discovered_endpoint(
-                                peer.endpoint);
-                        if (!normalized)
+                    ++outcome.accepted;
+
+                    // Mark as seen in crawl
+                    if (self->endpoint_cache_)
+                    {
+                        try
                         {
-                            ++filtered;
-                            continue;
+                            self->endpoint_cache_->remember_seen_crawl(
+                                self->network_id_, *normalized);
                         }
-
-                        ++accepted;
-
-                        // Mark as seen in crawl
-                        if (self->endpoint_cache_)
+                        catch (...)
                         {
-                            try
-                            {
-                                self->endpoint_cache_->remember_seen_crawl(
-                                    self->network_id_, *normalized);
-                            }
-                            catch (...)
-                            {
-                            }
-                        }
-
-                        if (auto status = self->choose_crawl_status(
-                                peer.complete_ledgers))
-                        {
-                            ++ranged;
-                            self->tracker_->update(*normalized, *status);
-                        }
-                        else
-                        {
-                            self->tracker_->add_discovered(
-                                *normalized, DiscoverySource::Crawl);
                         }
                     }
 
-                    PLOGI(
-                        log_,
-                        "[",
-                        self->net_label_,
-                        "] ",
-                        "Crawled ",
-                        key,
-                        " via ",
-                        response.used_tls ? "HTTPS" : "HTTP",
-                        ": ",
-                        response.peers.size(),
-                        " raw peers, ",
-                        accepted,
-                        " accepted public peers, ",
-                        ranged,
-                        " with ledger ranges, ",
-                        filtered,
-                        " filtered");
+                    if (auto status =
+                            self->choose_crawl_status(peer.complete_ledgers))
+                    {
+                        ++outcome.ranged;
+                        self->tracker_->update(*normalized, *status);
+                    }
+                    else
+                    {
+                        self->tracker_->add_discovered(
+                            *normalized, DiscoverySource::Crawl);
+                    }
                 }
-                catch (std::exception const& e)
-                {
-                    auto const summary = summarize_crawl_error(e.what());
-                    PLOGW(
-                        log_,
-                        "[",
-                        self->net_label_,
-                        "] Crawl failed for ",
-                        key,
-                        ": ",
-                        summary);
-                    self->note_crawl_failure(key, summary);
-                }
+            }
+            catch (...)
+            {
+                failure = std::current_exception();
+            }
+            self->complete_crawl_servant(key, outcome, std::move(failure));
+        };
 
-                self->crawl_in_flight_.erase(key);
-                self->crawled_[key] = std::chrono::steady_clock::now();
-
-                if (self->should_connect_endpoint(key))
-                {
-                    self->queue_connect(key);
-                }
-
-                self->prune_discovery_state();
-                self->pump_crawls();
-                self->pump_connects();
-            },
-            boost::asio::detached);
+        bool census_committed = false;
+        try
+        {
+            crawl_in_flight_.insert(key);
+            census_committed = true;
+            if (fail_crawl_servant_launches_for_test_ != 0)
+            {
+                --fail_crawl_servant_launches_for_test_;
+                throw std::runtime_error("crawl servant launch failpoint");
+            }
+            boost::asio::co_spawn(
+                strand_, std::move(servant), boost::asio::detached);
+        }
+        catch (...)
+        {
+            if (!census_committed)
+                throw;
+            complete_crawl_servant(
+                key, {}, std::current_exception(), SuccessorPump::defer);
+        }
     }
 }
 
@@ -1790,6 +2210,11 @@ PeerSet::configure_tracker_persistence()
     });
 }
 
+//@@authority transition=prv.T0089 status=provisional scope=function
+// bind=catl::peer_client::start_connect@41e1125ff34a6e3c
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0034,prv.S0037
+// label=queue_endpoint_under_owned_connect_servant_census
 void
 PeerSet::start_connect(std::string const& endpoint)
 {
@@ -1804,6 +2229,11 @@ PeerSet::start_connect(std::string const& endpoint)
     pump_connects();
 }
 
+//@@authority transition=prv.T0090 status=provisional scope=function
+// bind=catl::peer_client::start_connect@e1eb79fe7d36ee43
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0034,prv.S0037
+// label=queue_host_port_under_owned_connect_servant_census
 void
 PeerSet::start_connect(std::string const& host, uint16_t port)
 {
@@ -1821,6 +2251,9 @@ PeerSet::start_connect(std::string const& host, uint16_t port)
 boost::asio::awaitable<PeerGenerationPin>
 PeerSet::try_connect(std::string const& host, uint16_t port)
 {
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        co_return PeerGenerationPin{};
+
     auto self = shared_from_this();
     co_return co_await asio::co_spawn(
         strand_,
@@ -1843,6 +2276,8 @@ PeerSet::try_connect_on_strand(
     std::vector<TargetedAdmissionLeasePtr> admission_leases)
 {
     ASSERT_ON_STRAND();
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        co_return nullptr;
 
     auto key = make_key(host, port);
 
@@ -1948,6 +2383,16 @@ PeerSet::try_connect_on_strand(
         co_await co_connect(io_, host, port, std::move(connect_opts), client);
         ASSERT_ON_STRAND();
 
+        // A candidate whose handshake crossed the seal was never admitted.
+        // Consume its physical lifecycle before returning so the stop receipt
+        // cannot race an unowned socket close.
+        if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        {
+            if (client)
+                co_await client->co_disconnect();
+            co_return nullptr;
+        }
+
         // Re-check because another strand operation may have inserted this
         // key while the connection attempt was suspended.
         // Drop ours — first one wins.
@@ -1960,7 +2405,7 @@ PeerSet::try_connect_on_strand(
                 net_label_,
                 "] Discarding duplicate connection for ",
                 key);
-            client->disconnect();
+            co_await client->co_disconnect();
             co_return existing->second.session;
         }
 
@@ -1973,7 +2418,7 @@ PeerSet::try_connect_on_strand(
                 "] Connected candidate became unavailable before admission: ",
                 key);
             if (client)
-                client->disconnect();
+                co_await client->co_disconnect();
             co_return nullptr;
         }
 
@@ -1988,7 +2433,7 @@ PeerSet::try_connect_on_strand(
                 " (",
                 peer_is_archival(client) ? "archival" : "hub",
                 " pool at cap)");
-            client->disconnect();
+            co_await client->co_disconnect();
             co_return nullptr;
         }
 
@@ -2129,11 +2574,6 @@ PeerSet::try_connect_on_strand(
                     cache_error.what());
             }
         }
-
-        // Break shared_ptr cycle: PeerClient <-> peer_connection
-        if (client)
-            client->disconnect();
-        co_return nullptr;
     }
     catch (std::exception const& e)
     {
@@ -2166,16 +2606,21 @@ PeerSet::try_connect_on_strand(
                     cache_error.what());
             }
         }
-        // Break shared_ptr cycle: PeerClient <-> peer_connection
-        if (client)
-            client->disconnect();
-        co_return nullptr;
     }
+
+    // Exception handlers above only classify and persist failure evidence.
+    // Physical lifecycle consumption remains awaitable and outside the catch
+    // handlers, where coroutine suspension is legal.
+    if (client)
+        co_await client->co_disconnect();
+    co_return nullptr;
 }
 
 void
 PeerSet::bootstrap()
 {
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        return;
     if (!strand_.running_in_this_thread())
     {
         asio::post(
@@ -2228,6 +2673,8 @@ PeerSet::bootstrap()
 void
 PeerSet::start_tracked_endpoints()
 {
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        return;
     if (!strand_.running_in_this_thread())
     {
         asio::post(strand_, [self = shared_from_this()]() {
@@ -2251,6 +2698,8 @@ PeerSet::start_tracked_endpoints()
 void
 PeerSet::try_undiscovered()
 {
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        return;
     if (!strand_.running_in_this_thread())
     {
         asio::post(strand_, [self = shared_from_this()]() {
@@ -2310,6 +2759,8 @@ PeerSet::try_undiscovered()
 void
 PeerSet::prioritize_ledger(uint32_t ledger_seq)
 {
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        return;
     if (!strand_.running_in_this_thread())
     {
         asio::post(strand_, [self = shared_from_this(), ledger_seq]() {
@@ -2448,6 +2899,8 @@ PeerSet::try_candidates_for(
     std::size_t connect_budget)
 {
     ASSERT_ON_STRAND();
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        return {};
     if (!authorization || !authorization->is_active())
         return {};
     auto const ledger_seq = authorization->ledger_seq;
@@ -2564,7 +3017,8 @@ PeerSet::seal_node_batch_command(
     asio::any_io_executor completion_executor,
     std::function<void(std::optional<NodeBatchCommand>)> on_sealed)
 {
-    if (!on_sealed || !completion_executor)
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
+        !on_sealed || !completion_executor)
         return false;
 
     // Sealing is owner-strand authority, so enter it rather than validating
@@ -2677,7 +3131,8 @@ PeerSet::seal_node_batch_command_on_strand(
     PeerGenerationPin const& pin)
 {
     ASSERT_ON_STRAND();
-    if (!strand_.running_in_this_thread() || !pin)
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
+        !strand_.running_in_this_thread() || !pin)
         return std::nullopt;
 
     // The pin must have been minted by THIS PeerSet. A pin from another
@@ -2738,7 +3193,8 @@ PeerGenerationPin
 PeerSet::make_peer_pin(PeerSessionPtr const& expected_session)
 {
     ASSERT_ON_STRAND();
-    if (!strand_.running_in_this_thread() || !expected_session ||
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
+        !strand_.running_in_this_thread() || !expected_session ||
         next_peer_pin_id_ == std::numeric_limits<std::uint64_t>::max())
     {
         return {};
@@ -2799,6 +3255,7 @@ PeerSet::release_peer_pin(
         return;
     }
     active_peer_pins_.erase(pin);
+    notify_shutdown_progress();
 }
 
 void
@@ -2886,6 +3343,9 @@ PeerSet::wait_for_any_peer(
     int timeout_secs,
     std::unordered_set<std::string> const& excluded)
 {
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        co_return PeerGenerationPin{};
+
     auto self = shared_from_this();
     co_return co_await asio::co_spawn(
         strand_,
@@ -2907,6 +3367,8 @@ PeerSet::wait_for_any_peer_on_strand(
     std::unordered_set<std::string> excluded)
 {
     ASSERT_ON_STRAND();
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        co_return nullptr;
 
     if (auto client = choose_any_peer(excluded))
     {
@@ -2937,6 +3399,9 @@ PeerSet::wait_for_any_peer_on_strand(
 
     for (;;)
     {
+        if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+            co_return nullptr;
+
         auto const now = std::chrono::steady_clock::now();
 
         if (now >= next_maintenance)
@@ -2981,6 +3446,8 @@ PeerSet::wait_for_any_peer_on_strand(
                 wait_until - std::chrono::steady_clock::now());
         co_await wait_for_signal_or_timeout(strand_, wait_signal, wait_for);
         ASSERT_ON_STRAND();
+        if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+            co_return nullptr;
     }
 
     PLOGW(
@@ -3015,6 +3482,9 @@ PeerSet::wait_for_covering_peer(
     std::unordered_set<std::string> const& excluded,
     std::shared_ptr<std::atomic<bool>> cancel)
 {
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+        co_return PeerGenerationPin{};
+
     auto self = shared_from_this();
     co_return co_await asio::co_spawn(
         strand_,
@@ -3051,7 +3521,8 @@ PeerSet::wait_for_covering_peer_on_strand(
 {
     ASSERT_ON_STRAND();
 
-    if (cancel && cancel->load(std::memory_order_relaxed))
+    if (shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
+        (cancel && cancel->load(std::memory_order_relaxed)))
         co_return nullptr;
 
     auto self = shared_from_this();
@@ -3222,7 +3693,8 @@ PeerSet::wait_for_covering_peer_on_strand(
 
     for (;;)
     {
-        if (cancel && cancel->load(std::memory_order_relaxed))
+        if (shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
+            (cancel && cancel->load(std::memory_order_relaxed)))
         {
             cleanup.clean_now();
             PLOGD(
@@ -3338,7 +3810,8 @@ PeerSet::wait_for_covering_peer_on_strand(
         auto outcome = co_await wait_for_signal_or_timeout(
             strand_, wait_signal, wait_for, cancel);
         ASSERT_ON_STRAND();
-        if (outcome == WaitOutcome::canceled)
+        if (shutdown_ingress_sealed_.load(std::memory_order_acquire) ||
+            outcome == WaitOutcome::canceled)
         {
             cleanup.clean_now();
             PLOGD(

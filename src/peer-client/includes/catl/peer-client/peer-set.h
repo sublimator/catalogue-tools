@@ -25,6 +25,8 @@
 #include <chrono>
 #include <cstddef>
 #include <deque>
+#include <exception>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -98,6 +100,16 @@ public:
     void
     start();
 
+    /// Seal every PeerSet admission root, let predecessor-held generation
+    /// pins drain, close each admitted session on its own strand, and wait for
+    /// all PeerSet-owned connect/crawl servants to finish.
+    ///
+    /// The caller must stop and drain predecessor services first. Completion
+    /// proves PeerSet quiescence only; it does not prove NodeCache or
+    /// coordinator quiescence.
+    boost::asio::awaitable<void>
+    co_stop();
+
     /// The shared tracker — peers feed it via TMStatusChange.
     std::shared_ptr<EndpointTracker>
     tracker()
@@ -113,6 +125,12 @@ public:
     /// Returns immediately — connections complete in background.
     void
     bootstrap();
+
+    /// Queue one configured endpoint through the PeerSet-owned servant census.
+    /// Unlike a detached caller awaiting try_connect(), this operation is part
+    /// of co_stop()'s exhaustive connect drain.
+    void
+    start_connect(std::string const& host, uint16_t port);
 
     /// Start connecting to all undiscovered tracker endpoints in parallel.
     /// Deduplicates against in-flight and completed connections.
@@ -319,6 +337,8 @@ public:
     hub_peer_count() const;
 
 private:
+    enum class Lifecycle : std::uint8_t { running, stopping, stopped };
+
     struct TargetedConnectAuthorization;
     using TargetedConnectAuthorizationPtr =
         std::shared_ptr<TargetedConnectAuthorization>;
@@ -460,6 +480,10 @@ private:
     /// stepping — the first attempt to write that control burned the whole
     /// retry budget with the flag still armed.
     std::uint32_t drop_seal_completions_for_test_ = 0;
+    std::uint32_t fail_connect_servant_launches_for_test_ = 0;
+    std::uint32_t fail_crawl_servant_launches_for_test_ = 0;
+    std::function<void()> connect_completion_diagnostic_hook_for_test_;
+    std::function<void()> crawl_completion_diagnostic_hook_for_test_;
 
     /// The single delivery point for a seal result. Marked //@@callback-funnel
     /// in the implementation: consumer code runs on its own executor, so
@@ -593,9 +617,6 @@ private:
 
     /// Schedule a background connect attempt (deduped, fire-and-forget).
     void
-    start_connect(std::string const& host, uint16_t port);
-
-    void
     start_connect(std::string const& endpoint);
 
     void
@@ -609,6 +630,39 @@ private:
 
     void
     pump_crawls();
+
+    void
+    begin_stop_on_strand();
+
+    void
+    notify_shutdown_progress() noexcept;
+
+    struct CrawlServantOutcome
+    {
+        std::size_t raw = 0;
+        std::size_t accepted = 0;
+        std::size_t ranged = 0;
+        std::size_t filtered = 0;
+        bool used_tls = false;
+    };
+
+    enum class SuccessorPump : std::uint8_t { run, defer };
+
+    void
+    complete_connect_servant(
+        std::string const& key,
+        std::exception_ptr failure,
+        SuccessorPump successor = SuccessorPump::run) noexcept;
+
+    void
+    complete_crawl_servant(
+        std::string const& key,
+        CrawlServantOutcome const& outcome,
+        std::exception_ptr failure,
+        SuccessorPump successor = SuccessorPump::run) noexcept;
+
+    bool
+    shutdown_drained_on_strand() const noexcept;
 
     void
     sort_pending_connects();
@@ -730,6 +784,23 @@ private:
     std::string net_label_;
     std::shared_ptr<EndpointTracker> tracker_;
     std::shared_ptr<PeerEndpointCache> endpoint_cache_;
+    /// Immediate cross-thread admission gate. The strand-owned lifecycle below
+    /// remains the sole authority for settlement and the stop receipt.
+    //@@authority state=prv.S0034 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::shutdown_ingress_sealed_@c68580f2aee79d2b
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=cross_thread_peer_ingress_shutdown_seal
+    std::atomic<bool> shutdown_ingress_sealed_{false};
+    //@@authority state=prv.S0035 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::lifecycle_@189b670b4df58ed4
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=peer_set_admission_and_drain_lifecycle
+    Lifecycle lifecycle_ = Lifecycle::running;
+    //@@authority state=prv.S0036 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::shutdown_waiters_@945bb664bfc34337
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=joined_peer_set_stop_waiter_registry
+    std::vector<std::weak_ptr<boost::asio::steady_timer>> shutdown_waiters_;
     struct EndpointStats
     {
         PeerStatus status;
@@ -797,6 +868,10 @@ private:
         std::string kind;
     };
     std::deque<FailureEvent> recent_failures_;
+    //@@authority state=prv.S0037 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::in_flight_@9b830888c93b1ab8
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=owned_background_connect_servant_census
     std::set<std::string> in_flight_;  // currently connecting
     std::set<std::string> queued_;
     // Request-scoped authority for queued ledger-specific replacement probes.
@@ -807,6 +882,10 @@ private:
     std::map<std::string, std::vector<TargetedConnectAuthorizationPtr>>
         targeted_connects_;
     std::vector<std::string> pending_connects_;
+    //@@authority state=prv.S0038 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::crawl_in_flight_@20b1e8147bbd2e1e
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=owned_background_crawl_servant_census
     std::set<std::string> crawl_in_flight_;
     std::set<std::string> crawl_queued_;
     std::map<std::string, std::chrono::steady_clock::time_point> crawled_;

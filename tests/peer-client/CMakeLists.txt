@@ -24,7 +24,8 @@ target_link_libraries(node-cache-signal-gtest
 
 add_executable(peer-session-interface-gtest peer-session-interface-gtest.cpp)
 target_link_libraries(peer-session-interface-gtest
-                      PRIVATE catl::peer-client GTest::gtest_main)
+                      PRIVATE catl::peer-client protobuf::libprotobuf
+                              GTest::gtest_main)
 
 add_executable(node-credentials-gtest node-credentials-gtest.cpp)
 target_link_libraries(node-credentials-gtest

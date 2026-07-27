@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <functional>
 #include <future>
 #include <memory>
 #include <stdexcept>
@@ -21,6 +22,14 @@ class PeerSetTestAccess
 {
 public:
     static constexpr std::size_t max_tracked_endpoints = 4096;
+
+    static void
+    post_on_owner_strand(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::function<void()> operation)
+    {
+        boost::asio::post(peers->strand_, std::move(operation));
+    }
 
     static void
     add_discovered(
@@ -775,6 +784,31 @@ public:
         return count;
     }
 
+    static std::shared_ptr<void>
+    insert_unnotified_peer_pin(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint,
+        std::uint64_t generation)
+    {
+        auto handle = std::make_shared<int>(0);
+        run_on_strand(
+            io,
+            peers,
+            [&handle, endpoint = std::move(endpoint), generation](auto& set) {
+                auto const pin_id = ++set.next_peer_pin_id_;
+                set.active_peer_pins_.emplace(
+                    pin_id,
+                    typename std::remove_reference_t<
+                        decltype(set)>::ActivePeerPin{
+                        .endpoint = endpoint,
+                        .connection_generation = generation,
+                        .live_handle = handle,
+                    });
+            });
+        return handle;
+    }
+
     static void
     block_strand_until(
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
@@ -925,6 +959,197 @@ public:
         std::shared_ptr<catl::peer_client::PeerSet> const& peers)
     {
         return peers->strand_.running_in_this_thread();
+    }
+
+    struct ServantCompletionProbe
+    {
+        bool exact_row_consumed = false;
+        bool stop_waiter_woke = false;
+        bool throwing_diagnostic_ran = false;
+    };
+
+    static ServantCompletionProbe
+    fail_connect_servant_launch(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string key)
+    {
+        ServantCompletionProbe result;
+        auto wake =
+            std::make_shared<std::promise<boost::system::error_code>>();
+        auto woke = wake->get_future();
+
+        run_on_strand(
+            io,
+            peers,
+            [&result, key = std::move(key), wake](auto& set) mutable {
+                auto waiter = std::make_shared<boost::asio::steady_timer>(
+                    set.strand_,
+                    boost::asio::steady_timer::time_point::max());
+                set.shutdown_waiters_.push_back(waiter);
+                waiter->async_wait(
+                    [waiter, wake](auto ec) { wake->set_value(ec); });
+
+                set.fail_connect_servant_launches_for_test_ = 1;
+                set.pending_connects_.push_back(key);
+                set.queued_.insert(key);
+                set.pump_connects();
+                result.exact_row_consumed = set.in_flight_.count(key) == 0;
+                set.fail_connect_servant_launches_for_test_ = 0;
+            });
+
+        while (woke.wait_for(std::chrono::milliseconds(1)) !=
+               std::future_status::ready)
+        {
+            io.poll();
+            io.restart();
+        }
+        result.stop_waiter_woke =
+            woke.get() == boost::asio::error::operation_aborted;
+        return result;
+    }
+
+    static ServantCompletionProbe
+    fail_crawl_servant_launch(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string key)
+    {
+        ServantCompletionProbe result;
+        auto wake =
+            std::make_shared<std::promise<boost::system::error_code>>();
+        auto woke = wake->get_future();
+
+        run_on_strand(
+            io,
+            peers,
+            [&result, key = std::move(key), wake](auto& set) mutable {
+                auto waiter = std::make_shared<boost::asio::steady_timer>(
+                    set.strand_,
+                    boost::asio::steady_timer::time_point::max());
+                set.shutdown_waiters_.push_back(waiter);
+                waiter->async_wait(
+                    [waiter, wake](auto ec) { wake->set_value(ec); });
+
+                set.fail_crawl_servant_launches_for_test_ = 1;
+                set.queue_crawl(key);
+                set.pump_crawls();
+                result.exact_row_consumed =
+                    set.crawl_in_flight_.count(key) == 0;
+                set.fail_crawl_servant_launches_for_test_ = 0;
+            });
+
+        while (woke.wait_for(std::chrono::milliseconds(1)) !=
+               std::future_status::ready)
+        {
+            io.poll();
+            io.restart();
+        }
+        result.stop_waiter_woke =
+            woke.get() == boost::asio::error::operation_aborted;
+        return result;
+    }
+
+    static ServantCompletionProbe
+    complete_connect_servant_after_body_failure(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string key)
+    {
+        ServantCompletionProbe result;
+        auto wake = std::make_shared<
+            std::promise<boost::system::error_code>>();
+        auto woke = wake->get_future();
+
+        run_on_strand(
+            io,
+            peers,
+            [&result, key = std::move(key), wake](auto& set) mutable {
+                set.shutdown_ingress_sealed_.store(
+                    true, std::memory_order_release);
+                set.in_flight_.insert(key);
+
+                auto waiter = std::make_shared<boost::asio::steady_timer>(
+                    set.strand_,
+                    boost::asio::steady_timer::time_point::max());
+                set.shutdown_waiters_.push_back(waiter);
+                waiter->async_wait([waiter, wake](auto ec) {
+                    wake->set_value(ec);
+                });
+
+                set.connect_completion_diagnostic_hook_for_test_ = [&result]() {
+                    result.throwing_diagnostic_ran = true;
+                    throw std::runtime_error("connect diagnostic failpoint");
+                };
+                set.complete_connect_servant(
+                    key,
+                    std::make_exception_ptr(
+                        std::runtime_error("connect body failed")));
+                result.exact_row_consumed = set.in_flight_.count(key) == 0;
+                set.connect_completion_diagnostic_hook_for_test_ = {};
+            });
+
+        while (woke.wait_for(std::chrono::milliseconds(1)) !=
+               std::future_status::ready)
+        {
+            io.poll();
+            io.restart();
+        }
+        result.stop_waiter_woke =
+            woke.get() == boost::asio::error::operation_aborted;
+        return result;
+    }
+
+    static ServantCompletionProbe
+    complete_crawl_servant_after_body_failure(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string key)
+    {
+        ServantCompletionProbe result;
+        auto wake = std::make_shared<
+            std::promise<boost::system::error_code>>();
+        auto woke = wake->get_future();
+
+        run_on_strand(
+            io,
+            peers,
+            [&result, key = std::move(key), wake](auto& set) mutable {
+                set.shutdown_ingress_sealed_.store(
+                    true, std::memory_order_release);
+                set.crawl_in_flight_.insert(key);
+
+                auto waiter = std::make_shared<boost::asio::steady_timer>(
+                    set.strand_,
+                    boost::asio::steady_timer::time_point::max());
+                set.shutdown_waiters_.push_back(waiter);
+                waiter->async_wait([waiter, wake](auto ec) {
+                    wake->set_value(ec);
+                });
+
+                set.crawl_completion_diagnostic_hook_for_test_ = [&result]() {
+                    result.throwing_diagnostic_ran = true;
+                    throw std::runtime_error("crawl diagnostic failpoint");
+                };
+                set.complete_crawl_servant(
+                    key,
+                    {},
+                    std::make_exception_ptr(
+                        std::runtime_error("crawl body failed")));
+                result.exact_row_consumed =
+                    set.crawl_in_flight_.count(key) == 0;
+                set.crawl_completion_diagnostic_hook_for_test_ = {};
+            });
+
+        while (woke.wait_for(std::chrono::milliseconds(1)) !=
+               std::future_status::ready)
+        {
+            io.poll();
+            io.restart();
+        }
+        result.stop_waiter_woke =
+            woke.get() == boost::asio::error::operation_aborted;
+        return result;
     }
 
     /// Release one pin row by its exact (pin_id, connection_generation), so a

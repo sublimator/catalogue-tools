@@ -8,6 +8,7 @@
 #include <catl/crypto/sha512-half-hasher.h>
 #include <catl/peer-client/ledger-fetch-coordinator.h>
 
+#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/deferred.hpp>
 #include <boost/asio/detached.hpp>
@@ -19,7 +20,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <limits>
+#include <stdexcept>
 #include <string_view>
 #include <unordered_set>
 
@@ -28,6 +31,8 @@ namespace catl::peer_client {
 LogPartition NodeCache::log_("node-cache", LogLevel::INHERIT);
 
 namespace {
+
+constexpr auto kCancelPollInterval = std::chrono::milliseconds(25);
 
 bool
 advertises_ledger(PeerSession const* peer, uint32_t ledger_seq)
@@ -57,35 +62,72 @@ complete_header_round(std::shared_ptr<Round> const& round) noexcept
     }
 }
 
+void
+verify_parallel_branch(
+    std::exception_ptr const& failure, bool cancellation_expected)
+{
+    if (!failure)
+        return;
+    try
+    {
+        std::rethrow_exception(failure);
+    }
+    catch (boost::system::system_error const& error)
+    {
+        if (cancellation_expected &&
+            error.code() == asio::error::operation_aborted)
+        {
+            return;
+        }
+        throw;
+    }
+}
+
+//@@authority transition=prv.T0131 status=provisional scope=function bind=catl::peer_client::wait_for_signal_or_progress@cd5c94aacf428935
+// owner=unresolved owner_hypothesis=request_rider
+// commit=rider_arbitration_strand touches=prv.S0002,prv.S0004
+// mutation_class=running_guarded
+// label=arbitrate_terminal_and_progress_signal_without_lost_winner
 asio::awaitable<std::pair<int, boost::system::error_code>>
 wait_for_signal_or_progress(
     std::shared_ptr<SerializedTimerSignal> done_signal,
     std::shared_ptr<SerializedTimerSignal> progress_signal)
 {
-    auto ex = co_await asio::this_coro::executor;
+    auto arbitration = asio::make_strand(done_signal->base_executor());
+    auto done = asio::bind_executor(
+        arbitration,
+        asio::co_spawn(
+            arbitration,
+            [done_signal]() -> asio::awaitable<boost::system::error_code> {
+                co_return co_await done_signal->wait();
+            },
+            asio::deferred));
+    auto progress = asio::bind_executor(
+        arbitration,
+        asio::co_spawn(
+            arbitration,
+            [progress_signal]() -> asio::awaitable<boost::system::error_code> {
+                co_return co_await progress_signal->wait();
+            },
+            asio::deferred));
     auto [order, ex0, ec0, ex1, ec1] =
         co_await asio::experimental::make_parallel_group(
-            asio::co_spawn(
-                ex,
-                [done_signal]() -> asio::awaitable<boost::system::error_code> {
-                    co_return co_await done_signal->wait();
-                },
-                asio::deferred),
-            asio::co_spawn(
-                ex,
-                [progress_signal]()
-                    -> asio::awaitable<boost::system::error_code> {
-                    co_return co_await progress_signal->wait();
-                },
-                asio::deferred))
+            std::move(done), std::move(progress))
             .async_wait(
                 asio::experimental::wait_for_one(), asio::use_awaitable);
 
+    verify_parallel_branch(ex0, order[0] != 0);
+    verify_parallel_branch(ex1, order[0] != 1);
     if (order[0] == 0)
         co_return std::pair{0, ec0};
     co_return std::pair{1, ec1};
 }
 
+//@@authority transition=prv.T0132 status=provisional scope=function bind=catl::peer_client::wait_for_signal_or_progress_or_cancel@10dce7a12fa3d59c
+// owner=unresolved owner_hypothesis=request_rider
+// commit=rider_arbitration_strand touches=prv.S0002,prv.S0004
+// mutation_class=running_guarded
+// label=arbitrate_terminal_progress_and_rider_cancel
 asio::awaitable<std::pair<int, boost::system::error_code>>
 wait_for_signal_or_progress_or_cancel(
     std::shared_ptr<SerializedTimerSignal> done_signal,
@@ -96,40 +138,49 @@ wait_for_signal_or_progress_or_cancel(
         co_return co_await wait_for_signal_or_progress(
             std::move(done_signal), std::move(progress_signal));
 
-    static constexpr auto kCancelPollInterval = std::chrono::milliseconds(25);
-
-    auto ex = co_await asio::this_coro::executor;
+    auto arbitration = asio::make_strand(done_signal->base_executor());
     while (!cancel->load(std::memory_order_relaxed))
     {
+        auto done = asio::bind_executor(
+            arbitration,
+            asio::co_spawn(
+                arbitration,
+                [done_signal]() -> asio::awaitable<boost::system::error_code> {
+                    co_return co_await done_signal->wait();
+                },
+                asio::deferred));
+        auto progress = asio::bind_executor(
+            arbitration,
+            asio::co_spawn(
+                arbitration,
+                [progress_signal]()
+                    -> asio::awaitable<boost::system::error_code> {
+                    co_return co_await progress_signal->wait();
+                },
+                asio::deferred));
+        auto poll = asio::bind_executor(
+            arbitration,
+            asio::co_spawn(
+                arbitration,
+                [arbitration]()
+                    -> asio::awaitable<boost::system::error_code> {
+                    asio::steady_timer timer(
+                        arbitration, kCancelPollInterval);
+                    boost::system::error_code ec;
+                    co_await timer.async_wait(
+                        asio::redirect_error(asio::use_awaitable, ec));
+                    co_return ec;
+                },
+                asio::deferred));
         auto [order, ex0, ec0, ex1, ec1, ex2, ec2] =
             co_await asio::experimental::make_parallel_group(
-                asio::co_spawn(
-                    ex,
-                    [done_signal]()
-                        -> asio::awaitable<boost::system::error_code> {
-                        co_return co_await done_signal->wait();
-                    },
-                    asio::deferred),
-                asio::co_spawn(
-                    ex,
-                    [progress_signal]()
-                        -> asio::awaitable<boost::system::error_code> {
-                        co_return co_await progress_signal->wait();
-                    },
-                    asio::deferred),
-                asio::co_spawn(
-                    ex,
-                    [ex]() -> asio::awaitable<boost::system::error_code> {
-                        asio::steady_timer timer(ex, kCancelPollInterval);
-                        boost::system::error_code ec;
-                        co_await timer.async_wait(
-                            asio::redirect_error(asio::use_awaitable, ec));
-                        co_return ec;
-                    },
-                    asio::deferred))
+                std::move(done), std::move(progress), std::move(poll))
                 .async_wait(
                     asio::experimental::wait_for_one(), asio::use_awaitable);
 
+        verify_parallel_branch(ex0, order[0] != 0);
+        verify_parallel_branch(ex1, order[0] != 1);
+        verify_parallel_branch(ex2, order[0] != 2);
         if (order[0] == 0)
             co_return std::pair{0, ec0};
         if (order[0] == 1)
@@ -137,6 +188,57 @@ wait_for_signal_or_progress_or_cancel(
     }
 
     co_return std::pair{2, boost::system::error_code{}};
+}
+
+//@@authority transition=prv.T0134 status=provisional scope=function bind=catl::peer_client::wait_for_signal_or_cancellation@9abff3c5d4a26683
+// owner=unresolved owner_hypothesis=request_rider
+// commit=rider_arbitration_strand touches=prv.S0042
+// mutation_class=running_guarded
+// label=join_shared_node_stop_or_observe_rider_cancellation
+asio::awaitable<std::pair<int, boost::system::error_code>>
+wait_for_signal_or_cancellation(
+    std::shared_ptr<SerializedTimerSignal> signal)
+{
+    auto arbitration = asio::make_strand(signal->base_executor());
+    for (;;)
+    {
+        auto const cancel_state = co_await asio::this_coro::cancellation_state;
+        if (cancel_state.cancelled() != asio::cancellation_type::none)
+            co_return std::pair{1, boost::system::error_code{}};
+
+        auto done = asio::bind_executor(
+            arbitration,
+            asio::co_spawn(
+                arbitration,
+                [signal]() -> asio::awaitable<boost::system::error_code> {
+                    co_return co_await signal->wait();
+                },
+                asio::deferred));
+        auto poll = asio::bind_executor(
+            arbitration,
+            asio::co_spawn(
+                arbitration,
+                [arbitration]()
+                    -> asio::awaitable<boost::system::error_code> {
+                    asio::steady_timer timer(
+                        arbitration, kCancelPollInterval);
+                    boost::system::error_code ec;
+                    co_await timer.async_wait(
+                        asio::redirect_error(asio::use_awaitable, ec));
+                    co_return ec;
+                },
+                asio::deferred));
+        auto [order, ex0, ec0, ex1, ec1] =
+            co_await asio::experimental::make_parallel_group(
+                std::move(done), std::move(poll))
+                .async_wait(
+                    asio::experimental::wait_for_one(), asio::use_awaitable);
+
+        verify_parallel_branch(ex0, order[0] != 0);
+        verify_parallel_branch(ex1, order[0] != 1);
+        if (order[0] == 0)
+            co_return std::pair{0, ec0};
+    }
 }
 
 }  // namespace
@@ -183,6 +285,129 @@ NodeCache::make_progress_signal()
 {
     return SerializedTimerSignal::create(
         io_, asio::steady_timer::time_point::max());
+}
+
+void
+//@@authority transition=prv.T0103 status=provisional scope=function
+// bind=catl::peer_client::remember_node_pin_owner_barrier_locked@2b0843e869e79f78
+// owner=unresolved owner_hypothesis=node_cache commit=mutex
+// touches=prv.S0043 mutation_class=running_guarded
+// label=register_distinct_peer_set_strand_for_local_pin_destruction
+NodeCache::remember_node_pin_owner_barrier_locked(PeerGenerationPin const& pin)
+{
+    auto owner = pin.release_owner();
+    if (!owner)
+        return;
+    if (std::find(
+            node_pin_owner_barriers_.begin(),
+            node_pin_owner_barriers_.end(),
+            owner) == node_pin_owner_barriers_.end())
+    {
+        node_pin_owner_barriers_.push_back(std::move(owner));
+    }
+}
+
+//@@authority transition=prv.T0106 status=provisional scope=function
+// bind=catl::peer_client::maybe_complete_node_operation_locked@399b81845cf54c79
+// owner=unresolved owner_hypothesis=node_cache commit=mutex
+// touches=prv.S0040,prv.S0041 mutation_class=terminal_receipt
+// label=consume_terminal_operation_row_after_zero_servant_witness
+std::shared_ptr<SerializedTimerSignal>
+NodeCache::maybe_complete_node_operation_locked(
+    std::shared_ptr<NodeFetchRound> const& round) noexcept
+{
+    if (!round || round->operation_id == 0 ||
+        round->phase != NodeFetchRound::Phase::retired ||
+        !round->deadline_servants.empty())
+    {
+        return nullptr;
+    }
+
+    auto const it = active_node_operations_.find(round->operation_id);
+    if (it == active_node_operations_.end() || it->second != round)
+        return nullptr;
+
+    active_node_operations_.erase(it);
+    return round->servants_done_signal;
+}
+
+//@@authority transition=prv.T0097 status=provisional scope=function
+// bind=catl::peer_client::terminalize_node_operation_locked@cafe3bcf7b1c99ff
+// owner=unresolved owner_hypothesis=node_cache commit=mutex
+// touches=prv.S0018,prv.S0040,prv.S0041
+// mutation_class=terminal_receipt
+// label=terminalize_exact_node_operation_and_publish_receipt_when_empty
+std::shared_ptr<SerializedTimerSignal>
+NodeCache::terminalize_node_operation_locked(
+    std::shared_ptr<NodeFetchRound> const& round) noexcept
+{
+    if (!round)
+        return nullptr;
+    round->phase = NodeFetchRound::Phase::retired;
+    round->submissions_closed = true;
+    return maybe_complete_node_operation_locked(round);
+}
+
+//@@authority transition=prv.T0096 status=provisional scope=function
+// bind=catl::peer_client::on_node_deadline_servant_done@47542784ced75d0a
+// owner=unresolved owner_hypothesis=node_cache commit=mutex
+// touches=prv.S0040,prv.S0041 mutation_class=terminal_receipt
+// label=consume_exact_node_deadline_servant_receipt
+void
+NodeCache::on_node_deadline_servant_done(
+    std::shared_ptr<NodeFetchRound> const& round,
+    std::uint64_t servant_id) noexcept
+{
+    std::shared_ptr<SerializedTimerSignal> operation_done;
+    try
+    {
+        std::lock_guard lock(mutex_);
+        if (!round || round->deadline_servants.erase(servant_id) != 1)
+            return;
+        operation_done = maybe_complete_node_operation_locked(round);
+    }
+    catch (...)
+    {
+        return;
+    }
+    complete_timer_noexcept(operation_done);
+}
+
+//@@authority transition=prv.T0105 status=provisional scope=function
+// bind=catl::peer_client::publish_node_stop_failure_locked@351f24a0babcc548
+// owner=unresolved owner_hypothesis=node_cache commit=mutex
+// touches=prv.S0042 mutation_class=terminal_receipt
+// label=publish_shared_node_stop_failure_after_storing_exception
+void
+NodeCache::publish_node_stop_failure_locked(
+    std::shared_ptr<NodeStopState> const& stop,
+    std::exception_ptr failure) noexcept
+{
+    stop->failure = std::move(failure);
+    stop->phase = NodeStopState::Phase::failed;
+}
+
+bool
+NodeCache::node_stop_terminal_predicate_locked(
+    std::shared_ptr<NodeStopState> const& stop,
+    std::vector<std::shared_ptr<NodeFetchRound>> const& operations,
+    bool local_pins_consumed,
+    bool owner_barriers_consumed) const noexcept
+{
+    if (node_stop_state_ != stop ||
+        node_lifecycle_ != NodeLifecycle::stopping || !store_.empty() ||
+        !lru_.empty() || !lru_map_.empty() ||
+        !active_node_operations_.empty() || !node_pin_owner_barriers_.empty() ||
+        !local_pins_consumed || !owner_barriers_consumed)
+    {
+        return false;
+    }
+
+    return std::all_of(
+        operations.begin(), operations.end(), [](auto const& round) {
+            return round && round->phase == NodeFetchRound::Phase::retired &&
+                round->deadline_servants.empty();
+        });
 }
 
 std::string
@@ -264,6 +489,11 @@ NodeCache::format_progress(ProgressEvent const& event)
     return std::string(prefix) + "unknown progress";
 }
 
+//@@authority transition=prv.T0113 status=provisional scope=function
+// bind=catl::peer_client::attach_waiter_locked@ef82e61e4b2f6bef
+// owner=unresolved owner_hypothesis=node_cache commit=mutex
+// touches=prv.S0004 mutation_class=running_guarded
+// label=attach_node_rider_progress_signal
 NodeCache::WaitRegistration
 NodeCache::attach_waiter_locked(Entry& entry)
 {
@@ -290,6 +520,11 @@ NodeCache::attach_waiter_locked(HeaderEntry& entry)
         .cursor = entry.progress.journal.subscribe()};
 }
 
+//@@authority transition=prv.T0114 status=provisional scope=function
+// bind=catl::peer_client::refresh_waiter_locked@0bfca3576767be3a
+// owner=unresolved owner_hypothesis=node_cache commit=mutex
+// touches=prv.S0004 mutation_class=running_guarded
+// label=refresh_node_rider_progress_signal
 void
 NodeCache::refresh_waiter_locked(Entry& entry, WaitRegistration& wait)
 {
@@ -311,6 +546,11 @@ NodeCache::refresh_waiter_locked(HeaderEntry& entry, WaitRegistration& wait)
     wait.progress_signal = entry.progress.signal;
 }
 
+//@@authority transition=prv.T0115 status=provisional scope=function
+// bind=catl::peer_client::publish_progress_locked@567ca0cb198ead5d
+// owner=unresolved owner_hypothesis=node_cache commit=mutex
+// touches=prv.S0004 mutation_class=running_guarded
+// label=publish_node_progress_and_rotate_signal
 std::shared_ptr<SerializedTimerSignal>
 NodeCache::publish_progress_locked(
     Entry& entry,
@@ -379,7 +619,8 @@ NodeCache::publish_node_progress(
     {
         std::lock_guard lock(mutex_);
         auto it = store_.find(hash);
-        if (it != store_.end() && !it->second.present)
+        if (node_lifecycle_ == NodeLifecycle::running && it != store_.end() &&
+            !it->second.present)
         {
             wake = publish_progress_locked(
                 it->second,
@@ -935,7 +1176,7 @@ NodeCache::walk_to_impl(
 // alive so late-arriving peer responses still get cached.
 // ═══════════════════════════════════════════════════════════════════════
 
-asio::awaitable<std::shared_ptr<std::vector<uint8_t>>>
+asio::awaitable<std::shared_ptr<std::vector<uint8_t> const>>
 NodeCache::ensure_present(
     Hash256 expected_hash,
     Hash256 ledger_hash,
@@ -960,17 +1201,23 @@ NodeCache::ensure_present(
 
     enum class Action { hit, return_null, wait, send_and_wait };
     Action action;
-    std::shared_ptr<std::vector<uint8_t>> hit_data;
+    std::shared_ptr<std::vector<uint8_t> const> hit_data;
     std::shared_ptr<SerializedTimerSignal> send_signal;
     std::shared_ptr<SerializedTimerSignal> deadline_signal;
     std::shared_ptr<NodeFetchRound> deadline_round;
     std::shared_ptr<SerializedTimerSignal> superseded_signal;
+    std::shared_ptr<SerializedTimerSignal> superseded_admission_deadline;
+    std::shared_ptr<SerializedTimerSignal> superseded_operation_done;
     std::shared_ptr<NodeFetchRound> send_round;
     bool const managed_transport = node_fetch_coordinator_.has_value();
 
+    //@@authority transition=prv.T0120 status=provisional scope=statement
+    // bind=declaration@ecde2bc00a5e4fac
+    // owner=unresolved owner_hypothesis=node_cache commit=mutex
+    // touches=prv.S0002,prv.S0003,prv.S0005,prv.S0018,prv.S0040
+    // mutation_class=running_guarded
+    // label=open_exact_shared_node_fetch_round
     auto const open_round = [&](Entry& entry, bool send) {
-        if (entry.round)
-            entry.round->phase = NodeFetchRound::Phase::retired;
         auto round = std::make_shared<NodeFetchRound>();
         round->phase = managed_transport && send
             ? NodeFetchRound::Phase::admission
@@ -985,11 +1232,36 @@ NodeCache::ensure_present(
             round->admission_deadline =
                 SerializedTimerSignal::create(io_, managed_admission_timeout_);
         }
+        round->servants_done_signal = SerializedTimerSignal::create(
+            io_, asio::steady_timer::time_point::max());
+        if (next_node_operation_id_ ==
+            std::numeric_limits<std::uint64_t>::max())
+        {
+            throw PeerClientException(
+                Error::ResourceExhausted, "node operation identity exhausted");
+        }
+        round->operation_id = ++next_node_operation_id_;
+        //@@authority transition=prv.T0093 status=provisional scope=statement
+        // bind=expression_statement@26604e9d04292d89
+        // owner=unresolved owner_hypothesis=node_cache commit=mutex
+        // touches=prv.S0040 label=mint_exact_node_operation_into_registry
+        active_node_operations_.emplace(
+            round->operation_id,
+            round); //@@authority-target ids=prv.T0093
+
+        if (entry.round)
+        {
+            superseded_signal = entry.signal;
+            superseded_admission_deadline = entry.round->admission_deadline;
+            superseded_operation_done =
+                terminalize_node_operation_locked(entry.round);
+        }
+        entry.peer_pins.clear();
         entry.round = round;
         entry.signal = signal;
         entry.round_opened_at = std::chrono::steady_clock::now();
         return std::pair{std::move(round), std::move(signal)};
-    };
+    }; //@@authority-target ids=prv.T0120
     auto const project_round_evidence =
         [&](std::shared_ptr<NodeFetchRound> const& round) {
             if (!round)
@@ -1018,158 +1290,181 @@ NodeCache::ensure_present(
 
     {
         std::lock_guard lock(mutex_);
-        //@@authority transition=prv.T0011 status=provisional scope=statement
-        // bind=declaration@c92e96dd35b173c2
-        // owner=unresolved owner_hypothesis=node_cache
-        // commit=mutex touches=prv.S0001
-        // label=admit_or_join_hash_keyed_shared_node_row
-        auto [it, inserted] = store_.try_emplace(
-            expected_hash); //@@authority-target ids=prv.T0011
-        touch_lru(expected_hash);
-
-        if (!inserted && it->second.present)
+        if (node_lifecycle_ != NodeLifecycle::running)
         {
-            // HIT — already cached
-            hits_++;
-            touch_lru(expected_hash);
-            hit_data = it->second.wire_data;
-            action = Action::hit;
-            PLOGD(
-                log_,
-                "  ensure: HIT hash=",
-                expected_hash.hex().substr(0, 16),
-                " (",
-                hit_data->size(),
-                "B)");
+            action = Action::return_null;
         }
-        else if (!inserted)
+        else
         {
-            // IN-FLIGHT — entry exists but data hasn't arrived yet.
-            // Stale detection: if the last fetch was sent more than
-            // N*timeout ago, the original sender likely timed out and
-            // the peer probably dropped the request. Re-send with a
-            // fresh signal.
-            auto now = std::chrono::steady_clock::now();
-            bool signal_missing = !it->second.signal;
-            bool signal_expired =
-                it->second.signal && it->second.signal->expiry() <= now;
-            bool has_prior_dispatch = it->second.last_fetch_at !=
-                std::chrono::steady_clock::time_point{};
-            bool has_open_round = it->second.round_opened_at !=
-                std::chrono::steady_clock::time_point{};
-            auto const phase_timeout = it->second.round &&
-                    it->second.round->phase == NodeFetchRound::Phase::admission
-                ? managed_admission_timeout_
-                : fetch_timeout_;
-            auto stale_threshold = phase_timeout * fetch_stale_multiplier_;
-            bool is_stale = has_open_round &&
-                now - it->second.round_opened_at > stale_threshold;
-            bool const admission_owner_active = it->second.round &&
-                it->second.round->phase == NodeFetchRound::Phase::admission;
+            //@@authority transition=prv.T0011 status=provisional
+            // scope=statement
+            // bind=declaration@c92e96dd35b173c2
+            // owner=unresolved owner_hypothesis=node_cache
+            // commit=mutex touches=prv.S0001
+            // mutation_class=running_guarded
+            // label=admit_or_join_hash_keyed_shared_node_row
+            auto [it, inserted] = store_.try_emplace(
+                expected_hash); //@@authority-target ids=prv.T0011
+            touch_lru(expected_hash);
 
-            if (!admission_owner_active &&
-                (signal_missing || signal_expired || is_stale) && peer &&
-                peer->is_ready())
+            if (!inserted && it->second.present)
             {
-                // There is no active shared signal or the fetch is stale, so
-                // refresh the wait handle and re-send with the current peer.
-                it->second.peer_pins.clear();
-                superseded_signal = it->second.signal;
-                auto [round, signal] = open_round(it->second, true);
-                send_round = std::move(round);
+                // HIT — already cached
+                hits_++;
+                touch_lru(expected_hash);
+                hit_data = it->second.wire_data;
+                action = Action::hit;
+                PLOGD(
+                    log_,
+                    "  ensure: HIT hash=",
+                    expected_hash.hex().substr(0, 16),
+                    " (",
+                    hit_data->size(),
+                    "B)");
+            }
+            else if (!inserted)
+            {
+                // IN-FLIGHT — entry exists but data hasn't arrived yet.
+                // Stale detection: if the last fetch was sent more than
+                // N*timeout ago, the original sender likely timed out and
+                // the peer probably dropped the request. Re-send with a
+                // fresh signal.
+                auto now = std::chrono::steady_clock::now();
+                bool signal_missing = !it->second.signal;
+                bool signal_expired =
+                    it->second.signal && it->second.signal->expiry() <= now;
+                bool has_prior_dispatch = it->second.last_fetch_at !=
+                    std::chrono::steady_clock::time_point{};
+                bool has_open_round = it->second.round_opened_at !=
+                    std::chrono::steady_clock::time_point{};
+                auto const phase_timeout = it->second.round &&
+                        it->second.round->phase ==
+                            NodeFetchRound::Phase::admission
+                    ? managed_admission_timeout_
+                    : fetch_timeout_;
+                auto stale_threshold = phase_timeout * fetch_stale_multiplier_;
+                bool is_stale = has_open_round &&
+                    now - it->second.round_opened_at > stale_threshold;
+                bool const admission_owner_active = it->second.round &&
+                    it->second.round->phase == NodeFetchRound::Phase::admission;
+
+                if (!admission_owner_active &&
+                    (signal_missing || signal_expired || is_stale) && peer &&
+                    peer->is_ready())
+                {
+                    // There is no active shared signal or the fetch is stale,
+                    // so refresh the wait handle and re-send with the current
+                    // peer.
+                    //@@authority transition=prv.T0121 status=provisional
+                    // bind=expression_statement@9510acebc6d14c72
+                    // scope=statement owner=unresolved
+                    // owner_hypothesis=node_cache commit=mutex
+                    // touches=prv.S0003 mutation_class=running_guarded
+                    // label=release_superseded_round_generation_pins
+                    it->second.peer_pins
+                        .clear(); //@@authority-target ids=prv.T0121
+                    superseded_signal = it->second.signal;
+                    auto [round, signal] = open_round(it->second, true);
+                    send_round = std::move(round);
+                    send_signal = signal;
+                    deadline_round = send_round;
+                    deadline_signal = send_round->admission_deadline
+                        ? send_round->admission_deadline
+                        : signal;
+                    action = Action::send_and_wait;
+                    PLOGD(
+                        log_,
+                        "  ensure: ",
+                        signal_missing ? "RESET"
+                                       : (signal_expired ? "EXPIRED" : "STALE"),
+                        " in-flight hash=",
+                        expected_hash.hex().substr(0, 16),
+                        " — re-sending");
+                }
+                else if (
+                    !admission_owner_active &&
+                    (signal_missing || signal_expired) && has_prior_dispatch)
+                {
+                    // A prior fetch was sent, but there is no active timer left
+                    // to wait on. Create a fresh shared signal so another
+                    // caller can still benefit from a late response.
+                    auto [round, signal] = open_round(it->second, false);
+                    deadline_round = std::move(round);
+                    deadline_signal = std::move(signal);
+                    action = Action::wait;
+                    PLOGD(
+                        log_,
+                        "  ensure: ",
+                        signal_missing ? "RESET" : "EXPIRED",
+                        " (no peer) hash=",
+                        expected_hash.hex().substr(0, 16),
+                        " — fresh signal, waiting");
+                }
+                else if (signal_missing)
+                {
+                    // No active timer and no evidence a fetch was ever sent.
+                    // There is nothing to wait for until a caller supplies a
+                    // peer.
+                    action = Action::return_null;
+                    PLOGD(
+                        log_,
+                        "  ensure: RESET (no prior fetch) hash=",
+                        expected_hash.hex().substr(0, 16),
+                        " — no peer, returning miss");
+                }
+                else
+                {
+                    action = Action::wait;
+                    PLOGD(
+                        log_,
+                        "  ensure: IN-FLIGHT hash=",
+                        expected_hash.hex().substr(0, 16),
+                        " — waiting on signal");
+                }
+            }
+            else
+            {
+                // MISS — new entry, create signal and fetch
+                misses_++;
+                //@@authority transition=prv.T0012 status=provisional
+                // bind=declaration@19ae7a56972085f7
+                // scope=statement
+                // owner=unresolved owner_hypothesis=node_cache
+                // commit=mutex touches=prv.S0002
+                // label=install_new_shared_round_signal
+                auto [round, signal] = open_round(
+                    it->second, true); //@@authority-target ids=prv.T0012
+                //@@authority transition=prv.T0013 status=provisional
+                // bind=expression_statement@618c0b43a69e9a74
+                // scope=statement
+                // owner=unresolved owner_hypothesis=node_cache
+                // commit=mutex touches=prv.S0005
+                // label=publish_exact_round_admission_time
+                send_round =
+                    std::move(round); //@@authority-target ids=prv.T0013
                 send_signal = signal;
                 deadline_round = send_round;
                 deadline_signal = send_round->admission_deadline
                     ? send_round->admission_deadline
                     : signal;
                 action = Action::send_and_wait;
+                evict_if_needed();
                 PLOGD(
                     log_,
-                    "  ensure: ",
-                    signal_missing ? "RESET"
-                                   : (signal_expired ? "EXPIRED" : "STALE"),
-                    " in-flight hash=",
+                    "  ensure: MISS hash=",
                     expected_hash.hex().substr(0, 16),
-                    " — re-sending");
+                    " depth=",
+                    static_cast<int>(position.depth),
+                    " — fetching");
             }
-            else if (
-                !admission_owner_active && (signal_missing || signal_expired) &&
-                has_prior_dispatch)
-            {
-                // A prior fetch was sent, but there is no active timer left to
-                // wait on. Create a fresh shared signal so another caller can
-                // still benefit from a late response.
-                auto [round, signal] = open_round(it->second, false);
-                deadline_round = std::move(round);
-                deadline_signal = std::move(signal);
-                action = Action::wait;
-                PLOGD(
-                    log_,
-                    "  ensure: ",
-                    signal_missing ? "RESET" : "EXPIRED",
-                    " (no peer) hash=",
-                    expected_hash.hex().substr(0, 16),
-                    " — fresh signal, waiting");
-            }
-            else if (signal_missing)
-            {
-                // No active timer and no evidence a fetch was ever sent.
-                // There is nothing to wait for until a caller supplies a peer.
-                action = Action::return_null;
-                PLOGD(
-                    log_,
-                    "  ensure: RESET (no prior fetch) hash=",
-                    expected_hash.hex().substr(0, 16),
-                    " — no peer, returning miss");
-            }
-            else
-            {
-                action = Action::wait;
-                PLOGD(
-                    log_,
-                    "  ensure: IN-FLIGHT hash=",
-                    expected_hash.hex().substr(0, 16),
-                    " — waiting on signal");
-            }
-        }
-        else
-        {
-            // MISS — new entry, create signal and fetch
-            misses_++;
-            //@@authority transition=prv.T0012 status=provisional
-            // bind=declaration@19ae7a56972085f7
-            // scope=statement
-            // owner=unresolved owner_hypothesis=node_cache
-            // commit=mutex touches=prv.S0002
-            // label=install_new_shared_round_signal
-            auto [round, signal] = open_round(
-                it->second, true); //@@authority-target ids=prv.T0012
-            //@@authority transition=prv.T0013 status=provisional
-            // bind=expression_statement@618c0b43a69e9a74
-            // scope=statement
-            // owner=unresolved owner_hypothesis=node_cache
-            // commit=mutex touches=prv.S0005
-            // label=publish_exact_round_admission_time
-            send_round = std::move(round); //@@authority-target ids=prv.T0013
-            send_signal = signal;
-            deadline_round = send_round;
-            deadline_signal = send_round->admission_deadline
-                ? send_round->admission_deadline
-                : signal;
-            action = Action::send_and_wait;
-            evict_if_needed();
-            PLOGD(
-                log_,
-                "  ensure: MISS hash=",
-                expected_hash.hex().substr(0, 16),
-                " depth=",
-                static_cast<int>(position.depth),
-                " — fetching");
         }
     }  // mutex released
 
     if (superseded_signal)
         complete_timer_noexcept(superseded_signal);
+    if (superseded_admission_deadline != superseded_signal)
+        complete_timer_noexcept(superseded_admission_deadline);
+    complete_timer_noexcept(superseded_operation_done);
 
     auto abandon_exact_send_round = [&]() {
         retire_node_fetch_round(expected_hash, send_signal);
@@ -1247,25 +1542,39 @@ NodeCache::ensure_present(
 
         try
         {
+            if (before_node_primary_pin_commit_for_test_)
+                before_node_primary_pin_commit_for_test_();
             std::lock_guard lock(mutex_);
             auto it = store_.find(expected_hash);
             if (it == store_.end() || it->second.present ||
                 it->second.signal != send_signal ||
                 it->second.round != send_round)
             {
+                //@@authority transition=prv.T0122 status=provisional
+                // bind=co_return_statement@1d381e4a19a6760b
+                // scope=statement owner=unresolved
+                // owner_hypothesis=object_store commit=mutex
+                // touches=prv.S0001 mutation_class=running_guarded
+                // label=project_immutable_wire_after_competing_commit
                 co_return it != store_.end() && it->second.present
                     ? it->second.wire_data
-                    : nullptr;
+                    : nullptr; //@@authority-target ids=prv.T0122
             }
-            //@@authority transition=prv.T0001 status=provisional
-            // bind=share@7fe56c43ace668b4
-            // scope=statement owner=unresolved
-            // owner_hypothesis=node_cache commit=mutex
-            // touches=prv.S0003 calls=share
-            // label=conditionally_retain_primary_peer_pin
+            if (node_lifecycle_ != NodeLifecycle::running)
+                co_return nullptr;
             if (peer_pin)
+            {
+                remember_node_pin_owner_barrier_locked(peer_pin);
+                //@@authority transition=prv.T0001 status=provisional
+                // bind=share@1e314a0ca0896457
+                // scope=statement owner=unresolved
+                // owner_hypothesis=node_cache commit=mutex
+                // touches=prv.S0003 calls=share
+                // mutation_class=running_guarded
+                // label=conditionally_retain_primary_peer_pin
                 it->second.peer_pins.push_back(
                     peer_pin.share()); //@@authority-target ids=prv.T0001
+            }
             // The admission timestamp was committed with this exact signal.
             // This commit adds the primary transport pin without reopening
             // stale-round selection.
@@ -1411,15 +1720,25 @@ NodeCache::ensure_present(
         co_return nullptr;
 
     WaitRegistration wait;
+    if (before_node_waiter_attach_commit_for_test_)
+        before_node_waiter_attach_commit_for_test_();
     {
         std::lock_guard lock(mutex_);
+        if (node_lifecycle_ != NodeLifecycle::running)
+            co_return nullptr;
         auto it = store_.find(expected_hash);
         if (it == store_.end())
             co_return nullptr;
         if (it->second.present)
         {
             touch_lru(expected_hash);
-            co_return it->second.wire_data;
+            //@@authority transition=prv.T0123 status=provisional
+            // bind=co_return_statement@955cdf8fed59d2d5
+            // scope=statement owner=unresolved
+            // owner_hypothesis=object_store commit=mutex
+            // touches=prv.S0001 mutation_class=running_guarded
+            // label=project_immutable_wire_to_new_rider
+            co_return it->second.wire_data; //@@authority-target ids=prv.T0123
         }
         //@@authority transition=prv.T0014 status=provisional scope=statement
         // bind=attach_waiter_locked@92d86de861198d83
@@ -1459,9 +1778,18 @@ NodeCache::ensure_present(
                 if (ec == asio::error::operation_aborted)
                     waiter_wakeups_++;
                 touch_lru(expected_hash);
-                co_return it->second.wire_data;
+                //@@authority transition=prv.T0124 status=provisional
+                // bind=co_return_statement@955cdf8fed59d2d5
+                // scope=statement owner=unresolved
+                // owner_hypothesis=object_store commit=mutex
+                // touches=prv.S0001 mutation_class=running_guarded
+                // label=project_immutable_wire_to_woken_rider
+                co_return it->second
+                    .wire_data; //@@authority-target ids=prv.T0124
             }
 
+            if (node_lifecycle_ != NodeLifecycle::running)
+                co_return nullptr;
             progress_events = it->second.progress.journal.replay(wait.cursor);
             refresh_waiter_locked(it->second, wait);
         }
@@ -1522,7 +1850,7 @@ NodeCache::ensure_present(
 //@@authority transition=prv.T0034 status=provisional scope=function
 // bind=catl::peer_client::retain_node_fanout_pin@986e8fd18b9f00c0
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
-// touches=prv.S0003,prv.S0018
+// touches=prv.S0003,prv.S0018 mutation_class=running_guarded
 // label=retain_fanout_against_stable_round_identity
 bool
 NodeCache::retain_node_fanout_pin(
@@ -1534,15 +1862,19 @@ NodeCache::retain_node_fanout_pin(
     {
         std::lock_guard lock(mutex_);
         auto const it = store_.find(hash);
-        if (!round || it == store_.end() || it->second.present ||
-            !it->second.signal || it->second.round != round ||
+        if (node_lifecycle_ != NodeLifecycle::running || !round ||
+            it == store_.end() || it->second.present || !it->second.signal ||
+            it->second.round != round ||
             round->phase == NodeFetchRound::Phase::retired ||
             round->submissions_closed)
         {
             return false;
         }
         if (pin)
+        {
+            remember_node_pin_owner_barrier_locked(pin);
             it->second.peer_pins.push_back(std::move(pin));
+        }
         return true;
     }
     catch (...)
@@ -1554,7 +1886,8 @@ NodeCache::retain_node_fanout_pin(
 //@@authority transition=prv.T0056 status=provisional scope=function
 // bind=catl::peer_client::handle_node_waiter_timeout@c4790b17bbde32e5
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
-// touches=prv.S0002,prv.S0018
+// touches=prv.S0002,prv.S0003,prv.S0018
+// mutation_class=terminal_receipt
 // label=waiter_defers_admission_timeout_to_exact_round_owner
 bool
 NodeCache::handle_node_waiter_timeout(
@@ -1564,11 +1897,13 @@ NodeCache::handle_node_waiter_timeout(
     WaitRegistration& wait) noexcept
 {
     bool retired = false;
+    std::shared_ptr<SerializedTimerSignal> operation_done;
     try
     {
         std::lock_guard lock(mutex_);
         auto const it = store_.find(hash);
-        if (!round || it == store_.end() || it->second.present ||
+        if (node_lifecycle_ != NodeLifecycle::running || !round ||
+            it == store_.end() || it->second.present ||
             it->second.round != round || !it->second.signal ||
             round->phase == NodeFetchRound::Phase::retired)
         {
@@ -1592,7 +1927,7 @@ NodeCache::handle_node_waiter_timeout(
 
         it->second.signal.reset();
         it->second.peer_pins.clear();
-        round->phase = NodeFetchRound::Phase::retired;
+        operation_done = terminalize_node_operation_locked(round);
         retired = true;
     }
     catch (...)
@@ -1603,6 +1938,7 @@ NodeCache::handle_node_waiter_timeout(
     if (retired)
     {
         complete_timer_noexcept(waited_signal);
+        complete_timer_noexcept(operation_done);
         if (node_round_retired_hook_for_test_)
         {
             try
@@ -1629,7 +1965,8 @@ NodeCache::handle_node_waiter_timeout(
 //@@authority transition=prv.T0047 status=provisional scope=function
 // bind=catl::peer_client::register_managed_submission@4e9db16b5b96c56f
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
-// touches=prv.S0018 label=preinstall_managed_submission_handshake_slot
+// touches=prv.S0018 mutation_class=running_guarded
+// label=preinstall_managed_submission_handshake_slot
 std::optional<std::size_t>
 NodeCache::register_managed_submission(
     Hash256 const& hash,
@@ -1638,8 +1975,9 @@ NodeCache::register_managed_submission(
 {
     std::lock_guard lock(mutex_);
     auto const it = store_.find(hash);
-    if (it == store_.end() || it->second.present || it->second.round != round ||
-        !it->second.signal || round->phase == NodeFetchRound::Phase::retired ||
+    if (node_lifecycle_ != NodeLifecycle::running || it == store_.end() ||
+        it->second.present || it->second.round != round || !it->second.signal ||
+        round->phase == NodeFetchRound::Phase::retired ||
         round->submissions_closed ||
         round->dispatch_count == round->dispatches.size())
     {
@@ -1655,7 +1993,8 @@ NodeCache::register_managed_submission(
 //@@authority transition=prv.T0048 status=provisional scope=function
 // bind=catl::peer_client::commit_managed_submission@8bb95378c9b77f97
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
-// touches=prv.S0018 label=reconcile_reserved_return_with_early_outcome
+// touches=prv.S0018 mutation_class=running_guarded
+// label=reconcile_reserved_return_with_early_outcome
 void
 NodeCache::commit_managed_submission(
     Hash256 const& hash,
@@ -1665,7 +2004,8 @@ NodeCache::commit_managed_submission(
     try
     {
         std::lock_guard lock(mutex_);
-        if (!round || slot >= round->dispatch_count)
+        if (node_lifecycle_ != NodeLifecycle::running || !round ||
+            slot >= round->dispatch_count)
             return;
         auto& dispatch = round->dispatches[slot];
         if (dispatch.state == NodeFetchRound::DispatchState::submitting)
@@ -1694,7 +2034,8 @@ NodeCache::commit_managed_submission(
 //@@authority transition=prv.T0049 status=provisional scope=function
 // bind=catl::peer_client::rollback_managed_submission@73d9616462591ca5
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
-// touches=prv.S0018 label=rollback_synchronously_refused_submission_slot
+// touches=prv.S0018 mutation_class=terminal_receipt
+// label=rollback_synchronously_refused_submission_slot
 void
 NodeCache::rollback_managed_submission(
     Hash256 const& hash,
@@ -1704,7 +2045,8 @@ NodeCache::rollback_managed_submission(
     try
     {
         std::lock_guard lock(mutex_);
-        if (!round || slot >= round->dispatch_count)
+        if (node_lifecycle_ != NodeLifecycle::running || !round ||
+            slot >= round->dispatch_count)
             return;
 
         auto& dispatch = round->dispatches[slot];
@@ -1737,7 +2079,8 @@ NodeCache::rollback_managed_submission(
 //@@authority transition=prv.T0050 status=provisional scope=function
 // bind=catl::peer_client::close_managed_submissions@4c81761bc7dd9922
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
-// touches=prv.S0018 label=seal_fanout_set_before_all_not_written_terminal
+// touches=prv.S0018 mutation_class=running_guarded
+// label=seal_fanout_set_before_all_not_written_terminal
 void
 NodeCache::close_managed_submissions(
     Hash256 const& hash,
@@ -1746,7 +2089,7 @@ NodeCache::close_managed_submissions(
     try
     {
         std::lock_guard lock(mutex_);
-        if (!round)
+        if (node_lifecycle_ != NodeLifecycle::running || !round)
             return;
         round->submissions_closed = true;
     }
@@ -1759,7 +2102,8 @@ NodeCache::close_managed_submissions(
 //@@authority transition=prv.T0051 status=provisional scope=function
 // bind=catl::peer_client::settle_managed_submission@2d057973641c1f27
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
-// touches=prv.S0018 label=consume_managed_publication_outcome_exactly_once
+// touches=prv.S0006,prv.S0018 mutation_class=terminal_receipt
+// label=consume_managed_publication_outcome_exactly_once
 void
 NodeCache::settle_managed_submission(
     Hash256 const& hash,
@@ -1770,7 +2114,8 @@ NodeCache::settle_managed_submission(
     try
     {
         std::lock_guard lock(mutex_);
-        if (!round || slot >= round->dispatch_count)
+        if (node_lifecycle_ != NodeLifecycle::running || !round ||
+            slot >= round->dispatch_count)
             return;
 
         auto& dispatch = round->dispatches[slot];
@@ -1822,7 +2167,8 @@ NodeCache::settle_managed_submission(
 //@@authority transition=prv.T0055 status=provisional scope=function
 // bind=catl::peer_client::reconcile_managed_round@09790c04f27df0f3
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
-// touches=prv.S0018,prv.S0020
+// touches=prv.S0005,prv.S0018,prv.S0020
+// mutation_class=running_guarded
 // label=reconcile_closed_managed_round_into_response_or_retirement
 void
 NodeCache::reconcile_managed_round(
@@ -1837,7 +2183,8 @@ NodeCache::reconcile_managed_round(
     {
         std::lock_guard lock(mutex_);
         auto const it = store_.find(hash);
-        if (!round || it == store_.end() || it->second.present ||
+        if (node_lifecycle_ != NodeLifecycle::running || !round ||
+            it == store_.end() || it->second.present ||
             it->second.round != round || !it->second.signal ||
             round->phase != NodeFetchRound::Phase::admission ||
             !round->submissions_closed)
@@ -1906,7 +2253,8 @@ NodeCache::reconcile_managed_round(
     {
         std::lock_guard lock(mutex_);
         auto const it = store_.find(hash);
-        if (!round || it == store_.end() || it->second.present ||
+        if (node_lifecycle_ != NodeLifecycle::running || !round ||
+            it == store_.end() || it->second.present ||
             it->second.round != round || it->second.signal != observed_signal ||
             round->phase != NodeFetchRound::Phase::admission ||
             !round->submissions_closed || !round->response_possible)
@@ -1939,9 +2287,10 @@ NodeCache::reconcile_managed_round(
         retire_node_fetch_round(hash, response_signal);
 }
 
-//@@authority transition=prv.T0064 status=provisional scope=function bind=catl::peer_client::register_raw_submission@e3c7330f5d8d49ee
+//@@authority transition=prv.T0064 status=provisional scope=function
+// bind=catl::peer_client::register_raw_submission@e3c7330f5d8d49ee
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
-// touches=prv.S0018
+// touches=prv.S0018 mutation_class=running_guarded
 // label=preinstall_raw_write_completion_slot
 std::optional<std::size_t>
 NodeCache::register_raw_submission(
@@ -1951,9 +2300,9 @@ NodeCache::register_raw_submission(
 {
     std::lock_guard lock(mutex_);
     auto const it = store_.find(hash);
-    if (!round || it == store_.end() || it->second.present ||
-        it->second.round != round || !it->second.signal ||
-        round->phase != NodeFetchRound::Phase::response ||
+    if (node_lifecycle_ != NodeLifecycle::running || !round ||
+        it == store_.end() || it->second.present || it->second.round != round ||
+        !it->second.signal || round->phase != NodeFetchRound::Phase::response ||
         round->submissions_closed ||
         round->dispatch_count == round->dispatches.size())
     {
@@ -1966,9 +2315,10 @@ NodeCache::register_raw_submission(
     return slot;
 }
 
-//@@authority transition=prv.T0065 status=provisional scope=function bind=catl::peer_client::settle_raw_submission@99bdf78ccc432ed4
+//@@authority transition=prv.T0065 status=provisional scope=function
+// bind=catl::peer_client::settle_raw_submission@99bdf78ccc432ed4
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
-// touches=prv.S0018,prv.S0006
+// touches=prv.S0018,prv.S0006 mutation_class=terminal_receipt
 // label=consume_raw_write_completion_into_exact_dispatch_slot
 void
 NodeCache::settle_raw_submission(
@@ -1980,7 +2330,8 @@ NodeCache::settle_raw_submission(
     try
     {
         std::lock_guard lock(mutex_);
-        if (!round || slot >= round->dispatch_count)
+        if (node_lifecycle_ != NodeLifecycle::running || !round ||
+            slot >= round->dispatch_count)
             return;
 
         auto& dispatch = round->dispatches[slot];
@@ -2001,13 +2352,15 @@ NodeCache::settle_raw_submission(
             if (it != store_.end() && !it->second.present &&
                 it->second.round == round)
             {
-                //@@authority transition=prv.T0032 status=provisional bind=expression_statement@d318fee4b7edaf1d
+                //@@authority transition=prv.T0032 status=provisional
+                // bind=expression_statement@d318fee4b7edaf1d
                 // scope=statement
                 // owner=unresolved owner_hypothesis=object_store
                 // commit=mutex touches=prv.S0006
                 // label=record_confirmed_raw_content_addressed_dispatch
-                it->second.last_fetch_at =
-                    std::chrono::steady_clock::now(); //@@authority-target ids=prv.T0032
+                // clang-format off
+                it->second.last_fetch_at = std::chrono::steady_clock::now(); //@@authority-target ids=prv.T0032
+                // clang-format on
             }
         }
     }
@@ -2017,9 +2370,10 @@ NodeCache::settle_raw_submission(
     reconcile_raw_round(hash, round);
 }
 
-//@@authority transition=prv.T0066 status=provisional scope=function bind=catl::peer_client::close_raw_submissions@168e4aef17b8e267
+//@@authority transition=prv.T0066 status=provisional scope=function
+// bind=catl::peer_client::close_raw_submissions@168e4aef17b8e267
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
-// touches=prv.S0018
+// touches=prv.S0018 mutation_class=running_guarded
 // label=seal_raw_projection_set_before_retirement_decision
 void
 NodeCache::close_raw_submissions(
@@ -2029,7 +2383,7 @@ NodeCache::close_raw_submissions(
     try
     {
         std::lock_guard lock(mutex_);
-        if (!round)
+        if (node_lifecycle_ != NodeLifecycle::running || !round)
             return;
         round->submissions_closed = true;
     }
@@ -2039,7 +2393,8 @@ NodeCache::close_raw_submissions(
     reconcile_raw_round(hash, round);
 }
 
-//@@authority transition=prv.T0067 status=provisional scope=function bind=catl::peer_client::reconcile_raw_round@e1b960994bce19b2
+//@@authority transition=prv.T0067 status=provisional scope=function
+// bind=catl::peer_client::reconcile_raw_round@e1b960994bce19b2
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
 // touches=prv.S0018,prv.S0002
 // label=retire_closed_raw_round_when_every_write_is_terminally_not_written
@@ -2053,7 +2408,8 @@ NodeCache::reconcile_raw_round(
     {
         std::lock_guard lock(mutex_);
         auto const it = store_.find(hash);
-        if (!round || it == store_.end() || it->second.present ||
+        if (node_lifecycle_ != NodeLifecycle::running || !round ||
+            it == store_.end() || it->second.present ||
             it->second.round != round || !it->second.signal ||
             round->phase != NodeFetchRound::Phase::response ||
             !round->submissions_closed || round->response_possible)
@@ -2086,7 +2442,7 @@ NodeCache::reconcile_raw_round(
 }
 
 //@@authority transition=prv.T0061 status=provisional scope=function
-//bind=catl::peer_client::send_fetch@a3c31883e13f0fce
+// bind=catl::peer_client::send_fetch@a3c31883e13f0fce
 // owner=unresolved owner_hypothesis=node_cache commit=local
 // touches=prv.S0021
 // label=preflight_refuse_node_projection_without_advertised_coverage
@@ -2365,19 +2721,50 @@ NodeCache::ensure_response_handler(PeerSession& peer)
 // bind=catl::peer_client::arm_node_round_deadline@a426f45bba4fe4e5
 // owner=unresolved owner_hypothesis=node_cache
 // commit=io_context_projection
-// touches=prv.S0002 label=own_exact_round_deadline_servant
+// touches=prv.S0041 mutation_class=running_guarded
+// label=own_exact_round_deadline_servant
 bool
 NodeCache::arm_node_round_deadline(
     Hash256 hash,
     std::shared_ptr<NodeFetchRound> round,
     std::shared_ptr<SerializedTimerSignal> signal) noexcept
 {
+    std::uint64_t servant_id = 0;
     try
     {
-        auto weak = weak_from_this();
+        auto self = shared_from_this();
+        {
+            std::lock_guard lock(mutex_);
+            auto const active = round
+                ? active_node_operations_.find(round->operation_id)
+                : active_node_operations_.end();
+            if (node_lifecycle_ != NodeLifecycle::running || !round ||
+                !signal || round->phase == NodeFetchRound::Phase::retired ||
+                active == active_node_operations_.end() ||
+                active->second != round ||
+                next_node_deadline_servant_id_ ==
+                    std::numeric_limits<std::uint64_t>::max())
+            {
+                return false;
+            }
+
+            servant_id = ++next_node_deadline_servant_id_;
+            //@@authority transition=prv.T0094 status=provisional
+            // bind=expression_statement@3fd6c70dbd0a89c3
+            // scope=statement owner=unresolved owner_hypothesis=node_cache
+            // commit=mutex touches=prv.S0041
+            // label=reserve_exact_deadline_servant_and_wake_signal_before_launch
+            round->deadline_servants.emplace(
+                servant_id,
+                signal); //@@authority-target ids=prv.T0094
+        }
+
+        if (before_node_deadline_launch_for_test_)
+            before_node_deadline_launch_for_test_();
+
         asio::co_spawn(
             io_,
-            [weak, hash, round, signal]() -> asio::awaitable<void> {
+            [self, hash, round, signal]() -> asio::awaitable<void> {
                 try
                 {
                     // Keep servant startup observably after successful co_spawn
@@ -2385,8 +2772,7 @@ NodeCache::arm_node_round_deadline(
                     // than merely the caller-side launch.
                     auto ex = co_await asio::this_coro::executor;
                     co_await asio::post(ex, asio::use_awaitable);
-                    if (auto self = weak.lock();
-                        self && self->node_deadline_servant_hook_for_test_)
+                    if (self->node_deadline_servant_hook_for_test_)
                     {
                         self->node_deadline_servant_hook_for_test_();
                     }
@@ -2394,27 +2780,24 @@ NodeCache::arm_node_round_deadline(
                     auto ec = co_await signal->wait();
                     if (ec == asio::error::operation_aborted)
                         co_return;
-                    if (auto self = weak.lock();
-                        self && self->after_node_deadline_wait_for_test_)
+                    if (self->after_node_deadline_wait_for_test_)
                     {
                         self->after_node_deadline_wait_for_test_();
                     }
-                    if (auto self = weak.lock())
-                    {
-                        self->expire_node_fetch_round(hash, round, signal);
-                        if (self->after_node_deadline_commit_for_test_)
-                            self->after_node_deadline_commit_for_test_();
-                    }
+                    self->expire_node_fetch_round(hash, round, signal);
+                    if (self->after_node_deadline_commit_for_test_)
+                        self->after_node_deadline_commit_for_test_();
                 }
                 catch (...)
                 {
                     // A servant-body failure still consumes the exact
                     // lifecycle obligation it was created to own.
-                    if (auto self = weak.lock())
-                        self->retire_node_fetch_round(hash, signal);
+                    self->retire_node_fetch_round(hash, signal);
                 }
             },
-            asio::detached);
+            [self, round, servant_id](std::exception_ptr) {
+                self->on_node_deadline_servant_done(round, servant_id);
+            });
         return true;
     }
     catch (std::exception const& e)
@@ -2425,13 +2808,25 @@ NodeCache::arm_node_round_deadline(
     {
         PLOGE(log_, "failed to arm node-round deadline");
     }
+    if (servant_id != 0)
+    {
+        //@@authority transition=prv.T0095 status=provisional
+        // bind=on_node_deadline_servant_done@237a050306836d7c
+        // scope=statement owner=unresolved owner_hypothesis=node_cache
+        // commit=mutex calls=on_node_deadline_servant_done
+        // touches=prv.S0041
+        // label=rollback_deadline_servant_reservation_after_launch_refusal
+        on_node_deadline_servant_done(
+            round, servant_id); //@@authority-target ids=prv.T0095
+    }
     return false;
 }
 
 //@@authority transition=prv.T0052 status=provisional scope=function
 // bind=catl::peer_client::expire_node_fetch_round@06c62132472cdf10
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
-// touches=prv.S0018 label=classify_lost_publication_as_indeterminate
+// touches=prv.S0018,prv.S0020 mutation_class=terminal_receipt
+// label=classify_lost_publication_as_indeterminate
 void
 NodeCache::expire_node_fetch_round(
     Hash256 const& hash,
@@ -2449,7 +2844,8 @@ NodeCache::expire_node_fetch_round(
             (round->phase == NodeFetchRound::Phase::admission
                  ? round->admission_deadline == signal
                  : it != store_.end() && it->second.signal == signal);
-        if (!round || it == store_.end() || it->second.present ||
+        if (node_lifecycle_ != NodeLifecycle::running || !round ||
+            it == store_.end() || it->second.present ||
             it->second.round != round || !exact_deadline ||
             round->phase == NodeFetchRound::Phase::retired)
         {
@@ -2498,7 +2894,9 @@ NodeCache::expire_node_fetch_round(
 //@@authority transition=prv.T0018 status=provisional scope=function
 // bind=catl::peer_client::retire_node_fetch_round@77dfd4cb94a3d65b
 // owner=unresolved owner_hypothesis=node_cache commit=mutex
-// touches=prv.S0002 label=retire_exact_node_fetch_round_and_release_pins
+// touches=prv.S0002,prv.S0003,prv.S0018
+// mutation_class=terminal_receipt
+// label=retire_exact_node_fetch_round_and_release_pins
 void
 NodeCache::retire_node_fetch_round(
     Hash256 const& hash,
@@ -2507,6 +2905,7 @@ NodeCache::retire_node_fetch_round(
     bool retired = false;
     std::shared_ptr<SerializedTimerSignal> phase_signal;
     std::shared_ptr<SerializedTimerSignal> admission_deadline;
+    std::shared_ptr<SerializedTimerSignal> operation_done;
     try
     {
         std::lock_guard lock(mutex_);
@@ -2525,7 +2924,10 @@ NodeCache::retire_node_fetch_round(
             it->second.signal.reset();
             it->second.peer_pins.clear();
             if (it->second.round)
-                it->second.round->phase = NodeFetchRound::Phase::retired;
+            {
+                operation_done =
+                    terminalize_node_operation_locked(it->second.round);
+            }
             retired = true;
         }
     }
@@ -2539,6 +2941,7 @@ NodeCache::retire_node_fetch_round(
     complete_timer_noexcept(phase_signal);
     if (admission_deadline != phase_signal)
         complete_timer_noexcept(admission_deadline);
+    complete_timer_noexcept(operation_done);
     if (node_round_retired_hook_for_test_)
     {
         try
@@ -2678,83 +3081,176 @@ NodeCache::compute_inner_hash(std::span<const uint8_t> wire_data)
 // Cache operations
 // ═══════════════════════════════════════════════════════════════════════
 
+//@@authority transition=prv.T0117 status=provisional scope=function
+// bind=catl::peer_client::insert@6e9bd7ca4a70e939
+// owner=unresolved owner_hypothesis=object_store commit=mutex
+// touches=prv.S0001,prv.S0002,prv.S0003,prv.S0004,prv.S0018
+// mutation_class=terminal_receipt
+// label=commit_prepared_content_addressed_response
 bool
 NodeCache::insert(Hash256 const& hash, std::vector<uint8_t> data)
 {
-    std::lock_guard lock(mutex_);
-    auto [it, inserted] = store_.try_emplace(hash);
-    if (inserted || !it->second.present)
+    if (before_node_response_prepare_for_test_)
+        before_node_response_prepare_for_test_();
+    auto prepared =
+        std::make_shared<std::vector<uint8_t> const>(std::move(data));
+    std::shared_ptr<SerializedTimerSignal> signal;
+    std::shared_ptr<SerializedTimerSignal> admission_deadline;
+    std::shared_ptr<SerializedTimerSignal> progress_signal;
+    std::shared_ptr<SerializedTimerSignal> operation_done;
+    bool committed = false;
     {
-        it->second.wire_data =
-            std::make_shared<std::vector<uint8_t>>(std::move(data));
-        it->second.present = true;
-        it->second.signal = nullptr;
-        if (it->second.round)
-            it->second.round->phase = NodeFetchRound::Phase::retired;
-        it->second.round.reset();
-        it->second.peer_pins.clear();
-        it->second.progress.signal = nullptr;
-        touch_lru(hash);
-        evict_if_needed();
+        std::lock_guard lock(mutex_);
+        //@@authority transition=prv.T0102 status=provisional scope=statement
+        // bind=declaration@5efe0caeb499442a
+        // owner=unresolved owner_hypothesis=node_cache commit=mutex
+        // touches=prv.S0039 label=refuse_post_seal_node_store_mutation
+        bool const node_store_open = node_lifecycle_ ==
+            NodeLifecycle::running; //@@authority-target ids=prv.T0102
+        if (!node_store_open)
+        {
+            return false;
+        }
 
-        PLOGD(
-            log_,
-            "  insert: hash=",
-            hash.hex().substr(0, 16),
-            " (",
-            it->second.wire_data->size(),
-            "B) store_size=",
-            store_.size());
-        return true;
+        auto [it, inserted] = store_.try_emplace(hash);
+        if (inserted || !it->second.present)
+        {
+            // All fallible response/LRU preparation precedes terminality.
+            try
+            {
+                touch_lru(hash);
+            }
+            catch (...)
+            {
+                if (inserted)
+                    store_.erase(it);
+                throw;
+            }
+            if (before_node_response_commit_for_test_)
+                before_node_response_commit_for_test_();
+            signal = it->second.signal;
+            progress_signal = it->second.progress.signal;
+            if (it->second.round)
+            {
+                admission_deadline = it->second.round->admission_deadline;
+                operation_done =
+                    terminalize_node_operation_locked(it->second.round);
+            }
+            it->second.wire_data = std::move(prepared);
+            it->second.present = true;
+            it->second.signal.reset();
+            it->second.round.reset();
+            it->second.peer_pins.clear();
+            it->second.progress.signal.reset();
+            evict_if_needed();
+            committed = true;
+        }
     }
-    return false;
+
+    if (committed && after_node_response_commit_for_test_)
+    {
+        try
+        {
+            after_node_response_commit_for_test_();
+        }
+        catch (...)
+        {
+            // A diagnostic/test observer cannot turn a committed response
+            // into a failed publication or suppress its exact wakes.
+        }
+    }
+    complete_timer_noexcept(signal);
+    if (admission_deadline != signal)
+        complete_timer_noexcept(admission_deadline);
+    complete_timer_noexcept(progress_signal);
+    complete_timer_noexcept(operation_done);
+    if (committed)
+    {
+        try
+        {
+            PLOGD(
+                log_,
+                "  insert: hash=",
+                hash.hex().substr(0, 16),
+                " store_size=",
+                size());
+        }
+        catch (...)
+        {
+            // Diagnostics are outside the response transaction.
+        }
+    }
+    return committed;
 }
 
 //@@authority transition=prv.T0020 status=provisional scope=function
 // bind=catl::peer_client::insert_and_notify@b837ca69c236e302
 // owner=unresolved owner_hypothesis=object_store commit=mutex
-// touches=prv.S0001 label=commit_content_addressed_response_and_wake_round
+// touches=prv.S0001,prv.S0002,prv.S0003,prv.S0004,prv.S0018
+// mutation_class=terminal_receipt
+// label=commit_content_addressed_response_and_wake_round
 void
 NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
 {
+    if (before_node_response_prepare_for_test_)
+        before_node_response_prepare_for_test_();
+    auto prepared =
+        std::make_shared<std::vector<uint8_t> const>(std::move(data));
     std::shared_ptr<SerializedTimerSignal> signal;
     std::shared_ptr<SerializedTimerSignal> admission_deadline;
+    std::shared_ptr<SerializedTimerSignal> progress_signal;
+    std::shared_ptr<SerializedTimerSignal> operation_done;
 
     {
         std::lock_guard lock(mutex_);
+        if (node_lifecycle_ != NodeLifecycle::running)
+            return;
         auto [it, inserted] = store_.try_emplace(hash);
 
         if (!inserted && it->second.present)
             return;  // already populated — skip
 
+        // All fallible response/LRU preparation precedes terminality.
+        try
+        {
+            touch_lru(hash);
+        }
+        catch (...)
+        {
+            if (inserted)
+                store_.erase(it);
+            throw;
+        }
+        if (before_node_response_commit_for_test_)
+            before_node_response_commit_for_test_();
         signal = it->second.signal;  // may be null if no waiters
+        progress_signal = it->second.progress.signal;
         if (it->second.round)
         {
-            admission_deadline =
-                std::move(it->second.round->admission_deadline);
+            admission_deadline = it->second.round->admission_deadline;
+            operation_done =
+                terminalize_node_operation_locked(it->second.round);
         }
-        it->second.wire_data =
-            std::make_shared<std::vector<uint8_t>>(std::move(data));
+        it->second.wire_data = std::move(prepared);
         it->second.present = true;
-        it->second.signal = nullptr;
-        if (it->second.round)
-            it->second.round->phase = NodeFetchRound::Phase::retired;
+        it->second.signal.reset();
         it->second.round.reset();
         it->second.peer_pins.clear();
-        it->second.progress.signal = nullptr;
-        touch_lru(hash);
+        it->second.progress.signal.reset();
         evict_if_needed();
-
-        PLOGD(
-            log_,
-            "  insert+notify: hash=",
-            hash.hex().substr(0, 16),
-            " waiters=",
-            (signal ? "yes" : "no"),
-            " store_size=",
-            store_.size());
     }
 
+    if (after_node_response_commit_for_test_)
+    {
+        try
+        {
+            after_node_response_commit_for_test_();
+        }
+        catch (...)
+        {
+            // A diagnostic/test observer cannot suppress committed wakes.
+        }
+    }
     // Wake waiters outside the lock
     if (signal)
     {
@@ -2763,6 +3259,23 @@ NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
     }
     if (admission_deadline != signal)
         complete_timer_noexcept(admission_deadline);
+    complete_timer_noexcept(progress_signal);
+    complete_timer_noexcept(operation_done);
+    try
+    {
+        PLOGD(
+            log_,
+            "  insert+notify: hash=",
+            hash.hex().substr(0, 16),
+            " waiters=",
+            (signal ? "yes" : "no"),
+            " store_size=",
+            size());
+    }
+    catch (...)
+    {
+        // Diagnostics are outside the response transaction.
+    }
 }
 
 void
@@ -3618,7 +4131,7 @@ NodeCache::has(Hash256 const& hash) const
     return it != store_.end() && it->second.present;
 }
 
-std::shared_ptr<std::vector<uint8_t>>
+std::shared_ptr<std::vector<uint8_t> const>
 NodeCache::get(Hash256 const& hash) const
 {
     std::lock_guard lock(mutex_);
@@ -3662,16 +4175,33 @@ NodeCache::bytes() const
 void
 NodeCache::clear_nodes()
 {
+    //@@authority transition=prv.T0107 status=provisional scope=function
+    // bind=catl::peer_client::clear_nodes@c6f70b8014e9f71f
+    // owner=unresolved owner_hypothesis=node_cache commit=mutex
+    // touches=prv.S0001,prv.S0002,prv.S0003,prv.S0040,prv.S0041
+    // mutation_class=stop_driver
+    // label=compatibility_invalidate_rows_without_terminal_admission_seal
     std::vector<std::shared_ptr<SerializedTimerSignal>> signals;
     {
         std::lock_guard lock(mutex_);
-        signals.reserve(store_.size() * 2);
-        for (auto const& [_, entry] : store_)
+        if (node_lifecycle_ != NodeLifecycle::running)
+            return;
+        signals.reserve(store_.size() * 4);
+        for (auto& [_, entry] : store_)
         {
             if (entry.signal)
                 signals.push_back(entry.signal);
             if (entry.progress.signal)
                 signals.push_back(entry.progress.signal);
+            if (entry.round)
+            {
+                if (entry.round->admission_deadline)
+                    signals.push_back(entry.round->admission_deadline);
+                if (auto done = terminalize_node_operation_locked(entry.round))
+                {
+                    signals.push_back(std::move(done));
+                }
+            }
         }
 
         store_.clear();
@@ -3681,6 +4211,278 @@ NodeCache::clear_nodes()
 
     for (auto const& signal : signals)
         complete_timer_noexcept(signal);
+}
+
+asio::awaitable<void>
+NodeCache::co_stop_nodes()
+{
+    std::shared_ptr<NodeStopState> stop;
+    bool launch_driver = false;
+    {
+        std::lock_guard lock(mutex_);
+        if (node_lifecycle_ == NodeLifecycle::stopped)
+            co_return;
+
+        stop = node_stop_state_;
+        if (!stop)
+        {
+            stop = std::make_shared<NodeStopState>();
+            //@@authority transition=prv.T0125 status=provisional
+            // bind=expression_statement@fefbfae2ab852e46
+            // scope=statement owner=unresolved
+            // owner_hypothesis=node_cache commit=mutex
+            // touches=prv.S0042 mutation_class=seal_commit
+            // label=prepare_shared_node_stop_completion_signal
+            // clang-format off
+            stop->completion_signal = SerializedTimerSignal::create(io_, asio::steady_timer::time_point::max()); //@@authority-target ids=prv.T0125
+            // clang-format on
+            //@@authority transition=prv.T0098 status=provisional
+            // bind=expression_statement@7c4a6a7e5ab4904e
+            // scope=statement owner=unresolved owner_hypothesis=node_cache
+            // commit=mutex touches=prv.S0039
+            // mutation_class=seal_commit
+            // label=seal_node_admission
+            // clang-format off
+            node_lifecycle_ = NodeLifecycle::stopping; //@@authority-target ids=prv.T0098
+            // clang-format on
+            //@@authority transition=prv.T0108 status=provisional
+            // bind=expression_statement@0c1c78dfecbd64b9
+            // scope=statement owner=unresolved owner_hypothesis=node_cache
+            // commit=mutex touches=prv.S0042
+            // mutation_class=seal_commit
+            // label=publish_shared_node_stop_boundary
+            node_stop_state_ = stop; //@@authority-target ids=prv.T0108
+            launch_driver = true;
+        }
+    }
+
+    if (launch_driver)
+    {
+        if (node_stop_sealed_hook_for_test_)
+        {
+            try
+            {
+                node_stop_sealed_hook_for_test_();
+            }
+            catch (...)
+            {
+            }
+        }
+        try
+        {
+            auto self = shared_from_this();
+            if (before_node_stop_driver_launch_for_test_)
+                before_node_stop_driver_launch_for_test_();
+            asio::co_spawn(
+                io_,
+                [self, stop]() -> asio::awaitable<void> {
+                    co_await self->drive_node_stop(stop);
+                },
+                [self, stop](std::exception_ptr error) {
+                    {
+                        std::lock_guard lock(self->mutex_);
+                        if (error)
+                        {
+                            self->publish_node_stop_failure_locked(stop, error);
+                        }
+                        else
+                        {
+                            //@@authority transition=prv.T0101
+                            // bind=expression_statement@c9b4f55c309f13bf
+                            // status=provisional scope=statement
+                            // owner=unresolved owner_hypothesis=node_cache
+                            // commit=mutex touches=prv.S0039
+                            // mutation_class=terminal_receipt
+                            // label=publish_terminal_node_lifecycle_after_exhaustive_drain
+                            // clang-format off
+                            self->node_lifecycle_ = NodeLifecycle::stopped; //@@authority-target ids=prv.T0101
+                            // clang-format on
+                            //@@authority transition=prv.T0109
+                            // bind=expression_statement@a647a1f4c7dfbabb
+                            // status=provisional scope=statement
+                            // owner=unresolved owner_hypothesis=node_cache
+                            // commit=mutex touches=prv.S0042
+                            // mutation_class=terminal_receipt
+                            // label=publish_shared_successful_node_stop_receipt
+                            // clang-format off
+                            stop->phase = NodeStopState::Phase::succeeded; //@@authority-target ids=prv.T0109
+                            // clang-format on
+                        }
+                    }
+                    complete_timer_noexcept(stop->completion_signal);
+                });
+        }
+        catch (...)
+        {
+            {
+                std::lock_guard lock(mutex_);
+                publish_node_stop_failure_locked(
+                    stop, std::current_exception());
+            }
+            complete_timer_noexcept(stop->completion_signal);
+        }
+    }
+
+    for (;;)
+    {
+        //@@authority transition=prv.T0133 status=provisional scope=statement bind=wait_for_signal_or_cancellation@49459b10ce80770a
+        // owner=unresolved owner_hypothesis=request_rider
+        // commit=rider_arbitration_strand touches=prv.S0042
+        // mutation_class=running_guarded
+        // calls=wait_for_signal_or_cancellation
+        // label=join_shared_node_stop_without_cancelling_shared_driver
+        auto const [wake_kind, wake_error] =
+            co_await wait_for_signal_or_cancellation(
+                stop->completion_signal); //@@authority-target ids=prv.T0133
+        (void)wake_error;
+        if (wake_kind == 1)
+            throw boost::system::system_error(asio::error::operation_aborted);
+
+        auto const cancel_state = co_await asio::this_coro::cancellation_state;
+        if (cancel_state.cancelled() != asio::cancellation_type::none)
+            throw boost::system::system_error(asio::error::operation_aborted);
+
+        std::exception_ptr failure;
+        NodeStopState::Phase phase;
+        {
+            std::lock_guard lock(mutex_);
+            phase = stop->phase;
+            failure = stop->failure;
+        }
+        if (phase == NodeStopState::Phase::running)
+            continue;
+        if (failure)
+            std::rethrow_exception(failure);
+        co_return;
+    }
+}
+
+asio::awaitable<void>
+NodeCache::drive_node_stop(std::shared_ptr<NodeStopState> stop)
+{
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::disable_cancellation());
+
+    std::vector<std::shared_ptr<NodeFetchRound>> operations;
+    std::vector<std::shared_ptr<SerializedTimerSignal>> signals;
+    std::vector<PeerGenerationPin> pins;
+    std::vector<std::shared_ptr<PeerSet>> owner_barriers;
+
+    //@@authority transition=prv.T0126 status=provisional scope=statement
+    // bind=compound_statement@b21c40e3ed9f0cf7
+    // owner=unresolved owner_hypothesis=node_cache commit=mutex
+    // touches=prv.S0001,prv.S0003,prv.S0043 mutation_class=stop_driver
+    // label=extract_and_destroy_owner_local_node_state
+    {
+        std::lock_guard lock(mutex_);
+        if (node_stop_state_ != stop ||
+            node_lifecycle_ != NodeLifecycle::stopping)
+        {
+            throw std::logic_error(
+                "node stop driver lost its committed boundary");
+        }
+        if (node_stop_driver_hook_for_test_)
+            node_stop_driver_hook_for_test_();
+
+        operations.reserve(active_node_operations_.size());
+        for (auto const& [_, round] : active_node_operations_)
+            operations.push_back(round);
+
+        signals.reserve(store_.size() * 4 + operations.size());
+        for (auto& [_, entry] : store_)
+        {
+            if (entry.signal)
+                signals.push_back(entry.signal);
+            if (entry.progress.signal)
+                signals.push_back(entry.progress.signal);
+            for (auto& pin : entry.peer_pins)
+                pins.push_back(std::move(pin));
+            entry.peer_pins.clear();
+        }
+
+        for (auto const& round : operations)
+        {
+            if (round->admission_deadline)
+                signals.push_back(round->admission_deadline);
+            for (auto const& [_, signal] : round->deadline_servants)
+            {
+                if (signal)
+                    signals.push_back(signal);
+            }
+            if (auto done = terminalize_node_operation_locked(round))
+                signals.push_back(std::move(done));
+        }
+
+        store_.clear();
+        lru_.clear();
+        lru_map_.clear();
+        //@@authority transition=prv.T0104 status=provisional scope=statement
+        // bind=expression_statement@218d5541333007fd
+        // owner=unresolved owner_hypothesis=node_cache commit=mutex
+        // touches=prv.S0043
+        // label=transfer_peer_set_strand_barriers_to_stop_driver
+        owner_barriers = std::move(
+            node_pin_owner_barriers_); //@@authority-target ids=prv.T0104
+    } //@@authority-target ids=prv.T0126
+
+    //@@authority transition=prv.T0110 status=provisional scope=statement
+    // bind=for_range_loop@670cfc246324f2ee
+    // owner=unresolved owner_hypothesis=node_cache
+    // commit=post_seal_driver touches=prv.S0002,prv.S0004,prv.S0041
+    // label=complete_all_predecessor_node_latches
+    for (auto const& signal : signals)
+    {
+        complete_timer_noexcept(signal);
+    } //@@authority-target ids=prv.T0110
+    //@@authority transition=prv.T0099 status=provisional scope=statement
+    // bind=expression_statement@0de5953ebb00f70d
+    // owner=unresolved owner_hypothesis=node_cache
+    // commit=post_seal_driver touches=prv.S0003
+    // label=destroy_node_cache_local_generation_pin_shares
+    pins.clear(); //@@authority-target ids=prv.T0099
+    if (after_node_local_pins_destroyed_for_test_)
+        after_node_local_pins_destroyed_for_test_();
+
+    //@@authority transition=prv.T0111 status=provisional scope=statement
+    // bind=for_range_loop@055e487252eaa111
+    // owner=unresolved owner_hypothesis=node_cache
+    // commit=post_seal_driver touches=prv.S0040,prv.S0041
+    // label=join_every_exact_node_operation_receipt
+    for (auto const& round : operations)
+    {
+        if (round->servants_done_signal)
+            (void)co_await round->servants_done_signal->wait();
+    } //@@authority-target ids=prv.T0111
+    //@@authority transition=prv.T0112 status=provisional scope=statement
+    // bind=for_range_loop@1d30198e3f9c8bb3
+    // owner=unresolved owner_hypothesis=node_cache
+    // commit=post_seal_driver touches=prv.S0043
+    // label=cross_every_relevant_peer_set_owner_strand
+    for (auto const& owner : owner_barriers)
+    {
+        if (owner)
+            co_await owner->co_generation_pin_release_barrier();
+    } //@@authority-target ids=prv.T0112
+    owner_barriers.clear();
+
+    {
+        std::lock_guard lock(mutex_);
+        //@@authority transition=prv.T0100 status=provisional scope=statement
+        // bind=declaration@47132ce04ad3b771
+        // owner=unresolved owner_hypothesis=node_cache
+        // commit=joined_receipts touches=prv.S0040,prv.S0041,prv.S0043
+        // label=verify_full_node_stop_terminal_predicate
+        bool const node_receipts_complete = node_stop_terminal_predicate_locked(
+            stop,
+            operations,
+            pins.empty(),
+            owner_barriers.empty()); //@@authority-target ids=prv.T0100
+        if (!node_receipts_complete)
+        {
+            throw std::logic_error(
+                "node stop completed without its full terminal predicate");
+        }
+    }
 }
 
 asio::awaitable<void>
@@ -3939,6 +4741,11 @@ NodeCache::refresh_header_entries_projection_locked() noexcept
 // LRU
 // ═══════════════════════════════════════════════════════════════════════
 
+//@@authority transition=prv.T0118 status=provisional scope=function
+// bind=catl::peer_client::touch_lru@361de0e43d43bff3
+// owner=unresolved owner_hypothesis=object_store commit=mutex
+// touches=prv.S0001 mutation_class=running_guarded
+// label=maintain_node_object_store_lru_membership
 void
 NodeCache::touch_lru(Hash256 const& hash) const
 {
@@ -3951,7 +4758,15 @@ NodeCache::touch_lru(Hash256 const& hash) const
     else
     {
         lru_.push_front(hash);
-        lru_map_[hash] = lru_.begin();
+        try
+        {
+            lru_map_.emplace(hash, lru_.begin());
+        }
+        catch (...)
+        {
+            lru_.pop_front();
+            throw;
+        }
     }
 }
 
@@ -3971,6 +4786,11 @@ NodeCache::touch_header_lru(uint32_t ledger_seq) const
     }
 }
 
+//@@authority transition=prv.T0119 status=provisional scope=function
+// bind=catl::peer_client::evict_if_needed@dbd506a6611312f4
+// owner=unresolved owner_hypothesis=object_store commit=mutex
+// touches=prv.S0001 mutation_class=running_guarded
+// label=evict_node_object_store_rows_to_bound
 void
 NodeCache::evict_if_needed()
 {
@@ -3995,7 +4815,14 @@ NodeCache::evict_if_needed()
                 lru_.splice(lru_.begin(), lru_, std::prev(lru_.end()));
                 continue;
             }
-            PLOGD(log_, "  evict: hash=", victim.hex().substr(0, 16));
+            try
+            {
+                PLOGD(log_, "  evict: hash=", victim.hex().substr(0, 16));
+            }
+            catch (...)
+            {
+                // Cache eviction is authoritative; diagnostics are not.
+            }
             store_.erase(it);
         }
         lru_map_.erase(victim);

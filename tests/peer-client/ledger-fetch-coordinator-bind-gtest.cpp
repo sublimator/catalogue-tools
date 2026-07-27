@@ -27,7 +27,9 @@
 
 #include <gtest/gtest.h>
 
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include <chrono>
 #include <limits>
@@ -563,6 +565,88 @@ TEST(LedgerFetchCoordinatorBind, FenceDuringOpenBindCompletesExactlyOnce)
     EXPECT_EQ(Access::completions_seen(f.coord), 1u);
     EXPECT_EQ(f.coord->outstanding_bind_projections(), 0u);
     EXPECT_EQ(fenced, 1);
+}
+
+TEST(LedgerFetchCoordinatorBind, AwaitableFenceCompletesAtLogicalBoundary)
+{
+    CoordFixture f;
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+
+    auto fenced =
+        asio::co_spawn(f.io, f.coord->co_fence(), asio::use_future);
+    f.io.run();
+    EXPECT_NO_THROW(fenced.get());
+    EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fenced);
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
+    f.io.restart();
+}
+
+TEST(
+    LedgerFetchCoordinatorBind,
+    ShutdownReconciliationConsumesOnlyProvablyLostProjectionResidue)
+{
+    CoordFixture f;
+    PeerSetTestAccess::drop_next_seal_completions(f.peers, 1);
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+
+    auto reconciled = asio::co_spawn(
+        f.io,
+        [&f]() -> asio::awaitable<std::size_t> {
+            co_await f.coord->co_fence();
+            co_await f.peers->co_generation_pin_release_barrier();
+            co_await f.peers->co_generation_pin_release_barrier();
+            co_return co_await f.coord
+                ->co_reconcile_shutdown_projection_residue();
+        },
+        asio::use_future);
+
+    f.io.run();
+    EXPECT_EQ(reconciled.get(), 1u);
+    EXPECT_EQ(f.coord->outstanding_bind_projections(), 0u);
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u);
+    f.io.restart();
+}
+
+TEST(
+    LedgerFetchCoordinatorBind,
+    ShutdownReconciliationPreservesCompletedProjectionAccounting)
+{
+    CoordFixture f;
+    ASSERT_EQ(f.submit(), Ingress::reserved);
+
+    auto reconciled = asio::co_spawn(
+        f.io,
+        [&f]() -> asio::awaitable<std::size_t> {
+            co_await f.coord->co_fence();
+            co_await f.peers->co_generation_pin_release_barrier();
+            co_await f.peers->co_generation_pin_release_barrier();
+            co_return co_await f.coord
+                ->co_reconcile_shutdown_projection_residue();
+        },
+        asio::use_future);
+
+    f.io.run();
+    EXPECT_EQ(reconciled.get(), 0u)
+        << "an ordinarily delivered projection completion is accounting, not "
+           "shutdown residue";
+    EXPECT_EQ(f.coord->outstanding_bind_projections(), 0u);
+    EXPECT_EQ(f.coord->work_outstanding(), 0u);
+    EXPECT_EQ(f.coord->receipt_obligations(), 0u);
+    EXPECT_FALSE(f.coord->accounting_broken());
+    f.io.restart();
+}
+
+TEST(LedgerFetchCoordinatorBind, ShutdownReconciliationRefusesBeforeFence)
+{
+    CoordFixture f;
+    auto reconciled = asio::co_spawn(
+        f.io,
+        f.coord->co_reconcile_shutdown_projection_residue(),
+        asio::use_future);
+    f.io.run();
+    EXPECT_THROW(reconciled.get(), std::logic_error);
+    f.io.restart();
 }
 
 /// 12. The attempt-ID ceiling refuses without wrapping and without a partial row.
