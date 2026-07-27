@@ -1,6 +1,7 @@
 #include <xprv/http-server.h>
 #include <xprv/proof-engine.h>
 
+#include "../test-support/deterministic-scheduler.h"
 #include "http-child-completion.h"
 
 #include <boost/asio/bind_cancellation_slot.hpp>
@@ -203,7 +204,8 @@ TEST(HttpChildCompletion, BodyExceptionStillPublishesJoinReceipt)
 {
     namespace asio = boost::asio;
 
-    asio::io_context io;
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
     auto receipt = std::make_shared<xprv::detail::HttpChildCompletionChannel>(
         io.get_executor(), 1);
     boost::system::error_code received;
@@ -225,7 +227,7 @@ TEST(HttpChildCompletion, BodyExceptionStillPublishesJoinReceipt)
         },
         asio::detached);
 
-    io.run();
+    scheduler.run_until_idle();
 
     EXPECT_TRUE(joined);
     EXPECT_FALSE(received);
@@ -235,7 +237,8 @@ TEST(HttpChildCompletion, ThrowingDiagnosticCannotRetractJoinReceipt)
 {
     namespace asio = boost::asio;
 
-    asio::io_context io;
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
     auto receipt = std::make_shared<xprv::detail::HttpChildCompletionChannel>(
         io.get_executor(), 1);
     bool diagnostic_ran = false;
@@ -260,7 +263,7 @@ TEST(HttpChildCompletion, ThrowingDiagnosticCannotRetractJoinReceipt)
         },
         asio::detached);
 
-    io.run();
+    scheduler.run_until_idle();
 
     EXPECT_TRUE(diagnostic_ran);
     EXPECT_TRUE(joined);
@@ -270,7 +273,8 @@ TEST(HttpChildCompletion, ParentCancellationCannotCounterfeitJoinReceipt)
 {
     namespace asio = boost::asio;
 
-    asio::io_context io;
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
     asio::cancellation_signal cancel;
     auto receipt = std::make_shared<xprv::detail::HttpChildCompletionChannel>(
         io.get_executor(), 1);
@@ -290,18 +294,16 @@ TEST(HttpChildCompletion, ParentCancellationCannotCounterfeitJoinReceipt)
                 failure = std::move(result);
             }));
 
-    io.poll();
+    scheduler.run_until_idle();
     ASSERT_TRUE(entered);
     ASSERT_FALSE(joined);
 
     cancel.emit(asio::cancellation_type::all);
-    io.restart();
-    io.poll();
+    scheduler.run_until_idle();
     EXPECT_FALSE(joined);
 
     ASSERT_TRUE(receipt->try_send(boost::system::error_code{}));
-    io.restart();
-    io.run();
+    scheduler.run_until_idle();
 
     EXPECT_TRUE(joined);
     EXPECT_FALSE(failure);
@@ -380,24 +382,42 @@ TEST(
         response.wait_for(std::chrono::seconds(0)),
         std::future_status::timeout);
 
-    watcher_gate->cancel();
-    ASSERT_TRUE(pump_until(io, [&] {
-        return response.wait_for(std::chrono::seconds(0)) ==
-            std::future_status::ready;
-    }));
-    auto result = response.get();
-    EXPECT_EQ(result.result(), http::status::internal_server_error);
-
     auto stopped = asio::co_spawn(
         io,
         [server]() -> asio::awaitable<void> {
             (void)co_await server->co_stop();
         },
         asio::use_future);
+    io.restart();
+    io.poll();
+    EXPECT_EQ(
+        stopped.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+
+    watcher_gate->cancel();
     ASSERT_TRUE(pump_until(io, [&] {
-        return stopped.wait_for(std::chrono::seconds(0)) ==
+        return response.wait_for(std::chrono::seconds(0)) ==
+            std::future_status::ready &&
+            stopped.wait_for(std::chrono::seconds(0)) ==
             std::future_status::ready;
     }));
+    try
+    {
+        auto result = response.get();
+        EXPECT_EQ(result.result(), http::status::internal_server_error);
+    }
+    catch (boost::system::system_error const& error)
+    {
+        // co_stop() may close the client transport while the server frame
+        // remains alive waiting for the exact watcher receipt. The client
+        // therefore observes either the prepared 500 or a shutdown terminal;
+        // neither is a service-drain receipt.
+        EXPECT_TRUE(
+            error.code() == http::error::end_of_stream ||
+            error.code() == asio::error::eof ||
+            error.code() == asio::error::operation_aborted ||
+            error.code() == asio::error::connection_reset)
+            << error.code().message();
+    }
     EXPECT_NO_THROW(stopped.get());
 }
 
