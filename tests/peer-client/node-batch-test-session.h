@@ -84,6 +84,11 @@ public:
     disconnect() override
     {
     }
+    boost::asio::awaitable<void>
+    co_disconnect() override
+    {
+        co_return;
+    }
     boost::asio::strand<boost::asio::io_context::executor_type>&
     strand() override
     {

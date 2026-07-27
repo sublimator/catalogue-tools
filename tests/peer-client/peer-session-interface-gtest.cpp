@@ -110,11 +110,21 @@ public:
         ready_.store(false, std::memory_order_relaxed);
     }
 
+    asio::awaitable<void>
+    co_disconnect() override
+    {
+        ++co_disconnect_calls;
+        disconnect();
+        co_return;
+    }
+
     asio::strand<asio::io_context::executor_type>&
     strand() override
     {
         return strand_;
     }
+
+    std::atomic<std::uint64_t> co_disconnect_calls{0};
 
     void
     set_unsolicited_handler(UnsolicitedHandler handler) override

@@ -369,6 +369,120 @@ TEST(PeerClientLifecycle, FailedLogicalStateStillClosesPhysicalTransport)
     EXPECT_FALSE(client->raw_connection().socket().lowest_layer().is_open());
 }
 
+TEST(PeerClientLifecycle, CoDisconnectJoinsOnePhysicalReceiptForAllCallers)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+
+    peer_connection::test_write_completion held_completion;
+    client->raw_connection().set_write_initiator_for_test(
+        [&held_completion](
+            asio::const_buffer,
+            peer_connection::test_write_completion completion) {
+            held_completion = std::move(completion);
+        });
+
+    std::vector<boost::system::error_code> write_results;
+    asio::post(client->strand(), [client, &write_results] {
+        client->raw_connection().async_send_packet(
+            packet_type::ping,
+            std::vector<std::uint8_t>(64, 0xAC),
+            [&write_results](boost::system::error_code ec) {
+                write_results.push_back(ec);
+            });
+    });
+    io.run();
+
+    ASSERT_TRUE(held_completion);
+    ASSERT_EQ(
+        client->raw_connection().transport_operation_count_for_test(), 1u);
+    ASSERT_FALSE(
+        client->raw_connection().physical_transport_drained_for_test());
+
+    int joins = 0;
+    std::vector<std::exception_ptr> failures;
+    auto launch_join = [&] {
+        asio::co_spawn(
+            io,
+            [client]() -> asio::awaitable<void> {
+                co_await client->co_disconnect();
+            },
+            [&joins, &failures](std::exception_ptr failure) {
+                if (failure)
+                    failures.push_back(failure);
+                else
+                    ++joins;
+            });
+    };
+
+    launch_join();
+    launch_join();
+    io.restart();
+    io.poll();
+
+    EXPECT_EQ(client->state(), State::Disconnected);
+    EXPECT_FALSE(client->raw_connection().socket().lowest_layer().is_open());
+    EXPECT_EQ(write_results.size(), 1u);
+    EXPECT_EQ(write_results.front(), asio::error::operation_aborted);
+    EXPECT_EQ(
+        client->raw_connection().transport_operation_count_for_test(), 1u);
+    EXPECT_FALSE(
+        client->raw_connection().physical_transport_drained_for_test());
+    EXPECT_EQ(joins, 0);
+    EXPECT_TRUE(failures.empty());
+
+    auto completion = std::move(held_completion);
+    asio::post(client->strand(), [completion = std::move(completion)] {
+        completion(asio::error::operation_aborted);
+    });
+    io.restart();
+    io.run();
+
+    EXPECT_EQ(
+        client->raw_connection().transport_operation_count_for_test(), 0u);
+    EXPECT_TRUE(client->raw_connection().physical_transport_drained_for_test());
+    EXPECT_EQ(joins, 2);
+    EXPECT_TRUE(failures.empty());
+
+    launch_join();
+    io.restart();
+    io.run();
+    EXPECT_EQ(joins, 3);
+    EXPECT_TRUE(failures.empty());
+}
+
+TEST(PeerClientLifecycle, FailureTransitionCannotOverwriteTerminalState)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Disconnected);
+    std::vector<std::optional<State>> previous;
+
+    asio::post(client->strand(), [client, &previous] {
+        previous.push_back(
+            PeerClientTestAccess::commit_failed_on_strand(*client));
+    });
+    io.run();
+
+    ASSERT_EQ(previous.size(), 1u);
+    EXPECT_FALSE(previous.front());
+    EXPECT_EQ(client->state(), State::Disconnected);
+
+    client = PeerClientTestAccess::make(io, State::Ready);
+    io.restart();
+    asio::post(client->strand(), [client, &previous] {
+        previous.push_back(
+            PeerClientTestAccess::commit_failed_on_strand(*client));
+    });
+    io.run();
+
+    ASSERT_EQ(previous.size(), 2u);
+    ASSERT_TRUE(previous.back());
+    EXPECT_EQ(*previous.back(), State::Ready);
+    EXPECT_EQ(client->state(), State::Failed);
+}
+
 TEST(PeerClientLifecycle, FailedClientRejectsWithoutQueueing)
 {
     asio::io_context io;

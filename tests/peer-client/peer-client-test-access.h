@@ -191,6 +191,12 @@ public:
         client.flush_queue();
     }
 
+    static std::optional<State>
+    commit_failed_on_strand(PeerClient& client)
+    {
+        return client.commit_failed_on_strand();
+    }
+
     static void
     seed_incarnations(
         PeerClient& client,

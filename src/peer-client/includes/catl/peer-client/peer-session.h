@@ -3,6 +3,7 @@
 #include "node-transport.h"
 #include "types.h"
 
+#include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/system/error_code.hpp>
@@ -106,6 +107,15 @@ public:
 
     virtual void
     disconnect() = 0;
+
+    /// Consume the physical session lifecycle on its owning executor.
+    ///
+    /// Completion is a receipt that every implementation-owned physical
+    /// transport operation admitted before close has returned. It is stronger
+    /// than disconnect(), whose thread-safe close projection may still be
+    /// queued when that call returns.
+    virtual boost::asio::awaitable<void>
+    co_disconnect() = 0;
 
     virtual boost::asio::strand<boost::asio::io_context::executor_type>&
     strand() = 0;

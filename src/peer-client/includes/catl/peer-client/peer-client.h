@@ -284,6 +284,9 @@ public:
     void
     disconnect() override;
 
+    boost::asio::awaitable<void>
+    co_disconnect() override;
+
     size_t
     pending_count() const override;
 
@@ -378,6 +381,9 @@ private:
 
     void
     disconnect_on_strand();
+
+    std::optional<State>
+    commit_failed_on_strand() noexcept;
 
     void
     send_get_nodes_on_strand(
@@ -615,10 +621,13 @@ private:
     ReadyCallback ready_callback_;
     ConnectCompletionCallback connect_completion_callback_;
 
+    //@@authority state=prv.S0049 status=provisional scope=field bind=catl::peer_client::PeerClient::state_@9f0ac0751dded7b7
+    // owner=unresolved owner_hypothesis=peer_client
+    // observed_home=peer_client label=peer_client_logical_lifecycle_phase
     std::atomic<State> state_{State::Disconnected};
     std::atomic<uint32_t> peer_ledger_seq_{0};
     //@@authority state=prv.S0021 status=provisional scope=field
-    //bind=catl::peer_client::PeerClient::advertised_ledger_range_@f4cbfc77b30d3841
+    // bind=catl::peer_client::PeerClient::advertised_ledger_range_@f4cbfc77b30d3841
     // owner=unresolved owner_hypothesis=peer_client
     // observed_home=peer_client
     // label=coherent_advertised_ledger_range_snapshot

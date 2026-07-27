@@ -880,6 +880,28 @@ PeerClient::disconnect()
     asio::dispatch(strand_, [self]() { self->disconnect_on_strand(); });
 }
 
+//@@authority transition=prv.T0145 status=provisional scope=function bind=catl::peer_client::co_disconnect@8237806aa45018b4
+// owner=unresolved owner_hypothesis=peer_client commit=peer_client_strand
+// touches=prv.S0046,prv.S0048,prv.S0049 mutation_class=stop_driver
+// label=join_connection_physical_drain_after_logical_disconnect
+asio::awaitable<void>
+PeerClient::co_disconnect()
+{
+    auto self = shared_from_this();
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::disable_cancellation());
+    co_await asio::co_spawn(
+        strand_,
+        [self]() -> asio::awaitable<void> {
+            auto connection = self->connection_;
+            self->disconnect_on_strand();
+            if (connection)
+                co_await connection->co_close();
+            co_return;
+        },
+        asio::use_awaitable);
+}
+
 void
 PeerClient::disconnect_on_strand()
 {
@@ -902,6 +924,22 @@ PeerClient::disconnect_on_strand()
 
     if (previous != State::Ready)
         complete_connect(boost::asio::error::operation_aborted);
+}
+
+//@@authority transition=prv.T0146 status=provisional scope=function bind=catl::peer_client::commit_failed_on_strand@fe49a9f576e5dd76
+// owner=unresolved owner_hypothesis=peer_client commit=peer_client_strand
+// touches=prv.S0049 mutation_class=terminal_receipt
+// label=commit_connection_failure_without_overwriting_terminal_state
+std::optional<State>
+PeerClient::commit_failed_on_strand() noexcept
+{
+    assert(strand_.running_in_this_thread());
+    auto const previous = state_.load();
+    if (previous == State::Disconnected || previous == State::Failed)
+        return std::nullopt;
+
+    state_.store(State::Failed);
+    return previous;
 }
 
 void
@@ -1226,7 +1264,8 @@ PeerClient::submit_node_batch_on_strand(
     // The command crossed executors after PeerSet admitted its pin. Status
     // changes are serialized by this same strand, so this is the authoritative
     // dispatch-time coverage decision. Earlier selector checks are advisory.
-    //@@authority transition=prv.T0062 status=provisional scope=statement bind=if_statement@71ecdc0da9d7dc10
+    //@@authority transition=prv.T0062 status=provisional scope=statement
+    // bind=if_statement@71ecdc0da9d7dc10
     // owner=unresolved owner_hypothesis=peer_client commit=strand
     // touches=prv.S0021,prv.S0022
     // label=managed_node_packet_commit_requires_current_advertised_coverage
@@ -1475,8 +1514,8 @@ PeerClient::do_connect(
         if (!self)
             return;
 
-        auto const previous = self->state_.exchange(State::Failed);
-        if (previous == State::Disconnected || previous == State::Failed)
+        auto const previous = self->commit_failed_on_strand();
+        if (!previous)
             return;
 
         self->complete_all_pending(Error::Disconnected);
@@ -1508,7 +1547,7 @@ PeerClient::do_connect(
             }
         }
 
-        if (previous == State::Ready)
+        if (*previous == State::Ready)
             return;
 
         if (ec == boost::asio::error::invalid_argument ||
@@ -1555,9 +1594,12 @@ PeerClient::do_connect(
                 self->endpoint_str_,
                 "] Connection failed: ",
                 ec.message());
-            auto const previous = self->state_.exchange(State::Failed);
-            if (previous != State::Disconnected && previous != State::Failed)
-                self->complete_all_pending(Error::Disconnected);
+            if (!self->commit_failed_on_strand())
+            {
+                self->complete_connect(ec);
+                return;
+            }
+            self->complete_all_pending(Error::Disconnected);
             self->complete_connect(ec);
             return;
         }
@@ -1684,7 +1726,7 @@ PeerClient::send_initial_probe_ping()
 }
 
 //@@authority transition=prv.T0060 status=provisional scope=function
-//bind=catl::peer_client::publish_advertised_ledger_range@7067c13e402f7a68
+// bind=catl::peer_client::publish_advertised_ledger_range@7067c13e402f7a68
 // owner=unresolved owner_hypothesis=peer_client commit=atomic
 // touches=prv.S0021
 // label=publish_one_coherent_advertised_ledger_range
@@ -2332,7 +2374,8 @@ PeerClient::get_ledger_header(
         });
 }
 
-//@@authority transition=prv.T0063 status=provisional scope=function bind=catl::peer_client::get_ledger_header_on_strand@7a7c058436449b49
+//@@authority transition=prv.T0063 status=provisional scope=function
+// bind=catl::peer_client::get_ledger_header_on_strand@7a7c058436449b49
 // owner=unresolved owner_hypothesis=peer_client commit=strand
 // touches=prv.S0021
 // label=header_packet_commit_requires_current_advertised_coverage
