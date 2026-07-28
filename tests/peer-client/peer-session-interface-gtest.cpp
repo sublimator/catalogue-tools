@@ -7,6 +7,8 @@
 #include <catl/core/context-executor.h>
 #include <catl/core/request-context.h>
 
+#include "../test-support/deterministic-scheduler.h"
+
 #include "ripple.pb.h"
 
 #include <boost/asio/bind_cancellation_slot.hpp>
@@ -6758,6 +6760,77 @@ TEST(PeerSetShutdown, HeldSessionReceiptDominatesTerminalPeerSetState)
     auto late = asio::co_spawn(io, peers->co_stop(), asio::use_future);
     io.run();
     EXPECT_NO_THROW(late.get());
+}
+
+TEST(
+    PeerSetShutdownDeterministic,
+    CollidingLocalGenerationValuesCannotSharePhysicalReceipt)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto peers_a = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+    auto peers_b = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    // Each aggregate mints its first generation independently. Endpoint and
+    // numeric generation therefore collide; only the retained PeerSet/session
+    // identity can keep these two structured joins distinct.
+    auto session_a = std::make_shared<FakePeerSession>(
+        io, "colliding-shutdown-peer:1", true, 500, 400, 600);
+    auto session_b = std::make_shared<FakePeerSession>(
+        io, "colliding-shutdown-peer:1", true, 500, 400, 600);
+    session_a->hold_disconnect_receipt();
+    session_b->hold_disconnect_receipt();
+    auto const generation_a =
+        PeerSetTestAccess::insert_ready_peer_with_generation(
+            io, peers_a, session_a);
+    auto const generation_b =
+        PeerSetTestAccess::insert_ready_peer_with_generation(
+            io, peers_b, session_b);
+    ASSERT_EQ(generation_a, generation_b);
+
+    bool stopped_a = false;
+    bool stopped_b = false;
+    std::exception_ptr failure_a;
+    std::exception_ptr failure_b;
+    asio::co_spawn(io, peers_a->co_stop(), [&](std::exception_ptr failure) {
+        failure_a = std::move(failure);
+        stopped_a = true;
+    });
+    asio::co_spawn(io, peers_b->co_stop(), [&](std::exception_ptr failure) {
+        failure_b = std::move(failure);
+        stopped_b = true;
+    });
+    scheduler.run_until_idle();
+
+    ASSERT_TRUE(
+        session_a->co_disconnect_waiting.load(std::memory_order_acquire));
+    ASSERT_TRUE(
+        session_b->co_disconnect_waiting.load(std::memory_order_acquire));
+    EXPECT_FALSE(stopped_a);
+    EXPECT_FALSE(stopped_b);
+
+    session_a->release_disconnect_receipt();
+    scheduler.run_until_idle();
+
+    EXPECT_TRUE(stopped_a);
+    EXPECT_EQ(failure_a, nullptr);
+    EXPECT_FALSE(stopped_b)
+        << "same endpoint and generation cannot let A's receipt satisfy B";
+    EXPECT_EQ(
+        PeerSetTestAccess::live_generation(io, peers_a, session_a->endpoint()),
+        0u);
+    EXPECT_EQ(
+        PeerSetTestAccess::live_generation(io, peers_b, session_b->endpoint()),
+        generation_b);
+
+    session_b->release_disconnect_receipt();
+    scheduler.run_until_idle();
+
+    EXPECT_TRUE(stopped_b);
+    EXPECT_EQ(failure_b, nullptr);
+    EXPECT_EQ(
+        PeerSetTestAccess::live_generation(io, peers_b, session_b->endpoint()),
+        0u);
 }
 
 TEST(PeerSetShutdown, CallerCancellationCannotAbandonPhysicalReceipt)
