@@ -739,6 +739,13 @@ private:
     /// Pause after the terminal population is proven and before the retained
     /// fence fact is committed. Production leaves this empty.
     std::function<void()> before_fence_terminal_commit_for_test_;
+    /// Pause after one co_fence caller registers its receipt but before it
+    /// starts waiting. Production leaves this empty.
+    std::function<void()> after_fence_registration_before_wait_for_test_;
+    /// Pause after shutdown reconciliation proves every terminal predicate and
+    /// reads the retained residue, but before consuming that residue.
+    /// Production leaves this empty.
+    std::function<void()> before_shutdown_reconciliation_commit_for_test_;
     /// Refuse to arm the retry timer, to prove a scheduling failure leaves one
     /// named owned obligation and does not recurse.
     bool fail_retry_arm_for_test_ = false;

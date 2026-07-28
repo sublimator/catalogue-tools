@@ -583,6 +583,31 @@ TEST(LedgerFetchCoordinatorBind, AwaitableFenceCompletesAtLogicalBoundary)
 
 TEST(
     LedgerFetchCoordinatorBind,
+    AwaitableFenceRetainsReceiptBeforeWaitInitiation)
+{
+    CoordFixture f;
+    LedgerFetchCoordinatorTestAccess::set_after_fence_registration_before_wait(
+        f.coord, [&]() {
+            // Drain the exact coordinator commit and every notification it
+            // queues before co_fence initiates its receive. The former timer
+            // edge lost its cancellation in this ordering and slept forever.
+            while (f.io.poll_one() != 0)
+            {
+            }
+        });
+
+    auto fenced = asio::co_spawn(f.io, f.coord->co_fence(), asio::use_future);
+    f.io.run_for(std::chrono::milliseconds(50));
+
+    ASSERT_EQ(
+        fenced.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_NO_THROW(fenced.get());
+    EXPECT_EQ(f.coord->lifecycle(), Lifecycle::fenced);
+    f.io.restart();
+}
+
+TEST(
+    LedgerFetchCoordinatorBind,
     ShutdownReconciliationConsumesOnlyProvablyLostProjectionResidue)
 {
     CoordFixture f;

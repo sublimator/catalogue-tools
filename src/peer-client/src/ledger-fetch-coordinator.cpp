@@ -4,6 +4,7 @@
 #include <catl/core/logger.h>
 
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/this_coro.hpp>
@@ -1432,31 +1433,35 @@ LedgerFetchCoordinator::co_fence()
         if (lifecycle() == Lifecycle::fenced)
             co_return;
 
-        auto signal = std::make_shared<asio::steady_timer>(
-            caller_executor, asio::steady_timer::time_point::max());
-        auto disposition = fence([caller_executor, signal]() noexcept {
+        using FenceReceipt = asio::experimental::concurrent_channel<void(
+            boost::system::error_code)>;
+        auto receipt = std::make_shared<FenceReceipt>(caller_executor, 1);
+        auto disposition = fence([receipt]() noexcept {
             try
             {
-                asio::post(caller_executor, [signal]() noexcept {
-                    try
-                    {
-                        signal->cancel();
-                    }
-                    catch (...)
-                    {
-                    }
-                });
+                // The channel retains the receipt if the coordinator commits
+                // before this coroutine initiates async_receive. A posted
+                // timer cancellation was only an edge: under multiple runners
+                // it could execute first, cancel zero waits, and strand the
+                // later wait forever.
+                if (!receipt->try_send(boost::system::error_code{}))
+                    std::terminate();
             }
             catch (...)
             {
+                std::terminate();
             }
         });
 
         if (disposition == Fence::drain_queued)
         {
+            if (after_fence_registration_before_wait_for_test_)
+                after_fence_registration_before_wait_for_test_();
             boost::system::error_code ec;
-            co_await signal->async_wait(
+            co_await receipt->async_receive(
                 asio::redirect_error(asio::use_awaitable, ec));
+            if (ec)
+                throw boost::system::system_error(ec);
             if (lifecycle() == Lifecycle::fenced)
                 co_return;
         }
@@ -1465,9 +1470,10 @@ LedgerFetchCoordinator::co_fence()
             // Capacity exhaustion proves another queued fence projection owns
             // the notification budget and will perform the drain. Projection
             // failure leaves ingress sealed and fence() explicitly retryable.
-            signal->expires_after(std::chrono::milliseconds(10));
+            asio::steady_timer signal(caller_executor);
+            signal.expires_after(std::chrono::milliseconds(10));
             boost::system::error_code ec;
-            co_await signal->async_wait(
+            co_await signal.async_wait(
                 asio::redirect_error(asio::use_awaitable, ec));
         }
     }
@@ -1499,6 +1505,8 @@ LedgerFetchCoordinator::co_reconcile_shutdown_projection_residue()
             }
 
             auto const residue = self->outstanding_bind_projections();
+            if (self->before_shutdown_reconciliation_commit_for_test_)
+                self->before_shutdown_reconciliation_commit_for_test_();
             self->outstanding_projections_.store(0, std::memory_order_release);
             co_return residue;
         },

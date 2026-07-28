@@ -73,6 +73,22 @@ public:
         c->before_fence_terminal_commit_for_test_ = std::move(hook);
     }
 
+    static void
+    set_after_fence_registration_before_wait(
+        std::shared_ptr<Coordinator> const& c,
+        std::function<void()> hook)
+    {
+        c->after_fence_registration_before_wait_for_test_ = std::move(hook);
+    }
+
+    static void
+    set_before_shutdown_reconciliation_commit(
+        std::shared_ptr<Coordinator> const& c,
+        std::function<void()> hook)
+    {
+        c->before_shutdown_reconciliation_commit_for_test_ = std::move(hook);
+    }
+
     // --- bounds, so each can be forced independently ----------------------
 
     static void
