@@ -118,11 +118,11 @@ ProofEngine::start()
 
     if (ledger_fetch_coordinator_enabled_)
     {
-        //@@authority transition=prv.T0044 status=provisional scope=statement
+        //@@authority transition=prv.T0044 status=provisional scope=statement bind=create@c921008e8a6ff63e
         // owner=unresolved owner_hypothesis=proof_engine
         // commit=startup_coroutine calls=create
         // label=construct_one_ledger_fetch_coordinator_per_peer_set
-        ledger_fetch_coordinator_ = LedgerFetchCoordinator::create(io_, peers_);
+        ledger_fetch_coordinator_ = LedgerFetchCoordinator::create(io_, peers_); //@@authority-target ids=prv.T0044
         if (!ledger_fetch_coordinator_)
             throw std::runtime_error(
                 "failed to create ledger fetch coordinator generation");
@@ -130,7 +130,7 @@ ProofEngine::start()
 
     // Node cache (content-addressed wire node store). The optional coordinator
     // is selected once here; request callsites do not branch on server mode.
-    //@@authority transition=prv.T0004 status=provisional scope=statement
+    //@@authority transition=prv.T0004 status=provisional scope=statement bind=create@c881629500fe6506
     // owner=unresolved owner_hypothesis=ledger_data_provider
     // commit=startup_coroutine calls=create
     // label=construct_live_node_cache_with_selected_transport_capability
@@ -140,7 +140,7 @@ ProofEngine::start()
          .fetch_timeout = fetch_timeout_,
          .max_walk_peer_retries = max_walk_peer_retries_,
          .fetch_stale_multiplier = fetch_stale_multiplier_},
-        ledger_fetch_coordinator_);
+        ledger_fetch_coordinator_); //@@authority-target ids=prv.T0004
 
     // Wire peers → validation buffer: unsolicited validations
     auto vbuf = val_buffer_;
@@ -234,10 +234,10 @@ ProofEngine::stop()
     {
         // Logical seal only. The owning io_context must keep running to execute
         // the coordinator's drain; stop() does not pretend this is quiescence.
-        //@@authority transition=prv.T0045 status=provisional scope=statement
+        //@@authority transition=prv.T0045 status=provisional scope=statement bind=fence@f07d60bfb8be76ad
         // owner=unresolved owner_hypothesis=proof_engine commit=atomic
         // calls=fence label=seal_managed_node_ingress_before_io_context_stop
-        auto const disposition = ledger_fetch_coordinator_->fence();
+        auto const disposition = ledger_fetch_coordinator_->fence(); //@@authority-target ids=prv.T0045
         if (disposition != LedgerFetchCoordinator::Fence::drain_queued)
         {
             PLOGW(
@@ -313,7 +313,7 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
 // prove() — build a proof chain using shared services
 // ═══════════════════════════════════════════════════════════════════════
 
-//@@authority transition=prv.T0005 status=provisional scope=function
+//@@authority transition=prv.T0005 status=provisional scope=function bind=xprv::prove@3023246064adff8e
 // owner=unresolved owner_hypothesis=ledger_data_control commit=unresolved
 // label=begin_real_proof_operation_without_authority_identity
 asio::awaitable<ProofEngine::ProveResult>
@@ -411,11 +411,11 @@ ProofEngine::prove(
         .on_step = std::move(on_step),
     };
 
-    //@@authority transition=prv.T0006 status=provisional scope=statement
+    //@@authority transition=prv.T0006 status=provisional scope=statement bind=build_proof@628b5988ba4dbec4
     // owner=unresolved owner_hypothesis=ledger_data_control commit=unresolved
     // calls=build_proof
     // label=enter_shared_proof_build_without_operation_identity
-    auto result = co_await build_proof(svc, tx_hash);
+    auto result = co_await build_proof(svc, tx_hash); //@@authority-target ids=prv.T0006
     result.chain.network_id = config_.network_id;
 
     // Cache the tx→ledger mapping for future requests
