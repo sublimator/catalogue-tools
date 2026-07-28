@@ -6,6 +6,7 @@
 #include "service-lifecycle.h"
 
 #include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -31,7 +32,9 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
+#include <vector>
 
 namespace xprv {
 
@@ -163,7 +166,17 @@ timer_control(catl::test::DeterministicScheduler::Timer& timer)
         .expires_after =
             [&timer](auto duration) { timer.expires_after(duration); },
         .async_wait =
-            [&timer](auto handler) { timer.async_wait(std::move(handler)); },
+            [&timer](auto executor, auto handler) {
+                timer.async_wait([executor = std::move(executor),
+                                  handler = std::move(handler)](
+                                     boost::system::error_code error) mutable {
+                    boost::asio::post(
+                        std::move(executor),
+                        [error, handler = std::move(handler)]() mutable {
+                            handler(error);
+                        });
+                });
+            },
         .cancel = [&timer]() { (void)timer.cancel(); },
     };
 }
@@ -171,10 +184,6 @@ timer_control(catl::test::DeterministicScheduler::Timer& timer)
 class ControlledServiceTimer
 {
 public:
-    explicit ControlledServiceTimer(boost::asio::io_context& io) : io_(io)
-    {
-    }
-
     xprv::detail::ServiceTimerControl
     control()
     {
@@ -185,11 +194,12 @@ public:
                         throw std::runtime_error("timer expires failpoint");
                 },
             .async_wait =
-                [this](auto handler) {
+                [this](auto executor, auto handler) {
                     if (throw_on_wait)
                         throw std::runtime_error("timer wait failpoint");
                     if (handler_)
                         throw std::logic_error("timer already has a handler");
+                    executor_ = std::move(executor);
                     handler_ = std::move(handler);
                 },
             .cancel =
@@ -197,7 +207,7 @@ public:
                     ++cancel_calls;
                     if (throw_on_cancel)
                         throw std::runtime_error("timer cancel failpoint");
-                    queue(boost::asio::error::operation_aborted);
+                    queue(cancel_error);
                 },
         };
     }
@@ -208,9 +218,17 @@ public:
         queue({});
     }
 
+    void
+    complete(boost::system::error_code error)
+    {
+        queue(error);
+    }
+
     bool throw_on_expires = false;
     bool throw_on_wait = false;
     bool throw_on_cancel = false;
+    boost::system::error_code cancel_error =
+        boost::asio::error::operation_aborted;
     std::size_t cancel_calls = 0;
     bool raw_handler_entered = false;
     bool raw_handler_returned = false;
@@ -219,20 +237,138 @@ private:
     void
     queue(boost::system::error_code error)
     {
-        if (!handler_)
+        if (!handler_ || !executor_)
             return;
         auto handler = std::move(handler_);
         handler_ = {};
         boost::asio::post(
-            io_, [this, error, handler = std::move(handler)]() mutable {
+            *executor_, [this, error, handler = std::move(handler)]() mutable {
                 raw_handler_entered = true;
                 handler(error);
                 raw_handler_returned = true;
             });
     }
 
-    boost::asio::io_context& io_;
+    std::optional<boost::asio::any_io_executor> executor_;
     xprv::detail::ServiceTimerControl::Handler handler_;
+};
+
+xprv::detail::ServiceTimerControl
+asio_timer_control(std::shared_ptr<boost::asio::steady_timer> timer)
+{
+    return {
+        .expires_after =
+            [timer](auto duration) { timer->expires_after(duration); },
+        .async_wait =
+            [timer](auto executor, auto handler) {
+                timer->async_wait(boost::asio::bind_executor(
+                    std::move(executor), std::move(handler)));
+            },
+        .cancel = [timer]() { (void)timer->cancel(); },
+    };
+}
+
+std::vector<std::thread>
+start_io_runners(boost::asio::io_context& io, std::size_t count)
+{
+    std::vector<std::thread> runners;
+    runners.reserve(count);
+    for (std::size_t index = 0; index < count; ++index)
+        runners.emplace_back([&io]() { io.run(); });
+    return runners;
+}
+
+void
+join_io_runners(std::vector<std::thread>& runners)
+{
+    for (auto& runner : runners)
+        runner.join();
+}
+
+std::string
+exception_message(std::exception_ptr const& failure)
+{
+    if (!failure)
+        return {};
+    try
+    {
+        std::rethrow_exception(failure);
+    }
+    catch (std::exception const& error)
+    {
+        return error.what();
+    }
+    catch (...)
+    {
+        return "non-standard exception";
+    }
+}
+
+class BlockingReturnTimer
+{
+public:
+    BlockingReturnTimer()
+        : release_future_(release_promise_.get_future().share())
+        , handler_return_pending_future_(
+              handler_return_pending_promise_.get_future())
+    {
+    }
+
+    xprv::detail::ServiceTimerControl
+    control()
+    {
+        return {
+            .expires_after = [](auto) {},
+            .async_wait =
+                [this](auto executor, auto handler) {
+                    executor_ = std::move(executor);
+                    handler_ = std::move(handler);
+                },
+            .cancel =
+                [this]() {
+                    if (!executor_ || !handler_)
+                        return;
+                    auto handler = std::move(handler_);
+                    handler_ = {};
+                    boost::asio::post(
+                        *executor_,
+                        [this, handler = std::move(handler)]() mutable {
+                            handler(boost::asio::error::operation_aborted);
+                            handler_return_pending_promise_.set_value();
+                            release_future_.wait();
+                            raw_handler_returned_.store(
+                                true, std::memory_order_release);
+                        });
+                },
+        };
+    }
+
+    std::future_status
+    wait_until_return_is_blocked(std::chrono::steady_clock::duration timeout)
+    {
+        return handler_return_pending_future_.wait_for(timeout);
+    }
+
+    void
+    release_return()
+    {
+        release_promise_.set_value();
+    }
+
+    bool
+    raw_handler_returned() const
+    {
+        return raw_handler_returned_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::optional<boost::asio::any_io_executor> executor_;
+    xprv::detail::ServiceTimerControl::Handler handler_;
+    std::promise<void> release_promise_;
+    std::shared_future<void> release_future_;
+    std::promise<void> handler_return_pending_promise_;
+    std::future<void> handler_return_pending_future_;
+    std::atomic<bool> raw_handler_returned_{false};
 };
 
 xprv::detail::ServiceLifecycleOperations
@@ -438,8 +574,8 @@ TEST(ServiceRootLifecycle, TimerReceiptIsConsumedOnlyAfterRawHandlerReturns)
     using Outcome = xprv::detail::ServiceTerminalOutcome;
 
     catl::test::DeterministicScheduler scheduler;
-    ControlledServiceTimer status_timer(scheduler.io());
-    ControlledServiceTimer deadline_timer(scheduler.io());
+    ControlledServiceTimer status_timer;
+    ControlledServiceTimer deadline_timer;
     auto authority = xprv::RequestDrainTestAccess::make_authority(1);
     std::size_t stop_io_calls = 0;
     auto operations = basic_service_operations(authority, stop_io_calls);
@@ -553,8 +689,8 @@ TEST(ServiceRootLifecycle, StatusTimerLaunchRefusalIsRetainedFailure)
     using Outcome = xprv::detail::ServiceTerminalOutcome;
 
     catl::test::DeterministicScheduler scheduler;
-    ControlledServiceTimer status_timer(scheduler.io());
-    ControlledServiceTimer deadline_timer(scheduler.io());
+    ControlledServiceTimer status_timer;
+    ControlledServiceTimer deadline_timer;
     status_timer.throw_on_wait = true;
     auto authority = xprv::RequestDrainTestAccess::make_authority(1);
     std::size_t stop_io_calls = 0;
@@ -576,6 +712,120 @@ TEST(ServiceRootLifecycle, StatusTimerLaunchRefusalIsRetainedFailure)
     ASSERT_TRUE(result);
     EXPECT_EQ(result->outcome, Outcome::failed);
     EXPECT_TRUE(result->failure);
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
+TEST(ServiceRootLifecycle, StatusTimerErrorWithoutDiagnosticIsRetainedFailure)
+{
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    catl::test::DeterministicScheduler scheduler;
+    ControlledServiceTimer status_timer;
+    ControlledServiceTimer deadline_timer;
+    status_timer.cancel_error = boost::asio::error::operation_not_supported;
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t stop_io_calls = 0;
+    auto operations = basic_service_operations(authority, stop_io_calls);
+
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        scheduler.io(),
+        status_timer.control(),
+        deadline_timer.control(),
+        std::move(operations),
+        std::chrono::seconds(30),
+        std::chrono::seconds(10));
+    lifecycle->start();
+    scheduler.run_until_idle();
+    lifecycle->begin_shutdown();
+    scheduler.run_until_idle();
+
+    auto const result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::failed);
+    ASSERT_TRUE(result->failure);
+    EXPECT_NE(
+        exception_message(result->failure).find("not supported"),
+        std::string::npos);
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
+TEST(ServiceRootLifecycle, StatusTimerCancelFailureSurvivesExactReceipt)
+{
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    catl::test::DeterministicScheduler scheduler;
+    ControlledServiceTimer status_timer;
+    ControlledServiceTimer deadline_timer;
+    status_timer.throw_on_cancel = true;
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t stop_io_calls = 0;
+    auto operations = basic_service_operations(authority, stop_io_calls);
+
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        scheduler.io(),
+        status_timer.control(),
+        deadline_timer.control(),
+        std::move(operations),
+        std::chrono::seconds(30),
+        std::chrono::seconds(10));
+    lifecycle->start();
+    scheduler.run_until_idle();
+    lifecycle->begin_shutdown();
+    scheduler.run_until_idle();
+
+    EXPECT_FALSE(lifecycle->terminal_result());
+    status_timer.complete(boost::asio::error::operation_aborted);
+    scheduler.run_until_idle();
+
+    auto const result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::failed);
+    ASSERT_TRUE(result->failure);
+    EXPECT_EQ(exception_message(result->failure), "timer cancel failpoint");
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
+TEST(ServiceRootLifecycle, OrdinaryEngineFailureWaitsForEveryAdmittedResult)
+{
+    namespace asio = boost::asio;
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    catl::test::DeterministicScheduler scheduler;
+    catl::test::DeterministicScheduler::Timer status_timer(scheduler);
+    catl::test::DeterministicScheduler::Timer deadline_timer(scheduler);
+    catl::test::Gate held_engine(scheduler.io());
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t stop_io_calls = 0;
+    auto operations = basic_service_operations(authority, stop_io_calls);
+    operations.stop_engines = {
+        [](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+            throw std::runtime_error("ordinary engine failure");
+            co_return;
+        },
+        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+            co_await held_engine.async_wait(asio::use_awaitable);
+        },
+    };
+
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        scheduler.io(),
+        timer_control(status_timer),
+        timer_control(deadline_timer),
+        std::move(operations),
+        std::chrono::seconds(30),
+        std::chrono::seconds(10));
+    lifecycle->begin_shutdown();
+    scheduler.run_until_idle();
+
+    EXPECT_FALSE(lifecycle->terminal_result());
+    held_engine.open();
+    scheduler.run_until_idle();
+
+    auto const result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::failed);
+    ASSERT_TRUE(result->failure);
+    EXPECT_EQ(exception_message(result->failure), "ordinary engine failure");
     EXPECT_EQ(stop_io_calls, 1);
 }
 
@@ -645,6 +895,195 @@ TEST(ServiceRootLifecycle, ForcedStopKeepsBorrowedReceiptAliveUntilFrameDies)
     EXPECT_TRUE(probe_destroyed);
     EXPECT_TRUE(receipt_was_valid);
 }
+
+class ServiceRootRunnerModes : public ::testing::TestWithParam<std::size_t>
+{
+};
+
+TEST_P(ServiceRootRunnerModes, ConcurrentShutdownRequestsCommitOneOutcome)
+{
+    namespace asio = boost::asio;
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    asio::io_context io;
+    auto status_timer = std::make_shared<asio::steady_timer>(io);
+    auto deadline_timer = std::make_shared<asio::steady_timer>(io);
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t stop_io_calls = 0;
+    auto operations = basic_service_operations(authority, stop_io_calls);
+    operations.stop_io = [&]() {
+        ++stop_io_calls;
+        io.stop();
+    };
+
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        io,
+        asio_timer_control(status_timer),
+        asio_timer_control(deadline_timer),
+        std::move(operations),
+        std::chrono::hours(1),
+        std::chrono::hours(1));
+
+    std::vector<std::thread> callers;
+    callers.reserve(8);
+    for (std::size_t index = 0; index < 8; ++index)
+        callers.emplace_back([lifecycle]() { lifecycle->begin_shutdown(); });
+    join_io_runners(callers);
+
+    auto runners = start_io_runners(io, GetParam());
+    join_io_runners(runners);
+
+    auto const result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::graceful);
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
+TEST_P(ServiceRootRunnerModes, ParallelEngineReceiptsDrainOnEveryRunnerMode)
+{
+    namespace asio = boost::asio;
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    asio::io_context io;
+    auto status_timer = std::make_shared<asio::steady_timer>(io);
+    auto deadline_timer = std::make_shared<asio::steady_timer>(io);
+    auto first_engine = std::make_shared<asio::steady_timer>(
+        io, asio::steady_timer::time_point::max());
+    auto second_engine = std::make_shared<asio::steady_timer>(
+        io, asio::steady_timer::time_point::max());
+    std::promise<void> first_entered;
+    std::promise<void> second_entered;
+    auto first_entered_future = first_entered.get_future();
+    auto second_entered_future = second_entered.get_future();
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t stop_io_calls = 0;
+    auto operations = basic_service_operations(authority, stop_io_calls);
+    operations.stop_io = [&]() {
+        ++stop_io_calls;
+        io.stop();
+    };
+    operations.stop_engines = {
+        [first_engine, &first_entered](
+            xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+            first_entered.set_value();
+            boost::system::error_code error;
+            co_await first_engine->async_wait(
+                asio::redirect_error(asio::use_awaitable, error));
+        },
+        [second_engine, &second_entered](
+            xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+            second_entered.set_value();
+            boost::system::error_code error;
+            co_await second_engine->async_wait(
+                asio::redirect_error(asio::use_awaitable, error));
+        },
+    };
+
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        io,
+        asio_timer_control(status_timer),
+        asio_timer_control(deadline_timer),
+        std::move(operations),
+        std::chrono::hours(1),
+        std::chrono::hours(1));
+    lifecycle->begin_shutdown();
+    auto runners = start_io_runners(io, GetParam());
+
+    auto const first_ready =
+        first_entered_future.wait_for(std::chrono::seconds(2)) ==
+        std::future_status::ready;
+    auto const second_ready =
+        second_entered_future.wait_for(std::chrono::seconds(2)) ==
+        std::future_status::ready;
+    if (first_ready && second_ready)
+    {
+        std::thread first_release(
+            [first_engine]() { (void)first_engine->cancel(); });
+        std::thread second_release(
+            [second_engine]() { (void)second_engine->cancel(); });
+        first_release.join();
+        second_release.join();
+    }
+    else
+    {
+        io.stop();
+    }
+    join_io_runners(runners);
+
+    ASSERT_TRUE(first_ready);
+    ASSERT_TRUE(second_ready);
+    auto const result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::graceful);
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OneTwoAndFourRunners,
+    ServiceRootRunnerModes,
+    ::testing::Values(1u, 2u, 4u));
+
+class ServiceRootConcurrentRunnerModes
+    : public ::testing::TestWithParam<std::size_t>
+{
+};
+
+TEST_P(
+    ServiceRootConcurrentRunnerModes,
+    TimerReceiptCannotOvertakeBoundHandlerReturn)
+{
+    namespace asio = boost::asio;
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    asio::io_context io;
+    ControlledServiceTimer status_timer;
+    BlockingReturnTimer deadline_timer;
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t unused_stop_calls = 0;
+    std::atomic<std::size_t> stop_io_calls{0};
+    auto operations = basic_service_operations(authority, unused_stop_calls);
+    operations.stop_io = [&]() {
+        stop_io_calls.fetch_add(1, std::memory_order_acq_rel);
+        io.stop();
+    };
+
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        io,
+        status_timer.control(),
+        deadline_timer.control(),
+        std::move(operations),
+        std::chrono::hours(1),
+        std::chrono::hours(1));
+    lifecycle->begin_shutdown();
+    auto runners = start_io_runners(io, GetParam());
+
+    auto const blocked =
+        deadline_timer.wait_until_return_is_blocked(std::chrono::seconds(2)) ==
+        std::future_status::ready;
+    if (blocked)
+    {
+        EXPECT_FALSE(deadline_timer.raw_handler_returned());
+        EXPECT_FALSE(lifecycle->terminal_result());
+        EXPECT_EQ(stop_io_calls.load(std::memory_order_acquire), 0u);
+    }
+
+    deadline_timer.release_return();
+    if (!blocked)
+        io.stop();
+    join_io_runners(runners);
+
+    ASSERT_TRUE(blocked);
+    EXPECT_TRUE(deadline_timer.raw_handler_returned());
+    auto const result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::graceful);
+    EXPECT_EQ(stop_io_calls.load(std::memory_order_acquire), 1u);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    TwoAndFourRunners,
+    ServiceRootConcurrentRunnerModes,
+    ::testing::Values(2u, 4u));
 
 TEST(RequestDrainReceipt, RefusesDifferentAdmissionAuthority)
 {

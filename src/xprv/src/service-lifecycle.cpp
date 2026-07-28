@@ -114,21 +114,24 @@ ServiceLifecycle::arm_status_timer_on_control()
     {
         status_timer_.expires_after(status_interval_);
         auto self = shared_from_this();
-        status_timer_.async_wait([self](boost::system::error_code error) {
-            // The raw timer handler owns no lifecycle transition. Posting the
-            // immutable event is its final act; the receipt cannot be consumed
-            // on the owner strand until this callback has returned.
-            try
-            {
-                asio::post(self->control_, [self, error]() {
-                    self->finish_status_timer_on_control(error);
-                });
-            }
-            catch (...)
-            {
-                std::terminate();
-            }
-        });
+        status_timer_.async_wait(
+            control_, [self](boost::system::error_code error) {
+                if (!self->control_.running_in_this_thread())
+                    std::terminate();
+                // The adapter binds this raw handler to the owner strand.
+                // Posting the immutable event is its final act, so no other
+                // runner can consume the receipt before this callback returns.
+                try
+                {
+                    asio::post(self->control_, [self, error]() {
+                        self->finish_status_timer_on_control(error);
+                    });
+                }
+                catch (...)
+                {
+                    std::terminate();
+                }
+            });
     }
     catch (...)
     {
@@ -168,18 +171,23 @@ ServiceLifecycle::finish_status_timer_on_control(
         return;
     }
 
-    if (error && error != asio::error::operation_aborted &&
-        operations_.report_diagnostic)
+    auto const expected_shutdown_cancel =
+        error == asio::error::operation_aborted && phase_ != Phase::running;
+    if (error && !expected_shutdown_cancel)
     {
         auto const failure = timer_failure(error);
         record_failure_on_control(failure);
-        status_reporting_disabled_ = true;
-        try
+        if (phase_ == Phase::running)
+            status_reporting_disabled_ = true;
+        if (operations_.report_diagnostic)
         {
-            operations_.report_diagnostic(failure);
-        }
-        catch (...)
-        {
+            try
+            {
+                operations_.report_diagnostic(failure);
+            }
+            catch (...)
+            {
+            }
         }
     }
 
@@ -293,11 +301,13 @@ ServiceLifecycle::begin_shutdown_on_control()
         }
         catch (...)
         {
+            auto const failure = std::current_exception();
+            record_failure_on_control(failure);
             if (operations_.report_diagnostic)
             {
                 try
                 {
-                    operations_.report_diagnostic(std::current_exception());
+                    operations_.report_diagnostic(failure);
                 }
                 catch (...)
                 {
@@ -329,20 +339,23 @@ ServiceLifecycle::arm_deadline_on_control()
     {
         deadline_timer_.expires_after(shutdown_timeout_);
         auto self = shared_from_this();
-        deadline_timer_.async_wait([self](boost::system::error_code error) {
-            // As with the status timer, handler return precedes receipt
-            // consumption. cancel() and callback entry are not quiescence.
-            try
-            {
-                asio::post(self->control_, [self, error]() {
-                    self->finish_deadline_on_control(error);
-                });
-            }
-            catch (...)
-            {
-                std::terminate();
-            }
-        });
+        deadline_timer_.async_wait(
+            control_, [self](boost::system::error_code error) {
+                if (!self->control_.running_in_this_thread())
+                    std::terminate();
+                // As with the status timer, handler return precedes receipt
+                // consumption. cancel() and callback entry are not quiescence.
+                try
+                {
+                    asio::post(self->control_, [self, error]() {
+                        self->finish_deadline_on_control(error);
+                    });
+                }
+                catch (...)
+                {
+                    std::terminate();
+                }
+            });
     }
     catch (...)
     {

@@ -2,6 +2,7 @@
 
 #include "xprv/proof-engine.h"
 
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
@@ -23,7 +24,7 @@ struct ServiceTimerControl
     using Handler = std::function<void(boost::system::error_code)>;
 
     std::function<void(std::chrono::steady_clock::duration)> expires_after;
-    std::function<void(Handler)> async_wait;
+    std::function<void(boost::asio::any_io_executor, Handler)> async_wait;
     std::function<void()> cancel;
 
     explicit
