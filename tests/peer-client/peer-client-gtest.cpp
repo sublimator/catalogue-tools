@@ -1,5 +1,7 @@
 #include "peer-client-test-access.h"
 
+#include "../test-support/io-context-runners.h"
+
 #include <catl/peer-client/connection-types.h>
 #include <catl/peer-client/endpoint-tracker.h>
 #include <catl/peer-client/peer-client-coro.h>
@@ -12,6 +14,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <future>
 #include <limits>
 #include <stdexcept>
 #include <thread>
@@ -539,6 +542,99 @@ TEST(PeerClientLifecycle, CoDisconnectJoinsOnePhysicalReceiptForAllCallers)
     EXPECT_EQ(joins, 3);
     EXPECT_TRUE(failures.empty());
 }
+
+class PeerClientPhysicalRunnerModes
+    : public ::testing::TestWithParam<std::size_t>
+{
+};
+
+TEST_P(
+    PeerClientPhysicalRunnerModes,
+    HeldPhysicalCompletionDominatesConcurrentDisconnectCallers)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+
+    peer_connection::test_write_completion held_completion;
+    client->raw_connection().set_write_initiator_for_test(
+        [&held_completion](
+            asio::const_buffer,
+            peer_connection::test_write_completion completion) {
+            held_completion = std::move(completion);
+        });
+
+    std::promise<boost::system::error_code> logical_close;
+    auto logical_close_future = logical_close.get_future();
+    asio::post(client->strand(), [client, &logical_close] {
+        client->raw_connection().async_send_packet(
+            packet_type::ping,
+            std::vector<std::uint8_t>(64, 0xBD),
+            [&logical_close](boost::system::error_code error) {
+                logical_close.set_value(error);
+            });
+    });
+    io.run();
+
+    ASSERT_TRUE(held_completion);
+    ASSERT_EQ(
+        client->raw_connection().transport_operation_count_for_test(), 1u);
+    ASSERT_FALSE(
+        client->raw_connection().physical_transport_drained_for_test());
+
+    constexpr std::size_t caller_count = 8;
+    std::atomic<std::size_t> joined{0};
+    std::atomic<std::size_t> failed{0};
+    for (std::size_t index = 0; index < caller_count; ++index)
+    {
+        asio::co_spawn(
+            io,
+            [client]() -> asio::awaitable<void> {
+                co_await client->co_disconnect();
+            },
+            [&joined, &failed](std::exception_ptr failure) {
+                if (failure)
+                    failed.fetch_add(1, std::memory_order_acq_rel);
+                else
+                    joined.fetch_add(1, std::memory_order_acq_rel);
+            });
+    }
+
+    io.restart();
+    catl::test::IoContextRunners runners(io, GetParam());
+    auto const logically_closed =
+        logical_close_future.wait_for(std::chrono::seconds(2)) ==
+        std::future_status::ready;
+    if (!logically_closed)
+    {
+        io.stop();
+        runners.join();
+    }
+    ASSERT_TRUE(logically_closed);
+    EXPECT_EQ(logical_close_future.get(), asio::error::operation_aborted);
+    EXPECT_EQ(joined.load(std::memory_order_acquire), 0u)
+        << "logical close cannot counterfeit the held physical receipt";
+    EXPECT_EQ(failed.load(std::memory_order_acquire), 0u);
+
+    auto completion = std::move(held_completion);
+    asio::post(
+        client->strand(), [completion = std::move(completion)]() mutable {
+            completion(asio::error::operation_aborted);
+        });
+    runners.join();
+
+    EXPECT_EQ(joined.load(std::memory_order_acquire), caller_count);
+    EXPECT_EQ(failed.load(std::memory_order_acquire), 0u);
+    EXPECT_EQ(
+        client->raw_connection().transport_operation_count_for_test(), 0u);
+    EXPECT_TRUE(client->raw_connection().physical_transport_drained_for_test());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OneTwoAndFourRunners,
+    PeerClientPhysicalRunnerModes,
+    ::testing::Values(1u, 2u, 4u));
 
 TEST(PeerClientLifecycle, FailureTransitionCannotOverwriteTerminalState)
 {

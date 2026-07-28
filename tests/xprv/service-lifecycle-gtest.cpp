@@ -2,6 +2,7 @@
 #include <xprv/proof-engine.h>
 
 #include "../test-support/deterministic-scheduler.h"
+#include "../test-support/io-context-runners.h"
 #include "http-child-completion.h"
 #include "service-lifecycle.h"
 
@@ -255,23 +256,6 @@ private:
     std::optional<boost::asio::any_io_executor> executor_;
     xprv::detail::ServiceTimerControl::Handler handler_;
 };
-
-std::vector<std::thread>
-start_io_runners(boost::asio::io_context& io, std::size_t count)
-{
-    std::vector<std::thread> runners;
-    runners.reserve(count);
-    for (std::size_t index = 0; index < count; ++index)
-        runners.emplace_back([&io]() { io.run(); });
-    return runners;
-}
-
-void
-join_io_runners(std::vector<std::thread>& runners)
-{
-    for (auto& runner : runners)
-        runner.join();
-}
 
 std::string
 exception_message(std::exception_ptr const& failure)
@@ -916,10 +900,11 @@ TEST_P(ServiceRootRunnerModes, ConcurrentShutdownRequestsCommitOneOutcome)
     callers.reserve(8);
     for (std::size_t index = 0; index < 8; ++index)
         callers.emplace_back([lifecycle]() { lifecycle->begin_shutdown(); });
-    join_io_runners(callers);
+    for (auto& caller : callers)
+        caller.join();
 
-    auto runners = start_io_runners(io, GetParam());
-    join_io_runners(runners);
+    catl::test::IoContextRunners runners(io, GetParam());
+    runners.join();
 
     auto const result = lifecycle->terminal_result();
     ASSERT_TRUE(result);
@@ -975,7 +960,7 @@ TEST_P(ServiceRootRunnerModes, ParallelEngineReceiptsDrainOnEveryRunnerMode)
         std::chrono::hours(1),
         std::chrono::hours(1));
     lifecycle->begin_shutdown();
-    auto runners = start_io_runners(io, GetParam());
+    catl::test::IoContextRunners runners(io, GetParam());
 
     auto const first_ready =
         first_entered_future.wait_for(std::chrono::seconds(2)) ==
@@ -996,7 +981,7 @@ TEST_P(ServiceRootRunnerModes, ParallelEngineReceiptsDrainOnEveryRunnerMode)
     {
         io.stop();
     }
-    join_io_runners(runners);
+    runners.join();
 
     ASSERT_TRUE(first_ready);
     ASSERT_TRUE(second_ready);
@@ -1043,7 +1028,7 @@ TEST_P(
         std::chrono::hours(1),
         std::chrono::hours(1));
     lifecycle->begin_shutdown();
-    auto runners = start_io_runners(io, GetParam());
+    catl::test::IoContextRunners runners(io, GetParam());
 
     auto const blocked =
         deadline_timer.wait_until_return_is_blocked(std::chrono::seconds(2)) ==
@@ -1058,7 +1043,7 @@ TEST_P(
     deadline_timer.release_return();
     if (!blocked)
         io.stop();
-    join_io_runners(runners);
+    runners.join();
 
     ASSERT_TRUE(blocked);
     EXPECT_TRUE(deadline_timer.raw_handler_returned());
