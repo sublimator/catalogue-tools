@@ -45,6 +45,10 @@ class RequestDrainBinding;
 class RequestDrainTestAccess;
 class ProofEngineTestAccess;
 
+namespace detail {
+class ServiceLifecycle;
+}
+
 /// Identity shared by one HTTP admission owner and the exact engines whose
 /// request frames it owns. The epoch advances whenever that owner starts a new
 /// admission lifecycle, invalidating receipts from every prior lifecycle.
@@ -151,6 +155,39 @@ class ProofEngine : public std::enable_shared_from_this<ProofEngine>
 #endif
 
 public:
+    /// Unforgeable evidence that this exact engine instance consumed its
+    /// admitted request-drain authority and completed its installed child
+    /// population. Failure produces no receipt.
+    class [[nodiscard]] DrainReceipt
+    {
+    public:
+        DrainReceipt(DrainReceipt const&) = delete;
+        DrainReceipt&
+        operator=(DrainReceipt const&) = delete;
+        DrainReceipt(DrainReceipt&&) noexcept = default;
+        DrainReceipt&
+        operator=(DrainReceipt&&) noexcept = default;
+
+    private:
+        friend class ProofEngine;
+        friend class ProofEngineTestAccess;
+        friend class detail::ServiceLifecycle;
+
+        explicit DrainReceipt(
+            std::shared_ptr<ProofEngine const> engine) noexcept
+            : engine_(std::move(engine))
+        {
+        }
+
+        bool
+        matches(std::shared_ptr<ProofEngine const> const& engine) const noexcept
+        {
+            return engine_ && engine && engine_.get() == engine.get();
+        }
+
+        std::shared_ptr<ProofEngine const> engine_;
+    };
+
     static std::shared_ptr<ProofEngine>
     create(boost::asio::io_context& io, NetworkConfig config);
 
@@ -170,7 +207,7 @@ public:
     /// Drains NodeCache node-operation and header servants, fences and
     /// reconciles managed transport, then awaits PeerSet's physical
     /// session/servant receipt.
-    boost::asio::awaitable<void>
+    [[nodiscard]] boost::asio::awaitable<DrainReceipt>
     co_stop(RequestDrainReceipt const& request_drain);
 
     /// Result from prove() — chain + metadata the caller needs.

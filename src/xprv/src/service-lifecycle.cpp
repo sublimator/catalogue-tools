@@ -23,6 +23,12 @@ struct HttpStopCompletion
     std::exception_ptr failure;
 };
 
+struct EngineStopCompletion
+{
+    std::optional<ProofEngine::DrainReceipt> receipt;
+    std::exception_ptr failure;
+};
+
 std::exception_ptr
 timer_failure(boost::system::error_code error)
 {
@@ -60,8 +66,9 @@ ServiceLifecycle::create(
 {
     if (!status_timer || !deadline_timer || !operations.report_status ||
         !operations.stop_http || !operations.stop_io ||
-        std::ranges::any_of(
-            operations.stop_engines, [](auto const& stop) { return !stop; }))
+        std::ranges::any_of(operations.stop_engines, [](auto const& operation) {
+            return !operation;
+        }))
     {
         throw std::invalid_argument(
             "service lifecycle requires complete timer and operation controls");
@@ -563,27 +570,35 @@ ServiceLifecycle::launch_engine_stops_on_control()
                 control_,
                 [self,
                  receipt,
-                 index]() -> asio::awaitable<std::exception_ptr> {
+                 index]() -> asio::awaitable<EngineStopCompletion> {
                     try
                     {
-                        co_await self->operations_.stop_engines[index](
-                            *receipt);
-                        co_return std::exception_ptr{};
+                        auto engine_receipt =
+                            co_await self->operations_.stop_engines[index].stop(
+                                *receipt);
+                        co_return EngineStopCompletion{
+                            .receipt = std::move(engine_receipt),
+                            .failure = {},
+                        };
                     }
                     catch (...)
                     {
-                        co_return std::current_exception();
+                        co_return EngineStopCompletion{
+                            .receipt = std::nullopt,
+                            .failure = std::current_exception(),
+                        };
                     }
                 },
                 asio::bind_executor(
                     control_,
                     [self, index](
                         std::exception_ptr outer_failure,
-                        std::exception_ptr engine_failure) {
+                        EngineStopCompletion completion) {
                         self->finish_engine_stop_on_control(
                             index,
+                            std::move(completion.receipt),
                             outer_failure ? std::move(outer_failure)
-                                          : std::move(engine_failure));
+                                          : std::move(completion.failure));
                     }));
         }
         catch (...)
@@ -597,13 +612,14 @@ ServiceLifecycle::launch_engine_stops_on_control()
 }
 
 //@@authority transition=prv.T0161 status=provisional scope=function
-//bind=xprv::detail::finish_engine_stop_on_control@3ea01d723e0ae726
+// bind=xprv::detail::finish_engine_stop_on_control@861ed9ddc88b68d0
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0053
 // label=consume_one_proof_engine_drain_outcome
 void
 ServiceLifecycle::finish_engine_stop_on_control(
     std::size_t index,
+    std::optional<ProofEngine::DrainReceipt> receipt,
     std::exception_ptr failure)
 {
     assert(control_.running_in_this_thread());
@@ -617,9 +633,16 @@ ServiceLifecycle::finish_engine_stop_on_control(
     auto& row = engine_drains_[index];
     if (row.phase != EngineDrainRow::Phase::running)
         return;
+    if (!failure &&
+        (!receipt || !receipt->matches(operations_.stop_engines[index].engine)))
+    {
+        failure = std::make_exception_ptr(std::logic_error(
+            "engine drain completed without its exact receipt"));
+    }
     if (failure)
     {
-        //@@authority transition=prv.T0180 status=provisional scope=statement bind=expression_statement@deecbd84eaac5ce0
+        //@@authority transition=prv.T0180 status=provisional scope=statement
+        //bind=expression_statement@271015ba0d3ef897
         // owner=unresolved owner_hypothesis=service_lifecycle
         // commit=service_root_strand touches=prv.S0053
         // label=record_one_proof_engine_drain_failure_outcome
@@ -632,7 +655,8 @@ ServiceLifecycle::finish_engine_stop_on_control(
     else
     {
         // Only this success arm consumes the receipt published by T0176.
-        //@@authority transition=prv.T0179 status=provisional scope=statement bind=expression_statement@d23ea42b6e5ffe01
+        //@@authority transition=prv.T0179 status=provisional scope=statement
+        //bind=expression_statement@a3eaf432a225c2c3
         // owner=unresolved owner_hypothesis=service_lifecycle
         // commit=service_root_strand touches=prv.S0053
         // boundary_ref=proof_engine.drain_receipt

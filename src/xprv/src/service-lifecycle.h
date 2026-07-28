@@ -53,13 +53,25 @@ struct ServiceTerminalResult
     std::exception_ptr failure;
 };
 
+struct EngineDrainOperation
+{
+    std::shared_ptr<ProofEngine const> engine;
+    std::function<boost::asio::awaitable<ProofEngine::DrainReceipt>(
+        RequestDrainReceipt const&)>
+        stop;
+
+    explicit
+    operator bool() const noexcept
+    {
+        return engine && stop;
+    }
+};
+
 struct ServiceLifecycleOperations
 {
     std::function<boost::asio::awaitable<void>()> report_status;
     std::function<boost::asio::awaitable<RequestDrainReceipt>()> stop_http;
-    std::vector<
-        std::function<boost::asio::awaitable<void>(RequestDrainReceipt const&)>>
-        stop_engines;
+    std::vector<EngineDrainOperation> stop_engines;
     std::function<void(std::exception_ptr const&)> report_diagnostic;
     std::function<void(ServiceTerminalResult const&)> terminal_diagnostic;
     std::function<void()> stop_io;
@@ -175,6 +187,7 @@ private:
     void
     finish_engine_stop_on_control(
         std::size_t index,
+        std::optional<ProofEngine::DrainReceipt> receipt,
         std::exception_ptr failure);
 
     void

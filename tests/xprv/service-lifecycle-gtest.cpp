@@ -96,6 +96,12 @@ public:
 class ProofEngineTestAccess
 {
 public:
+    static ProofEngine::DrainReceipt
+    mint_drain_receipt(std::shared_ptr<ProofEngine> const& engine)
+    {
+        return ProofEngine::DrainReceipt{engine};
+    }
+
     static void
     set_validation_buffer(
         ProofEngine& engine,
@@ -206,8 +212,29 @@ concept CanStopWithRequestDrain =
 static_assert(!std::is_default_constructible_v<xprv::RequestDrainReceipt>);
 static_assert(!std::is_copy_constructible_v<xprv::RequestDrainReceipt>);
 static_assert(std::is_move_constructible_v<xprv::RequestDrainReceipt>);
+static_assert(
+    !std::is_default_constructible_v<xprv::ProofEngine::DrainReceipt>);
+static_assert(!std::is_copy_constructible_v<xprv::ProofEngine::DrainReceipt>);
+static_assert(std::is_move_constructible_v<xprv::ProofEngine::DrainReceipt>);
 static_assert(!CanStopWithoutRequestDrain<xprv::ProofEngine>);
 static_assert(CanStopWithRequestDrain<xprv::ProofEngine>);
+
+template <class Stop>
+xprv::detail::EngineDrainOperation
+test_engine_stop(boost::asio::io_context& io, Stop stop)
+{
+    auto engine =
+        xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
+    return {
+        .engine = engine,
+        .stop = [engine, stop = std::move(stop)](
+                    xprv::RequestDrainReceipt const& request_drain) mutable
+        -> boost::asio::awaitable<xprv::ProofEngine::DrainReceipt> {
+            co_await stop(request_drain);
+            co_return xprv::ProofEngineTestAccess::mint_drain_receipt(engine);
+        },
+    };
+}
 
 xprv::detail::ServiceTimerControl
 timer_control(catl::test::DeterministicScheduler::Timer& timer)
@@ -422,14 +449,18 @@ TEST(ServiceRootLifecycle, SealsEveryEngineRowBeforeLaunchingAny)
     std::array<std::size_t, 2> entered{};
     auto operations = basic_service_operations(authority, stop_io_calls);
     operations.stop_engines = {
-        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
-            ++entered[0];
-            co_await first_gate.async_wait(asio::use_awaitable);
-        },
-        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
-            ++entered[1];
-            co_await second_gate.async_wait(asio::use_awaitable);
-        },
+        test_engine_stop(
+            scheduler.io(),
+            [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+                ++entered[0];
+                co_await first_gate.async_wait(asio::use_awaitable);
+            }),
+        test_engine_stop(
+            scheduler.io(),
+            [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+                ++entered[1];
+                co_await second_gate.async_wait(asio::use_awaitable);
+            }),
     };
 
     auto lifecycle = xprv::detail::ServiceLifecycle::create(
@@ -507,18 +538,24 @@ TEST(ServiceRootLifecycle, MiddleLaunchFailureDoesNotOrphanLaterRows)
     std::array<std::size_t, 3> entered{};
     auto operations = basic_service_operations(authority, stop_io_calls);
     operations.stop_engines = {
-        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
-            ++entered[0];
-            co_return;
-        },
-        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
-            ++entered[1];
-            co_return;
-        },
-        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
-            ++entered[2];
-            co_return;
-        },
+        test_engine_stop(
+            scheduler.io(),
+            [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+                ++entered[0];
+                co_return;
+            }),
+        test_engine_stop(
+            scheduler.io(),
+            [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+                ++entered[1];
+                co_return;
+            }),
+        test_engine_stop(
+            scheduler.io(),
+            [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+                ++entered[2];
+                co_return;
+            }),
     };
     operations.before_engine_launch_for_test = [&](std::size_t index) {
         ++launch_attempts[index];
@@ -637,9 +674,11 @@ TEST(ServiceRootLifecycle, DeadlineWinsWithoutRewritingLaterCompletion)
     std::size_t stop_io_calls = 0;
     auto operations = basic_service_operations(authority, stop_io_calls);
     operations.stop_engines = {
-        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
-            co_await engine_gate.async_wait(asio::use_awaitable);
-        },
+        test_engine_stop(
+            scheduler.io(),
+            [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+                co_await engine_gate.async_wait(asio::use_awaitable);
+            }),
     };
 
     auto lifecycle = xprv::detail::ServiceLifecycle::create(
@@ -816,13 +855,17 @@ TEST(ServiceRootLifecycle, OrdinaryEngineFailureWaitsForEveryAdmittedResult)
     std::size_t stop_io_calls = 0;
     auto operations = basic_service_operations(authority, stop_io_calls);
     operations.stop_engines = {
-        [](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
-            throw std::runtime_error("ordinary engine failure");
-            co_return;
-        },
-        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
-            co_await held_engine.async_wait(asio::use_awaitable);
-        },
+        test_engine_stop(
+            scheduler.io(),
+            [](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+                throw std::runtime_error("ordinary engine failure");
+                co_return;
+            }),
+        test_engine_stop(
+            scheduler.io(),
+            [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+                co_await held_engine.async_wait(asio::use_awaitable);
+            }),
     };
 
     auto lifecycle = xprv::detail::ServiceLifecycle::create(
@@ -847,6 +890,52 @@ TEST(ServiceRootLifecycle, OrdinaryEngineFailureWaitsForEveryAdmittedResult)
     EXPECT_EQ(stop_io_calls, 1);
 }
 
+TEST(ServiceRootLifecycle, ForeignEngineReceiptCannotSatisfyAdmittedRow)
+{
+    namespace asio = boost::asio;
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    catl::test::DeterministicScheduler scheduler;
+    catl::test::DeterministicScheduler::Timer status_timer(scheduler);
+    catl::test::DeterministicScheduler::Timer deadline_timer(scheduler);
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    auto expected_engine = xprv::ProofEngine::create(
+        scheduler.io(), xprv::NetworkConfig::for_network(0));
+    auto foreign_engine = xprv::ProofEngine::create(
+        scheduler.io(), xprv::NetworkConfig::for_network(0));
+    std::size_t stop_io_calls = 0;
+    auto operations = basic_service_operations(authority, stop_io_calls);
+    operations.stop_engines = {
+        xprv::detail::EngineDrainOperation{
+            .engine = expected_engine,
+            .stop = [foreign_engine](xprv::RequestDrainReceipt const&)
+                -> asio::awaitable<xprv::ProofEngine::DrainReceipt> {
+                co_return xprv::ProofEngineTestAccess::mint_drain_receipt(
+                    foreign_engine);
+            },
+        },
+    };
+
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        scheduler.io(),
+        timer_control(status_timer),
+        timer_control(deadline_timer),
+        std::move(operations),
+        std::chrono::seconds(30),
+        std::chrono::seconds(10));
+    lifecycle->begin_shutdown();
+    scheduler.run_until_idle();
+
+    auto const result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::failed);
+    ASSERT_TRUE(result->failure);
+    EXPECT_EQ(
+        exception_message(result->failure),
+        "engine drain completed without its exact receipt");
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
 TEST(ServiceRootLifecycle, ForcedStopKeepsBorrowedReceiptAliveUntilFrameDies)
 {
     namespace asio = boost::asio;
@@ -865,7 +954,8 @@ TEST(ServiceRootLifecycle, ForcedStopKeepsBorrowedReceiptAliveUntilFrameDies)
             ++stop_io_calls;
             scheduler.io().stop();
         };
-        operations.stop_engines = {
+        operations.stop_engines = {test_engine_stop(
+            scheduler.io(),
             [authority, &probe_destroyed, &receipt_was_valid](
                 xprv::RequestDrainReceipt const& receipt)
                 -> asio::awaitable<void> {
@@ -888,8 +978,7 @@ TEST(ServiceRootLifecycle, ForcedStopKeepsBorrowedReceiptAliveUntilFrameDies)
                 asio::steady_timer never(
                     executor, asio::steady_timer::time_point::max());
                 co_await never.async_wait(asio::use_awaitable);
-            },
-        };
+            })};
 
         auto lifecycle = xprv::detail::ServiceLifecycle::create(
             scheduler.io(),
@@ -982,20 +1071,24 @@ TEST_P(ServiceRootRunnerModes, ParallelEngineReceiptsDrainOnEveryRunnerMode)
         io.stop();
     };
     operations.stop_engines = {
-        [first_engine, &first_entered](
-            xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
-            first_entered.set_value();
-            boost::system::error_code error;
-            co_await first_engine->async_wait(
-                asio::redirect_error(asio::use_awaitable, error));
-        },
-        [second_engine, &second_entered](
-            xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
-            second_entered.set_value();
-            boost::system::error_code error;
-            co_await second_engine->async_wait(
-                asio::redirect_error(asio::use_awaitable, error));
-        },
+        test_engine_stop(
+            io,
+            [first_engine, &first_entered](
+                xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+                first_entered.set_value();
+                boost::system::error_code error;
+                co_await first_engine->async_wait(
+                    asio::redirect_error(asio::use_awaitable, error));
+            }),
+        test_engine_stop(
+            io,
+            [second_engine, &second_entered](
+                xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+                second_entered.set_value();
+                boost::system::error_code error;
+                co_await second_engine->async_wait(
+                    asio::redirect_error(asio::use_awaitable, error));
+            }),
     };
 
     auto lifecycle = xprv::detail::ServiceLifecycle::create(
@@ -1394,7 +1487,7 @@ TEST(HttpServerLifecycle, OneShotStartSurvivesSecondStartRefusal)
         io,
         [server, engine]() -> asio::awaitable<void> {
             auto receipt = co_await server->co_stop();
-            co_await engine->co_stop(receipt);
+            (void)co_await engine->co_stop(receipt);
         },
         asio::use_future);
     io.run();
@@ -1444,7 +1537,7 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsValidationBufferOwnerReceipt)
             [server, engine, &engine_stop_entered]() -> asio::awaitable<void> {
                 auto receipt = co_await server->co_stop();
                 engine_stop_entered.set_value();
-                co_await engine->co_stop(receipt);
+                (void)co_await engine->co_stop(receipt);
             },
             asio::use_future);
 
@@ -1510,7 +1603,7 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsNodeCacheStopDriverReceipt)
             io,
             [server, engine]() -> asio::awaitable<void> {
                 auto receipt = co_await server->co_stop();
-                co_await engine->co_stop(receipt);
+                (void)co_await engine->co_stop(receipt);
             },
             asio::use_future);
 
@@ -1572,7 +1665,7 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsNodeCacheHeaderClearReceipt)
             io,
             [server, engine]() -> asio::awaitable<void> {
                 auto receipt = co_await server->co_stop();
-                co_await engine->co_stop(receipt);
+                (void)co_await engine->co_stop(receipt);
             },
             asio::use_future);
 
@@ -1639,7 +1732,7 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsCoordinatorFenceReceipt)
             io,
             [server, engine]() -> asio::awaitable<void> {
                 auto receipt = co_await server->co_stop();
-                co_await engine->co_stop(receipt);
+                (void)co_await engine->co_stop(receipt);
             },
             asio::use_future);
 
@@ -1716,7 +1809,7 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsBothPeerSetPinReleaseBarriers)
                 io,
                 [server, engine]() -> asio::awaitable<void> {
                     auto receipt = co_await server->co_stop();
-                    co_await engine->co_stop(receipt);
+                    (void)co_await engine->co_stop(receipt);
                 },
                 asio::use_future);
 
@@ -1791,7 +1884,7 @@ TEST(
             io,
             [server, engine]() -> asio::awaitable<void> {
                 auto receipt = co_await server->co_stop();
-                co_await engine->co_stop(receipt);
+                (void)co_await engine->co_stop(receipt);
             },
             asio::use_future);
 
@@ -1857,7 +1950,7 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsPeerSetAggregateStopReceipt)
             io,
             [server, engine]() -> asio::awaitable<void> {
                 auto receipt = co_await server->co_stop();
-                co_await engine->co_stop(receipt);
+                (void)co_await engine->co_stop(receipt);
             },
             asio::use_future);
 
@@ -1926,11 +2019,13 @@ TEST(
             [server]() -> asio::awaitable<xprv::RequestDrainReceipt> {
             co_return co_await server->co_stop();
         };
-        operations.stop_engines.emplace_back(
-            [engine](xprv::RequestDrainReceipt const& receipt)
-                -> asio::awaitable<void> {
-                co_await engine->co_stop(receipt);
-            });
+        operations.stop_engines.emplace_back(xprv::detail::EngineDrainOperation{
+            .engine = engine,
+            .stop = [engine](xprv::RequestDrainReceipt const& receipt)
+                -> asio::awaitable<xprv::ProofEngine::DrainReceipt> {
+                co_return co_await engine->co_stop(receipt);
+            },
+        });
         operations.terminal_diagnostic =
             [&](xprv::detail::ServiceTerminalResult const&) {
                 terminal_diagnostic_calls.fetch_add(

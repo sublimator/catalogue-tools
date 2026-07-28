@@ -262,16 +262,16 @@ ProofEngine::stop()
 // statements.
 // clang-format off
 //@@authority state=prv.S0056 status=provisional scope=function
-//bind=xprv::co_stop@eb43bbcc90625807
+//bind=xprv::co_stop@3da48b9d47023132
 // owner=unresolved owner_hypothesis=proof_engine_drain_frame
 // observed_home=ProofEngine::co_stop_coroutine_frame
 // label=owned_installed_proof_engine_child_population_and_receipt_census
 //@@authority channel=prv.C0004 status=provisional scope=function
-//bind=xprv::co_stop@eb43bbcc90625807
+//bind=xprv::co_stop@3da48b9d47023132
 // endpoints=service_lifecycle,proof_engine
 // channel_semantics=process_local_join
 // label=await_exact_proof_engine_drain_receipt
-asio::awaitable<void>
+asio::awaitable<ProofEngine::DrainReceipt>
 ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
 {
     //@@authority transition=prv.T0166 status=provisional scope=statement
@@ -461,14 +461,14 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
     if (before_drain_receipt_publish_for_test_)
         before_drain_receipt_publish_for_test_();
     //@@authority transition=prv.T0176 status=provisional scope=statement
-    //bind=co_return_statement@a7e5f24d79554a8d
+    //bind=co_return_statement@14dc731903ca3625
     // owner=unresolved owner_hypothesis=proof_engine_drain_frame
     // commit=proof_engine_drain_coroutine touches=prv.S0056
     // boundary_ref=proof_engine.drain_receipt
     // receipt=proof_engine.drain_receipt
     // population_ref=proof_engine.installed_drain_population
     // label=publish_exact_proof_engine_drain_receipt
-    co_return; //@@authority-target ids=prv.T0176
+    co_return DrainReceipt{shared_from_this()}; //@@authority-target ids=prv.T0176
 }
 // clang-format on
 

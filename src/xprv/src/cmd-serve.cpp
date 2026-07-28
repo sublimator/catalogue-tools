@@ -566,8 +566,12 @@ cmd_serve()
     for (auto const& [_, engine] : *engine_snapshot)
     {
         lifecycle_operations.stop_engines.emplace_back(
-            [engine](xprv::RequestDrainReceipt const& request_drain) {
-                return engine->co_stop(request_drain);
+            xprv::detail::EngineDrainOperation{
+                .engine = engine,
+                .stop =
+                    [engine](xprv::RequestDrainReceipt const& request_drain) {
+                        return engine->co_stop(request_drain);
+                    },
             });
     }
     lifecycle_operations.report_diagnostic =
