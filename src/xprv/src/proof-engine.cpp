@@ -458,6 +458,8 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
     }
 
     PLOGI(log_, "[", net_label_, "] Engine drained");
+    if (before_drain_receipt_publish_for_test_)
+        before_drain_receipt_publish_for_test_();
     //@@authority transition=prv.T0176 status=provisional scope=statement
     //bind=co_return_statement@a7e5f24d79554a8d
     // owner=unresolved owner_hypothesis=proof_engine_drain_frame

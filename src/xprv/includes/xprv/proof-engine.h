@@ -396,6 +396,10 @@ private:
     // label=proof_engine_start_once_lifecycle_boundary
     bool start_called_ = false;
     RequestDrainBinding request_drain_binding_;
+    // Test-only observation point after every admitted child receipt has
+    // returned but before co_stop() publishes the engine drain receipt.
+    // Production leaves this empty.
+    std::function<void()> before_drain_receipt_publish_for_test_;
     std::atomic<size_t> cache_hits_{0};
     std::atomic<size_t> cache_misses_{0};
 

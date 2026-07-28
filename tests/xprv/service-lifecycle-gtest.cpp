@@ -127,6 +127,14 @@ public:
     {
         engine.peers_ = std::move(peers);
     }
+
+    static void
+    set_before_drain_receipt_publish(
+        ProofEngine& engine,
+        std::function<void()> hook)
+    {
+        engine.before_drain_receipt_publish_for_test_ = std::move(hook);
+    }
 };
 
 class HttpServerTestAccess
@@ -1866,6 +1874,104 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsPeerSetAggregateStopReceipt)
             EXPECT_NO_THROW(drained.get());
         else
             io.stop();
+
+        work.reset();
+        runners.join();
+    }
+}
+
+TEST(
+    HttpServerLifecycle,
+    ServiceTerminalAwaitsExactProofEngineDrainReceipt)
+{
+    namespace asio = boost::asio;
+    using namespace std::chrono_literals;
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    for (auto const runner_count : {2u, 4u})
+    {
+        SCOPED_TRACE(testing::Message() << "runners=" << runner_count);
+
+        asio::io_context io;
+        auto work = asio::make_work_guard(io);
+        auto engine =
+            xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
+        auto server = xprv::HttpServer::create(
+            io,
+            engine,
+            xprv::HttpServerOptions{
+                .bind_address = "127.0.0.1",
+                .port = 0,
+            });
+        server->start();
+
+        std::promise<void> receipt_publish_entered;
+        std::promise<void> release_receipt_publish;
+        auto release_receipt_publish_future =
+            release_receipt_publish.get_future().share();
+        xprv::ProofEngineTestAccess::set_before_drain_receipt_publish(
+            *engine, [&]() {
+                receipt_publish_entered.set_value();
+                release_receipt_publish_future.wait();
+            });
+
+        auto status_timer = std::make_shared<asio::steady_timer>(io);
+        auto deadline_timer = std::make_shared<asio::steady_timer>(io);
+        std::promise<void> terminal_published;
+        std::atomic<std::size_t> stop_io_calls{0};
+        xprv::detail::ServiceLifecycleOperations operations;
+        operations.report_status = []() -> asio::awaitable<void> { co_return; };
+        operations.stop_http =
+            [server]() -> asio::awaitable<xprv::RequestDrainReceipt> {
+            co_return co_await server->co_stop();
+        };
+        operations.stop_engines.emplace_back(
+            [engine](xprv::RequestDrainReceipt const& receipt)
+                -> asio::awaitable<void> {
+                co_await engine->co_stop(receipt);
+            });
+        operations.terminal_diagnostic =
+            [&](xprv::detail::ServiceTerminalResult const&) {
+                terminal_published.set_value();
+            };
+        operations.stop_io = [&]() {
+            stop_io_calls.fetch_add(1, std::memory_order_relaxed);
+        };
+
+        auto lifecycle = xprv::detail::ServiceLifecycle::create(
+            io,
+            xprv::detail::make_service_timer_control(status_timer),
+            xprv::detail::make_service_timer_control(deadline_timer),
+            std::move(operations),
+            1h,
+            1h);
+        lifecycle->begin_shutdown();
+
+        catl::test::IoContextRunners runners(io, runner_count);
+        auto const entered_status =
+            receipt_publish_entered.get_future().wait_for(5s);
+        EXPECT_EQ(entered_status, std::future_status::ready);
+        if (entered_status == std::future_status::ready)
+        {
+            EXPECT_FALSE(lifecycle->terminal_result());
+            EXPECT_EQ(stop_io_calls.load(std::memory_order_relaxed), 0u);
+        }
+
+        release_receipt_publish.set_value();
+        auto const terminal_status =
+            terminal_published.get_future().wait_for(5s);
+        EXPECT_EQ(terminal_status, std::future_status::ready);
+        if (terminal_status == std::future_status::ready)
+        {
+            auto const terminal = lifecycle->terminal_result();
+            ASSERT_TRUE(terminal);
+            EXPECT_EQ(terminal->outcome, Outcome::graceful);
+            EXPECT_EQ(stop_io_calls.load(std::memory_order_relaxed), 1u);
+        }
+        else
+        {
+            io.stop();
+        }
 
         work.reset();
         runners.join();
