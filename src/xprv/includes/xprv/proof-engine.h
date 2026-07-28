@@ -43,6 +43,7 @@ class HttpServer;
 class ProofEngine;
 class RequestDrainBinding;
 class RequestDrainTestAccess;
+class ProofEngineTestAccess;
 
 /// Identity shared by one HTTP admission owner and the exact engines whose
 /// request frames it owns. The epoch advances whenever that owner starts a new
@@ -145,6 +146,10 @@ struct VerifyResult
 
 class ProofEngine : public std::enable_shared_from_this<ProofEngine>
 {
+#ifdef XPRV_TESTING
+    friend class ProofEngineTestAccess;
+#endif
+
 public:
     static std::shared_ptr<ProofEngine>
     create(boost::asio::io_context& io, NetworkConfig config);
@@ -354,7 +359,8 @@ private:
     catl::xdata::Protocol protocol_;
 
     std::shared_ptr<catl::peer_client::PeerSet> peers_;
-    //@@authority state=prv.S0015 status=provisional scope=field bind=xprv::ProofEngine::ledger_fetch_coordinator_@6cee545daf224610
+    //@@authority state=prv.S0015 status=provisional scope=field
+    // bind=xprv::ProofEngine::ledger_fetch_coordinator_@6cee545daf224610
     // owner=unresolved owner_hypothesis=proof_engine observed_home=proof_engine
     // label=proof_engine_owned_ledger_fetch_coordinator_lifecycle
     std::shared_ptr<catl::peer_client::LedgerFetchCoordinator>
@@ -379,11 +385,13 @@ private:
     int fetch_stale_multiplier_ = 2;
     int rpc_max_concurrent_ = 8;
     bool single_shot_ = false;
-    //@@authority state=prv.S0016 status=provisional scope=field bind=xprv::ProofEngine::ledger_fetch_coordinator_enabled_@568396b37d0ef4a3
+    //@@authority state=prv.S0016 status=provisional scope=field
+    // bind=xprv::ProofEngine::ledger_fetch_coordinator_enabled_@568396b37d0ef4a3
     // owner=unresolved owner_hypothesis=proof_engine observed_home=proof_engine
     // label=pre_start_managed_node_transport_selection
     bool ledger_fetch_coordinator_enabled_ = false;
-    //@@authority state=prv.S0017 status=provisional scope=field bind=xprv::ProofEngine::start_called_@75aec8130a675b5f
+    //@@authority state=prv.S0017 status=provisional scope=field
+    // bind=xprv::ProofEngine::start_called_@75aec8130a675b5f
     // owner=unresolved owner_hypothesis=proof_engine observed_home=proof_engine
     // label=proof_engine_start_once_lifecycle_boundary
     bool start_called_ = false;

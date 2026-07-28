@@ -119,6 +119,25 @@ void
 ValidationBuffer::stop()
 {
     auto const weak = weak_from_this();
+    seal_admission_and_join_worker();
+    try
+    {
+        asio::post(strand_, [weak]() {
+            if (auto self = weak.lock())
+            {
+                std::lock_guard publication_lock(self->publication_mutex_);
+                self->cancel_pending_locked(QuorumCollectStopReason::timeout);
+            }
+        });
+    }
+    catch (...)
+    {
+    }
+}
+
+void
+ValidationBuffer::seal_admission_and_join_worker()
+{
     {
         std::lock_guard publication_lock(publication_mutex_);
         std::lock_guard admission_lock(admission_mutex_);
@@ -136,21 +155,47 @@ ValidationBuffer::stop()
         {
         }
     }
-    try
-    {
-        asio::post(strand_, [weak]() {
-            if (auto self = weak.lock())
-            {
-                std::lock_guard publication_lock(self->publication_mutex_);
-                self->cancel_pending_locked(QuorumCollectStopReason::timeout);
-            }
-        });
-    }
-    catch (...)
-    {
-    }
     if (manifest_worker_)
         manifest_worker_->stop();
+}
+
+//@@authority state=prv.S0057 status=provisional scope=function
+// bind=xprv::co_stop@916bc1beee7eaa2d
+// owner=unresolved owner_hypothesis=validation_buffer_stop_frame
+// observed_home=ValidationBuffer::co_stop_coroutine_frame
+// label=exact_validation_buffer_owner_drain_join_frame
+//@@authority channel=prv.C0005 status=provisional scope=function
+// bind=xprv::co_stop@916bc1beee7eaa2d
+// endpoints=proof_engine,validation_buffer
+// channel_semantics=process_local_join
+// label=await_exact_validation_buffer_drain_receipt
+asio::awaitable<void>
+ValidationBuffer::co_stop()
+{
+    auto self = shared_from_this();
+    co_await asio::this_coro::reset_cancellation_state(
+        asio::disable_cancellation());
+
+    //@@authority transition=prv.T0177 status=provisional scope=statement
+    // bind=expression_statement@34375817f968c49b
+    // owner=unresolved owner_hypothesis=validation_buffer_stop_frame
+    // commit=publication_admission_mutex_and_manifest_worker_join
+    // touches=prv.S0057 label=seal_validation_ingress_and_join_manifest_worker
+    seal_admission_and_join_worker();  //@@authority-target ids=prv.T0177
+
+    //@@authority transition=prv.T0178 status=provisional scope=statement
+    // bind=expression_statement@78b49cb1c9415f99
+    // owner=unresolved owner_hypothesis=validation_buffer_stop_frame
+    // commit=validation_buffer_strand touches=prv.S0057
+    // label=consume_owner_barrier_and_publish_validation_stop_receipt
+    co_await asio::co_spawn(
+        strand_,
+        [self]() -> asio::awaitable<void> {
+            std::lock_guard publication_lock(self->publication_mutex_);
+            self->cancel_pending_locked(QuorumCollectStopReason::timeout);
+            co_return;
+        },
+        asio::use_awaitable);  //@@authority-target ids=prv.T0178
 }
 
 void
@@ -1292,8 +1337,9 @@ ValidationBuffer::co_wait_best_quorum(
     auto self = shared_from_this();
     co_return co_await asio::co_spawn(
         strand_,
-        [self, timeout, expected_vl_sequence]()
-            -> asio::awaitable<QuorumCollectResult> {
+        [self,
+         timeout,
+         expected_vl_sequence]() -> asio::awaitable<QuorumCollectResult> {
             co_return co_await self->co_wait_best_quorum_on_strand(
                 timeout, expected_vl_sequence);
         },
@@ -1446,8 +1492,7 @@ ValidationBuffer::co_wait_best_quorum_on_strand(
                     "] co_wait_best_quorum: waiting for initial quorum...");
             }
 
-            if (next_pending_id_ ==
-                std::numeric_limits<std::uint64_t>::max())
+            if (next_pending_id_ == std::numeric_limits<std::uint64_t>::max())
             {
                 throw std::overflow_error(
                     "ValidationBuffer pending identity exhausted");
@@ -1483,28 +1528,25 @@ ValidationBuffer::co_wait_best_quorum_on_strand(
         if (quorum_deadline_arm_hook_for_test_)
             quorum_deadline_arm_hook_for_test_();
 #endif
-        deadline_timer->async_wait(
-            [weak = weak_from_this(),
-             deadline_timer](boost::system::error_code ec) {
-                if (ec)
-                    return;
-                if (auto self = weak.lock())
-                {
-                    std::lock_guard publication_lock(
-                        self->publication_mutex_);
+        deadline_timer->async_wait([weak = weak_from_this(), deadline_timer](
+                                       boost::system::error_code ec) {
+            if (ec)
+                return;
+            if (auto self = weak.lock())
+            {
+                std::lock_guard publication_lock(self->publication_mutex_);
 #ifdef XPRV_TESTING
-                    if (self->deadline_publish_hook_for_test_)
-                        self->deadline_publish_hook_for_test_();
+                if (self->deadline_publish_hook_for_test_)
+                    self->deadline_publish_hook_for_test_();
 #endif
-                    {
-                        std::lock_guard admission_lock(
-                            self->admission_mutex_);
-                        if (self->pending_unl_updates_ != 0)
-                            return;
-                    }
-                    self->resolve_pending();
+                {
+                    std::lock_guard admission_lock(self->admission_mutex_);
+                    if (self->pending_unl_updates_ != 0)
+                        return;
                 }
-            });
+                self->resolve_pending();
+            }
+        });
     }
     catch (...)
     {

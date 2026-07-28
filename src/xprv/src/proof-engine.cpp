@@ -312,11 +312,11 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
     if (val_buffer_)
     {
         //@@authority transition=prv.T0168 status=provisional scope=statement
-        //bind=stop@73b285cdf9ba60f9
+        //bind=co_stop@223484bc05e2c58f
         // owner=unresolved owner_hypothesis=validation_buffer
-        // commit=validation_buffer_publication_and_admission_mutex calls=stop
-        // touches=prv.S0056 label=request_and_join_manifest_worker_stop
-        val_buffer_->stop(); //@@authority-target ids=prv.T0168
+        // commit=proof_engine_drain_coroutine calls=co_stop
+        // touches=prv.S0056 label=consume_validation_buffer_stop_receipt
+        co_await val_buffer_->co_stop(); //@@authority-target ids=prv.T0168
     }
 
     if (node_cache_)

@@ -91,6 +91,18 @@ public:
     }
 };
 
+class ProofEngineTestAccess
+{
+public:
+    static void
+    set_validation_buffer(
+        ProofEngine& engine,
+        std::shared_ptr<ValidationBuffer> validation_buffer)
+    {
+        engine.val_buffer_ = std::move(validation_buffer);
+    }
+};
+
 class HttpServerTestAccess
 {
 public:
@@ -1355,6 +1367,76 @@ TEST(HttpServerLifecycle, OneShotStartSurvivesSecondStartRefusal)
 
     EXPECT_NO_THROW(stopped.get());
     EXPECT_THROW(server->start(), std::logic_error);
+}
+
+TEST(HttpServerLifecycle, EngineDrainAwaitsValidationBufferOwnerReceipt)
+{
+    namespace asio = boost::asio;
+    using namespace std::chrono_literals;
+
+    for (auto const runner_count : {2u, 4u})
+    {
+        SCOPED_TRACE(testing::Message() << "runners=" << runner_count);
+
+        asio::io_context io;
+        auto work = asio::make_work_guard(io);
+        auto engine =
+            xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
+        auto protocol =
+            catl::xdata::Protocol::load_embedded_xrpl_protocol();
+        auto validation_buffer =
+            xprv::ValidationBuffer::create(io, protocol, 0);
+        xprv::ProofEngineTestAccess::set_validation_buffer(
+            *engine, validation_buffer);
+        auto server = xprv::HttpServer::create(
+            io,
+            engine,
+            xprv::HttpServerOptions{
+                .bind_address = "127.0.0.1",
+                .port = 0,
+            });
+        server->start();
+
+        std::promise<void> owner_entered;
+        std::promise<void> release_owner;
+        auto release_owner_future = release_owner.get_future().share();
+        asio::post(validation_buffer->owner_strand_for_test(), [&]() {
+            owner_entered.set_value();
+            release_owner_future.wait();
+        });
+
+        std::promise<void> engine_stop_entered;
+        auto drained = asio::co_spawn(
+            io,
+            [server, engine, &engine_stop_entered]() -> asio::awaitable<void> {
+                auto receipt = co_await server->co_stop();
+                engine_stop_entered.set_value();
+                co_await engine->co_stop(receipt);
+            },
+            asio::use_future);
+
+        catl::test::IoContextRunners runners(io, runner_count);
+        auto const owner_status = owner_entered.get_future().wait_for(5s);
+        auto const engine_status =
+            engine_stop_entered.get_future().wait_for(5s);
+        EXPECT_EQ(owner_status, std::future_status::ready);
+        EXPECT_EQ(engine_status, std::future_status::ready);
+
+        if (owner_status == std::future_status::ready &&
+            engine_status == std::future_status::ready)
+        {
+            EXPECT_EQ(drained.wait_for(50ms), std::future_status::timeout);
+        }
+
+        release_owner.set_value();
+        auto const drained_status = drained.wait_for(5s);
+        EXPECT_EQ(drained_status, std::future_status::ready);
+        if (drained_status == std::future_status::ready)
+            EXPECT_NO_THROW(drained.get());
+
+        work.reset();
+        runners.join();
+    }
 }
 
 TEST(HttpServerLifecycle, FailedStartCannotMintOrRetryLifecycle)
