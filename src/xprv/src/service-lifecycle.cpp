@@ -37,6 +37,21 @@ timer_failure(boost::system::error_code error)
 
 }  // namespace
 
+EngineDrainOperation
+EngineDrainOperation::for_engine(std::shared_ptr<ProofEngine> engine)
+{
+    if (!engine)
+        throw std::invalid_argument(
+            "engine drain operation requires an engine");
+
+    return EngineDrainOperation{
+        engine,
+        [engine](RequestDrainReceipt const& request_drain) {
+            return engine->co_stop(request_drain);
+        },
+    };
+}
+
 ServiceTimerControl
 make_service_timer_control(std::shared_ptr<asio::steady_timer> timer)
 {
@@ -574,8 +589,8 @@ ServiceLifecycle::launch_engine_stops_on_control()
                     try
                     {
                         auto engine_receipt =
-                            co_await self->operations_.stop_engines[index].stop(
-                                *receipt);
+                            co_await self->operations_.stop_engines[index]
+                                .co_stop(*receipt);
                         co_return EngineStopCompletion{
                             .receipt = std::move(engine_receipt),
                             .failure = {},
@@ -634,7 +649,7 @@ ServiceLifecycle::finish_engine_stop_on_control(
     if (row.phase != EngineDrainRow::Phase::running)
         return;
     if (!failure &&
-        (!receipt || !receipt->matches(operations_.stop_engines[index].engine)))
+        (!receipt || !operations_.stop_engines[index].accepts(*receipt)))
     {
         failure = std::make_exception_ptr(std::logic_error(
             "engine drain completed without its exact receipt"));

@@ -102,6 +102,15 @@ public:
         return ProofEngine::DrainReceipt{engine};
     }
 
+    static detail::EngineDrainOperation
+    make_engine_drain_operation(
+        std::shared_ptr<ProofEngine> const& engine,
+        std::function<boost::asio::awaitable<ProofEngine::DrainReceipt>(
+            RequestDrainReceipt const&)> stop)
+    {
+        return detail::EngineDrainOperation{engine, std::move(stop)};
+    }
+
     static void
     set_validation_buffer(
         ProofEngine& engine,
@@ -215,7 +224,21 @@ static_assert(std::is_move_constructible_v<xprv::RequestDrainReceipt>);
 static_assert(
     !std::is_default_constructible_v<xprv::ProofEngine::DrainReceipt>);
 static_assert(!std::is_copy_constructible_v<xprv::ProofEngine::DrainReceipt>);
+static_assert(!std::is_copy_assignable_v<xprv::ProofEngine::DrainReceipt>);
 static_assert(std::is_move_constructible_v<xprv::ProofEngine::DrainReceipt>);
+static_assert(std::is_move_assignable_v<xprv::ProofEngine::DrainReceipt>);
+static_assert(!std::is_constructible_v<
+              xprv::ProofEngine::DrainReceipt,
+              std::shared_ptr<xprv::ProofEngine const>>);
+using EngineStopFunction =
+    std::function<boost::asio::awaitable<xprv::ProofEngine::DrainReceipt>(
+        xprv::RequestDrainReceipt const&)>;
+static_assert(
+    !std::is_default_constructible_v<xprv::detail::EngineDrainOperation>);
+static_assert(!std::is_constructible_v<
+              xprv::detail::EngineDrainOperation,
+              std::shared_ptr<xprv::ProofEngine const>,
+              EngineStopFunction>);
 static_assert(!CanStopWithoutRequestDrain<xprv::ProofEngine>);
 static_assert(CanStopWithRequestDrain<xprv::ProofEngine>);
 
@@ -225,15 +248,14 @@ test_engine_stop(boost::asio::io_context& io, Stop stop)
 {
     auto engine =
         xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
-    return {
-        .engine = engine,
-        .stop = [engine, stop = std::move(stop)](
-                    xprv::RequestDrainReceipt const& request_drain) mutable
+    return xprv::ProofEngineTestAccess::make_engine_drain_operation(
+        engine,
+        [engine, stop = std::move(stop)](
+            xprv::RequestDrainReceipt const& request_drain) mutable
         -> boost::asio::awaitable<xprv::ProofEngine::DrainReceipt> {
             co_await stop(request_drain);
             co_return xprv::ProofEngineTestAccess::mint_drain_receipt(engine);
-        },
-    };
+        });
 }
 
 xprv::detail::ServiceTimerControl
@@ -906,14 +928,13 @@ TEST(ServiceRootLifecycle, ForeignEngineReceiptCannotSatisfyAdmittedRow)
     std::size_t stop_io_calls = 0;
     auto operations = basic_service_operations(authority, stop_io_calls);
     operations.stop_engines = {
-        xprv::detail::EngineDrainOperation{
-            .engine = expected_engine,
-            .stop = [foreign_engine](xprv::RequestDrainReceipt const&)
+        xprv::ProofEngineTestAccess::make_engine_drain_operation(
+            expected_engine,
+            [foreign_engine](xprv::RequestDrainReceipt const&)
                 -> asio::awaitable<xprv::ProofEngine::DrainReceipt> {
                 co_return xprv::ProofEngineTestAccess::mint_drain_receipt(
                     foreign_engine);
-            },
-        },
+            }),
     };
 
     auto lifecycle = xprv::detail::ServiceLifecycle::create(
@@ -2019,13 +2040,8 @@ TEST(
             [server]() -> asio::awaitable<xprv::RequestDrainReceipt> {
             co_return co_await server->co_stop();
         };
-        operations.stop_engines.emplace_back(xprv::detail::EngineDrainOperation{
-            .engine = engine,
-            .stop = [engine](xprv::RequestDrainReceipt const& receipt)
-                -> asio::awaitable<xprv::ProofEngine::DrainReceipt> {
-                co_return co_await engine->co_stop(receipt);
-            },
-        });
+        operations.stop_engines.emplace_back(
+            xprv::detail::EngineDrainOperation::for_engine(engine));
         operations.terminal_diagnostic =
             [&](xprv::detail::ServiceTerminalResult const&) {
                 terminal_diagnostic_calls.fetch_add(

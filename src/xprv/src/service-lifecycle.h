@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace xprv::detail {
@@ -53,18 +54,47 @@ struct ServiceTerminalResult
     std::exception_ptr failure;
 };
 
-struct EngineDrainOperation
+class EngineDrainOperation
 {
-    std::shared_ptr<ProofEngine const> engine;
-    std::function<boost::asio::awaitable<ProofEngine::DrainReceipt>(
-        RequestDrainReceipt const&)>
-        stop;
+public:
+    static EngineDrainOperation
+    for_engine(std::shared_ptr<ProofEngine> engine);
+
+    boost::asio::awaitable<ProofEngine::DrainReceipt>
+    co_stop(RequestDrainReceipt const& request_drain) const
+    {
+        return stop_(request_drain);
+    }
+
+    bool
+    accepts(ProofEngine::DrainReceipt const& receipt) const noexcept
+    {
+        return engine_ && engine_->accepts_drain_receipt(receipt);
+    }
 
     explicit
     operator bool() const noexcept
     {
-        return engine && stop;
+        return engine_ && stop_;
     }
+
+private:
+#ifdef XPRV_TESTING
+    friend class ::xprv::ProofEngineTestAccess;
+#endif
+
+    EngineDrainOperation(
+        std::shared_ptr<ProofEngine const> engine,
+        std::function<boost::asio::awaitable<ProofEngine::DrainReceipt>(
+            RequestDrainReceipt const&)> stop)
+        : engine_(std::move(engine)), stop_(std::move(stop))
+    {
+    }
+
+    std::shared_ptr<ProofEngine const> engine_;
+    std::function<boost::asio::awaitable<ProofEngine::DrainReceipt>(
+        RequestDrainReceipt const&)>
+        stop_;
 };
 
 struct ServiceLifecycleOperations

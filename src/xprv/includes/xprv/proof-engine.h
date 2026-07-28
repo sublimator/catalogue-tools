@@ -45,10 +45,6 @@ class RequestDrainBinding;
 class RequestDrainTestAccess;
 class ProofEngineTestAccess;
 
-namespace detail {
-class ServiceLifecycle;
-}
-
 /// Identity shared by one HTTP admission owner and the exact engines whose
 /// request frames it owns. The epoch advances whenever that owner starts a new
 /// admission lifecycle, invalidating receipts from every prior lifecycle.
@@ -170,8 +166,9 @@ public:
 
     private:
         friend class ProofEngine;
+#ifdef XPRV_TESTING
         friend class ProofEngineTestAccess;
-        friend class detail::ServiceLifecycle;
+#endif
 
         explicit DrainReceipt(
             std::shared_ptr<ProofEngine const> engine) noexcept
@@ -179,14 +176,16 @@ public:
         {
         }
 
-        bool
-        matches(std::shared_ptr<ProofEngine const> const& engine) const noexcept
-        {
-            return engine_ && engine && engine_.get() == engine.get();
-        }
-
         std::shared_ptr<ProofEngine const> engine_;
     };
+
+    /// Verify a drain receipt against this exact engine without granting its
+    /// consumer authority to construct one.
+    bool
+    accepts_drain_receipt(DrainReceipt const& receipt) const noexcept
+    {
+        return receipt.engine_ && receipt.engine_.get() == this;
+    }
 
     static std::shared_ptr<ProofEngine>
     create(boost::asio::io_context& io, NetworkConfig config);
