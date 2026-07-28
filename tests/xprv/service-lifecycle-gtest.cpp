@@ -1917,7 +1917,8 @@ TEST(
 
         auto status_timer = std::make_shared<asio::steady_timer>(io);
         auto deadline_timer = std::make_shared<asio::steady_timer>(io);
-        std::promise<void> terminal_published;
+        std::promise<void> stop_io_called;
+        std::atomic<std::size_t> terminal_diagnostic_calls{0};
         std::atomic<std::size_t> stop_io_calls{0};
         xprv::detail::ServiceLifecycleOperations operations;
         operations.report_status = []() -> asio::awaitable<void> { co_return; };
@@ -1932,10 +1933,12 @@ TEST(
             });
         operations.terminal_diagnostic =
             [&](xprv::detail::ServiceTerminalResult const&) {
-                terminal_published.set_value();
+                terminal_diagnostic_calls.fetch_add(
+                    1, std::memory_order_relaxed);
             };
         operations.stop_io = [&]() {
-            stop_io_calls.fetch_add(1, std::memory_order_relaxed);
+            if (stop_io_calls.fetch_add(1, std::memory_order_relaxed) == 0)
+                stop_io_called.set_value();
         };
 
         auto lifecycle = xprv::detail::ServiceLifecycle::create(
@@ -1958,14 +1961,15 @@ TEST(
         }
 
         release_receipt_publish.set_value();
-        auto const terminal_status =
-            terminal_published.get_future().wait_for(5s);
-        EXPECT_EQ(terminal_status, std::future_status::ready);
-        if (terminal_status == std::future_status::ready)
+        auto const stop_io_status = stop_io_called.get_future().wait_for(5s);
+        EXPECT_EQ(stop_io_status, std::future_status::ready);
+        if (stop_io_status == std::future_status::ready)
         {
             auto const terminal = lifecycle->terminal_result();
             ASSERT_TRUE(terminal);
             EXPECT_EQ(terminal->outcome, Outcome::graceful);
+            EXPECT_EQ(
+                terminal_diagnostic_calls.load(std::memory_order_relaxed), 1u);
             EXPECT_EQ(stop_io_calls.load(std::memory_order_relaxed), 1u);
         }
         else
