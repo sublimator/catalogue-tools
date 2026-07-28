@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -62,6 +63,14 @@ public:
         bool fail)
     {
         c->fail_fence_projection_for_test_ = fail;
+    }
+
+    static void
+    set_before_fence_terminal_commit(
+        std::shared_ptr<Coordinator> const& c,
+        std::function<void()> hook)
+    {
+        c->before_fence_terminal_commit_for_test_ = std::move(hook);
     }
 
     // --- bounds, so each can be forced independently ----------------------

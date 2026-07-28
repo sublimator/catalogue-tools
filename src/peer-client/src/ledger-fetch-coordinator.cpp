@@ -618,7 +618,7 @@ LedgerFetchCoordinator::begin_publish_on_strand(TransportAttemptId attempt)
         // A second identity for one payload is exactly what the receiver's
         // identity_conflict refusal exists to catch.
         //@@authority channel=prv.C0003 status=provisional scope=statement
-        // bind=submit_node_batch@c78a495a729a6a5e
+        // bind=submit_node_batch@8c216cd03b7675ba
         // endpoints=ledger_fetch_coordinator,peer_client
         // channel_semantics=command_receipt calls=submit_node_batch
         // label=candidate_exact_node_batch_write_command_and_receipt_channel
@@ -1607,6 +1607,8 @@ LedgerFetchCoordinator::check_fenced_on_strand()
         return;
     }
 
+    if (before_fence_terminal_commit_for_test_)
+        before_fence_terminal_commit_for_test_();
     fenced_.store(true, std::memory_order_release);
 
     // Detach by SWAP, so nothing fallible happens after the terminal commit.

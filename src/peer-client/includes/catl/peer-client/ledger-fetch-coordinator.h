@@ -736,6 +736,9 @@ private:
     bool fail_bind_initiation_for_test_ = false;
     bool fail_fence_projection_for_test_ = false;
     bool fail_publish_initiation_for_test_ = false;
+    /// Pause after the terminal population is proven and before the retained
+    /// fence fact is committed. Production leaves this empty.
+    std::function<void()> before_fence_terminal_commit_for_test_;
     /// Refuse to arm the retry timer, to prove a scheduling failure leaves one
     /// named owned obligation and does not recurse.
     bool fail_retry_arm_for_test_ = false;

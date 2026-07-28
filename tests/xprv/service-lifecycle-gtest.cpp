@@ -1,6 +1,7 @@
 #include <xprv/http-server.h>
 #include <xprv/proof-engine.h>
 
+#include "../peer-client/ledger-fetch-coordinator-test-access.h"
 #include "../test-support/deterministic-scheduler.h"
 #include "../test-support/io-context-runners.h"
 #include "http-child-completion.h"
@@ -108,6 +109,22 @@ public:
         std::shared_ptr<catl::peer_client::NodeCache> node_cache)
     {
         engine.node_cache_ = std::move(node_cache);
+    }
+
+    static void
+    set_ledger_fetch_coordinator(
+        ProofEngine& engine,
+        std::shared_ptr<catl::peer_client::LedgerFetchCoordinator> coordinator)
+    {
+        engine.ledger_fetch_coordinator_ = std::move(coordinator);
+    }
+
+    static void
+    set_peer_set(
+        ProofEngine& engine,
+        std::shared_ptr<catl::peer_client::PeerSet> peers)
+    {
+        engine.peers_ = std::move(peers);
     }
 };
 
@@ -1558,6 +1575,73 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsNodeCacheHeaderClearReceipt)
             EXPECT_EQ(drained.wait_for(50ms), std::future_status::timeout);
 
         release_clear_driver.set_value();
+        auto const drained_status = drained.wait_for(5s);
+        EXPECT_EQ(drained_status, std::future_status::ready);
+        if (drained_status == std::future_status::ready)
+            EXPECT_NO_THROW(drained.get());
+        else
+            io.stop();
+
+        work.reset();
+        runners.join();
+    }
+}
+
+TEST(HttpServerLifecycle, EngineDrainAwaitsCoordinatorFenceReceipt)
+{
+    namespace asio = boost::asio;
+    using namespace std::chrono_literals;
+
+    for (auto const runner_count : {2u, 4u})
+    {
+        SCOPED_TRACE(testing::Message() << "runners=" << runner_count);
+
+        asio::io_context io;
+        auto work = asio::make_work_guard(io);
+        auto engine =
+            xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
+        auto peers = catl::peer_client::PeerSet::create(
+            io, catl::peer_client::PeerSetOptions{});
+        auto coordinator =
+            catl::peer_client::LedgerFetchCoordinator::create(io, peers);
+        xprv::ProofEngineTestAccess::set_peer_set(*engine, peers);
+        xprv::ProofEngineTestAccess::set_ledger_fetch_coordinator(
+            *engine, coordinator);
+        auto server = xprv::HttpServer::create(
+            io,
+            engine,
+            xprv::HttpServerOptions{
+                .bind_address = "127.0.0.1",
+                .port = 0,
+            });
+        server->start();
+
+        std::promise<void> fence_commit_entered;
+        std::promise<void> release_fence_commit;
+        auto release_fence_commit_future =
+            release_fence_commit.get_future().share();
+        LedgerFetchCoordinatorTestAccess::set_before_fence_terminal_commit(
+            coordinator, [&]() {
+                fence_commit_entered.set_value();
+                release_fence_commit_future.wait();
+            });
+
+        auto drained = asio::co_spawn(
+            io,
+            [server, engine]() -> asio::awaitable<void> {
+                auto receipt = co_await server->co_stop();
+                co_await engine->co_stop(receipt);
+            },
+            asio::use_future);
+
+        catl::test::IoContextRunners runners(io, runner_count);
+        auto const entered_status =
+            fence_commit_entered.get_future().wait_for(5s);
+        EXPECT_EQ(entered_status, std::future_status::ready);
+        if (entered_status == std::future_status::ready)
+            EXPECT_EQ(drained.wait_for(50ms), std::future_status::timeout);
+
+        release_fence_commit.set_value();
         auto const drained_status = drained.wait_for(5s);
         EXPECT_EQ(drained_status, std::future_status::ready);
         if (drained_status == std::future_status::ready)
