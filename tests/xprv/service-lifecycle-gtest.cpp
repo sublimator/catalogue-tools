@@ -1500,6 +1500,8 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsNodeCacheStopDriverReceipt)
         EXPECT_EQ(drained_status, std::future_status::ready);
         if (drained_status == std::future_status::ready)
             EXPECT_NO_THROW(drained.get());
+        else
+            io.stop();
 
         work.reset();
         runners.join();
