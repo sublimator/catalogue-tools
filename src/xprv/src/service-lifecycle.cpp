@@ -31,6 +31,24 @@ timer_failure(boost::system::error_code error)
 
 }  // namespace
 
+ServiceTimerControl
+make_service_timer_control(std::shared_ptr<asio::steady_timer> timer)
+{
+    if (!timer)
+        throw std::invalid_argument("service timer cannot be null");
+
+    return {
+        .expires_after =
+            [timer](auto duration) { timer->expires_after(duration); },
+        .async_wait =
+            [timer](auto owner, auto handler) {
+                timer->async_wait(
+                    asio::bind_executor(std::move(owner), std::move(handler)));
+            },
+        .cancel = [timer]() { (void)timer->cancel(); },
+    };
+}
+
 std::shared_ptr<ServiceLifecycle>
 ServiceLifecycle::create(
     asio::io_context& io,

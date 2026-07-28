@@ -6,7 +6,6 @@
 #include "service-lifecycle.h"
 
 #include <boost/asio/bind_cancellation_slot.hpp>
-#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -252,21 +251,6 @@ private:
     std::optional<boost::asio::any_io_executor> executor_;
     xprv::detail::ServiceTimerControl::Handler handler_;
 };
-
-xprv::detail::ServiceTimerControl
-asio_timer_control(std::shared_ptr<boost::asio::steady_timer> timer)
-{
-    return {
-        .expires_after =
-            [timer](auto duration) { timer->expires_after(duration); },
-        .async_wait =
-            [timer](auto executor, auto handler) {
-                timer->async_wait(boost::asio::bind_executor(
-                    std::move(executor), std::move(handler)));
-            },
-        .cancel = [timer]() { (void)timer->cancel(); },
-    };
-}
 
 std::vector<std::thread>
 start_io_runners(boost::asio::io_context& io, std::size_t count)
@@ -918,8 +902,8 @@ TEST_P(ServiceRootRunnerModes, ConcurrentShutdownRequestsCommitOneOutcome)
 
     auto lifecycle = xprv::detail::ServiceLifecycle::create(
         io,
-        asio_timer_control(status_timer),
-        asio_timer_control(deadline_timer),
+        xprv::detail::make_service_timer_control(status_timer),
+        xprv::detail::make_service_timer_control(deadline_timer),
         std::move(operations),
         std::chrono::hours(1),
         std::chrono::hours(1));
@@ -981,8 +965,8 @@ TEST_P(ServiceRootRunnerModes, ParallelEngineReceiptsDrainOnEveryRunnerMode)
 
     auto lifecycle = xprv::detail::ServiceLifecycle::create(
         io,
-        asio_timer_control(status_timer),
-        asio_timer_control(deadline_timer),
+        xprv::detail::make_service_timer_control(status_timer),
+        xprv::detail::make_service_timer_control(deadline_timer),
         std::move(operations),
         std::chrono::hours(1),
         std::chrono::hours(1));

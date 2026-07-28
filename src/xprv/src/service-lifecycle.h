@@ -5,6 +5,7 @@
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -33,6 +34,12 @@ struct ServiceTimerControl
         return expires_after && async_wait && cancel;
     }
 };
+
+/// Bind a production steady_timer's full completion handler to the supplied
+/// lifecycle owner executor. This is the sole production adapter for the
+/// timer-receipt boundary.
+ServiceTimerControl
+make_service_timer_control(std::shared_ptr<boost::asio::steady_timer> timer);
 
 enum class ServiceTerminalOutcome {
     graceful,

@@ -1,21 +1,19 @@
 #include "commands.h"
 #include "config.h"
+#include "service-lifecycle.h"
 
 #include "xprv/http-server.h"
 #include "xprv/proof-engine.h"
 
 #include <catl/core/logger.h>
 
-#include <atomic>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/asio/use_awaitable.hpp>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <pthread.h>
 #include <sstream>
 #include <sys/resource.h>
@@ -349,6 +347,110 @@ log_memory(char const* label)
     PLOGI(log_, label, ": RSS=", static_cast<int>(mb), "MB");
 }
 
+using ServiceEngineSnapshot =
+    std::vector<std::pair<uint32_t, std::shared_ptr<xprv::ProofEngine>>>;
+
+static boost::asio::awaitable<void>
+co_report_service_status(
+    std::shared_ptr<ServiceEngineSnapshot const> engines,
+    std::shared_ptr<LoggedStatusState> status_state)
+{
+    auto const rss = get_rss_bytes();
+    if (rss == 0)
+        co_return;
+
+    std::map<uint32_t, LoggedNetworkStatus> networks;
+    for (auto const& [network_id, engine] : *engines)
+    {
+        auto peer_snapshot = co_await engine->peers()->co_snapshot();
+        auto health = co_await engine->co_health();
+        auto proof_cache = engine->cache_stats();
+        auto node_cache = engine->node_cache_stats();
+
+        LoggedNetworkStatus status;
+        status.label = network_label_for_id(network_id);
+        status.known_endpoints = peer_snapshot.known_endpoints;
+        status.tracked_endpoints = peer_snapshot.tracked_endpoints;
+        status.connected_peers = peer_snapshot.connected_peers;
+        status.ready_peers = peer_snapshot.ready_peers;
+        status.in_flight_connects = peer_snapshot.in_flight_connects;
+        status.queued_connects = peer_snapshot.queued_connects;
+        status.crawl_in_flight = peer_snapshot.crawl_in_flight;
+        status.queued_crawls = peer_snapshot.queued_crawls;
+        status.vl_loaded = health.vl_loaded;
+        status.has_quorum = health.latest_quorum_seq.has_value();
+        status.latest_quorum_seq = health.latest_quorum_seq.value_or(0);
+        status.validation_waiters = health.validation_buffer.pending_callbacks;
+        status.recent_quorums = health.validation_buffer.recent_quorums;
+        status.collector_ledgers = health.validation_buffer.collector_ledgers;
+        status.collector_validations =
+            health.validation_buffer.collector_validations;
+        status.queued_validations = health.validation_buffer.queued_validations;
+        status.validation_packets_deduplicated =
+            health.validation_buffer.validation_packets_deduplicated;
+        status.validation_packets_dropped =
+            health.validation_buffer.validation_packets_dropped;
+        status.proof_cache_entries = proof_cache.entries;
+        status.node_cache_entries = node_cache.entries;
+        status.node_cache_resident_entries = node_cache.resident_entries;
+        status.node_cache_header_entries = node_cache.header_entries;
+        status.crawled_size = peer_snapshot.crawled_size;
+        status.failed_at_size = peer_snapshot.failed_at_size;
+        status.recent_failures =
+            format_failure_buckets(peer_snapshot.recent_failures);
+        status.top_failing_endpoints =
+            format_failure_endpoints(peer_snapshot.top_failing_endpoints);
+        networks.emplace(network_id, std::move(status));
+    }
+
+    log_status_if_changed(rss, networks, *status_state);
+    co_return;
+}
+
+static void
+log_service_failure(char const* message, std::exception_ptr const& failure)
+{
+    if (!failure)
+    {
+        PLOGE(log_, message);
+        return;
+    }
+
+    try
+    {
+        std::rethrow_exception(failure);
+    }
+    catch (std::exception const& error)
+    {
+        PLOGE(log_, message, ": ", error.what());
+    }
+    catch (...)
+    {
+        PLOGE(log_, message);
+    }
+}
+
+static void
+log_service_terminal(xprv::detail::ServiceTerminalResult const& result)
+{
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+    switch (result.outcome)
+    {
+        case Outcome::graceful:
+            PLOGI(log_, "Graceful service drain complete");
+            return;
+        case Outcome::failed:
+            log_service_failure(
+                "Service drain completed with failure", result.failure);
+            return;
+        case Outcome::forced:
+            log_service_failure(
+                "Service shutdown forced before all drains completed",
+                result.failure);
+            return;
+    }
+}
+
 /// Create and configure a ProofEngine for a specific network, using
 /// the shared (non-network) settings from config.
 static std::shared_ptr<xprv::ProofEngine>
@@ -445,196 +547,63 @@ cmd_serve()
 
     log_memory("startup");
 
-    auto shutting_down = std::make_shared<std::atomic_bool>(false);
+    auto engine_snapshot_mutable = std::make_shared<ServiceEngineSnapshot>();
+    engine_snapshot_mutable->reserve(engines.size());
+    for (auto const& [network_id, engine] : engines)
+        engine_snapshot_mutable->emplace_back(network_id, engine);
+    std::shared_ptr<ServiceEngineSnapshot const> engine_snapshot =
+        std::move(engine_snapshot_mutable);
+
     auto status_timer = std::make_shared<boost::asio::steady_timer>(io);
+    auto deadline_timer = std::make_shared<boost::asio::steady_timer>(io);
     auto status_state = std::make_shared<LoggedStatusState>();
-    std::function<void()> schedule_status_report;
-    schedule_status_report = [&io,
-                              &engines,
-                              shutting_down,
-                              status_timer,
-                              status_state,
-                              &schedule_status_report]() {
-        if (shutting_down->load())
-            return;
-
-        status_timer->expires_after(std::chrono::seconds(60));
-        status_timer->async_wait([&io,
-                                  &engines,
-                                  shutting_down,
-                                  status_timer,
-                                  status_state,
-                                  &schedule_status_report](
-                                     boost::system::error_code ec) {
-            if (ec || shutting_down->load())
-                return;
-
-            boost::asio::co_spawn(
-                io,
-                [&engines,
-                 shutting_down,
-                 status_state,
-                 &schedule_status_report]() -> boost::asio::awaitable<void> {
-                    try
-                    {
-                        if (!shutting_down->load())
-                        {
-                            auto const rss = get_rss_bytes();
-                            if (rss != 0)
-                            {
-                                std::map<uint32_t, LoggedNetworkStatus>
-                                    networks;
-                                for (auto const& [network_id, engine] : engines)
-                                {
-                                    auto peer_snapshot =
-                                        co_await engine->peers()->co_snapshot();
-                                    auto health = co_await engine->co_health();
-                                    auto proof_cache = engine->cache_stats();
-                                    auto node_cache =
-                                        engine->node_cache_stats();
-
-                                    LoggedNetworkStatus status;
-                                    status.label =
-                                        network_label_for_id(network_id);
-                                    status.known_endpoints =
-                                        peer_snapshot.known_endpoints;
-                                    status.tracked_endpoints =
-                                        peer_snapshot.tracked_endpoints;
-                                    status.connected_peers =
-                                        peer_snapshot.connected_peers;
-                                    status.ready_peers =
-                                        peer_snapshot.ready_peers;
-                                    status.in_flight_connects =
-                                        peer_snapshot.in_flight_connects;
-                                    status.queued_connects =
-                                        peer_snapshot.queued_connects;
-                                    status.crawl_in_flight =
-                                        peer_snapshot.crawl_in_flight;
-                                    status.queued_crawls =
-                                        peer_snapshot.queued_crawls;
-                                    status.vl_loaded = health.vl_loaded;
-                                    status.has_quorum =
-                                        health.latest_quorum_seq.has_value();
-                                    status.latest_quorum_seq =
-                                        health.latest_quorum_seq.value_or(0);
-                                    status.validation_waiters =
-                                        health.validation_buffer
-                                            .pending_callbacks;
-                                    status.recent_quorums =
-                                        health.validation_buffer.recent_quorums;
-                                    status.collector_ledgers =
-                                        health.validation_buffer
-                                            .collector_ledgers;
-                                    status.collector_validations =
-                                        health.validation_buffer
-                                            .collector_validations;
-                                    status.queued_validations =
-                                        health.validation_buffer
-                                            .queued_validations;
-                                    status.validation_packets_deduplicated =
-                                        health.validation_buffer
-                                            .validation_packets_deduplicated;
-                                    status.validation_packets_dropped =
-                                        health.validation_buffer
-                                            .validation_packets_dropped;
-                                    status.proof_cache_entries =
-                                        proof_cache.entries;
-                                    status.node_cache_entries =
-                                        node_cache.entries;
-                                    status.node_cache_resident_entries =
-                                        node_cache.resident_entries;
-                                    status.node_cache_header_entries =
-                                        node_cache.header_entries;
-                                    status.crawled_size =
-                                        peer_snapshot.crawled_size;
-                                    status.failed_at_size =
-                                        peer_snapshot.failed_at_size;
-                                    status.recent_failures =
-                                        format_failure_buckets(
-                                            peer_snapshot.recent_failures);
-                                    status.top_failing_endpoints =
-                                        format_failure_endpoints(
-                                            peer_snapshot
-                                                .top_failing_endpoints);
-                                    networks.emplace(
-                                        network_id, std::move(status));
-                                }
-
-                                log_status_if_changed(
-                                    rss, networks, *status_state);
-                            }
-                        }
-                    }
-                    catch (std::exception const& e)
-                    {
-                        PLOGW(log_, "status report failed: ", e.what());
-                    }
-
-                    if (!shutting_down->load())
-                        schedule_status_report();
-                    co_return;
-                },
-                boost::asio::detached);
-        });
+    xprv::detail::ServiceLifecycleOperations lifecycle_operations;
+    lifecycle_operations.report_status = [engine_snapshot, status_state]() {
+        return co_report_service_status(engine_snapshot, status_state);
     };
-    schedule_status_report();
+    lifecycle_operations.stop_http = [server]() { return server->co_stop(); };
+    lifecycle_operations.stop_engines.reserve(engine_snapshot->size());
+    for (auto const& [_, engine] : *engine_snapshot)
+    {
+        lifecycle_operations.stop_engines.emplace_back(
+            [engine](xprv::RequestDrainReceipt const& request_drain) {
+                return engine->co_stop(request_drain);
+            });
+    }
+    lifecycle_operations.report_diagnostic =
+        [](std::exception_ptr const& failure) {
+            log_service_failure("Service lifecycle operation failed", failure);
+        };
+    lifecycle_operations.terminal_diagnostic = log_service_terminal;
+    lifecycle_operations.stop_io = [&io]() { io.stop(); };
 
-    // SIGINT/SIGTERM → seal admission, await every owned drain, then stop io.
-    // The deadline is a distinct forced-teardown outcome; it never gets logged
-    // as graceful shutdown.
+    //@@authority transition=prv.T0164 status=provisional scope=statement bind=xprv::detail::ServiceLifecycle::create@0232f2d0395da28b
+    // owner=unresolved owner_hypothesis=service_process
+    // commit=single_threaded_construction
+    // touches=prv.S0050,prv.S0051,prv.S0052,prv.S0053,prv.S0054,prv.S0055
+    // calls=xprv::detail::ServiceLifecycle::create
+    // label=bind_live_server_operations_to_owned_service_root
+    auto service_lifecycle = xprv::detail::ServiceLifecycle::create(
+        io,
+        xprv::detail::make_service_timer_control(status_timer),
+        xprv::detail::make_service_timer_control(deadline_timer),
+        std::move(lifecycle_operations),
+        std::chrono::seconds(60),
+        std::chrono::seconds(30)); //@@authority-target ids=prv.T0164
+    service_lifecycle->start();
+
+    // SIGINT/SIGTERM only requests the owner-strand transition. T0155 seals
+    // admission; T0163 remains the sole io.stop() authority.
     boost::asio::signal_set signals(io, SIGINT, SIGTERM);
-    signals.async_wait([&](boost::system::error_code ec, int sig) {
-        if (ec || shutting_down->exchange(true))
-            return;
-
-        log_memory("shutdown");
-        PLOGI(log_, "Signal ", sig, " received, draining services...");
-        status_timer->cancel();
-
-        auto deadline = std::make_shared<boost::asio::steady_timer>(io);
-        deadline->expires_after(std::chrono::seconds(30));
-        deadline->async_wait([&io](boost::system::error_code timer_ec) {
-            if (timer_ec)
+    signals.async_wait(
+        [service_lifecycle](boost::system::error_code ec, int sig) {
+            if (ec)
                 return;
-            PLOGE(
-                log_,
-                "Graceful shutdown deadline expired; forcing io_context "
-                "teardown");
-            io.stop();
+
+            log_memory("shutdown");
+            PLOGI(log_, "Signal ", sig, " received, draining services...");
+            service_lifecycle->begin_shutdown();
         });
-
-        boost::asio::co_spawn(
-            io,
-            [server, &engines, deadline, &io]()
-                -> boost::asio::awaitable<void> {
-                try
-                {
-                    auto request_drain = co_await server->co_stop();
-                    for (auto const& [_, engine] : engines)
-                        co_await engine->co_stop(request_drain);
-
-                    deadline->cancel();
-                    PLOGI(log_, "Graceful service drain complete");
-                }
-                catch (std::exception const& e)
-                {
-                    deadline->cancel();
-                    PLOGE(
-                        log_,
-                        "Graceful service drain failed; forcing teardown: ",
-                        e.what());
-                }
-                catch (...)
-                {
-                    deadline->cancel();
-                    PLOGE(
-                        log_,
-                        "Graceful service drain failed; forcing teardown");
-                }
-                io.stop();
-            },
-            boost::asio::detached);
-    });
 
     // Run io_context on N threads
     auto const n_threads = config.threads;
