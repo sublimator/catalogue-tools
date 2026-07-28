@@ -552,6 +552,84 @@ TEST(
     EXPECT_TRUE(conn->physical_transport_drained_for_test());
 }
 
+TEST(
+    ConnectionWriteLifecycle,
+    ResolveCompletionAfterCloseRetiresExactOperationBeforeDrain)
+{
+    asio::io_context io;
+    asio::ssl::context ssl(asio::ssl::context::tlsv12_client);
+    auto strand = asio::make_strand(io);
+    peer_config config;
+    config.host = "127.0.0.1";
+    config.port = 443;
+    auto conn =
+        std::make_shared<peer_connection>(strand, ssl, std::move(config));
+
+    std::size_t physical_waiters = 0;
+    conn->set_after_physical_drain_waiter_registered_for_test(
+        [&](std::size_t count) { physical_waiters = count; });
+
+    bool closed_after_admission = false;
+    int joins = 0;
+    std::exception_ptr join_failure;
+    conn->set_before_resolve_initiation_for_test([&] {
+        ASSERT_TRUE(strand.running_in_this_thread());
+        ASSERT_EQ(conn->transport_operation_count_for_test(), 1u);
+        ASSERT_TRUE(conn->resolver_installed_for_test());
+
+        // The exact resolve row already exists, but its Asio initiation has not
+        // happened. Close seals admission and consumes the resolver capability;
+        // the subsequently delivered callback still owns the operation receipt.
+        conn->close();
+        closed_after_admission = true;
+        EXPECT_EQ(conn->transport_operation_count_for_test(), 1u);
+        EXPECT_FALSE(conn->resolver_installed_for_test());
+        EXPECT_FALSE(conn->physical_transport_drained_for_test());
+
+        asio::co_spawn(
+            strand,
+            [conn]() -> asio::awaitable<void> { co_await conn->co_close(); },
+            [&](std::exception_ptr failure) {
+                join_failure = std::move(failure);
+                ++joins;
+            });
+    });
+
+    std::vector<boost::system::error_code> outcomes;
+    asio::post(strand, [&] {
+        conn->async_connect(
+            [&](boost::system::error_code ec) { outcomes.push_back(ec); });
+    });
+
+    ASSERT_EQ(io.poll_one(), 1u);
+    ASSERT_TRUE(closed_after_admission);
+
+    // Locally queued close work precedes the resolver service's completion.
+    // Drive only until the exact physical waiter is registered, then inspect
+    // the deliberately open completion window.
+    for (int step = 0; step != 8 && physical_waiters == 0; ++step)
+    {
+        io.restart();
+        ASSERT_EQ(io.poll_one(), 1u);
+    }
+    ASSERT_EQ(physical_waiters, 1u);
+    EXPECT_EQ(joins, 0);
+    EXPECT_EQ(conn->transport_operation_count_for_test(), 1u);
+    EXPECT_FALSE(conn->resolver_installed_for_test());
+    EXPECT_FALSE(conn->physical_transport_drained_for_test());
+
+    io.restart();
+    io.run();
+
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_EQ(outcomes.front(), asio::error::operation_aborted);
+    EXPECT_EQ(conn->transport_operation_count_for_test(), 0u);
+    EXPECT_FALSE(conn->resolver_installed_for_test());
+    EXPECT_TRUE(conn->physical_transport_drained_for_test());
+    EXPECT_EQ(joins, 1);
+    EXPECT_EQ(join_failure, nullptr);
+}
+
 // ─── 2. in-flight plus queued successors, then close ────────────────────────
 
 TEST(ConnectionWriteLifecycle, CloseDrainsSuccessorsButRetainsOnlyActivePacket)

@@ -119,9 +119,14 @@ public:
     asio::awaitable<void>
     co_disconnect() override
     {
-        ++co_disconnect_calls;
+        auto const call_index =
+            co_disconnect_calls.fetch_add(1, std::memory_order_relaxed);
         disconnect();
-        auto gate = disconnect_receipt_gate_;
+        auto gate = disconnect_receipt_gates_.empty()
+            ? nullptr
+            : disconnect_receipt_gates_[std::min<std::size_t>(
+                  static_cast<std::size_t>(call_index),
+                  disconnect_receipt_gates_.size() - 1)];
         if (gate)
         {
             co_disconnect_waiting.store(true, std::memory_order_release);
@@ -145,14 +150,28 @@ public:
     void
     hold_disconnect_receipt()
     {
-        disconnect_receipt_gate_ = std::make_shared<asio::steady_timer>(
-            strand_, asio::steady_timer::time_point::max());
+        disconnect_receipt_gates_.push_back(
+            std::make_shared<asio::steady_timer>(
+                strand_, asio::steady_timer::time_point::max()));
     }
 
     void
     release_disconnect_receipt()
     {
-        auto gate = disconnect_receipt_gate_;
+        for (auto const& gate : disconnect_receipt_gates_)
+        {
+            asio::post(strand_, [gate] {
+                if (gate)
+                    gate->cancel();
+            });
+        }
+    }
+
+    void
+    release_disconnect_receipt(std::size_t call_index)
+    {
+        ASSERT_LT(call_index, disconnect_receipt_gates_.size());
+        auto gate = disconnect_receipt_gates_[call_index];
         asio::post(strand_, [gate] {
             if (gate)
                 gate->cancel();
@@ -442,7 +461,7 @@ private:
     std::atomic<std::size_t> node_batch_submissions_{0};
     std::atomic<std::size_t> node_batch_node_count_{0};
     std::atomic<int> node_batch_tree_{0};
-    std::shared_ptr<asio::steady_timer> disconnect_receipt_gate_;
+    std::vector<std::shared_ptr<asio::steady_timer>> disconnect_receipt_gates_;
 
     std::mutex mutex_;
     UnsolicitedHandler unsolicited_handler_;
@@ -6764,73 +6783,109 @@ TEST(PeerSetShutdown, HeldSessionReceiptDominatesTerminalPeerSetState)
 
 TEST(
     PeerSetShutdownDeterministic,
-    CollidingLocalGenerationValuesCannotSharePhysicalReceipt)
+    ReturnedReceiptCannotEraseDifferentSessionAtSameGeneration)
 {
     catl::test::DeterministicScheduler scheduler;
     auto& io = scheduler.io();
-    auto peers_a = PeerSet::create(io, PeerSetOptions{.network_id = 42});
-    auto peers_b = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
 
-    // Each aggregate mints its first generation independently. Endpoint and
-    // numeric generation therefore collide; only the retained PeerSet/session
-    // identity can keep these two structured joins distinct.
-    auto session_a = std::make_shared<FakePeerSession>(
-        io, "colliding-shutdown-peer:1", true, 500, 400, 600);
-    auto session_b = std::make_shared<FakePeerSession>(
-        io, "colliding-shutdown-peer:1", true, 500, 400, 600);
-    session_a->hold_disconnect_receipt();
-    session_b->hold_disconnect_receipt();
-    auto const generation_a =
+    auto incumbent = std::make_shared<FakePeerSession>(
+        io, "guarded-shutdown-peer:1", true, 500, 400, 600);
+    auto replacement = std::make_shared<FakePeerSession>(
+        io, "guarded-shutdown-peer:1", true, 500, 400, 600);
+    incumbent->hold_disconnect_receipt();
+    replacement->hold_disconnect_receipt();
+    auto const generation =
         PeerSetTestAccess::insert_ready_peer_with_generation(
-            io, peers_a, session_a);
-    auto const generation_b =
-        PeerSetTestAccess::insert_ready_peer_with_generation(
-            io, peers_b, session_b);
-    ASSERT_EQ(generation_a, generation_b);
+            io, peers, incumbent);
 
-    bool stopped_a = false;
-    bool stopped_b = false;
-    std::exception_ptr failure_a;
-    std::exception_ptr failure_b;
-    asio::co_spawn(io, peers_a->co_stop(), [&](std::exception_ptr failure) {
-        failure_a = std::move(failure);
-        stopped_a = true;
-    });
-    asio::co_spawn(io, peers_b->co_stop(), [&](std::exception_ptr failure) {
-        failure_b = std::move(failure);
-        stopped_b = true;
+    bool stopped = false;
+    std::exception_ptr stop_failure;
+    asio::co_spawn(io, peers->co_stop(), [&](std::exception_ptr failure) {
+        stop_failure = std::move(failure);
+        stopped = true;
     });
     scheduler.run_until_idle();
 
     ASSERT_TRUE(
-        session_a->co_disconnect_waiting.load(std::memory_order_acquire));
-    ASSERT_TRUE(
-        session_b->co_disconnect_waiting.load(std::memory_order_acquire));
-    EXPECT_FALSE(stopped_a);
-    EXPECT_FALSE(stopped_b);
+        incumbent->co_disconnect_waiting.load(std::memory_order_acquire));
+    EXPECT_FALSE(stopped);
 
-    session_a->release_disconnect_receipt();
+    // Production admission is sealed here. This adversarial overwrite exists
+    // only to make the exact post-await session predicate falsifiable.
+    PeerSetTestAccess::overwrite_connection_row_for_guard_control(
+        io, peers, replacement, generation);
+    incumbent->release_disconnect_receipt();
     scheduler.run_until_idle();
 
-    EXPECT_TRUE(stopped_a);
-    EXPECT_EQ(failure_a, nullptr);
-    EXPECT_FALSE(stopped_b)
-        << "same endpoint and generation cannot let A's receipt satisfy B";
+    EXPECT_FALSE(stopped)
+        << "the incumbent receipt cannot retire a different exact session";
+    EXPECT_TRUE(
+        replacement->co_disconnect_waiting.load(std::memory_order_acquire));
     EXPECT_EQ(
-        PeerSetTestAccess::live_generation(io, peers_a, session_a->endpoint()),
-        0u);
-    EXPECT_EQ(
-        PeerSetTestAccess::live_generation(io, peers_b, session_b->endpoint()),
-        generation_b);
+        PeerSetTestAccess::live_generation(io, peers, replacement->endpoint()),
+        generation);
 
-    session_b->release_disconnect_receipt();
+    replacement->release_disconnect_receipt();
     scheduler.run_until_idle();
 
-    EXPECT_TRUE(stopped_b);
-    EXPECT_EQ(failure_b, nullptr);
+    EXPECT_TRUE(stopped);
+    EXPECT_EQ(stop_failure, nullptr);
     EXPECT_EQ(
-        PeerSetTestAccess::live_generation(io, peers_b, session_b->endpoint()),
+        PeerSetTestAccess::live_generation(io, peers, replacement->endpoint()),
         0u);
+}
+
+TEST(
+    PeerSetShutdownDeterministic,
+    ReturnedReceiptCannotEraseDifferentGenerationOfSameSession)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+
+    auto session = std::make_shared<FakePeerSession>(
+        io, "generation-guarded-shutdown-peer:1", true, 500, 400, 600);
+    session->hold_disconnect_receipt();
+    session->hold_disconnect_receipt();
+    auto const generation =
+        PeerSetTestAccess::insert_ready_peer_with_generation(
+            io, peers, session);
+
+    bool stopped = false;
+    std::exception_ptr stop_failure;
+    asio::co_spawn(io, peers->co_stop(), [&](std::exception_ptr failure) {
+        stop_failure = std::move(failure);
+        stopped = true;
+    });
+    scheduler.run_until_idle();
+
+    ASSERT_TRUE(session->co_disconnect_waiting.load(std::memory_order_acquire));
+    ASSERT_EQ(session->co_disconnect_calls.load(), 1u);
+
+    // The same object under a different generation makes the generation guard,
+    // rather than the exact-session guard, solely responsible for refusing the
+    // first returned receipt.
+    PeerSetTestAccess::overwrite_connection_row_for_guard_control(
+        io, peers, session, generation + 1);
+    session->release_disconnect_receipt(0);
+    scheduler.run_until_idle();
+
+    EXPECT_FALSE(stopped)
+        << "the predecessor receipt cannot retire a successor generation";
+    EXPECT_TRUE(session->co_disconnect_waiting.load(std::memory_order_acquire));
+    EXPECT_EQ(session->co_disconnect_calls.load(), 2u);
+    EXPECT_EQ(
+        PeerSetTestAccess::live_generation(io, peers, session->endpoint()),
+        generation + 1);
+
+    session->release_disconnect_receipt(1);
+    scheduler.run_until_idle();
+
+    EXPECT_TRUE(stopped);
+    EXPECT_EQ(stop_failure, nullptr);
+    EXPECT_EQ(
+        PeerSetTestAccess::live_generation(io, peers, session->endpoint()), 0u);
 }
 
 TEST(PeerSetShutdown, CallerCancellationCannotAbandonPhysicalReceipt)

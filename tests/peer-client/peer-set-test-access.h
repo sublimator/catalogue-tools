@@ -710,6 +710,24 @@ public:
         return generation;
     }
 
+    /// Deliberately bypass production admission to attack the post-await exact
+    /// tuple guards. This may be used only after a stop driver has snapshotted
+    /// the incumbent row and suspended on its physical receipt.
+    static void
+    overwrite_connection_row_for_guard_control(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::PeerSessionPtr peer,
+        std::uint64_t generation)
+    {
+        run_on_strand(
+            io, peers, [peer = std::move(peer), generation](auto& set) {
+                set.connections_[peer->endpoint()] =
+                    catl::peer_client::PeerSet::ConnectionEntry{
+                        peer, generation};
+            });
+    }
+
     /// Drive the terminal-record consumer deterministically on the strand.
     static void
     consume_terminal(

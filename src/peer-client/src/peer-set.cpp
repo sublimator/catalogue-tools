@@ -421,8 +421,12 @@ PeerSet::co_stop()
 
                 auto live = self->connections_.find(endpoint);
                 if (live != self->connections_.end() &&
+                    //@@mutation-site peer-set-stop-exact-generation-guard
                     live->second.generation == generation &&
+                    //@@mutation-end peer-set-stop-exact-generation-guard
+                    //@@mutation-site peer-set-stop-exact-session-guard
                     live->second.session == session)
+                //@@mutation-end peer-set-stop-exact-session-guard
                 {
                     self->connections_.erase(live);
                     ++self->total_disconnects_;
