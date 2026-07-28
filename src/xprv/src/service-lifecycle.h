@@ -114,7 +114,8 @@ private:
         enum class Phase {
             reserved,
             running,
-            completed,
+            succeeded,
+            failed,
             launch_failed,
         };
 
@@ -195,12 +196,14 @@ private:
     std::chrono::steady_clock::duration status_interval_;
     std::chrono::steady_clock::duration shutdown_timeout_;
 
-    //@@authority state=prv.S0050 status=provisional scope=field bind=xprv::detail::ServiceLifecycle::phase_@e8a3623c7145351a
+    //@@authority state=prv.S0050 status=provisional scope=field
+    //bind=xprv::detail::ServiceLifecycle::phase_@e8a3623c7145351a
     // owner=unresolved owner_hypothesis=service_lifecycle
     // observed_home=service_lifecycle label=service_root_lifecycle
     Phase phase_ = Phase::created;
 
-    //@@authority state=prv.S0051 status=provisional scope=field bind=xprv::detail::ServiceLifecycle::status_timer_outstanding_@d9cc1410ced11f02
+    //@@authority state=prv.S0051 status=provisional scope=field
+    //bind=xprv::detail::ServiceLifecycle::status_timer_outstanding_@d9cc1410ced11f02
     // owner=unresolved owner_hypothesis=service_lifecycle
     // observed_home=service_lifecycle
     // label=status_timer_and_report_obligations
@@ -208,28 +211,32 @@ private:
     bool status_report_outstanding_ = false;
     bool status_reporting_disabled_ = false;
 
-    //@@authority state=prv.S0052 status=provisional scope=field bind=xprv::detail::ServiceLifecycle::http_stop_admitted_@498addcb8671ce17
+    //@@authority state=prv.S0052 status=provisional scope=field
+    //bind=xprv::detail::ServiceLifecycle::http_stop_admitted_@498addcb8671ce17
     // owner=unresolved owner_hypothesis=service_lifecycle
     // observed_home=service_lifecycle label=http_drain_obligation_and_receipt
     bool http_stop_admitted_ = false;
     bool http_stop_completed_ = false;
     std::shared_ptr<RequestDrainReceipt const> request_drain_;
 
-    //@@authority state=prv.S0053 status=provisional scope=field bind=xprv::detail::ServiceLifecycle::engine_admission_@a24c8b15e19405a9
+    //@@authority state=prv.S0053 status=provisional scope=field
+    //bind=xprv::detail::ServiceLifecycle::engine_admission_@a24c8b15e19405a9
     // owner=unresolved owner_hypothesis=service_lifecycle
     // observed_home=service_lifecycle
     // label=sealed_exact_engine_drain_census_and_result_rows
     EngineAdmission engine_admission_ = EngineAdmission::unopened;
     std::vector<EngineDrainRow> engine_drains_;
 
-    //@@authority state=prv.S0054 status=provisional scope=field bind=xprv::detail::ServiceLifecycle::deadline_outstanding_@096d7fc191c97324
+    //@@authority state=prv.S0054 status=provisional scope=field
+    //bind=xprv::detail::ServiceLifecycle::deadline_outstanding_@096d7fc191c97324
     // owner=unresolved owner_hypothesis=service_lifecycle
     // observed_home=service_lifecycle label=shutdown_deadline_obligation
     bool deadline_outstanding_ = false;
     bool deadline_cancel_requested_ = false;
     bool deadline_fired_ = false;
 
-    //@@authority state=prv.S0055 status=provisional scope=field bind=xprv::detail::ServiceLifecycle::terminal_@04d18aa9ccef0727
+    //@@authority state=prv.S0055 status=provisional scope=field
+    //bind=xprv::detail::ServiceLifecycle::terminal_@04d18aa9ccef0727
     // owner=unresolved owner_hypothesis=service_lifecycle
     // observed_home=service_lifecycle label=retained_service_terminal_outcome
     std::optional<ServiceTerminalResult> terminal_;

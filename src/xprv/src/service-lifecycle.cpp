@@ -99,7 +99,8 @@ ServiceLifecycle::start()
     asio::dispatch(control_, [self]() { self->start_on_control(); });
 }
 
-//@@authority transition=prv.T0150 status=provisional scope=function bind=xprv::detail::start_on_control@81010d2d1ad86567
+//@@authority transition=prv.T0150 status=provisional scope=function
+//bind=xprv::detail::start_on_control@81010d2d1ad86567
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0050
 // label=start_service_root_status_lifecycle
@@ -113,7 +114,8 @@ ServiceLifecycle::start_on_control()
     arm_status_timer_on_control();
 }
 
-//@@authority transition=prv.T0151 status=provisional scope=function bind=xprv::detail::arm_status_timer_on_control@ea92a9a7b3f76da7
+//@@authority transition=prv.T0151 status=provisional scope=function
+//bind=xprv::detail::arm_status_timer_on_control@ea92a9a7b3f76da7
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0051
 // label=admit_status_timer_handler_obligation
@@ -170,7 +172,8 @@ ServiceLifecycle::arm_status_timer_on_control()
     }
 }
 
-//@@authority transition=prv.T0152 status=provisional scope=function bind=xprv::detail::finish_status_timer_on_control@657407810e2e6476
+//@@authority transition=prv.T0152 status=provisional scope=function
+//bind=xprv::detail::finish_status_timer_on_control@657407810e2e6476
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0051
 // label=consume_status_timer_handler_receipt
@@ -215,7 +218,8 @@ ServiceLifecycle::finish_status_timer_on_control(
         try_finish_shutdown_on_control();
 }
 
-//@@authority transition=prv.T0153 status=provisional scope=function bind=xprv::detail::launch_status_report_on_control@f8af8562c0a20e96
+//@@authority transition=prv.T0153 status=provisional scope=function
+//bind=xprv::detail::launch_status_report_on_control@f8af8562c0a20e96
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0051
 // label=admit_active_status_report_obligation
@@ -259,7 +263,8 @@ ServiceLifecycle::launch_status_report_on_control()
     }
 }
 
-//@@authority transition=prv.T0154 status=provisional scope=function bind=xprv::detail::finish_status_report_on_control@3fe91f68fc197eee
+//@@authority transition=prv.T0154 status=provisional scope=function
+//bind=xprv::detail::finish_status_report_on_control@3fe91f68fc197eee
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0051
 // label=consume_active_status_report_receipt
@@ -309,7 +314,8 @@ ServiceLifecycle::begin_shutdown() noexcept
     }
 }
 
-//@@authority transition=prv.T0155 status=provisional scope=function bind=xprv::detail::begin_shutdown_on_control@1ea7166a198135ea
+//@@authority transition=prv.T0155 status=provisional scope=function
+//bind=xprv::detail::begin_shutdown_on_control@1ea7166a198135ea
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0050,prv.S0051
 // label=seal_service_root_admission_and_status_rearm
@@ -353,7 +359,8 @@ ServiceLifecycle::begin_shutdown_on_control()
     try_finish_shutdown_on_control();
 }
 
-//@@authority transition=prv.T0156 status=provisional scope=function bind=xprv::detail::arm_deadline_on_control@c1747038a774bb01
+//@@authority transition=prv.T0156 status=provisional scope=function
+//bind=xprv::detail::arm_deadline_on_control@c1747038a774bb01
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0054
 // label=admit_shutdown_deadline_handler_obligation
@@ -396,7 +403,8 @@ ServiceLifecycle::arm_deadline_on_control()
     }
 }
 
-//@@authority transition=prv.T0157 status=provisional scope=function bind=xprv::detail::finish_deadline_on_control@a25e322fe30f19d2
+//@@authority transition=prv.T0157 status=provisional scope=function
+//bind=xprv::detail::finish_deadline_on_control@a25e322fe30f19d2
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0054
 // label=consume_shutdown_deadline_handler_receipt
@@ -423,7 +431,8 @@ ServiceLifecycle::finish_deadline_on_control(boost::system::error_code error)
     try_finish_shutdown_on_control();
 }
 
-//@@authority transition=prv.T0158 status=provisional scope=function bind=xprv::detail::launch_http_stop_on_control@f241826ec4352327
+//@@authority transition=prv.T0158 status=provisional scope=function
+//bind=xprv::detail::launch_http_stop_on_control@f241826ec4352327
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0052
 // label=admit_http_request_drain_obligation
@@ -471,7 +480,8 @@ ServiceLifecycle::launch_http_stop_on_control()
     }
 }
 
-//@@authority transition=prv.T0159 status=provisional scope=function bind=xprv::detail::finish_http_stop_on_control@949cac9f0b9d0663
+//@@authority transition=prv.T0159 status=provisional scope=function
+//bind=xprv::detail::finish_http_stop_on_control@949cac9f0b9d0663
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0052
 // label=consume_http_request_drain_receipt
@@ -521,7 +531,8 @@ ServiceLifecycle::finish_http_stop_on_control(
     try_finish_shutdown_on_control();
 }
 
-//@@authority transition=prv.T0160 status=provisional scope=function bind=xprv::detail::launch_engine_stops_on_control@45a1bfeedceb2892
+//@@authority transition=prv.T0160 status=provisional scope=function
+//bind=xprv::detail::launch_engine_stops_on_control@45a1bfeedceb2892
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0053
 // label=reserve_all_engine_drain_rows_before_launch
@@ -585,11 +596,11 @@ ServiceLifecycle::launch_engine_stops_on_control()
     try_finish_shutdown_on_control();
 }
 
-//@@authority transition=prv.T0161 status=provisional scope=function bind=xprv::detail::finish_engine_stop_on_control@3ea01d723e0ae726
+//@@authority transition=prv.T0161 status=provisional scope=function
+//bind=xprv::detail::finish_engine_stop_on_control@3ea01d723e0ae726
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0053
-// boundary_ref=proof_engine.drain_receipt receipt=proof_engine.drain_receipt
-// label=consume_one_exact_proof_engine_drain_receipt
+// label=consume_one_proof_engine_drain_outcome
 void
 ServiceLifecycle::finish_engine_stop_on_control(
     std::size_t index,
@@ -606,9 +617,32 @@ ServiceLifecycle::finish_engine_stop_on_control(
     auto& row = engine_drains_[index];
     if (row.phase != EngineDrainRow::Phase::running)
         return;
-    row.phase = EngineDrainRow::Phase::completed;
-    row.failure = failure;
-    record_failure_on_control(std::move(failure));
+    if (failure)
+    {
+        //@@authority transition=prv.T0180 status=provisional scope=statement bind=expression_statement@deecbd84eaac5ce0
+        // owner=unresolved owner_hypothesis=service_lifecycle
+        // commit=service_root_strand touches=prv.S0053
+        // label=record_one_proof_engine_drain_failure_outcome
+        // clang-format off
+        row.phase = EngineDrainRow::Phase::failed; //@@authority-target ids=prv.T0180
+        // clang-format on
+        row.failure = failure;
+        record_failure_on_control(std::move(failure));
+    }
+    else
+    {
+        // Only this success arm consumes the receipt published by T0176.
+        //@@authority transition=prv.T0179 status=provisional scope=statement bind=expression_statement@d23ea42b6e5ffe01
+        // owner=unresolved owner_hypothesis=service_lifecycle
+        // commit=service_root_strand touches=prv.S0053
+        // boundary_ref=proof_engine.drain_receipt
+        // receipt=proof_engine.drain_receipt
+        // label=consume_one_exact_proof_engine_drain_receipt
+        // clang-format off
+        row.phase = EngineDrainRow::Phase::succeeded; //@@authority-target ids=prv.T0179
+        // clang-format on
+        row.failure = {};
+    }
     try_finish_shutdown_on_control();
 }
 
@@ -640,7 +674,8 @@ ServiceLifecycle::non_deadline_children_complete_on_control() const
         return false;
     }
     return std::ranges::all_of(engine_drains_, [](EngineDrainRow const& row) {
-        return row.phase == EngineDrainRow::Phase::completed ||
+        return row.phase == EngineDrainRow::Phase::succeeded ||
+            row.phase == EngineDrainRow::Phase::failed ||
             row.phase == EngineDrainRow::Phase::launch_failed;
     });
 }
@@ -684,7 +719,8 @@ ServiceLifecycle::try_finish_shutdown_on_control()
                        : ServiceTerminalOutcome::graceful);
 }
 
-//@@authority transition=prv.T0162 status=provisional scope=function bind=xprv::detail::commit_terminal_on_control@03ee3b82474034fd
+//@@authority transition=prv.T0162 status=provisional scope=function
+//bind=xprv::detail::commit_terminal_on_control@03ee3b82474034fd
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0050,prv.S0055
 // label=commit_one_retained_service_terminal_outcome
@@ -729,7 +765,8 @@ ServiceLifecycle::commit_terminal_on_control(ServiceTerminalOutcome outcome)
     stop_io_called_ = true;
     try
     {
-        //@@authority transition=prv.T0163 status=provisional scope=statement bind=expression_statement@31b8a1743dbe93d7
+        //@@authority transition=prv.T0163 status=provisional scope=statement
+        //bind=expression_statement@31b8a1743dbe93d7
         // owner=unresolved owner_hypothesis=service_lifecycle
         // commit=service_root_strand touches=prv.S0055
         // label=invoke_io_stop_once_after_terminal_commit
