@@ -586,6 +586,14 @@ TEST_P(
     constexpr std::size_t caller_count = 8;
     std::atomic<std::size_t> joined{0};
     std::atomic<std::size_t> failed{0};
+    std::promise<void> all_callers_waiting;
+    auto all_callers_waiting_future = all_callers_waiting.get_future();
+    client->raw_connection()
+        .set_after_physical_drain_waiter_registered_for_test(
+            [&all_callers_waiting](std::size_t count) {
+                if (count == caller_count)
+                    all_callers_waiting.set_value();
+            });
     for (std::size_t index = 0; index < caller_count; ++index)
     {
         asio::co_spawn(
@@ -603,32 +611,155 @@ TEST_P(
 
     io.restart();
     catl::test::IoContextRunners runners(io, GetParam());
-    auto const logically_closed =
-        logical_close_future.wait_for(std::chrono::seconds(2)) ==
+    auto const all_waiting =
+        all_callers_waiting_future.wait_for(std::chrono::seconds(2)) ==
         std::future_status::ready;
-    if (!logically_closed)
+    if (!all_waiting)
     {
         io.stop();
         runners.join();
     }
-    ASSERT_TRUE(logically_closed);
+    ASSERT_TRUE(all_waiting);
+
+    io.stop();
+    runners.join();
+    client->raw_connection()
+        .set_after_physical_drain_waiter_registered_for_test({});
+    io.restart();
+    while (io.poll() != 0)
+    {
+    }
+
+    ASSERT_EQ(
+        logical_close_future.wait_for(std::chrono::seconds(0)),
+        std::future_status::ready);
     EXPECT_EQ(logical_close_future.get(), asio::error::operation_aborted);
     EXPECT_EQ(joined.load(std::memory_order_acquire), 0u)
         << "logical close cannot counterfeit the held physical receipt";
     EXPECT_EQ(failed.load(std::memory_order_acquire), 0u);
+    EXPECT_EQ(
+        client->raw_connection().transport_operation_count_for_test(), 1u);
+    EXPECT_FALSE(
+        client->raw_connection().physical_transport_drained_for_test());
 
     auto completion = std::move(held_completion);
     asio::post(
         client->strand(), [completion = std::move(completion)]() mutable {
             completion(asio::error::operation_aborted);
         });
-    runners.join();
+    catl::test::IoContextRunners release_runners(io, GetParam());
+    release_runners.join();
 
     EXPECT_EQ(joined.load(std::memory_order_acquire), caller_count);
     EXPECT_EQ(failed.load(std::memory_order_acquire), 0u);
     EXPECT_EQ(
         client->raw_connection().transport_operation_count_for_test(), 0u);
     EXPECT_TRUE(client->raw_connection().physical_transport_drained_for_test());
+}
+
+TEST_P(
+    PeerClientPhysicalRunnerModes,
+    OracleExposesDetachedPhysicalWaitBeforeReceipt)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+
+    peer_connection::test_write_completion held_completion;
+    client->raw_connection().set_write_initiator_for_test(
+        [&held_completion](
+            asio::const_buffer,
+            peer_connection::test_write_completion completion) {
+            held_completion = std::move(completion);
+        });
+    asio::post(client->strand(), [client] {
+        client->raw_connection().async_send_packet(
+            packet_type::ping,
+            std::vector<std::uint8_t>(64, 0xBD),
+            [](boost::system::error_code) {});
+    });
+    io.run();
+    ASSERT_TRUE(held_completion);
+
+    constexpr std::size_t caller_count = 8;
+    std::promise<void> all_waiters_registered;
+    auto all_waiters_registered_future = all_waiters_registered.get_future();
+    client->raw_connection()
+        .set_after_physical_drain_waiter_registered_for_test(
+            [&all_waiters_registered](std::size_t count) {
+                if (count == caller_count)
+                    all_waiters_registered.set_value();
+            });
+
+    std::atomic<std::size_t> returned_before_receipt{0};
+    std::atomic<std::size_t> failures{0};
+    auto connection = client->raw_connection().shared_from_this();
+    for (std::size_t index = 0; index < caller_count; ++index)
+    {
+        asio::co_spawn(
+            io,
+            [connection, &failures]() -> asio::awaitable<void> {
+                auto executor = co_await asio::this_coro::executor;
+                asio::co_spawn(
+                    executor,
+                    connection->co_close(),
+                    [&failures](std::exception_ptr failure) {
+                        if (failure)
+                            failures.fetch_add(1, std::memory_order_acq_rel);
+                    });
+                co_return;
+            },
+            [&returned_before_receipt, &failures](std::exception_ptr failure) {
+                if (failure)
+                    failures.fetch_add(1, std::memory_order_acq_rel);
+                returned_before_receipt.fetch_add(1, std::memory_order_acq_rel);
+            });
+    }
+
+    io.restart();
+    catl::test::IoContextRunners runners(io, GetParam());
+    auto const all_registered =
+        all_waiters_registered_future.wait_for(std::chrono::seconds(2)) ==
+        std::future_status::ready;
+    if (!all_registered)
+    {
+        io.stop();
+        runners.join();
+    }
+    ASSERT_TRUE(all_registered);
+
+    io.stop();
+    runners.join();
+    client->raw_connection()
+        .set_after_physical_drain_waiter_registered_for_test({});
+    io.restart();
+    while (io.poll() != 0)
+    {
+    }
+
+    EXPECT_EQ(
+        returned_before_receipt.load(std::memory_order_acquire), caller_count)
+        << "the production control's pre-receipt zero assertion must reject "
+           "this detached-wait mutant";
+    EXPECT_EQ(failures.load(std::memory_order_acquire), 0u);
+    EXPECT_EQ(
+        client->raw_connection().transport_operation_count_for_test(), 1u);
+    EXPECT_FALSE(
+        client->raw_connection().physical_transport_drained_for_test());
+
+    auto completion = std::move(held_completion);
+    asio::post(
+        client->strand(), [completion = std::move(completion)]() mutable {
+            completion(asio::error::operation_aborted);
+        });
+    catl::test::IoContextRunners release_runners(io, GetParam());
+    release_runners.join();
+
+    EXPECT_EQ(
+        client->raw_connection().transport_operation_count_for_test(), 0u);
+    EXPECT_TRUE(client->raw_connection().physical_transport_drained_for_test());
+    EXPECT_EQ(failures.load(std::memory_order_acquire), 0u);
 }
 
 INSTANTIATE_TEST_SUITE_P(

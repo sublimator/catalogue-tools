@@ -202,6 +202,15 @@ public:
         before_resolve_initiation_for_test_ = std::move(hook);
     }
 
+    /// Test seam: observe registration at the exact physical-drain wait site.
+    /// Runs on the connection strand after the waiter has an owned home.
+    void
+    set_after_physical_drain_waiter_registered_for_test(
+        std::function<void(std::size_t)> observer)
+    {
+        after_physical_drain_waiter_registered_for_test_ = std::move(observer);
+    }
+
     /// Test observation: the retained backing store of the write currently in
     /// flight, or `{nullptr, 0}` when none is. Lets a test assert that a close
     /// did not free bytes Asio still owns (blocker 1) without relying on ASan
@@ -576,6 +585,10 @@ private:
     /// Never set in production. See
     /// set_before_resolve_initiation_for_test().
     std::function<void()> before_resolve_initiation_for_test_;
+    /// Never set in production. See
+    /// set_after_physical_drain_waiter_registered_for_test().
+    std::function<void(std::size_t)>
+        after_physical_drain_waiter_registered_for_test_;
 
     void
     do_write();

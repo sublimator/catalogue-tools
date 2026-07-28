@@ -2238,6 +2238,11 @@ peer_connection::co_close()
         auto signal = std::make_shared<asio::steady_timer>(
             strand_, asio::steady_timer::time_point::max());
         physical_drain_waiters_.push_back(signal);
+        if (after_physical_drain_waiter_registered_for_test_)
+        {
+            after_physical_drain_waiter_registered_for_test_(
+                physical_drain_waiters_.size());
+        }
 
         boost::system::error_code ec;
         co_await signal->async_wait(

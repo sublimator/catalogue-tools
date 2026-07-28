@@ -13,6 +13,9 @@ namespace catl::test {
 ///
 /// This is stress/reproduction support, not deterministic schedule
 /// enumeration. Tests must still name the interleaving they force.
+///
+/// The helper is externally owned: construct, join, and destroy it outside
+/// the runner threads it creates.
 class IoContextRunners final
 {
 public:
@@ -22,8 +25,17 @@ public:
             throw std::invalid_argument("io runner count must be positive");
 
         runners_.reserve(count);
-        for (std::size_t index = 0; index < count; ++index)
-            runners_.emplace_back([&io]() { io.run(); });
+        try
+        {
+            for (std::size_t index = 0; index < count; ++index)
+                runners_.emplace_back([&io]() { io.run(); });
+        }
+        catch (...)
+        {
+            io_.stop();
+            join();
+            throw;
+        }
     }
 
     IoContextRunners(IoContextRunners const&) = delete;
