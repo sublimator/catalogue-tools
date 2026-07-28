@@ -118,11 +118,13 @@ ProofEngine::start()
 
     if (ledger_fetch_coordinator_enabled_)
     {
-        //@@authority transition=prv.T0044 status=provisional scope=statement bind=create@c921008e8a6ff63e
+        //@@authority transition=prv.T0044 status=provisional scope=statement
+        // bind=create@c921008e8a6ff63e
         // owner=unresolved owner_hypothesis=proof_engine
         // commit=startup_coroutine calls=create
         // label=construct_one_ledger_fetch_coordinator_per_peer_set
-        ledger_fetch_coordinator_ = LedgerFetchCoordinator::create(io_, peers_); //@@authority-target ids=prv.T0044
+        ledger_fetch_coordinator_ = LedgerFetchCoordinator::create(
+            io_, peers_);  //@@authority-target ids=prv.T0044
         if (!ledger_fetch_coordinator_)
             throw std::runtime_error(
                 "failed to create ledger fetch coordinator generation");
@@ -130,7 +132,8 @@ ProofEngine::start()
 
     // Node cache (content-addressed wire node store). The optional coordinator
     // is selected once here; request callsites do not branch on server mode.
-    //@@authority transition=prv.T0004 status=provisional scope=statement bind=create@c881629500fe6506
+    //@@authority transition=prv.T0004 status=provisional scope=statement
+    // bind=create@c881629500fe6506
     // owner=unresolved owner_hypothesis=ledger_data_provider
     // commit=startup_coroutine calls=create
     // label=construct_live_node_cache_with_selected_transport_capability
@@ -140,7 +143,7 @@ ProofEngine::start()
          .fetch_timeout = fetch_timeout_,
          .max_walk_peer_retries = max_walk_peer_retries_,
          .fetch_stale_multiplier = fetch_stale_multiplier_},
-        ledger_fetch_coordinator_); //@@authority-target ids=prv.T0004
+        ledger_fetch_coordinator_);  //@@authority-target ids=prv.T0004
 
     // Wire peers → validation buffer: unsolicited validations
     auto vbuf = val_buffer_;
@@ -234,10 +237,13 @@ ProofEngine::stop()
     {
         // Logical seal only. The owning io_context must keep running to execute
         // the coordinator's drain; stop() does not pretend this is quiescence.
-        //@@authority transition=prv.T0045 status=provisional scope=statement bind=fence@f07d60bfb8be76ad
+        //@@authority transition=prv.T0045 status=provisional scope=statement
+        // bind=fence@f07d60bfb8be76ad
         // owner=unresolved owner_hypothesis=proof_engine commit=atomic
         // calls=fence label=seal_managed_node_ingress_before_io_context_stop
-        auto const disposition = ledger_fetch_coordinator_->fence(); //@@authority-target ids=prv.T0045
+        auto const disposition =
+            ledger_fetch_coordinator_
+                ->fence();  //@@authority-target ids=prv.T0045
         if (disposition != LedgerFetchCoordinator::Fence::drain_queued)
         {
             PLOGW(
@@ -252,12 +258,37 @@ ProofEngine::stop()
     // boundary is not a graceful drain or a reusable-engine quiescence claim.
 }
 
+// Machine-readable target anchors in this block must remain on their
+// statements.
+// clang-format off
+//@@authority state=prv.S0056 status=provisional scope=function
+//bind=xprv::co_stop@eb43bbcc90625807
+// owner=unresolved owner_hypothesis=proof_engine_drain_frame
+// observed_home=ProofEngine::co_stop_coroutine_frame
+// label=exact_proof_engine_child_drain_join_frame
+//@@authority transition=prv.T0165 status=provisional scope=function
+//bind=xprv::co_stop@eb43bbcc90625807
+// owner=unresolved owner_hypothesis=proof_engine_drain_frame
+// commit=proof_engine_drain_coroutine touches=prv.S0056
+// label=join_exact_proof_engine_child_drain_sequence
+//@@authority channel=prv.C0004 status=provisional scope=function
+//bind=xprv::co_stop@eb43bbcc90625807
+// endpoints=service_lifecycle,proof_engine
+// channel_semantics=process_local_join
+// label=await_exact_proof_engine_drain_receipt
 asio::awaitable<void>
 ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
 {
+    //@@authority transition=prv.T0166 status=provisional scope=statement
+    //bind=if_statement@5f390c1b907fdbdf
+    // owner=unresolved owner_hypothesis=proof_engine
+    // commit=request_drain_binding_mutex touches=prv.S0056
+    // label=accept_exact_http_request_drain_authority
     if (!request_drain_binding_.accepts(request_drain))
+    {
         throw std::invalid_argument(
             "request-drain receipt does not authorize this engine");
+    } //@@authority-target ids=prv.T0166
 
     // This is shared service lifecycle work. A canceled signal waiter must not
     // abandon the drain between components and leave later joiners observing a
@@ -270,27 +301,77 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
     // The HTTP admission owner has already drained every request frame before
     // entering here, so no new cache operation can be minted by this service.
     if (vl_cache_)
-        co_await vl_cache_->co_stop();
+    {
+        //@@authority transition=prv.T0167 status=provisional scope=statement
+        //bind=co_stop@e29d5977c3f4b067
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine calls=co_stop touches=prv.S0056
+        // label=consume_vl_cache_stop_receipt
+        co_await vl_cache_->co_stop(); //@@authority-target ids=prv.T0167
+    }
     if (val_buffer_)
-        val_buffer_->stop();
+    {
+        //@@authority transition=prv.T0168 status=provisional scope=statement
+        //bind=stop@73b285cdf9ba60f9
+        // owner=unresolved owner_hypothesis=validation_buffer
+        // commit=validation_buffer_publication_and_admission_mutex calls=stop
+        // touches=prv.S0056 label=request_and_join_manifest_worker_stop
+        val_buffer_->stop(); //@@authority-target ids=prv.T0168
+    }
 
     if (node_cache_)
     {
-        co_await node_cache_->co_stop_nodes();
-        co_await node_cache_->co_clear_headers();
+        //@@authority transition=prv.T0169 status=provisional scope=statement
+        //bind=co_stop_nodes@d56e96e1aa7057c4
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine calls=co_stop_nodes
+        // touches=prv.S0056 label=consume_node_cache_node_stop_receipt
+        co_await node_cache_
+            ->co_stop_nodes(); //@@authority-target ids=prv.T0169
+        //@@authority transition=prv.T0170 status=provisional scope=statement
+        //bind=co_clear_headers@5b732a4bad82ab4e
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine calls=co_clear_headers
+        // touches=prv.S0056 label=consume_node_cache_header_clear_receipt
+        co_await node_cache_
+            ->co_clear_headers(); //@@authority-target ids=prv.T0170
     }
 
     if (ledger_fetch_coordinator_)
     {
-        co_await ledger_fetch_coordinator_->co_fence();
+        //@@authority transition=prv.T0171 status=provisional scope=statement
+        //bind=co_fence@71ef652c577a3710
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine calls=co_fence touches=prv.S0056
+        // label=consume_coordinator_fence_receipt
+        co_await ledger_fetch_coordinator_
+            ->co_fence(); //@@authority-target ids=prv.T0171
 
         // A PeerSet seal handler can enqueue its pin release behind the first
         // barrier. The second pass consumes those causally generated releases.
-        co_await peers_->co_generation_pin_release_barrier();
-        co_await peers_->co_generation_pin_release_barrier();
+        //@@authority transition=prv.T0172 status=provisional scope=statement
+        //bind=co_generation_pin_release_barrier@4008f5b2ea323561
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine touches=prv.S0056
+        // calls=co_generation_pin_release_barrier
+        // label=consume_first_peer_set_pin_release_barrier
+        co_await peers_->co_generation_pin_release_barrier(); //@@authority-target ids=prv.T0172
+        //@@authority transition=prv.T0173 status=provisional scope=statement
+        //bind=co_generation_pin_release_barrier@f6a9e514365b5562
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine touches=prv.S0056
+        // calls=co_generation_pin_release_barrier
+        // label=consume_causally_generated_peer_set_pin_release_barrier
+        co_await peers_->co_generation_pin_release_barrier(); //@@authority-target ids=prv.T0173
 
+        //@@authority transition=prv.T0174 status=provisional scope=statement
+        //bind=co_reconcile_shutdown_projection_residue@0c39121bc8a9f209
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine touches=prv.S0056
+        // calls=co_reconcile_shutdown_projection_residue
+        // label=consume_coordinator_projection_reconciliation_receipt
         auto const lost = co_await ledger_fetch_coordinator_
-                              ->co_reconcile_shutdown_projection_residue();
+                              ->co_reconcile_shutdown_projection_residue(); //@@authority-target ids=prv.T0174
         if (lost != 0)
         {
             PLOGW(
@@ -304,16 +385,31 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
     }
 
     if (peers_)
-        co_await peers_->co_stop();
+    {
+        //@@authority transition=prv.T0175 status=provisional scope=statement
+        //bind=co_stop@ec1addb3f351b7a5
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+        // commit=proof_engine_drain_coroutine calls=co_stop touches=prv.S0056
+        // label=consume_peer_set_aggregate_stop_receipt
+        co_await peers_->co_stop(); //@@authority-target ids=prv.T0175
+    }
 
     PLOGI(log_, "[", net_label_, "] Engine drained");
+    //@@authority transition=prv.T0176 status=provisional scope=statement
+    //bind=co_return_statement@a7e5f24d79554a8d
+    // owner=unresolved owner_hypothesis=proof_engine_drain_frame
+    // commit=proof_engine_drain_coroutine touches=prv.S0056
+    // label=publish_exact_proof_engine_drain_receipt
+    co_return; //@@authority-target ids=prv.T0176
 }
+// clang-format on
 
 // ═══════════════════════════════════════════════════════════════════════
 // prove() — build a proof chain using shared services
 // ═══════════════════════════════════════════════════════════════════════
 
-//@@authority transition=prv.T0005 status=provisional scope=function bind=xprv::prove@3023246064adff8e
+//@@authority transition=prv.T0005 status=provisional scope=function
+// bind=xprv::prove@3023246064adff8e
 // owner=unresolved owner_hypothesis=ledger_data_control commit=unresolved
 // label=begin_real_proof_operation_without_authority_identity
 asio::awaitable<ProofEngine::ProveResult>
@@ -411,11 +507,13 @@ ProofEngine::prove(
         .on_step = std::move(on_step),
     };
 
-    //@@authority transition=prv.T0006 status=provisional scope=statement bind=build_proof@628b5988ba4dbec4
+    //@@authority transition=prv.T0006 status=provisional scope=statement
+    // bind=build_proof@628b5988ba4dbec4
     // owner=unresolved owner_hypothesis=ledger_data_control commit=unresolved
     // calls=build_proof
     // label=enter_shared_proof_build_without_operation_identity
-    auto result = co_await build_proof(svc, tx_hash); //@@authority-target ids=prv.T0006
+    auto result =
+        co_await build_proof(svc, tx_hash);  //@@authority-target ids=prv.T0006
     result.chain.network_id = config_.network_id;
 
     // Cache the tx→ledger mapping for future requests
