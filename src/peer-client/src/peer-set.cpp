@@ -1165,6 +1165,12 @@ PeerSet::co_generation_pin_release_barrier()
         [self]() -> asio::awaitable<void> {
             assert(self->strand_.running_in_this_thread());
             self->prune_expired_peer_pins();
+            if (self
+                    ->before_generation_pin_release_barrier_return_for_test_)
+            {
+                self
+                    ->before_generation_pin_release_barrier_return_for_test_();
+            }
             co_return;
         },
         asio::use_awaitable);

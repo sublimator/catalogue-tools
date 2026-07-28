@@ -24,6 +24,15 @@ public:
     static constexpr std::size_t max_tracked_endpoints = 4096;
 
     static void
+    set_before_generation_pin_release_barrier_return(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::function<void()> hook)
+    {
+        peers->before_generation_pin_release_barrier_return_for_test_ =
+            std::move(hook);
+    }
+
+    static void
     post_on_owner_strand(
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         std::function<void()> operation)

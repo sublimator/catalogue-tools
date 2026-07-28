@@ -2,6 +2,7 @@
 #include <xprv/proof-engine.h>
 
 #include "../peer-client/ledger-fetch-coordinator-test-access.h"
+#include "../peer-client/peer-set-test-access.h"
 #include "../test-support/deterministic-scheduler.h"
 #include "../test-support/io-context-runners.h"
 #include "http-child-completion.h"
@@ -1651,6 +1652,89 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsCoordinatorFenceReceipt)
 
         work.reset();
         runners.join();
+    }
+}
+
+TEST(HttpServerLifecycle, EngineDrainAwaitsBothPeerSetPinReleaseBarriers)
+{
+    namespace asio = boost::asio;
+    using namespace std::chrono_literals;
+
+    for (auto const held_barrier : {1u, 2u})
+    {
+        for (auto const runner_count : {2u, 4u})
+        {
+            SCOPED_TRACE(
+                testing::Message()
+                << "held_barrier=" << held_barrier
+                << " runners=" << runner_count);
+
+            asio::io_context io;
+            auto work = asio::make_work_guard(io);
+            auto engine = xprv::ProofEngine::create(
+                io, xprv::NetworkConfig::for_network(0));
+            auto peers = catl::peer_client::PeerSet::create(
+                io, catl::peer_client::PeerSetOptions{});
+            auto coordinator =
+                catl::peer_client::LedgerFetchCoordinator::create(io, peers);
+            xprv::ProofEngineTestAccess::set_peer_set(*engine, peers);
+            xprv::ProofEngineTestAccess::set_ledger_fetch_coordinator(
+                *engine, coordinator);
+            auto server = xprv::HttpServer::create(
+                io,
+                engine,
+                xprv::HttpServerOptions{
+                    .bind_address = "127.0.0.1",
+                    .port = 0,
+                });
+            server->start();
+
+            std::atomic<unsigned> barriers_seen{0};
+            std::promise<void> held_barrier_entered;
+            std::promise<void> release_held_barrier;
+            auto release_held_barrier_future =
+                release_held_barrier.get_future().share();
+            PeerSetTestAccess::
+                set_before_generation_pin_release_barrier_return(
+                    peers, [&]() {
+                        auto const ordinal = ++barriers_seen;
+                        if (ordinal != held_barrier)
+                            return;
+                        held_barrier_entered.set_value();
+                        release_held_barrier_future.wait();
+                    });
+
+            auto drained = asio::co_spawn(
+                io,
+                [server, engine]() -> asio::awaitable<void> {
+                    auto receipt = co_await server->co_stop();
+                    co_await engine->co_stop(receipt);
+                },
+                asio::use_future);
+
+            catl::test::IoContextRunners runners(io, runner_count);
+            auto const entered_status =
+                held_barrier_entered.get_future().wait_for(5s);
+            EXPECT_EQ(entered_status, std::future_status::ready);
+            if (entered_status == std::future_status::ready)
+                EXPECT_EQ(drained.wait_for(50ms), std::future_status::timeout);
+
+            release_held_barrier.set_value();
+            auto const drained_status = drained.wait_for(5s);
+            EXPECT_EQ(drained_status, std::future_status::ready);
+            if (drained_status == std::future_status::ready)
+            {
+                EXPECT_NO_THROW(drained.get());
+                EXPECT_GE(barriers_seen.load(), 2u);
+            }
+            else
+            {
+                io.stop();
+            }
+
+            work.reset();
+            runners.join();
+        }
     }
 }
 

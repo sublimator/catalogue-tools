@@ -484,6 +484,11 @@ private:
     std::uint32_t fail_crawl_servant_launches_for_test_ = 0;
     std::function<void()> connect_completion_diagnostic_hook_for_test_;
     std::function<void()> crawl_completion_diagnostic_hook_for_test_;
+    /// Pause after one owner-strand generation-pin barrier has consumed its
+    /// causal prefix but before that barrier receipt returns to its caller.
+    /// Production leaves this empty.
+    std::function<void()>
+        before_generation_pin_release_barrier_return_for_test_;
 
     /// The single delivery point for a seal result. Marked //@@callback-funnel
     /// in the implementation: consumer code runs on its own executor, so
