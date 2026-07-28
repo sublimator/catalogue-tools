@@ -588,7 +588,8 @@ ServiceLifecycle::launch_engine_stops_on_control()
 //@@authority transition=prv.T0161 status=provisional scope=function bind=xprv::detail::finish_engine_stop_on_control@3ea01d723e0ae726
 // owner=unresolved owner_hypothesis=service_lifecycle
 // commit=service_root_strand touches=prv.S0053
-// label=consume_one_exact_engine_drain_result
+// boundary_ref=proof_engine.drain_receipt receipt=proof_engine.drain_receipt
+// label=consume_one_exact_proof_engine_drain_receipt
 void
 ServiceLifecycle::finish_engine_stop_on_control(
     std::size_t index,

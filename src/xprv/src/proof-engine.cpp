@@ -283,7 +283,9 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
     //bind=if_statement@5f390c1b907fdbdf
     // owner=unresolved owner_hypothesis=proof_engine
     // commit=request_drain_binding_mutex touches=prv.S0056
-    // label=accept_exact_http_request_drain_authority
+    // boundary_ref=http.request_drain_receipt
+    // receipt=http.request_drain_receipt
+    // label=accept_exact_http_request_drain_receipt
     if (!request_drain_binding_.accepts(request_drain))
     {
         throw std::invalid_argument(
@@ -306,6 +308,7 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         //bind=co_stop@e29d5977c3f4b067
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
         // commit=proof_engine_drain_coroutine calls=co_stop touches=prv.S0056
+        // boundary_ref=vl_cache.co_stop receipt=vl_cache.stop_receipt
         // label=consume_vl_cache_stop_receipt
         co_await vl_cache_->co_stop(); //@@authority-target ids=prv.T0167
     }
@@ -313,9 +316,11 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
     {
         //@@authority transition=prv.T0168 status=provisional scope=statement
         //bind=co_stop@223484bc05e2c58f
-        // owner=unresolved owner_hypothesis=validation_buffer
+        // owner=unresolved owner_hypothesis=proof_engine_drain_frame
         // commit=proof_engine_drain_coroutine calls=co_stop
-        // touches=prv.S0056 label=consume_validation_buffer_stop_receipt
+        // touches=prv.S0056 boundary_ref=validation_buffer.co_stop
+        // receipt=validation_buffer.stop_receipt
+        // label=consume_validation_buffer_stop_receipt
         co_await val_buffer_->co_stop(); //@@authority-target ids=prv.T0168
     }
 
@@ -325,14 +330,18 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         //bind=co_stop_nodes@d56e96e1aa7057c4
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
         // commit=proof_engine_drain_coroutine calls=co_stop_nodes
-        // touches=prv.S0056 label=consume_node_cache_node_stop_receipt
+        // touches=prv.S0056 boundary_ref=node_cache.co_stop_nodes
+        // receipt=node_cache.node_stop_receipt
+        // label=consume_node_cache_node_stop_receipt
         co_await node_cache_
             ->co_stop_nodes(); //@@authority-target ids=prv.T0169
         //@@authority transition=prv.T0170 status=provisional scope=statement
         //bind=co_clear_headers@5b732a4bad82ab4e
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
         // commit=proof_engine_drain_coroutine calls=co_clear_headers
-        // touches=prv.S0056 label=consume_node_cache_header_clear_receipt
+        // touches=prv.S0056 boundary_ref=node_cache.co_clear_headers
+        // receipt=node_cache.header_clear_receipt
+        // label=consume_node_cache_header_clear_receipt
         co_await node_cache_
             ->co_clear_headers(); //@@authority-target ids=prv.T0170
     }
@@ -343,7 +352,9 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         //bind=co_fence@71ef652c577a3710
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
         // commit=proof_engine_drain_coroutine calls=co_fence touches=prv.S0056
-        // label=consume_coordinator_fence_receipt
+        // boundary_ref=ledger_fetch_coordinator.co_fence
+        // receipt=ledger_fetch_coordinator.fence_receipt
+        // label=consume_ledger_fetch_coordinator_fence_receipt
         co_await ledger_fetch_coordinator_
             ->co_fence(); //@@authority-target ids=prv.T0171
 
@@ -354,14 +365,18 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
         // commit=proof_engine_drain_coroutine touches=prv.S0056
         // calls=co_generation_pin_release_barrier
-        // label=consume_first_peer_set_pin_release_barrier
+        // boundary_ref=peer_set.first_generation_pin_release_barrier
+        // receipt=peer_set.first_generation_pin_barrier_receipt
+        // label=consume_peer_set_first_generation_pin_barrier_receipt
         co_await peers_->co_generation_pin_release_barrier(); //@@authority-target ids=prv.T0172
         //@@authority transition=prv.T0173 status=provisional scope=statement
         //bind=co_generation_pin_release_barrier@f6a9e514365b5562
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
         // commit=proof_engine_drain_coroutine touches=prv.S0056
         // calls=co_generation_pin_release_barrier
-        // label=consume_causally_generated_peer_set_pin_release_barrier
+        // boundary_ref=peer_set.causal_generation_pin_release_barrier
+        // receipt=peer_set.causal_generation_pin_barrier_receipt
+        // label=consume_peer_set_causal_generation_pin_barrier_receipt
         co_await peers_->co_generation_pin_release_barrier(); //@@authority-target ids=prv.T0173
 
         //@@authority transition=prv.T0174 status=provisional scope=statement
@@ -369,7 +384,9 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
         // commit=proof_engine_drain_coroutine touches=prv.S0056
         // calls=co_reconcile_shutdown_projection_residue
-        // label=consume_coordinator_projection_reconciliation_receipt
+        // boundary_ref=ledger_fetch_coordinator.co_reconcile_shutdown_projection_residue
+        // receipt=ledger_fetch_coordinator.projection_reconciliation_receipt
+        // label=consume_ledger_fetch_coordinator_projection_reconciliation_receipt
         auto const lost = co_await ledger_fetch_coordinator_
                               ->co_reconcile_shutdown_projection_residue(); //@@authority-target ids=prv.T0174
         if (lost != 0)
@@ -390,6 +407,8 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
         //bind=co_stop@ec1addb3f351b7a5
         // owner=unresolved owner_hypothesis=proof_engine_drain_frame
         // commit=proof_engine_drain_coroutine calls=co_stop touches=prv.S0056
+        // boundary_ref=peer_set.co_stop
+        // receipt=peer_set.aggregate_stop_receipt
         // label=consume_peer_set_aggregate_stop_receipt
         co_await peers_->co_stop(); //@@authority-target ids=prv.T0175
     }
@@ -399,6 +418,8 @@ ProofEngine::co_stop(RequestDrainReceipt const& request_drain)
     //bind=co_return_statement@a7e5f24d79554a8d
     // owner=unresolved owner_hypothesis=proof_engine_drain_frame
     // commit=proof_engine_drain_coroutine touches=prv.S0056
+    // boundary_ref=proof_engine.drain_receipt
+    // receipt=proof_engine.drain_receipt
     // label=publish_exact_proof_engine_drain_receipt
     co_return; //@@authority-target ids=prv.T0176
 }
