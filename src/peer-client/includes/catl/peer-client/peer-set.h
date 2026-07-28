@@ -489,6 +489,10 @@ private:
     /// Production leaves this empty.
     std::function<void()>
         before_generation_pin_release_barrier_return_for_test_;
+    /// Pause after the aggregate stopped fact is committed and joined waiters
+    /// are notified, but before co_stop returns its receipt. Production leaves
+    /// this empty.
+    std::function<void()> before_stop_receipt_return_for_test_;
 
     /// The single delivery point for a seal result. Marked //@@callback-funnel
     /// in the implementation: consumer code runs on its own executor, so

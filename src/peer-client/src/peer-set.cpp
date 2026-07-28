@@ -408,14 +408,15 @@ PeerSet::co_stop()
 
                 if (session)
                 {
-                    //@@authority transition=prv.T0147 status=provisional bind=co_disconnect@fe212b8dead6afae
+                    //@@authority transition=prv.T0147 status=provisional
+                    //bind=co_disconnect@fe212b8dead6afae
                     // scope=statement owner=unresolved
                     // owner_hypothesis=peer_set commit=peer_set_strand
                     // touches=prv.S0035,prv.S0046
                     // mutation_class=stop_driver calls=co_disconnect
                     // label=join_exact_session_physical_drain_receipt
                     co_await session
-                        ->co_disconnect(); //@@authority-target ids=prv.T0147
+                        ->co_disconnect();  //@@authority-target ids=prv.T0147
                 }
                 assert(self->strand_.running_in_this_thread());
 
@@ -451,6 +452,8 @@ PeerSet::co_stop()
 
             self->lifecycle_ = Lifecycle::stopped;
             self->notify_shutdown_progress();
+            if (self->before_stop_receipt_return_for_test_)
+                self->before_stop_receipt_return_for_test_();
             try
             {
                 PLOGI(
@@ -537,10 +540,11 @@ PeerSet::complete_connect_servant(
 
     // The exact census consumption and stop wake are the no-throw receipt
     // commit. Diagnostics and successor pumping are optional downstream work.
-    //@@authority transition=prv.T0091 status=provisional scope=statement bind=expression_statement@6f2db77abd01a92f
+    //@@authority transition=prv.T0091 status=provisional scope=statement
+    //bind=expression_statement@6f2db77abd01a92f
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0037 label=consume_background_connect_servant_receipt
-    in_flight_.erase(key); //@@authority-target ids=prv.T0091
+    in_flight_.erase(key);  //@@authority-target ids=prv.T0091
     notify_shutdown_progress();
 
     try
@@ -616,10 +620,11 @@ PeerSet::complete_crawl_servant(
 
     // As above, optional retention and diagnostics cannot sit between census
     // consumption and the shared stop wake.
-    //@@authority transition=prv.T0092 status=provisional scope=statement bind=expression_statement@660eab6dbbe007d7
+    //@@authority transition=prv.T0092 status=provisional scope=statement
+    //bind=expression_statement@660eab6dbbe007d7
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0038 label=consume_background_crawl_servant_receipt
-    crawl_in_flight_.erase(key); //@@authority-target ids=prv.T0092
+    crawl_in_flight_.erase(key);  //@@authority-target ids=prv.T0092
     notify_shutdown_progress();
 
     try
@@ -1165,11 +1170,9 @@ PeerSet::co_generation_pin_release_barrier()
         [self]() -> asio::awaitable<void> {
             assert(self->strand_.running_in_this_thread());
             self->prune_expired_peer_pins();
-            if (self
-                    ->before_generation_pin_release_barrier_return_for_test_)
+            if (self->before_generation_pin_release_barrier_return_for_test_)
             {
-                self
-                    ->before_generation_pin_release_barrier_return_for_test_();
+                self->before_generation_pin_release_barrier_return_for_test_();
             }
             co_return;
         },

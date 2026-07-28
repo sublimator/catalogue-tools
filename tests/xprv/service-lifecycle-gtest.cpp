@@ -1807,6 +1807,71 @@ TEST(
     }
 }
 
+TEST(HttpServerLifecycle, EngineDrainAwaitsPeerSetAggregateStopReceipt)
+{
+    namespace asio = boost::asio;
+    using namespace std::chrono_literals;
+
+    for (auto const runner_count : {2u, 4u})
+    {
+        SCOPED_TRACE(testing::Message() << "runners=" << runner_count);
+
+        asio::io_context io;
+        auto work = asio::make_work_guard(io);
+        auto engine =
+            xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
+        auto peers = catl::peer_client::PeerSet::create(
+            io, catl::peer_client::PeerSetOptions{});
+        auto coordinator =
+            catl::peer_client::LedgerFetchCoordinator::create(io, peers);
+        xprv::ProofEngineTestAccess::set_peer_set(*engine, peers);
+        xprv::ProofEngineTestAccess::set_ledger_fetch_coordinator(
+            *engine, coordinator);
+        auto server = xprv::HttpServer::create(
+            io,
+            engine,
+            xprv::HttpServerOptions{
+                .bind_address = "127.0.0.1",
+                .port = 0,
+            });
+        server->start();
+
+        std::promise<void> stop_receipt_held;
+        std::promise<void> release_stop_receipt;
+        auto release_stop_receipt_future =
+            release_stop_receipt.get_future().share();
+        PeerSetTestAccess::set_before_stop_receipt_return(peers, [&]() {
+            stop_receipt_held.set_value();
+            release_stop_receipt_future.wait();
+        });
+
+        auto drained = asio::co_spawn(
+            io,
+            [server, engine]() -> asio::awaitable<void> {
+                auto receipt = co_await server->co_stop();
+                co_await engine->co_stop(receipt);
+            },
+            asio::use_future);
+
+        catl::test::IoContextRunners runners(io, runner_count);
+        auto const held_status = stop_receipt_held.get_future().wait_for(5s);
+        EXPECT_EQ(held_status, std::future_status::ready);
+        if (held_status == std::future_status::ready)
+            EXPECT_EQ(drained.wait_for(50ms), std::future_status::timeout);
+
+        release_stop_receipt.set_value();
+        auto const drained_status = drained.wait_for(5s);
+        EXPECT_EQ(drained_status, std::future_status::ready);
+        if (drained_status == std::future_status::ready)
+            EXPECT_NO_THROW(drained.get());
+        else
+            io.stop();
+
+        work.reset();
+        runners.join();
+    }
+}
+
 TEST(HttpServerLifecycle, FailedStartCannotMintOrRetryLifecycle)
 {
     namespace asio = boost::asio;
