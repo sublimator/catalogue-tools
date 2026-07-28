@@ -548,6 +548,32 @@ class PeerClientPhysicalRunnerModes
 {
 };
 
+TEST(IoContextRunners, PartialConstructionNeverStartsIo)
+{
+    asio::io_context io;
+    std::atomic<bool> handler_ran{false};
+    asio::post(io, [&handler_ran] {
+        handler_ran.store(true, std::memory_order_release);
+    });
+
+    std::size_t attempts = 0;
+    catl::test::IoContextRunners::RunnerFactory make_runner =
+        [&attempts](std::function<void()> run) -> std::thread {
+        ++attempts;
+        if (attempts == 2)
+            throw std::runtime_error("expected thread creation refusal");
+        return std::thread(std::move(run));
+    };
+
+    EXPECT_THROW(
+        (catl::test::IoContextRunners(io, 2, make_runner)), std::runtime_error);
+    EXPECT_EQ(attempts, 2u);
+    EXPECT_FALSE(handler_ran.load(std::memory_order_acquire));
+
+    io.poll();
+    EXPECT_TRUE(handler_ran.load(std::memory_order_acquire));
+}
+
 TEST_P(
     PeerClientPhysicalRunnerModes,
     HeldPhysicalCompletionDominatesConcurrentDisconnectCallers)

@@ -3,8 +3,11 @@
 #include <boost/asio/io_context.hpp>
 
 #include <cstddef>
+#include <functional>
+#include <future>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace catl::test {
@@ -19,23 +22,44 @@ namespace catl::test {
 class IoContextRunners final
 {
 public:
-    IoContextRunners(boost::asio::io_context& io, std::size_t count) : io_(io)
+    using RunnerFactory = std::function<std::thread(std::function<void()>)>;
+
+    IoContextRunners(boost::asio::io_context& io, std::size_t count)
+        : IoContextRunners(io, count, [](std::function<void()> run) {
+            return std::thread(std::move(run));
+        })
+    {
+    }
+
+    IoContextRunners(
+        boost::asio::io_context& io,
+        std::size_t count,
+        RunnerFactory const& make_runner)
+        : io_(io)
     {
         if (count == 0)
             throw std::invalid_argument("io runner count must be positive");
 
+        std::promise<bool> start;
+        auto const start_gate = start.get_future().share();
         runners_.reserve(count);
         try
         {
             for (std::size_t index = 0; index < count; ++index)
-                runners_.emplace_back([&io]() { io.run(); });
+            {
+                runners_.push_back(make_runner([&io, start_gate]() {
+                    if (start_gate.get())
+                        io.run();
+                }));
+            }
         }
         catch (...)
         {
-            io_.stop();
+            start.set_value(false);
             join();
             throw;
         }
+        start.set_value(true);
     }
 
     IoContextRunners(IoContextRunners const&) = delete;
