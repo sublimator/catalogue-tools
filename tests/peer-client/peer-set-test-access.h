@@ -1,5 +1,6 @@
 #pragma once
 
+#include <catl/peer-client/peer-client.h>
 #include <catl/peer-client/peer-set.h>
 
 #include <boost/asio/co_spawn.hpp>
@@ -38,6 +39,14 @@ public:
         std::function<void()> hook)
     {
         peers->before_stop_receipt_return_for_test_ = std::move(hook);
+    }
+
+    static void
+    set_connect_completion_diagnostic_hook(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::function<void()> hook)
+    {
+        peers->connect_completion_diagnostic_hook_for_test_ = std::move(hook);
     }
 
     static void
@@ -642,6 +651,27 @@ public:
         return found;
     }
 
+    static std::shared_ptr<catl::peer_client::PeerClient>
+    connect_servant_client(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        std::shared_ptr<catl::peer_client::PeerClient> client;
+        run_on_strand(
+            io,
+            peers,
+            [&client, endpoint = std::move(endpoint)](auto& set) {
+                auto row = set.in_flight_.find(endpoint);
+                if (row != set.in_flight_.end())
+                {
+                    client = std::dynamic_pointer_cast<
+                        catl::peer_client::PeerClient>(row->second.session);
+                }
+            });
+        return client;
+    }
+
     static bool
     candidate_better(
         boost::asio::io_context& io,
@@ -1102,7 +1132,7 @@ public:
             [&result, key = std::move(key), wake](auto& set) mutable {
                 set.shutdown_ingress_sealed_.store(
                     true, std::memory_order_release);
-                set.in_flight_.insert(key);
+                set.in_flight_.try_emplace(key);
 
                 auto waiter = std::make_shared<boost::asio::steady_timer>(
                     set.strand_,

@@ -664,6 +664,11 @@ private:
         SuccessorPump successor = SuccessorPump::run) noexcept;
 
     void
+    install_connect_servant_session(
+        std::string const& key,
+        PeerSessionPtr const& session) noexcept;
+
+    void
     complete_crawl_servant(
         std::string const& key,
         CrawlServantOutcome const& outcome,
@@ -877,11 +882,17 @@ private:
         std::string kind;
     };
     std::deque<FailureEvent> recent_failures_;
-    //@@authority state=prv.S0037 status=provisional scope=field
-    // bind=catl::peer_client::PeerSet::in_flight_@9b830888c93b1ab8
+    struct ConnectServant
+    {
+        /// Installed before the connect helper first suspends. The row remains
+        /// authoritative until the servant consumes the exact physical drain
+        /// receipt; requesting disconnect never retires it.
+        PeerSessionPtr session;
+    };
+    //@@authority state=prv.S0037 status=provisional scope=field bind=catl::peer_client::PeerSet::in_flight_@8017d2247e9adce2
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
-    // label=owned_background_connect_servant_census
-    std::set<std::string> in_flight_;  // currently connecting
+    // label=owned_background_connect_servant_census_and_cancel_capability
+    std::map<std::string, ConnectServant> in_flight_;  // currently connecting
     std::set<std::string> queued_;
     // Request-scoped authority for queued ledger-specific replacement probes.
     //@@authority state=prv.S0009 status=provisional scope=field

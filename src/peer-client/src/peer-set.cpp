@@ -409,7 +409,7 @@ PeerSet::co_stop()
                 if (session)
                 {
                     //@@authority transition=prv.T0147 status=provisional
-                    //bind=co_disconnect@fe212b8dead6afae
+                    // bind=co_disconnect@fe212b8dead6afae
                     // scope=statement owner=unresolved
                     // owner_hypothesis=peer_set commit=peer_set_strand
                     // touches=prv.S0035,prv.S0046
@@ -499,6 +499,32 @@ PeerSet::begin_stop_on_strand()
     queued_.clear();
     pending_crawls_.clear();
     crawl_queued_.clear();
+
+    // Cancellation is intent, not terminality. Each row remains in S0037
+    // until its servant awaits this exact session's physical drain and T0091
+    // consumes the row.
+    for (auto const& [_, servant] : in_flight_)
+    {
+        if (!servant.session)
+            continue;
+        try
+        {
+            //@@authority transition=prv.T0182 status=provisional
+            //bind=disconnect@cd31ff180f9a6cb6
+            // scope=statement owner=unresolved owner_hypothesis=peer_set
+            // commit=peer_set_strand touches=prv.S0037
+            // calls=disconnect
+            // label=request_connect_servant_cancellation_without_retirement
+            servant.session->disconnect();  //@@authority-target ids=prv.T0182
+        }
+        catch (...)
+        {
+            // A projection refusal cannot counterfeit completion. The servant
+            // remains counted and its normal bounded terminal path is still
+            // joined by co_stop().
+        }
+    }
+
     notify_waiters();
 }
 
@@ -541,7 +567,7 @@ PeerSet::complete_connect_servant(
     // The exact census consumption and stop wake are the no-throw receipt
     // commit. Diagnostics and successor pumping are optional downstream work.
     //@@authority transition=prv.T0091 status=provisional scope=statement
-    //bind=expression_statement@6f2db77abd01a92f
+    // bind=expression_statement@6f2db77abd01a92f
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0037 label=consume_background_connect_servant_receipt
     in_flight_.erase(key);  //@@authority-target ids=prv.T0091
@@ -610,6 +636,24 @@ PeerSet::complete_connect_servant(
 }
 
 void
+PeerSet::install_connect_servant_session(
+    std::string const& key,
+    PeerSessionPtr const& session) noexcept
+{
+    ASSERT_ON_STRAND();
+    auto row = in_flight_.find(key);
+    if (row == in_flight_.end() || row->second.session)
+        return;
+
+    //@@authority transition=prv.T0181 status=provisional scope=statement
+    //bind=expression_statement@65d1f1e9c4d95232
+    // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+    // touches=prv.S0037
+    // label=install_connect_servant_cancellation_capability
+    row->second.session = session;  //@@authority-target ids=prv.T0181
+}
+
+void
 PeerSet::complete_crawl_servant(
     std::string const& key,
     CrawlServantOutcome const& outcome,
@@ -621,7 +665,7 @@ PeerSet::complete_crawl_servant(
     // As above, optional retention and diagnostics cannot sit between census
     // consumption and the shared stop wake.
     //@@authority transition=prv.T0092 status=provisional scope=statement
-    //bind=expression_statement@660eab6dbbe007d7
+    // bind=expression_statement@660eab6dbbe007d7
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0038 label=consume_background_crawl_servant_receipt
     crawl_in_flight_.erase(key);  //@@authority-target ids=prv.T0092
@@ -1859,7 +1903,7 @@ PeerSet::pump_connects()
         bool census_committed = false;
         try
         {
-            in_flight_.insert(key);
+            in_flight_.try_emplace(key);
             census_committed = true;
             if (fail_connect_servant_launches_for_test_ != 0)
             {
@@ -2393,7 +2437,17 @@ PeerSet::try_connect_on_strand(
             };
         }
 
-        co_await co_connect(io_, host, port, std::move(connect_opts), client);
+        co_await co_connect(
+            io_,
+            host,
+            port,
+            std::move(connect_opts),
+            client,
+            10,
+            [self = shared_from_this(),
+             key](std::shared_ptr<PeerClient> const& created) noexcept {
+                self->install_connect_servant_session(key, created);
+            });
         ASSERT_ON_STRAND();
 
         // A candidate whose handshake crossed the seal was never admitted.
@@ -4227,7 +4281,8 @@ PeerSet::snapshot_unsafe() const
         endpoints.insert(key);
     for (auto const& [key, _] : connections_)
         endpoints.insert(key);
-    endpoints.insert(in_flight_.begin(), in_flight_.end());
+    for (auto const& [key, _] : in_flight_)
+        endpoints.insert(key);
     endpoints.insert(queued_.begin(), queued_.end());
     endpoints.insert(crawl_in_flight_.begin(), crawl_in_flight_.end());
     endpoints.insert(crawl_queued_.begin(), crawl_queued_.end());
@@ -4552,7 +4607,8 @@ PeerSet::prune_endpoint_stats()
     std::unordered_set<std::string> keep;
     for (auto const& [key, _] : connections_)
         keep.insert(key);
-    keep.insert(in_flight_.begin(), in_flight_.end());
+    for (auto const& [key, _] : in_flight_)
+        keep.insert(key);
     keep.insert(queued_.begin(), queued_.end());
     keep.insert(crawl_in_flight_.begin(), crawl_in_flight_.end());
     keep.insert(crawl_queued_.begin(), crawl_queued_.end());
@@ -4640,7 +4696,8 @@ PeerSet::prune_discovery_state()
     std::unordered_set<std::string> active;
     for (auto const& [key, _] : connections_)
         active.insert(key);
-    active.insert(in_flight_.begin(), in_flight_.end());
+    for (auto const& [key, _] : in_flight_)
+        active.insert(key);
     active.insert(queued_.begin(), queued_.end());
     active.insert(crawl_in_flight_.begin(), crawl_in_flight_.end());
     active.insert(crawl_queued_.begin(), crawl_queued_.end());

@@ -6782,6 +6782,177 @@ TEST(PeerSetShutdown, HeldSessionReceiptDominatesTerminalPeerSetState)
 }
 
 TEST(
+    PeerSetShutdown,
+    ActiveConnectCancellationWaitsForExactPhysicalDrainReceipt)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    constexpr std::size_t servant_count = 2;
+    std::array<std::shared_ptr<asio::ip::tcp::acceptor>, servant_count>
+        acceptors;
+    std::array<std::shared_ptr<asio::ip::tcp::socket>, servant_count> accepted;
+    std::array<std::string, servant_count> keys;
+    for (std::size_t index = 0; index < servant_count; ++index)
+    {
+        acceptors[index] = std::make_shared<asio::ip::tcp::acceptor>(
+            io,
+            asio::ip::tcp::endpoint(
+                asio::ip::make_address("127.0.0.1"), 0));
+        accepted[index] = std::make_shared<asio::ip::tcp::socket>(io);
+        acceptors[index]->async_accept(
+            *accepted[index],
+            [socket = accepted[index]](boost::system::error_code) {});
+        keys[index] = "127.0.0.1:" +
+            std::to_string(acceptors[index]->local_endpoint().port());
+    }
+
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = servant_count,
+            .max_in_flight_crawls = 0,
+        });
+    std::size_t servant_receipts = 0;
+    PeerSetTestAccess::set_connect_completion_diagnostic_hook(
+        peers, [&servant_receipts] { ++servant_receipts; });
+    for (auto const& key : keys)
+        PeerSetTestAccess::push_pending_connect(io, peers, key);
+    PeerSetTestAccess::pump_connects(io, peers);
+
+    std::array<std::shared_ptr<PeerClient>, servant_count> clients;
+    for (std::size_t attempt = 0; attempt < 100; ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+        for (std::size_t index = 0; index < servant_count; ++index)
+        {
+            if (!clients[index])
+            {
+                clients[index] = PeerSetTestAccess::connect_servant_client(
+                    io, peers, keys[index]);
+            }
+        }
+        if (std::ranges::all_of(clients, [](auto const& client) {
+                return static_cast<bool>(client);
+            }))
+        {
+            break;
+        }
+    }
+    ASSERT_TRUE(std::ranges::all_of(
+        clients, [](auto const& client) { return static_cast<bool>(client); }));
+
+    std::array<peer_connection::test_write_completion, servant_count>
+        held_completions;
+    for (std::size_t index = 0; index < servant_count; ++index)
+    {
+        asio::post(
+            clients[index]->strand(),
+            [client = clients[index], &held_completions, index] {
+                client->raw_connection().set_write_initiator_for_test(
+                    [&held_completions, index](
+                        asio::const_buffer,
+                        peer_connection::test_write_completion completion) {
+                        held_completions[index] = std::move(completion);
+                    });
+                client->raw_connection().async_send_packet(
+                    packet_type::ping,
+                    std::vector<std::uint8_t>(64, 0xC7),
+                    [](boost::system::error_code) {});
+            });
+    }
+    for (std::size_t attempt = 0; attempt < 100; ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+        if (std::ranges::all_of(held_completions, [](auto const& completion) {
+                return static_cast<bool>(completion);
+            }))
+        {
+            break;
+        }
+    }
+    ASSERT_TRUE(std::ranges::all_of(
+        held_completions,
+        [](auto const& completion) { return static_cast<bool>(completion); }));
+
+    auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run_for(20ms);
+    io.restart();
+
+    for (std::size_t index = 0; index < servant_count; ++index)
+    {
+        EXPECT_EQ(clients[index]->state(), State::Disconnected)
+            << "stop must actively cancel every admitted connect servant";
+        EXPECT_TRUE(
+            PeerSetTestAccess::in_flight_contains(io, peers, keys[index]))
+            << "cancellation intent cannot retire a servant census row";
+        EXPECT_GE(
+            clients[index]
+                ->raw_connection()
+                .transport_operation_count_for_test(),
+            1u);
+        EXPECT_FALSE(clients[index]
+                         ->raw_connection()
+                         .physical_transport_drained_for_test());
+    }
+    EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout)
+        << "PeerSet terminality must wait for the exact physical receipt";
+
+    // Keep the predecessor executable after the deliberately red assertion:
+    // the manual disconnect is cleanup only. The production successor must
+    // make it redundant.
+    for (auto const& client : clients)
+    {
+        if (client->state() != State::Disconnected)
+            client->disconnect();
+    }
+    auto first_completion = std::move(held_completions[0]);
+    asio::post(
+        clients[0]->strand(),
+        [completion = std::move(first_completion)]() mutable {
+            completion(asio::error::operation_aborted);
+        });
+    for (std::size_t attempt = 0;
+         attempt < 100 &&
+         PeerSetTestAccess::in_flight_contains(io, peers, keys[0]);
+         ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+    }
+
+    EXPECT_FALSE(PeerSetTestAccess::in_flight_contains(io, peers, keys[0]));
+    EXPECT_TRUE(PeerSetTestAccess::in_flight_contains(io, peers, keys[1]))
+        << "one exact receipt cannot retire an unrelated servant row";
+    EXPECT_EQ(servant_receipts, 1u);
+    EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout)
+        << "one remaining exact servant keeps terminality unavailable";
+
+    auto second_completion = std::move(held_completions[1]);
+    asio::post(
+        clients[1]->strand(),
+        [completion = std::move(second_completion)]() mutable {
+            completion(asio::error::operation_aborted);
+        });
+    io.run();
+
+    EXPECT_NO_THROW(stopped.get());
+    io.restart();
+    EXPECT_FALSE(PeerSetTestAccess::in_flight_contains(io, peers, keys[1]));
+    EXPECT_EQ(servant_receipts, servant_count)
+        << "each admitted connect servant retires exactly once";
+
+    auto late = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run();
+    EXPECT_NO_THROW(late.get())
+        << "the terminal PeerSet fact must be replayable to later joiners";
+    EXPECT_EQ(servant_receipts, servant_count);
+}
+
+TEST(
     PeerSetShutdownDeterministic,
     ReturnedReceiptCannotEraseDifferentSessionAtSameGeneration)
 {

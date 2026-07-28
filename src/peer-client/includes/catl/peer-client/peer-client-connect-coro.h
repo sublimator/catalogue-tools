@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <string>
 
 namespace catl::peer_client {
@@ -75,7 +76,9 @@ co_connect(
     uint16_t port,
     PeerClient::ConnectOptions opts,
     std::shared_ptr<PeerClient>& out_client,
-    int timeout_secs = 10)
+    int timeout_secs = 10,
+    std::function<void(std::shared_ptr<PeerClient> const&)> on_client_created =
+        {})
 {
     auto executor = co_await asio::this_coro::executor;
 
@@ -114,19 +117,21 @@ co_connect(
     };
 
     out_client = PeerClient::connect(io_context, host, port, std::move(opts));
+    if (on_client_created)
+        on_client_created(out_client);
 
-    auto arm_deadline =
-        [deadline, signal, timed_out](std::chrono::seconds duration) {
-            *timed_out = false;
-            deadline->expires_after(duration);
-            deadline->async_wait([signal, timed_out](boost::system::error_code ec) {
-                if (!ec)
-                {
-                    *timed_out = true;
-                    signal->cancel();
-                }
-            });
-        };
+    auto arm_deadline = [deadline, signal, timed_out](
+                            std::chrono::seconds duration) {
+        *timed_out = false;
+        deadline->expires_after(duration);
+        deadline->async_wait([signal, timed_out](boost::system::error_code ec) {
+            if (!ec)
+            {
+                *timed_out = true;
+                signal->cancel();
+            }
+        });
+    };
 
     arm_deadline(std::chrono::seconds(timeout_secs));
 
@@ -140,7 +145,8 @@ co_connect(
     {
         total_timeout_secs += post_handshake_grace_secs;
         arm_deadline(std::chrono::seconds(post_handshake_grace_secs));
-        co_await signal->async_wait(asio::redirect_error(asio::use_awaitable, ec));
+        co_await signal->async_wait(
+            asio::redirect_error(asio::use_awaitable, ec));
     }
 
     deadline->cancel();
@@ -158,10 +164,11 @@ co_connect(
             if (!conn_detail.empty())
             {
                 if (!suppress_generic_ec && *connect_ec)
-                    detail_text =
-                        detail::append_detail(detail_text, connect_ec->message());
+                    detail_text = detail::append_detail(
+                        detail_text, connect_ec->message());
                 if (detail_text != conn_detail)
-                    detail_text = detail::append_detail(detail_text, conn_detail);
+                    detail_text =
+                        detail::append_detail(detail_text, conn_detail);
             }
         }
         if (*timed_out)
