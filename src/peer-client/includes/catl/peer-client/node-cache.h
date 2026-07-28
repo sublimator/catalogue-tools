@@ -413,6 +413,12 @@ public:
     {
         before_node_stop_driver_launch_for_test_ = std::move(hook);
     }
+
+    void
+    set_before_header_clear_driver_launch_for_test(std::function<void()> hook)
+    {
+        before_header_clear_driver_launch_for_test_ = std::move(hook);
+    }
 #endif
 
 private:
@@ -1167,6 +1173,7 @@ private:
     std::function<void()> before_node_stop_driver_launch_for_test_;
     std::function<void()> node_stop_driver_hook_for_test_;
     std::function<void()> after_node_local_pins_destroyed_for_test_;
+    std::function<void()> before_header_clear_driver_launch_for_test_;
 
     // Stats — atomic for lock-free concurrent access
     mutable std::atomic<size_t> hits_{0};

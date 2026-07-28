@@ -4515,6 +4515,8 @@ NodeCache::co_clear_headers()
         try
         {
             auto self = shared_from_this();
+            if (before_header_clear_driver_launch_for_test_)
+                before_header_clear_driver_launch_for_test_();
             asio::co_spawn(
                 header_state_strand_,
                 [self, clear]() -> asio::awaitable<void> {

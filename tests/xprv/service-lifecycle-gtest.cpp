@@ -1508,6 +1508,68 @@ TEST(HttpServerLifecycle, EngineDrainAwaitsNodeCacheStopDriverReceipt)
     }
 }
 
+TEST(HttpServerLifecycle, EngineDrainAwaitsNodeCacheHeaderClearReceipt)
+{
+    namespace asio = boost::asio;
+    using namespace std::chrono_literals;
+
+    for (auto const runner_count : {2u, 4u})
+    {
+        SCOPED_TRACE(testing::Message() << "runners=" << runner_count);
+
+        asio::io_context io;
+        auto work = asio::make_work_guard(io);
+        auto engine =
+            xprv::ProofEngine::create(io, xprv::NetworkConfig::for_network(0));
+        auto node_cache = catl::peer_client::NodeCache::create(
+            io, catl::peer_client::NodeCache::Options{});
+        xprv::ProofEngineTestAccess::set_node_cache(*engine, node_cache);
+        auto server = xprv::HttpServer::create(
+            io,
+            engine,
+            xprv::HttpServerOptions{
+                .bind_address = "127.0.0.1",
+                .port = 0,
+            });
+        server->start();
+
+        std::promise<void> clear_driver_entered;
+        std::promise<void> release_clear_driver;
+        auto release_clear_driver_future =
+            release_clear_driver.get_future().share();
+        node_cache->set_before_header_clear_driver_launch_for_test([&]() {
+            clear_driver_entered.set_value();
+            release_clear_driver_future.wait();
+        });
+
+        auto drained = asio::co_spawn(
+            io,
+            [server, engine]() -> asio::awaitable<void> {
+                auto receipt = co_await server->co_stop();
+                co_await engine->co_stop(receipt);
+            },
+            asio::use_future);
+
+        catl::test::IoContextRunners runners(io, runner_count);
+        auto const entered_status =
+            clear_driver_entered.get_future().wait_for(5s);
+        EXPECT_EQ(entered_status, std::future_status::ready);
+        if (entered_status == std::future_status::ready)
+            EXPECT_EQ(drained.wait_for(50ms), std::future_status::timeout);
+
+        release_clear_driver.set_value();
+        auto const drained_status = drained.wait_for(5s);
+        EXPECT_EQ(drained_status, std::future_status::ready);
+        if (drained_status == std::future_status::ready)
+            EXPECT_NO_THROW(drained.get());
+        else
+            io.stop();
+
+        work.reset();
+        runners.join();
+    }
+}
+
 TEST(HttpServerLifecycle, FailedStartCannotMintOrRetryLifecycle)
 {
     namespace asio = boost::asio;
