@@ -407,6 +407,14 @@ public:
     asio::awaitable<void>
     co_clear_headers();
 
+#ifdef XPRV_TESTING
+    void
+    set_before_node_stop_driver_launch_for_test(std::function<void()> hook)
+    {
+        before_node_stop_driver_launch_for_test_ = std::move(hook);
+    }
+#endif
+
 private:
     NodeCache(
         asio::io_context& io,
