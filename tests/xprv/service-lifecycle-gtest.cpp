@@ -3,6 +3,7 @@
 
 #include "../test-support/deterministic-scheduler.h"
 #include "http-child-completion.h"
+#include "service-lifecycle.h"
 
 #include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/cancellation_signal.hpp>
@@ -19,12 +20,14 @@
 #include <boost/beast/http.hpp>
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <exception>
 #include <functional>
 #include <future>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -152,6 +155,496 @@ static_assert(!std::is_copy_constructible_v<xprv::RequestDrainReceipt>);
 static_assert(std::is_move_constructible_v<xprv::RequestDrainReceipt>);
 static_assert(!CanStopWithoutRequestDrain<xprv::ProofEngine>);
 static_assert(CanStopWithRequestDrain<xprv::ProofEngine>);
+
+xprv::detail::ServiceTimerControl
+timer_control(catl::test::DeterministicScheduler::Timer& timer)
+{
+    return {
+        .expires_after =
+            [&timer](auto duration) { timer.expires_after(duration); },
+        .async_wait =
+            [&timer](auto handler) { timer.async_wait(std::move(handler)); },
+        .cancel = [&timer]() { (void)timer.cancel(); },
+    };
+}
+
+class ControlledServiceTimer
+{
+public:
+    explicit ControlledServiceTimer(boost::asio::io_context& io) : io_(io)
+    {
+    }
+
+    xprv::detail::ServiceTimerControl
+    control()
+    {
+        return {
+            .expires_after =
+                [this](auto) {
+                    if (throw_on_expires)
+                        throw std::runtime_error("timer expires failpoint");
+                },
+            .async_wait =
+                [this](auto handler) {
+                    if (throw_on_wait)
+                        throw std::runtime_error("timer wait failpoint");
+                    if (handler_)
+                        throw std::logic_error("timer already has a handler");
+                    handler_ = std::move(handler);
+                },
+            .cancel =
+                [this]() {
+                    ++cancel_calls;
+                    if (throw_on_cancel)
+                        throw std::runtime_error("timer cancel failpoint");
+                    queue(boost::asio::error::operation_aborted);
+                },
+        };
+    }
+
+    void
+    fire()
+    {
+        queue({});
+    }
+
+    bool throw_on_expires = false;
+    bool throw_on_wait = false;
+    bool throw_on_cancel = false;
+    std::size_t cancel_calls = 0;
+    bool raw_handler_entered = false;
+    bool raw_handler_returned = false;
+
+private:
+    void
+    queue(boost::system::error_code error)
+    {
+        if (!handler_)
+            return;
+        auto handler = std::move(handler_);
+        handler_ = {};
+        boost::asio::post(
+            io_, [this, error, handler = std::move(handler)]() mutable {
+                raw_handler_entered = true;
+                handler(error);
+                raw_handler_returned = true;
+            });
+    }
+
+    boost::asio::io_context& io_;
+    xprv::detail::ServiceTimerControl::Handler handler_;
+};
+
+xprv::detail::ServiceLifecycleOperations
+basic_service_operations(
+    std::shared_ptr<xprv::RequestDrainAuthority> authority,
+    std::size_t& stop_io_calls)
+{
+    return {
+        .report_status = []() -> boost::asio::awaitable<void> { co_return; },
+        .stop_http = [authority = std::move(authority)]()
+            -> boost::asio::awaitable<xprv::RequestDrainReceipt> {
+            co_return xprv::RequestDrainTestAccess::mint(authority, 1);
+        },
+        .stop_engines = {},
+        .report_diagnostic = {},
+        .terminal_diagnostic = {},
+        .stop_io = [&stop_io_calls]() { ++stop_io_calls; },
+    };
+}
+
+TEST(ServiceRootLifecycle, SealsEveryEngineRowBeforeLaunchingAny)
+{
+    namespace asio = boost::asio;
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    catl::test::DeterministicScheduler scheduler;
+    catl::test::DeterministicScheduler::Timer status_timer(scheduler);
+    catl::test::DeterministicScheduler::Timer deadline_timer(scheduler);
+    catl::test::Gate first_gate(scheduler.io());
+    catl::test::Gate second_gate(scheduler.io());
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t stop_io_calls = 0;
+    std::array<std::size_t, 2> entered{};
+    auto operations = basic_service_operations(authority, stop_io_calls);
+    operations.stop_engines = {
+        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+            ++entered[0];
+            co_await first_gate.async_wait(asio::use_awaitable);
+        },
+        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+            ++entered[1];
+            co_await second_gate.async_wait(asio::use_awaitable);
+        },
+    };
+
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        scheduler.io(),
+        timer_control(status_timer),
+        timer_control(deadline_timer),
+        std::move(operations),
+        std::chrono::seconds(30),
+        std::chrono::seconds(10));
+    lifecycle->begin_shutdown();
+    scheduler.run_until_idle();
+
+    EXPECT_EQ(entered[0], 1);
+    EXPECT_EQ(entered[1], 1);
+    EXPECT_FALSE(lifecycle->terminal_result());
+
+    first_gate.open();
+    second_gate.open();
+    scheduler.run_until_idle();
+
+    auto const result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::graceful);
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
+TEST(ServiceRootLifecycle, SealedZeroEngineCensusIsNotTransientEmpty)
+{
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    catl::test::DeterministicScheduler scheduler;
+    catl::test::DeterministicScheduler::Timer status_timer(scheduler);
+    catl::test::DeterministicScheduler::Timer deadline_timer(scheduler);
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t stop_io_calls = 0;
+    bool reached_pre_seal = false;
+    std::weak_ptr<xprv::detail::ServiceLifecycle> weak;
+    auto operations = basic_service_operations(authority, stop_io_calls);
+    operations.before_engine_admission_seal_for_test = [&]() {
+        reached_pre_seal = true;
+        auto lifecycle = weak.lock();
+        ASSERT_TRUE(lifecycle);
+        EXPECT_FALSE(lifecycle->terminal_result());
+    };
+
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        scheduler.io(),
+        timer_control(status_timer),
+        timer_control(deadline_timer),
+        std::move(operations),
+        std::chrono::seconds(30),
+        std::chrono::seconds(10));
+    weak = lifecycle;
+    lifecycle->begin_shutdown();
+    scheduler.run_until_idle();
+
+    EXPECT_TRUE(reached_pre_seal);
+    auto const result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::graceful);
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
+TEST(ServiceRootLifecycle, MiddleLaunchFailureDoesNotOrphanLaterRows)
+{
+    namespace asio = boost::asio;
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    catl::test::DeterministicScheduler scheduler;
+    catl::test::DeterministicScheduler::Timer status_timer(scheduler);
+    catl::test::DeterministicScheduler::Timer deadline_timer(scheduler);
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t stop_io_calls = 0;
+    std::array<std::size_t, 3> launch_attempts{};
+    std::array<std::size_t, 3> entered{};
+    auto operations = basic_service_operations(authority, stop_io_calls);
+    operations.stop_engines = {
+        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+            ++entered[0];
+            co_return;
+        },
+        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+            ++entered[1];
+            co_return;
+        },
+        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+            ++entered[2];
+            co_return;
+        },
+    };
+    operations.before_engine_launch_for_test = [&](std::size_t index) {
+        ++launch_attempts[index];
+        if (index == 1)
+            throw std::runtime_error("middle engine launch failpoint");
+    };
+
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        scheduler.io(),
+        timer_control(status_timer),
+        timer_control(deadline_timer),
+        std::move(operations),
+        std::chrono::seconds(30),
+        std::chrono::seconds(10));
+    lifecycle->begin_shutdown();
+    scheduler.run_until_idle();
+
+    EXPECT_EQ(launch_attempts, (std::array<std::size_t, 3>{1, 1, 1}));
+    EXPECT_EQ(entered, (std::array<std::size_t, 3>{1, 0, 1}));
+    auto const result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::failed);
+    EXPECT_TRUE(result->failure);
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
+TEST(ServiceRootLifecycle, ActiveStatusReportBlocksGracefulTerminal)
+{
+    namespace asio = boost::asio;
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    catl::test::DeterministicScheduler scheduler;
+    catl::test::DeterministicScheduler::Timer status_timer(scheduler);
+    catl::test::DeterministicScheduler::Timer deadline_timer(scheduler);
+    catl::test::Gate report_gate(scheduler.io());
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t stop_io_calls = 0;
+    bool report_entered = false;
+    auto operations = basic_service_operations(authority, stop_io_calls);
+    operations.report_status = [&]() -> asio::awaitable<void> {
+        report_entered = true;
+        co_await report_gate.async_wait(asio::use_awaitable);
+    };
+
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        scheduler.io(),
+        timer_control(status_timer),
+        timer_control(deadline_timer),
+        std::move(operations),
+        std::chrono::seconds(1),
+        std::chrono::seconds(10));
+    lifecycle->start();
+    scheduler.run_until_idle();
+    scheduler.advance(std::chrono::seconds(1));
+    ASSERT_TRUE(report_entered);
+
+    lifecycle->begin_shutdown();
+    scheduler.run_until_idle();
+    EXPECT_FALSE(lifecycle->terminal_result());
+
+    report_gate.open();
+    scheduler.run_until_idle();
+    auto const result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::graceful);
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
+TEST(ServiceRootLifecycle, TimerReceiptIsConsumedOnlyAfterRawHandlerReturns)
+{
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    catl::test::DeterministicScheduler scheduler;
+    ControlledServiceTimer status_timer(scheduler.io());
+    ControlledServiceTimer deadline_timer(scheduler.io());
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t stop_io_calls = 0;
+    auto operations = basic_service_operations(authority, stop_io_calls);
+
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        scheduler.io(),
+        status_timer.control(),
+        deadline_timer.control(),
+        std::move(operations),
+        std::chrono::seconds(30),
+        std::chrono::seconds(10));
+    lifecycle->begin_shutdown();
+    while (deadline_timer.cancel_calls == 0)
+        ASSERT_TRUE(scheduler.step());
+
+    EXPECT_FALSE(deadline_timer.raw_handler_entered);
+    EXPECT_FALSE(lifecycle->terminal_result());
+
+    ASSERT_TRUE(scheduler.step());
+    EXPECT_TRUE(deadline_timer.raw_handler_entered);
+    EXPECT_TRUE(deadline_timer.raw_handler_returned);
+    EXPECT_FALSE(lifecycle->terminal_result());
+
+    ASSERT_TRUE(scheduler.step());
+    auto const result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::graceful);
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
+TEST(ServiceRootLifecycle, DeadlineWinsWithoutRewritingLaterCompletion)
+{
+    namespace asio = boost::asio;
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    catl::test::DeterministicScheduler scheduler;
+    catl::test::DeterministicScheduler::Timer status_timer(scheduler);
+    catl::test::DeterministicScheduler::Timer deadline_timer(scheduler);
+    catl::test::Gate engine_gate(scheduler.io());
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t stop_io_calls = 0;
+    auto operations = basic_service_operations(authority, stop_io_calls);
+    operations.stop_engines = {
+        [&](xprv::RequestDrainReceipt const&) -> asio::awaitable<void> {
+            co_await engine_gate.async_wait(asio::use_awaitable);
+        },
+    };
+
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        scheduler.io(),
+        timer_control(status_timer),
+        timer_control(deadline_timer),
+        std::move(operations),
+        std::chrono::seconds(30),
+        std::chrono::seconds(2));
+    lifecycle->begin_shutdown();
+    scheduler.run_until_idle();
+    ASSERT_FALSE(lifecycle->terminal_result());
+
+    scheduler.advance(std::chrono::seconds(2));
+    auto result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::forced);
+    EXPECT_EQ(stop_io_calls, 1);
+
+    engine_gate.open();
+    scheduler.run_until_idle();
+    result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::forced);
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
+TEST(ServiceRootLifecycle, DuplicateShutdownReplaysOneRetainedOutcome)
+{
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    catl::test::DeterministicScheduler scheduler;
+    catl::test::DeterministicScheduler::Timer status_timer(scheduler);
+    catl::test::DeterministicScheduler::Timer deadline_timer(scheduler);
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t stop_io_calls = 0;
+    auto operations = basic_service_operations(authority, stop_io_calls);
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        scheduler.io(),
+        timer_control(status_timer),
+        timer_control(deadline_timer),
+        std::move(operations),
+        std::chrono::seconds(30),
+        std::chrono::seconds(10));
+
+    lifecycle->begin_shutdown();
+    lifecycle->begin_shutdown();
+    scheduler.run_until_idle();
+    auto first = lifecycle->terminal_result();
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->outcome, Outcome::graceful);
+    EXPECT_EQ(stop_io_calls, 1);
+
+    lifecycle->begin_shutdown();
+    scheduler.run_until_idle();
+    auto second = lifecycle->terminal_result();
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->outcome, first->outcome);
+    EXPECT_EQ(second->failure, first->failure);
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
+TEST(ServiceRootLifecycle, StatusTimerLaunchRefusalIsRetainedFailure)
+{
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    catl::test::DeterministicScheduler scheduler;
+    ControlledServiceTimer status_timer(scheduler.io());
+    ControlledServiceTimer deadline_timer(scheduler.io());
+    status_timer.throw_on_wait = true;
+    auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+    std::size_t stop_io_calls = 0;
+    auto operations = basic_service_operations(authority, stop_io_calls);
+    auto lifecycle = xprv::detail::ServiceLifecycle::create(
+        scheduler.io(),
+        status_timer.control(),
+        deadline_timer.control(),
+        std::move(operations),
+        std::chrono::seconds(30),
+        std::chrono::seconds(10));
+
+    lifecycle->start();
+    scheduler.run_until_idle();
+    lifecycle->begin_shutdown();
+    scheduler.run_until_idle();
+
+    auto const result = lifecycle->terminal_result();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->outcome, Outcome::failed);
+    EXPECT_TRUE(result->failure);
+    EXPECT_EQ(stop_io_calls, 1);
+}
+
+TEST(ServiceRootLifecycle, ForcedStopKeepsBorrowedReceiptAliveUntilFrameDies)
+{
+    namespace asio = boost::asio;
+    using Outcome = xprv::detail::ServiceTerminalOutcome;
+
+    bool probe_destroyed = false;
+    bool receipt_was_valid = false;
+    {
+        catl::test::DeterministicScheduler scheduler;
+        catl::test::DeterministicScheduler::Timer status_timer(scheduler);
+        catl::test::DeterministicScheduler::Timer deadline_timer(scheduler);
+        auto authority = xprv::RequestDrainTestAccess::make_authority(1);
+        std::size_t stop_io_calls = 0;
+        auto operations = basic_service_operations(authority, stop_io_calls);
+        operations.stop_io = [&]() {
+            ++stop_io_calls;
+            scheduler.io().stop();
+        };
+        operations.stop_engines = {
+            [authority, &probe_destroyed, &receipt_was_valid](
+                xprv::RequestDrainReceipt const& receipt)
+                -> asio::awaitable<void> {
+                struct Probe
+                {
+                    xprv::RequestDrainReceipt const& receipt;
+                    std::shared_ptr<xprv::RequestDrainAuthority> authority;
+                    bool& destroyed;
+                    bool& valid;
+
+                    ~Probe()
+                    {
+                        valid = xprv::RequestDrainTestAccess::matches(
+                            receipt, authority);
+                        destroyed = true;
+                    }
+                } probe{receipt, authority, probe_destroyed, receipt_was_valid};
+
+                auto executor = co_await asio::this_coro::executor;
+                asio::steady_timer never(
+                    executor, asio::steady_timer::time_point::max());
+                co_await never.async_wait(asio::use_awaitable);
+            },
+        };
+
+        auto lifecycle = xprv::detail::ServiceLifecycle::create(
+            scheduler.io(),
+            timer_control(status_timer),
+            timer_control(deadline_timer),
+            std::move(operations),
+            std::chrono::seconds(30),
+            std::chrono::seconds(1));
+        lifecycle->begin_shutdown();
+        scheduler.run_until_idle();
+        scheduler.advance(std::chrono::seconds(1));
+
+        auto const result = lifecycle->terminal_result();
+        ASSERT_TRUE(result);
+        EXPECT_EQ(result->outcome, Outcome::forced);
+        EXPECT_EQ(stop_io_calls, 1);
+        EXPECT_FALSE(probe_destroyed);
+        lifecycle.reset();
+    }
+
+    EXPECT_TRUE(probe_destroyed);
+    EXPECT_TRUE(receipt_was_valid);
+}
 
 TEST(RequestDrainReceipt, RefusesDifferentAdmissionAuthority)
 {

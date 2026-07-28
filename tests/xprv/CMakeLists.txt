@@ -34,6 +34,7 @@ target_sources(
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-binary.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-builder.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-engine.cpp
+                       ${CMAKE_SOURCE_DIR}/src/xprv/src/service-lifecycle.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/http-server.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/peer-json.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/anchor-verifier.cpp

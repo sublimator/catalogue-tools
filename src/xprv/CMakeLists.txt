@@ -56,6 +56,7 @@ add_executable(
   src/proof-chain-binary.cpp
   src/proof-chain-json.cpp
   src/proof-engine.cpp
+  src/service-lifecycle.cpp
   src/proof-resolver.cpp
   src/proof-steps.cpp
   src/manifest-utils.cpp
