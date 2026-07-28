@@ -600,9 +600,18 @@ cmd_serve()
             if (ec)
                 return;
 
-            log_memory("shutdown");
-            PLOGI(log_, "Signal ", sig, " received, draining services...");
+            // The signal wait is one-shot. Request the owned transition before
+            // any fallible diagnostics so logging cannot consume the signal
+            // without starting shutdown.
             service_lifecycle->begin_shutdown();
+            try
+            {
+                log_memory("shutdown");
+                PLOGI(log_, "Signal ", sig, " received, draining services...");
+            }
+            catch (...)
+            {
+            }
         });
 
     // Run io_context on N threads

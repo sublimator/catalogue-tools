@@ -92,7 +92,7 @@ public:
     start();
 
     void
-    begin_shutdown();
+    begin_shutdown() noexcept;
 
     /// Return the immutable terminal projection without requiring executor
     /// progress. This remains usable after the sole finalizer calls io.stop().

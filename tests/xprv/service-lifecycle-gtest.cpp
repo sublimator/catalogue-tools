@@ -33,6 +33,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace xprv {
@@ -113,6 +114,9 @@ public:
 }  // namespace xprv
 
 namespace {
+
+static_assert(
+    noexcept(std::declval<xprv::detail::ServiceLifecycle&>().begin_shutdown()));
 
 template <class Predicate>
 bool

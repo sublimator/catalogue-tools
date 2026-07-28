@@ -291,10 +291,22 @@ ServiceLifecycle::finish_status_report_on_control(std::exception_ptr failure)
 }
 
 void
-ServiceLifecycle::begin_shutdown()
+ServiceLifecycle::begin_shutdown() noexcept
 {
-    auto self = shared_from_this();
-    asio::dispatch(control_, [self]() { self->begin_shutdown_on_control(); });
+    try
+    {
+        auto self = shared_from_this();
+        asio::dispatch(
+            control_, [self]() { self->begin_shutdown_on_control(); });
+    }
+    catch (...)
+    {
+        // Once the external shutdown request has been accepted there is no
+        // second authority which may safely perform this owner transition.
+        // Refuse an indeterminate half-shutdown rather than unwinding out of
+        // the one-shot signal handler.
+        std::terminate();
+    }
 }
 
 //@@authority transition=prv.T0155 status=provisional scope=function bind=xprv::detail::begin_shutdown_on_control@1ea7166a198135ea
