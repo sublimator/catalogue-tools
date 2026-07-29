@@ -324,12 +324,11 @@ public:
         }
 
         auto completed = std::make_shared<std::atomic<bool>>(false);
-        auto complete =
-            [completed, on_write = std::move(on_write)](
-                boost::system::error_code ec) mutable {
-                if (!completed->exchange(true) && on_write)
-                    on_write(ec);
-            };
+        auto complete = [completed, on_write = std::move(on_write)](
+                            boost::system::error_code ec) mutable {
+            if (!completed->exchange(true) && on_write)
+                on_write(ec);
+        };
         asio::post(
             strand_,
             [handler = std::move(handler),
@@ -960,18 +959,16 @@ public:
             state.round,
             state.managed_slot,
             NodeCache::ManagedSubmissionOutcome::written);
-        cache.settle_raw_submission(
-            Hash256{}, state.round, state.raw_slot, {});
+        cache.settle_raw_submission(Hash256{}, state.round, state.raw_slot, {});
     }
 
     static bool
-    late_submission_callbacks_are_inert(
-        LateSubmissionState const& state)
+    late_submission_callbacks_are_inert(LateSubmissionState const& state)
     {
         return state.round->dispatches[state.managed_slot].state ==
-                NodeCache::NodeFetchRound::DispatchState::submitting &&
+            NodeCache::NodeFetchRound::DispatchState::submitting &&
             state.round->dispatches[state.raw_slot].state ==
-                NodeCache::NodeFetchRound::DispatchState::submitting;
+            NodeCache::NodeFetchRound::DispatchState::submitting;
     }
 
     static void
@@ -1177,9 +1174,8 @@ TEST(
     io.run();
 
     EXPECT_EQ(writes, 0u);
-    EXPECT_TRUE(
-        NodeCacheTestAccess::raw_refusal_retired_without_write_evidence(
-            *cache));
+    EXPECT_TRUE(NodeCacheTestAccess::raw_refusal_retired_without_write_evidence(
+        *cache));
     auto const refused = cache->stats();
     EXPECT_EQ(refused.raw_fetches_projected, 1u);
     EXPECT_EQ(refused.raw_writes_confirmed, 0u);
@@ -2773,11 +2769,10 @@ TEST(PeerSessionInterface, NodeCacheFanoutSurvivesOneWriteFailure)
         io, "z-fake-delayed-response:1", true, ledger_seq, 4900, 5100);
 
     failing->set_send_get_nodes_handler(
-        [](
-            Hash256 const&,
-            int,
-            std::vector<SHAMapNodeID> const&,
-            std::function<void(boost::system::error_code)> on_error) {
+        [](Hash256 const&,
+           int,
+           std::vector<SHAMapNodeID> const&,
+           std::function<void(boost::system::error_code)> on_error) {
             if (on_error)
                 on_error(asio::error::connection_reset);
         });
@@ -4070,18 +4065,13 @@ TEST(NodeCacheShutdown, PostCommitDiagnosticFailureCannotSuppressWakes)
         {},
         {},
         {});
-    NodeCacheTestAccess::set_node_round_hooks(
-        *cache,
-        {},
-        [&]() {
-            if (!waiter_reported.exchange(true))
-                waiter_attached.set_value();
-        });
-    NodeCacheTestAccess::set_node_response_hooks(
-        *cache,
-        {},
-        {},
-        [] { throw std::runtime_error("forced post-commit diagnostic failure"); });
+    NodeCacheTestAccess::set_node_round_hooks(*cache, {}, [&]() {
+        if (!waiter_reported.exchange(true))
+            waiter_attached.set_value();
+    });
+    NodeCacheTestAccess::set_node_response_hooks(*cache, {}, {}, [] {
+        throw std::runtime_error("forced post-commit diagnostic failure");
+    });
 
     bool initiated = false;
     std::unordered_set<std::string> attempted;
@@ -4168,8 +4158,7 @@ TEST(NodeCacheShutdown, StopCrossesActualPeerSetStrandAfterLocalPinDestruction)
 
     auto stopped = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
     EXPECT_EQ(
-        local_pins_destroyed_future.wait_for(2s),
-        std::future_status::ready);
+        local_pins_destroyed_future.wait_for(2s), std::future_status::ready);
     EXPECT_EQ(stopped.wait_for(50ms), std::future_status::timeout);
     release_strand.set_value();
     ASSERT_EQ(stopped.wait_for(2s), std::future_status::ready);
@@ -4341,8 +4330,7 @@ TEST(NodeCacheShutdown, CancellingInitiatorDoesNotCancelSharedDriver)
             cancellation.slot(), [&initiator_done](std::exception_ptr failure) {
                 initiator_done.set_value(std::move(failure));
             }));
-    ASSERT_EQ(
-        initiator_sealed_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(initiator_sealed_future.wait_for(2s), std::future_status::ready);
     auto joiner = asio::co_spawn(io, cache->co_stop_nodes(), asio::use_future);
 
     cancellation.emit(asio::cancellation_type::all);
@@ -4547,16 +4535,14 @@ TEST(NodeCacheShutdown, ClearFirstKeepsOldServantAndDrainsSuccessor)
 
     asio::io_context io;
     auto work = asio::make_work_guard(io);
-    auto cache = NodeCache::create(
-        io, NodeCache::Options{.fetch_timeout = 1h});
+    auto cache = NodeCache::create(io, NodeCache::Options{.fetch_timeout = 1h});
     auto session = std::make_shared<FakePeerSession>(
         io, "node-clear-first:1", true, 5500, 5400, 5600);
 
     std::promise<void> old_servant_started;
     auto old_servant_started_future = old_servant_started.get_future();
     std::promise<void> release_old_servant;
-    auto release_old_servant_future =
-        release_old_servant.get_future().share();
+    auto release_old_servant_future = release_old_servant.get_future().share();
     std::atomic<unsigned> servant_calls{0};
     NodeCacheTestAccess::set_node_deadline_hooks(
         *cache,
@@ -4598,11 +4584,7 @@ TEST(NodeCacheShutdown, ClearFirstKeepsOldServantAndDrainsSuccessor)
     auto successor_request = asio::co_spawn(
         io,
         NodeCacheTestAccess::ensure_node(
-            *cache,
-            *session,
-            {},
-            &successor_attempted,
-            &successor_initiated),
+            *cache, *session, {}, &successor_attempted, &successor_initiated),
         asio::use_future);
     ASSERT_TRUE(wait_until(
         [&]() {
@@ -4635,8 +4617,7 @@ TEST(NodeCacheShutdown, StopFirstMakesCompatibilityClearInert)
 
     asio::io_context io;
     auto work = asio::make_work_guard(io);
-    auto cache = NodeCache::create(
-        io, NodeCache::Options{.fetch_timeout = 1h});
+    auto cache = NodeCache::create(io, NodeCache::Options{.fetch_timeout = 1h});
     auto session = std::make_shared<FakePeerSession>(
         io, "node-stop-first-clear:1", true, 5500, 5400, 5600);
 
@@ -6752,8 +6733,7 @@ TEST(PeerSetShutdown, HeldSessionReceiptDominatesTerminalPeerSetState)
     auto joined = asio::co_spawn(io, peers->co_stop(), asio::use_future);
     io.run_for(10ms);
 
-    EXPECT_TRUE(
-        session->co_disconnect_waiting.load(std::memory_order_acquire));
+    EXPECT_TRUE(session->co_disconnect_waiting.load(std::memory_order_acquire));
     EXPECT_GE(session->co_disconnect_calls.load(), 1u);
     EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout);
     EXPECT_EQ(joined.wait_for(0ms), std::future_status::timeout);
@@ -6797,8 +6777,7 @@ TEST(
     {
         acceptors[index] = std::make_shared<asio::ip::tcp::acceptor>(
             io,
-            asio::ip::tcp::endpoint(
-                asio::ip::make_address("127.0.0.1"), 0));
+            asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
         accepted[index] = std::make_shared<asio::ip::tcp::socket>(io);
         acceptors[index]->async_accept(
             *accepted[index],
@@ -6940,8 +6919,7 @@ TEST(
         [completion = std::move(first_completion)]() mutable {
             completion(asio::error::operation_aborted);
         });
-    for (std::size_t attempt = 0;
-         attempt < 100 &&
+    for (std::size_t attempt = 0; attempt < 100 &&
          PeerSetTestAccess::in_flight_contains(io, peers, keys[0]);
          ++attempt)
     {
@@ -6979,22 +6957,180 @@ TEST(
     EXPECT_EQ(servant_receipts, servant_count);
 }
 
-TEST(
-    PeerSetShutdown,
-    PeerFailureCauseSurvivesOwnerStopBeforeServantCatch)
+TEST(PeerSetShutdown, PostReadyPeerFailureIsClassifiedBeforeServantRetirement)
 {
     using namespace std::chrono_literals;
 
     asio::io_context io;
     auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
-        io,
-        asio::ip::tcp::endpoint(
-            asio::ip::make_address("127.0.0.1"), 0));
+        io, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
     auto accepted = std::make_shared<asio::ip::tcp::socket>(io);
-    acceptor->async_accept(
-        *accepted, [accepted](boost::system::error_code) {});
-    auto const key = "127.0.0.1:" +
-        std::to_string(acceptor->local_endpoint().port());
+    acceptor->async_accept(*accepted, [accepted](boost::system::error_code) {});
+    auto const key =
+        "127.0.0.1:" + std::to_string(acceptor->local_endpoint().port());
+
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .endpoint_cache_path = ":memory:",
+            .max_in_flight_connects = 1,
+            .max_in_flight_crawls = 0,
+        });
+    PeerSetTestAccess::set_after_connect_ready_before_admission(
+        peers,
+        [](std::shared_ptr<PeerClient> const& client) -> asio::awaitable<void> {
+            co_await asio::co_spawn(
+                client->strand(),
+                [client]() -> asio::awaitable<void> {
+                    PeerClientTestAccess::fail_initial_connect_on_strand(
+                        *client);
+                    co_return;
+                },
+                asio::use_awaitable);
+        });
+    PeerSetTestAccess::push_pending_connect(io, peers, key);
+    PeerSetTestAccess::pump_connects(io, peers);
+
+    std::shared_ptr<PeerClient> client;
+    for (std::size_t attempt = 0; attempt < 100; ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+        client = PeerSetTestAccess::connect_servant_client(io, peers, key);
+        if (client)
+            break;
+    }
+    ASSERT_TRUE(client);
+    ASSERT_NE(client->state(), State::Disconnected);
+
+    asio::post(client->strand(), [client] {
+        PeerClientTestAccess::become_ready_on_strand(*client);
+    });
+    io.run_for(1s);
+    io.restart();
+
+    auto const initial_terminal =
+        PeerClientTestAccess::initial_connect_terminal(*client);
+    ASSERT_TRUE(initial_terminal);
+    EXPECT_EQ(
+        initial_terminal->kind,
+        catl::peer_client::detail::ConnectAttemptTerminalKind::ready)
+        << "the immutable initial result remains Ready";
+    EXPECT_EQ(client->terminal_cause(), PeerLogicalTerminalCause::peer_failure);
+    EXPECT_TRUE(PeerSetTestAccess::has_failed(io, peers, key));
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u);
+    EXPECT_EQ(
+        PeerSetTestAccess::cached_endpoint_failure_count(io, peers, key), 1u);
+    EXPECT_FALSE(PeerSetTestAccess::in_flight_contains(io, peers, key));
+
+    auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run_for(1s);
+    io.restart();
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u)
+        << "later shutdown cannot classify the same servant twice";
+}
+
+TEST(PeerSetShutdown, OwnerStopWinsInPostReadyPreAdmissionWindow)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
+        io, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
+    auto accepted = std::make_shared<asio::ip::tcp::socket>(io);
+    acceptor->async_accept(*accepted, [accepted](boost::system::error_code) {});
+    auto const key =
+        "127.0.0.1:" + std::to_string(acceptor->local_endpoint().port());
+
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .endpoint_cache_path = ":memory:",
+            .max_in_flight_connects = 1,
+            .max_in_flight_crawls = 0,
+        });
+    auto admission_gate = std::make_shared<asio::steady_timer>(
+        io, asio::steady_timer::time_point::max());
+    std::atomic<bool> gap_reached{false};
+    PeerSetTestAccess::set_after_connect_ready_before_admission(
+        peers,
+        [admission_gate, &gap_reached](
+            std::shared_ptr<PeerClient> const&) -> asio::awaitable<void> {
+            gap_reached.store(true, std::memory_order_release);
+            boost::system::error_code ec;
+            co_await admission_gate->async_wait(
+                asio::redirect_error(asio::use_awaitable, ec));
+        });
+    PeerSetTestAccess::push_pending_connect(io, peers, key);
+    PeerSetTestAccess::pump_connects(io, peers);
+
+    std::shared_ptr<PeerClient> client;
+    for (std::size_t attempt = 0; attempt < 100; ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+        client = PeerSetTestAccess::connect_servant_client(io, peers, key);
+        if (client)
+            break;
+    }
+    ASSERT_TRUE(client);
+    ASSERT_NE(client->state(), State::Disconnected);
+
+    asio::post(client->strand(), [client] {
+        PeerClientTestAccess::become_ready_on_strand(*client);
+    });
+    for (std::size_t attempt = 0;
+         attempt < 100 && !gap_reached.load(std::memory_order_acquire);
+         ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+    }
+    ASSERT_TRUE(gap_reached.load(std::memory_order_acquire));
+    ASSERT_TRUE(PeerSetTestAccess::in_flight_contains(io, peers, key));
+
+    auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    for (std::size_t attempt = 0;
+         attempt < 100 && !PeerSetTestAccess::shutdown_ingress_sealed(peers);
+         ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+    }
+    ASSERT_TRUE(PeerSetTestAccess::shutdown_ingress_sealed(peers));
+    EXPECT_EQ(
+        client->terminal_cause(), PeerLogicalTerminalCause::owner_disconnect);
+    EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout);
+    EXPECT_TRUE(PeerSetTestAccess::in_flight_contains(io, peers, key));
+
+    admission_gate->cancel();
+    io.run_for(1s);
+    io.restart();
+
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    EXPECT_FALSE(PeerSetTestAccess::has_failed(io, peers, key));
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 0u);
+    EXPECT_EQ(
+        PeerSetTestAccess::cached_endpoint_failure_count(io, peers, key), 0u);
+    EXPECT_FALSE(PeerSetTestAccess::in_flight_contains(io, peers, key));
+}
+
+TEST(PeerSetShutdown, PeerFailureCauseSurvivesOwnerStopBeforeServantCatch)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
+        io, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
+    auto accepted = std::make_shared<asio::ip::tcp::socket>(io);
+    acceptor->async_accept(*accepted, [accepted](boost::system::error_code) {});
+    auto const key =
+        "127.0.0.1:" + std::to_string(acceptor->local_endpoint().port());
 
     auto peers = PeerSet::create(
         io,
@@ -7015,9 +7151,8 @@ TEST(
         client = PeerSetTestAccess::connect_servant_client(io, peers, key);
     }
     ASSERT_TRUE(client);
-    ASSERT_TRUE(
-        PeerClientTestAccess::hold_initial_connect_terminal_publication(
-            *client));
+    ASSERT_TRUE(PeerClientTestAccess::hold_initial_connect_terminal_publication(
+        *client));
 
     asio::post(client->strand(), [client] {
         PeerClientTestAccess::fail_initial_connect_on_strand(*client);
@@ -7031,17 +7166,15 @@ TEST(
     EXPECT_EQ(
         terminal->kind,
         catl::peer_client::detail::ConnectAttemptTerminalKind::peer_failure);
-    EXPECT_EQ(
-        client->terminal_cause(), PeerLogicalTerminalCause::peer_failure);
+    EXPECT_EQ(client->terminal_cause(), PeerLogicalTerminalCause::peer_failure);
 
     auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
     io.run_for(100ms);
     io.restart();
 
     EXPECT_TRUE(PeerSetTestAccess::shutdown_ingress_sealed(peers));
-    EXPECT_TRUE(
-        PeerSetTestAccess::connect_servant_stop_cancellation_requested(
-            io, peers, key));
+    EXPECT_TRUE(PeerSetTestAccess::connect_servant_stop_cancellation_requested(
+        io, peers, key));
     EXPECT_EQ(client->state(), State::Disconnected)
         << "the public stop path must project the stale mutable state before "
            "the retained peer-failure result reaches classification";
@@ -7071,14 +7204,11 @@ TEST(PeerSetShutdown, OwnerDisconnectWinsBeforeConnectDeadline)
 
     asio::io_context io;
     auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
-        io,
-        asio::ip::tcp::endpoint(
-            asio::ip::make_address("127.0.0.1"), 0));
+        io, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
     auto accepted = std::make_shared<asio::ip::tcp::socket>(io);
-    acceptor->async_accept(
-        *accepted, [accepted](boost::system::error_code) {});
-    auto const key = "127.0.0.1:" +
-        std::to_string(acceptor->local_endpoint().port());
+    acceptor->async_accept(*accepted, [accepted](boost::system::error_code) {});
+    auto const key =
+        "127.0.0.1:" + std::to_string(acceptor->local_endpoint().port());
 
     auto peers = PeerSet::create(
         io,
@@ -7099,21 +7229,18 @@ TEST(PeerSetShutdown, OwnerDisconnectWinsBeforeConnectDeadline)
         client = PeerSetTestAccess::connect_servant_client(io, peers, key);
     }
     ASSERT_TRUE(client);
-    ASSERT_TRUE(
-        PeerClientTestAccess::hold_initial_connect_terminal_publication(
-            *client));
+    ASSERT_TRUE(PeerClientTestAccess::hold_initial_connect_terminal_publication(
+        *client));
 
     auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
     io.run_for(100ms);
     io.restart();
 
     ASSERT_TRUE(PeerSetTestAccess::shutdown_ingress_sealed(peers));
-    ASSERT_TRUE(
-        PeerSetTestAccess::connect_servant_stop_cancellation_requested(
-            io, peers, key));
+    ASSERT_TRUE(PeerSetTestAccess::connect_servant_stop_cancellation_requested(
+        io, peers, key));
     ASSERT_EQ(
-        client->terminal_cause(),
-        PeerLogicalTerminalCause::owner_disconnect);
+        client->terminal_cause(), PeerLogicalTerminalCause::owner_disconnect);
     auto const owner_terminal =
         PeerClientTestAccess::initial_connect_terminal(*client);
     ASSERT_TRUE(owner_terminal);
@@ -7147,14 +7274,11 @@ TEST(PeerSetShutdown, ConnectDeadlineWinsBeforeOwnerDisconnect)
 
     asio::io_context io;
     auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
-        io,
-        asio::ip::tcp::endpoint(
-            asio::ip::make_address("127.0.0.1"), 0));
+        io, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
     auto accepted = std::make_shared<asio::ip::tcp::socket>(io);
-    acceptor->async_accept(
-        *accepted, [accepted](boost::system::error_code) {});
-    auto const key = "127.0.0.1:" +
-        std::to_string(acceptor->local_endpoint().port());
+    acceptor->async_accept(*accepted, [accepted](boost::system::error_code) {});
+    auto const key =
+        "127.0.0.1:" + std::to_string(acceptor->local_endpoint().port());
 
     auto peers = PeerSet::create(
         io,
@@ -7175,9 +7299,8 @@ TEST(PeerSetShutdown, ConnectDeadlineWinsBeforeOwnerDisconnect)
         client = PeerSetTestAccess::connect_servant_client(io, peers, key);
     }
     ASSERT_TRUE(client);
-    ASSERT_TRUE(
-        PeerClientTestAccess::hold_initial_connect_terminal_publication(
-            *client));
+    ASSERT_TRUE(PeerClientTestAccess::hold_initial_connect_terminal_publication(
+        *client));
     ASSERT_TRUE(
         PeerClientTestAccess::commit_initial_connect_deadline(*client, 10)
             .terminal_committed);
@@ -7187,12 +7310,10 @@ TEST(PeerSetShutdown, ConnectDeadlineWinsBeforeOwnerDisconnect)
     io.restart();
 
     ASSERT_TRUE(PeerSetTestAccess::shutdown_ingress_sealed(peers));
-    ASSERT_TRUE(
-        PeerSetTestAccess::connect_servant_stop_cancellation_requested(
-            io, peers, key));
+    ASSERT_TRUE(PeerSetTestAccess::connect_servant_stop_cancellation_requested(
+        io, peers, key));
     EXPECT_EQ(
-        client->terminal_cause(),
-        PeerLogicalTerminalCause::owner_disconnect);
+        client->terminal_cause(), PeerLogicalTerminalCause::owner_disconnect);
     auto const deadline_terminal =
         PeerClientTestAccess::initial_connect_terminal(*client);
     ASSERT_TRUE(deadline_terminal);
@@ -7225,14 +7346,11 @@ TEST(
 
     asio::io_context io;
     auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
-        io,
-        asio::ip::tcp::endpoint(
-            asio::ip::make_address("127.0.0.1"), 0));
+        io, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
     auto accepted = std::make_shared<asio::ip::tcp::socket>(io);
-    acceptor->async_accept(
-        *accepted, [accepted](boost::system::error_code) {});
-    auto const key = "127.0.0.1:" +
-        std::to_string(acceptor->local_endpoint().port());
+    acceptor->async_accept(*accepted, [accepted](boost::system::error_code) {});
+    auto const key =
+        "127.0.0.1:" + std::to_string(acceptor->local_endpoint().port());
 
     auto peers = PeerSet::create(
         io,
@@ -7278,8 +7396,7 @@ TEST(
         PeerClientTestAccess::fail_initial_connect_on_strand(*client);
     });
     for (std::size_t attempt = 0;
-         attempt < 100 &&
-         (!held_completion || !classification_reached);
+         attempt < 100 && (!held_completion || !classification_reached);
          ++attempt)
     {
         io.run_for(1ms);
@@ -7292,7 +7409,8 @@ TEST(
         << "the real pump catch must retain S0037 until T0183 joins";
     EXPECT_GE(
         client->raw_connection().transport_operation_count_for_test(), 1u);
-    EXPECT_FALSE(client->raw_connection().physical_transport_drained_for_test());
+    EXPECT_FALSE(
+        client->raw_connection().physical_transport_drained_for_test());
     EXPECT_EQ(servant_receipts, 0u);
 
     auto completion = std::move(held_completion);
@@ -7439,8 +7557,7 @@ TEST(PeerSetShutdown, CallerCancellationCannotAbandonPhysicalReceipt)
             }));
     io.run_for(10ms);
 
-    ASSERT_TRUE(
-        session->co_disconnect_waiting.load(std::memory_order_acquire));
+    ASSERT_TRUE(session->co_disconnect_waiting.load(std::memory_order_acquire));
     cancellation.emit(asio::cancellation_type::all);
     io.restart();
     io.poll();

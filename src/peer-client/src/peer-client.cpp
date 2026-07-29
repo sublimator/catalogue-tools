@@ -1667,12 +1667,15 @@ PeerClient::complete_connect(boost::system::error_code ec)
         return;
     }
 
-    auto cb = std::move(connect_completion_callback_);
+    //@@mutation-site connect-completion-observer-is-consumed
     //@@authority transition=prv.T0185 status=provisional scope=statement
-    // bind=try_statement@abbeaf6221593066
+    // bind=declaration@1d0e14c7fe979588
     // owner=unresolved owner_hypothesis=peer_client
     // commit=peer_client_strand touches=prv.S0060
-    // label=notify_legacy_connect_completion_after_terminal_commit
+    // label=consume_one_shot_connect_completion_before_invoke
+    auto cb = std::exchange(
+        connect_completion_callback_, {});  //@@authority-target ids=prv.T0185
+    //@@mutation-end connect-completion-observer-is-consumed
     try
     {
         cb(ec, peer_ledger_seq_.load());
@@ -1684,7 +1687,7 @@ PeerClient::complete_connect(boost::system::error_code ec)
     catch (...)
     {
         PLOGE(log_, "connect completion observer threw");
-    }  //@@authority-target ids=prv.T0185
+    }
 }
 
 void
@@ -1958,7 +1961,8 @@ PeerClient::become_ready()
             {},
             peer_ledger_seq_.load(),
             0},
-        [this]() noexcept { state_.store(State::Ready); });
+        [this]() noexcept { state_.store(State::Ready); },
+        detail::ConnectAttemptPublication::deferred);
     if (!ready.event_committed)
         return;
 
@@ -1971,12 +1975,19 @@ PeerClient::become_ready()
         ")");
 
     flush_queue();
-    complete_connect({});
 
     if (ready_callback_)
     {
         PLOGD(log_, "become_ready: invoking ready_callback_");
-        auto cb = std::move(ready_callback_);
+        //@@mutation-site connect-ready-observer-is-consumed
+        //@@authority transition=prv.T0188 status=provisional scope=statement
+        // bind=declaration@472710938f942183
+        // owner=unresolved owner_hypothesis=peer_client
+        // commit=peer_client_strand touches=prv.S0061
+        // label=consume_one_shot_ready_observer_before_invoke
+        auto cb = std::exchange(
+            ready_callback_, {});  //@@authority-target ids=prv.T0188
+        //@@mutation-end connect-ready-observer-is-consumed
         try
         {
             cb(peer_ledger_seq_);
@@ -1991,6 +2002,9 @@ PeerClient::become_ready()
             PLOGE(log_, "ready observer threw");
         }
     }
+
+    complete_connect({});
+    initial_connect_attempt_->publish_terminal();
 }
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -57,12 +57,20 @@ public:
         peers->connect_failure_classification_hook_for_test_ = std::move(hook);
     }
 
+    static void
+    set_after_connect_ready_before_admission(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::function<boost::asio::awaitable<void>(
+            std::shared_ptr<catl::peer_client::PeerClient> const&)> hook)
+    {
+        peers->after_connect_ready_before_admission_for_test_ = std::move(hook);
+    }
+
     static bool
     shutdown_ingress_sealed(
         std::shared_ptr<catl::peer_client::PeerSet> const& peers)
     {
-        return peers->shutdown_ingress_sealed_.load(
-            std::memory_order_acquire);
+        return peers->shutdown_ingress_sealed_.load(std::memory_order_acquire);
     }
 
     static bool
@@ -690,9 +698,7 @@ public:
     {
         std::shared_ptr<catl::peer_client::PeerClient> client;
         run_on_strand(
-            io,
-            peers,
-            [&client, endpoint = std::move(endpoint)](auto& set) {
+            io, peers, [&client, endpoint = std::move(endpoint)](auto& set) {
                 auto row = set.in_flight_.find(endpoint);
                 if (row != set.in_flight_.end())
                 {
@@ -1093,8 +1099,7 @@ public:
         std::string key)
     {
         ServantCompletionProbe result;
-        auto wake =
-            std::make_shared<std::promise<boost::system::error_code>>();
+        auto wake = std::make_shared<std::promise<boost::system::error_code>>();
         auto woke = wake->get_future();
 
         run_on_strand(
@@ -1102,8 +1107,7 @@ public:
             peers,
             [&result, key = std::move(key), wake](auto& set) mutable {
                 auto waiter = std::make_shared<boost::asio::steady_timer>(
-                    set.strand_,
-                    boost::asio::steady_timer::time_point::max());
+                    set.strand_, boost::asio::steady_timer::time_point::max());
                 set.shutdown_waiters_.push_back(waiter);
                 waiter->async_wait(
                     [waiter, wake](auto ec) { wake->set_value(ec); });
@@ -1134,8 +1138,7 @@ public:
         std::string key)
     {
         ServantCompletionProbe result;
-        auto wake =
-            std::make_shared<std::promise<boost::system::error_code>>();
+        auto wake = std::make_shared<std::promise<boost::system::error_code>>();
         auto woke = wake->get_future();
 
         run_on_strand(
@@ -1143,8 +1146,7 @@ public:
             peers,
             [&result, key = std::move(key), wake](auto& set) mutable {
                 auto waiter = std::make_shared<boost::asio::steady_timer>(
-                    set.strand_,
-                    boost::asio::steady_timer::time_point::max());
+                    set.strand_, boost::asio::steady_timer::time_point::max());
                 set.shutdown_waiters_.push_back(waiter);
                 waiter->async_wait(
                     [waiter, wake](auto ec) { wake->set_value(ec); });
@@ -1175,8 +1177,7 @@ public:
         std::string key)
     {
         ServantCompletionProbe result;
-        auto wake = std::make_shared<
-            std::promise<boost::system::error_code>>();
+        auto wake = std::make_shared<std::promise<boost::system::error_code>>();
         auto woke = wake->get_future();
 
         run_on_strand(
@@ -1188,12 +1189,10 @@ public:
                 set.in_flight_.try_emplace(key);
 
                 auto waiter = std::make_shared<boost::asio::steady_timer>(
-                    set.strand_,
-                    boost::asio::steady_timer::time_point::max());
+                    set.strand_, boost::asio::steady_timer::time_point::max());
                 set.shutdown_waiters_.push_back(waiter);
-                waiter->async_wait([waiter, wake](auto ec) {
-                    wake->set_value(ec);
-                });
+                waiter->async_wait(
+                    [waiter, wake](auto ec) { wake->set_value(ec); });
 
                 set.connect_completion_diagnostic_hook_for_test_ = [&result]() {
                     result.throwing_diagnostic_ran = true;
@@ -1253,8 +1252,7 @@ public:
         std::string key)
     {
         ServantCompletionProbe result;
-        auto wake = std::make_shared<
-            std::promise<boost::system::error_code>>();
+        auto wake = std::make_shared<std::promise<boost::system::error_code>>();
         auto woke = wake->get_future();
 
         run_on_strand(
@@ -1266,12 +1264,10 @@ public:
                 set.crawl_in_flight_.insert(key);
 
                 auto waiter = std::make_shared<boost::asio::steady_timer>(
-                    set.strand_,
-                    boost::asio::steady_timer::time_point::max());
+                    set.strand_, boost::asio::steady_timer::time_point::max());
                 set.shutdown_waiters_.push_back(waiter);
-                waiter->async_wait([waiter, wake](auto ec) {
-                    wake->set_value(ec);
-                });
+                waiter->async_wait(
+                    [waiter, wake](auto ec) { wake->set_value(ec); });
 
                 set.crawl_completion_diagnostic_hook_for_test_ = [&result]() {
                     result.throwing_diagnostic_ran = true;

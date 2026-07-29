@@ -15,6 +15,7 @@
 #include <boost/asio/ssl.hpp>
 #include <chrono>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <map>
 #include <memory>
@@ -22,6 +23,7 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace catl::peer_client {
@@ -54,14 +56,35 @@ enum class ConnectAttemptTerminalKind : std::uint8_t {
     owner_disconnect,
     deadline,
     caller_cancelled,
+    infrastructure_failure,
 };
 
 struct ConnectAttemptTerminal
 {
+    ConnectAttemptTerminal(
+        ConnectAttemptTerminalKind kind,
+        boost::system::error_code error = {},
+        std::uint32_t peer_seq = 0,
+        int deadline_seconds = 0,
+        std::exception_ptr failure = {})
+        : kind(kind)
+        , error(error)
+        , peer_seq(peer_seq)
+        , deadline_seconds(deadline_seconds)
+        , failure(std::move(failure))
+    {
+    }
+
     ConnectAttemptTerminalKind kind;
     boost::system::error_code error;
     uint32_t peer_seq = 0;
     int deadline_seconds = 0;
+    std::exception_ptr failure;
+};
+
+enum class ConnectAttemptPublication : std::uint8_t {
+    immediate,
+    deferred,
 };
 
 struct ConnectAttemptCommit
@@ -95,7 +118,7 @@ public:
     template <typename Commit>
         requires std::is_nothrow_invocable_v<Commit>
     //@@authority transition=prv.T0186 status=provisional scope=function
-    // bind=catl::peer_client::detail::ConnectAttemptState::try_commit_initial@e3ff70439934026a
+    // bind=catl::peer_client::detail::ConnectAttemptState::try_commit_initial@40046a19bde7ce9b
     // owner=unresolved owner_hypothesis=connect_attempt
     // commit=connect_attempt_mutex touches=prv.S0059
     // mutation_class=terminal_receipt
@@ -103,7 +126,9 @@ public:
     ConnectAttemptCommit
     try_commit_initial(
         ConnectAttemptTerminal terminal,
-        Commit&& owner_commit) noexcept
+        Commit&& owner_commit,
+        ConnectAttemptPublication publication =
+            ConnectAttemptPublication::immediate) noexcept
     {
         bool publish_now = false;
         {
@@ -112,9 +137,9 @@ public:
                 return {};
             terminal_ = terminal;
             std::forward<Commit>(owner_commit)();
-            terminal_publication_pending_for_test_ =
-                hold_terminal_publication_for_test_;
-            publish_now = !terminal_publication_pending_for_test_;
+            terminal_publication_pending_ = true;
+            publish_now = publication == ConnectAttemptPublication::immediate &&
+                !hold_terminal_publication_for_test_;
         }
         if (publish_now)
             publish_terminal();
@@ -140,9 +165,8 @@ public:
             {
                 terminal_ = terminal;
                 terminal_committed = true;
-                terminal_publication_pending_for_test_ =
-                    hold_terminal_publication_for_test_;
-                publish_now = !terminal_publication_pending_for_test_;
+                terminal_publication_pending_ = true;
+                publish_now = !hold_terminal_publication_for_test_;
             }
             std::forward<Commit>(owner_commit)();
         }
@@ -159,9 +183,8 @@ public:
         return terminal_;
     }
 
-    /// Defines the pre-admission observation boundary. A session death which
-    /// wins before this snapshot is reported separately from the immutable
-    /// initial result; a later death belongs to the admitted session lifetime.
+    /// Returns both retained facts under one lock. This is an observation, not
+    /// a transfer of session authority to PeerSet.
     ConnectAttemptSnapshot
     snapshot_for_handoff() const
     {
@@ -200,18 +223,27 @@ public:
     {
         {
             std::lock_guard lock(mutex_);
-            if (!terminal_publication_pending_for_test_)
+            if (!hold_terminal_publication_for_test_ ||
+                !terminal_publication_pending_)
                 return false;
-            terminal_publication_pending_for_test_ = false;
+            hold_terminal_publication_for_test_ = false;
         }
-        publish_terminal();
-        return true;
+        return publish_terminal();
     }
 
-private:
-    void
+    bool
     publish_terminal() noexcept
     {
+        {
+            std::lock_guard lock(mutex_);
+            if (!terminal_publication_pending_ || terminal_published_ ||
+                hold_terminal_publication_for_test_)
+            {
+                return false;
+            }
+            terminal_publication_pending_ = false;
+            terminal_published_ = true;
+        }
         try
         {
             if (!signal_.try_send(boost::system::error_code{}))
@@ -221,8 +253,10 @@ private:
         {
             std::terminate();
         }
+        return true;
     }
 
+private:
     mutable std::mutex mutex_;
     //@@authority state=prv.S0059 status=provisional scope=field
     // bind=catl::peer_client::detail::ConnectAttemptState::terminal_@3a9e1ad6fc4a0214
@@ -238,7 +272,8 @@ private:
     PeerLogicalTerminalCause terminal_cause_ = PeerLogicalTerminalCause::none;
     Signal signal_;
     bool hold_terminal_publication_for_test_ = false;
-    bool terminal_publication_pending_for_test_ = false;
+    bool terminal_publication_pending_ = false;
+    bool terminal_published_ = false;
 };
 
 }  // namespace detail
@@ -832,6 +867,11 @@ private:
     std::shared_ptr<peer_connection> connection_;
     mutable std::mutex handler_mutex_;
     UnsolicitedHandler unsolicited_handler_;
+    //@@authority state=prv.S0061 status=provisional scope=field
+    // bind=catl::peer_client::PeerClient::ready_callback_@14ce61062bcf8d7c
+    // owner=unresolved owner_hypothesis=peer_client
+    // observed_home=peer_client
+    // label=one_shot_ready_observer
     ReadyCallback ready_callback_;
     //@@authority state=prv.S0060 status=provisional scope=field
     // bind=catl::peer_client::PeerClient::connect_completion_callback_@0916e06aa7c57741

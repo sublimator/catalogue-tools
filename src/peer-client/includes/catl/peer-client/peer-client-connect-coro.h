@@ -68,16 +68,25 @@ class ConnectDeadlineController
     : public std::enable_shared_from_this<ConnectDeadlineController>
 {
 public:
+    using BeforeArmHook = std::function<void(bool allow_post_handshake_grace)>;
+
     ConnectDeadlineController(
         asio::any_io_executor executor,
         std::shared_ptr<ConnectAttemptState> attempt,
         std::weak_ptr<PeerClient> client,
-        int timeout_seconds)
+        int timeout_seconds,
+        std::chrono::steady_clock::duration post_handshake_grace =
+            std::chrono::seconds(15),
+        int post_handshake_grace_seconds = 15,
+        BeforeArmHook before_arm = {})
         : strand_(asio::make_strand(std::move(executor)))
         , timer_(strand_)
         , attempt_(std::move(attempt))
         , client_(std::move(client))
         , timeout_seconds_(timeout_seconds)
+        , post_handshake_grace_(post_handshake_grace)
+        , post_handshake_grace_seconds_(post_handshake_grace_seconds)
+        , before_arm_(std::move(before_arm))
     {
     }
 
@@ -86,33 +95,75 @@ public:
     {
         auto self = shared_from_this();
         asio::dispatch(strand_, [self]() {
-            self->arm(std::chrono::seconds(self->timeout_seconds_), true);
+            self->arm_or_fail(
+                std::chrono::seconds(self->timeout_seconds_), true);
         });
     }
 
     void
     cancel() noexcept
     {
-        auto self = shared_from_this();
-        asio::post(strand_, [self]() {
-            try
-            {
-                self->timer_.cancel();
-            }
-            catch (...)
-            {
-            }
-        });
+        try
+        {
+            auto self = shared_from_this();
+            asio::post(strand_, [self]() noexcept {
+                try
+                {
+                    self->timer_.cancel();
+                }
+                catch (...)
+                {
+                }
+            });
+        }
+        catch (...)
+        {
+        }
     }
 
 private:
     void
-    arm(std::chrono::seconds duration, bool allow_post_handshake_grace)
+    publish_infrastructure_failure(std::exception_ptr failure) noexcept
     {
+        attempt_->try_commit_initial(
+            ConnectAttemptTerminal{
+                ConnectAttemptTerminalKind::infrastructure_failure,
+                {},
+                0,
+                0,
+                std::move(failure)},
+            []() noexcept {});
+    }
+
+    void
+    arm_or_fail(
+        std::chrono::steady_clock::duration duration,
+        bool allow_post_handshake_grace) noexcept
+    {
+        try
+        {
+            arm(duration, allow_post_handshake_grace);
+        }
+        catch (...)
+        {
+            //@@mutation-site connect-deadline-arm-failure-publishes
+            publish_infrastructure_failure(std::current_exception());
+            //@@mutation-end connect-deadline-arm-failure-publishes
+        }
+    }
+
+    void
+    arm(std::chrono::steady_clock::duration duration,
+        bool allow_post_handshake_grace)
+    {
+        if (before_arm_)
+            before_arm_(allow_post_handshake_grace);
         timer_.expires_after(duration);
         auto self = shared_from_this();
-        timer_.async_wait(
-            [self, allow_post_handshake_grace](boost::system::error_code ec) {
+        timer_.async_wait([self, allow_post_handshake_grace](
+                              boost::system::error_code ec) {
+            try
+            {
                 if (ec)
                     return;
 
@@ -120,8 +171,11 @@ private:
                 if (allow_post_handshake_grace && !self->attempt_->snapshot() &&
                     client && is_post_handshake_state(client->state()))
                 {
-                    self->timeout_seconds_ += 15;
-                    self->arm(std::chrono::seconds(15), false);
+                    self->timeout_seconds_ +=
+                        self->post_handshake_grace_seconds_;
+                    //@@mutation-site connect-deadline-grace-is-bounded
+                    self->arm_or_fail(self->post_handshake_grace_, false);
+                    //@@mutation-end connect-deadline-grace-is-bounded
                     return;
                 }
 
@@ -132,7 +186,12 @@ private:
                         0,
                         self->timeout_seconds_},
                     []() noexcept {});
-            });
+            }
+            catch (...)
+            {
+                self->publish_infrastructure_failure(std::current_exception());
+            }
+        });
     }
 
     asio::strand<asio::any_io_executor> strand_;
@@ -140,6 +199,17 @@ private:
     std::shared_ptr<ConnectAttemptState> attempt_;
     std::weak_ptr<PeerClient> client_;
     int timeout_seconds_;
+    std::chrono::steady_clock::duration post_handshake_grace_;
+    int post_handshake_grace_seconds_;
+    BeforeArmHook before_arm_;
+};
+
+struct ConnectAttemptSetupHooks
+{
+    std::function<void()> before_deadline_construction;
+    std::function<void()> before_deadline_start;
+    std::function<void()> before_terminal_wait;
+    ConnectDeadlineController::BeforeArmHook before_deadline_arm;
 };
 
 /// Converts inherited coroutine cancellation into a retained attempt result.
@@ -191,7 +261,8 @@ co_connect(
     std::shared_ptr<PeerClient>& out_client,
     int timeout_secs = 10,
     std::function<void(std::shared_ptr<PeerClient> const&)> on_client_created =
-        {})
+        {},
+    detail::ConnectAttemptSetupHooks setup_hooks = {})
 {
     auto executor = co_await asio::this_coro::executor;
 
@@ -199,38 +270,61 @@ co_connect(
     auto client = out_client;
     auto attempt = client->initial_connect_attempt();
 
-    auto const inherited_cancellation =
-        co_await asio::this_coro::cancellation_state;
-    auto const cancellation_was_already_requested =
-        inherited_cancellation.cancelled() != asio::cancellation_type::none;
-    auto cancellation_filter = detail::ConnectCancellationFilter{attempt};
-    co_await asio::this_coro::reset_cancellation_state(cancellation_filter);
-    if (cancellation_was_already_requested)
-        cancellation_filter(asio::cancellation_type::all);
-
-    std::exception_ptr publication_failure;
+    std::shared_ptr<detail::ConnectDeadlineController> deadline;
+    std::exception_ptr setup_failure;
     try
     {
+        auto cancellation_filter = detail::ConnectCancellationFilter{attempt};
+        co_await asio::this_coro::reset_cancellation_state(cancellation_filter);
+
         if (on_client_created)
             on_client_created(client);
+
+        if (setup_hooks.before_deadline_construction)
+            setup_hooks.before_deadline_construction();
+        deadline = std::make_shared<detail::ConnectDeadlineController>(
+            executor,
+            attempt,
+            client,
+            timeout_secs,
+            std::chrono::seconds(15),
+            15,
+            std::move(setup_hooks.before_deadline_arm));
+        if (setup_hooks.before_deadline_start)
+            setup_hooks.before_deadline_start();
+        deadline->start();
+        if (setup_hooks.before_terminal_wait)
+            setup_hooks.before_terminal_wait();
     }
     catch (...)
     {
-        publication_failure = std::current_exception();
+        setup_failure = std::current_exception();
     }
-    if (publication_failure)
+    if (setup_failure)
     {
+        if (deadline)
+            deadline->cancel();
         co_await client->co_disconnect();
-        std::rethrow_exception(publication_failure);
+        std::rethrow_exception(setup_failure);
     }
 
-    auto deadline = std::make_shared<detail::ConnectDeadlineController>(
-        executor, attempt, client, timeout_secs);
-    deadline->start();
-
-    auto receive_ec = co_await attempt->wait_terminal();
-    auto const handoff = attempt->snapshot_for_handoff();
-    auto const& terminal = handoff.initial_terminal;
+    boost::system::error_code receive_ec;
+    std::exception_ptr receive_failure;
+    try
+    {
+        receive_ec = co_await attempt->wait_terminal();
+    }
+    catch (...)
+    {
+        receive_failure = std::current_exception();
+    }
+    if (receive_failure)
+    {
+        deadline->cancel();
+        co_await client->co_disconnect();
+        std::rethrow_exception(receive_failure);
+    }
+    auto const terminal = attempt->snapshot();
 
     if (!terminal)
     {
@@ -249,22 +343,18 @@ co_connect(
     }
 
     if (terminal->kind == detail::ConnectAttemptTerminalKind::ready)
-    {
-        auto const later_cause = handoff.session_terminal_cause;
-        if (later_cause != PeerLogicalTerminalCause::none)
-        {
-            auto const disposition =
-                later_cause == PeerLogicalTerminalCause::owner_disconnect
-                ? ConnectAttemptDisposition::owner_disconnect
-                : ConnectAttemptDisposition::peer_failure;
-            throw PeerClientException(
-                Error::Disconnected,
-                detail::append_detail(
-                    detail::connect_phase_detail(client),
-                    "session became terminal before ready handoff"),
-                disposition);
-        }
         co_return terminal->peer_seq;
+
+    if (terminal->kind ==
+        detail::ConnectAttemptTerminalKind::infrastructure_failure)
+    {
+        //@@mutation-site connect-infrastructure-failure-joins-physical-drain
+        co_await client->co_disconnect();
+        //@@mutation-end connect-infrastructure-failure-joins-physical-drain
+        if (terminal->failure)
+            std::rethrow_exception(terminal->failure);
+        throw std::runtime_error(
+            "connect attempt infrastructure failed without exception");
     }
 
     if (terminal->kind != detail::ConnectAttemptTerminalKind::ready)

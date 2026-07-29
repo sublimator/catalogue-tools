@@ -707,9 +707,15 @@ PeerSet::finish_connect_servant(
     complete_connect_servant(key, std::move(failure), successor);
 }
 
+//@@authority transition=prv.T0181 status=provisional scope=function
+// bind=catl::peer_client::install_connect_servant_session@98ed45e580566bc0
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0037
+// label=install_connect_servant_cancellation_capability
 void
 PeerSet::install_connect_servant_session(
     std::string const& key,
+    std::uint64_t generation,
     PeerSessionPtr const& session) noexcept
 {
     ASSERT_ON_STRAND();
@@ -717,12 +723,79 @@ PeerSet::install_connect_servant_session(
     if (row == in_flight_.end() || row->second.session)
         return;
 
-    //@@authority transition=prv.T0181 status=provisional scope=statement
-    // bind=expression_statement@65d1f1e9c4d95232
-    // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
-    // touches=prv.S0037
-    // label=install_connect_servant_cancellation_capability
-    row->second.session = session;  //@@authority-target ids=prv.T0181
+    row->second.session = session;
+    row->second.generation = generation;
+}
+
+//@@authority transition=prv.T0187 status=provisional scope=function
+// bind=catl::peer_client::classify_unadmitted_connect_terminal@7cb2098a2e785948
+// owner=unresolved owner_hypothesis=peer_set
+// commit=peer_set_strand touches=prv.S0037
+// mutation_class=terminal_receipt
+// label=consume_post_ready_terminal_before_connect_servant_retirement
+void
+PeerSet::classify_unadmitted_connect_terminal(
+    std::string const& key,
+    std::uint64_t generation,
+    std::shared_ptr<PeerClient> const& client)
+{
+    ASSERT_ON_STRAND();
+    auto row = in_flight_.find(key);
+    if (row == in_flight_.end() || row->second.session != client ||
+        row->second.generation != generation || row->second.terminal_classified)
+    {
+        return;
+    }
+
+    //@@mutation-site unadmitted-peer-terminal-is-classified
+    // Consume the exact row's disposition before servant retirement. Ready is
+    // immutable; this is the separate live-session cause which won after Ready
+    // but before PeerSet either adopted or refused the candidate.
+    auto const cause = client->terminal_cause();
+    if (cause == PeerLogicalTerminalCause::owner_disconnect)
+    {
+        row->second.terminal_classified = true;
+        return;
+    }
+
+    std::string detail;
+    try
+    {
+        detail = trim_connect_failure_detail(
+            client->raw_connection().connect_failure_detail());
+    }
+    catch (...)
+    {
+    }
+    if (detail.empty())
+    {
+        detail = cause == PeerLogicalTerminalCause::peer_failure
+            ? "peer became terminal before admission"
+            : "connect terminal cause missing before admission";
+    }
+
+    note_connect_failure(key, detail);
+    failed_at_[key] = std::chrono::steady_clock::now();
+    if (endpoint_cache_)
+    {
+        try
+        {
+            endpoint_cache_->remember_connect_failure(network_id_, key);
+        }
+        catch (std::exception const& e)
+        {
+            PLOGW(
+                log_,
+                "[",
+                net_label_,
+                "] Peer cache write failed for ",
+                key,
+                ": ",
+                e.what());
+        }
+    }
+    row->second.terminal_classified = true;
+    //@@mutation-end unadmitted-peer-terminal-is-classified
 }
 
 void
@@ -2515,11 +2588,16 @@ PeerSet::try_connect_on_strand(
             std::move(connect_opts),
             client,
             10,
-            [self = shared_from_this(),
-             key](std::shared_ptr<PeerClient> const& created) noexcept {
-                self->install_connect_servant_session(key, created);
+            [self = shared_from_this(), key, generation](
+                std::shared_ptr<PeerClient> const& created) noexcept {
+                self->install_connect_servant_session(key, generation, created);
             });
         ASSERT_ON_STRAND();
+        if (after_connect_ready_before_admission_for_test_)
+        {
+            co_await after_connect_ready_before_admission_for_test_(client);
+            ASSERT_ON_STRAND();
+        }
 
         // A candidate whose handshake crossed the seal was never admitted.
         // Consume its physical lifecycle before returning so the stop receipt
@@ -2527,7 +2605,10 @@ PeerSet::try_connect_on_strand(
         if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
         {
             if (client)
+            {
                 co_await client->co_disconnect();
+                classify_unadmitted_connect_terminal(key, generation, client);
+            }
             co_return nullptr;
         }
 
@@ -2544,6 +2625,7 @@ PeerSet::try_connect_on_strand(
                 "] Discarding duplicate connection for ",
                 key);
             co_await client->co_disconnect();
+            classify_unadmitted_connect_terminal(key, generation, client);
             co_return existing->second.session;
         }
 
@@ -2556,7 +2638,10 @@ PeerSet::try_connect_on_strand(
                 "] Connected candidate became unavailable before admission: ",
                 key);
             if (client)
+            {
                 co_await client->co_disconnect();
+                classify_unadmitted_connect_terminal(key, generation, client);
+            }
             co_return nullptr;
         }
 
@@ -2572,6 +2657,7 @@ PeerSet::try_connect_on_strand(
                 peer_is_archival(client) ? "archival" : "hub",
                 " pool at cap)");
             co_await client->co_disconnect();
+            classify_unadmitted_connect_terminal(key, generation, client);
             co_return nullptr;
         }
 
