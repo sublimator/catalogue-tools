@@ -676,6 +676,66 @@ public:
         run_on_strand(io, peers, [](auto& set) { set.pump_connects(); });
     }
 
+    static void
+    pump_crawls(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        run_on_strand(io, peers, [](auto& set) { set.pump_crawls(); });
+    }
+
+    static bool
+    crawl_in_flight_contains(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        bool found = false;
+        run_on_strand(
+            io, peers, [&found, endpoint = std::move(endpoint)](auto& set) {
+                found = set.crawl_in_flight_.count(endpoint) != 0;
+            });
+        return found;
+    }
+
+    static bool
+    crawl_stop_cancellation_requested(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        bool requested = false;
+        run_on_strand(
+            io, peers, [&requested, endpoint = std::move(endpoint)](auto& set) {
+                auto const row = set.crawl_in_flight_.find(endpoint);
+                requested = row != set.crawl_in_flight_.end() &&
+                    row->second.stop_cancellation_requested;
+            });
+        return requested;
+    }
+
+    static void
+    set_defer_crawl_servant_receipt(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::function<void(std::string const&, std::function<void()>)> hook)
+    {
+        run_on_strand(io, peers, [hook = std::move(hook)](auto& set) mutable {
+            set.defer_crawl_servant_receipt_for_test_ = std::move(hook);
+        });
+    }
+
+    static void
+    set_crawl_completion_diagnostic_hook(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::function<void()> hook)
+    {
+        run_on_strand(io, peers, [hook = std::move(hook)](auto& set) mutable {
+            set.crawl_completion_diagnostic_hook_for_test_ = std::move(hook);
+        });
+    }
+
     static bool
     in_flight_contains(
         boost::asio::io_context& io,
@@ -1261,7 +1321,7 @@ public:
             [&result, key = std::move(key), wake](auto& set) mutable {
                 set.shutdown_ingress_sealed_.store(
                     true, std::memory_order_release);
-                set.crawl_in_flight_.insert(key);
+                set.crawl_in_flight_.try_emplace(key);
 
                 auto waiter = std::make_shared<boost::asio::steady_timer>(
                     set.strand_, boost::asio::steady_timer::time_point::max());

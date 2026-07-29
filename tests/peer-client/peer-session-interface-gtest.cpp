@@ -19,8 +19,10 @@
 #include <boost/asio/experimental/parallel_group.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/read_until.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/streambuf.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
 
@@ -6956,6 +6958,137 @@ TEST(
         << "the terminal PeerSet fact must be replayable to later joiners";
     EXPECT_EQ(servant_receipts, servant_count);
 }
+
+//@@start active-crawl-cancellation-before-deadline
+TEST(PeerSetShutdown, ActiveCrawlCancellationWaitsForExactPhysicalReceipt)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
+        io, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
+    auto accepted = std::make_shared<asio::ip::tcp::socket>(io);
+    auto request = std::make_shared<asio::streambuf>();
+    auto close_probe = std::make_shared<std::array<char, 1>>();
+    auto request_seen = std::make_shared<std::promise<void>>();
+    auto request_seen_future = request_seen->get_future();
+    auto client_closed = std::make_shared<std::promise<void>>();
+    auto client_closed_future = client_closed->get_future();
+
+    acceptor->async_accept(
+        *accepted,
+        [accepted, request, close_probe, request_seen, client_closed](
+            boost::system::error_code accept_error) {
+            if (accept_error)
+            {
+                auto failure = std::make_exception_ptr(
+                    boost::system::system_error(accept_error));
+                request_seen->set_exception(failure);
+                client_closed->set_exception(std::move(failure));
+                return;
+            }
+            asio::async_read_until(
+                *accepted,
+                *request,
+                "\r\n\r\n",
+                [accepted, close_probe, request_seen, client_closed](
+                    boost::system::error_code read_error, std::size_t) {
+                    if (read_error)
+                    {
+                        auto failure = std::make_exception_ptr(
+                            boost::system::system_error(read_error));
+                        request_seen->set_exception(failure);
+                        client_closed->set_exception(std::move(failure));
+                        return;
+                    }
+                    request_seen->set_value();
+                    accepted->async_read_some(
+                        asio::buffer(*close_probe),
+                        [accepted, close_probe, client_closed](
+                            boost::system::error_code, std::size_t) {
+                            client_closed->set_value();
+                        });
+                });
+        });
+
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .endpoint_cache_path = ":memory:",
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 1,
+        });
+    auto const key =
+        "127.0.0.1:" + std::to_string(acceptor->local_endpoint().port());
+    auto withheld_receipt = std::make_shared<std::function<void()>>();
+    auto receipt_withheld = std::make_shared<std::atomic_bool>(false);
+    std::size_t servant_receipts = 0;
+    PeerSetTestAccess::set_defer_crawl_servant_receipt(
+        io,
+        peers,
+        [withheld_receipt, receipt_withheld](
+            std::string const&, std::function<void()> receipt) {
+            *withheld_receipt = std::move(receipt);
+            receipt_withheld->store(true, std::memory_order_release);
+        });
+    PeerSetTestAccess::set_crawl_completion_diagnostic_hook(
+        io, peers, [&servant_receipts] { ++servant_receipts; });
+    PeerSetTestAccess::queue_crawl(io, peers, key);
+    PeerSetTestAccess::pump_crawls(io, peers);
+
+    for (std::size_t attempt = 0; attempt < 100 &&
+         request_seen_future.wait_for(0ms) != std::future_status::ready;
+         ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+    }
+    ASSERT_EQ(request_seen_future.wait_for(0ms), std::future_status::ready);
+    ASSERT_NO_THROW(request_seen_future.get());
+
+    auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run_for(20ms);
+    io.restart();
+
+    ASSERT_EQ(client_closed_future.wait_for(0ms), std::future_status::ready)
+        << "stop must cancel an admitted crawl instead of waiting for its "
+           "configured read deadline";
+    EXPECT_NO_THROW(client_closed_future.get());
+    EXPECT_TRUE(receipt_withheld->load(std::memory_order_acquire));
+    EXPECT_TRUE(
+        PeerSetTestAccess::crawl_stop_cancellation_requested(io, peers, key));
+    EXPECT_TRUE(PeerSetTestAccess::crawl_in_flight_contains(io, peers, key))
+        << "cancellation intent cannot retire the crawl servant row";
+    EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout)
+        << "PeerSet terminality must wait for the exact crawl receipt";
+    EXPECT_EQ(servant_receipts, 0u);
+
+    boost::system::error_code ignored;
+    acceptor->close(ignored);
+    accepted->close(ignored);
+
+    ASSERT_TRUE(static_cast<bool>(*withheld_receipt));
+    auto exact_receipt = std::move(*withheld_receipt);
+    PeerSetTestAccess::post_on_owner_strand(
+        peers, [exact_receipt = std::move(exact_receipt)]() mutable {
+            exact_receipt();
+        });
+    io.run_for(1s);
+
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    io.restart();
+    EXPECT_FALSE(PeerSetTestAccess::crawl_in_flight_contains(io, peers, key));
+    EXPECT_EQ(servant_receipts, 1u);
+
+    auto late = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run_for(1s);
+    ASSERT_EQ(late.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(late.get());
+    EXPECT_EQ(servant_receipts, 1u);
+}
+//@@end active-crawl-cancellation-before-deadline
 
 TEST(PeerSetShutdown, PostReadyPeerFailureIsClassifiedBeforeServantRetirement)
 {

@@ -5,6 +5,7 @@
 #include <catl/core/logger.h>
 
 #include <algorithm>
+#include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/deferred.hpp>
 #include <boost/asio/detached.hpp>
@@ -527,6 +528,33 @@ PeerSet::begin_stop_on_strand()
         }
     }
 
+    // S0038 owns both the admitted crawl census and its cancellation
+    // capability. Cancellation is intent: the row remains until the co_spawn
+    // completion funnel delivers the exact T0092 physical receipt.
+    for (auto& [_, servant] : crawl_in_flight_)
+    {
+        if (!servant.cancellation || servant.stop_cancellation_requested)
+            continue;
+        try
+        {
+            servant.stop_cancellation_requested = true;
+            // clang-format off
+            //@@authority transition=prv.T0189 status=provisional bind=declaration@138f3c75ab7f4ee0
+            // scope=statement owner=unresolved owner_hypothesis=peer_set
+            // commit=peer_set_strand touches=prv.S0038
+            // label=request_crawl_servant_cancellation_without_retirement
+            auto const cancellation_type = asio::cancellation_type::all; //@@authority-target ids=prv.T0189
+            // clang-format on
+            //@@mutation-site crawl-stop-emits-owned-cancellation
+            servant.cancellation->emit(cancellation_type);
+            //@@mutation-end crawl-stop-emits-owned-cancellation
+        }
+        catch (...)
+        {
+            servant.stop_cancellation_requested = false;
+        }
+    }
+
     notify_waiters();
 }
 
@@ -936,7 +964,9 @@ PeerSet::shutdown_drained_on_strand() const noexcept
     ASSERT_ON_STRAND();
     return connections_.empty() && active_peer_pins_.empty() &&
         in_flight_.empty() && queued_.empty() && pending_connects_.empty() &&
+        //@@mutation-site crawl-physical-receipt-required-for-terminal
         crawl_in_flight_.empty() && crawl_queued_.empty() &&
+        //@@mutation-end crawl-physical-receipt-required-for-terminal
         pending_crawls_.empty() && targeted_connects_.empty() &&
         active_target_authorizations_.empty() && wanted_ledgers_.empty();
 }
@@ -2105,69 +2135,69 @@ PeerSet::pump_crawls()
         }
 
         auto self = shared_from_this();
-        auto servant =
-            [self, host, port, key]() -> boost::asio::awaitable<void> {
-            std::exception_ptr failure;
+        auto cancellation = std::make_shared<asio::cancellation_signal>();
+        auto servant = [self,
+                        host,
+                        port]() -> boost::asio::awaitable<CrawlServantOutcome> {
             CrawlServantOutcome outcome;
-            try
+            auto response = co_await co_fetch_peer_crawl(host, port);
+
+            outcome.raw = response.peers.size();
+            outcome.used_tls = response.used_tls;
+            for (auto const& peer : response.peers)
             {
-                auto response = co_await co_fetch_peer_crawl(host, port);
+                if (peer.endpoint.empty())
+                    continue;
 
-                outcome.raw = response.peers.size();
-                outcome.used_tls = response.used_tls;
-                for (auto const& peer : response.peers)
+                auto normalized =
+                    EndpointTracker::normalize_discovered_endpoint(
+                        peer.endpoint);
+                if (!normalized)
                 {
-                    if (peer.endpoint.empty())
-                        continue;
+                    ++outcome.filtered;
+                    continue;
+                }
 
-                    auto normalized =
-                        EndpointTracker::normalize_discovered_endpoint(
-                            peer.endpoint);
-                    if (!normalized)
+                ++outcome.accepted;
+
+                // Mark as seen in crawl
+                if (self->endpoint_cache_)
+                {
+                    try
                     {
-                        ++outcome.filtered;
-                        continue;
+                        self->endpoint_cache_->remember_seen_crawl(
+                            self->network_id_, *normalized);
                     }
-
-                    ++outcome.accepted;
-
-                    // Mark as seen in crawl
-                    if (self->endpoint_cache_)
+                    catch (...)
                     {
-                        try
-                        {
-                            self->endpoint_cache_->remember_seen_crawl(
-                                self->network_id_, *normalized);
-                        }
-                        catch (...)
-                        {
-                        }
-                    }
-
-                    if (auto status =
-                            self->choose_crawl_status(peer.complete_ledgers))
-                    {
-                        ++outcome.ranged;
-                        self->tracker_->update(*normalized, *status);
-                    }
-                    else
-                    {
-                        self->tracker_->add_discovered(
-                            *normalized, DiscoverySource::Crawl);
                     }
                 }
+
+                if (auto status =
+                        self->choose_crawl_status(peer.complete_ledgers))
+                {
+                    ++outcome.ranged;
+                    self->tracker_->update(*normalized, *status);
+                }
+                else
+                {
+                    self->tracker_->add_discovered(
+                        *normalized, DiscoverySource::Crawl);
+                }
             }
-            catch (...)
-            {
-                failure = std::current_exception();
-            }
-            self->complete_crawl_servant(key, outcome, std::move(failure));
+            co_return outcome;
         };
 
         bool census_committed = false;
         try
         {
-            crawl_in_flight_.insert(key);
+            auto [_, inserted] = crawl_in_flight_.try_emplace(
+                key,
+                CrawlServant{
+                    .cancellation = cancellation,
+                    .stop_cancellation_requested = false});
+            if (!inserted)
+                continue;
             census_committed = true;
             if (fail_crawl_servant_launches_for_test_ != 0)
             {
@@ -2175,7 +2205,40 @@ PeerSet::pump_crawls()
                 throw std::runtime_error("crawl servant launch failpoint");
             }
             boost::asio::co_spawn(
-                strand_, std::move(servant), boost::asio::detached);
+                strand_,
+                std::move(servant),
+                asio::bind_cancellation_slot(
+                    cancellation->slot(),
+                    [self, key](
+                        std::exception_ptr failure,
+                        CrawlServantOutcome outcome) mutable {
+                        assert(self->strand_.running_in_this_thread());
+                        auto consumed =
+                            std::make_shared<std::atomic_bool>(false);
+                        auto finish = [self,
+                                       key,
+                                       outcome = std::move(outcome),
+                                       failure = std::move(failure),
+                                       consumed]() mutable {
+                            if (consumed->exchange(true))
+                                return;
+                            self->complete_crawl_servant(
+                                key, outcome, std::move(failure));
+                        };
+                        if (self->defer_crawl_servant_receipt_for_test_)
+                        {
+                            try
+                            {
+                                self->defer_crawl_servant_receipt_for_test_(
+                                    key, finish);
+                                return;
+                            }
+                            catch (...)
+                            {
+                            }
+                        }
+                        finish();
+                    }));
         }
         catch (...)
         {
@@ -4471,7 +4534,8 @@ PeerSet::snapshot_unsafe() const
     for (auto const& [key, _] : in_flight_)
         endpoints.insert(key);
     endpoints.insert(queued_.begin(), queued_.end());
-    endpoints.insert(crawl_in_flight_.begin(), crawl_in_flight_.end());
+    for (auto const& [key, _] : crawl_in_flight_)
+        endpoints.insert(key);
     endpoints.insert(crawl_queued_.begin(), crawl_queued_.end());
     for (auto const& [key, _] : crawled_)
         endpoints.insert(key);
@@ -4797,7 +4861,8 @@ PeerSet::prune_endpoint_stats()
     for (auto const& [key, _] : in_flight_)
         keep.insert(key);
     keep.insert(queued_.begin(), queued_.end());
-    keep.insert(crawl_in_flight_.begin(), crawl_in_flight_.end());
+    for (auto const& [key, _] : crawl_in_flight_)
+        keep.insert(key);
     keep.insert(crawl_queued_.begin(), crawl_queued_.end());
 
     // Collect eviction candidates (not in keep set)
@@ -4886,7 +4951,8 @@ PeerSet::prune_discovery_state()
     for (auto const& [key, _] : in_flight_)
         active.insert(key);
     active.insert(queued_.begin(), queued_.end());
-    active.insert(crawl_in_flight_.begin(), crawl_in_flight_.end());
+    for (auto const& [key, _] : crawl_in_flight_)
+        active.insert(key);
     active.insert(crawl_queued_.begin(), crawl_queued_.end());
 
     if (tracker_->size() > kMaxTrackedEndpoints)

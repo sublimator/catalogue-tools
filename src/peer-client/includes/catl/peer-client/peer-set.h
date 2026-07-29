@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -488,6 +489,8 @@ private:
     std::function<void()> connect_failure_classification_hook_for_test_;
     std::function<void()> connect_completion_diagnostic_hook_for_test_;
     std::function<void()> crawl_completion_diagnostic_hook_for_test_;
+    std::function<void(std::string const&, std::function<void()>)>
+        defer_crawl_servant_receipt_for_test_;
     /// Pause after one owner-strand generation-pin barrier has consumed its
     /// causal prefix but before that barrier receipt returns to its caller.
     /// Production leaves this empty.
@@ -931,11 +934,19 @@ private:
     std::map<std::string, std::vector<TargetedConnectAuthorizationPtr>>
         targeted_connects_;
     std::vector<std::string> pending_connects_;
+    struct CrawlServant
+    {
+        /// Installed in the authoritative row before co_spawn can expose the
+        /// servant. Stop may request cancellation through this exact signal,
+        /// but only the co_spawn completion funnel may retire the row.
+        std::shared_ptr<boost::asio::cancellation_signal> cancellation;
+        bool stop_cancellation_requested = false;
+    };
     //@@authority state=prv.S0038 status=provisional scope=field
-    // bind=catl::peer_client::PeerSet::crawl_in_flight_@20b1e8147bbd2e1e
+    // bind=catl::peer_client::PeerSet::crawl_in_flight_@5fdc9078863857e4
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
-    // label=owned_background_crawl_servant_census
-    std::set<std::string> crawl_in_flight_;
+    // label=owned_background_crawl_servant_census_and_cancellation_authority
+    std::map<std::string, CrawlServant> crawl_in_flight_;
     std::set<std::string> crawl_queued_;
     std::map<std::string, std::chrono::steady_clock::time_point> crawled_;
     std::vector<std::string> pending_crawls_;

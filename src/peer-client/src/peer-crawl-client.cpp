@@ -6,6 +6,7 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/ssl.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -253,7 +254,8 @@ fetch_crawl_https(std::string const& host, uint16_t port)
     try
     {
         tcp_stream.expires_after(std::chrono::seconds(5));
-        co_await tcp_stream.async_connect(endpoints, boost::asio::use_awaitable);
+        co_await tcp_stream.async_connect(
+            endpoints, boost::asio::use_awaitable);
     }
     catch (std::exception const& e)
     {
@@ -373,23 +375,33 @@ co_fetch_peer_crawl(std::string host, uint16_t port)
     // Try HTTP first — XRPL/Xahau peer crawl endpoints serve plain HTTP
     // on the peer port. HTTPS wastes time on TLS handshake timeout.
     std::string http_summary;
+    std::exception_ptr http_failure;
     try
     {
         co_return co_await fetch_crawl_http(host, port);
     }
     catch (std::exception const& http_error)
     {
+        http_failure = std::current_exception();
         http_summary = strip_diagnostic(http_error.what());
-        PLOGD(
-            log_,
-            "HTTP crawl failed for ",
-            host,
-            ":",
-            port,
-            ": ",
-            http_summary,
-            " — falling back to HTTPS");
     }
+
+    auto const cancellation =
+        co_await boost::asio::this_coro::cancellation_state;
+    if (cancellation.cancelled() != boost::asio::cancellation_type::none)
+    {
+        std::rethrow_exception(http_failure);
+    }
+
+    PLOGD(
+        log_,
+        "HTTP crawl failed for ",
+        host,
+        ":",
+        port,
+        ": ",
+        http_summary,
+        " — falling back to HTTPS");
 
     try
     {
