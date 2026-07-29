@@ -44,6 +44,10 @@ enum class Error {
     /// peer advertised the required ledger. This carries no peer-response
     /// evidence and must never be reported as PeerNoLedger.
     NoSuitablePeer,
+    /// This exact PeerClient no longer advertised the requested ledger when
+    /// the queued request reached its owner strand. This is neither peer
+    /// response evidence nor proof that the PeerSet has no suitable peer.
+    PeerCoverageChanged,
 };
 
 /// First retained logical terminal cause for one PeerClient instance.

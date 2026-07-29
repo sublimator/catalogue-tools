@@ -72,6 +72,9 @@ public:
             case Error::NoSuitablePeer:
                 return "NoSuitablePeer (no eligible peer advertises the "
                        "ledger)";
+            case Error::PeerCoverageChanged:
+                return "PeerCoverageChanged (selected peer revoked coverage "
+                       "before send)";
             default:
                 return "Unknown(" + std::to_string(static_cast<int>(e)) + ")";
         }

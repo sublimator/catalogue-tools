@@ -1634,6 +1634,186 @@ TEST(
 
 TEST(
     PeerSessionInterface,
+    QueuedNodeAttemptCannotConsumeUntilTransportInitiationReturns)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+    auto const ledger_hash = hash_with_byte(0x3d);
+    auto const node_id = SHAMapNodeID::root();
+    auto const payload =
+        serialize(*make_node_response(ledger_hash, node_id, true));
+    std::vector<peer_connection::test_write_completion> writes;
+    std::vector<Error> completions;
+    client->raw_connection().set_write_initiator_for_test(
+        [&writes](
+            asio::const_buffer,
+            peer_connection::test_write_completion completion) {
+            writes.push_back(std::move(completion));
+        });
+
+    asio::post(client->strand(), [&, client, payload] {
+        EXPECT_EQ(
+            client->raw_connection().async_send_packet(
+                packet_type::ping,
+                std::vector<std::uint8_t>(1, 0x3d),
+                [](boost::system::error_code) {}),
+            peer_connection::SendAdmission::accepted);
+        ASSERT_EQ(writes.size(), 1u);
+
+        client->get_tx_nodes(
+            ledger_hash,
+            {node_id},
+            [&completions](Error error, LedgerNodesResult) {
+                completions.push_back(error);
+            });
+        ASSERT_EQ(writes.size(), 1u)
+            << "the request is admitted behind the active write but its "
+               "transport initiation has not run";
+
+        PeerClientTestAccess::dispatch_ledger_data(*client, payload);
+        EXPECT_TRUE(completions.empty());
+        EXPECT_EQ(client->pending_count(), 1u);
+
+        auto predecessor = std::move(writes.front());
+        predecessor({});
+        ASSERT_EQ(writes.size(), 2u)
+            << "retiring the predecessor must initiate the queued request";
+
+        PeerClientTestAccess::dispatch_ledger_data(*client, payload);
+        ASSERT_EQ(completions.size(), 1u);
+        EXPECT_EQ(completions.front(), Error::Success);
+        EXPECT_EQ(client->pending_count(), 0u);
+
+        auto request_write = std::move(writes.back());
+        request_write({});
+    });
+    io.run();
+
+    ASSERT_EQ(completions.size(), 1u);
+    EXPECT_EQ(completions.front(), Error::Success);
+}
+
+TEST(
+    PeerSessionInterface,
+    ClosedAdmissionRefusalCannotLeaveOrCorrelatePendingNodeAttempt)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+    auto const ledger_hash = hash_with_byte(0x3e);
+    auto const node_id = SHAMapNodeID::root();
+    auto const payload =
+        serialize(*make_node_response(ledger_hash, node_id, true));
+    peer_connection::test_write_completion write;
+    std::vector<Error> completions;
+    client->raw_connection().set_write_initiator_for_test(
+        [&write](
+            asio::const_buffer,
+            peer_connection::test_write_completion completion) {
+            write = std::move(completion);
+        });
+
+    asio::post(client->strand(), [&, client, payload] {
+        EXPECT_EQ(
+            client->raw_connection().async_send_packet(
+                packet_type::ping,
+                std::vector<std::uint8_t>(1, 0x3e),
+                [&, client](boost::system::error_code) {
+                    client->get_tx_nodes(
+                        ledger_hash,
+                        {node_id},
+                        [&completions](Error error, LedgerNodesResult) {
+                            completions.push_back(error);
+                        });
+                }),
+            peer_connection::SendAdmission::accepted);
+        ASSERT_TRUE(write);
+
+        auto fatal = std::move(write);
+        fatal(asio::error::connection_reset);
+
+        ASSERT_EQ(completions.size(), 1u);
+        EXPECT_EQ(completions.front(), Error::Disconnected);
+        EXPECT_EQ(client->pending_count(), 0u);
+
+        PeerClientTestAccess::dispatch_ledger_data(*client, payload);
+        EXPECT_EQ(completions.size(), 1u)
+            << "a later packet cannot satisfy the refused attempt";
+    });
+    io.run();
+
+    ASSERT_EQ(completions.size(), 1u);
+    EXPECT_EQ(completions.front(), Error::Disconnected);
+}
+
+TEST(
+    PeerSessionInterface,
+    QueueFullRefusalRetiresPendingNodeAttemptWithoutOutOfRange)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+    auto const ledger_hash = hash_with_byte(0x3f);
+    auto const node_id = SHAMapNodeID::root();
+    auto const payload =
+        serialize(*make_node_response(ledger_hash, node_id, true));
+    peer_connection::test_write_completion active_write;
+    std::vector<Error> completions;
+    client->raw_connection().set_write_initiator_for_test(
+        [&active_write](
+            asio::const_buffer,
+            peer_connection::test_write_completion completion) {
+            ASSERT_FALSE(active_write);
+            active_write = std::move(completion);
+        });
+
+    asio::post(client->strand(), [&, client, payload] {
+        EXPECT_EQ(
+            client->raw_connection().async_send_packet(
+                packet_type::ping,
+                std::vector<std::uint8_t>(1, 0x40),
+                [](boost::system::error_code) {}),
+            peer_connection::SendAdmission::accepted);
+        ASSERT_TRUE(active_write);
+
+        for (std::size_t index = 0; index < 256; ++index)
+        {
+            EXPECT_EQ(
+                client->raw_connection().async_send_packet(
+                    packet_type::ping,
+                    std::vector<std::uint8_t>(1, 0x41),
+                    [](boost::system::error_code) {}),
+                peer_connection::SendAdmission::accepted);
+        }
+
+        client->get_tx_nodes(
+            ledger_hash,
+            {node_id},
+            [&completions](Error error, LedgerNodesResult) {
+                completions.push_back(error);
+            });
+
+        ASSERT_EQ(completions.size(), 1u);
+        EXPECT_EQ(completions.front(), Error::ResourceExhausted);
+        EXPECT_EQ(client->pending_count(), 0u);
+        PeerClientTestAccess::dispatch_ledger_data(*client, payload);
+        EXPECT_EQ(completions.size(), 1u);
+
+        auto physical_receipt = std::move(active_write);
+        physical_receipt(asio::error::operation_aborted);
+    });
+    io.run();
+
+    ASSERT_EQ(completions.size(), 1u);
+    EXPECT_EQ(completions.front(), Error::ResourceExhausted);
+}
+
+TEST(
+    PeerSessionInterface,
     StaleUniqueNodeClassificationCannotConsumeReplacementIncarnation)
 {
     asio::io_context io;
@@ -5764,6 +5944,63 @@ TEST(PeerSessionInterface, FastHeaderFailureIsLatchedBeforeOwnerWaits)
     EXPECT_LT(
         std::chrono::steady_clock::now() - started,
         std::chrono::milliseconds(250));
+}
+
+TEST(
+    PeerSessionInterface,
+    PeerLocalCoverageRevocationDoesNotMintLedgerFailureEvidence)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = std::chrono::milliseconds(10),
+            .peer_refresh_timeout_secs = 0,
+            .header_timeout_floor = std::chrono::milliseconds(20),
+        });
+    constexpr std::uint32_t ledger_seq = 6000;
+    auto primary = std::make_shared<FakePeerSession>(
+        io, "coverage-revoked:1", true, ledger_seq, 5900, 6100);
+    primary->set_invoke_header_handler_inline(true);
+    primary->set_get_ledger_header_handler(
+        [](uint32_t, Callback<LedgerHeaderResult> callback) {
+            callback(Error::PeerCoverageChanged, LedgerHeaderResult{});
+        });
+    PeerSetTestAccess::insert_connected_peer(io, peers, primary);
+
+    bool terminal = false;
+    asio::co_spawn(
+        io,
+        [&, cache, peers, primary]() -> asio::awaitable<void> {
+            try
+            {
+                (void)co_await cache->get_header(
+                    ledger_seq, peers, std::move(primary));
+            }
+            catch (PeerClientException const&)
+            {
+                terminal = true;
+            }
+        },
+        asio::detached);
+    io.run_for(std::chrono::milliseconds(250));
+    io.restart();
+
+    EXPECT_TRUE(terminal);
+    EXPECT_EQ(
+        PeerSetTestAccess::ledger_failure_count(
+            io, peers, "coverage-revoked:1"),
+        0u)
+        << "one peer's local coverage revocation cannot become service-failure "
+           "history";
 }
 
 TEST(PeerSessionInterface, HeaderLeaderCancellationDoesNotAbandonFollower)

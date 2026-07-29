@@ -208,8 +208,9 @@ TEST(PeerClientStatusRange, QueuedRevocationRefusesHeaderWriteAtCommit)
 
     EXPECT_EQ(writes, 0u);
     ASSERT_EQ(completions.size(), 1u);
-    EXPECT_EQ(completions.front(), Error::NoSuitablePeer)
-        << "pre-send coverage revocation has no peer-response evidence";
+    EXPECT_EQ(completions.front(), Error::PeerCoverageChanged)
+        << "one peer's revoked coverage is neither peer-response evidence nor "
+           "population-level search exhaustion";
     EXPECT_EQ(client->pending_count(), 0u);
 }
 

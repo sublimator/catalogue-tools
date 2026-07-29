@@ -542,6 +542,41 @@ PeerClient::resolve(PendingMap<T>& map, Hash256 const& key, Error err, T result)
     }
 }
 
+template <typename T>
+void
+PeerClient::mark_network_request_initiated(
+    PendingMap<T>& map,
+    Hash256 const& key,
+    std::uint64_t incarnation) noexcept
+{
+    assert(strand_.running_in_this_thread());
+    auto const found = map.find(key);
+    if (found == map.end() || found->second.incarnation != incarnation)
+        return;
+    found->second.network_request_initiated = true;
+}
+
+template <typename T>
+void
+PeerClient::complete_network_send(
+    PendingMap<T>& map,
+    Hash256 const& key,
+    std::uint64_t incarnation,
+    boost::system::error_code error)
+{
+    assert(strand_.running_in_this_thread());
+    if (!error)
+        return;
+    auto const found = map.find(key);
+    if (found == map.end() || found->second.incarnation != incarnation)
+        return;
+
+    auto const terminal = error == boost::asio::error::no_buffer_space
+        ? Error::ResourceExhausted
+        : Error::Disconnected;
+    resolve(map, key, terminal, T{});
+}
+
 // Explicit instantiations
 template bool
 PeerClient::register_callback(
@@ -941,7 +976,7 @@ PeerClient::disconnect_on_strand()
             0},
         [this, &previous]() noexcept {
             previous = state_.exchange(State::Disconnected);
-        }); //@@authority-target ids=prv.T0184
+        });  //@@authority-target ids=prv.T0184
     if (!commit.event_committed)
         previous = state_.exchange(State::Disconnected);
 
@@ -1321,7 +1356,7 @@ PeerClient::submit_node_batch_on_strand(
     {
         refuse(NodeBatchWriteOutcome::ledger_not_advertised);
         return false;
-    } //@@authority-target ids=prv.T0062
+    }  //@@authority-target ids=prv.T0062
 
     if (node_batch_write_records_.size() >= kMaxNodeBatchReceiptRows)
     {
@@ -1672,7 +1707,7 @@ PeerClient::do_connect(
                         return;
                     self->on_connected(std::move(on_ready));
                 });
-        }); //@@authority-target ids=prv.T0148
+        });  //@@authority-target ids=prv.T0148
 }
 
 void
@@ -1690,7 +1725,7 @@ PeerClient::complete_connect(boost::system::error_code ec)
     // commit=peer_client_strand touches=prv.S0060
     // label=consume_one_shot_connect_completion_before_invoke
     auto cb = std::exchange(
-        connect_completion_callback_, {}); //@@authority-target ids=prv.T0185
+        connect_completion_callback_, {});  //@@authority-target ids=prv.T0185
     //@@mutation-end connect-completion-observer-is-consumed
     try
     {
@@ -2002,7 +2037,7 @@ PeerClient::become_ready()
         // commit=peer_client_strand touches=prv.S0061
         // label=consume_one_shot_ready_observer_before_invoke
         auto cb = std::exchange(
-            ready_callback_, {}); //@@authority-target ids=prv.T0188
+            ready_callback_, {});  //@@authority-target ids=prv.T0188
         //@@mutation-end connect-ready-observer-is-consumed
         try
         {
@@ -2155,12 +2190,13 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
     if (msg->has_requestcookie())
     {
         PLOGW(log_, "dispatch_ledger_data: refusing unexpected relay cookie");
-        //@@authority transition=prv.T0197 status=provisional bind=expression_statement@5f5909b2f6b7edc6
+        //@@authority transition=prv.T0197 status=provisional
+        // bind=expression_statement@5f5909b2f6b7edc6
         // scope=statement owner=unresolved owner_hypothesis=peer_client
         // commit=strand touches=prv.S0064
         // label=refuse_unowned_relay_routing_authority
         legacy_identity_envelope_complete =
-            false; //@@authority-target ids=prv.T0197
+            false;  //@@authority-target ids=prv.T0197
     }
 
     // Reject responses with an absurd node count before any iteration. The
@@ -2203,7 +2239,7 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
                 // label=invoke_snapshot_and_observe_uncorrelated_response_sink
                 //@@mutation-site node-response-sink-disposition-preserved
                 cache_observation =
-                    observer(msg); //@@authority-target ids=prv.T0041
+                    observer(msg);  //@@authority-target ids=prv.T0041
                 //@@mutation-end node-response-sink-disposition-preserved
             }
             catch (...)
@@ -2484,7 +2520,7 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
               observation, candidates.front()}}
         : LedgerObservationCorrelation{AmbiguousLedgerObservation{
               observation,
-              std::move(candidates)}}; //@@authority-target ids=prv.T0194
+              std::move(candidates)}};  //@@authority-target ids=prv.T0194
 
     auto const* unique =
         std::get_if<UniquelyCorrelatedLedgerObservation>(&correlation);
@@ -2522,7 +2558,7 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
                 candidate.key,
                 error,
                 LedgerHeaderResult{
-                    std::move(result)}); //@@authority-target ids=prv.T0195
+                    std::move(result)});  //@@authority-target ids=prv.T0195
             return true;
         }
 
@@ -2546,7 +2582,7 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
             candidate.key,
             error,
             LedgerNodesResult{
-                std::move(result)}); //@@authority-target ids=prv.T0196
+                std::move(result)});  //@@authority-target ids=prv.T0196
         return true;
     };
 
@@ -2753,7 +2789,7 @@ PeerClient::get_ledger_header_on_strand(
     if (!advertised_ledger_range().contains(ledger_seq))
     {
         complete_callback_noexcept(
-            log_, std::move(callback), Error::NoSuitablePeer);
+            log_, std::move(callback), Error::PeerCoverageChanged);
         return;
     }
 
@@ -2785,21 +2821,36 @@ PeerClient::get_ledger_header_on_strand(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_headers_.at(key).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::get_ledger, data, [](boost::system::error_code ec) {
+        packet_type::get_ledger,
+        data,
+        [weak, key, incarnation](boost::system::error_code ec) {
             if (ec)
                 PLOGE(
                     PeerClient::log_,
                     "send TMGetLedger failed: ",
                     ec.message());
+            if (auto self = weak.lock())
+                self->complete_network_send(
+                    self->pending_headers_, key, incarnation, ec);
+        },
+        [weak, key, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0198 status=provisional
+                // bind=expression_statement@0f209b623021e574
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_sequence_header_send_initiation
+                self->mark_network_request_initiated(
+                    self->pending_headers_,
+                    key,
+                    incarnation);  //@@authority-target ids=prv.T0198
+            }
         });
-    //@@authority transition=prv.T0198 status=provisional scope=statement
-    // bind=expression_statement@9244997b98f9a9e7
-    // owner=unresolved owner_hypothesis=peer_client commit=strand
-    // touches=prv.S0065
-    // label=record_sequence_header_send_initiation
-    pending_headers_.at(key).network_request_initiated =
-        true; //@@authority-target ids=prv.T0198
 }
 
 void
@@ -2863,15 +2914,31 @@ PeerClient::get_ledger_header_on_strand(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_headers_.at(key).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::get_ledger, data, [](boost::system::error_code) {});
-    //@@authority transition=prv.T0199 status=provisional scope=statement
-    // bind=expression_statement@51f98dd86aa74e9f
-    // owner=unresolved owner_hypothesis=peer_client commit=strand
-    // touches=prv.S0065
-    // label=record_hash_header_send_initiation
-    pending_headers_.at(key).network_request_initiated =
-        true; //@@authority-target ids=prv.T0199
+        packet_type::get_ledger,
+        data,
+        [weak, key, incarnation](boost::system::error_code ec) {
+            if (auto self = weak.lock())
+                self->complete_network_send(
+                    self->pending_headers_, key, incarnation, ec);
+        },
+        [weak, key, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0199 status=provisional
+                // bind=expression_statement@24ea44f75b1d37c8
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_hash_header_send_initiation
+                self->mark_network_request_initiated(
+                    self->pending_headers_,
+                    key,
+                    incarnation);  //@@authority-target ids=prv.T0199
+            }
+        });
 }
 
 void
@@ -2959,21 +3026,36 @@ PeerClient::get_state_nodes_on_strand(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_nodes_.at(key).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::get_ledger, data, [](boost::system::error_code ec) {
+        packet_type::get_ledger,
+        data,
+        [weak, key, incarnation](boost::system::error_code ec) {
             if (ec)
                 PLOGE(
                     PeerClient::log_,
                     "send get_state_nodes failed: ",
                     ec.message());
+            if (auto self = weak.lock())
+                self->complete_network_send(
+                    self->pending_nodes_, key, incarnation, ec);
+        },
+        [weak, key, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0200 status=provisional
+                // bind=expression_statement@ce67337b191241d7
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_state_node_send_initiation
+                self->mark_network_request_initiated(
+                    self->pending_nodes_,
+                    key,
+                    incarnation);  //@@authority-target ids=prv.T0200
+            }
         });
-    //@@authority transition=prv.T0200 status=provisional scope=statement
-    // bind=expression_statement@bcfa8d653379ef8c
-    // owner=unresolved owner_hypothesis=peer_client commit=strand
-    // touches=prv.S0065
-    // label=record_state_node_send_initiation
-    pending_nodes_.at(key).network_request_initiated =
-        true; //@@authority-target ids=prv.T0200
 }
 
 void
@@ -3061,21 +3143,36 @@ PeerClient::get_tx_nodes_on_strand(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_nodes_.at(key).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::get_ledger, data, [](boost::system::error_code ec) {
+        packet_type::get_ledger,
+        data,
+        [weak, key, incarnation](boost::system::error_code ec) {
             if (ec)
                 PLOGE(
                     PeerClient::log_,
                     "send get_tx_nodes failed: ",
                     ec.message());
+            if (auto self = weak.lock())
+                self->complete_network_send(
+                    self->pending_nodes_, key, incarnation, ec);
+        },
+        [weak, key, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0201 status=provisional
+                // bind=expression_statement@422928ff37eb7f53
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_transaction_node_send_initiation
+                self->mark_network_request_initiated(
+                    self->pending_nodes_,
+                    key,
+                    incarnation);  //@@authority-target ids=prv.T0201
+            }
         });
-    //@@authority transition=prv.T0201 status=provisional scope=statement
-    // bind=expression_statement@0108afa84f302f83
-    // owner=unresolved owner_hypothesis=peer_client commit=strand
-    // touches=prv.S0065
-    // label=record_transaction_node_send_initiation
-    pending_nodes_.at(key).network_request_initiated =
-        true; //@@authority-target ids=prv.T0201
 }
 
 void

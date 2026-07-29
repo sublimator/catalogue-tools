@@ -124,7 +124,8 @@ peer_connection::complete_transport_operation(TransportOperationId id) noexcept
     try_complete_physical_drain();
 }
 
-//@@authority transition=prv.T0143 status=provisional scope=function bind=catl::peer_client::release_resolver_after_non_close_terminal@99d6b7b2c13b8bfd
+//@@authority transition=prv.T0143 status=provisional scope=function
+// bind=catl::peer_client::release_resolver_after_non_close_terminal@99d6b7b2c13b8bfd
 // owner=unresolved owner_hypothesis=peer_connection commit=connection_strand
 // touches=prv.S0047 mutation_class=terminal_receipt
 // label=release_resolver_after_completion_or_initiation_refusal
@@ -181,7 +182,8 @@ peer_connection::async_connect(const connection_handler& handler)
         handler(boost::asio::error::operation_aborted);
         return;
     }
-    //@@authority transition=prv.T0149 status=provisional scope=statement bind=if_statement@c65a0e313ebc0566
+    //@@authority transition=prv.T0149 status=provisional scope=statement
+    // bind=if_statement@c65a0e313ebc0566
     // owner=unresolved owner_hypothesis=peer_connection
     // commit=connection_strand touches=prv.S0047
     // mutation_class=running_guarded
@@ -190,7 +192,7 @@ peer_connection::async_connect(const connection_handler& handler)
     {
         handler(boost::asio::error::already_started);
         return;
-    } //@@authority-target ids=prv.T0149
+    }  //@@authority-target ids=prv.T0149
 
     // Resolve the host asynchronously
     //@@authority transition=prv.T0141 status=provisional scope=statement
@@ -199,7 +201,7 @@ peer_connection::async_connect(const connection_handler& handler)
     // commit=connection_strand touches=prv.S0047 mutation_class=running_guarded
     // label=install_owned_resolver_cancellation_capability
     resolver_ = std::make_shared<tcp::resolver>(
-        strand_); //@@authority-target ids=prv.T0141
+        strand_);  //@@authority-target ids=prv.T0141
     auto const resolver = resolver_;
     try
     {
@@ -1465,12 +1467,12 @@ peer_connection::handle_read_payload(
     // The packet callback is external code and may synchronously close this
     // connection. Recheck the seal before it can rearm the read loop.
     //@@authority transition=prv.T0144 status=provisional scope=statement
-    //bind=if_statement@78b0eb52dc803579
+    // bind=if_statement@78b0eb52dc803579
     // owner=unresolved owner_hypothesis=peer_connection
     // commit=connection_strand touches=prv.S0048 mutation_class=running_guarded
     // label=refuse_read_rearm_after_reentrant_close
     if (physical_phase_ != PhysicalPhase::open)
-        return; //@@authority-target ids=prv.T0144
+        return;  //@@authority-target ids=prv.T0144
 
     // Continue reading
     async_read_header();
@@ -1544,13 +1546,14 @@ peer_connection::drain_payload(std::size_t remaining)
 }
 
 //@@authority transition=peer_client.admit_write owner=peer_client commit=strand
-// bind=catl::peer_client::async_send_packet@aa941b4cfb0ffae8
+// bind=catl::peer_client::async_send_packet@8fd1fdbed8dbc03d
 // Admission authority. Refuses before any queue mutation once admission closes.
-void
+peer_connection::SendAdmission
 peer_connection::async_send_packet(
     packet_type type,
     std::vector<std::uint8_t> const& data,
-    std::function<void(boost::system::error_code)> handler)
+    std::function<void(boost::system::error_code)> handler,
+    send_initiated_handler on_initiated)
 {
     // Closed admission, refused BEFORE any queue mutation. Without this gate a
     // send after close_impl() was queued against a dead transport, and its
@@ -1561,7 +1564,7 @@ peer_connection::async_send_packet(
     if (admission_closed_)
     {
         deliver_terminal(handler, asio::error::operation_aborted);
-        return;
+        return SendAdmission::admission_closed;
     }
 
     // Build the wire packet: header(6) + payload
@@ -1596,12 +1599,14 @@ peer_connection::async_send_packet(
         // queue-full refusal without bound.
         fail_and_close(boost::asio::error::no_buffer_space);
         deliver_terminal(handler, boost::asio::error::no_buffer_space);
-        return;
+        return SendAdmission::queue_full;
     }
 
     // Enqueue and pump — only one async_write in flight at a time
-    write_queue_.push_back({std::move(packet), std::move(handler)});
+    write_queue_.push_back(
+        {std::move(packet), std::move(handler), std::move(on_initiated)});
     do_write();
+    return SendAdmission::accepted;
 }
 
 //@@authority transition=peer_client.initiate_write owner=peer_client
@@ -1650,6 +1655,9 @@ peer_connection::do_write()
         write_queue_.pop_front();
 
         std::optional<TransportOperationId> operation;
+        send_initiated_handler on_initiated =
+            std::move(active_write_->on_initiated);
+        active_write_->on_initiated = nullptr;
         try
         {
             operation =
@@ -1675,20 +1683,42 @@ peer_connection::do_write()
                         self->on_write_complete(ec);
                     });
             }
-            return;  // initiated — the completion owns the rest
         }
         catch (std::exception const& exc)
         {
             if (operation)
                 complete_transport_operation(*operation);
             rollback(exc.what());
+            continue;
         }
         catch (...)
         {
             if (operation)
                 complete_transport_operation(*operation);
             rollback("unknown exception");
+            continue;
         }
+
+        // The initiation call returned normally, so Asio now owns the active
+        // row's bytes. Publish that retained fact separately from queue
+        // admission. The callback is exception-contained because rollback is
+        // no longer legal after transport initiation succeeds.
+        if (on_initiated)
+        {
+            try
+            {
+                on_initiated();
+            }
+            catch (std::exception const& exc)
+            {
+                PLOGW(log_, "write initiation observer threw: ", exc.what());
+            }
+            catch (...)
+            {
+                PLOGW(log_, "write initiation observer threw");
+            }
+        }
+        return;  // initiated — the completion owns the rest
     }
 }
 
@@ -2273,7 +2303,7 @@ peer_connection::settle_and_close(
     // commit=connection_strand touches=prv.S0048 mutation_class=seal_commit
     // label=seal_connection_transport_admission
     physical_phase_ =
-        PhysicalPhase::closing; //@@authority-target ids=prv.T0137
+        PhysicalPhase::closing;  //@@authority-target ids=prv.T0137
 
     // Admission closes as part of the same commit, before any external
     // callback. It may already be closed — the failing-write path commits it
@@ -2327,7 +2357,7 @@ peer_connection::settle_and_close(
     {
         resolver_->cancel();
         resolver_.reset();
-    } //@@authority-target ids=prv.T0142
+    }  //@@authority-target ids=prv.T0142
 
     // Break shared_ptr cycles: packet_handler_ and disconnect_handler_
     // capture shared_ptr<PeerClient> which holds shared_ptr<peer_connection>.

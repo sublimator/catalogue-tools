@@ -26,6 +26,18 @@ public:
     using packet_handler = std::function<
         void(packet_header const&, std::vector<std::uint8_t> const&)>;
     using disconnect_handler = std::function<void(boost::system::error_code)>;
+    using send_initiated_handler = std::function<void()>;
+
+    /// Synchronous disposition of one packet's queue-admission attempt.
+    ///
+    /// `accepted` says only that the connection retained the row. The separate
+    /// initiation callback publishes the later fact that the transport
+    /// initiation call itself returned successfully.
+    enum class SendAdmission {
+        accepted,
+        admission_closed,
+        queue_full,
+    };
 
     /// Strand-based construction. All async operations complete on the
     /// strand, so all callbacks fire on it automatically.
@@ -49,11 +61,12 @@ public:
     start_read(packet_handler handler);
 
     // Send packet
-    void
+    SendAdmission
     async_send_packet(
         packet_type type,
         std::vector<std::uint8_t> const& data,
-        std::function<void(boost::system::error_code)> handler);
+        std::function<void(boost::system::error_code)> handler,
+        send_initiated_handler on_initiated = {});
 
     // Get remote endpoint info
     std::string
@@ -461,7 +474,7 @@ private:
     TransportOperationId next_transport_operation_id_ = 1;
 
     //@@authority state=prv.S0048 status=provisional scope=field
-    //bind=catl::peer_client::peer_connection::physical_phase_@11427c92d72ac66a
+    // bind=catl::peer_client::peer_connection::physical_phase_@11427c92d72ac66a
     // owner=unresolved owner_hypothesis=peer_connection
     // observed_home=peer_connection
     // label=connection_physical_lifecycle_phase
@@ -517,6 +530,7 @@ private:
     {
         std::vector<std::uint8_t> packet;
         std::function<void(boost::system::error_code)> handler;
+        send_initiated_handler on_initiated;
     };
     // Four distinct things, deliberately not collapsed into flags:
     //

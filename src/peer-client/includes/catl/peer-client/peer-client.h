@@ -811,6 +811,21 @@ private:
     void
     resolve(PendingMap<T>& map, Hash256 const& key, Error err, T result);
 
+    template <typename T>
+    void
+    mark_network_request_initiated(
+        PendingMap<T>& map,
+        Hash256 const& key,
+        std::uint64_t incarnation) noexcept;
+
+    template <typename T>
+    void
+    complete_network_send(
+        PendingMap<T>& map,
+        Hash256 const& key,
+        std::uint64_t incarnation,
+        boost::system::error_code error);
+
     void
     complete_all_pending(Error error);
 

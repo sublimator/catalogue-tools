@@ -42,6 +42,22 @@ advertises_ledger(PeerSession const* peer, uint32_t ledger_seq)
     return peer->advertised_ledger_range().contains(ledger_seq);
 }
 
+bool
+carries_peer_ledger_failure_evidence(Error error) noexcept
+{
+    switch (error)
+    {
+        case Error::Timeout:
+        case Error::Disconnected:
+        case Error::PeerNoLedger:
+        case Error::NoNode:
+        case Error::ParseError:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void
 complete_timer_noexcept(
     std::shared_ptr<SerializedTimerSignal> const& timer) noexcept
@@ -3338,8 +3354,7 @@ NodeCache::send_header_fetch(
     uint32_t ledger_seq,
     PeerSession& peer,
     std::shared_ptr<HeaderFetchState> fetch,
-    std::shared_ptr<HeaderRound> round,
-    std::shared_ptr<PeerSet> peers)
+    std::shared_ptr<HeaderRound> round)
 {
     fetches_++;
 
@@ -3356,12 +3371,8 @@ NodeCache::send_header_fetch(
 
     peer.get_ledger_header(
         ledger_seq,
-        [weak_self,
-         ledger_seq,
-         fetch,
-         round,
-         peers,
-         endpoint = peer.endpoint()](Error err, LedgerHeaderResult result) {
+        [weak_self, ledger_seq, fetch, round, endpoint = peer.endpoint()](
+            Error err, LedgerHeaderResult result) {
             auto self = weak_self.lock();
             if (!self)
                 return;
@@ -3372,7 +3383,6 @@ NodeCache::send_header_fetch(
                  ledger_seq,
                  fetch,
                  round,
-                 peers,
                  endpoint,
                  err,
                  result = std::move(result)]() mutable {
@@ -3403,11 +3413,16 @@ NodeCache::send_header_fetch(
                             " err=",
                             static_cast<int>(err));
 
-                        // Record per-peer failure for future peer selection
-                        if (peers)
-                        {
-                            peers->note_ledger_failure(endpoint, ledger_seq);
-                        }
+                        //@@authority transition=prv.T0202 status=provisional
+                        //bind=expression_statement@196946007691d948
+                        // scope=statement owner=unresolved
+                        // owner_hypothesis=node_cache
+                        // commit=header_state_strand touches=prv.S0066
+                        // label=classify_exact_header_endpoint_terminal
+                        round->settled_endpoints.insert(
+                            endpoint);  //@@authority-target ids=prv.T0202
+                        if (carries_peer_ledger_failure_evidence(err))
+                            round->ledger_failure_endpoints.insert(endpoint);
 
                         // If all fan-out peers have failed, wake this round's
                         // owner instead of waiting for its timeout.
@@ -3420,6 +3435,7 @@ NodeCache::send_header_fetch(
                         return;
                     }
 
+                    round->settled_endpoints.insert(endpoint);
                     round->outstanding.fetch_sub(1);
                     self->finish_header_fetch(
                         ledger_seq, fetch, std::move(result));
@@ -3938,13 +3954,14 @@ NodeCache::drive_header_fetch(
         fetch->round_peers.push_back(endpoint);
         try
         {
-            send_header_fetch(ledger_seq, *session, fetch, round, fetch->peers);
+            send_header_fetch(ledger_seq, *session, fetch, round);
         }
         catch (...)
         {
             fetch_errors_++;
-            if (fetch->peers)
-                fetch->peers->note_ledger_failure(endpoint, ledger_seq);
+            // A local call/setup exception terminalizes this round member, but
+            // it is not evidence that the peer failed to serve the ledger.
+            round->settled_endpoints.insert(endpoint);
             if (round->outstanding.fetch_sub(1, std::memory_order_acq_rel) ==
                     1 &&
                 round->dispatch_complete.load(std::memory_order_acquire))
@@ -4144,10 +4161,28 @@ NodeCache::drive_header_fetch(
                 break;
             }
 
+            if (round->outstanding.load(std::memory_order_acquire) != 0)
+            {
+                for (auto const& endpoint : fetch->round_peers)
+                {
+                    if (!round->settled_endpoints.contains(endpoint))
+                    {
+                        //@@authority transition=prv.T0203
+                        //bind=expression_statement@245fcb4f21f1a529
+                        // status=provisional scope=statement owner=unresolved
+                        // owner_hypothesis=node_cache
+                        // commit=header_state_strand touches=prv.S0066
+                        // label=classify_unsettled_header_endpoint_timeout
+                        round->ledger_failure_endpoints.insert(
+                            endpoint);  //@@authority-target ids=prv.T0203
+                    }
+                }
+            }
+
             complete_header_round(round);
             if (fetch->peers)
             {
-                for (auto const& endpoint : fetch->round_peers)
+                for (auto const& endpoint : round->ledger_failure_endpoints)
                     fetch->peers->note_ledger_failure(endpoint, ledger_seq);
             }
 

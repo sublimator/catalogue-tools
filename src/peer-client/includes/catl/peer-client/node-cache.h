@@ -755,6 +755,17 @@ private:
         std::atomic<bool> dispatch_complete{false};
         std::atomic<bool> completed{false};
         bool closed = false;
+        //@@authority state=prv.S0066 status=provisional scope=field
+        //bind=catl::peer_client::NodeCache::HeaderRound::settled_endpoints@165d2594b0b69e02
+        // owner=unresolved owner_hypothesis=node_cache
+        // observed_home=node_cache
+        // label=per_header_round_endpoint_terminal_evidence
+        // Both sets are confined to header_state_strand_. A settled endpoint
+        // returned a typed terminal; the subset in ledger_failure_endpoints
+        // carries actual service-failure evidence. An unsettled endpoint is
+        // added to that subset only when the round timer expires.
+        std::unordered_set<std::string> settled_endpoints;
+        std::unordered_set<std::string> ledger_failure_endpoints;
 
         bool
         try_begin_send(PeerGenerationPin pin)
@@ -972,8 +983,7 @@ private:
         uint32_t ledger_seq,
         PeerSession& peer,
         std::shared_ptr<HeaderFetchState> fetch,
-        std::shared_ptr<HeaderRound> round,
-        std::shared_ptr<PeerSet> peers);
+        std::shared_ptr<HeaderRound> round);
 
     asio::awaitable<void>
     drive_header_fetch(

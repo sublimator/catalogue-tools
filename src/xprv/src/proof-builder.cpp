@@ -435,6 +435,7 @@ build_proof_DEAD(
             case Error::Disconnected:
             case Error::PeerNoLedger:
             case Error::NoSuitablePeer:
+            case Error::PeerCoverageChanged:
             case Error::NoNode:
                 return true;
             default:
@@ -1070,7 +1071,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             Hash256 const& state_root_hash,
             Hash256 const& key,
             PeerGenerationPin peer = {}) -> boost::asio::awaitable<WalkResult> {
-        //@@authority transition=prv.T0007 status=provisional scope=statement
+        //@@authority transition=prv.T0007 status=provisional scope=statement bind=walk_to@a8ce5c76166dd75c
         // owner=unresolved owner_hypothesis=ledger_fetch_coordinator
         // commit=unresolved calls=walk_to
         // label=submit_state_tree_interest_without_interest_identity
@@ -1082,7 +1083,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             2,  // liAS_NODE
             ctx->peers,
             std::move(peer),
-            ctx->cancel_token);
+            ctx->cancel_token); //@@authority-target ids=prv.T0007
         co_return require_walk_transport(std::move(result));
     };
 
@@ -1094,7 +1095,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             Hash256 const& tx_root_hash,
             Hash256 const& key,
             PeerGenerationPin peer = {}) -> boost::asio::awaitable<WalkResult> {
-        //@@authority transition=prv.T0008 status=provisional scope=statement
+        //@@authority transition=prv.T0008 status=provisional scope=statement bind=walk_to@c29ef95a7f7bf289
         // owner=unresolved owner_hypothesis=ledger_fetch_coordinator
         // commit=unresolved calls=walk_to
         // label=submit_transaction_tree_interest_without_interest_identity
@@ -1106,7 +1107,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             1,  // liTX_NODE
             ctx->peers,
             std::move(peer),
-            ctx->cancel_token);
+            ctx->cancel_token); //@@authority-target ids=prv.T0008
         co_return require_walk_transport(std::move(result));
     };
 
