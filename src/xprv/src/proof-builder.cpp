@@ -438,12 +438,6 @@ build_proof_DEAD(
             case Error::PeerCoverageChanged:
             case Error::NoNode:
                 return true;
-            case Error::SendNotInitiated:
-                // The timed-out packet remains in the connection's physical
-                // queue. Retrying here could enqueue a second indistinguishable
-                // wire request before the first one drains, so fail locally
-                // until queued-send cancellation has its own exact receipt.
-                return false;
             default:
                 return false;
         }
