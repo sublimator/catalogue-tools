@@ -1200,8 +1200,13 @@ TEST(PeerSessionInterface, PeerClientPreservesBothNodeResponseSinkResults)
             " legacy=" + (test_case.legacy_matched ? "matched" : "absent");
         auto const globally_unowned =
             !test_case.cache_accepted && !test_case.legacy_matched;
-        EXPECT_EQ(
-            logs.error().find(expected) != std::string::npos, globally_unowned);
+        auto const disposition_warning =
+            logs.error().find("node response disposition:") !=
+            std::string::npos;
+        EXPECT_EQ(disposition_warning, globally_unowned);
+        if (!globally_unowned)
+            continue;
+        EXPECT_NE(logs.error().find(expected), std::string::npos);
     }
 }
 
