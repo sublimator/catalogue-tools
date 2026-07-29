@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <boost/asio.hpp>
+#include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/ssl.hpp>
 #include <chrono>
 #include <deque>
@@ -29,10 +30,8 @@ namespace catl::peer_client {
 using ReadyCallback = std::function<void(uint32_t peer_ledger_seq)>;
 
 /// Called exactly once when initial setup either becomes ready or fails.
-using ConnectCompletionCallback = std::function<void(
-    boost::system::error_code,
-    uint32_t peer_ledger_seq,
-    ConnectAttemptDisposition)>;
+using ConnectCompletionCallback =
+    std::function<void(boost::system::error_code, uint32_t peer_ledger_seq)>;
 
 //------------------------------------------------------------------------------
 // Connection state
@@ -46,6 +45,203 @@ enum class State {
     Ready,             // Status exchanged, can send requests
     Failed,
 };
+
+namespace detail {
+
+enum class ConnectAttemptTerminalKind : std::uint8_t {
+    ready,
+    peer_failure,
+    owner_disconnect,
+    deadline,
+    caller_cancelled,
+};
+
+struct ConnectAttemptTerminal
+{
+    ConnectAttemptTerminalKind kind;
+    boost::system::error_code error;
+    uint32_t peer_seq = 0;
+    int deadline_seconds = 0;
+};
+
+struct ConnectAttemptCommit
+{
+    bool event_committed = false;
+    bool terminal_committed = false;
+};
+
+struct ConnectAttemptSnapshot
+{
+    std::optional<ConnectAttemptTerminal> initial_terminal;
+    PeerLogicalTerminalCause session_terminal_cause =
+        PeerLogicalTerminalCause::none;
+};
+
+/// One synchronization home for the initial attempt result and the pre-ready
+/// PeerClient terminal cause. The deadline and PeerClient owner transitions
+/// compete under the same mutex; the capacity-one channel retains the winner
+/// when publication precedes receive initiation.
+class ConnectAttemptState
+{
+public:
+    using Signal = boost::asio::experimental::concurrent_channel<void(
+        boost::system::error_code)>;
+
+    explicit ConnectAttemptState(boost::asio::any_io_executor executor)
+        : signal_(std::move(executor), 1)
+    {
+    }
+
+    template <typename Commit>
+        requires std::is_nothrow_invocable_v<Commit>
+    //@@authority transition=prv.T0186 status=provisional scope=function
+    // bind=catl::peer_client::detail::ConnectAttemptState::try_commit_initial@e3ff70439934026a
+    // owner=unresolved owner_hypothesis=connect_attempt
+    // commit=connect_attempt_mutex touches=prv.S0059
+    // mutation_class=terminal_receipt
+    // label=commit_first_connect_attempt_terminal_result
+    ConnectAttemptCommit
+    try_commit_initial(
+        ConnectAttemptTerminal terminal,
+        Commit&& owner_commit) noexcept
+    {
+        bool publish_now = false;
+        {
+            std::lock_guard lock(mutex_);
+            if (terminal_)
+                return {};
+            terminal_ = terminal;
+            std::forward<Commit>(owner_commit)();
+            terminal_publication_pending_for_test_ =
+                hold_terminal_publication_for_test_;
+            publish_now = !terminal_publication_pending_for_test_;
+        }
+        if (publish_now)
+            publish_terminal();
+        return {.event_committed = true, .terminal_committed = true};
+    }
+
+    template <typename Commit>
+        requires std::is_nothrow_invocable_v<Commit>
+    ConnectAttemptCommit
+    try_commit_peer_terminal(
+        PeerLogicalTerminalCause cause,
+        ConnectAttemptTerminal terminal,
+        Commit&& owner_commit) noexcept
+    {
+        bool terminal_committed = false;
+        bool publish_now = false;
+        {
+            std::lock_guard lock(mutex_);
+            if (terminal_cause_ != PeerLogicalTerminalCause::none)
+                return {};
+            terminal_cause_ = cause;
+            if (!terminal_)
+            {
+                terminal_ = terminal;
+                terminal_committed = true;
+                terminal_publication_pending_for_test_ =
+                    hold_terminal_publication_for_test_;
+                publish_now = !terminal_publication_pending_for_test_;
+            }
+            std::forward<Commit>(owner_commit)();
+        }
+        if (publish_now)
+            publish_terminal();
+        return {
+            .event_committed = true, .terminal_committed = terminal_committed};
+    }
+
+    std::optional<ConnectAttemptTerminal>
+    snapshot() const
+    {
+        std::lock_guard lock(mutex_);
+        return terminal_;
+    }
+
+    /// Defines the pre-admission observation boundary. A session death which
+    /// wins before this snapshot is reported separately from the immutable
+    /// initial result; a later death belongs to the admitted session lifetime.
+    ConnectAttemptSnapshot
+    snapshot_for_handoff() const
+    {
+        std::lock_guard lock(mutex_);
+        return {terminal_, terminal_cause_};
+    }
+
+    PeerLogicalTerminalCause
+    terminal_cause() const
+    {
+        std::lock_guard lock(mutex_);
+        return terminal_cause_;
+    }
+
+    boost::asio::awaitable<boost::system::error_code>
+    wait_terminal()
+    {
+        boost::system::error_code ec;
+        co_await signal_.async_receive(
+            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+        co_return ec;
+    }
+
+    bool
+    hold_terminal_publication_for_test()
+    {
+        std::lock_guard lock(mutex_);
+        if (terminal_)
+            return false;
+        hold_terminal_publication_for_test_ = true;
+        return true;
+    }
+
+    bool
+    release_terminal_publication_for_test() noexcept
+    {
+        {
+            std::lock_guard lock(mutex_);
+            if (!terminal_publication_pending_for_test_)
+                return false;
+            terminal_publication_pending_for_test_ = false;
+        }
+        publish_terminal();
+        return true;
+    }
+
+private:
+    void
+    publish_terminal() noexcept
+    {
+        try
+        {
+            if (!signal_.try_send(boost::system::error_code{}))
+                std::terminate();
+        }
+        catch (...)
+        {
+            std::terminate();
+        }
+    }
+
+    mutable std::mutex mutex_;
+    //@@authority state=prv.S0059 status=provisional scope=field
+    // bind=catl::peer_client::detail::ConnectAttemptState::terminal_@3a9e1ad6fc4a0214
+    // owner=unresolved owner_hypothesis=connect_attempt
+    // observed_home=connect_attempt
+    // label=first_wins_initial_connect_attempt_terminal_result
+    std::optional<ConnectAttemptTerminal> terminal_;
+    //@@authority state=prv.S0058 status=provisional scope=field
+    // bind=catl::peer_client::detail::ConnectAttemptState::terminal_cause_@00cad104243cf62c
+    // owner=unresolved owner_hypothesis=connect_attempt
+    // observed_home=connect_attempt
+    // label=retained_first_peer_logical_terminal_cause
+    PeerLogicalTerminalCause terminal_cause_ = PeerLogicalTerminalCause::none;
+    Signal signal_;
+    bool hold_terminal_publication_for_test_ = false;
+    bool terminal_publication_pending_for_test_ = false;
+};
+
+}  // namespace detail
 
 //------------------------------------------------------------------------------
 // PeerClient
@@ -220,7 +416,15 @@ public:
     PeerLogicalTerminalCause
     terminal_cause() const
     {
-        return terminal_cause_.load(std::memory_order_acquire);
+        return initial_connect_attempt_->terminal_cause();
+    }
+
+    /// Internal typed result home consumed by the coroutine bridge. Public
+    /// callbacks remain legacy two-argument observers.
+    std::shared_ptr<detail::ConnectAttemptState> const&
+    initial_connect_attempt() const noexcept
+    {
+        return initial_connect_attempt_;
     }
 
     bool
@@ -347,9 +551,7 @@ private:
     on_connected(ReadyCallback on_ready);
 
     void
-    complete_connect(
-        boost::system::error_code ec,
-        ConnectAttemptDisposition disposition);
+    complete_connect(boost::system::error_code ec);
 
     void
     send_monitoring_status();
@@ -393,7 +595,9 @@ private:
     disconnect_on_strand();
 
     std::optional<State>
-    commit_failed_on_strand() noexcept;
+    commit_failed_on_strand(
+        boost::system::error_code ec =
+            boost::asio::error::connection_reset) noexcept;
 
     void
     send_get_nodes_on_strand(
@@ -636,16 +840,11 @@ private:
     ConnectCompletionCallback connect_completion_callback_;
 
     //@@authority state=prv.S0049 status=provisional scope=field
-    //bind=catl::peer_client::PeerClient::state_@9f0ac0751dded7b7
+    // bind=catl::peer_client::PeerClient::state_@9f0ac0751dded7b7
     // owner=unresolved owner_hypothesis=peer_client
     // observed_home=peer_client label=peer_client_logical_lifecycle_phase
     std::atomic<State> state_{State::Disconnected};
-    //@@authority state=prv.S0058 status=provisional scope=field
-    // bind=catl::peer_client::PeerClient::terminal_cause_@f9cb6076054dbb7f
-    // owner=unresolved owner_hypothesis=peer_client observed_home=peer_client
-    // label=retained_first_peer_logical_terminal_cause
-    std::atomic<PeerLogicalTerminalCause> terminal_cause_{
-        PeerLogicalTerminalCause::none};
+    std::shared_ptr<detail::ConnectAttemptState> initial_connect_attempt_;
     std::atomic<uint32_t> peer_ledger_seq_{0};
     //@@authority state=prv.S0021 status=provisional scope=field
     // bind=catl::peer_client::PeerClient::advertised_ledger_range_@f4cbfc77b30d3841

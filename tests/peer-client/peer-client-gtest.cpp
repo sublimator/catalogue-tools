@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <future>
 #include <limits>
@@ -221,31 +222,353 @@ TEST(PeerClientTypes, PeerClientExceptionIncludesDetail)
 
 TEST(ConnectAttemptState, DeadlineAndCompletionAreFirstWins)
 {
-    detail::ConnectAttemptState deadline_first;
-    EXPECT_TRUE(deadline_first.try_commit(
-        {ConnectAttemptDisposition::deadline, asio::error::timed_out, 0, 10}));
-    EXPECT_FALSE(deadline_first.try_commit(
-        {ConnectAttemptDisposition::peer_failure,
-         asio::error::connection_reset,
-         0,
-         0}));
+    asio::io_context io;
+    detail::ConnectAttemptState deadline_first(io.get_executor());
+    EXPECT_TRUE(
+        deadline_first
+            .try_commit_initial(
+                {detail::ConnectAttemptTerminalKind::deadline,
+                 asio::error::timed_out,
+                 0,
+                 10},
+                []() noexcept {})
+            .terminal_committed);
+    EXPECT_FALSE(
+        deadline_first
+            .try_commit_peer_terminal(
+                PeerLogicalTerminalCause::peer_failure,
+                {detail::ConnectAttemptTerminalKind::peer_failure,
+                 asio::error::connection_reset,
+                 0,
+                 0},
+                []() noexcept {})
+            .terminal_committed);
     ASSERT_TRUE(deadline_first.snapshot());
     EXPECT_EQ(
-        deadline_first.snapshot()->disposition,
-        ConnectAttemptDisposition::deadline);
+        deadline_first.snapshot()->kind,
+        detail::ConnectAttemptTerminalKind::deadline);
+    EXPECT_EQ(
+        deadline_first.terminal_cause(),
+        PeerLogicalTerminalCause::peer_failure);
 
-    detail::ConnectAttemptState completion_first;
-    EXPECT_TRUE(completion_first.try_commit(
-        {ConnectAttemptDisposition::peer_failure,
-         asio::error::connection_reset,
-         0,
-         0}));
-    EXPECT_FALSE(completion_first.try_commit(
-        {ConnectAttemptDisposition::deadline, asio::error::timed_out, 0, 10}));
+    detail::ConnectAttemptState completion_first(io.get_executor());
+    EXPECT_TRUE(
+        completion_first
+            .try_commit_peer_terminal(
+                PeerLogicalTerminalCause::peer_failure,
+                {detail::ConnectAttemptTerminalKind::peer_failure,
+                 asio::error::connection_reset,
+                 0,
+                 0},
+                []() noexcept {})
+            .terminal_committed);
+    EXPECT_FALSE(
+        completion_first
+            .try_commit_initial(
+                {detail::ConnectAttemptTerminalKind::deadline,
+                 asio::error::timed_out,
+                 0,
+                 10},
+                []() noexcept {})
+            .terminal_committed);
     ASSERT_TRUE(completion_first.snapshot());
     EXPECT_EQ(
-        completion_first.snapshot()->disposition,
-        ConnectAttemptDisposition::peer_failure);
+        completion_first.snapshot()->kind,
+        detail::ConnectAttemptTerminalKind::peer_failure);
+}
+
+TEST(ConnectAttemptState, EveryInitialOutcomePairRetainsTheFirstWinner)
+{
+    using Kind = detail::ConnectAttemptTerminalKind;
+    auto const kinds = std::array{
+        Kind::ready,
+        Kind::peer_failure,
+        Kind::owner_disconnect,
+        Kind::deadline};
+
+    for (auto const first : kinds)
+    {
+        for (auto const second : kinds)
+        {
+            if (first == second)
+                continue;
+
+            asio::io_context io;
+            detail::ConnectAttemptState attempt(io.get_executor());
+            auto commit = [&attempt](Kind kind) {
+                auto terminal =
+                    detail::ConnectAttemptTerminal{kind, {}, 0, 0};
+                if (kind == Kind::peer_failure ||
+                    kind == Kind::owner_disconnect)
+                {
+                    auto const cause = kind == Kind::peer_failure
+                        ? PeerLogicalTerminalCause::peer_failure
+                        : PeerLogicalTerminalCause::owner_disconnect;
+                    return attempt.try_commit_peer_terminal(
+                        cause, terminal, []() noexcept {});
+                }
+                return attempt.try_commit_initial(
+                    terminal, []() noexcept {});
+            };
+
+            ASSERT_TRUE(commit(first).terminal_committed);
+            EXPECT_FALSE(commit(second).terminal_committed);
+            auto const terminal = attempt.snapshot();
+            ASSERT_TRUE(terminal);
+            EXPECT_EQ(terminal->kind, first);
+        }
+    }
+}
+
+TEST(ConnectAttemptState, ReadyAndLaterSessionCauseRemainDistinctAtHandoff)
+{
+    asio::io_context io;
+    detail::ConnectAttemptState attempt(io.get_executor());
+    ASSERT_TRUE(
+        attempt
+            .try_commit_initial(
+                {detail::ConnectAttemptTerminalKind::ready, {}, 7, 0},
+                []() noexcept {})
+            .terminal_committed);
+    auto const later = attempt.try_commit_peer_terminal(
+        PeerLogicalTerminalCause::peer_failure,
+        {detail::ConnectAttemptTerminalKind::peer_failure,
+         asio::error::connection_reset,
+         0,
+         0},
+        []() noexcept {});
+    EXPECT_TRUE(later.event_committed);
+    EXPECT_FALSE(later.terminal_committed);
+
+    auto const handoff = attempt.snapshot_for_handoff();
+    ASSERT_TRUE(handoff.initial_terminal);
+    EXPECT_EQ(
+        handoff.initial_terminal->kind,
+        detail::ConnectAttemptTerminalKind::ready);
+    EXPECT_EQ(handoff.initial_terminal->peer_seq, 7u);
+    EXPECT_EQ(
+        handoff.session_terminal_cause,
+        PeerLogicalTerminalCause::peer_failure);
+}
+
+TEST(ConnectAttemptState, TerminalPublicationBeforeReceiveIsRetained)
+{
+    for (auto const runners_count : {1u, 2u, 4u})
+    {
+        asio::io_context io;
+        auto attempt =
+            std::make_shared<detail::ConnectAttemptState>(io.get_executor());
+        ASSERT_TRUE(
+            attempt
+                ->try_commit_initial(
+                    {detail::ConnectAttemptTerminalKind::peer_failure,
+                     asio::error::connection_reset,
+                     0,
+                     0},
+                    []() noexcept {})
+                .terminal_committed);
+
+        std::atomic<bool> received{false};
+        std::exception_ptr failure;
+        asio::co_spawn(
+            io,
+            [attempt, &received]() -> asio::awaitable<void> {
+                auto const ec = co_await attempt->wait_terminal();
+                if (ec)
+                    throw boost::system::system_error(ec);
+                received.store(true, std::memory_order_release);
+            },
+            [&failure](std::exception_ptr error) {
+                failure = std::move(error);
+            });
+
+        catl::test::IoContextRunners runners(io, runners_count);
+        runners.join();
+        EXPECT_EQ(failure, nullptr);
+        EXPECT_TRUE(received.load(std::memory_order_acquire));
+    }
+}
+
+TEST(ConnectAttemptState, DeadlineControllerPublishesOnRawRunnerModes)
+{
+    for (auto const runners_count : {1u, 2u, 4u})
+    {
+        asio::io_context io;
+        auto client = PeerClientTestAccess::make(io, State::Connecting);
+        auto attempt = client->initial_connect_attempt();
+        auto deadline = std::make_shared<detail::ConnectDeadlineController>(
+            io.get_executor(), attempt, client, 0);
+        deadline->start();
+
+        std::atomic<bool> received{false};
+        std::exception_ptr failure;
+        asio::co_spawn(
+            io,
+            [attempt, &received]() -> asio::awaitable<void> {
+                auto const ec = co_await attempt->wait_terminal();
+                if (ec)
+                    throw boost::system::system_error(ec);
+                received.store(true, std::memory_order_release);
+            },
+            [&failure](std::exception_ptr error) {
+                failure = std::move(error);
+            });
+
+        catl::test::IoContextRunners runners(io, runners_count);
+        runners.join();
+        ASSERT_EQ(failure, nullptr);
+        ASSERT_TRUE(received.load(std::memory_order_acquire));
+        auto const terminal = attempt->snapshot();
+        ASSERT_TRUE(terminal);
+        EXPECT_EQ(
+            terminal->kind, detail::ConnectAttemptTerminalKind::deadline);
+        EXPECT_EQ(terminal->deadline_seconds, 0);
+    }
+}
+
+TEST(ConnectAttemptState, FirstDeadlineGrantsPostHandshakeGrace)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Connected);
+    auto attempt = client->initial_connect_attempt();
+    auto deadline = std::make_shared<detail::ConnectDeadlineController>(
+        io.get_executor(), attempt, client, 0);
+
+    deadline->start();
+    ASSERT_EQ(io.poll_one(), 1u)
+        << "the controller must first install its owner-strand timer";
+    ASSERT_EQ(io.poll_one(), 1u)
+        << "the first expiry must execute the grace decision";
+    EXPECT_FALSE(attempt->snapshot())
+        << "post-handshake grace is not a terminal connect result";
+
+    deadline->cancel();
+    io.run();
+    EXPECT_FALSE(attempt->snapshot());
+}
+
+TEST(PeerClientLifecycle, CoConnectCallerCancellationDrainsPublishedClient)
+{
+    asio::io_context io;
+    asio::cancellation_signal cancellation;
+    std::shared_ptr<PeerClient> client;
+    std::optional<Error> observed_error;
+    std::exception_ptr completion_failure;
+
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            try
+            {
+                PeerClient::ConnectOptions options;
+                co_await co_connect(
+                    io,
+                    "cancel-before-connect-wait.invalid",
+                    443,
+                    std::move(options),
+                    client,
+                    10,
+                    [&](std::shared_ptr<PeerClient> const&) {
+                        cancellation.emit(asio::cancellation_type::all);
+                    });
+            }
+            catch (PeerClientException const& e)
+            {
+                observed_error = e.error;
+                EXPECT_FALSE(e.connect_disposition);
+            }
+        },
+        asio::bind_cancellation_slot(
+            cancellation.slot(),
+            [&completion_failure](std::exception_ptr failure) {
+                completion_failure = std::move(failure);
+            }));
+
+    io.run();
+
+    EXPECT_EQ(completion_failure, nullptr);
+    ASSERT_TRUE(client);
+    ASSERT_TRUE(observed_error);
+    EXPECT_EQ(*observed_error, Error::Cancelled);
+    EXPECT_EQ(client->state(), State::Disconnected);
+    EXPECT_TRUE(
+        client->raw_connection().physical_transport_drained_for_test());
+}
+
+TEST(PeerClientLifecycle, CoConnectPublicationFailureDrainsPublishedClient)
+{
+    asio::io_context io;
+    std::shared_ptr<PeerClient> client;
+    std::optional<std::string> observed_failure;
+    std::exception_ptr completion_failure;
+
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            try
+            {
+                PeerClient::ConnectOptions options;
+                co_await co_connect(
+                    io,
+                    "publication-failure.invalid",
+                    443,
+                    std::move(options),
+                    client,
+                    10,
+                    [](std::shared_ptr<PeerClient> const&) {
+                        throw std::runtime_error("publication refused");
+                    });
+            }
+            catch (std::runtime_error const& e)
+            {
+                observed_failure = e.what();
+            }
+        },
+        [&completion_failure](std::exception_ptr failure) {
+            completion_failure = std::move(failure);
+        });
+
+    io.run();
+
+    EXPECT_EQ(completion_failure, nullptr);
+    ASSERT_TRUE(client);
+    ASSERT_TRUE(observed_failure);
+    EXPECT_EQ(*observed_failure, "publication refused");
+    EXPECT_EQ(client->state(), State::Disconnected);
+    EXPECT_TRUE(
+        client->raw_connection().physical_transport_drained_for_test());
+}
+
+TEST(PeerClientLifecycle, ThrowingReadyObserversCannotEraseReadyTerminal)
+{
+    asio::io_context io;
+    auto client =
+        PeerClientTestAccess::make(io, State::ExchangingStatus);
+    std::size_t ready_calls = 0;
+    std::size_t completion_calls = 0;
+    PeerClientTestAccess::set_initial_connect_observers(
+        *client,
+        [&ready_calls](std::uint32_t) {
+            ++ready_calls;
+            throw std::runtime_error("ready observer failure");
+        },
+        [&completion_calls](boost::system::error_code, std::uint32_t) {
+            ++completion_calls;
+            throw std::runtime_error("completion observer failure");
+        });
+
+    asio::post(client->strand(), [client] {
+        PeerClientTestAccess::become_ready_on_strand(*client);
+    });
+    EXPECT_NO_THROW(io.run());
+
+    auto const terminal =
+        PeerClientTestAccess::initial_connect_terminal(*client);
+    ASSERT_TRUE(terminal);
+    EXPECT_EQ(terminal->kind, detail::ConnectAttemptTerminalKind::ready);
+    EXPECT_EQ(client->state(), State::Ready);
+    EXPECT_EQ(completion_calls, 1u);
+    EXPECT_EQ(ready_calls, 1u);
 }
 
 TEST(PeerClientTypes, SummarizeCrawlErrorStripsBoostSourceNoise)
@@ -415,10 +738,7 @@ TEST(
     std::vector<boost::system::error_code> completions;
 
     PeerClient::ConnectOptions opts;
-    opts.on_complete = [&](
-                           boost::system::error_code ec,
-                           std::uint32_t,
-                           ConnectAttemptDisposition) {
+    opts.on_complete = [&](boost::system::error_code ec, std::uint32_t) {
         completion_on_strand = client->strand().running_in_this_thread();
         completions.push_back(ec);
     };

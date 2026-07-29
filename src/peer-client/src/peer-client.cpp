@@ -800,6 +800,8 @@ PeerClient::PeerClient(asio::io_context& io_context)
     : io_context_(io_context), strand_(asio::make_strand(io_context))
 {
     receiver_instance_id_ = mint_peer_client_instance_id();
+    initial_connect_attempt_ =
+        std::make_shared<detail::ConnectAttemptState>(strand_);
 }
 
 PeerClient::~PeerClient()
@@ -881,7 +883,7 @@ PeerClient::disconnect()
 }
 
 //@@authority transition=prv.T0145 status=provisional scope=function
-//bind=catl::peer_client::co_disconnect@8237806aa45018b4
+// bind=catl::peer_client::co_disconnect@8237806aa45018b4
 // owner=unresolved owner_hypothesis=peer_client commit=peer_client_strand
 // touches=prv.S0046,prv.S0048,prv.S0049 mutation_class=stop_driver
 // label=join_connection_physical_drain_after_logical_disconnect
@@ -907,18 +909,25 @@ void
 PeerClient::disconnect_on_strand()
 {
     assert(strand_.running_in_this_thread());
-    auto expected_cause = PeerLogicalTerminalCause::none;
-    //@@authority transition=prv.T0184 status=provisional scope=statement bind=expression_statement@ce2a14d40c0a1b38
+    State previous = state_.load();
+    //@@authority transition=prv.T0184 status=provisional scope=statement
+    // bind=declaration@8145f15a5c540e99
     // owner=unresolved owner_hypothesis=peer_client
-    // commit=peer_client_strand touches=prv.S0058
+    // commit=connect_attempt_mutex touches=prv.S0049,prv.S0058,prv.S0059
     // mutation_class=terminal_receipt
-    // label=commit_owner_disconnect_only_if_no_terminal_cause_won
-    terminal_cause_.compare_exchange_strong(
-        expected_cause,
+    // label=commit_owner_disconnect_and_initial_result_atomically
+    auto const commit = initial_connect_attempt_->try_commit_peer_terminal(
         PeerLogicalTerminalCause::owner_disconnect,
-        std::memory_order_acq_rel,
-        std::memory_order_acquire); //@@authority-target ids=prv.T0184
-    auto const previous = state_.exchange(State::Disconnected);
+        detail::ConnectAttemptTerminal{
+            detail::ConnectAttemptTerminalKind::owner_disconnect,
+            boost::asio::error::operation_aborted,
+            peer_ledger_seq_.load(),
+            0},
+        [this, &previous]() noexcept {
+            previous = state_.exchange(State::Disconnected);
+        });  //@@authority-target ids=prv.T0184
+    if (!commit.event_committed)
+        previous = state_.exchange(State::Disconnected);
 
     if (previous != State::Disconnected && previous != State::Failed)
         complete_all_pending(Error::Cancelled);
@@ -934,36 +943,34 @@ PeerClient::disconnect_on_strand()
     if (previous == State::Disconnected || previous == State::Failed)
         return;
 
-    if (previous != State::Ready)
-        complete_connect(
-            boost::asio::error::operation_aborted,
-            ConnectAttemptDisposition::owner_disconnect);
+    if (previous != State::Ready && commit.event_committed)
+        complete_connect(boost::asio::error::operation_aborted);
 }
 
 //@@authority transition=prv.T0146 status=provisional scope=function
-//bind=catl::peer_client::commit_failed_on_strand@fe49a9f576e5dd76
-// owner=unresolved owner_hypothesis=peer_client commit=peer_client_strand
-// touches=prv.S0049,prv.S0058 mutation_class=terminal_receipt
-// label=commit_peer_failure_without_overwriting_first_terminal_cause
+// bind=catl::peer_client::commit_failed_on_strand@8a1d2d52a01ef0c7
+// owner=unresolved owner_hypothesis=peer_client commit=connect_attempt_mutex
+// touches=prv.S0049,prv.S0058,prv.S0059 mutation_class=terminal_receipt
+// label=commit_peer_failure_and_initial_result_atomically
 std::optional<State>
-PeerClient::commit_failed_on_strand() noexcept
+PeerClient::commit_failed_on_strand(boost::system::error_code ec) noexcept
 {
     assert(strand_.running_in_this_thread());
     auto const previous = state_.load();
     if (previous == State::Disconnected || previous == State::Failed)
         return std::nullopt;
 
-    auto expected_cause = PeerLogicalTerminalCause::none;
-    if (!terminal_cause_.compare_exchange_strong(
-            expected_cause,
-            PeerLogicalTerminalCause::peer_failure,
-            std::memory_order_acq_rel,
-            std::memory_order_acquire))
-    {
+    auto committed = initial_connect_attempt_->try_commit_peer_terminal(
+        PeerLogicalTerminalCause::peer_failure,
+        detail::ConnectAttemptTerminal{
+            detail::ConnectAttemptTerminalKind::peer_failure,
+            ec,
+            peer_ledger_seq_.load(),
+            0},
+        [this]() noexcept { state_.store(State::Failed); });
+    if (!committed.event_committed)
         return std::nullopt;
-    }
 
-    state_.store(State::Failed);
     return previous;
 }
 
@@ -1298,7 +1305,7 @@ PeerClient::submit_node_batch_on_strand(
     {
         refuse(NodeBatchWriteOutcome::ledger_not_advertised);
         return false;
-    } //@@authority-target ids=prv.T0062
+    }  //@@authority-target ids=prv.T0062
 
     if (node_batch_write_records_.size() >= kMaxNodeBatchReceiptRows)
     {
@@ -1539,7 +1546,7 @@ PeerClient::do_connect(
         if (!self)
             return;
 
-        auto const previous = self->commit_failed_on_strand();
+        auto const previous = self->commit_failed_on_strand(ec);
         if (!previous)
             return;
 
@@ -1598,7 +1605,7 @@ PeerClient::do_connect(
                 "] Connection lost before ready: ",
                 ec.message());
         }
-        self->complete_connect(ec, ConnectAttemptDisposition::peer_failure);
+        self->complete_connect(ec);
     });
 
     // Construction above is exclusive because the client has not escaped.
@@ -1608,7 +1615,7 @@ PeerClient::do_connect(
     auto self = shared_from_this();
     auto connection = connection_;
     //@@authority transition=prv.T0148 status=provisional scope=statement
-    // bind=expression_statement@a1e24306a6da2d3a
+    // bind=expression_statement@808245b5e3cf12b7
     // owner=unresolved owner_hypothesis=peer_client
     // commit=peer_client_strand mutation_class=running_guarded
     // label=enter_owner_strand_before_physical_connection_admission
@@ -1635,18 +1642,13 @@ PeerClient::do_connect(
                             self->endpoint_str_,
                             "] Connection failed: ",
                             ec.message());
-                        if (!self->commit_failed_on_strand())
+                        if (!self->commit_failed_on_strand(ec))
                         {
-                            auto const disposition = self->terminal_cause() ==
-                                    PeerLogicalTerminalCause::owner_disconnect
-                                ? ConnectAttemptDisposition::owner_disconnect
-                                : ConnectAttemptDisposition::peer_failure;
-                            self->complete_connect(ec, disposition);
+                            self->complete_connect(ec);
                             return;
                         }
                         self->complete_all_pending(Error::Disconnected);
-                        self->complete_connect(
-                            ec, ConnectAttemptDisposition::peer_failure);
+                        self->complete_connect(ec);
                         return;
                     }
                     auto const state = self->state_.load();
@@ -1654,13 +1656,11 @@ PeerClient::do_connect(
                         return;
                     self->on_connected(std::move(on_ready));
                 });
-        }); //@@authority-target ids=prv.T0148
+        });  //@@authority-target ids=prv.T0148
 }
 
 void
-PeerClient::complete_connect(
-    boost::system::error_code ec,
-    ConnectAttemptDisposition disposition)
+PeerClient::complete_connect(boost::system::error_code ec)
 {
     if (!connect_completion_callback_)
     {
@@ -1668,15 +1668,23 @@ PeerClient::complete_connect(
     }
 
     auto cb = std::move(connect_completion_callback_);
-    //@@authority transition=prv.T0185 status=provisional scope=statement bind=expression_statement@db6d2c11a768afb0
+    //@@authority transition=prv.T0185 status=provisional scope=statement
+    // bind=try_statement@abbeaf6221593066
     // owner=unresolved owner_hypothesis=peer_client
     // commit=peer_client_strand touches=prv.S0060
-    // boundary_ref=peer_client.connect_attempt_terminal
-    // receipt=peer_client.connect_attempt_terminal
-    // label=export_exact_one_shot_connect_attempt_disposition
-    cb(ec,
-       peer_ledger_seq_.load(),
-       disposition); //@@authority-target ids=prv.T0185
+    // label=notify_legacy_connect_completion_after_terminal_commit
+    try
+    {
+        cb(ec, peer_ledger_seq_.load());
+    }
+    catch (std::exception const& e)
+    {
+        PLOGE(log_, "connect completion observer threw: ", e.what());
+    }
+    catch (...)
+    {
+        PLOGE(log_, "connect completion observer threw");
+    }  //@@authority-target ids=prv.T0185
 }
 
 void
@@ -1944,7 +1952,16 @@ PeerClient::handle_endpoints(std::vector<uint8_t> const& payload)
 void
 PeerClient::become_ready()
 {
-    state_ = State::Ready;
+    auto const ready = initial_connect_attempt_->try_commit_initial(
+        detail::ConnectAttemptTerminal{
+            detail::ConnectAttemptTerminalKind::ready,
+            {},
+            peer_ledger_seq_.load(),
+            0},
+        [this]() noexcept { state_.store(State::Ready); });
+    if (!ready.event_committed)
+        return;
+
     PLOGI(
         log_,
         "[",
@@ -1954,16 +1971,26 @@ PeerClient::become_ready()
         ")");
 
     flush_queue();
+    complete_connect({});
 
     if (ready_callback_)
     {
         PLOGD(log_, "become_ready: invoking ready_callback_");
         auto cb = std::move(ready_callback_);
-        cb(peer_ledger_seq_);
-        PLOGD(log_, "become_ready: ready_callback_ returned");
+        try
+        {
+            cb(peer_ledger_seq_);
+            PLOGD(log_, "become_ready: ready_callback_ returned");
+        }
+        catch (std::exception const& e)
+        {
+            PLOGE(log_, "ready observer threw: ", e.what());
+        }
+        catch (...)
+        {
+            PLOGE(log_, "ready observer threw");
+        }
     }
-
-    complete_connect({}, ConnectAttemptDisposition::ready);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2115,7 +2142,7 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
             // owner=unresolved owner_hypothesis=peer_client commit=strand
             // touches=prv.S0007
             // label=invoke_snapshot_of_singleton_uncorrelated_response_sink
-            handler(msg); //@@authority-target ids=prv.T0041
+            handler(msg);  //@@authority-target ids=prv.T0041
         }
     }
 

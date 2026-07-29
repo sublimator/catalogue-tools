@@ -482,8 +482,6 @@ private:
     std::uint32_t drop_seal_completions_for_test_ = 0;
     std::uint32_t fail_connect_servant_launches_for_test_ = 0;
     std::uint32_t fail_crawl_servant_launches_for_test_ = 0;
-    std::function<void(ConnectAttemptDisposition)>
-        connect_attempt_completion_hook_for_test_;
     std::function<void()> connect_failure_classification_hook_for_test_;
     std::function<void()> connect_completion_diagnostic_hook_for_test_;
     std::function<void()> crawl_completion_diagnostic_hook_for_test_;

@@ -2508,18 +2508,6 @@ PeerSet::try_connect_on_strand(
                 }
             };
         }
-        if (connect_attempt_completion_hook_for_test_)
-        {
-            auto hook = connect_attempt_completion_hook_for_test_;
-            connect_opts.on_complete =
-                [hook = std::move(hook)](
-                    boost::system::error_code,
-                    std::uint32_t,
-                    ConnectAttemptDisposition disposition) {
-                    hook(disposition);
-                };
-        }
-
         co_await co_connect(
             io_,
             host,
@@ -2637,8 +2625,11 @@ PeerSet::try_connect_on_strand(
     {
         auto const stop_owned_cancellation = [&]() {
             if (!client ||
+                //@@mutation-site connect-stop-requires-explicit-owner-cause
                 e.connect_disposition !=
-                    ConnectAttemptDisposition::owner_disconnect)
+                    ConnectAttemptDisposition::owner_disconnect
+                //@@mutation-end connect-stop-requires-explicit-owner-cause
+            )
             {
                 return false;
             }

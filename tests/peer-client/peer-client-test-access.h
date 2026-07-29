@@ -191,10 +191,28 @@ public:
         client.flush_queue();
     }
 
-    static std::optional<State>
-    commit_failed_on_strand(PeerClient& client)
+    static void
+    set_initial_connect_observers(
+        PeerClient& client,
+        ReadyCallback ready,
+        ConnectCompletionCallback complete)
     {
-        return client.commit_failed_on_strand();
+        client.ready_callback_ = std::move(ready);
+        client.connect_completion_callback_ = std::move(complete);
+    }
+
+    static void
+    become_ready_on_strand(PeerClient& client)
+    {
+        client.become_ready();
+    }
+
+    static std::optional<State>
+    commit_failed_on_strand(
+        PeerClient& client,
+        boost::system::error_code ec = asio::error::connection_reset)
+    {
+        return client.commit_failed_on_strand(ec);
     }
 
     static void
@@ -202,18 +220,47 @@ public:
         PeerClient& client,
         boost::system::error_code ec = asio::error::connection_reset)
     {
-        auto const previous = client.commit_failed_on_strand();
+        auto const previous = client.commit_failed_on_strand(ec);
         if (previous)
-        {
-            client.complete_connect(
-                ec, ConnectAttemptDisposition::peer_failure);
-        }
+            client.complete_connect(ec);
     }
 
     static void
     disconnect_on_strand(PeerClient& client)
     {
         client.disconnect_on_strand();
+    }
+
+    static bool
+    hold_initial_connect_terminal_publication(PeerClient& client)
+    {
+        return client.initial_connect_attempt_
+            ->hold_terminal_publication_for_test();
+    }
+
+    static bool
+    release_initial_connect_terminal_publication(PeerClient& client)
+    {
+        return client.initial_connect_attempt_
+            ->release_terminal_publication_for_test();
+    }
+
+    static std::optional<detail::ConnectAttemptTerminal>
+    initial_connect_terminal(PeerClient const& client)
+    {
+        return client.initial_connect_attempt_->snapshot();
+    }
+
+    static detail::ConnectAttemptCommit
+    commit_initial_connect_deadline(PeerClient& client, int seconds)
+    {
+        return client.initial_connect_attempt_->try_commit_initial(
+            detail::ConnectAttemptTerminal{
+                detail::ConnectAttemptTerminalKind::deadline,
+                asio::error::timed_out,
+                0,
+                seconds},
+            []() noexcept {});
     }
 
     static void

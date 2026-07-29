@@ -7004,11 +7004,6 @@ TEST(
             .max_in_flight_connects = 1,
             .max_in_flight_crawls = 0,
         });
-    bool stop_interposed = false;
-    PeerSetTestAccess::stop_on_connect_attempt_completion(
-        peers,
-        ConnectAttemptDisposition::peer_failure,
-        [&stop_interposed] { stop_interposed = true; });
     PeerSetTestAccess::push_pending_connect(io, peers, key);
     PeerSetTestAccess::pump_connects(io, peers);
 
@@ -7020,19 +7015,202 @@ TEST(
         client = PeerSetTestAccess::connect_servant_client(io, peers, key);
     }
     ASSERT_TRUE(client);
+    ASSERT_TRUE(
+        PeerClientTestAccess::hold_initial_connect_terminal_publication(
+            *client));
 
     asio::post(client->strand(), [client] {
         PeerClientTestAccess::fail_initial_connect_on_strand(*client);
     });
+    io.run_for(100ms);
+    io.restart();
+
+    auto const terminal =
+        PeerClientTestAccess::initial_connect_terminal(*client);
+    ASSERT_TRUE(terminal);
+    EXPECT_EQ(
+        terminal->kind,
+        catl::peer_client::detail::ConnectAttemptTerminalKind::peer_failure);
+    EXPECT_EQ(
+        client->terminal_cause(), PeerLogicalTerminalCause::peer_failure);
+
+    auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run_for(100ms);
+    io.restart();
+
+    EXPECT_TRUE(PeerSetTestAccess::shutdown_ingress_sealed(peers));
+    EXPECT_TRUE(
+        PeerSetTestAccess::connect_servant_stop_cancellation_requested(
+            io, peers, key));
+    EXPECT_EQ(client->state(), State::Disconnected)
+        << "the public stop path must project the stale mutable state before "
+           "the retained peer-failure result reaches classification";
+    EXPECT_TRUE(PeerSetTestAccess::in_flight_contains(io, peers, key));
+    EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout);
+
+    ASSERT_TRUE(
+        PeerClientTestAccess::release_initial_connect_terminal_publication(
+            *client));
     io.run_for(1s);
     io.restart();
 
-    EXPECT_TRUE(stop_interposed)
-        << "stop must run after failure commits but before PeerSet consumes it";
-    EXPECT_EQ(
-        client->terminal_cause(), PeerLogicalTerminalCause::peer_failure);
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
     EXPECT_TRUE(PeerSetTestAccess::has_failed(io, peers, key))
-        << "the stop request bit cannot suppress earlier peer failure";
+        << "the public stop seal and request bit cannot suppress an earlier "
+           "peer failure";
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u);
+    EXPECT_EQ(
+        PeerSetTestAccess::cached_endpoint_failure_count(io, peers, key), 1u);
+    EXPECT_FALSE(PeerSetTestAccess::in_flight_contains(io, peers, key));
+}
+
+TEST(PeerSetShutdown, OwnerDisconnectWinsBeforeConnectDeadline)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
+        io,
+        asio::ip::tcp::endpoint(
+            asio::ip::make_address("127.0.0.1"), 0));
+    auto accepted = std::make_shared<asio::ip::tcp::socket>(io);
+    acceptor->async_accept(
+        *accepted, [accepted](boost::system::error_code) {});
+    auto const key = "127.0.0.1:" +
+        std::to_string(acceptor->local_endpoint().port());
+
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .endpoint_cache_path = ":memory:",
+            .max_in_flight_connects = 1,
+            .max_in_flight_crawls = 0,
+        });
+    PeerSetTestAccess::push_pending_connect(io, peers, key);
+    PeerSetTestAccess::pump_connects(io, peers);
+
+    std::shared_ptr<PeerClient> client;
+    for (std::size_t attempt = 0; attempt < 100 && !client; ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+        client = PeerSetTestAccess::connect_servant_client(io, peers, key);
+    }
+    ASSERT_TRUE(client);
+    ASSERT_TRUE(
+        PeerClientTestAccess::hold_initial_connect_terminal_publication(
+            *client));
+
+    auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run_for(100ms);
+    io.restart();
+
+    ASSERT_TRUE(PeerSetTestAccess::shutdown_ingress_sealed(peers));
+    ASSERT_TRUE(
+        PeerSetTestAccess::connect_servant_stop_cancellation_requested(
+            io, peers, key));
+    ASSERT_EQ(
+        client->terminal_cause(),
+        PeerLogicalTerminalCause::owner_disconnect);
+    auto const owner_terminal =
+        PeerClientTestAccess::initial_connect_terminal(*client);
+    ASSERT_TRUE(owner_terminal);
+    EXPECT_EQ(
+        owner_terminal->kind,
+        catl::peer_client::detail::ConnectAttemptTerminalKind::
+            owner_disconnect);
+    EXPECT_FALSE(
+        PeerClientTestAccess::commit_initial_connect_deadline(*client, 10)
+            .terminal_committed)
+        << "a later deadline cannot overtake the owner terminal commit";
+
+    ASSERT_TRUE(
+        PeerClientTestAccess::release_initial_connect_terminal_publication(
+            *client));
+    io.run_for(1s);
+    io.restart();
+
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    EXPECT_FALSE(PeerSetTestAccess::has_failed(io, peers, key));
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 0u);
+    EXPECT_EQ(
+        PeerSetTestAccess::cached_endpoint_failure_count(io, peers, key), 0u);
+    EXPECT_FALSE(PeerSetTestAccess::in_flight_contains(io, peers, key));
+}
+
+TEST(PeerSetShutdown, ConnectDeadlineWinsBeforeOwnerDisconnect)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
+        io,
+        asio::ip::tcp::endpoint(
+            asio::ip::make_address("127.0.0.1"), 0));
+    auto accepted = std::make_shared<asio::ip::tcp::socket>(io);
+    acceptor->async_accept(
+        *accepted, [accepted](boost::system::error_code) {});
+    auto const key = "127.0.0.1:" +
+        std::to_string(acceptor->local_endpoint().port());
+
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .endpoint_cache_path = ":memory:",
+            .max_in_flight_connects = 1,
+            .max_in_flight_crawls = 0,
+        });
+    PeerSetTestAccess::push_pending_connect(io, peers, key);
+    PeerSetTestAccess::pump_connects(io, peers);
+
+    std::shared_ptr<PeerClient> client;
+    for (std::size_t attempt = 0; attempt < 100 && !client; ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+        client = PeerSetTestAccess::connect_servant_client(io, peers, key);
+    }
+    ASSERT_TRUE(client);
+    ASSERT_TRUE(
+        PeerClientTestAccess::hold_initial_connect_terminal_publication(
+            *client));
+    ASSERT_TRUE(
+        PeerClientTestAccess::commit_initial_connect_deadline(*client, 10)
+            .terminal_committed);
+
+    auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run_for(100ms);
+    io.restart();
+
+    ASSERT_TRUE(PeerSetTestAccess::shutdown_ingress_sealed(peers));
+    ASSERT_TRUE(
+        PeerSetTestAccess::connect_servant_stop_cancellation_requested(
+            io, peers, key));
+    EXPECT_EQ(
+        client->terminal_cause(),
+        PeerLogicalTerminalCause::owner_disconnect);
+    auto const deadline_terminal =
+        PeerClientTestAccess::initial_connect_terminal(*client);
+    ASSERT_TRUE(deadline_terminal);
+    EXPECT_EQ(
+        deadline_terminal->kind,
+        catl::peer_client::detail::ConnectAttemptTerminalKind::deadline)
+        << "owner cleanup cannot rewrite an earlier deadline";
+    EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout);
+
+    ASSERT_TRUE(
+        PeerClientTestAccess::release_initial_connect_terminal_publication(
+            *client));
+    io.run_for(1s);
+    io.restart();
+
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+    EXPECT_TRUE(PeerSetTestAccess::has_failed(io, peers, key));
     EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u);
     EXPECT_EQ(
         PeerSetTestAccess::cached_endpoint_failure_count(io, peers, key), 1u);
