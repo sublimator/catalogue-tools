@@ -314,9 +314,8 @@ public:
     bool
     insert(Hash256 const& hash, std::vector<uint8_t> data);
 
-    /// Insert a node and wake any waiters for this hash. Returns true when the
-    /// running store accepts the content, including an idempotent duplicate.
-    bool
+    /// Insert a node and wake any waiters for this hash.
+    void
     insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data);
 
     /// Check if a hash is in the cache (present, not in-flight).
@@ -988,10 +987,15 @@ private:
         PeerSessionPtr unmanaged_owner);
 
     /// Called by the response handler for every TMLedgerData node response.
-    /// Reports whether at least one valid node was accepted by the running
-    /// content-addressed store, including an idempotent duplicate.
-    NodeResponseDisposition
+    /// Reports acceptance and processing failure independently. An earlier
+    /// node in a multi-node response may commit before a later node fails.
+    NodeResponseObservation
     on_node_response(std::shared_ptr<protocol::TMLedgerData> const& msg);
+
+    /// Observed form used only by the response sink. Public callers keep the
+    /// predecessor's void insert-and-notify contract.
+    bool
+    insert_and_notify_observed(Hash256 const& hash, std::vector<uint8_t> data);
 
     /// Evict LRU entries when over capacity.
     void

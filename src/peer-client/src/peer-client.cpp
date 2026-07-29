@@ -864,15 +864,31 @@ PeerClient::set_tracker(std::shared_ptr<EndpointTracker> tracker)
     tracker_ = std::move(tracker);
 }
 
-//@@authority transition=prv.T0021 status=provisional scope=function
-// bind=catl::peer_client::set_node_response_handler@6ad81a5e64932f0e
-// owner=unresolved owner_hypothesis=peer_client commit=mutex
-// touches=prv.S0007 label=replace_singleton_node_response_sink
 void
 PeerClient::set_node_response_handler(NodeResponseHandler handler)
 {
+    if (!handler)
+    {
+        set_node_response_observer({});
+        return;
+    }
+    set_node_response_observer(
+        [handler = std::move(handler)](
+            std::shared_ptr<protocol::TMLedgerData> const& message) mutable {
+            handler(message);
+            return NodeResponseObservation{};
+        });
+}
+
+//@@authority transition=prv.T0021 status=provisional scope=function
+// bind=catl::peer_client::set_node_response_observer@9f2c8cc7561283eb
+// owner=unresolved owner_hypothesis=peer_client commit=mutex
+// touches=prv.S0007 label=replace_singleton_node_response_observer
+void
+PeerClient::set_node_response_observer(NodeResponseObserver observer)
+{
     std::lock_guard lock(handler_mutex_);
-    node_response_handler_ = std::move(handler);
+    node_response_observer_ = std::move(observer);
 }
 
 void
@@ -2143,25 +2159,44 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
     // Feed node responses to the NodeCache sink first. Delivery is not the
     // disposition: the sink reports whether it accepted valid content, while
     // the legacy pending map independently reports whether it matched.
-    auto cache_disposition = NodeResponseDisposition::ignored;
+    NodeResponseObservation cache_observation;
     if (msg->type() != protocol::liBASE && !msg->has_error())
     {
-        NodeResponseHandler handler;
+        NodeResponseObserver observer;
         {
             std::lock_guard lock(handler_mutex_);
-            handler = node_response_handler_;
+            observer = node_response_observer_;
         }
-        if (handler)
+        if (observer)
         {
-            //@@authority transition=prv.T0041 status=provisional
-            // bind=expression_statement@aae0c22a82ada519 scope=statement
-            // owner=unresolved owner_hypothesis=peer_client commit=strand
-            // touches=prv.S0007
-            // label=invoke_snapshot_and_observe_uncorrelated_response_sink
-            //@@mutation-site node-response-sink-disposition-preserved
-            cache_disposition =
-                handler(msg);  //@@authority-target ids=prv.T0041
-            //@@mutation-end node-response-sink-disposition-preserved
+            try
+            {
+                //@@authority transition=prv.T0041 status=provisional
+                // bind=expression_statement@5d67e628682c2fe8 scope=statement
+                // owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0007
+                // label=invoke_snapshot_and_observe_uncorrelated_response_sink
+                //@@mutation-site node-response-sink-disposition-preserved
+                cache_observation =
+                    observer(msg);  //@@authority-target ids=prv.T0041
+                //@@mutation-end node-response-sink-disposition-preserved
+            }
+            catch (...)
+            {
+                // clang-format off
+                //@@authority transition=prv.T0191 status=provisional
+                // bind=expression_statement@a3ab411002d19fc5 scope=statement
+                // owner=unresolved
+                // owner_hypothesis=peer_client commit=peer_client_strand
+                // touches=prv.S0007
+                // label=contain_node_response_sink_failure_before_legacy_dispatch
+                //@@mutation-site node-response-observer-failure-contained
+                cache_observation.failure =
+                    std::current_exception();  //@@authority-target ids=prv.T0191
+                //@@mutation-end node-response-observer-failure-contained
+                // clang-format on
+            }
         }
     }
 
@@ -2389,8 +2424,8 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
     else
     {
         auto const response_type = msg->type();
-        auto const cache_accepted =
-            cache_disposition == NodeResponseDisposition::accepted;
+        auto const cache_accepted = cache_observation.accepted;
+        auto const cache_failed = static_cast<bool>(cache_observation.failure);
         bool legacy_matched = false;
         //@@mutation-site node-response-legacy-dispatch-remains-independent
         if (auto k = find_node_key())
@@ -2410,8 +2445,40 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
                 LedgerNodesResult{std::move(msg)});
         }
 
+        if (cache_failed)
+        {
+            try
+            {
+                std::rethrow_exception(cache_observation.failure);
+            }
+            catch (std::exception const& error)
+            {
+                PLOGE(
+                    log_,
+                    "  node response sink failure: type=",
+                    response_type,
+                    " cache=",
+                    cache_accepted ? "accepted" : "ignored",
+                    " legacy=",
+                    legacy_matched ? "matched" : "absent",
+                    " error=",
+                    error.what());
+            }
+            catch (...)
+            {
+                PLOGE(
+                    log_,
+                    "  node response sink failure: type=",
+                    response_type,
+                    " cache=",
+                    cache_accepted ? "accepted" : "ignored",
+                    " legacy=",
+                    legacy_matched ? "matched" : "absent",
+                    " error=non-std exception");
+            }
+        }
         //@@mutation-site node-response-warning-requires-global-nonownership
-        if (!legacy_matched && !cache_accepted)
+        else if (!legacy_matched && !cache_accepted)
         //@@mutation-end node-response-warning-requires-global-nonownership
         {
             PLOGW(

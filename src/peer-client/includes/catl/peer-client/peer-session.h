@@ -9,6 +9,7 @@
 #include <boost/system/error_code.hpp>
 
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <map>
 #include <memory>
@@ -76,15 +77,18 @@ struct AdvertisedLedgerRange
         default;
 };
 
-enum class NodeResponseDisposition : std::uint8_t {
-    ignored,
-    accepted,
+struct NodeResponseObservation
+{
+    bool accepted = false;
+    std::exception_ptr failure;
 };
 
 class PeerSession
 {
 public:
-    using NodeResponseHandler = std::function<NodeResponseDisposition(
+    using NodeResponseHandler =
+        std::function<void(std::shared_ptr<protocol::TMLedgerData> const&)>;
+    using NodeResponseObserver = std::function<NodeResponseObservation(
         std::shared_ptr<protocol::TMLedgerData> const&)>;
 
     virtual ~PeerSession() = default;
@@ -130,6 +134,23 @@ public:
 
     virtual void
     set_node_response_handler(NodeResponseHandler handler) = 0;
+
+    /// Install an observing response sink. Existing PeerSession
+    /// implementations remain source-compatible: their legacy void sink is
+    /// used when they do not provide observation semantics.
+    virtual void
+    set_node_response_observer(NodeResponseObserver observer)
+    {
+        if (!observer)
+        {
+            set_node_response_handler({});
+            return;
+        }
+        set_node_response_handler(
+            [observer = std::move(observer)](
+                std::shared_ptr<protocol::TMLedgerData> const&
+                    message) mutable { (void)observer(message); });
+    }
 
     virtual void
     get_ledger_header(

@@ -1212,7 +1212,7 @@ NodeCache::ensure_present(
     bool const managed_transport = node_fetch_coordinator_.has_value();
 
     //@@authority transition=prv.T0120 status=provisional scope=statement
-    // bind=declaration@ecde2bc00a5e4fac
+    // bind=declaration@fb8665a738bbf33e
     // owner=unresolved owner_hypothesis=node_cache commit=mutex
     // touches=prv.S0002,prv.S0003,prv.S0005,prv.S0018,prv.S0040
     // mutation_class=running_guarded
@@ -2702,17 +2702,18 @@ NodeCache::send_fetch(
 
 //@@authority transition=prv.T0017 status=provisional scope=function
 // bind=catl::peer_client::ensure_response_handler@2046ece6aff84f9c
-// owner=unresolved owner_hypothesis=peer_client commit=unresolved
-// label=overwrite_peer_node_response_handler_for_shared_store
+// owner=unresolved owner_hypothesis=node_cache
+// commit=peer_client_handler_mutex_via_setter touches=prv.S0007
+// label=install_node_cache_receiver_in_peer_response_observer_home
 void
 NodeCache::ensure_response_handler(PeerSession& peer)
 {
     auto weak = weak_from_this();
-    peer.set_node_response_handler(
+    peer.set_node_response_observer(
         [weak](std::shared_ptr<protocol::TMLedgerData> const& msg) {
             if (auto self = weak.lock())
                 return self->on_node_response(msg);
-            return NodeResponseDisposition::ignored;
+            return NodeResponseObservation{};
         });
 
     PLOGD(log_, "  installed response handler on peer ", peer.endpoint());
@@ -2957,10 +2958,10 @@ NodeCache::retire_node_fetch_round(
 }
 
 //@@authority transition=prv.T0019 status=provisional scope=function
-// bind=catl::peer_client::on_node_response@12955ab26e1b73ad
+// bind=catl::peer_client::on_node_response@8738337c6f97af0d
 // owner=unresolved owner_hypothesis=object_store commit=unresolved
 // label=accept_uncorrelated_peer_node_response
-NodeResponseDisposition
+NodeResponseObservation
 NodeCache::on_node_response(std::shared_ptr<protocol::TMLedgerData> const& msg)
 {
     PLOGD(
@@ -2970,91 +2971,103 @@ NodeCache::on_node_response(std::shared_ptr<protocol::TMLedgerData> const& msg)
         " nodes=",
         msg->nodes_size());
 
-    auto disposition = NodeResponseDisposition::ignored;
+    NodeResponseObservation observation;
     for (int i = 0; i < msg->nodes_size(); ++i)
     {
-        auto const& node = msg->nodes(i);
-        if (!node.has_nodeid() || node.nodeid().size() != 33)
-            continue;
-
-        auto const& wire = node.nodedata();
-        if (wire.empty())
-            continue;
-
-        std::span<const uint8_t> wire_span(
-            reinterpret_cast<const uint8_t*>(wire.data()), wire.size());
-
-        WireNodeView view(wire_span);
-        Hash256 computed_hash;
-
-        if (view.is_inner())
+        try
         {
-            computed_hash = compute_inner_hash(wire_span);
-            PLOGD(
-                log_,
-                "    response node depth=",
-                static_cast<int>(static_cast<uint8_t>(node.nodeid()[32])),
-                " INNER hash=",
-                computed_hash.hex().substr(0, 16),
-                " children=",
-                view.inner().child_count());
-        }
-        else
-        {
-            // Leaf: compute the content hash using the correct prefix.
-            // Wire format: [item_data][wire_type_byte]
-            // Leaf hash: SHA512Half(prefix + item_data + key)
-            // The key is the LAST 32 bytes of item_data.
-            auto leaf_data = view.leaf().data();  // excludes wire type byte
-            if (leaf_data.size() < 32)
-            {
-                PLOGW(log_, "    response LEAF too small: ", leaf_data.size());
+            auto const& node = msg->nodes(i);
+            if (!node.has_nodeid() || node.nodeid().size() != 33)
                 continue;
+
+            auto const& wire = node.nodedata();
+            if (wire.empty())
+                continue;
+
+            std::span<const uint8_t> wire_span(
+                reinterpret_cast<const uint8_t*>(wire.data()), wire.size());
+
+            WireNodeView view(wire_span);
+            Hash256 computed_hash;
+
+            if (view.is_inner())
+            {
+                computed_hash = compute_inner_hash(wire_span);
+                PLOGD(
+                    log_,
+                    "    response node depth=",
+                    static_cast<int>(static_cast<uint8_t>(node.nodeid()[32])),
+                    " INNER hash=",
+                    computed_hash.hex().substr(0, 16),
+                    " children=",
+                    view.inner().child_count());
+            }
+            else
+            {
+                // Leaf: compute the content hash using the correct prefix.
+                // Wire format: [item_data][wire_type_byte]
+                // Leaf hash: SHA512Half(prefix + item_data + key)
+                // The key is the LAST 32 bytes of item_data.
+                auto leaf_data = view.leaf().data();  // excludes wire type byte
+                if (leaf_data.size() < 32)
+                {
+                    PLOGW(
+                        log_,
+                        "    response LEAF too small: ",
+                        leaf_data.size());
+                    continue;
+                }
+
+                // Determine prefix from message type
+                // liTX_NODE (1) → SNDprefix (tx with metadata)
+                // liAS_NODE (2) → MLNprefix (account state leaf)
+                static constexpr uint8_t tx_prefix[] = {'S', 'N', 'D', 0x00};
+                static constexpr uint8_t state_prefix[] = {'M', 'L', 'N', 0x00};
+                auto const* prefix =
+                    (msg->type() == 1) ? tx_prefix : state_prefix;
+
+                // item_data = everything except the last 32 bytes (the key)
+                // key = last 32 bytes
+                auto const* key_ptr = leaf_data.data() + leaf_data.size() - 32;
+                size_t data_size = leaf_data.size() - 32;
+
+                crypto::Sha512HalfHasher hasher;
+                hasher.update(prefix, 4);
+                hasher.update(leaf_data.data(), data_size);
+                hasher.update(key_ptr, 32);
+                computed_hash = hasher.finalize();
+
+                PLOGD(
+                    log_,
+                    "    response LEAF depth=",
+                    static_cast<int>(static_cast<uint8_t>(node.nodeid()[32])),
+                    " hash=",
+                    computed_hash.hex().substr(0, 16),
+                    " size=",
+                    wire.size());
             }
 
-            // Determine prefix from message type
-            // liTX_NODE (1) → SNDprefix (tx with metadata)
-            // liAS_NODE (2) → MLNprefix (account state leaf)
-            static constexpr uint8_t tx_prefix[] = {'S', 'N', 'D', 0x00};
-            static constexpr uint8_t state_prefix[] = {'M', 'L', 'N', 0x00};
-            auto const* prefix = (msg->type() == 1) ? tx_prefix : state_prefix;
-
-            // item_data = everything except the last 32 bytes (the key)
-            // key = last 32 bytes
-            auto const* key_ptr = leaf_data.data() + leaf_data.size() - 32;
-            size_t data_size = leaf_data.size() - 32;
-
-            crypto::Sha512HalfHasher hasher;
-            hasher.update(prefix, 4);
-            hasher.update(leaf_data.data(), data_size);
-            hasher.update(key_ptr, 32);
-            computed_hash = hasher.finalize();
-
-            PLOGD(
-                log_,
-                "    response LEAF depth=",
-                static_cast<int>(static_cast<uint8_t>(node.nodeid()[32])),
-                " hash=",
-                computed_hash.hex().substr(0, 16),
-                " size=",
-                wire.size());
+            //@@authority transition=prv.T0040 status=provisional
+            // bind=insert_and_notify_observed@2d7eb05dbad9c3f3 scope=statement
+            // owner=unresolved owner_hypothesis=object_store
+            // commit=mutex_via_insert_and_notify
+            // calls=insert_and_notify_observed touches=prv.S0001
+            // label=project_validated_uncorrelated_node_into_content_store
+            auto const accepted = insert_and_notify_observed(
+                computed_hash,
+                std::vector<uint8_t>(
+                    wire_span.begin(),
+                    wire_span.end()));  //@@authority-target ids=prv.T0040
+            if (accepted)
+                observation.accepted = true;
         }
-
-        //@@authority transition=prv.T0040 status=provisional scope=statement
-        // bind=insert_and_notify@f85299d88957f723
-        // owner=unresolved owner_hypothesis=object_store
-        // commit=mutex_via_insert_and_notify calls=insert_and_notify
-        // touches=prv.S0001
-        // label=project_validated_uncorrelated_node_into_content_store
-        auto const accepted = insert_and_notify(
-            computed_hash,
-            std::vector<uint8_t>(
-                wire_span.begin(),
-                wire_span.end()));  //@@authority-target ids=prv.T0040
-        if (accepted)
-            disposition = NodeResponseDisposition::accepted;
+        catch (...)
+        {
+            observation.failure = std::current_exception();
+            break;
+        }
     }
-    return disposition;
+    return observation;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3188,14 +3201,22 @@ NodeCache::insert(Hash256 const& hash, std::vector<uint8_t> data)
     return committed;
 }
 
+void
+NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
+{
+    (void)insert_and_notify_observed(hash, std::move(data));
+}
+
 //@@authority transition=prv.T0020 status=provisional scope=function
-// bind=catl::peer_client::insert_and_notify@8f747cfcf211f194
+// bind=catl::peer_client::insert_and_notify_observed@88f9e554d049e750
 // owner=unresolved owner_hypothesis=object_store commit=mutex
 // touches=prv.S0001,prv.S0002,prv.S0003,prv.S0004,prv.S0018
 // mutation_class=terminal_receipt
 // label=commit_content_addressed_response_and_wake_round
 bool
-NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
+NodeCache::insert_and_notify_observed(
+    Hash256 const& hash,
+    std::vector<uint8_t> data)
 {
     if (before_node_response_prepare_for_test_)
         before_node_response_prepare_for_test_();
@@ -4375,7 +4396,7 @@ NodeCache::drive_node_stop(std::shared_ptr<NodeStopState> stop)
     std::vector<std::shared_ptr<PeerSet>> owner_barriers;
 
     //@@authority transition=prv.T0126 status=provisional scope=statement
-    // bind=compound_statement@b21c40e3ed9f0cf7
+    // bind=compound_statement@a2c77c554e23db0e
     // owner=unresolved owner_hypothesis=node_cache commit=mutex
     // touches=prv.S0001,prv.S0003,prv.S0043 mutation_class=stop_driver
     // label=extract_and_destroy_owner_local_node_state

@@ -54,6 +54,10 @@ static_assert(std::is_move_constructible_v<PeerGenerationPin>);
 static_assert(std::is_move_assignable_v<PeerGenerationPin>);
 static_assert(!std::is_copy_constructible_v<PeerGenerationPin>);
 static_assert(!std::is_copy_assignable_v<PeerGenerationPin>);
+static_assert(
+    std::is_same_v<
+        PeerSession::NodeResponseHandler,
+        std::function<void(std::shared_ptr<protocol::TMLedgerData> const&)>>);
 
 class FakePeerSession : public PeerSession,
                         public std::enable_shared_from_this<FakePeerSession>
@@ -479,7 +483,7 @@ private:
 class NodeCacheTestAccess
 {
 public:
-    static NodeResponseDisposition
+    static NodeResponseObservation
     on_node_response(
         NodeCache& cache,
         std::shared_ptr<protocol::TMLedgerData> const& message)
@@ -1072,15 +1076,9 @@ class ScopedErrorLogCapture
 {
 public:
     ScopedErrorLogCapture()
+        : partition_level_("peer-client", LogLevel::WARNING)
+        , error_stream_(error_)
     {
-        Logger::set_error_stream(&error_);
-        Logger::set_partition_level("peer-client", LogLevel::WARNING);
-    }
-
-    ~ScopedErrorLogCapture()
-    {
-        Logger::set_partition_level("peer-client", LogLevel::INHERIT);
-        Logger::reset_streams();
     }
 
     std::string
@@ -1091,6 +1089,8 @@ public:
 
 private:
     std::ostringstream error_;
+    ScopedLogPartitionLevel partition_level_;
+    ScopedErrorLogStream error_stream_;
 };
 
 template <class T>
@@ -1126,19 +1126,67 @@ TEST(PeerSessionInterface, NodeCacheReportsAcceptedAndIgnoredResponses)
     auto const node_id = SHAMapNodeID::root();
 
     auto valid = make_node_response(ledger_hash, node_id, true);
-    EXPECT_EQ(
-        NodeCacheTestAccess::on_node_response(*cache, valid),
-        NodeResponseDisposition::accepted);
-    EXPECT_EQ(
-        NodeCacheTestAccess::on_node_response(*cache, valid),
-        NodeResponseDisposition::accepted)
+    auto accepted = NodeCacheTestAccess::on_node_response(*cache, valid);
+    EXPECT_TRUE(accepted.accepted);
+    EXPECT_FALSE(accepted.failure);
+    auto duplicate = NodeCacheTestAccess::on_node_response(*cache, valid);
+    EXPECT_TRUE(duplicate.accepted)
         << "an idempotent duplicate remains accepted by the cache sink";
+    EXPECT_FALSE(duplicate.failure);
 
     auto invalid = make_node_response(ledger_hash, node_id, false);
-    EXPECT_EQ(
-        NodeCacheTestAccess::on_node_response(*cache, invalid),
-        NodeResponseDisposition::ignored);
+    auto ignored = NodeCacheTestAccess::on_node_response(*cache, invalid);
+    EXPECT_FALSE(ignored.accepted);
+    EXPECT_FALSE(ignored.failure);
     cache->clear_nodes();
+
+    auto stopped_cache = NodeCache::create(io, {});
+    auto stopped =
+        asio::co_spawn(io, stopped_cache->co_stop_nodes(), asio::use_future);
+    io.run();
+    ASSERT_EQ(
+        stopped.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    ASSERT_NO_THROW(stopped.get());
+    auto stopped_observation =
+        NodeCacheTestAccess::on_node_response(*stopped_cache, valid);
+    EXPECT_FALSE(stopped_observation.accepted);
+    EXPECT_FALSE(stopped_observation.failure);
+}
+
+TEST(PeerSessionInterface, NodeCachePreservesPartialAcceptanceAndFailure)
+{
+    asio::io_context io;
+    auto const ledger_hash = hash_with_byte(0x33);
+    auto const node_id = SHAMapNodeID::root();
+    auto two_nodes = make_node_response(ledger_hash, node_id, true);
+    *two_nodes->add_nodes() = two_nodes->nodes(0);
+
+    auto fail_before_acceptance = NodeCache::create(io, {});
+    NodeCacheTestAccess::set_node_response_hooks(
+        *fail_before_acceptance,
+        [] { throw std::runtime_error("before first node commit"); },
+        {},
+        {});
+    auto first_failure = NodeCacheTestAccess::on_node_response(
+        *fail_before_acceptance, two_nodes);
+    EXPECT_FALSE(first_failure.accepted);
+    EXPECT_TRUE(first_failure.failure);
+
+    auto accept_then_fail = NodeCache::create(io, {});
+    std::size_t preparations = 0;
+    NodeCacheTestAccess::set_node_response_hooks(
+        *accept_then_fail,
+        [&preparations] {
+            if (++preparations == 2)
+                throw std::runtime_error("after first node commit");
+        },
+        {},
+        {});
+    auto partial =
+        NodeCacheTestAccess::on_node_response(*accept_then_fail, two_nodes);
+    EXPECT_TRUE(partial.accepted);
+    EXPECT_TRUE(partial.failure);
+    EXPECT_EQ(preparations, 2u);
 }
 
 TEST(PeerSessionInterface, PeerClientPreservesBothNodeResponseSinkResults)
@@ -1146,27 +1194,38 @@ TEST(PeerSessionInterface, PeerClientPreservesBothNodeResponseSinkResults)
     struct Case
     {
         bool cache_accepted;
+        bool cache_failed;
         bool legacy_matched;
     };
 
     for (auto const test_case :
-         {Case{false, false},
-          Case{false, true},
-          Case{true, false},
-          Case{true, true}})
+         {Case{false, false, false},
+          Case{false, false, true},
+          Case{true, false, false},
+          Case{true, false, true},
+          Case{false, true, false},
+          Case{false, true, true},
+          Case{true, true, false},
+          Case{true, true, true}})
     {
         SCOPED_TRACE(
             std::string{"cache="} +
             (test_case.cache_accepted ? "accepted" : "ignored") +
+            " failure=" + (test_case.cache_failed ? "present" : "absent") +
             " legacy=" + (test_case.legacy_matched ? "matched" : "absent"));
 
         asio::io_context io;
         auto client = PeerClientTestAccess::make(io, State::Ready);
-        client->set_node_response_handler(
-            [accepted = test_case.cache_accepted](
+        client->set_node_response_observer(
+            [accepted = test_case.cache_accepted,
+             failed = test_case.cache_failed](
                 std::shared_ptr<protocol::TMLedgerData> const&) {
-                return accepted ? NodeResponseDisposition::accepted
-                                : NodeResponseDisposition::ignored;
+                return NodeResponseObservation{
+                    .accepted = accepted,
+                    .failure = failed
+                        ? std::make_exception_ptr(
+                              std::runtime_error("test sink failure"))
+                        : std::exception_ptr{}};
             });
 
         auto const ledger_hash = hash_with_byte(0x32);
@@ -1198,16 +1257,57 @@ TEST(PeerSessionInterface, PeerClientPreservesBothNodeResponseSinkResults)
         auto const expected = std::string{"cache="} +
             (test_case.cache_accepted ? "accepted" : "ignored") +
             " legacy=" + (test_case.legacy_matched ? "matched" : "absent");
-        auto const globally_unowned =
-            !test_case.cache_accepted && !test_case.legacy_matched;
+        auto const globally_unowned = !test_case.cache_accepted &&
+            !test_case.cache_failed && !test_case.legacy_matched;
         auto const disposition_warning =
             logs.error().find("node response disposition:") !=
             std::string::npos;
         EXPECT_EQ(disposition_warning, globally_unowned);
-        if (!globally_unowned)
-            continue;
-        EXPECT_NE(logs.error().find(expected), std::string::npos);
+        auto const failure_diagnostic =
+            logs.error().find("node response sink failure:") !=
+            std::string::npos;
+        EXPECT_EQ(failure_diagnostic, test_case.cache_failed);
+        if (globally_unowned || test_case.cache_failed)
+            EXPECT_NE(logs.error().find(expected), std::string::npos);
     }
+}
+
+TEST(PeerSessionInterface, ThrowingNodeObserverCannotBypassLegacyDispatch)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    client->set_node_response_observer(
+        [](std::shared_ptr<protocol::TMLedgerData> const&)
+            -> NodeResponseObservation {
+            throw std::runtime_error("throwing sink");
+        });
+
+    auto const ledger_hash = hash_with_byte(0x34);
+    auto const node_id = SHAMapNodeID::root();
+    auto const message = make_node_response(ledger_hash, node_id, true);
+    auto const payload = serialize(*message);
+    std::size_t legacy_callbacks = 0;
+    ScopedErrorLogCapture logs;
+    asio::post(client->strand(), [&, client, payload] {
+        EXPECT_TRUE(PeerClientTestAccess::seed_pending_nodes(
+            *client,
+            ledger_hash,
+            protocol::liTX_NODE,
+            {node_id},
+            [&legacy_callbacks](Error error, LedgerNodesResult result) {
+                EXPECT_EQ(error, Error::Success);
+                EXPECT_TRUE(static_cast<bool>(result));
+                ++legacy_callbacks;
+            }));
+        PeerClientTestAccess::dispatch_ledger_data(*client, payload);
+    });
+    io.run();
+
+    EXPECT_EQ(legacy_callbacks, 1u);
+    EXPECT_NE(
+        logs.error().find("node response sink failure:"), std::string::npos);
+    EXPECT_EQ(
+        logs.error().find("node response disposition:"), std::string::npos);
 }
 
 TEST(PeerSessionInterface, NodeCacheRoutesOnlyManagedPinsThroughCoordinator)

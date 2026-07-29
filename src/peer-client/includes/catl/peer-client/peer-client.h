@@ -504,6 +504,10 @@ public:
     void
     set_node_response_handler(NodeResponseHandler handler) override;
 
+    /// Set a sink which reports acceptance and failure independently.
+    void
+    set_node_response_observer(NodeResponseObserver observer) override;
+
     /// Send a raw TMGetLedger for specific node IDs without registering
     /// in pending_nodes. The response will be delivered via the
     /// node_response_handler (if set) and then through normal dispatch.
@@ -902,10 +906,10 @@ private:
 
     DisconnectCallback on_disconnect_;
     //@@authority state=prv.S0007 status=provisional scope=field
-    // bind=catl::peer_client::PeerClient::node_response_handler_@21740938935a972d
+    // bind=catl::peer_client::PeerClient::node_response_observer_@4ed65a4019fccdea
     // owner=unresolved owner_hypothesis=peer_client observed_home=peer_client
-    // label=singleton_uncorrelated_node_response_sink
-    NodeResponseHandler node_response_handler_;
+    // label=singleton_uncorrelated_node_response_observer
+    NodeResponseObserver node_response_observer_;
 
     static LogPartition log_;
 };
