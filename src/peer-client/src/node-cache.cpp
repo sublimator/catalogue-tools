@@ -2711,7 +2711,8 @@ NodeCache::ensure_response_handler(PeerSession& peer)
     peer.set_node_response_handler(
         [weak](std::shared_ptr<protocol::TMLedgerData> const& msg) {
             if (auto self = weak.lock())
-                self->on_node_response(msg);
+                return self->on_node_response(msg);
+            return NodeResponseDisposition::ignored;
         });
 
     PLOGD(log_, "  installed response handler on peer ", peer.endpoint());
@@ -2956,10 +2957,10 @@ NodeCache::retire_node_fetch_round(
 }
 
 //@@authority transition=prv.T0019 status=provisional scope=function
-// bind=catl::peer_client::on_node_response@c096b9c840f0b353
+// bind=catl::peer_client::on_node_response@12955ab26e1b73ad
 // owner=unresolved owner_hypothesis=object_store commit=unresolved
 // label=accept_uncorrelated_peer_node_response
-void
+NodeResponseDisposition
 NodeCache::on_node_response(std::shared_ptr<protocol::TMLedgerData> const& msg)
 {
     PLOGD(
@@ -2969,6 +2970,7 @@ NodeCache::on_node_response(std::shared_ptr<protocol::TMLedgerData> const& msg)
         " nodes=",
         msg->nodes_size());
 
+    auto disposition = NodeResponseDisposition::ignored;
     for (int i = 0; i < msg->nodes_size(); ++i)
     {
         auto const& node = msg->nodes(i);
@@ -3039,17 +3041,20 @@ NodeCache::on_node_response(std::shared_ptr<protocol::TMLedgerData> const& msg)
         }
 
         //@@authority transition=prv.T0040 status=provisional scope=statement
-        // bind=insert_and_notify@0958f75fea8a50d8
+        // bind=insert_and_notify@f85299d88957f723
         // owner=unresolved owner_hypothesis=object_store
         // commit=mutex_via_insert_and_notify calls=insert_and_notify
         // touches=prv.S0001
         // label=project_validated_uncorrelated_node_into_content_store
-        insert_and_notify(
+        auto const accepted = insert_and_notify(
             computed_hash,
             std::vector<uint8_t>(
                 wire_span.begin(),
-                wire_span.end())); //@@authority-target ids=prv.T0040
+                wire_span.end()));  //@@authority-target ids=prv.T0040
+        if (accepted)
+            disposition = NodeResponseDisposition::accepted;
     }
+    return disposition;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3184,12 +3189,12 @@ NodeCache::insert(Hash256 const& hash, std::vector<uint8_t> data)
 }
 
 //@@authority transition=prv.T0020 status=provisional scope=function
-// bind=catl::peer_client::insert_and_notify@b837ca69c236e302
+// bind=catl::peer_client::insert_and_notify@8f747cfcf211f194
 // owner=unresolved owner_hypothesis=object_store commit=mutex
 // touches=prv.S0001,prv.S0002,prv.S0003,prv.S0004,prv.S0018
 // mutation_class=terminal_receipt
 // label=commit_content_addressed_response_and_wake_round
-void
+bool
 NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
 {
     if (before_node_response_prepare_for_test_)
@@ -3204,11 +3209,11 @@ NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
     {
         std::lock_guard lock(mutex_);
         if (node_lifecycle_ != NodeLifecycle::running)
-            return;
+            return false;
         auto [it, inserted] = store_.try_emplace(hash);
 
         if (!inserted && it->second.present)
-            return;  // already populated — skip
+            return true;  // already populated — accepted idempotently
 
         // All fallible response/LRU preparation precedes terminality.
         try
@@ -3276,6 +3281,7 @@ NodeCache::insert_and_notify(Hash256 const& hash, std::vector<uint8_t> data)
     {
         // Diagnostics are outside the response transaction.
     }
+    return true;
 }
 
 void

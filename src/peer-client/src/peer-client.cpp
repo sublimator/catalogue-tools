@@ -2140,8 +2140,10 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         return;
     }
 
-    // Feed node responses to the NodeCache interceptor FIRST.
-    // This handles responses from send_get_nodes() which bypass pending_nodes.
+    // Feed node responses to the NodeCache sink first. Delivery is not the
+    // disposition: the sink reports whether it accepted valid content, while
+    // the legacy pending map independently reports whether it matched.
+    auto cache_disposition = NodeResponseDisposition::ignored;
     if (msg->type() != protocol::liBASE && !msg->has_error())
     {
         NodeResponseHandler handler;
@@ -2152,11 +2154,14 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         if (handler)
         {
             //@@authority transition=prv.T0041 status=provisional
-            // bind=expression_statement@0a62d39eed858ac3 scope=statement
+            // bind=expression_statement@aae0c22a82ada519 scope=statement
             // owner=unresolved owner_hypothesis=peer_client commit=strand
             // touches=prv.S0007
-            // label=invoke_snapshot_of_singleton_uncorrelated_response_sink
-            handler(msg);  //@@authority-target ids=prv.T0041
+            // label=invoke_snapshot_and_observe_uncorrelated_response_sink
+            //@@mutation-site node-response-sink-disposition-preserved
+            cache_disposition =
+                handler(msg);  //@@authority-target ids=prv.T0041
+            //@@mutation-end node-response-sink-disposition-preserved
         }
     }
 
@@ -2383,8 +2388,15 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
     }
     else
     {
+        auto const response_type = msg->type();
+        auto const cache_accepted =
+            cache_disposition == NodeResponseDisposition::accepted;
+        bool legacy_matched = false;
+        //@@mutation-site node-response-legacy-dispatch-remains-independent
         if (auto k = find_node_key())
+        //@@mutation-end node-response-legacy-dispatch-remains-independent
         {
+            legacy_matched = true;
             PLOGD(
                 log_,
                 "  resolving type=",
@@ -2397,13 +2409,27 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
                 Error::Success,
                 LedgerNodesResult{std::move(msg)});
         }
-        else
+
+        //@@mutation-site node-response-warning-requires-global-nonownership
+        if (!legacy_matched && !cache_accepted)
+        //@@mutation-end node-response-warning-requires-global-nonownership
         {
             PLOGW(
                 log_,
-                "  type=",
-                msg->type(),
-                " response but no matching pending_nodes");
+                "  node response disposition: type=",
+                response_type,
+                " cache=ignored legacy=absent");
+        }
+        else
+        {
+            PLOGD(
+                log_,
+                "  node response disposition: type=",
+                response_type,
+                " cache=",
+                cache_accepted ? "accepted" : "ignored",
+                " legacy=",
+                legacy_matched ? "matched" : "absent");
         }
     }
 }

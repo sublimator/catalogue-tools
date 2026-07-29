@@ -178,6 +178,32 @@ public:
             client.pending_headers_, key, Error::Success, LedgerHeaderResult{});
     }
 
+    static bool
+    seed_pending_nodes(
+        PeerClient& client,
+        Hash256 const& ledger_hash,
+        int type,
+        std::vector<SHAMapNodeID> const& node_ids,
+        Callback<LedgerNodesResult> callback)
+    {
+        RequestOptions opts;
+        auto const key = PeerClient::nodes_key(ledger_hash, type, node_ids);
+        auto const registered = client.register_callback(
+            client.pending_nodes_, key, std::move(callback), opts, false);
+        client.pending_nodes_[key].match_key =
+            PeerClient::ledger_key(ledger_hash, type);
+        client.pending_nodes_[key].requested_nodeids = node_ids;
+        return registered;
+    }
+
+    static void
+    dispatch_ledger_data(
+        PeerClient& client,
+        std::vector<std::uint8_t> const& data)
+    {
+        client.dispatch_ledger_data(data);
+    }
+
     static void
     defer(PeerClient& client, PeerClient::DeferredRequest request)
     {

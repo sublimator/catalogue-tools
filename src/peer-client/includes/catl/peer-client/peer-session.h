@@ -76,11 +76,16 @@ struct AdvertisedLedgerRange
         default;
 };
 
+enum class NodeResponseDisposition : std::uint8_t {
+    ignored,
+    accepted,
+};
+
 class PeerSession
 {
 public:
-    using NodeResponseHandler =
-        std::function<void(std::shared_ptr<protocol::TMLedgerData> const&)>;
+    using NodeResponseHandler = std::function<NodeResponseDisposition(
+        std::shared_ptr<protocol::TMLedgerData> const&)>;
 
     virtual ~PeerSession() = default;
 

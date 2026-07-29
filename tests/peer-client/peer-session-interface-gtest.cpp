@@ -5,6 +5,7 @@
 #include <catl/peer-client/peer-set.h>
 
 #include <catl/core/context-executor.h>
+#include <catl/core/logger.h>
 #include <catl/core/request-context.h>
 
 #include "../test-support/deterministic-scheduler.h"
@@ -38,6 +39,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -477,6 +479,14 @@ private:
 class NodeCacheTestAccess
 {
 public:
+    static NodeResponseDisposition
+    on_node_response(
+        NodeCache& cache,
+        std::shared_ptr<protocol::TMLedgerData> const& message)
+    {
+        return cache.on_node_response(message);
+    }
+
     struct LateSubmissionState
     {
         std::shared_ptr<NodeCache::NodeFetchRound> round;
@@ -1029,6 +1039,60 @@ make_leaf_wire(Hash256 const& key)
     return wire;
 }
 
+std::shared_ptr<protocol::TMLedgerData>
+make_node_response(
+    Hash256 const& ledger_hash,
+    SHAMapNodeID const& node_id,
+    bool valid_node)
+{
+    auto message = std::make_shared<protocol::TMLedgerData>();
+    message->set_type(protocol::liTX_NODE);
+    message->set_ledgerseq(1);
+    message->set_ledgerhash(ledger_hash.data(), Hash256::size());
+
+    auto* node = message->add_nodes();
+    node->set_nodeid(node_id.to_wire());
+    if (valid_node)
+    {
+        auto const wire = make_leaf_wire(Hash256{});
+        node->set_nodedata(wire.data(), wire.size());
+    }
+    return message;
+}
+
+std::vector<std::uint8_t>
+serialize(protocol::TMLedgerData const& message)
+{
+    std::vector<std::uint8_t> payload(message.ByteSizeLong());
+    EXPECT_TRUE(message.SerializeToArray(payload.data(), payload.size()));
+    return payload;
+}
+
+class ScopedErrorLogCapture
+{
+public:
+    ScopedErrorLogCapture()
+    {
+        Logger::set_error_stream(&error_);
+        Logger::set_partition_level("peer-client", LogLevel::WARNING);
+    }
+
+    ~ScopedErrorLogCapture()
+    {
+        Logger::set_partition_level("peer-client", LogLevel::INHERIT);
+        Logger::reset_streams();
+    }
+
+    std::string
+    error() const
+    {
+        return error_.str();
+    }
+
+private:
+    std::ostringstream error_;
+};
+
 template <class T>
 T
 wait_for_future(std::future<T>& fut, std::chrono::seconds timeout)
@@ -1053,6 +1117,93 @@ wait_until(Predicate&& predicate, std::chrono::duration<Rep, Period> timeout)
 }
 
 }  // namespace
+
+TEST(PeerSessionInterface, NodeCacheReportsAcceptedAndIgnoredResponses)
+{
+    asio::io_context io;
+    auto cache = NodeCache::create(io, {});
+    auto const ledger_hash = hash_with_byte(0x31);
+    auto const node_id = SHAMapNodeID::root();
+
+    auto valid = make_node_response(ledger_hash, node_id, true);
+    EXPECT_EQ(
+        NodeCacheTestAccess::on_node_response(*cache, valid),
+        NodeResponseDisposition::accepted);
+    EXPECT_EQ(
+        NodeCacheTestAccess::on_node_response(*cache, valid),
+        NodeResponseDisposition::accepted)
+        << "an idempotent duplicate remains accepted by the cache sink";
+
+    auto invalid = make_node_response(ledger_hash, node_id, false);
+    EXPECT_EQ(
+        NodeCacheTestAccess::on_node_response(*cache, invalid),
+        NodeResponseDisposition::ignored);
+    cache->clear_nodes();
+}
+
+TEST(PeerSessionInterface, PeerClientPreservesBothNodeResponseSinkResults)
+{
+    struct Case
+    {
+        bool cache_accepted;
+        bool legacy_matched;
+    };
+
+    for (auto const test_case :
+         {Case{false, false},
+          Case{false, true},
+          Case{true, false},
+          Case{true, true}})
+    {
+        SCOPED_TRACE(
+            std::string{"cache="} +
+            (test_case.cache_accepted ? "accepted" : "ignored") +
+            " legacy=" + (test_case.legacy_matched ? "matched" : "absent"));
+
+        asio::io_context io;
+        auto client = PeerClientTestAccess::make(io, State::Ready);
+        client->set_node_response_handler(
+            [accepted = test_case.cache_accepted](
+                std::shared_ptr<protocol::TMLedgerData> const&) {
+                return accepted ? NodeResponseDisposition::accepted
+                                : NodeResponseDisposition::ignored;
+            });
+
+        auto const ledger_hash = hash_with_byte(0x32);
+        auto const node_id = SHAMapNodeID::root();
+        std::size_t legacy_callbacks = 0;
+        auto const message = make_node_response(ledger_hash, node_id, true);
+        auto const payload = serialize(*message);
+        ScopedErrorLogCapture logs;
+        asio::post(client->strand(), [&, client, payload] {
+            if (test_case.legacy_matched)
+            {
+                EXPECT_TRUE(PeerClientTestAccess::seed_pending_nodes(
+                    *client,
+                    ledger_hash,
+                    protocol::liTX_NODE,
+                    {node_id},
+                    [&legacy_callbacks](Error error, LedgerNodesResult result) {
+                        EXPECT_EQ(error, Error::Success);
+                        EXPECT_TRUE(static_cast<bool>(result));
+                        ++legacy_callbacks;
+                    }));
+            }
+            PeerClientTestAccess::dispatch_ledger_data(*client, payload);
+        });
+        io.run();
+
+        EXPECT_EQ(
+            legacy_callbacks, test_case.legacy_matched ? std::size_t{1} : 0u);
+        auto const expected = std::string{"cache="} +
+            (test_case.cache_accepted ? "accepted" : "ignored") +
+            " legacy=" + (test_case.legacy_matched ? "matched" : "absent");
+        auto const globally_unowned =
+            !test_case.cache_accepted && !test_case.legacy_matched;
+        EXPECT_EQ(
+            logs.error().find(expected) != std::string::npos, globally_unowned);
+    }
+}
 
 TEST(PeerSessionInterface, NodeCacheRoutesOnlyManagedPinsThroughCoordinator)
 {
