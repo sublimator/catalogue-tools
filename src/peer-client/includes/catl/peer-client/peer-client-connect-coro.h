@@ -244,6 +244,17 @@ private:
     std::shared_ptr<ConnectAttemptState> attempt_;
 };
 
+inline asio::awaitable<uint32_t>
+co_connect_with_setup_hooks(
+    asio::io_context& io_context,
+    std::string const& host,
+    uint16_t port,
+    PeerClient::ConnectOptions opts,
+    std::shared_ptr<PeerClient>& out_client,
+    int timeout_secs,
+    std::function<void(std::shared_ptr<PeerClient> const&)> on_client_created,
+    ConnectAttemptSetupHooks setup_hooks);
+
 }  // namespace detail
 
 //------------------------------------------------------------------------------
@@ -253,16 +264,15 @@ private:
 //------------------------------------------------------------------------------
 
 inline asio::awaitable<uint32_t>
-co_connect(
+detail::co_connect_with_setup_hooks(
     asio::io_context& io_context,
     std::string const& host,
     uint16_t port,
     PeerClient::ConnectOptions opts,
     std::shared_ptr<PeerClient>& out_client,
-    int timeout_secs = 10,
-    std::function<void(std::shared_ptr<PeerClient> const&)> on_client_created =
-        {},
-    detail::ConnectAttemptSetupHooks setup_hooks = {})
+    int timeout_secs,
+    std::function<void(std::shared_ptr<PeerClient> const&)> on_client_created,
+    ConnectAttemptSetupHooks setup_hooks)
 {
     auto executor = co_await asio::this_coro::executor;
 
@@ -399,6 +409,31 @@ co_connect(
     }
 
     throw std::logic_error("unhandled connect attempt disposition");
+}
+
+/// Public API-compatible entry point. Test-only setup fault injection belongs
+/// to detail::co_connect_with_setup_hooks and must not change this function
+/// type.
+inline asio::awaitable<uint32_t>
+co_connect(
+    asio::io_context& io_context,
+    std::string const& host,
+    uint16_t port,
+    PeerClient::ConnectOptions opts,
+    std::shared_ptr<PeerClient>& out_client,
+    int timeout_secs = 10,
+    std::function<void(std::shared_ptr<PeerClient> const&)> on_client_created =
+        {})
+{
+    co_return co_await detail::co_connect_with_setup_hooks(
+        io_context,
+        host,
+        port,
+        std::move(opts),
+        out_client,
+        timeout_secs,
+        std::move(on_client_created),
+        {});
 }
 
 /// Legacy overload — wraps into ConnectOptions.

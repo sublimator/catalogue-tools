@@ -22,6 +22,21 @@
 #include <thread>
 
 namespace catl::peer_client {
+TEST(PeerClientLifecycle, PublicCoConnectFunctionTypeRemainsStable)
+{
+    using PublicCoConnect = asio::awaitable<std::uint32_t> (*)(
+        asio::io_context&,
+        std::string const&,
+        std::uint16_t,
+        PeerClient::ConnectOptions,
+        std::shared_ptr<PeerClient>&,
+        int,
+        std::function<void(std::shared_ptr<PeerClient> const&)>);
+
+    PublicCoConnect function = &co_connect;
+    EXPECT_NE(function, nullptr);
+}
+
 TEST(PeerClientTypes, ErrorEnumValues)
 {
     EXPECT_EQ(static_cast<int>(Error::Success), 0);
@@ -685,7 +700,7 @@ TEST(PeerClientLifecycle, CoConnectDeadlineArmFailureDrainsPublishedClient)
             try
             {
                 PeerClient::ConnectOptions options;
-                co_await co_connect(
+                co_await detail::co_connect_with_setup_hooks(
                     io,
                     "deadline-arm-failure.invalid",
                     443,
@@ -771,7 +786,7 @@ TEST(PeerClientLifecycle, EveryPostPublicationSetupFailureDrainsAndRethrows)
                 try
                 {
                     PeerClient::ConnectOptions options;
-                    co_await co_connect(
+                    co_await detail::co_connect_with_setup_hooks(
                         io,
                         "setup-failure.invalid",
                         443,
