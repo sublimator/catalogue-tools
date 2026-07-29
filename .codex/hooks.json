@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".ai-docs/agents/codex/tools/post-compact",
+            "timeout": 20,
+            "statusMessage": "Restoring pinned Codex context",
+            "additionalContextLimit": 60000
+          }
+        ]
+      }
+    ]
+  }
+}
