@@ -438,6 +438,12 @@ build_proof_DEAD(
             case Error::PeerCoverageChanged:
             case Error::NoNode:
                 return true;
+            case Error::SendNotInitiated:
+                // The timed-out packet remains in the connection's physical
+                // queue. Retrying here could enqueue a second indistinguishable
+                // wire request before the first one drains, so fail locally
+                // until queued-send cancellation has its own exact receipt.
+                return false;
             default:
                 return false;
         }
@@ -1071,7 +1077,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             Hash256 const& state_root_hash,
             Hash256 const& key,
             PeerGenerationPin peer = {}) -> boost::asio::awaitable<WalkResult> {
-        //@@authority transition=prv.T0007 status=provisional scope=statement bind=walk_to@a8ce5c76166dd75c
+        //@@authority transition=prv.T0007 status=provisional scope=statement
+        // bind=walk_to@a8ce5c76166dd75c
         // owner=unresolved owner_hypothesis=ledger_fetch_coordinator
         // commit=unresolved calls=walk_to
         // label=submit_state_tree_interest_without_interest_identity
@@ -1083,7 +1090,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             2,  // liAS_NODE
             ctx->peers,
             std::move(peer),
-            ctx->cancel_token); //@@authority-target ids=prv.T0007
+            ctx->cancel_token);  //@@authority-target ids=prv.T0007
         co_return require_walk_transport(std::move(result));
     };
 
@@ -1095,7 +1102,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             Hash256 const& tx_root_hash,
             Hash256 const& key,
             PeerGenerationPin peer = {}) -> boost::asio::awaitable<WalkResult> {
-        //@@authority transition=prv.T0008 status=provisional scope=statement bind=walk_to@c29ef95a7f7bf289
+        //@@authority transition=prv.T0008 status=provisional scope=statement
+        // bind=walk_to@c29ef95a7f7bf289
         // owner=unresolved owner_hypothesis=ledger_fetch_coordinator
         // commit=unresolved calls=walk_to
         // label=submit_transaction_tree_interest_without_interest_identity
@@ -1107,7 +1115,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             1,  // liTX_NODE
             ctx->peers,
             std::move(peer),
-            ctx->cancel_token); //@@authority-target ids=prv.T0008
+            ctx->cancel_token);  //@@authority-target ids=prv.T0008
         co_return require_walk_transport(std::move(result));
     };
 

@@ -342,7 +342,7 @@ PeerClient::register_callback(
                     auto const terminal =
                         current->second.network_request_initiated
                             ? Error::Timeout
-                            : Error::SendNotInitiated;  //@@authority-target ids=prv.T0204
+                            : Error::SendNotInitiated; //@@authority-target ids=prv.T0204
                     //@@mutation-end header-deadline-consults-exact-send-initiation
                     // clang-format on
                     callbacks.erase(callback_it);
@@ -1808,13 +1808,11 @@ void
 PeerClient::send_initial_probe_ping()
 {
     auto const seq = static_cast<uint32_t>(next_seq_.fetch_add(1));
-    auto const key = ping_key(seq);
 
     RequestOptions opts;
     opts.timeout = std::chrono::seconds{10};
-    if (!register_callback<PingResult>(
-            pending_pings_,
-            key,
+    if (!send_ping_request_on_strand(
+            seq,
             Callback<PingResult>{[seq](Error err, PingResult) {
                 if (err == Error::Success)
                 {
@@ -1836,8 +1834,7 @@ PeerClient::send_initial_probe_ping()
                         static_cast<int>(err));
                 }
             }},
-            opts,
-            false))
+            opts))
     {
         PLOGW(
             log_,
@@ -1848,15 +1845,6 @@ PeerClient::send_initial_probe_ping()
         return;
     }
 
-    protocol::TMPing msg;
-    msg.set_type(protocol::TMPing_pingType_ptPING);
-    msg.set_seq(seq);
-
-    std::vector<uint8_t> data(msg.ByteSizeLong());
-    msg.SerializeToArray(data.data(), data.size());
-
-    connection_->async_send_packet(
-        packet_type::ping, data, [](boost::system::error_code) {});
     PLOGD(log_, "[", net_label_, "] Sent initial probe ping seq=", seq);
 }
 
@@ -3267,13 +3255,41 @@ PeerClient::get_tx_proof_path_on_strand(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_proof_paths_.at(ckey).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::proof_path_req, data, [](boost::system::error_code ec) {
+        packet_type::proof_path_req,
+        data,
+        [weak, ckey, incarnation](boost::system::error_code ec) {
             if (ec)
                 PLOGE(
                     PeerClient::log_,
                     "send get_tx_proof_path failed: ",
                     ec.message());
+            if (auto self = weak.lock())
+            {
+                //@@mutation-site tx-proof-path-send-error-retires-pending
+                self->complete_network_send(
+                    self->pending_proof_paths_, ckey, incarnation, ec);
+                //@@mutation-end tx-proof-path-send-error-retires-pending
+            }
+        },
+        [weak, ckey, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0205 status=provisional
+                //bind=expression_statement@71a1b1d7568d95d3
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_transaction_proof_path_send_initiation
+                //@@mutation-site tx-proof-path-records-send-initiation
+                self->mark_network_request_initiated(
+                    self->pending_proof_paths_,
+                    ckey,
+                    incarnation);  //@@authority-target ids=prv.T0205
+                //@@mutation-end tx-proof-path-records-send-initiation
+            }
         });
 }
 
@@ -3353,13 +3369,41 @@ PeerClient::get_state_proof_path_on_strand(
     std::vector<uint8_t> data(request.ByteSizeLong());
     request.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_proof_paths_.at(ckey).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::proof_path_req, data, [](boost::system::error_code ec) {
+        packet_type::proof_path_req,
+        data,
+        [weak, ckey, incarnation](boost::system::error_code ec) {
             if (ec)
                 PLOGE(
                     PeerClient::log_,
                     "send get_state_proof_path failed: ",
                     ec.message());
+            if (auto self = weak.lock())
+            {
+                //@@mutation-site state-proof-path-send-error-retires-pending
+                self->complete_network_send(
+                    self->pending_proof_paths_, ckey, incarnation, ec);
+                //@@mutation-end state-proof-path-send-error-retires-pending
+            }
+        },
+        [weak, ckey, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0206 status=provisional
+                //bind=expression_statement@f8a084d8a0a7f248
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_state_proof_path_send_initiation
+                //@@mutation-site state-proof-path-records-send-initiation
+                self->mark_network_request_initiated(
+                    self->pending_proof_paths_,
+                    ckey,
+                    incarnation);  //@@authority-target ids=prv.T0206
+                //@@mutation-end state-proof-path-records-send-initiation
+            }
         });
 }
 
@@ -3396,6 +3440,16 @@ PeerClient::ping_on_strand(Callback<PingResult> callback, RequestOptions opts)
     }
 
     auto seq = static_cast<uint32_t>(next_seq_.fetch_add(1));
+    (void)send_ping_request_on_strand(seq, std::move(callback), opts);
+}
+
+bool
+PeerClient::send_ping_request_on_strand(
+    std::uint32_t seq,
+    Callback<PingResult> callback,
+    RequestOptions const& opts)
+{
+    assert(strand_.running_in_this_thread());
     auto key = ping_key(seq);
     PLOGD(log_, "ping: seq=", seq, " key=", key.hex().substr(0, 16));
 
@@ -3403,7 +3457,7 @@ PeerClient::ping_on_strand(Callback<PingResult> callback, RequestOptions opts)
             pending_pings_, key, std::move(callback), opts, false))
     {
         PLOGD(log_, "ping: registration refused before send");
-        return;
+        return false;
     }
 
     protocol::TMPing msg;
@@ -3413,8 +3467,38 @@ PeerClient::ping_on_strand(Callback<PingResult> callback, RequestOptions opts)
     std::vector<uint8_t> data(msg.ByteSizeLong());
     msg.SerializeToArray(data.data(), data.size());
 
+    auto const incarnation = pending_pings_.at(key).incarnation;
+    auto weak = weak_from_this();
     connection_->async_send_packet(
-        packet_type::ping, data, [](boost::system::error_code) {});
+        packet_type::ping,
+        data,
+        [weak, key, incarnation](boost::system::error_code ec) {
+            if (auto self = weak.lock())
+            {
+                //@@mutation-site ping-send-error-retires-pending
+                self->complete_network_send(
+                    self->pending_pings_, key, incarnation, ec);
+                //@@mutation-end ping-send-error-retires-pending
+            }
+        },
+        [weak, key, incarnation] {
+            if (auto self = weak.lock())
+            {
+                //@@authority transition=prv.T0207 status=provisional
+                //bind=expression_statement@0eea5f51802de08a
+                // scope=statement owner=unresolved
+                // owner_hypothesis=peer_client commit=strand
+                // touches=prv.S0065
+                // label=record_ping_send_initiation
+                //@@mutation-site ping-records-send-initiation
+                self->mark_network_request_initiated(
+                    self->pending_pings_,
+                    key,
+                    incarnation);  //@@authority-target ids=prv.T0207
+                //@@mutation-end ping-records-send-initiation
+            }
+        });
+    return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -599,6 +599,12 @@ private:
     void
     send_initial_probe_ping();
 
+    bool
+    send_ping_request_on_strand(
+        std::uint32_t seq,
+        Callback<PingResult> callback,
+        RequestOptions const& opts);
+
     void
     handle_status_change(std::vector<uint8_t> const& payload);
 

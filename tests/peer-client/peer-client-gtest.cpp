@@ -59,6 +59,192 @@ TEST(PeerClientTypes, DefaultRequestOptions)
     EXPECT_EQ(opts.timeout, std::chrono::seconds{5});
 }
 
+enum class TrackedRequestFamily {
+    ping,
+    transaction_proof_path,
+    state_proof_path,
+};
+
+static void
+submit_tracked_request(
+    std::shared_ptr<PeerClient> const& client,
+    TrackedRequestFamily family,
+    std::vector<Error>& terminals,
+    RequestOptions opts)
+{
+    switch (family)
+    {
+        case TrackedRequestFamily::ping:
+            client->ping(
+                [&terminals](Error error, PingResult) {
+                    terminals.push_back(error);
+                },
+                opts);
+            return;
+        case TrackedRequestFamily::transaction_proof_path:
+            client->get_tx_proof_path(
+                {},
+                {},
+                [&terminals](Error error, ProofPathResult) {
+                    terminals.push_back(error);
+                },
+                opts);
+            return;
+        case TrackedRequestFamily::state_proof_path:
+            client->get_state_proof_path(
+                {},
+                {},
+                [&terminals](Error error, ProofPathResult) {
+                    terminals.push_back(error);
+                },
+                opts);
+            return;
+    }
+    FAIL() << "unknown tracked request family";
+}
+
+class PeerClientTrackedRequestInitiation
+    : public ::testing::TestWithParam<TrackedRequestFamily>
+{
+};
+
+TEST_P(
+    PeerClientTrackedRequestInitiation,
+    QueuedDeadlineRetainsPreInitiationDisposition)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+
+    std::vector<peer_connection::test_write_completion> writes;
+    client->raw_connection().set_write_initiator_for_test(
+        [&writes](
+            asio::const_buffer,
+            peer_connection::test_write_completion complete) {
+            writes.push_back(std::move(complete));
+        });
+
+    asio::post(client->strand(), [client] {
+        EXPECT_EQ(
+            client->raw_connection().async_send_packet(
+                packet_type::ping,
+                std::vector<std::uint8_t>(1, 0x65),
+                [](boost::system::error_code) {}),
+            peer_connection::SendAdmission::accepted);
+    });
+    io.run();
+    io.restart();
+    ASSERT_EQ(writes.size(), 1u);
+
+    std::vector<Error> terminals;
+    submit_tracked_request(
+        client, GetParam(), terminals, RequestOptions{.timeout = 0s});
+    io.run_for(250ms);
+    io.restart();
+
+    ASSERT_EQ(terminals.size(), 1u);
+    EXPECT_EQ(terminals.front(), Error::SendNotInitiated);
+    EXPECT_EQ(writes.size(), 1u)
+        << "the tracked request must still be queued behind the predecessor";
+
+    auto predecessor = std::move(writes.front());
+    asio::post(
+        client->strand(),
+        [predecessor = std::move(predecessor)]() mutable { predecessor({}); });
+    io.run();
+    io.restart();
+    ASSERT_EQ(writes.size(), 2u);
+
+    auto late_write = std::move(writes.back());
+    asio::post(
+        client->strand(),
+        [late_write = std::move(late_write)]() mutable { late_write({}); });
+    io.run();
+}
+
+TEST_P(
+    PeerClientTrackedRequestInitiation,
+    InitiatedDeadlineRetainsPostInitiationDisposition)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+
+    std::vector<peer_connection::test_write_completion> writes;
+    client->raw_connection().set_write_initiator_for_test(
+        [&writes](
+            asio::const_buffer,
+            peer_connection::test_write_completion complete) {
+            writes.push_back(std::move(complete));
+        });
+
+    std::vector<Error> terminals;
+    submit_tracked_request(
+        client, GetParam(), terminals, RequestOptions{.timeout = 0s});
+    io.run_for(250ms);
+    io.restart();
+
+    ASSERT_EQ(writes.size(), 1u);
+    ASSERT_EQ(terminals.size(), 1u);
+    EXPECT_EQ(terminals.front(), Error::Timeout);
+
+    auto late_write = std::move(writes.front());
+    asio::post(
+        client->strand(),
+        [late_write = std::move(late_write)]() mutable { late_write({}); });
+    io.run();
+}
+
+TEST_P(
+    PeerClientTrackedRequestInitiation,
+    InitiationFailureConsumesExactPendingAttempt)
+{
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+
+    client->raw_connection().set_write_initiator_for_test(
+        [](asio::const_buffer, peer_connection::test_write_completion) {
+            throw std::runtime_error(
+                "forced tracked request initiation failure");
+        });
+
+    std::vector<Error> terminals;
+    submit_tracked_request(client, GetParam(), terminals, {});
+    io.run();
+
+    ASSERT_EQ(terminals.size(), 1u);
+    EXPECT_EQ(terminals.front(), Error::Disconnected);
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllPendingFamilies,
+    PeerClientTrackedRequestInitiation,
+    ::testing::Values(
+        TrackedRequestFamily::ping,
+        TrackedRequestFamily::transaction_proof_path,
+        TrackedRequestFamily::state_proof_path),
+    [](auto const& info) {
+        switch (info.param)
+        {
+            case TrackedRequestFamily::ping:
+                return "Ping";
+            case TrackedRequestFamily::transaction_proof_path:
+                return "TransactionProofPath";
+            case TrackedRequestFamily::state_proof_path:
+                return "StateProofPath";
+        }
+        return "Unknown";
+    });
+
 TEST(PeerClientStatusRange, PublicationIsOneCoherentFact)
 {
     asio::io_context io;
