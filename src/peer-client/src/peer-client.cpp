@@ -331,6 +331,20 @@ PeerClient::register_callback(
                         return;
 
                     auto callback = std::move(callback_it->callback);
+                    //@@authority transition=prv.T0204 status=provisional
+                    // bind=declaration@3ec3250d7d11cea5
+                    // scope=statement owner=unresolved
+                    // owner_hypothesis=peer_client commit=strand
+                    // touches=prv.S0065
+                    // label=classify_request_deadline_from_exact_send_evidence
+                    // clang-format off
+                    //@@mutation-site header-deadline-consults-exact-send-initiation
+                    auto const terminal =
+                        current->second.network_request_initiated
+                            ? Error::Timeout
+                            : Error::SendNotInitiated;  //@@authority-target ids=prv.T0204
+                    //@@mutation-end header-deadline-consults-exact-send-initiation
+                    // clang-format on
                     callbacks.erase(callback_it);
                     if (callbacks.empty())
                         map.erase(current);
@@ -343,9 +357,11 @@ PeerClient::register_callback(
                         " entry=",
                         entry_incarnation,
                         " callback=",
-                        callback_incarnation);
+                        callback_incarnation,
+                        " terminal=",
+                        static_cast<int>(terminal));
                     complete_callback_noexcept(
-                        PeerClient::log_, std::move(callback), Error::Timeout);
+                        PeerClient::log_, std::move(callback), terminal);
                 });
             return true;
         }

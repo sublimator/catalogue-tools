@@ -48,6 +48,10 @@ enum class Error {
     /// the queued request reached its owner strand. This is neither peer
     /// response evidence nor proof that the PeerSet has no suitable peer.
     PeerCoverageChanged,
+    /// The local request deadline expired before this PeerClient initiated
+    /// the physical write. No packet was yet attributable to the peer, so this
+    /// must never become peer response or service-failure evidence.
+    SendNotInitiated,
 };
 
 /// First retained logical terminal cause for one PeerClient instance.

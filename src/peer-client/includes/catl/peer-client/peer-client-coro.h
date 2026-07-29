@@ -75,6 +75,9 @@ public:
             case Error::PeerCoverageChanged:
                 return "PeerCoverageChanged (selected peer revoked coverage "
                        "before send)";
+            case Error::SendNotInitiated:
+                return "SendNotInitiated (local deadline expired before "
+                       "physical write initiation)";
             default:
                 return "Unknown(" + std::to_string(static_cast<int>(e)) + ")";
         }

@@ -318,10 +318,11 @@ private:
  *
  * ## Timeouts
  *
- * Each callback has its own asio::steady_timer. When it fires, that
- * callback is called with Error::Timeout and removed. Other callbacks
- * for the same key remain active. If all callbacks timeout, the entry
- * is removed (response will arrive but nobody cares).
+ * Each callback has its own asio::steady_timer. When it fires, that callback
+ * is removed. It receives Error::SendNotInitiated if the exact pending attempt
+ * never reached physical write initiation, otherwise Error::Timeout. Other
+ * callbacks for the same key remain active. If all callbacks expire, the entry
+ * is removed (a later response has no remaining request consumer).
  *
  * ## Result Types
  *

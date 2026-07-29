@@ -732,6 +732,14 @@ public:
     }
 
     static void
+    set_header_request_timeout(
+        NodeCache& cache,
+        std::chrono::seconds timeout)
+    {
+        cache.header_request_timeout_for_test_ = timeout;
+    }
+
+    static void
     set_node_round_hooks(
         NodeCache& cache,
         std::function<void()> before_send_commit,
@@ -5888,7 +5896,9 @@ TEST(PeerSessionInterface, LateHeaderFailureCannotCancelNewRound)
     EXPECT_EQ(
         PeerSetTestAccess::ledger_failure_count(
             io, peers, old_round->endpoint()),
-        1u);
+        0u)
+        << "neither aggregate expiry nor a callback from a stale round may "
+           "manufacture peer-failure evidence";
     EXPECT_EQ(
         PeerSetTestAccess::ledger_failure_count(
             io, peers, new_round->endpoint()),
@@ -6001,6 +6011,245 @@ TEST(
         0u)
         << "one peer's local coverage revocation cannot become service-failure "
            "history";
+}
+
+TEST(
+    PeerSessionInterface,
+    HeaderDeadlineBeforeTransportInitiationDoesNotBlamePeer)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 10ms,
+            .peer_refresh_timeout_secs = 0,
+            .header_timeout_floor = 100ms,
+        });
+    NodeCacheTestAccess::set_header_request_timeout(*cache, 0s);
+
+    constexpr std::uint32_t ledger_seq = 6000;
+    std::string const endpoint = "queued-header-timeout:1";
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    PeerClientTestAccess::set_endpoint(*client, endpoint);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+
+    std::vector<peer_connection::test_write_completion> writes;
+    client->raw_connection().set_write_initiator_for_test(
+        [&writes](
+            asio::const_buffer,
+            peer_connection::test_write_completion complete) {
+            writes.push_back(std::move(complete));
+        });
+    PeerSetTestAccess::insert_connected_peer(io, peers, client);
+
+    asio::post(client->strand(), [client] {
+        EXPECT_EQ(
+            client->raw_connection().async_send_packet(
+                packet_type::ping,
+                std::vector<std::uint8_t>(1, 0x65),
+                [](boost::system::error_code) {}),
+            peer_connection::SendAdmission::accepted);
+    });
+    io.run();
+    io.restart();
+    ASSERT_EQ(writes.size(), 1u);
+
+    auto terminal = asio::co_spawn(
+        io,
+        [cache, peers, client]() -> asio::awaitable<bool> {
+            try
+            {
+                (void)co_await cache->get_header(ledger_seq, peers, client);
+                co_return false;
+            }
+            catch (PeerClientException const&)
+            {
+                co_return true;
+            }
+        },
+        asio::use_future);
+    io.run_for(250ms);
+    io.restart();
+
+    ASSERT_EQ(terminal.wait_for(0ms), std::future_status::ready);
+    EXPECT_TRUE(terminal.get());
+    EXPECT_EQ(writes.size(), 1u)
+        << "the header request must still be queued behind the predecessor";
+    EXPECT_EQ(
+        PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 0u)
+        << "T0204 must classify a deadline before S0065 as local "
+           "SendNotInitiated, not peer failure";
+
+    auto predecessor = std::move(writes.front());
+    asio::post(
+        client->strand(),
+        [predecessor = std::move(predecessor)]() mutable { predecessor({}); });
+    io.run();
+    io.restart();
+    ASSERT_EQ(writes.size(), 2u);
+
+    auto late_header_write = std::move(writes.back());
+    asio::post(
+        client->strand(),
+        [late_header_write = std::move(late_header_write)]() mutable {
+            late_header_write({});
+        });
+    io.run();
+}
+
+TEST(
+    PeerSessionInterface,
+    HeaderDeadlineAfterTransportInitiationBlamesExactPeerOnce)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    asio::ssl::context ssl_context(asio::ssl::context::tlsv12);
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 10ms,
+            .peer_refresh_timeout_secs = 0,
+            .header_timeout_floor = 100ms,
+        });
+    NodeCacheTestAccess::set_header_request_timeout(*cache, 0s);
+
+    constexpr std::uint32_t ledger_seq = 6000;
+    std::string const endpoint = "initiated-header-timeout:1";
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    PeerClientTestAccess::set_endpoint(*client, endpoint);
+    PeerClientTestAccess::seed_open_connection(*client, ssl_context);
+
+    std::vector<peer_connection::test_write_completion> writes;
+    client->raw_connection().set_write_initiator_for_test(
+        [&writes](
+            asio::const_buffer,
+            peer_connection::test_write_completion complete) {
+            writes.push_back(std::move(complete));
+        });
+    PeerSetTestAccess::insert_connected_peer(io, peers, client);
+
+    auto terminal = asio::co_spawn(
+        io,
+        [cache, peers, client]() -> asio::awaitable<bool> {
+            try
+            {
+                (void)co_await cache->get_header(ledger_seq, peers, client);
+                co_return false;
+            }
+            catch (PeerClientException const&)
+            {
+                co_return true;
+            }
+        },
+        asio::use_future);
+    io.run_for(250ms);
+    io.restart();
+
+    ASSERT_EQ(terminal.wait_for(0ms), std::future_status::ready);
+    EXPECT_TRUE(terminal.get());
+    ASSERT_EQ(writes.size(), 1u)
+        << "the exact header write must have crossed transport initiation";
+    EXPECT_EQ(
+        PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 1u)
+        << "a post-S0065 response timeout carries peer-failure evidence";
+
+    auto header_write = std::move(writes.front());
+    asio::post(
+        client->strand(),
+        [header_write = std::move(header_write)]() mutable {
+            header_write({});
+        });
+    io.run();
+    io.restart();
+    EXPECT_EQ(
+        PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 1u)
+        << "late physical completion cannot double-retire the terminal";
+}
+
+TEST(PeerSessionInterface, HeaderRoundExpiryDoesNotInventPeerFailure)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto cache = NodeCache::create(
+        io,
+        NodeCache::Options{
+            .max_entries = 1024,
+            .fetch_timeout = 10ms,
+            .peer_refresh_timeout_secs = 0,
+            .header_timeout_floor = 20ms,
+        });
+
+    constexpr std::uint32_t ledger_seq = 6000;
+    std::string const endpoint = "unsettled-header-round:1";
+    auto peer = std::make_shared<FakePeerSession>(
+        io, endpoint, true, ledger_seq, 5900, 6100);
+    Callback<LedgerHeaderResult> withheld;
+    peer->set_invoke_header_handler_inline(true);
+    peer->set_get_ledger_header_handler(
+        [&withheld](std::uint32_t, Callback<LedgerHeaderResult> callback) {
+            withheld = std::move(callback);
+        });
+    PeerSetTestAccess::insert_connected_peer(io, peers, peer);
+
+    auto terminal = asio::co_spawn(
+        io,
+        [cache, peers, peer]() -> asio::awaitable<bool> {
+            try
+            {
+                (void)co_await cache->get_header(ledger_seq, peers, peer);
+                co_return false;
+            }
+            catch (PeerClientException const&)
+            {
+                co_return true;
+            }
+        },
+        asio::use_future);
+    io.run_for(250ms);
+    io.restart();
+
+    ASSERT_EQ(terminal.wait_for(0ms), std::future_status::ready);
+    EXPECT_TRUE(terminal.get());
+    ASSERT_TRUE(withheld);
+    EXPECT_EQ(
+        PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 0u)
+        << "aggregate S0066 round expiry is a local bound, not an endpoint "
+           "terminal";
+
+    withheld(Error::Timeout, LedgerHeaderResult{});
+    io.run();
+    io.restart();
+    EXPECT_EQ(
+        PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 0u)
+        << "a late stale terminal cannot retroactively blame the endpoint";
 }
 
 TEST(PeerSessionInterface, HeaderLeaderCancellationDoesNotAbandonFollower)

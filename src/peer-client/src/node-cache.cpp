@@ -3368,6 +3368,8 @@ NodeCache::send_header_fetch(
     std::weak_ptr<NodeCache> weak_self = shared_from_this();
     RequestOptions opts;
     opts.dedupe = false;
+    if (header_request_timeout_for_test_)
+        opts.timeout = *header_request_timeout_for_test_;
 
     peer.get_ledger_header(
         ledger_seq,
@@ -3414,7 +3416,7 @@ NodeCache::send_header_fetch(
                             static_cast<int>(err));
 
                         //@@authority transition=prv.T0202 status=provisional
-                        //bind=expression_statement@196946007691d948
+                        // bind=expression_statement@196946007691d948
                         // scope=statement owner=unresolved
                         // owner_hypothesis=node_cache
                         // commit=header_state_strand touches=prv.S0066
@@ -4161,24 +4163,11 @@ NodeCache::drive_header_fetch(
                 break;
             }
 
-            if (round->outstanding.load(std::memory_order_acquire) != 0)
-            {
-                for (auto const& endpoint : fetch->round_peers)
-                {
-                    if (!round->settled_endpoints.contains(endpoint))
-                    {
-                        //@@authority transition=prv.T0203
-                        //bind=expression_statement@245fcb4f21f1a529
-                        // status=provisional scope=statement owner=unresolved
-                        // owner_hypothesis=node_cache
-                        // commit=header_state_strand touches=prv.S0066
-                        // label=classify_unsettled_header_endpoint_timeout
-                        round->ledger_failure_endpoints.insert(
-                            endpoint);  //@@authority-target ids=prv.T0203
-                    }
-                }
-            }
-
+            // Round expiry is an aggregate local bound. An endpoint which has
+            // not returned a typed terminal may still be queued behind another
+            // write, so expiry cannot manufacture per-peer failure evidence.
+            //@@mutation-site header-round-expiry-does-not-blame-unsettled
+            //@@mutation-end header-round-expiry-does-not-blame-unsettled
             complete_header_round(round);
             if (fetch->peers)
             {

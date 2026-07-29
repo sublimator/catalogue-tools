@@ -756,14 +756,15 @@ private:
         std::atomic<bool> completed{false};
         bool closed = false;
         //@@authority state=prv.S0066 status=provisional scope=field
-        //bind=catl::peer_client::NodeCache::HeaderRound::settled_endpoints@165d2594b0b69e02
+        // bind=catl::peer_client::NodeCache::HeaderRound::settled_endpoints@165d2594b0b69e02
         // owner=unresolved owner_hypothesis=node_cache
         // observed_home=node_cache
         // label=per_header_round_endpoint_terminal_evidence
         // Both sets are confined to header_state_strand_. A settled endpoint
         // returned a typed terminal; the subset in ledger_failure_endpoints
-        // carries actual service-failure evidence. An unsettled endpoint is
-        // added to that subset only when the round timer expires.
+        // carries actual service-failure evidence. Aggregate round expiry
+        // cannot populate that subset: an unsettled endpoint carries no proof
+        // that its queued write physically started.
         std::unordered_set<std::string> settled_endpoints;
         std::unordered_set<std::string> ledger_failure_endpoints;
 
@@ -1288,6 +1289,7 @@ private:
     std::function<void()> node_stop_driver_hook_for_test_;
     std::function<void()> after_node_local_pins_destroyed_for_test_;
     std::function<void()> before_header_clear_driver_launch_for_test_;
+    std::optional<std::chrono::seconds> header_request_timeout_for_test_;
 
     // Stats — atomic for lock-free concurrent access
     mutable std::atomic<size_t> hits_{0};

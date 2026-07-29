@@ -422,6 +422,12 @@ public:
     }
 
     static void
+    set_endpoint(PeerClient& client, std::string endpoint)
+    {
+        client.endpoint_str_ = std::move(endpoint);
+    }
+
+    static void
     seed_successful_packet_writes(PeerClient& client)
     {
         ASSERT_TRUE(client.connection_);
