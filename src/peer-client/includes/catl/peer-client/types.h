@@ -30,7 +30,9 @@ enum class Error {
     Success = 0,
     Timeout,
     Disconnected,
-    NoLedger,
+    /// A peer emitted a reNO_LEDGER observation which this PeerClient
+    /// uniquely correlated to one currently pending request.
+    PeerNoLedger,
     NoNode,
     BadRequest,
     FeatureDisabled,
@@ -38,6 +40,10 @@ enum class Error {
     Cancelled,
     DuplicateRequest,
     ResourceExhausted,
+    /// No local transport attempt was admitted because no currently eligible
+    /// peer advertised the required ledger. This carries no peer-response
+    /// evidence and must never be reported as PeerNoLedger.
+    NoSuitablePeer,
 };
 
 /// First retained logical terminal cause for one PeerClient instance.

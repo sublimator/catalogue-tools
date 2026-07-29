@@ -53,8 +53,8 @@ public:
                 return "Timeout (peer did not respond in time)";
             case Error::Disconnected:
                 return "Disconnected";
-            case Error::NoLedger:
-                return "NoLedger (peer does not have this ledger)";
+            case Error::PeerNoLedger:
+                return "PeerNoLedger (uniquely correlated peer observation)";
             case Error::NoNode:
                 return "NoNode (requested node not found)";
             case Error::BadRequest:
@@ -69,6 +69,9 @@ public:
                 return "DuplicateRequest";
             case Error::ResourceExhausted:
                 return "ResourceExhausted";
+            case Error::NoSuitablePeer:
+                return "NoSuitablePeer (no eligible peer advertises the "
+                       "ledger)";
             default:
                 return "Unknown(" + std::to_string(static_cast<int>(e)) + ")";
         }

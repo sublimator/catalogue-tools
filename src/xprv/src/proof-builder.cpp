@@ -41,6 +41,43 @@ advertises_ledger(PeerSession const* peer, uint32_t ledger_seq)
     return peer->advertised_ledger_range().contains(ledger_seq);
 }
 
+static WalkResult
+require_walk_transport(WalkResult result)
+{
+    if (result.found() ||
+        std::holds_alternative<WalkBranchAbsent>(result.terminal()))
+    {
+        return result;
+    }
+    if (auto const* unavailable =
+            std::get_if<WalkNoSuitablePeer>(&result.terminal()))
+    {
+        throw PeerClientException(
+            Error::NoSuitablePeer,
+            "no eligible peer advertises ledger " +
+                std::to_string(unavailable->ledger_seq));
+    }
+    if (auto const* exhausted =
+            std::get_if<WalkTransportExhausted>(&result.terminal()))
+    {
+        throw PeerClientException(
+            Error::Timeout,
+            "node transport exhausted at depth " +
+                std::to_string(exhausted->depth) + " after " +
+                std::to_string(exhausted->retries) + " retries");
+    }
+    if (std::holds_alternative<WalkCancelled>(result.terminal()))
+        throw PeerClientException(Error::Cancelled);
+    if (auto const* exhausted =
+            std::get_if<WalkDepthExhausted>(&result.terminal()))
+    {
+        throw PeerClientException(
+            Error::ParseError,
+            "tree walk exceeded depth " + std::to_string(exhausted->depth));
+    }
+    throw PeerClientException(Error::ParseError, "unknown tree-walk terminal");
+}
+
 /// Build a proof-format on_leaf callback for trie_json.
 static catl::shamap::LeafJsonCallback
 make_proof_leaf_callback(catl::xdata::Protocol const& protocol, bool is_tx_tree)
@@ -221,7 +258,7 @@ build_proof_DEAD(
         boost::intrusive_ptr<MmapItem> item(OwnedItem::create(key, item_data));
         abbrev.set_item_at(wr.leaf_nid, item);
 
-        for (auto& p : wr.placeholders)
+        for (auto const& p : wr.placeholders())
         {
             if (abbrev.needs_placeholder(p.nid))
             {
@@ -236,7 +273,7 @@ build_proof_DEAD(
             "  State tree: ",
             ok ? "VERIFIED" : "MISMATCH",
             " (",
-            wr.placeholders.size(),
+            wr.placeholders().size(),
             " placeholders)");
         if (!ok)
         {
@@ -383,7 +420,7 @@ build_proof_DEAD(
                 "no peer advertising ledger " +
                 std::to_string(*required_ledger) + " while trying to " + purpose;
             catl::core::emit_status(message);
-            throw PeerClientException(Error::NoLedger, message);
+            throw PeerClientException(Error::NoSuitablePeer, message);
         }
 
         auto const message = "no ready peer while trying to " + purpose;
@@ -396,7 +433,8 @@ build_proof_DEAD(
         {
             case Error::Timeout:
             case Error::Disconnected:
-            case Error::NoLedger:
+            case Error::PeerNoLedger:
+            case Error::NoSuitablePeer:
             case Error::NoNode:
                 return true;
             default:
@@ -1045,13 +1083,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             ctx->peers,
             std::move(peer),
             ctx->cancel_token);
-        if (!result.found)
-        {
-            if (ctx->cancel_token && ctx->cancel_token->load())
-                throw PeerClientException(Error::Cancelled);
-            throw PeerClientException(Error::Timeout);
-        }
-        co_return result;
+        co_return require_walk_transport(std::move(result));
     };
 
     // walk_tx same pattern but liTX_NODE
@@ -1075,13 +1107,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             ctx->peers,
             std::move(peer),
             ctx->cancel_token);
-        if (!result.found)
-        {
-            if (ctx->cancel_token && ctx->cancel_token->load())
-                throw PeerClientException(Error::Cancelled);
-            throw PeerClientException(Error::Timeout);
-        }
-        co_return result;
+        co_return require_walk_transport(std::move(result));
     };
 
     auto build_state_proof =
@@ -1097,13 +1123,14 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
 
         // Convert WalkResult leaf_nid (peer_client::SHAMapNodeID) to
         // shamap::SHAMapNodeID for set_item_at
+        auto const& leaf = wr.leaf();
         catl::shamap::SHAMapNodeID leaf_pos(
-            Hash256(wr.leaf_nid.id.data()), wr.leaf_nid.depth);
-        Slice item_data(wr.leaf_data.data(), wr.leaf_data.size() - 32);
+            Hash256(leaf.leaf_nid.id.data()), leaf.leaf_nid.depth);
+        Slice item_data(leaf.leaf_data.data(), leaf.leaf_data.size() - 32);
         boost::intrusive_ptr<MmapItem> item(OwnedItem::create(key, item_data));
         abbrev.set_item_at(leaf_pos, item);
 
-        for (auto& p : wr.placeholders)
+        for (auto const& p : wr.placeholders())
         {
             catl::shamap::SHAMapNodeID ph_pos(
                 Hash256(p.nodeid.id.data()), p.nodeid.depth);
@@ -1118,11 +1145,11 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             "  State tree: ",
             ok ? "VERIFIED" : "MISMATCH",
             " (",
-            wr.placeholders.size(),
+            wr.placeholders().size(),
             " placeholders)");
         catl::core::emit_status(
             std::string("state tree: ") + (ok ? "verified" : "MISMATCH") +
-            " (" + std::to_string(wr.placeholders.size()) + " placeholders)");
+            " (" + std::to_string(wr.placeholders().size()) + " placeholders)");
         return {ok, std::move(abbrev)};
     };
 
@@ -1210,7 +1237,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         if (!advertises_ledger(peer.get(), required_ledger))
         {
             throw PeerClientException(
-                Error::NoLedger,
+                Error::NoSuitablePeer,
                 "no peer advertising ledger " +
                     std::to_string(required_ledger) + " while trying to " +
                     purpose);
@@ -1349,7 +1376,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                     skip_key_val,
                     std::move(peer));
             });
-        if (!wr.found)
+        if (!wr.found())
             throw std::runtime_error("Short skip list not found in state tree");
 
         auto sp = build_state_proof(wr, skip_key_val, ctx->anchor_account_hash);
@@ -1367,7 +1394,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             });
         ctx->target_ledger_hash = ctx->target_hdr_result->ledger_hash256();
 
-        Slice sle_leaf(wr.leaf_data.data(), wr.leaf_data.size());
+        auto const& wr_leaf = wr.leaf();
+        Slice sle_leaf(wr_leaf.leaf_data.data(), wr_leaf.leaf_data.size());
         if (sle_hashes_contain(
                 sle_leaf, ctx->target_ledger_hash, ctx->protocol))
         {
@@ -1412,7 +1440,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                     long_skip_key,
                     std::move(peer));
             });
-        if (!wr1.found)
+        if (!wr1.found())
             throw std::runtime_error("Long skip list not found in state tree");
 
         {
@@ -1435,7 +1463,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         auto flag_header = ctx->flag_hdr_result->header();
         co_await emit_step(make_header(*ctx->flag_hdr_result));
 
-        Slice long_sle(wr1.leaf_data.data(), wr1.leaf_data.size());
+        auto const& wr1_leaf = wr1.leaf();
+        Slice long_sle(wr1_leaf.leaf_data.data(), wr1_leaf.leaf_data.size());
         if (sle_hashes_contain(long_sle, flag_hash, ctx->protocol))
         {
             PLOGI(log_, "  Flag hash confirmed in long skip list");
@@ -1458,7 +1487,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                     short_skip_key,
                     std::move(peer));
             });
-        if (!wr2.found)
+        if (!wr2.found())
             throw std::runtime_error(
                 "Short skip list not found in flag ledger state tree");
 
@@ -1480,7 +1509,8 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
             });
         ctx->target_ledger_hash = ctx->target_hdr_result->ledger_hash256();
 
-        Slice short_sle(wr2.leaf_data.data(), wr2.leaf_data.size());
+        auto const& wr2_leaf = wr2.leaf();
+        Slice short_sle(wr2_leaf.leaf_data.data(), wr2_leaf.leaf_data.size());
         if (sle_hashes_contain(
                 short_sle, ctx->target_ledger_hash, ctx->protocol))
         {
@@ -1531,7 +1561,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                 std::move(peer));
         });
 
-    if (!tx_walk.found)
+    if (!tx_walk.found())
         throw std::runtime_error("Transaction not found in TX tree");
 
     // ── Step 8: Build abbreviated TX tree ──
@@ -1541,16 +1571,17 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         catl::shamap::ReferenceHashImpl::recursive_simple;
     AbbrevMap abbrev(catl::shamap::tnTRANSACTION_MD, opts);
 
+    auto const& tx_leaf = tx_walk.leaf();
     catl::shamap::SHAMapNodeID tx_leaf_pos(
-        Hash256(tx_walk.leaf_nid.id.data()), tx_walk.leaf_nid.depth);
+        Hash256(tx_leaf.leaf_nid.id.data()), tx_leaf.leaf_nid.depth);
     Slice leaf_item_data(
-        tx_walk.leaf_data.data(), tx_walk.leaf_data.size() - 32);
+        tx_leaf.leaf_data.data(), tx_leaf.leaf_data.size() - 32);
     boost::intrusive_ptr<MmapItem> leaf_item(
         OwnedItem::create(tx_hash, leaf_item_data));
     abbrev.set_item_at(tx_leaf_pos, leaf_item);
 
     int placed = 0;
-    for (auto& p : tx_walk.placeholders)
+    for (auto const& p : tx_walk.placeholders())
     {
         catl::shamap::SHAMapNodeID ph_pos(
             Hash256(p.nodeid.id.data()), p.nodeid.depth);

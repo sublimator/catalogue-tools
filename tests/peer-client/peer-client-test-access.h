@@ -166,8 +166,51 @@ public:
         RequestOptions opts;
         opts.timeout = timeout;
         auto const key = PeerClient::ledger_key(1, 0);
-        return client.register_callback(
+        auto const registered = client.register_callback(
             client.pending_headers_, key, std::move(callback), opts, dedupe);
+        if (registered)
+            client.pending_headers_.at(key).network_request_initiated = true;
+        return registered;
+    }
+
+    static bool
+    seed_pending_header_by_sequence(
+        PeerClient& client,
+        std::uint32_t ledger_seq,
+        int type,
+        Callback<LedgerHeaderResult> callback)
+    {
+        RequestOptions opts;
+        auto const key = PeerClient::ledger_key(ledger_seq, type);
+        auto const registered = client.register_callback(
+            client.pending_headers_,
+            key,
+            std::move(callback),
+            opts,
+            false);
+        if (registered)
+            client.pending_headers_.at(key).network_request_initiated = true;
+        return registered;
+    }
+
+    static bool
+    seed_pending_header_by_hash(
+        PeerClient& client,
+        Hash256 const& ledger_hash,
+        int type,
+        Callback<LedgerHeaderResult> callback)
+    {
+        RequestOptions opts;
+        auto const key = PeerClient::ledger_key(ledger_hash, type);
+        auto const registered = client.register_callback(
+            client.pending_headers_,
+            key,
+            std::move(callback),
+            opts,
+            false);
+        if (registered)
+            client.pending_headers_.at(key).network_request_initiated = true;
+        return registered;
     }
 
     static void
@@ -184,16 +227,50 @@ public:
         Hash256 const& ledger_hash,
         int type,
         std::vector<SHAMapNodeID> const& node_ids,
-        Callback<LedgerNodesResult> callback)
+        Callback<LedgerNodesResult> callback,
+        bool network_request_initiated = true)
     {
         RequestOptions opts;
         auto const key = PeerClient::nodes_key(ledger_hash, type, node_ids);
         auto const registered = client.register_callback(
             client.pending_nodes_, key, std::move(callback), opts, false);
-        client.pending_nodes_[key].match_key =
-            PeerClient::ledger_key(ledger_hash, type);
-        client.pending_nodes_[key].requested_nodeids = node_ids;
+        if (registered)
+        {
+            auto& entry = client.pending_nodes_.at(key);
+            entry.match_key = PeerClient::ledger_key(ledger_hash, type);
+            entry.requested_nodeids = node_ids;
+            entry.network_request_initiated = network_request_initiated;
+        }
         return registered;
+    }
+
+    static bool
+    replace_pending_nodes_same_key(
+        PeerClient& client,
+        Hash256 const& ledger_hash,
+        int type,
+        std::vector<SHAMapNodeID> const& node_ids,
+        Callback<LedgerNodesResult> callback)
+    {
+        assert(client.strand_.running_in_this_thread());
+        auto const key = PeerClient::nodes_key(ledger_hash, type, node_ids);
+        if (client.pending_nodes_.erase(key) != 1)
+            return false;
+        client.refresh_pending_count_projection();
+        return seed_pending_nodes(
+            client,
+            ledger_hash,
+            type,
+            node_ids,
+            std::move(callback));
+    }
+
+    static void
+    set_before_ledger_attempt_consume(
+        PeerClient& client,
+        std::function<void()> hook)
+    {
+        client.before_ledger_attempt_consume_for_test_ = std::move(hook);
     }
 
     static void

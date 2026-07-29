@@ -54,6 +54,12 @@ static_assert(std::is_move_constructible_v<PeerGenerationPin>);
 static_assert(std::is_move_assignable_v<PeerGenerationPin>);
 static_assert(!std::is_copy_constructible_v<PeerGenerationPin>);
 static_assert(!std::is_copy_assignable_v<PeerGenerationPin>);
+static_assert(std::is_default_constructible_v<WalkResult>);
+static_assert(!std::is_constructible_v<
+              WalkResult,
+              std::vector<PathNode>,
+              std::vector<PlaceholderNode>,
+              WalkTerminal>);
 static_assert(
     std::is_same_v<
         PeerSession::NodeResponseHandler,
@@ -1064,6 +1070,21 @@ make_node_response(
     return message;
 }
 
+std::shared_ptr<protocol::TMLedgerData>
+make_ledger_error_response(
+    Hash256 const& ledger_hash,
+    std::uint32_t ledger_seq,
+    int type,
+    protocol::TMReplyError error)
+{
+    auto message = std::make_shared<protocol::TMLedgerData>();
+    message->set_type(static_cast<protocol::TMLedgerInfoType>(type));
+    message->set_ledgerseq(ledger_seq);
+    message->set_ledgerhash(ledger_hash.data(), Hash256::size());
+    message->set_error(error);
+    return message;
+}
+
 std::vector<std::uint8_t>
 serialize(protocol::TMLedgerData const& message)
 {
@@ -1117,6 +1138,16 @@ wait_until(Predicate&& predicate, std::chrono::duration<Rep, Period> timeout)
 }
 
 }  // namespace
+
+TEST(PeerSessionInterface, DefaultWalkResultCarriesOnlyInertFailure)
+{
+    WalkResult result;
+    EXPECT_FALSE(result.found());
+    EXPECT_TRUE(
+        std::holds_alternative<WalkInternalFailure>(result.terminal()));
+    EXPECT_TRUE(result.path().empty());
+    EXPECT_TRUE(result.placeholders().empty());
+}
 
 TEST(PeerSessionInterface, NodeCacheReportsAcceptedAndIgnoredResponses)
 {
@@ -1308,6 +1339,356 @@ TEST(PeerSessionInterface, ThrowingNodeObserverCannotBypassLegacyDispatch)
         logs.error().find("node response sink failure:"), std::string::npos);
     EXPECT_EQ(
         logs.error().find("node response disposition:"), std::string::npos);
+}
+
+TEST(
+    PeerSessionInterface,
+    UniqueNegativeNodeObservationResolvesExactlyOnePendingAttempt)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    auto const ledger_hash = hash_with_byte(0x35);
+    auto const node_id = SHAMapNodeID::root();
+    std::vector<Error> completions;
+    auto const response = make_ledger_error_response(
+        ledger_hash, 1, protocol::liTX_NODE, protocol::reNO_LEDGER);
+    auto const payload = serialize(*response);
+
+    asio::post(client->strand(), [&, client, payload] {
+        ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
+            *client,
+            ledger_hash,
+            protocol::liTX_NODE,
+            {node_id},
+            [&completions](Error error, LedgerNodesResult) {
+                completions.push_back(error);
+            }));
+        PeerClientTestAccess::dispatch_ledger_data(*client, payload);
+    });
+    io.run();
+
+    ASSERT_EQ(completions.size(), 1u);
+    EXPECT_EQ(completions.front(), Error::PeerNoLedger);
+    EXPECT_EQ(client->pending_count(), 0u);
+}
+
+TEST(
+    PeerSessionInterface,
+    AmbiguousNegativeNodeObservationConsumesNoPendingAttempt)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    auto const ledger_hash = hash_with_byte(0x36);
+    auto const first_node = SHAMapNodeID::root();
+    auto const second_node = first_node.child(1);
+    std::vector<Error> completions;
+    auto callback = [&completions](Error error, LedgerNodesResult) {
+        completions.push_back(error);
+    };
+    auto const response = make_ledger_error_response(
+        ledger_hash, 1, protocol::liTX_NODE, protocol::reNO_LEDGER);
+    auto const payload = serialize(*response);
+
+    asio::post(client->strand(), [&, client, payload, callback] {
+        ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
+            *client,
+            ledger_hash,
+            protocol::liTX_NODE,
+            {first_node},
+            callback));
+        ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
+            *client,
+            ledger_hash,
+            protocol::liTX_NODE,
+            {second_node},
+            callback));
+        PeerClientTestAccess::dispatch_ledger_data(*client, payload);
+        EXPECT_TRUE(completions.empty());
+        EXPECT_EQ(client->pending_count(), 2u);
+        client->disconnect();
+    });
+    io.run();
+
+    ASSERT_EQ(completions.size(), 2u);
+    EXPECT_TRUE(std::ranges::all_of(
+        completions, [](Error error) { return error == Error::Cancelled; }));
+}
+
+TEST(
+    PeerSessionInterface,
+    SequenceAndHashHeaderAttemptsMakeNegativeObservationAmbiguous)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    auto const ledger_hash = hash_with_byte(0x37);
+    constexpr std::uint32_t ledger_seq = 77;
+    std::vector<Error> completions;
+    auto callback = [&completions](Error error, LedgerHeaderResult) {
+        completions.push_back(error);
+    };
+    auto const response = make_ledger_error_response(
+        ledger_hash, ledger_seq, protocol::liBASE, protocol::reNO_LEDGER);
+    auto const payload = serialize(*response);
+
+    asio::post(client->strand(), [&, client, payload, callback] {
+        ASSERT_TRUE(PeerClientTestAccess::seed_pending_header_by_sequence(
+            *client,
+            ledger_seq,
+            protocol::liBASE,
+            callback));
+        ASSERT_TRUE(PeerClientTestAccess::seed_pending_header_by_hash(
+            *client,
+            ledger_hash,
+            protocol::liBASE,
+            callback));
+        PeerClientTestAccess::dispatch_ledger_data(*client, payload);
+        EXPECT_TRUE(completions.empty());
+        EXPECT_EQ(client->pending_count(), 2u);
+        client->disconnect();
+    });
+    io.run();
+
+    ASSERT_EQ(completions.size(), 2u);
+    EXPECT_TRUE(std::ranges::all_of(
+        completions, [](Error error) { return error == Error::Cancelled; }));
+}
+
+TEST(PeerSessionInterface, UnexpectedRelayCookieCarriesNoLocalAuthority)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    auto cache = NodeCache::create(io, {});
+    auto const ledger_hash = hash_with_byte(0x38);
+    auto const node_id = SHAMapNodeID::root();
+    auto response = make_node_response(ledger_hash, node_id, true);
+    response->set_requestcookie(1);
+    auto const payload = serialize(*response);
+    auto const complete_payload =
+        serialize(*make_node_response(ledger_hash, node_id, true));
+    std::vector<Error> completions;
+    client->set_node_response_observer(
+        [cache](
+            std::shared_ptr<protocol::TMLedgerData> const& message) {
+            return NodeCacheTestAccess::on_node_response(*cache, message);
+        });
+
+    asio::post(client->strand(), [&, client, payload, complete_payload] {
+        ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
+            *client,
+            ledger_hash,
+            protocol::liTX_NODE,
+            {node_id},
+            [&completions](Error error, LedgerNodesResult) {
+                completions.push_back(error);
+            }));
+        PeerClientTestAccess::dispatch_ledger_data(*client, payload);
+        EXPECT_TRUE(completions.empty());
+        EXPECT_EQ(client->pending_count(), 1u);
+        EXPECT_EQ(cache->size(), 1u)
+            << "the cookie cannot taint independently valid node content";
+
+        PeerClientTestAccess::dispatch_ledger_data(*client, complete_payload);
+        ASSERT_EQ(completions.size(), 1u);
+        EXPECT_EQ(completions.front(), Error::Success);
+        EXPECT_EQ(client->pending_count(), 0u);
+    });
+    io.run();
+
+    ASSERT_EQ(completions.size(), 1u);
+    EXPECT_EQ(completions.front(), Error::Success);
+}
+
+TEST(
+    PeerSessionInterface,
+    AmbiguousSuccessfulNodeObservationMayEnterCacheButResolvesNoRequest)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    auto const ledger_hash = hash_with_byte(0x39);
+    auto const root = SHAMapNodeID::root();
+    auto const child = root.child(2);
+    auto const response = make_node_response(ledger_hash, child, true);
+    auto const payload = serialize(*response);
+    std::vector<Error> completions;
+    std::size_t cache_observations = 0;
+    client->set_node_response_observer(
+        [&cache_observations](
+            std::shared_ptr<protocol::TMLedgerData> const&) {
+            ++cache_observations;
+            return NodeResponseObservation{.accepted = true};
+        });
+    auto callback = [&completions](Error error, LedgerNodesResult) {
+        completions.push_back(error);
+    };
+
+    asio::post(client->strand(), [&, client, payload, callback] {
+        ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
+            *client,
+            ledger_hash,
+            protocol::liTX_NODE,
+            {root},
+            callback));
+        ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
+            *client,
+            ledger_hash,
+            protocol::liTX_NODE,
+            {child},
+            callback));
+        PeerClientTestAccess::dispatch_ledger_data(*client, payload);
+        EXPECT_EQ(cache_observations, 1u);
+        EXPECT_TRUE(completions.empty());
+        EXPECT_EQ(client->pending_count(), 2u);
+        client->disconnect();
+    });
+    io.run();
+
+    ASSERT_EQ(completions.size(), 2u);
+    EXPECT_TRUE(std::ranges::all_of(
+        completions, [](Error error) { return error == Error::Cancelled; }));
+}
+
+TEST(
+    PeerSessionInterface,
+    PartiallyMalformedNodeObservationMayEnterCacheButResolvesNoRequest)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    auto cache = NodeCache::create(io, {});
+    auto const ledger_hash = hash_with_byte(0x3a);
+    auto const node_id = SHAMapNodeID::root();
+    auto partial_response = make_node_response(ledger_hash, node_id, true);
+    partial_response->add_nodes()->set_nodedata("malformed-without-node-id");
+    auto const partial_payload = serialize(*partial_response);
+    auto const complete_payload =
+        serialize(*make_node_response(ledger_hash, node_id, true));
+    std::vector<Error> completions;
+    client->set_node_response_observer(
+        [cache](
+            std::shared_ptr<protocol::TMLedgerData> const& message) {
+            return NodeCacheTestAccess::on_node_response(*cache, message);
+        });
+
+    asio::post(client->strand(), [&, client, partial_payload, complete_payload] {
+        ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
+            *client,
+            ledger_hash,
+            protocol::liTX_NODE,
+            {node_id},
+            [&completions](Error error, LedgerNodesResult) {
+                completions.push_back(error);
+            }));
+        PeerClientTestAccess::dispatch_ledger_data(*client, partial_payload);
+        EXPECT_EQ(cache->size(), 1u)
+            << "the valid content-addressed node remains useful";
+        EXPECT_TRUE(completions.empty());
+        EXPECT_EQ(client->pending_count(), 1u);
+
+        PeerClientTestAccess::dispatch_ledger_data(*client, complete_payload);
+        ASSERT_EQ(completions.size(), 1u);
+        EXPECT_EQ(completions.front(), Error::Success);
+        EXPECT_EQ(client->pending_count(), 0u);
+        EXPECT_EQ(cache->size(), 1u)
+            << "the malformed node never became a second cache entry";
+    });
+    io.run();
+
+    ASSERT_EQ(completions.size(), 1u);
+    EXPECT_EQ(completions.front(), Error::Success);
+}
+
+TEST(
+    PeerSessionInterface,
+    RegisteredButUninitiatedNodeAttemptCannotConsumeWireObservation)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    auto const ledger_hash = hash_with_byte(0x3b);
+    auto const node_id = SHAMapNodeID::root();
+    auto const payload =
+        serialize(*make_node_response(ledger_hash, node_id, true));
+    std::vector<Error> completions;
+
+    asio::post(client->strand(), [&, client, payload] {
+        ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
+            *client,
+            ledger_hash,
+            protocol::liTX_NODE,
+            {node_id},
+            [&completions](Error error, LedgerNodesResult) {
+                completions.push_back(error);
+            },
+            false));
+
+        PeerClientTestAccess::dispatch_ledger_data(*client, payload);
+
+        EXPECT_TRUE(completions.empty())
+            << "registration alone is not evidence that a request started";
+        EXPECT_EQ(client->pending_count(), 1u);
+        client->disconnect();
+    });
+    io.run();
+
+    ASSERT_EQ(completions.size(), 1u);
+    EXPECT_EQ(completions.front(), Error::Cancelled);
+}
+
+TEST(
+    PeerSessionInterface,
+    StaleUniqueNodeClassificationCannotConsumeReplacementIncarnation)
+{
+    asio::io_context io;
+    auto client = PeerClientTestAccess::make(io, State::Ready);
+    auto const ledger_hash = hash_with_byte(0x3c);
+    auto const node_id = SHAMapNodeID::root();
+    auto const response = make_node_response(ledger_hash, node_id, true);
+    auto const payload = serialize(*response);
+    std::vector<Error> predecessor_completions;
+    std::vector<Error> successor_completions;
+    ScopedErrorLogCapture logs;
+
+    asio::post(client->strand(), [&, client, payload] {
+        ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
+            *client,
+            ledger_hash,
+            protocol::liTX_NODE,
+            {node_id},
+            [&predecessor_completions](Error error, LedgerNodesResult) {
+                predecessor_completions.push_back(error);
+            }));
+        PeerClientTestAccess::set_before_ledger_attempt_consume(
+            *client,
+            [&, client] {
+                ASSERT_TRUE(
+                    PeerClientTestAccess::replace_pending_nodes_same_key(
+                        *client,
+                        ledger_hash,
+                        protocol::liTX_NODE,
+                        {node_id},
+                        [&successor_completions](
+                            Error error, LedgerNodesResult) {
+                            successor_completions.push_back(error);
+                        }));
+            });
+
+        PeerClientTestAccess::dispatch_ledger_data(*client, payload);
+
+        EXPECT_TRUE(predecessor_completions.empty());
+        EXPECT_TRUE(successor_completions.empty())
+            << "A's classified packet must not resolve replacement B";
+        EXPECT_EQ(client->pending_count(), 1u)
+            << "replacement B must remain the sole live attempt";
+        EXPECT_NE(
+            logs.error().find(
+                "stale ledger-attempt correlation refused before node "
+                "consumption"),
+            std::string::npos);
+        client->disconnect();
+    });
+    io.run();
+
+    EXPECT_TRUE(predecessor_completions.empty());
+    ASSERT_EQ(successor_completions.size(), 1u);
+    EXPECT_EQ(successor_completions.front(), Error::Cancelled);
 }
 
 TEST(PeerSessionInterface, NodeCacheRoutesOnlyManagedPinsThroughCoordinator)
@@ -2144,7 +2525,11 @@ TEST(PeerSessionInterface, ManagedUnknownPublicationConsumesCoveredPeerRetry)
     io.run_for(500ms);
 
     ASSERT_EQ(result.wait_for(0ms), std::future_status::ready);
-    EXPECT_FALSE(result.get().found);
+    auto exhausted = result.get();
+    EXPECT_FALSE(exhausted.found());
+    EXPECT_TRUE(
+        std::holds_alternative<WalkTransportExhausted>(
+            exhausted.terminal()));
     EXPECT_EQ(cache->stats().managed_fetches_reserved, 3u)
         << "the first two-peer round plus one covered-peer retry must consume "
            "the bounded retry budget";
@@ -2433,7 +2818,12 @@ TEST(PeerSessionInterface, NodeWalkSseReportsCoveringPeerSearchAndExhaustion)
                 1,
                 peers,
                 PeerGenerationPin{});
-            EXPECT_FALSE(result.found);
+            EXPECT_FALSE(result.found());
+            auto const* unavailable =
+                std::get_if<WalkNoSuitablePeer>(&result.terminal());
+            EXPECT_NE(unavailable, nullptr);
+            if (unavailable)
+                EXPECT_EQ(unavailable->ledger_seq, 500u);
             completed = true;
         },
         asio::detached);
@@ -2717,11 +3107,12 @@ TEST(PeerSessionInterface, NodeCacheWalkToCompletesAgainstScriptedFake)
     std::thread runner([&]() { io.run(); });
     auto result = wait_for_future(future, std::chrono::seconds(3));
 
-    EXPECT_TRUE(result.found);
-    ASSERT_EQ(result.path.size(), 1u);
-    ASSERT_EQ(result.leaf_data.size() + 1u, wire.size());
+    EXPECT_TRUE(result.found());
+    ASSERT_EQ(result.path().size(), 1u);
+    auto const& leaf = result.leaf();
+    ASSERT_EQ(leaf.leaf_data.size() + 1u, wire.size());
     EXPECT_TRUE(std::equal(
-        result.leaf_data.begin(), result.leaf_data.end(), wire.begin()));
+        leaf.leaf_data.begin(), leaf.leaf_data.end(), wire.begin()));
 
     io.stop();
     runner.join();
@@ -2798,8 +3189,8 @@ TEST(PeerSessionInterface, NodeCacheWalkToFailsOverAcrossFakePeers)
     std::thread runner([&]() { io.run(); });
     auto result = wait_for_future(future, std::chrono::seconds(5));
 
-    EXPECT_TRUE(result.found);
-    ASSERT_EQ(result.path.size(), 1u);
+    EXPECT_TRUE(result.found());
+    ASSERT_EQ(result.path().size(), 1u);
 
     io.stop();
     runner.join();
@@ -2887,7 +3278,16 @@ TEST(PeerSessionInterface, NodeCacheWalkFailureExcludesEveryAttemptedPeer)
     std::thread runner([&]() { io.run(); });
     auto [result, remaining] = wait_for_future(future, std::chrono::seconds(3));
 
-    EXPECT_FALSE(result.found);
+    EXPECT_FALSE(result.found());
+    auto const* exhausted =
+        std::get_if<WalkTransportExhausted>(&result.terminal());
+    ASSERT_NE(exhausted, nullptr);
+    EXPECT_TRUE(std::ranges::find(
+                    exhausted->attempted_peers, first->endpoint()) !=
+        exhausted->attempted_peers.end());
+    EXPECT_TRUE(std::ranges::find(
+                    exhausted->attempted_peers, second->endpoint()) !=
+        exhausted->attempted_peers.end());
     EXPECT_FALSE(remaining);
     EXPECT_GE(first_requests.load(std::memory_order_relaxed), 1);
     EXPECT_GE(second_requests.load(std::memory_order_relaxed), 1);
@@ -2987,7 +3387,7 @@ TEST(PeerSessionInterface, NodeCacheWalkReachesUntriedFanoutPeer)
     std::thread runner([&]() { io.run(); });
     auto result = wait_for_future(future, std::chrono::seconds(3));
 
-    EXPECT_TRUE(result.found);
+    EXPECT_TRUE(result.found());
     for (auto const& request_count : requests)
         EXPECT_GE(request_count.load(std::memory_order_relaxed), 1);
 
@@ -3079,7 +3479,7 @@ TEST(PeerSessionInterface, NodeCacheFanoutSurvivesOneWriteFailure)
     std::thread runner([&]() { io.run(); });
     auto result = wait_for_future(future, std::chrono::seconds(3));
 
-    EXPECT_TRUE(result.found);
+    EXPECT_TRUE(result.found());
 
     io.stop();
     runner.join();
@@ -3212,7 +3612,7 @@ TEST(
     std::this_thread::sleep_for(20ms);
     cancel->store(true, std::memory_order_relaxed);
     auto leader_result = wait_for_future(leader_future, 2s);
-    EXPECT_FALSE(leader_result.found);
+    EXPECT_FALSE(leader_result.found());
 
     EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 1u);
     EXPECT_FALSE(PeerSetTestAccess::admit_connected_peer(
@@ -3220,7 +3620,7 @@ TEST(
 
     cache->insert_and_notify(root_hash, wire);
     auto follower_result = wait_for_future(follower_future, 2s);
-    EXPECT_TRUE(follower_result.found);
+    EXPECT_TRUE(follower_result.found());
 
     EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 0u);
     EXPECT_TRUE(PeerSetTestAccess::admit_connected_peer(
@@ -3413,13 +3813,13 @@ TEST(
         stop();
         return;
     }
-    EXPECT_FALSE(leader_future.get().found);
+    EXPECT_FALSE(leader_future.get().found());
 
     cache->insert_and_notify(root_hash, wire);
     auto const joined_status = follower_future.wait_for(2s);
     EXPECT_EQ(joined_status, std::future_status::ready);
     if (joined_status == std::future_status::ready)
-        EXPECT_TRUE(follower_future.get().found);
+        EXPECT_TRUE(follower_future.get().found());
 
     EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 0u);
     stop();
@@ -3566,9 +3966,9 @@ TEST(
     EXPECT_EQ(leader_status, std::future_status::ready);
     EXPECT_EQ(joined_status, std::future_status::ready);
     if (leader_status == std::future_status::ready)
-        EXPECT_TRUE(leader_future.get().found);
+        EXPECT_TRUE(leader_future.get().found());
     if (joined_status == std::future_status::ready)
-        EXPECT_TRUE(follower_future.get().found);
+        EXPECT_TRUE(follower_future.get().found());
 
     stop();
 }
@@ -3667,7 +4067,7 @@ TEST(
         return;
     }
     cancel->store(true, std::memory_order_relaxed);
-    EXPECT_FALSE(wait_for_future(done_future, 2s).found);
+    EXPECT_FALSE(wait_for_future(done_future, 2s).found());
     EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 1u);
 
     std::this_thread::sleep_for(100ms);
@@ -3810,7 +4210,7 @@ TEST(
         stop();
         return;
     }
-    EXPECT_FALSE(done_future.get().found);
+    EXPECT_FALSE(done_future.get().found());
     EXPECT_EQ(PeerSetTestAccess::active_peer_pin_count(io, peers), 1u);
 
     allow_servant_failure.set_value();
@@ -5044,7 +5444,7 @@ TEST(
         io, peers, replacement, ledger_seq, {existing->endpoint()}));
 
     auto result = wait_for_future(done_future, 2s);
-    EXPECT_TRUE(result.found);
+    EXPECT_TRUE(result.found());
     EXPECT_FALSE(
         PeerSetTestAccess::has_connection(io, peers, existing->endpoint()));
     EXPECT_TRUE(
@@ -5165,12 +5565,12 @@ TEST(PeerSessionInterface, ExpiredOldNodeWaitCannotClearReplacementRound)
     ASSERT_NE(old_signal, replacement_signal);
 
     old_signal->expires_at(std::chrono::steady_clock::now());
-    EXPECT_FALSE(wait_for_future(first_done_future, 2s).found);
+    EXPECT_FALSE(wait_for_future(first_done_future, 2s).found());
     EXPECT_EQ(
         NodeCacheTestAccess::signal(*cache, root_hash), replacement_signal);
 
     cache->insert_and_notify(root_hash, wire);
-    EXPECT_TRUE(wait_for_future(second_done_future, 2s).found);
+    EXPECT_TRUE(wait_for_future(second_done_future, 2s).found());
 
     work.reset();
     io.stop();

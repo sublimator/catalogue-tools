@@ -12,7 +12,7 @@
 //   auto cache = NodeCache::create(io);
 //   auto walk = co_await cache->walk_to(
 //       root_hash, target_key, ledger_hash, liTX_NODE, peers);
-//   // walk.found, walk.leaf_nid, walk.leaf_data, walk.placeholders
+//   // walk.found(), walk.leaf(), walk.placeholders()
 
 #include "peer-client-coro.h"
 #include "peer-set.h"
@@ -44,6 +44,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <variant>
 #include <vector>
 
 class NodeCacheTestAccess;  // forward decl for test friend
@@ -229,21 +230,118 @@ struct PlaceholderNode
     Hash256 hash;
 };
 
-/// Result of walk_to: the full path from root to leaf (or deepest resolved).
-struct WalkResult
+struct WalkFound
 {
-    bool found = false;
-
-    /// Inner nodes along the path from root to leaf, in depth order.
-    std::vector<PathNode> path;
-
-    /// Sibling hashes at each depth — branches NOT on our target path.
-    /// These become placeholders in the abbreviated tree.
-    std::vector<PlaceholderNode> placeholders;
-
-    /// The leaf position and data (only valid when found=true).
     SHAMapNodeID leaf_nid;
     std::vector<uint8_t> leaf_data;
+};
+
+struct WalkBranchAbsent
+{
+    PathNode parent;
+    std::uint8_t branch = 0;
+};
+
+struct WalkNoSuitablePeer
+{
+    std::uint32_t ledger_seq = 0;
+};
+
+struct WalkTransportExhausted
+{
+    std::uint32_t ledger_seq = 0;
+    std::uint16_t depth = 0;
+    std::uint16_t retries = 0;
+    std::vector<std::string> attempted_peers;
+};
+
+struct WalkCancelled
+{
+};
+
+struct WalkDepthExhausted
+{
+    std::uint16_t depth = 0;
+};
+
+struct WalkInternalFailure
+{
+};
+
+/// Closed terminal disposition for one bounded tree walk.
+///
+/// A local selection refusal cannot carry a peer-response outcome. A found
+/// result owns its leaf; no leaf fields exist on any failure alternative.
+using WalkTerminal = std::variant<
+    WalkInternalFailure,
+    WalkFound,
+    WalkBranchAbsent,
+    WalkNoSuitablePeer,
+    WalkTransportExhausted,
+    WalkCancelled,
+    WalkDepthExhausted>;
+
+/// Result of walk_to: the resolved path plus one exact terminal disposition.
+class WalkResult
+{
+public:
+    /// Required by Asio's completion adapter for its exception path. The only
+    /// publicly mintable value is an inert failure with no authority-bearing
+    /// evidence.
+    WalkResult() = default;
+
+    std::vector<PathNode> const&
+    path() const noexcept
+    {
+        return path_;
+    }
+
+    std::vector<PlaceholderNode> const&
+    placeholders() const noexcept
+    {
+        return placeholders_;
+    }
+
+    WalkTerminal const&
+    terminal() const noexcept
+    {
+        return terminal_;
+    }
+
+    bool
+    found() const noexcept
+    {
+        return std::holds_alternative<WalkFound>(terminal_);
+    }
+
+    WalkFound const&
+    leaf() const
+    {
+        return std::get<WalkFound>(terminal_);
+    }
+
+private:
+    friend class NodeCache;
+
+    WalkResult(
+        std::vector<PathNode> path,
+        std::vector<PlaceholderNode> placeholders,
+        WalkTerminal terminal)
+        : path_(std::move(path))
+        , placeholders_(std::move(placeholders))
+        , terminal_(std::move(terminal))
+    {
+    }
+
+    std::vector<PathNode> path_;
+    std::vector<PlaceholderNode> placeholders_;
+
+    //@@authority state=prv.S0063 status=provisional scope=field
+    // bind=catl::peer_client::WalkResult::terminal_@ce74c248ea8dde2c
+    // owner=unresolved owner_hypothesis=node_cache
+    // observed_home=walk_result
+    // label=closed_node_walk_terminal_disposition
+    WalkTerminal terminal_ = WalkInternalFailure{};
 };
 
 // ─────────────────────────────────────────────────────────────────────

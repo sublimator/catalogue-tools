@@ -746,8 +746,13 @@ private:
     {
         std::uint64_t incarnation = 0;
         std::vector<PendingCallback<T>> callbacks;
-        bool network_request_sent =
-            false;          // first callback sends, rest piggyback
+        //@@authority state=prv.S0065 status=provisional scope=field
+        // bind=catl::peer_client::PeerClient::PendingEntry::network_request_initiated@6512b1a82fc8c797
+        // owner=unresolved owner_hypothesis=peer_client
+        // observed_home=peer_client
+        // label=per_pending_attempt_send_initiation_fact
+        // True only after async send initiation returns successfully.
+        bool network_request_initiated = false;
         Hash256 match_key;  // secondary key for response matching (e.g.
                             // ledger_key for node requests)
         std::vector<SHAMapNodeID>
@@ -856,6 +861,7 @@ private:
     std::uint64_t next_pending_incarnation_{1};
     std::uint64_t next_callback_incarnation_{1};
     std::atomic<std::size_t> pending_count_projection_{0};
+    std::function<void()> before_ledger_attempt_consume_for_test_;
 
     // Request state assumes strand affinity. Late-bound handler pointers
     // are separately mutex-protected so callers do not reintroduce races

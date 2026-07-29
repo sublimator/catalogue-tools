@@ -10,6 +10,7 @@
 #include <cassert>
 #include <limits>
 #include <stdexcept>
+#include <variant>
 
 namespace catl::peer_client {
 
@@ -441,7 +442,6 @@ PeerClient::register_callback(
 
     PendingEntry<T> entry;
     entry.incarnation = entry_incarnation;
-    entry.network_request_sent = true;
     entry.callbacks.push_back(
         {callback_incarnation, std::move(callback), std::move(timer)});
 
@@ -941,7 +941,7 @@ PeerClient::disconnect_on_strand()
             0},
         [this, &previous]() noexcept {
             previous = state_.exchange(State::Disconnected);
-        });  //@@authority-target ids=prv.T0184
+        }); //@@authority-target ids=prv.T0184
     if (!commit.event_committed)
         previous = state_.exchange(State::Disconnected);
 
@@ -1321,7 +1321,7 @@ PeerClient::submit_node_batch_on_strand(
     {
         refuse(NodeBatchWriteOutcome::ledger_not_advertised);
         return false;
-    }  //@@authority-target ids=prv.T0062
+    } //@@authority-target ids=prv.T0062
 
     if (node_batch_write_records_.size() >= kMaxNodeBatchReceiptRows)
     {
@@ -1672,7 +1672,7 @@ PeerClient::do_connect(
                         return;
                     self->on_connected(std::move(on_ready));
                 });
-        });  //@@authority-target ids=prv.T0148
+        }); //@@authority-target ids=prv.T0148
 }
 
 void
@@ -1690,7 +1690,7 @@ PeerClient::complete_connect(boost::system::error_code ec)
     // commit=peer_client_strand touches=prv.S0060
     // label=consume_one_shot_connect_completion_before_invoke
     auto cb = std::exchange(
-        connect_completion_callback_, {});  //@@authority-target ids=prv.T0185
+        connect_completion_callback_, {}); //@@authority-target ids=prv.T0185
     //@@mutation-end connect-completion-observer-is-consumed
     try
     {
@@ -2002,7 +2002,7 @@ PeerClient::become_ready()
         // commit=peer_client_strand touches=prv.S0061
         // label=consume_one_shot_ready_observer_before_invoke
         auto cb = std::exchange(
-            ready_callback_, {});  //@@authority-target ids=prv.T0188
+            ready_callback_, {}); //@@authority-target ids=prv.T0188
         //@@mutation-end connect-ready-observer-is-consumed
         try
         {
@@ -2112,9 +2112,16 @@ PeerClient::handle_ping(std::vector<uint8_t> const& payload)
 // bind=catl::peer_client::dispatch_ledger_data@f7d81d9d3abef04f
 // owner=unresolved owner_hypothesis=peer_client commit=strand
 // touches=prv.S0007 label=deliver_uncorrelated_node_response_to_shared_sink
+//@@authority state=prv.S0064 status=provisional scope=function
+// bind=catl::peer_client::dispatch_ledger_data@f7d81d9d3abef04f
+// owner=unresolved owner_hypothesis=peer_client
+// observed_home=dispatch_stack
+// label=peer_ledger_observation_and_candidate_snapshot
 void
 PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
 {
+    assert(strand_.running_in_this_thread());
+
     auto msg = std::make_shared<protocol::TMLedgerData>();
     if (!msg->ParseFromArray(payload.data(), payload.size()))
     {
@@ -2138,6 +2145,23 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         msg->has_error(),
         " has_cookie=",
         msg->has_requestcookie());
+
+    // We originate requests; we never act as a relay. A legitimate indirect
+    // response has its routing cookie removed by the relay before it reaches
+    // us. Treat a retained cookie as unowned routing authority for request
+    // correlation, while still allowing independently validated
+    // content-addressed nodes to reach their separate sink.
+    auto legacy_identity_envelope_complete = true;
+    if (msg->has_requestcookie())
+    {
+        PLOGW(log_, "dispatch_ledger_data: refusing unexpected relay cookie");
+        //@@authority transition=prv.T0197 status=provisional bind=expression_statement@5f5909b2f6b7edc6
+        // scope=statement owner=unresolved owner_hypothesis=peer_client
+        // commit=strand touches=prv.S0064
+        // label=refuse_unowned_relay_routing_authority
+        legacy_identity_envelope_complete =
+            false; //@@authority-target ids=prv.T0197
+    }
 
     // Reject responses with an absurd node count before any iteration. The
     // frame cap bounds the message size, but a densely-packed message could
@@ -2179,7 +2203,7 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
                 // label=invoke_snapshot_and_observe_uncorrelated_response_sink
                 //@@mutation-site node-response-sink-disposition-preserved
                 cache_observation =
-                    observer(msg);  //@@authority-target ids=prv.T0041
+                    observer(msg); //@@authority-target ids=prv.T0041
                 //@@mutation-end node-response-sink-disposition-preserved
             }
             catch (...)
@@ -2193,7 +2217,7 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
                 // label=contain_node_response_sink_failure_before_legacy_dispatch
                 //@@mutation-site node-response-observer-failure-contained
                 cache_observation.failure =
-                    std::current_exception();  //@@authority-target ids=prv.T0191
+                    std::current_exception(); //@@authority-target ids=prv.T0191
                 //@@mutation-end node-response-observer-failure-contained
                 // clang-format on
             }
@@ -2263,24 +2287,107 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
             (!e.callbacks.empty() ? static_cast<bool>(e.callbacks[0].callback)
                                   : false));
 
-    // For headers: direct key match (seq_key or hash_key)
-    auto find_header_key = [&]() -> Hash256 const* {
-        if (pending_headers_.count(seq_key))
-            return &seq_key;
-        if (have_hash_key && pending_headers_.count(hash_key_val))
-            return &hash_key_val;
-        return nullptr;
+    enum class PendingLedgerKind : std::uint8_t { header, nodes };
+
+    struct PeerLedgerObservation
+    {
+        PeerClient const* session = nullptr;
+        std::uint32_t ledger_seq = 0;
+        std::optional<Hash256> ledger_hash;
+        int type = 0;
+        std::optional<Error> remote_error;
     };
 
-    //@@start find-node-key
-    // For nodes: match response to the correct pending entry using the
-    // per-node nodeids in the response. Each response nodeid must be a
-    // descendant-or-equal of one of the entry's requested nodeids.
-    // This handles: exact matches, speculative depth (leaf terminates
-    // early → fewer nodes returned), and single-child chain traversal
-    // (queryDepth=0 still follows bc==1 chains → extra descendants).
-    //
-    // Fallback to match_key scan for error responses (no nodes).
+    struct PendingLedgerAttempt
+    {
+        PendingLedgerKind kind = PendingLedgerKind::header;
+        Hash256 key;
+        std::uint64_t attempt_id = 0;
+    };
+
+    struct UnmatchedLedgerObservation
+    {
+        PeerLedgerObservation observation;
+    };
+
+    struct AmbiguousLedgerObservation
+    {
+        PeerLedgerObservation observation;
+        std::vector<PendingLedgerAttempt> candidates;
+    };
+
+    struct UniquelyCorrelatedLedgerObservation
+    {
+        PeerLedgerObservation observation;
+        PendingLedgerAttempt candidate;
+    };
+
+    using LedgerObservationCorrelation = std::variant<
+        UnmatchedLedgerObservation,
+        AmbiguousLedgerObservation,
+        UniquelyCorrelatedLedgerObservation>;
+
+    auto const remote_error = [&]() -> std::optional<Error> {
+        if (!msg->has_error())
+            return std::nullopt;
+        if (msg->error() == protocol::reNO_LEDGER)
+            return Error::PeerNoLedger;
+        if (msg->error() == protocol::reNO_NODE)
+            return Error::NoNode;
+        return Error::BadRequest;
+    }();
+
+    PeerLedgerObservation observation{
+        .session = this,
+        .ledger_seq = msg->ledgerseq(),
+        .ledger_hash = have_hash_key
+            ? std::optional<Hash256>{Hash256(
+                  reinterpret_cast<std::uint8_t const*>(
+                      msg->ledgerhash().data()))}
+            : std::nullopt,
+        .type = msg->type(),
+        .remote_error = remote_error,
+    };
+
+    std::vector<PendingLedgerAttempt> candidates;
+    auto add_candidate = [&candidates, legacy_identity_envelope_complete](
+                             PendingLedgerKind kind,
+                             Hash256 const& key,
+                             auto const& entry) {
+        if (!legacy_identity_envelope_complete ||
+            !entry.network_request_initiated)
+            return;
+        if (std::ranges::any_of(
+                candidates, [&entry](PendingLedgerAttempt const& candidate) {
+                    return candidate.attempt_id == entry.incarnation;
+                }))
+        {
+            return;
+        }
+        candidates.push_back({kind, key, entry.incarnation});
+    };
+
+    auto add_header_candidate = [&](Hash256 const& key) {
+        auto const current = pending_headers_.find(key);
+        if (current != pending_headers_.end())
+        {
+            add_candidate(
+                PendingLedgerKind::header, current->first, current->second);
+        }
+    };
+
+    // Candidate identity is the union of every wire-supported index,
+    // deduplicated by the local pending-entry incarnation.
+    if (msg->type() == protocol::liBASE)
+    {
+        add_header_candidate(seq_key);
+        if (have_hash_key)
+            add_header_candidate(hash_key_val);
+    }
+
+    // For successful node responses, the response's self-identifying nodeids
+    // must fit the exact requested subtree. For errors, the wire carries no
+    // nodeids, so only ledger hash/sequence plus type are available.
     auto is_descendant_or_equal = [](SHAMapNodeID const& child,
                                      SHAMapNodeID const& ancestor) -> bool {
         if (child.depth < ancestor.depth)
@@ -2303,122 +2410,174 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         return true;
     };
 
-    auto find_node_key = [&]() -> Hash256 const* {
-        auto response_match = have_hash_key ? hash_key_val : seq_key;
-
-        // Extract response nodeids
-        std::vector<SHAMapNodeID> response_nids;
-        for (int i = 0; i < msg->nodes_size(); ++i)
+    std::vector<SHAMapNodeID> response_nids;
+    auto response_nodeids_complete = true;
+    if (!msg->has_error() && msg->type() != protocol::liBASE)
+    {
+        response_nids.reserve(static_cast<std::size_t>(msg->nodes_size()));
+        for (int index = 0; index < msg->nodes_size(); ++index)
         {
-            if (!msg->nodes(i).has_nodeid() ||
-                msg->nodes(i).nodeid().size() != 33)
+            if (!msg->nodes(index).has_nodeid() ||
+                msg->nodes(index).nodeid().size() != 33)
+            {
+                response_nodeids_complete = false;
                 continue;
-            auto const& nid_bytes = msg->nodes(i).nodeid();
+            }
+            auto const& nid_bytes = msg->nodes(index).nodeid();
             SHAMapNodeID nid;
             std::memcpy(nid.id.data(), nid_bytes.data(), 32);
             nid.depth = static_cast<uint8_t>(nid_bytes[32]);
+            if (nid.depth > 64)
+            {
+                response_nodeids_complete = false;
+                continue;
+            }
             response_nids.push_back(nid);
         }
+    }
 
-        // If we have response nodeids, find the pending entry whose
-        // requested_nodeids are ancestors of ALL response nodeids
-        if (!response_nids.empty())
+    if (msg->type() != protocol::liBASE)
+    {
+        for (auto const& [key, entry] : pending_nodes_)
         {
-            Hash256 const* best = nullptr;
-            for (auto const& [k, entry] : pending_nodes_)
+            auto const matches_wire_index = entry.match_key == seq_key ||
+                (have_hash_key && entry.match_key == hash_key_val);
+            if (!matches_wire_index)
+                continue;
+
+            if (msg->has_error())
             {
-                if (entry.match_key != response_match)
-                    continue;
-                if (entry.requested_nodeids.empty())
-                    continue;
-
-                // Every response nodeid must descend from at least one
-                // requested nodeid in this entry
-                bool all_match = true;
-                for (auto const& resp_nid : response_nids)
-                {
-                    bool found = false;
-                    for (auto const& req_nid : entry.requested_nodeids)
-                    {
-                        if (is_descendant_or_equal(resp_nid, req_nid))
-                        {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found)
-                    {
-                        all_match = false;
-                        break;
-                    }
-                }
-                if (all_match)
-                {
-                    best = &k;
-                    break;
-                }
+                add_candidate(PendingLedgerKind::nodes, key, entry);
+                continue;
             }
-            if (best)
-                return best;
+
+            if (!response_nodeids_complete || response_nids.empty() ||
+                entry.requested_nodeids.empty())
+                continue;
+
+            auto const all_match = std::ranges::all_of(
+                response_nids,
+                [&entry,
+                 &is_descendant_or_equal](SHAMapNodeID const& response_nid) {
+                    return std::ranges::any_of(
+                        entry.requested_nodeids,
+                        [&response_nid, &is_descendant_or_equal](
+                            SHAMapNodeID const& requested_nid) {
+                            return is_descendant_or_equal(
+                                response_nid, requested_nid);
+                        });
+                });
+            if (all_match)
+                add_candidate(PendingLedgerKind::nodes, key, entry);
+        }
+    }
+
+    //@@authority transition=prv.T0194 status=provisional scope=statement
+    // bind=declaration@99d2a3766448847e
+    // owner=unresolved owner_hypothesis=peer_client commit=strand
+    // touches=prv.S0064
+    // label=classify_wire_observation_against_pending_attempt_population
+    LedgerObservationCorrelation correlation = candidates.empty()
+        ? LedgerObservationCorrelation{UnmatchedLedgerObservation{observation}}
+        : candidates.size() == 1
+        ? LedgerObservationCorrelation{UniquelyCorrelatedLedgerObservation{
+              observation, candidates.front()}}
+        : LedgerObservationCorrelation{AmbiguousLedgerObservation{
+              observation,
+              std::move(candidates)}}; //@@authority-target ids=prv.T0194
+
+    auto const* unique =
+        std::get_if<UniquelyCorrelatedLedgerObservation>(&correlation);
+    auto const* ambiguous =
+        std::get_if<AmbiguousLedgerObservation>(&correlation);
+
+    auto before_consume = std::move(before_ledger_attempt_consume_for_test_);
+    if (before_consume)
+        before_consume();
+
+    auto consume_unique = [&](Error error, auto result) {
+        if (!unique || unique->observation.session != this)
+            return false;
+
+        auto const& candidate = unique->candidate;
+        if (candidate.kind == PendingLedgerKind::header)
+        {
+            auto const current = pending_headers_.find(candidate.key);
+            if (current == pending_headers_.end() ||
+                current->second.incarnation != candidate.attempt_id)
+            {
+                PLOGW(
+                    log_,
+                    "stale ledger-attempt correlation refused before header "
+                    "consumption");
+                return false;
+            }
+            //@@authority transition=prv.T0195 status=provisional
+            // bind=expression_statement@bd9ba51fc8010f1e
+            // scope=statement owner=unresolved owner_hypothesis=peer_client
+            // commit=strand touches=prv.S0064
+            // label=consume_uniquely_correlated_header_attempt
+            resolve(
+                pending_headers_,
+                candidate.key,
+                error,
+                LedgerHeaderResult{
+                    std::move(result)}); //@@authority-target ids=prv.T0195
+            return true;
         }
 
-        // Fallback: scan by match_key only (error responses, no nodeids,
-        // or no descendant match found)
-        for (auto const& [k, entry] : pending_nodes_)
+        auto const current = pending_nodes_.find(candidate.key);
+        if (current == pending_nodes_.end() ||
+            current->second.incarnation != candidate.attempt_id)
         {
-            if (entry.match_key == response_match)
-                return &k;
+            PLOGW(
+                log_,
+                "stale ledger-attempt correlation refused before node "
+                "consumption");
+            return false;
         }
-        return nullptr;
+        //@@authority transition=prv.T0196 status=provisional
+        // bind=expression_statement@d593400107116538
+        // scope=statement owner=unresolved owner_hypothesis=peer_client
+        // commit=strand touches=prv.S0064
+        // label=consume_uniquely_correlated_node_attempt
+        resolve(
+            pending_nodes_,
+            candidate.key,
+            error,
+            LedgerNodesResult{
+                std::move(result)}); //@@authority-target ids=prv.T0196
+        return true;
     };
-    //@@end find-node-key
 
     if (msg->has_error())
     {
-        auto err = msg->error() == protocol::reNO_LEDGER ? Error::NoLedger
-            : msg->error() == protocol::reNO_NODE        ? Error::NoNode
-                                                         : Error::BadRequest;
-        PLOGW(log_, "  error response: code=", msg->error());
-        if (auto k = find_header_key())
+        assert(remote_error);
+        if (!consume_unique(
+                *remote_error, std::shared_ptr<protocol::TMLedgerData>{}))
         {
-            PLOGD(
+            PLOGW(
                 log_,
-                "  resolving error → pending_headers key=",
-                k->hex().substr(0, 16));
-            resolve(pending_headers_, *k, err, LedgerHeaderResult{});
-        }
-        else if (auto k = find_node_key())
-        {
-            PLOGD(
-                log_,
-                "  resolving error → pending_nodes key=",
-                k->hex().substr(0, 16));
-            resolve(pending_nodes_, *k, err, LedgerNodesResult{});
-        }
-        else
-        {
-            PLOGW(log_, "  error response with no matching pending request");
+                "  error response unresolved: code=",
+                msg->error(),
+                " correlation=",
+                ambiguous ? "ambiguous" : "unmatched",
+                " candidates=",
+                ambiguous ? ambiguous->candidates.size() : 0);
         }
         return;
     }
 
     if (msg->type() == protocol::liBASE)
     {
-        if (auto k = find_header_key())
+        if (!consume_unique(Error::Success, std::move(msg)))
         {
-            PLOGD(
+            PLOGW(
                 log_,
-                "  resolving liBASE → headers key=",
-                k->hex().substr(0, 16));
-            resolve(
-                pending_headers_,
-                *k,
-                Error::Success,
-                LedgerHeaderResult{std::move(msg)});
-        }
-        else
-        {
-            PLOGW(log_, "  liBASE response but no matching pending_headers");
+                "  liBASE response unresolved: correlation=",
+                ambiguous ? "ambiguous" : "unmatched",
+                " candidates=",
+                ambiguous ? ambiguous->candidates.size() : 0);
         }
     }
     else
@@ -2426,23 +2585,12 @@ PeerClient::dispatch_ledger_data(std::vector<uint8_t> const& payload)
         auto const response_type = msg->type();
         auto const cache_accepted = cache_observation.accepted;
         auto const cache_failed = static_cast<bool>(cache_observation.failure);
-        bool legacy_matched = false;
+        auto legacy_matched = false;
         //@@mutation-site node-response-legacy-dispatch-remains-independent
-        if (auto k = find_node_key())
+        if (unique)
         //@@mutation-end node-response-legacy-dispatch-remains-independent
         {
-            legacy_matched = true;
-            PLOGD(
-                log_,
-                "  resolving type=",
-                msg->type(),
-                " → nodes key=",
-                k->hex().substr(0, 16));
-            resolve(
-                pending_nodes_,
-                *k,
-                Error::Success,
-                LedgerNodesResult{std::move(msg)});
+            legacy_matched = consume_unique(Error::Success, std::move(msg));
         }
 
         if (cache_failed)
@@ -2532,7 +2680,7 @@ PeerClient::dispatch_proof_path_response(std::vector<uint8_t> const& payload)
 
     if (msg->has_error())
     {
-        auto err = msg->error() == protocol::reNO_LEDGER ? Error::NoLedger
+        auto err = msg->error() == protocol::reNO_LEDGER ? Error::PeerNoLedger
             : msg->error() == protocol::reNO_NODE        ? Error::NoNode
                                                          : Error::BadRequest;
         resolve(pending_proof_paths_, key, err, ProofPathResult{});
@@ -2604,7 +2752,8 @@ PeerClient::get_ledger_header_on_strand(
     // status update may have revoked coverage in between.
     if (!advertised_ledger_range().contains(ledger_seq))
     {
-        complete_callback_noexcept(log_, std::move(callback), Error::NoLedger);
+        complete_callback_noexcept(
+            log_, std::move(callback), Error::NoSuitablePeer);
         return;
     }
 
@@ -2644,6 +2793,13 @@ PeerClient::get_ledger_header_on_strand(
                     "send TMGetLedger failed: ",
                     ec.message());
         });
+    //@@authority transition=prv.T0198 status=provisional scope=statement
+    // bind=expression_statement@9244997b98f9a9e7
+    // owner=unresolved owner_hypothesis=peer_client commit=strand
+    // touches=prv.S0065
+    // label=record_sequence_header_send_initiation
+    pending_headers_.at(key).network_request_initiated =
+        true; //@@authority-target ids=prv.T0198
 }
 
 void
@@ -2709,6 +2865,13 @@ PeerClient::get_ledger_header_on_strand(
 
     connection_->async_send_packet(
         packet_type::get_ledger, data, [](boost::system::error_code) {});
+    //@@authority transition=prv.T0199 status=provisional scope=statement
+    // bind=expression_statement@51f98dd86aa74e9f
+    // owner=unresolved owner_hypothesis=peer_client commit=strand
+    // touches=prv.S0065
+    // label=record_hash_header_send_initiation
+    pending_headers_.at(key).network_request_initiated =
+        true; //@@authority-target ids=prv.T0199
 }
 
 void
@@ -2804,6 +2967,13 @@ PeerClient::get_state_nodes_on_strand(
                     "send get_state_nodes failed: ",
                     ec.message());
         });
+    //@@authority transition=prv.T0200 status=provisional scope=statement
+    // bind=expression_statement@bcfa8d653379ef8c
+    // owner=unresolved owner_hypothesis=peer_client commit=strand
+    // touches=prv.S0065
+    // label=record_state_node_send_initiation
+    pending_nodes_.at(key).network_request_initiated =
+        true; //@@authority-target ids=prv.T0200
 }
 
 void
@@ -2899,6 +3069,13 @@ PeerClient::get_tx_nodes_on_strand(
                     "send get_tx_nodes failed: ",
                     ec.message());
         });
+    //@@authority transition=prv.T0201 status=provisional scope=statement
+    // bind=expression_statement@0108afa84f302f83
+    // owner=unresolved owner_hypothesis=peer_client commit=strand
+    // touches=prv.S0065
+    // label=record_transaction_node_send_initiation
+    pending_nodes_.at(key).network_request_initiated =
+        true; //@@authority-target ids=prv.T0201
 }
 
 void
