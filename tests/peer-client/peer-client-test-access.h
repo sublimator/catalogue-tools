@@ -198,6 +198,25 @@ public:
     }
 
     static void
+    fail_initial_connect_on_strand(
+        PeerClient& client,
+        boost::system::error_code ec = asio::error::connection_reset)
+    {
+        auto const previous = client.commit_failed_on_strand();
+        if (previous)
+        {
+            client.complete_connect(
+                ec, ConnectAttemptDisposition::peer_failure);
+        }
+    }
+
+    static void
+    disconnect_on_strand(PeerClient& client)
+    {
+        client.disconnect_on_strand();
+    }
+
+    static void
     seed_incarnations(
         PeerClient& client,
         std::uint64_t pending,

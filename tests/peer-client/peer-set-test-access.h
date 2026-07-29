@@ -50,6 +50,39 @@ public:
     }
 
     static void
+    stop_on_connect_attempt_completion(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        catl::peer_client::ConnectAttemptDisposition required,
+        std::function<void()> before_stop = {})
+    {
+        std::weak_ptr<catl::peer_client::PeerSet> weak = peers;
+        peers->connect_attempt_completion_hook_for_test_ =
+            [weak, required, before_stop = std::move(before_stop)](
+                catl::peer_client::ConnectAttemptDisposition disposition) {
+                if (disposition != required)
+                    return;
+                if (auto locked = weak.lock())
+                {
+                    boost::asio::dispatch(
+                        locked->strand_,
+                        [locked, before_stop]() {
+                            if (before_stop)
+                                before_stop();
+                            locked->begin_stop_on_strand();
+                        });
+                }
+            };
+    }
+
+    static void
+    set_connect_failure_classification_hook(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::function<void()> hook)
+    {
+        peers->connect_failure_classification_hook_for_test_ = std::move(hook);
+    }
+
+    static void
     post_on_owner_strand(
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
         std::function<void()> operation)

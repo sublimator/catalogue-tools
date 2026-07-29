@@ -40,6 +40,25 @@ enum class Error {
     ResourceExhausted,
 };
 
+/// First retained logical terminal cause for one PeerClient instance.
+///
+/// This is deliberately distinct from State: State may later move from Failed
+/// to Disconnected while physical transport is drained, but the cause which
+/// won terminality must remain stable for the initial-connect consumer.
+enum class PeerLogicalTerminalCause : std::uint8_t {
+    none,
+    peer_failure,
+    owner_disconnect,
+};
+
+/// Exact terminal disposition of one initial connect attempt.
+enum class ConnectAttemptDisposition : std::uint8_t {
+    ready,
+    peer_failure,
+    owner_disconnect,
+    deadline,
+};
+
 //------------------------------------------------------------------------------
 // Request options
 //------------------------------------------------------------------------------

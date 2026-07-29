@@ -2508,6 +2508,17 @@ PeerSet::try_connect_on_strand(
                 }
             };
         }
+        if (connect_attempt_completion_hook_for_test_)
+        {
+            auto hook = connect_attempt_completion_hook_for_test_;
+            connect_opts.on_complete =
+                [hook = std::move(hook)](
+                    boost::system::error_code,
+                    std::uint32_t,
+                    ConnectAttemptDisposition disposition) {
+                    hook(disposition);
+                };
+        }
 
         co_await co_connect(
             io_,
@@ -2625,8 +2636,9 @@ PeerSet::try_connect_on_strand(
     catch (PeerClientException const& e)
     {
         auto const stop_owned_cancellation = [&]() {
-            if (!client || e.error != Error::Disconnected ||
-                client->state() != State::Disconnected)
+            if (!client ||
+                e.connect_disposition !=
+                    ConnectAttemptDisposition::owner_disconnect)
             {
                 return false;
             }
@@ -2646,6 +2658,9 @@ PeerSet::try_connect_on_strand(
         }
         else
         {
+            if (connect_failure_classification_hook_for_test_)
+                connect_failure_classification_hook_for_test_();
+
             auto redirected = false;
             std::size_t redirect_count = 0;
             std::size_t filtered = 0;

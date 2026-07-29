@@ -29,8 +29,10 @@ namespace catl::peer_client {
 using ReadyCallback = std::function<void(uint32_t peer_ledger_seq)>;
 
 /// Called exactly once when initial setup either becomes ready or fails.
-using ConnectCompletionCallback =
-    std::function<void(boost::system::error_code, uint32_t peer_ledger_seq)>;
+using ConnectCompletionCallback = std::function<void(
+    boost::system::error_code,
+    uint32_t peer_ledger_seq,
+    ConnectAttemptDisposition)>;
 
 //------------------------------------------------------------------------------
 // Connection state
@@ -215,6 +217,12 @@ public:
         return state_;
     }
 
+    PeerLogicalTerminalCause
+    terminal_cause() const
+    {
+        return terminal_cause_.load(std::memory_order_acquire);
+    }
+
     bool
     is_ready() const override
     {
@@ -339,7 +347,9 @@ private:
     on_connected(ReadyCallback on_ready);
 
     void
-    complete_connect(boost::system::error_code ec);
+    complete_connect(
+        boost::system::error_code ec,
+        ConnectAttemptDisposition disposition);
 
     void
     send_monitoring_status();
@@ -619,12 +629,23 @@ private:
     mutable std::mutex handler_mutex_;
     UnsolicitedHandler unsolicited_handler_;
     ReadyCallback ready_callback_;
+    //@@authority state=prv.S0060 status=provisional scope=field
+    // bind=catl::peer_client::PeerClient::connect_completion_callback_@0916e06aa7c57741
+    // owner=unresolved owner_hypothesis=peer_client observed_home=peer_client
+    // label=one_shot_initial_connect_completion_export_capability
     ConnectCompletionCallback connect_completion_callback_;
 
-    //@@authority state=prv.S0049 status=provisional scope=field bind=catl::peer_client::PeerClient::state_@9f0ac0751dded7b7
+    //@@authority state=prv.S0049 status=provisional scope=field
+    //bind=catl::peer_client::PeerClient::state_@9f0ac0751dded7b7
     // owner=unresolved owner_hypothesis=peer_client
     // observed_home=peer_client label=peer_client_logical_lifecycle_phase
     std::atomic<State> state_{State::Disconnected};
+    //@@authority state=prv.S0058 status=provisional scope=field
+    // bind=catl::peer_client::PeerClient::terminal_cause_@f9cb6076054dbb7f
+    // owner=unresolved owner_hypothesis=peer_client observed_home=peer_client
+    // label=retained_first_peer_logical_terminal_cause
+    std::atomic<PeerLogicalTerminalCause> terminal_cause_{
+        PeerLogicalTerminalCause::none};
     std::atomic<uint32_t> peer_ledger_seq_{0};
     //@@authority state=prv.S0021 status=provisional scope=field
     // bind=catl::peer_client::PeerClient::advertised_ledger_range_@f4cbfc77b30d3841

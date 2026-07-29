@@ -40,6 +40,7 @@ class PeerClientException : public std::runtime_error
 public:
     Error error;
     std::string detail;
+    std::optional<ConnectAttemptDisposition> connect_disposition;
 
     static std::string
     error_name(Error e)
@@ -73,13 +74,17 @@ public:
         }
     }
 
-    explicit PeerClientException(Error e, std::string detail_text = {})
+    explicit PeerClientException(
+        Error e,
+        std::string detail_text = {},
+        std::optional<ConnectAttemptDisposition> disposition = std::nullopt)
         : std::runtime_error(
               detail_text.empty()
                   ? "PeerClient: " + error_name(e)
                   : "PeerClient: " + error_name(e) + " [" + detail_text + "]")
         , error(e)
         , detail(std::move(detail_text))
+        , connect_disposition(disposition)
     {
     }
 };

@@ -482,6 +482,9 @@ private:
     std::uint32_t drop_seal_completions_for_test_ = 0;
     std::uint32_t fail_connect_servant_launches_for_test_ = 0;
     std::uint32_t fail_crawl_servant_launches_for_test_ = 0;
+    std::function<void(ConnectAttemptDisposition)>
+        connect_attempt_completion_hook_for_test_;
+    std::function<void()> connect_failure_classification_hook_for_test_;
     std::function<void()> connect_completion_diagnostic_hook_for_test_;
     std::function<void()> crawl_completion_diagnostic_hook_for_test_;
     /// Pause after one owner-strand generation-pin barrier has consumed its
@@ -895,8 +898,9 @@ private:
         /// receipt; requesting disconnect never retires it.
         PeerSessionPtr session;
         /// Set by the PeerSet owner immediately before requesting disconnect.
-        /// This is the durable cause used to distinguish owner-issued shutdown
-        /// from peer/network failure evidence.
+        /// This proves cancellation intent for this exact row. The immutable
+        /// terminal cause exported by PeerClient still decides whether peer
+        /// failure evidence must be retained.
         bool stop_cancellation_requested = false;
     };
     //@@authority state=prv.S0037 status=provisional scope=field

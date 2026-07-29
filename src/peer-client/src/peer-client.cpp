@@ -880,7 +880,8 @@ PeerClient::disconnect()
     asio::dispatch(strand_, [self]() { self->disconnect_on_strand(); });
 }
 
-//@@authority transition=prv.T0145 status=provisional scope=function bind=catl::peer_client::co_disconnect@8237806aa45018b4
+//@@authority transition=prv.T0145 status=provisional scope=function
+//bind=catl::peer_client::co_disconnect@8237806aa45018b4
 // owner=unresolved owner_hypothesis=peer_client commit=peer_client_strand
 // touches=prv.S0046,prv.S0048,prv.S0049 mutation_class=stop_driver
 // label=join_connection_physical_drain_after_logical_disconnect
@@ -906,6 +907,17 @@ void
 PeerClient::disconnect_on_strand()
 {
     assert(strand_.running_in_this_thread());
+    auto expected_cause = PeerLogicalTerminalCause::none;
+    //@@authority transition=prv.T0184 status=provisional scope=statement bind=expression_statement@ce2a14d40c0a1b38
+    // owner=unresolved owner_hypothesis=peer_client
+    // commit=peer_client_strand touches=prv.S0058
+    // mutation_class=terminal_receipt
+    // label=commit_owner_disconnect_only_if_no_terminal_cause_won
+    terminal_cause_.compare_exchange_strong(
+        expected_cause,
+        PeerLogicalTerminalCause::owner_disconnect,
+        std::memory_order_acq_rel,
+        std::memory_order_acquire); //@@authority-target ids=prv.T0184
     auto const previous = state_.exchange(State::Disconnected);
 
     if (previous != State::Disconnected && previous != State::Failed)
@@ -923,13 +935,16 @@ PeerClient::disconnect_on_strand()
         return;
 
     if (previous != State::Ready)
-        complete_connect(boost::asio::error::operation_aborted);
+        complete_connect(
+            boost::asio::error::operation_aborted,
+            ConnectAttemptDisposition::owner_disconnect);
 }
 
-//@@authority transition=prv.T0146 status=provisional scope=function bind=catl::peer_client::commit_failed_on_strand@fe49a9f576e5dd76
+//@@authority transition=prv.T0146 status=provisional scope=function
+//bind=catl::peer_client::commit_failed_on_strand@fe49a9f576e5dd76
 // owner=unresolved owner_hypothesis=peer_client commit=peer_client_strand
-// touches=prv.S0049 mutation_class=terminal_receipt
-// label=commit_connection_failure_without_overwriting_terminal_state
+// touches=prv.S0049,prv.S0058 mutation_class=terminal_receipt
+// label=commit_peer_failure_without_overwriting_first_terminal_cause
 std::optional<State>
 PeerClient::commit_failed_on_strand() noexcept
 {
@@ -937,6 +952,16 @@ PeerClient::commit_failed_on_strand() noexcept
     auto const previous = state_.load();
     if (previous == State::Disconnected || previous == State::Failed)
         return std::nullopt;
+
+    auto expected_cause = PeerLogicalTerminalCause::none;
+    if (!terminal_cause_.compare_exchange_strong(
+            expected_cause,
+            PeerLogicalTerminalCause::peer_failure,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire))
+    {
+        return std::nullopt;
+    }
 
     state_.store(State::Failed);
     return previous;
@@ -1573,7 +1598,7 @@ PeerClient::do_connect(
                 "] Connection lost before ready: ",
                 ec.message());
         }
-        self->complete_connect(ec);
+        self->complete_connect(ec, ConnectAttemptDisposition::peer_failure);
     });
 
     // Construction above is exclusive because the client has not escaped.
@@ -1583,7 +1608,7 @@ PeerClient::do_connect(
     auto self = shared_from_this();
     auto connection = connection_;
     //@@authority transition=prv.T0148 status=provisional scope=statement
-    // bind=expression_statement@bc5d3718003dd443
+    // bind=expression_statement@a1e24306a6da2d3a
     // owner=unresolved owner_hypothesis=peer_client
     // commit=peer_client_strand mutation_class=running_guarded
     // label=enter_owner_strand_before_physical_connection_admission
@@ -1612,11 +1637,16 @@ PeerClient::do_connect(
                             ec.message());
                         if (!self->commit_failed_on_strand())
                         {
-                            self->complete_connect(ec);
+                            auto const disposition = self->terminal_cause() ==
+                                    PeerLogicalTerminalCause::owner_disconnect
+                                ? ConnectAttemptDisposition::owner_disconnect
+                                : ConnectAttemptDisposition::peer_failure;
+                            self->complete_connect(ec, disposition);
                             return;
                         }
                         self->complete_all_pending(Error::Disconnected);
-                        self->complete_connect(ec);
+                        self->complete_connect(
+                            ec, ConnectAttemptDisposition::peer_failure);
                         return;
                     }
                     auto const state = self->state_.load();
@@ -1628,7 +1658,9 @@ PeerClient::do_connect(
 }
 
 void
-PeerClient::complete_connect(boost::system::error_code ec)
+PeerClient::complete_connect(
+    boost::system::error_code ec,
+    ConnectAttemptDisposition disposition)
 {
     if (!connect_completion_callback_)
     {
@@ -1636,7 +1668,15 @@ PeerClient::complete_connect(boost::system::error_code ec)
     }
 
     auto cb = std::move(connect_completion_callback_);
-    cb(ec, peer_ledger_seq_.load());
+    //@@authority transition=prv.T0185 status=provisional scope=statement bind=expression_statement@db6d2c11a768afb0
+    // owner=unresolved owner_hypothesis=peer_client
+    // commit=peer_client_strand touches=prv.S0060
+    // boundary_ref=peer_client.connect_attempt_terminal
+    // receipt=peer_client.connect_attempt_terminal
+    // label=export_exact_one_shot_connect_attempt_disposition
+    cb(ec,
+       peer_ledger_seq_.load(),
+       disposition); //@@authority-target ids=prv.T0185
 }
 
 void
@@ -1923,7 +1963,7 @@ PeerClient::become_ready()
         PLOGD(log_, "become_ready: ready_callback_ returned");
     }
 
-    complete_connect({});
+    complete_connect({}, ConnectAttemptDisposition::ready);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

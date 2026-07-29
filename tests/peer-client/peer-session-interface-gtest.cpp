@@ -6980,6 +6980,158 @@ TEST(
 }
 
 TEST(
+    PeerSetShutdown,
+    PeerFailureCauseSurvivesOwnerStopBeforeServantCatch)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
+        io,
+        asio::ip::tcp::endpoint(
+            asio::ip::make_address("127.0.0.1"), 0));
+    auto accepted = std::make_shared<asio::ip::tcp::socket>(io);
+    acceptor->async_accept(
+        *accepted, [accepted](boost::system::error_code) {});
+    auto const key = "127.0.0.1:" +
+        std::to_string(acceptor->local_endpoint().port());
+
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .endpoint_cache_path = ":memory:",
+            .max_in_flight_connects = 1,
+            .max_in_flight_crawls = 0,
+        });
+    bool stop_interposed = false;
+    PeerSetTestAccess::stop_on_connect_attempt_completion(
+        peers,
+        ConnectAttemptDisposition::peer_failure,
+        [&stop_interposed] { stop_interposed = true; });
+    PeerSetTestAccess::push_pending_connect(io, peers, key);
+    PeerSetTestAccess::pump_connects(io, peers);
+
+    std::shared_ptr<PeerClient> client;
+    for (std::size_t attempt = 0; attempt < 100 && !client; ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+        client = PeerSetTestAccess::connect_servant_client(io, peers, key);
+    }
+    ASSERT_TRUE(client);
+
+    asio::post(client->strand(), [client] {
+        PeerClientTestAccess::fail_initial_connect_on_strand(*client);
+    });
+    io.run_for(1s);
+    io.restart();
+
+    EXPECT_TRUE(stop_interposed)
+        << "stop must run after failure commits but before PeerSet consumes it";
+    EXPECT_EQ(
+        client->terminal_cause(), PeerLogicalTerminalCause::peer_failure);
+    EXPECT_TRUE(PeerSetTestAccess::has_failed(io, peers, key))
+        << "the stop request bit cannot suppress earlier peer failure";
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u);
+    EXPECT_EQ(
+        PeerSetTestAccess::cached_endpoint_failure_count(io, peers, key), 1u);
+    EXPECT_FALSE(PeerSetTestAccess::in_flight_contains(io, peers, key));
+}
+
+TEST(
+    PeerSetShutdown,
+    PumpConnectFailurePathJoinsInstalledPhysicalReceiptBeforeRetirement)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
+        io,
+        asio::ip::tcp::endpoint(
+            asio::ip::make_address("127.0.0.1"), 0));
+    auto accepted = std::make_shared<asio::ip::tcp::socket>(io);
+    acceptor->async_accept(
+        *accepted, [accepted](boost::system::error_code) {});
+    auto const key = "127.0.0.1:" +
+        std::to_string(acceptor->local_endpoint().port());
+
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .endpoint_cache_path = ":memory:",
+            .max_in_flight_connects = 1,
+            .max_in_flight_crawls = 0,
+        });
+    bool classification_reached = false;
+    std::size_t servant_receipts = 0;
+    PeerSetTestAccess::set_connect_failure_classification_hook(
+        peers, [&classification_reached] {
+            classification_reached = true;
+            throw std::runtime_error("escaped connect classification");
+        });
+    PeerSetTestAccess::set_connect_completion_diagnostic_hook(
+        peers, [&servant_receipts] { ++servant_receipts; });
+    PeerSetTestAccess::push_pending_connect(io, peers, key);
+    PeerSetTestAccess::pump_connects(io, peers);
+
+    std::shared_ptr<PeerClient> client;
+    for (std::size_t attempt = 0; attempt < 100 && !client; ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+        client = PeerSetTestAccess::connect_servant_client(io, peers, key);
+    }
+    ASSERT_TRUE(client);
+
+    peer_connection::test_write_completion held_completion;
+    asio::post(client->strand(), [client, &held_completion] {
+        client->raw_connection().set_write_initiator_for_test(
+            [&held_completion](
+                asio::const_buffer,
+                peer_connection::test_write_completion completion) {
+                held_completion = std::move(completion);
+            });
+        client->raw_connection().async_send_packet(
+            packet_type::ping,
+            std::vector<std::uint8_t>(64, 0xC8),
+            [](boost::system::error_code) {});
+        PeerClientTestAccess::fail_initial_connect_on_strand(*client);
+    });
+    for (std::size_t attempt = 0;
+         attempt < 100 &&
+         (!held_completion || !classification_reached);
+         ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+    }
+
+    ASSERT_TRUE(held_completion);
+    ASSERT_TRUE(classification_reached);
+    EXPECT_TRUE(PeerSetTestAccess::in_flight_contains(io, peers, key))
+        << "the real pump catch must retain S0037 until T0183 joins";
+    EXPECT_GE(
+        client->raw_connection().transport_operation_count_for_test(), 1u);
+    EXPECT_FALSE(client->raw_connection().physical_transport_drained_for_test());
+    EXPECT_EQ(servant_receipts, 0u);
+
+    auto completion = std::move(held_completion);
+    asio::post(
+        client->strand(), [completion = std::move(completion)]() mutable {
+            completion(asio::error::operation_aborted);
+        });
+    io.run_for(1s);
+    io.restart();
+
+    EXPECT_TRUE(client->raw_connection().physical_transport_drained_for_test());
+    EXPECT_FALSE(PeerSetTestAccess::in_flight_contains(io, peers, key));
+    EXPECT_EQ(servant_receipts, 1u)
+        << "the production servant funnel retires the exact row once";
+}
+
+TEST(
     PeerSetShutdownDeterministic,
     ReturnedReceiptCannotEraseDifferentSessionAtSameGeneration)
 {

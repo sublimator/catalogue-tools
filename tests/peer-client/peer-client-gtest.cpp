@@ -5,6 +5,7 @@
 #include <catl/peer-client/connection-types.h>
 #include <catl/peer-client/endpoint-tracker.h>
 #include <catl/peer-client/peer-client-coro.h>
+#include <catl/peer-client/peer-client-connect-coro.h>
 #include <catl/peer-client/peer-client.h>
 #include <catl/peer-client/peer-crawl-client.h>
 #include <catl/peer-client/types.h>
@@ -218,6 +219,35 @@ TEST(PeerClientTypes, PeerClientExceptionIncludesDetail)
     EXPECT_EQ(ex.detail, "http upgrade status=503 redirect_peers=4");
 }
 
+TEST(ConnectAttemptState, DeadlineAndCompletionAreFirstWins)
+{
+    detail::ConnectAttemptState deadline_first;
+    EXPECT_TRUE(deadline_first.try_commit(
+        {ConnectAttemptDisposition::deadline, asio::error::timed_out, 0, 10}));
+    EXPECT_FALSE(deadline_first.try_commit(
+        {ConnectAttemptDisposition::peer_failure,
+         asio::error::connection_reset,
+         0,
+         0}));
+    ASSERT_TRUE(deadline_first.snapshot());
+    EXPECT_EQ(
+        deadline_first.snapshot()->disposition,
+        ConnectAttemptDisposition::deadline);
+
+    detail::ConnectAttemptState completion_first;
+    EXPECT_TRUE(completion_first.try_commit(
+        {ConnectAttemptDisposition::peer_failure,
+         asio::error::connection_reset,
+         0,
+         0}));
+    EXPECT_FALSE(completion_first.try_commit(
+        {ConnectAttemptDisposition::deadline, asio::error::timed_out, 0, 10}));
+    ASSERT_TRUE(completion_first.snapshot());
+    EXPECT_EQ(
+        completion_first.snapshot()->disposition,
+        ConnectAttemptDisposition::peer_failure);
+}
+
 TEST(PeerClientTypes, SummarizeCrawlErrorStripsBoostSourceNoise)
 {
     EXPECT_EQ(
@@ -385,7 +415,10 @@ TEST(
     std::vector<boost::system::error_code> completions;
 
     PeerClient::ConnectOptions opts;
-    opts.on_complete = [&](boost::system::error_code ec, std::uint32_t) {
+    opts.on_complete = [&](
+                           boost::system::error_code ec,
+                           std::uint32_t,
+                           ConnectAttemptDisposition) {
         completion_on_strand = client->strand().running_in_this_thread();
         completions.push_back(ec);
     };
@@ -821,6 +854,36 @@ TEST(PeerClientLifecycle, FailureTransitionCannotOverwriteTerminalState)
     ASSERT_TRUE(previous.back());
     EXPECT_EQ(*previous.back(), State::Ready);
     EXPECT_EQ(client->state(), State::Failed);
+}
+
+TEST(PeerClientLifecycle, FirstLogicalTerminalCauseSurvivesPhysicalClose)
+{
+    asio::io_context io;
+    auto failure_first = PeerClientTestAccess::make(io, State::Connecting);
+    asio::post(failure_first->strand(), [failure_first] {
+        EXPECT_TRUE(
+            PeerClientTestAccess::commit_failed_on_strand(*failure_first));
+        PeerClientTestAccess::disconnect_on_strand(*failure_first);
+    });
+    io.run();
+
+    EXPECT_EQ(failure_first->state(), State::Disconnected);
+    EXPECT_EQ(
+        failure_first->terminal_cause(),
+        PeerLogicalTerminalCause::peer_failure);
+
+    auto owner_first = PeerClientTestAccess::make(io, State::Connecting);
+    io.restart();
+    asio::post(owner_first->strand(), [owner_first] {
+        PeerClientTestAccess::disconnect_on_strand(*owner_first);
+        EXPECT_FALSE(PeerClientTestAccess::commit_failed_on_strand(*owner_first));
+    });
+    io.run();
+
+    EXPECT_EQ(owner_first->state(), State::Disconnected);
+    EXPECT_EQ(
+        owner_first->terminal_cause(),
+        PeerLogicalTerminalCause::owner_disconnect);
 }
 
 TEST(PeerClientLifecycle, FailedClientRejectsWithoutQueueing)
