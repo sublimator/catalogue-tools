@@ -37,6 +37,15 @@ TEST(PeerClientLifecycle, PublicCoConnectFunctionTypeRemainsStable)
     EXPECT_NE(function, nullptr);
 }
 
+TEST(PeerClientLifecycle, PublicCrawlFunctionTypeRemainsStable)
+{
+    using PublicCrawl =
+        asio::awaitable<CrawlResponse> (*)(std::string, std::uint16_t);
+
+    PublicCrawl function = &co_fetch_peer_crawl;
+    EXPECT_NE(function, nullptr);
+}
+
 TEST(PeerClientTypes, ErrorEnumValues)
 {
     EXPECT_EQ(static_cast<int>(Error::Success), 0);

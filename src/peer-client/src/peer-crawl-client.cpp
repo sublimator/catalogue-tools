@@ -369,12 +369,11 @@ summarize_crawl_error(std::string_view error)
 }
 
 boost::asio::awaitable<CrawlResponse>
-co_fetch_peer_crawl(
+detail::co_fetch_peer_crawl_with_stop(
     std::string host,
     uint16_t port,
     std::stop_token stop,
-    std::function<void()> before_stop_check,
-    std::function<void()> before_https_fallback)
+    CrawlFetchHooks hooks)
 {
     // Try HTTP first — XRPL/Xahau peer crawl endpoints serve plain HTTP
     // on the peer port. HTTPS wastes time on TLS handshake timeout.
@@ -392,8 +391,8 @@ co_fetch_peer_crawl(
 
     // The Asio cancellation edge can be consumed or translated by the nested
     // HTTP await. The PeerSet-issued stop token is the retained owner fact.
-    if (before_stop_check)
-        before_stop_check();
+    if (hooks.before_stop_check)
+        hooks.before_stop_check();
 
     //@@mutation-site crawl-stop-intent-prevents-https-fallback
     if (stop.stop_requested())
@@ -402,8 +401,8 @@ co_fetch_peer_crawl(
     }
     //@@mutation-end crawl-stop-intent-prevents-https-fallback
 
-    if (before_https_fallback)
-        before_https_fallback();
+    if (hooks.before_https_fallback)
+        hooks.before_https_fallback();
 
     PLOGD(
         log_,
@@ -425,6 +424,13 @@ co_fetch_peer_crawl(
             "crawl fallback failed: http=" + http_summary +
             "; https=" + strip_diagnostic(https_error.what()));
     }
+}
+
+boost::asio::awaitable<CrawlResponse>
+co_fetch_peer_crawl(std::string host, uint16_t port)
+{
+    co_return co_await detail::co_fetch_peer_crawl_with_stop(
+        std::move(host), port, {}, {});
 }
 
 }  // namespace catl::peer_client

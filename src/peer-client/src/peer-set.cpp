@@ -364,17 +364,22 @@ PeerSet::co_stop()
     // Publish retained stop policy before making the cross-thread seal
     // observable. A crawl already resuming from HTTP failure can then never
     // cross into HTTPS after it observes the sealed boundary.
-    //@@authority transition=prv.T0190 status=provisional scope=statement bind=expression_statement@46b6d04e8bcc7736
+    // clang-format off
+    //@@authority transition=prv.T0190 status=provisional scope=statement
+    // bind=expression_statement@46b6d04e8bcc7736
     // owner=unresolved owner_hypothesis=peer_set
     // commit=caller_thread_stop_state touches=prv.S0062
     // label=publish_retained_crawl_stop_fact_before_ingress_seal
     //@@mutation-site crawl-stop-fact-precedes-seal
     crawl_stop_source_.request_stop(); //@@authority-target ids=prv.T0190
-    //@@mutation-end crawl-stop-fact-precedes-seal
 
     // This is the immediate cross-thread admission boundary. Once committed,
     // no projection failure is allowed to reopen it.
     shutdown_ingress_sealed_.store(true, std::memory_order_release);
+    if (after_crawl_ingress_seal_for_test_)
+        after_crawl_ingress_seal_for_test_();
+    //@@mutation-end crawl-stop-fact-precedes-seal
+    // clang-format on
 
     auto self = shared_from_this();
     co_await asio::co_spawn(
@@ -2115,7 +2120,7 @@ PeerSet::pump_connects()
 //@@authority transition=prv.T0088 status=provisional scope=function
 // bind=catl::peer_client::pump_crawls@98ba9d5913454cfb
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
-// touches=prv.S0034,prv.S0038
+// touches=prv.S0034,prv.S0038,prv.S0062
 // label=admit_owned_background_crawl_servant
 void
 PeerSet::pump_crawls()
@@ -2166,12 +2171,13 @@ PeerSet::pump_crawls()
                             std::move(before_https_fallback)]() mutable
             -> boost::asio::awaitable<CrawlServantOutcome> {
             CrawlServantOutcome outcome;
-            auto response = co_await co_fetch_peer_crawl(
+            auto response = co_await detail::co_fetch_peer_crawl_with_stop(
                 host,
                 port,
                 stop_token,
-                std::move(before_stop_check),
-                std::move(before_https_fallback));
+                detail::CrawlFetchHooks{
+                    .before_stop_check = std::move(before_stop_check),
+                    .before_https_fallback = std::move(before_https_fallback)});
 
             outcome.raw = response.peers.size();
             outcome.used_tls = response.used_tls;

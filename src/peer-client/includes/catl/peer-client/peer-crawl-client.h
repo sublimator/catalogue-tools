@@ -36,11 +36,23 @@ std::string
 summarize_crawl_error(std::string_view error);
 
 boost::asio::awaitable<CrawlResponse>
-co_fetch_peer_crawl(
+co_fetch_peer_crawl(std::string host, uint16_t port);
+
+namespace detail {
+
+struct CrawlFetchHooks
+{
+    std::function<void()> before_stop_check;
+    std::function<void()> before_https_fallback;
+};
+
+boost::asio::awaitable<CrawlResponse>
+co_fetch_peer_crawl_with_stop(
     std::string host,
     uint16_t port,
     std::stop_token stop,
-    std::function<void()> before_stop_check = {},
-    std::function<void()> before_https_fallback = {});
+    CrawlFetchHooks hooks = {});
+
+}  // namespace detail
 
 }  // namespace catl::peer_client

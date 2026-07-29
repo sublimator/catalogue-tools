@@ -736,6 +736,24 @@ public:
         });
     }
 
+    static void
+    set_after_crawl_ingress_seal(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::function<void()> hook)
+    {
+        run_on_strand(io, peers, [hook = std::move(hook)](auto& set) mutable {
+            set.after_crawl_ingress_seal_for_test_ = std::move(hook);
+        });
+    }
+
+    static bool
+    crawl_stop_fact_published(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        return peers->crawl_stop_source_.stop_requested();
+    }
+
     static bool
     crawl_stop_fact_and_ingress_seal_published(
         std::shared_ptr<catl::peer_client::PeerSet> const& peers)

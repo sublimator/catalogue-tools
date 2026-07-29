@@ -7077,6 +7077,7 @@ TEST(PeerSetShutdown, ActiveCrawlCancellationWaitsForExactPhysicalReceipt)
 
     ASSERT_TRUE(static_cast<bool>(*withheld_receipt));
     auto exact_receipt = std::move(*withheld_receipt);
+    auto duplicate_receipt = exact_receipt;
     PeerSetTestAccess::post_on_owner_strand(
         peers, [exact_receipt = std::move(exact_receipt)]() mutable {
             exact_receipt();
@@ -7088,6 +7089,16 @@ TEST(PeerSetShutdown, ActiveCrawlCancellationWaitsForExactPhysicalReceipt)
     io.restart();
     EXPECT_FALSE(PeerSetTestAccess::crawl_in_flight_contains(io, peers, key));
     EXPECT_EQ(servant_receipts, 1u);
+
+    PeerSetTestAccess::post_on_owner_strand(
+        peers, [duplicate_receipt = std::move(duplicate_receipt)]() mutable {
+            duplicate_receipt();
+        });
+    io.run_for(10ms);
+    io.restart();
+    EXPECT_FALSE(PeerSetTestAccess::crawl_in_flight_contains(io, peers, key));
+    EXPECT_EQ(servant_receipts, 1u)
+        << "a duplicate deferred receipt must lose the once-only authority";
 
     auto late = asio::co_spawn(io, peers->co_stop(), asio::use_future);
     io.run_for(1s);
@@ -7114,6 +7125,12 @@ TEST(
     auto fallback_boundary_ready = fallback_boundary->get_future();
     auto release_boundary = std::make_shared<std::promise<void>>();
     auto release_boundary_ready = release_boundary->get_future().share();
+    auto seal_boundary = std::make_shared<std::promise<void>>();
+    auto seal_boundary_ready = seal_boundary->get_future();
+    auto release_seal = std::make_shared<std::promise<void>>();
+    auto release_seal_ready = release_seal->get_future().share();
+    auto https_boundary = std::make_shared<std::promise<void>>();
+    auto https_boundary_ready = https_boundary->get_future();
     auto https_accepted = std::make_shared<std::atomic_bool>(false);
 
     acceptor->async_accept(
@@ -7162,12 +7179,21 @@ TEST(
             release_boundary_ready.wait();
         });
     PeerSetTestAccess::set_before_crawl_https_fallback(
-        io, peers, [&https_fallbacks] { ++https_fallbacks; });
+        io, peers, [&https_fallbacks, https_boundary] {
+            ++https_fallbacks;
+            https_boundary->set_value();
+        });
+    PeerSetTestAccess::set_after_crawl_ingress_seal(
+        io, peers, [seal_boundary, release_seal_ready] {
+            seal_boundary->set_value();
+            release_seal_ready.wait();
+        });
     PeerSetTestAccess::queue_crawl(io, peers, key);
     PeerSetTestAccess::pump_crawls(io, peers);
 
     bool boundary_reached = false;
-    bool stop_fact_preceded_release = false;
+    bool seal_observer_reached = false;
+    bool stop_fact_preceded_seal = false;
     bool stop_completed = false;
     {
         catl::test::IoContextRunners runners(io, 2);
@@ -7178,20 +7204,19 @@ TEST(
         if (boundary_reached)
         {
             stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
-            auto const deadline = std::chrono::steady_clock::now() + 1s;
-            while (std::chrono::steady_clock::now() < deadline)
+            seal_observer_reached =
+                seal_boundary_ready.wait_for(1s) == std::future_status::ready;
+            if (seal_observer_reached)
             {
-                if (PeerSetTestAccess::
-                        crawl_stop_fact_and_ingress_seal_published(peers))
-                {
-                    stop_fact_preceded_release = true;
-                    break;
-                }
-                std::this_thread::yield();
+                stop_fact_preceded_seal =
+                    PeerSetTestAccess::crawl_stop_fact_published(peers);
             }
         }
 
         release_boundary->set_value();
+        if (seal_observer_reached && !stop_fact_preceded_seal)
+            (void)https_boundary_ready.wait_for(1s);
+        release_seal->set_value();
         if (boundary_reached)
         {
             stop_completed = stopped.wait_for(1s) == std::future_status::ready;
@@ -7202,9 +7227,11 @@ TEST(
 
     EXPECT_TRUE(boundary_reached)
         << "the control must hold the real HTTP-to-HTTPS decision boundary";
-    EXPECT_TRUE(stop_fact_preceded_release)
-        << "public co_stop must publish the sticky fact and ingress seal while "
-           "the fallback decision is held";
+    EXPECT_TRUE(seal_observer_reached)
+        << "the control must observe the public ingress seal";
+    EXPECT_TRUE(stop_fact_preceded_seal)
+        << "public co_stop must publish the sticky fact before the ingress "
+           "seal becomes observable";
     EXPECT_TRUE(stop_completed);
     EXPECT_EQ(https_fallbacks, 0u);
     EXPECT_FALSE(https_accepted->load(std::memory_order_acquire))

@@ -493,6 +493,7 @@ private:
     std::function<void()> crawl_completion_diagnostic_hook_for_test_;
     std::function<void()> before_crawl_fallback_stop_check_for_test_;
     std::function<void()> before_crawl_https_fallback_for_test_;
+    std::function<void()> after_crawl_ingress_seal_for_test_;
     std::function<void(std::string const&, std::function<void()>)>
         defer_crawl_servant_receipt_for_test_;
     /// Pause after one owner-strand generation-pin barrier has consumed its
@@ -829,10 +830,12 @@ private:
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=cross_thread_peer_ingress_shutdown_seal
     std::atomic<bool> shutdown_ingress_sealed_{false};
+    // clang-format off
     //@@authority state=prv.S0062 status=provisional scope=field bind=catl::peer_client::PeerSet::crawl_stop_source_@53c130b70c160a7e
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=cross_thread_retained_crawl_stop_fact
     std::stop_source crawl_stop_source_;
+    // clang-format on
     //@@authority state=prv.S0035 status=provisional scope=field
     // bind=catl::peer_client::PeerSet::lifecycle_@189b670b4df58ed4
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
