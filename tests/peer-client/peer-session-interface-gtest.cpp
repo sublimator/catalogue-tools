@@ -7024,6 +7024,9 @@ TEST(PeerSetShutdown, ActiveCrawlCancellationWaitsForExactPhysicalReceipt)
     auto withheld_receipt = std::make_shared<std::function<void()>>();
     auto receipt_withheld = std::make_shared<std::atomic_bool>(false);
     std::size_t servant_receipts = 0;
+    std::size_t https_fallbacks = 0;
+    PeerSetTestAccess::set_before_crawl_https_fallback(
+        io, peers, [&https_fallbacks] { ++https_fallbacks; });
     PeerSetTestAccess::set_defer_crawl_servant_receipt(
         io,
         peers,
@@ -7063,6 +7066,9 @@ TEST(PeerSetShutdown, ActiveCrawlCancellationWaitsForExactPhysicalReceipt)
     EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout)
         << "PeerSet terminality must wait for the exact crawl receipt";
     EXPECT_EQ(servant_receipts, 0u);
+    EXPECT_EQ(https_fallbacks, 0u)
+        << "owner-issued stop must not mint an HTTPS fallback after the "
+           "cancelled HTTP attempt";
 
     boost::system::error_code ignored;
     acceptor->close(ignored);
@@ -7853,3 +7859,44 @@ TEST(PeerSetShutdown, CrawlLaunchFailureConsumesCommittedCensusRow)
     EXPECT_TRUE(result.exact_row_consumed);
     EXPECT_TRUE(result.stop_waiter_woke);
 }
+
+//@@start crawl-completion-setup-failure
+TEST(PeerSetShutdown, CrawlCompletionSetupFailureConsumesCommittedCensusRow)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    asio::ip::tcp::acceptor unavailable(
+        io, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
+    auto const key =
+        "127.0.0.1:" + std::to_string(unavailable.local_endpoint().port());
+    boost::system::error_code ignored;
+    unavailable.close(ignored);
+
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .endpoint_cache_path = ":memory:",
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 1,
+        });
+    std::size_t servant_receipts = 0;
+    PeerSetTestAccess::set_crawl_completion_diagnostic_hook(
+        io, peers, [&servant_receipts] { ++servant_receipts; });
+    PeerSetTestAccess::fail_next_crawl_completion_setup(io, peers);
+    PeerSetTestAccess::queue_crawl(io, peers, key);
+    PeerSetTestAccess::pump_crawls(io, peers);
+
+    auto stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+    io.run_for(1s);
+
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready)
+        << "completion-token setup refusal must directly consume the exact "
+           "admitted crawl row";
+    EXPECT_NO_THROW(stopped.get());
+    io.restart();
+    EXPECT_FALSE(PeerSetTestAccess::crawl_in_flight_contains(io, peers, key));
+    EXPECT_EQ(servant_receipts, 1u);
+}
+//@@end crawl-completion-setup-failure

@@ -6,7 +6,6 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/ssl.hpp>
-#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -370,7 +369,11 @@ summarize_crawl_error(std::string_view error)
 }
 
 boost::asio::awaitable<CrawlResponse>
-co_fetch_peer_crawl(std::string host, uint16_t port)
+co_fetch_peer_crawl(
+    std::string host,
+    uint16_t port,
+    std::stop_token stop,
+    std::function<void()> before_https_fallback)
 {
     // Try HTTP first — XRPL/Xahau peer crawl endpoints serve plain HTTP
     // on the peer port. HTTPS wastes time on TLS handshake timeout.
@@ -386,12 +389,17 @@ co_fetch_peer_crawl(std::string host, uint16_t port)
         http_summary = strip_diagnostic(http_error.what());
     }
 
-    auto const cancellation =
-        co_await boost::asio::this_coro::cancellation_state;
-    if (cancellation.cancelled() != boost::asio::cancellation_type::none)
+    // The Asio cancellation edge can be consumed or translated by the nested
+    // HTTP await. The PeerSet-issued stop token is the retained owner fact.
+    //@@mutation-site crawl-stop-intent-prevents-https-fallback
+    if (stop.stop_requested())
     {
         std::rethrow_exception(http_failure);
     }
+    //@@mutation-end crawl-stop-intent-prevents-https-fallback
+
+    if (before_https_fallback)
+        before_https_fallback();
 
     PLOGD(
         log_,

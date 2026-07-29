@@ -709,9 +709,20 @@ public:
             io, peers, [&requested, endpoint = std::move(endpoint)](auto& set) {
                 auto const row = set.crawl_in_flight_.find(endpoint);
                 requested = row != set.crawl_in_flight_.end() &&
-                    row->second.stop_cancellation_requested;
+                    row->second.stop.stop_requested();
             });
         return requested;
+    }
+
+    static void
+    set_before_crawl_https_fallback(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::function<void()> hook)
+    {
+        run_on_strand(io, peers, [hook = std::move(hook)](auto& set) mutable {
+            set.before_crawl_https_fallback_for_test_ = std::move(hook);
+        });
     }
 
     static void
@@ -733,6 +744,16 @@ public:
     {
         run_on_strand(io, peers, [hook = std::move(hook)](auto& set) mutable {
             set.crawl_completion_diagnostic_hook_for_test_ = std::move(hook);
+        });
+    }
+
+    static void
+    fail_next_crawl_completion_setup(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        run_on_strand(io, peers, [](auto& set) {
+            set.fail_crawl_completion_setup_for_test_ = 1;
         });
     }
 

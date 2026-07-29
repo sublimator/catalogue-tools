@@ -13,6 +13,7 @@
 #include <cassert>
 #include <cctype>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <utility>
 
@@ -533,11 +534,11 @@ PeerSet::begin_stop_on_strand()
     // completion funnel delivers the exact T0092 physical receipt.
     for (auto& [_, servant] : crawl_in_flight_)
     {
-        if (!servant.cancellation || servant.stop_cancellation_requested)
+        if (!servant.cancellation || servant.stop.stop_requested())
             continue;
+        servant.stop.request_stop();
         try
         {
-            servant.stop_cancellation_requested = true;
             // clang-format off
             //@@authority transition=prv.T0189 status=provisional bind=declaration@138f3c75ab7f4ee0
             // scope=statement owner=unresolved owner_hypothesis=peer_set
@@ -551,7 +552,8 @@ PeerSet::begin_stop_on_strand()
         }
         catch (...)
         {
-            servant.stop_cancellation_requested = false;
+            // The retained stop fact still prevents fallback. The exact row
+            // remains owned until the operation's bounded terminal receipt.
         }
     }
 
@@ -2136,11 +2138,23 @@ PeerSet::pump_crawls()
 
         auto self = shared_from_this();
         auto cancellation = std::make_shared<asio::cancellation_signal>();
+        auto stop = std::stop_source{};
+        auto stop_token = stop.get_token();
+        // Allocate the exact once-only retirement capability before S0038 is
+        // visible. Every post-admission failure path can then consume it
+        // directly on the owner strand without allocating or scheduling.
+        auto receipt_consumed = std::make_shared<std::atomic_bool>(false);
+        auto before_https_fallback = before_crawl_https_fallback_for_test_;
         auto servant = [self,
                         host,
-                        port]() -> boost::asio::awaitable<CrawlServantOutcome> {
+                        port,
+                        stop_token,
+                        before_https_fallback =
+                            std::move(before_https_fallback)]() mutable
+            -> boost::asio::awaitable<CrawlServantOutcome> {
             CrawlServantOutcome outcome;
-            auto response = co_await co_fetch_peer_crawl(host, port);
+            auto response = co_await co_fetch_peer_crawl(
+                host, port, stop_token, std::move(before_https_fallback));
 
             outcome.raw = response.peers.size();
             outcome.used_tls = response.used_tls;
@@ -2195,7 +2209,8 @@ PeerSet::pump_crawls()
                 key,
                 CrawlServant{
                     .cancellation = cancellation,
-                    .stop_cancellation_requested = false});
+                    .stop = std::move(stop),
+                    .receipt_consumed = receipt_consumed});
             if (!inserted)
                 continue;
             census_committed = true;
@@ -2209,43 +2224,53 @@ PeerSet::pump_crawls()
                 std::move(servant),
                 asio::bind_cancellation_slot(
                     cancellation->slot(),
-                    [self, key](
+                    [self, key, receipt_consumed](
                         std::exception_ptr failure,
                         CrawlServantOutcome outcome) mutable {
                         assert(self->strand_.running_in_this_thread());
-                        auto consumed =
-                            std::make_shared<std::atomic_bool>(false);
-                        auto finish = [self,
-                                       key,
-                                       outcome = std::move(outcome),
-                                       failure = std::move(failure),
-                                       consumed]() mutable {
-                            if (consumed->exchange(true))
-                                return;
-                            self->complete_crawl_servant(
-                                key, outcome, std::move(failure));
-                        };
-                        if (self->defer_crawl_servant_receipt_for_test_)
+                        try
                         {
-                            try
+                            if (self->fail_crawl_completion_setup_for_test_ !=
+                                0)
+                            {
+                                --self->fail_crawl_completion_setup_for_test_;
+                                throw std::bad_alloc{};
+                            }
+                            auto finish = [self,
+                                           key,
+                                           outcome = std::move(outcome),
+                                           failure = std::move(failure),
+                                           receipt_consumed]() mutable {
+                                if (receipt_consumed->exchange(true))
+                                    return;
+                                self->complete_crawl_servant(
+                                    key, outcome, std::move(failure));
+                            };
+                            if (self->defer_crawl_servant_receipt_for_test_)
                             {
                                 self->defer_crawl_servant_receipt_for_test_(
                                     key, finish);
                                 return;
                             }
-                            catch (...)
-                            {
-                            }
+                            finish();
                         }
-                        finish();
+                        catch (...)
+                        {
+                            //@@mutation-site crawl-setup-failure-retires-row
+                            if (!receipt_consumed->exchange(true))
+                                self->complete_crawl_servant(
+                                    key, {}, std::current_exception());
+                            //@@mutation-end crawl-setup-failure-retires-row
+                        }
                     }));
         }
         catch (...)
         {
             if (!census_committed)
                 throw;
-            complete_crawl_servant(
-                key, {}, std::current_exception(), SuccessorPump::defer);
+            if (!receipt_consumed->exchange(true))
+                complete_crawl_servant(
+                    key, {}, std::current_exception(), SuccessorPump::defer);
         }
     }
 }

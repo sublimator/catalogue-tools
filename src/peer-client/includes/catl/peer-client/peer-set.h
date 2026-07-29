@@ -483,12 +483,14 @@ private:
     std::uint32_t drop_seal_completions_for_test_ = 0;
     std::uint32_t fail_connect_servant_launches_for_test_ = 0;
     std::uint32_t fail_crawl_servant_launches_for_test_ = 0;
+    std::uint32_t fail_crawl_completion_setup_for_test_ = 0;
     std::function<boost::asio::awaitable<void>(
         std::shared_ptr<PeerClient> const&)>
         after_connect_ready_before_admission_for_test_;
     std::function<void()> connect_failure_classification_hook_for_test_;
     std::function<void()> connect_completion_diagnostic_hook_for_test_;
     std::function<void()> crawl_completion_diagnostic_hook_for_test_;
+    std::function<void()> before_crawl_https_fallback_for_test_;
     std::function<void(std::string const&, std::function<void()>)>
         defer_crawl_servant_receipt_for_test_;
     /// Pause after one owner-strand generation-pin barrier has consumed its
@@ -940,12 +942,18 @@ private:
         /// servant. Stop may request cancellation through this exact signal,
         /// but only the co_spawn completion funnel may retire the row.
         std::shared_ptr<boost::asio::cancellation_signal> cancellation;
-        bool stop_cancellation_requested = false;
+        /// Sticky owner-issued intent survives nested coroutine cancellation
+        /// state and prevents a cancelled HTTP attempt from minting HTTPS work.
+        std::stop_source stop;
+        /// Allocated before admission and shared with the completion token.
+        /// Every post-admission terminal path consumes this exact capability
+        /// before the row can retire.
+        std::shared_ptr<std::atomic_bool> receipt_consumed;
     };
     //@@authority state=prv.S0038 status=provisional scope=field
     // bind=catl::peer_client::PeerSet::crawl_in_flight_@5fdc9078863857e4
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
-    // label=owned_background_crawl_servant_census_and_cancellation_authority
+    // label=owned_background_crawl_servant_census_and_terminal_authorities
     std::map<std::string, CrawlServant> crawl_in_flight_;
     std::set<std::string> crawl_queued_;
     std::map<std::string, std::chrono::steady_clock::time_point> crawled_;
