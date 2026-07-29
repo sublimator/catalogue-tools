@@ -1,15 +1,15 @@
 file(GLOB XPROOF_TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*-gtest.cpp")
 
-add_executable(xprv_gtest ${XPROOF_TEST_SOURCES})
+add_executable(xprv-gtest ${XPROOF_TEST_SOURCES})
 
-target_include_directories(xprv_gtest
+target_include_directories(xprv-gtest
                            PRIVATE ${CMAKE_SOURCE_DIR}/src/xprv/includes
                                    ${CMAKE_SOURCE_DIR}/src/xprv/src
                                    ${CMAKE_BINARY_DIR}/src/xprv
                                    ${CMAKE_SOURCE_DIR}/src/peer-client/includes)
 
 target_link_libraries(
-  xprv_gtest
+  xprv-gtest
   PRIVATE catl::xdata
           catl::crypto
           catl::peer-client
@@ -28,7 +28,7 @@ target_link_libraries(
 
 # xprv source files we need (not the main)
 target_sources(
-  xprv_gtest PRIVATE ${CMAKE_SOURCE_DIR}/src/xprv/src/config.cpp
+  xprv-gtest PRIVATE ${CMAKE_SOURCE_DIR}/src/xprv/src/config.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/network-config.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/node-identity-resolver.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/proof-chain-binary.cpp
@@ -46,13 +46,13 @@ target_sources(
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-buffer.cpp
                        ${CMAKE_SOURCE_DIR}/src/xprv/src/validation-collector.cpp)
 
-add_dependencies(xprv_gtest xprv_web_assets)
+add_dependencies(xprv-gtest xprv_web_assets)
 
 # Share format version with the xprv target
 file(READ ${CMAKE_SOURCE_DIR}/src/xprv/VERSION XPRV_FORMAT_VERSION)
 string(STRIP "${XPRV_FORMAT_VERSION}" XPRV_FORMAT_VERSION)
 target_compile_definitions(
-  xprv_gtest PRIVATE XPRV_FORMAT_VERSION=${XPRV_FORMAT_VERSION} XPRV_TESTING=1)
+  xprv-gtest PRIVATE XPRV_FORMAT_VERSION=${XPRV_FORMAT_VERSION} XPRV_TESTING=1)
 
 include(GoogleTest)
-gtest_discover_tests(xprv_gtest DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(xprv-gtest DISCOVERY_TIMEOUT 30)

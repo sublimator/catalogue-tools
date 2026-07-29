@@ -241,12 +241,12 @@ jobs:
             ..
 
       - name: Build instrumented test binaries
-        run: cmake --build ${{ env.build_dir }} --target shamap_gtest xprv_gtest -j"$(nproc)"
+        run: cmake --build ${{ env.build_dir }} --target shamap_gtest xprv-gtest -j"$(nproc)"
 
       - name: Run tests under ${{ matrix.san }} sanitizer
         run: |
           shamap=${{ env.build_dir }}/tests/shamap/shamap_gtest
-          xprv=${{ env.build_dir }}/tests/xprv/xprv_gtest
+          xprv=${{ env.build_dir }}/tests/xprv/xprv-gtest
           if [ "${{ matrix.san }}" = "thread" ]; then
             export TSAN_OPTIONS="halt_on_error=1"
           else
@@ -258,4 +258,3 @@ jobs:
           # Full SHAMap + xprv suites under the sanitizer.
           "$shamap" --gtest_brief=1
           "$xprv" --gtest_brief=1
-
