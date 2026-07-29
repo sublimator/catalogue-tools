@@ -6,16 +6,17 @@
 #include <iostream>
 #include <mutex>
 #include <ostream>
+#include <random>
 #include <sstream>
 #include <string>
-#include <random>
 #include <unordered_map>
 #include <vector>
 
 #include "catl/core/logger.h"
 
 // Initialize static members
-LogLevel Logger::current_level_ = LogLevel::ERROR;  // Default log level
+std::atomic<LogLevel> Logger::current_level_{
+    LogLevel::ERROR};  // Default log level
 std::mutex Logger::log_mutex_;
 std::ostream* Logger::output_stream_ = nullptr;  // nullptr = use std::cout
 std::ostream* Logger::error_stream_ = nullptr;   // nullptr = use std::cerr
@@ -32,7 +33,8 @@ bool
 Logger::should_log(LogLevel level)
 {
     // Ensure NONE level truly disables everything
-    return current_level_ != LogLevel::NONE && level <= current_level_;
+    auto const current = current_level_.load(std::memory_order_relaxed);
+    return current != LogLevel::NONE && level <= current;
 }
 
 namespace {
@@ -106,8 +108,8 @@ void
 Logger::set_level(LogLevel level)
 {
     // Log level change *before* the lock for potential self-logging
-    LogLevel old_level = current_level_;
-    current_level_ = level;
+    auto const old_level =
+        current_level_.exchange(level, std::memory_order_relaxed);
     if (should_log(LogLevel::INFO) ||
         (old_level != LogLevel::NONE && level > old_level))
     {
@@ -138,7 +140,7 @@ Logger::set_level(const std::string& levelStr)
 LogLevel
 Logger::get_level()
 {
-    return current_level_;
+    return current_level_.load(std::memory_order_relaxed);
 }
 
 void
@@ -217,6 +219,55 @@ Logger::unregister_partition(LogPartition* partition)
     auto& registry = partition_registry();
     std::lock_guard<std::mutex> lock(registry.mutex);
     std::erase(registry.partitions, partition);
+}
+
+ScopedLogPartitionLevel::ScopedLogPartitionLevel(
+    std::string_view name,
+    LogLevel level)
+{
+    auto& registry = partition_registry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+
+    for (auto* partition : registry.partitions)
+    {
+        if (partition && partition->name() == name)
+        {
+            previous_levels_.push_back(
+                PreviousLevel{partition, partition->configured_level()});
+        }
+    }
+
+    // Gather first so allocation failure cannot leave a partial override.
+    for (auto const& previous : previous_levels_)
+        previous.partition->set_level(level);
+}
+
+ScopedLogPartitionLevel::~ScopedLogPartitionLevel()
+{
+    auto& registry = partition_registry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+
+    for (auto const& previous : previous_levels_)
+    {
+        if (std::ranges::find(registry.partitions, previous.partition) !=
+            registry.partitions.end())
+        {
+            previous.partition->set_level(previous.level);
+        }
+    }
+}
+
+ScopedErrorLogStream::ScopedErrorLogStream(std::ostream& stream)
+{
+    std::lock_guard<std::mutex> lock(Logger::log_mutex_);
+    previous_ = Logger::error_stream_;
+    Logger::error_stream_ = &stream;
+}
+
+ScopedErrorLogStream::~ScopedErrorLogStream()
+{
+    std::lock_guard<std::mutex> lock(Logger::log_mutex_);
+    Logger::error_stream_ = previous_;
 }
 
 bool
@@ -324,7 +375,8 @@ Logger::partition_info()
     result.reserve(seen.size());
     for (auto& [_, info] : seen)
         result.push_back(std::move(info));
-    std::sort(result.begin(), result.end(),
-        [](auto const& a, auto const& b) { return a.name < b.name; });
+    std::sort(result.begin(), result.end(), [](auto const& a, auto const& b) {
+        return a.name < b.name;
+    });
     return result;
 }
