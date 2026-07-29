@@ -857,30 +857,25 @@ TEST(PeerClientLifecycle, ReadyObserversRunBeforeStickyPublication)
         client->terminal_cause(), PeerLogicalTerminalCause::owner_disconnect);
 }
 
-TEST(PeerClientLifecycle, ReentrantReadyCannotReinvokeConsumedObservers)
+TEST(PeerClientLifecycle, ReadyObserverReleasesCaptureWhenConsumed)
 {
     asio::io_context io;
     auto client = PeerClientTestAccess::make(io, State::ExchangingStatus);
-    std::size_t ready_calls = 0;
-    std::size_t completion_calls = 0;
+    auto capture = std::make_shared<int>(42);
+    std::weak_ptr<int> weak_capture = capture;
     PeerClientTestAccess::set_initial_connect_observers(
         *client,
-        [client, &ready_calls](std::uint32_t) {
-            ++ready_calls;
-            if (ready_calls == 1)
-                PeerClientTestAccess::become_ready_on_strand(*client);
-        },
-        [&completion_calls](boost::system::error_code, std::uint32_t) {
-            ++completion_calls;
-        });
+        [capture](std::uint32_t) {},
+        [](boost::system::error_code, std::uint32_t) {});
+    capture.reset();
 
     asio::post(client->strand(), [client] {
         PeerClientTestAccess::become_ready_on_strand(*client);
     });
     io.run();
 
-    EXPECT_EQ(ready_calls, 1u);
-    EXPECT_EQ(completion_calls, 1u);
+    EXPECT_TRUE(weak_capture.expired())
+        << "the consumed observer slot must release its captures";
 }
 
 TEST(PeerClientLifecycle, ThrowingReadyObserversCannotEraseReadyTerminal)
