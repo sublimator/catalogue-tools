@@ -663,6 +663,12 @@ private:
         std::exception_ptr failure,
         SuccessorPump successor = SuccessorPump::run) noexcept;
 
+    boost::asio::awaitable<void>
+    finish_connect_servant(
+        std::string key,
+        std::exception_ptr failure,
+        SuccessorPump successor = SuccessorPump::run);
+
     void
     install_connect_servant_session(
         std::string const& key,
@@ -888,8 +894,13 @@ private:
         /// authoritative until the servant consumes the exact physical drain
         /// receipt; requesting disconnect never retires it.
         PeerSessionPtr session;
+        /// Set by the PeerSet owner immediately before requesting disconnect.
+        /// This is the durable cause used to distinguish owner-issued shutdown
+        /// from peer/network failure evidence.
+        bool stop_cancellation_requested = false;
     };
-    //@@authority state=prv.S0037 status=provisional scope=field bind=catl::peer_client::PeerSet::in_flight_@8017d2247e9adce2
+    //@@authority state=prv.S0037 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::in_flight_@8017d2247e9adce2
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=owned_background_connect_servant_census_and_cancel_capability
     std::map<std::string, ConnectServant> in_flight_;  // currently connecting

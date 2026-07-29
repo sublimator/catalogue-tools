@@ -915,6 +915,28 @@ public:
         return count;
     }
 
+    static std::uint64_t
+    cached_endpoint_failure_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string const& key)
+    {
+        std::uint64_t count = 0;
+        run_on_strand(io, peers, [&count, key](auto& set) {
+            if (!set.endpoint_cache_)
+                return;
+            auto entries = set.endpoint_cache_->load_bootstrap_candidates(
+                set.network_id_, 1024);
+            auto const entry = std::ranges::find(
+                entries,
+                key,
+                &catl::peer_client::PeerEndpointCache::Entry::endpoint);
+            if (entry != entries.end())
+                count = entry->failure_count;
+        });
+        return count;
+    }
+
     static void
     note_connect_failure_for_test(
         boost::asio::io_context& io,
@@ -1163,6 +1185,34 @@ public:
         result.stop_waiter_woke =
             woke.get() == boost::asio::error::operation_aborted;
         return result;
+    }
+
+    static std::future<void>
+    finish_installed_connect_servant_after_body_failure(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string key,
+        std::shared_ptr<catl::peer_client::PeerSession> session)
+    {
+        std::future<void> finished;
+        run_on_strand(
+            io,
+            peers,
+            [&finished, key = std::move(key), session = std::move(session)](
+                auto& set) mutable {
+                auto [row, inserted] = set.in_flight_.try_emplace(key);
+                if (!inserted)
+                    throw std::logic_error("connect servant already exists");
+                row->second.session = std::move(session);
+                finished = boost::asio::co_spawn(
+                    set.strand_,
+                    set.finish_connect_servant(
+                        key,
+                        std::make_exception_ptr(
+                            std::runtime_error("connect body failed"))),
+                    boost::asio::use_future);
+            });
+        return finished;
     }
 
     static ServantCompletionProbe

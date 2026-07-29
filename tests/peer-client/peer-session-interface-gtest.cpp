@@ -6811,6 +6811,7 @@ TEST(
         io,
         PeerSetOptions{
             .network_id = 42,
+            .endpoint_cache_path = ":memory:",
             .max_in_flight_connects = servant_count,
             .max_in_flight_crawls = 0,
         });
@@ -6843,6 +6844,20 @@ TEST(
     }
     ASSERT_TRUE(std::ranges::all_of(
         clients, [](auto const& client) { return static_cast<bool>(client); }));
+    for (std::size_t index = 0; index < servant_count; ++index)
+    {
+        ASSERT_NE(clients[index]->state(), State::Disconnected);
+        ASSERT_TRUE(
+            PeerSetTestAccess::in_flight_contains(io, peers, keys[index]));
+        ASSERT_FALSE(PeerSetTestAccess::has_failed(io, peers, keys[index]));
+        ASSERT_EQ(
+            PeerSetTestAccess::endpoint_failure_count(io, peers, keys[index]),
+            0u);
+        ASSERT_EQ(
+            PeerSetTestAccess::cached_endpoint_failure_count(
+                io, peers, keys[index]),
+            0u);
+    }
 
     std::array<peer_connection::test_write_completion, servant_count>
         held_completions;
@@ -6897,6 +6912,16 @@ TEST(
         EXPECT_FALSE(clients[index]
                          ->raw_connection()
                          .physical_transport_drained_for_test());
+        EXPECT_FALSE(PeerSetTestAccess::has_failed(io, peers, keys[index]))
+            << "owner-issued shutdown is not peer failure evidence";
+        EXPECT_EQ(
+            PeerSetTestAccess::endpoint_failure_count(io, peers, keys[index]),
+            0u);
+        EXPECT_EQ(
+            PeerSetTestAccess::cached_endpoint_failure_count(
+                io, peers, keys[index]),
+            0u)
+            << "owner-issued shutdown must not poison restart ranking";
     }
     EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout)
         << "PeerSet terminality must wait for the exact physical receipt";
@@ -6937,8 +6962,9 @@ TEST(
         [completion = std::move(second_completion)]() mutable {
             completion(asio::error::operation_aborted);
         });
-    io.run();
+    io.run_for(1s);
 
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
     EXPECT_NO_THROW(stopped.get());
     io.restart();
     EXPECT_FALSE(PeerSetTestAccess::in_flight_contains(io, peers, keys[1]));
@@ -6946,7 +6972,8 @@ TEST(
         << "each admitted connect servant retires exactly once";
 
     auto late = asio::co_spawn(io, peers->co_stop(), asio::use_future);
-    io.run();
+    io.run_for(1s);
+    ASSERT_EQ(late.wait_for(0ms), std::future_status::ready);
     EXPECT_NO_THROW(late.get())
         << "the terminal PeerSet fact must be replayable to later joiners";
     EXPECT_EQ(servant_receipts, servant_count);
@@ -7166,6 +7193,47 @@ TEST(PeerSetShutdown, ConnectBodyFailureReceiptsBeforeThrowingDiagnostic)
     EXPECT_TRUE(result.throwing_diagnostic_ran);
     EXPECT_TRUE(result.exact_row_consumed);
     EXPECT_TRUE(result.stop_waiter_woke);
+}
+
+TEST(
+    PeerSetShutdown,
+    EscapedConnectBodyFailureJoinsInstalledPhysicalReceiptBeforeRetirement)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(io, PeerSetOptions{.network_id = 42});
+    auto session = std::make_shared<FakePeerSession>(
+        io, "connect-body-failure:51235", false, 0, 0, 0);
+    session->hold_disconnect_receipt();
+
+    std::size_t servant_receipts = 0;
+    PeerSetTestAccess::set_connect_completion_diagnostic_hook(
+        peers, [&servant_receipts] { ++servant_receipts; });
+    auto finished =
+        PeerSetTestAccess::finish_installed_connect_servant_after_body_failure(
+            io, peers, session->endpoint(), session);
+
+    io.run_for(20ms);
+    io.restart();
+
+    EXPECT_TRUE(session->co_disconnect_waiting.load(std::memory_order_acquire));
+    EXPECT_TRUE(
+        PeerSetTestAccess::in_flight_contains(io, peers, session->endpoint()))
+        << "an escaped body failure cannot consume S0037 before physical drain";
+    EXPECT_EQ(finished.wait_for(0ms), std::future_status::timeout);
+    EXPECT_EQ(servant_receipts, 0u);
+
+    session->release_disconnect_receipt();
+    io.restart();
+    io.run_for(1s);
+
+    ASSERT_EQ(finished.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(finished.get());
+    io.restart();
+    EXPECT_FALSE(
+        PeerSetTestAccess::in_flight_contains(io, peers, session->endpoint()));
+    EXPECT_EQ(servant_receipts, 1u);
 }
 
 TEST(PeerSetShutdown, CrawlBodyFailureReceiptsBeforeThrowingDiagnostic)

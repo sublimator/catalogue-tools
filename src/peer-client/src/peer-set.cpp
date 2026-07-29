@@ -503,14 +503,15 @@ PeerSet::begin_stop_on_strand()
     // Cancellation is intent, not terminality. Each row remains in S0037
     // until its servant awaits this exact session's physical drain and T0091
     // consumes the row.
-    for (auto const& [_, servant] : in_flight_)
+    for (auto& [_, servant] : in_flight_)
     {
         if (!servant.session)
             continue;
         try
         {
+            servant.stop_cancellation_requested = true;
             //@@authority transition=prv.T0182 status=provisional
-            //bind=disconnect@cd31ff180f9a6cb6
+            // bind=disconnect@cd31ff180f9a6cb6
             // scope=statement owner=unresolved owner_hypothesis=peer_set
             // commit=peer_set_strand touches=prv.S0037
             // calls=disconnect
@@ -519,9 +520,10 @@ PeerSet::begin_stop_on_strand()
         }
         catch (...)
         {
+            servant.stop_cancellation_requested = false;
             // A projection refusal cannot counterfeit completion. The servant
-            // remains counted and its normal bounded terminal path is still
-            // joined by co_stop().
+            // remains counted, retains no false owner-issued disposition, and
+            // its normal bounded terminal path is still joined by co_stop().
         }
     }
 
@@ -635,6 +637,76 @@ PeerSet::complete_connect_servant(
     }
 }
 
+boost::asio::awaitable<void>
+PeerSet::finish_connect_servant(
+    std::string key,
+    std::exception_ptr failure,
+    SuccessorPump successor)
+{
+    ASSERT_ON_STRAND();
+
+    // A failure which escapes after T0181 may still own a live PeerClient.
+    // Join its exact physical receipt before allowing T0091 to consume S0037.
+    // If physical drain itself refuses, retain the row so shutdown fails
+    // closed instead of manufacturing terminality.
+    if (failure)
+    {
+        auto row = in_flight_.find(key);
+        auto session =
+            row != in_flight_.end() ? row->second.session : PeerSessionPtr{};
+        if (session)
+        {
+            std::exception_ptr drain_failure;
+            try
+            {
+                //@@authority transition=prv.T0183 status=provisional
+                // bind=co_disconnect@8c60a2bcef4fffc7
+                // scope=statement owner=unresolved owner_hypothesis=peer_set
+                // commit=peer_set_strand touches=prv.S0037
+                // calls=co_disconnect
+                // label=join_escaped_connect_servant_physical_receipt
+                co_await session
+                    ->co_disconnect();  //@@authority-target ids=prv.T0183
+            }
+            catch (...)
+            {
+                drain_failure = std::current_exception();
+            }
+
+            if (drain_failure)
+            {
+                try
+                {
+                    std::rethrow_exception(drain_failure);
+                }
+                catch (std::exception const& e)
+                {
+                    PLOGE(
+                        log_,
+                        "[",
+                        net_label_,
+                        "] Connect servant physical drain failed for ",
+                        key,
+                        ": ",
+                        e.what());
+                }
+                catch (...)
+                {
+                    PLOGE(
+                        log_,
+                        "[",
+                        net_label_,
+                        "] Connect servant physical drain failed for ",
+                        key);
+                }
+                co_return;
+            }
+        }
+    }
+
+    complete_connect_servant(key, std::move(failure), successor);
+}
+
 void
 PeerSet::install_connect_servant_session(
     std::string const& key,
@@ -646,7 +718,7 @@ PeerSet::install_connect_servant_session(
         return;
 
     //@@authority transition=prv.T0181 status=provisional scope=statement
-    //bind=expression_statement@65d1f1e9c4d95232
+    // bind=expression_statement@65d1f1e9c4d95232
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0037
     // label=install_connect_servant_cancellation_capability
@@ -1897,7 +1969,7 @@ PeerSet::pump_connects()
             {
                 failure = std::current_exception();
             }
-            self->complete_connect_servant(key, std::move(failure));
+            co_await self->finish_connect_servant(key, std::move(failure));
         };
 
         bool census_committed = false;
@@ -2552,93 +2624,116 @@ PeerSet::try_connect_on_strand(
     }
     catch (PeerClientException const& e)
     {
-        auto redirected = false;
-        std::size_t redirect_count = 0;
-        std::size_t filtered = 0;
-
-        // Harvest 503 redirect IPs
-        if (client)
-        {
-            auto const& ips = client->raw_connection().redirect_ips();
-            redirect_count = ips.size();
-            redirected = redirect_count > 0;
-            for (auto const& ip : ips)
+        auto const stop_owned_cancellation = [&]() {
+            if (!client || e.error != Error::Disconnected ||
+                client->state() != State::Disconnected)
             {
-                auto normalized =
-                    EndpointTracker::normalize_discovered_host(ip, port);
-                if (!normalized)
-                {
-                    ++filtered;
-                    continue;
-                }
-                tracker_->add_discovered(
-                    *normalized, DiscoverySource::Redirect);
+                return false;
             }
-            if (redirected)
+            auto const row = in_flight_.find(key);
+            return row != in_flight_.end() && row->second.session == client &&
+                row->second.stop_cancellation_requested;
+        }();
+
+        if (stop_owned_cancellation)
+        {
+            PLOGD(
+                log_,
+                "[",
+                net_label_,
+                "] Connect servant canceled by shutdown: ",
+                key);
+        }
+        else
+        {
+            auto redirected = false;
+            std::size_t redirect_count = 0;
+            std::size_t filtered = 0;
+
+            // Harvest 503 redirect IPs
+            if (client)
             {
-                auto detail = trim_connect_failure_detail(e.detail);
-                PLOGI(
-                    log_,
-                    "[",
-                    net_label_,
-                    "] Connect redirected by ",
-                    key,
-                    ": ",
-                    detail.empty() ? std::string("redirect_peers=") +
-                            std::to_string(redirect_count)
-                                   : detail);
-                if (filtered > 0)
+                auto const& ips = client->raw_connection().redirect_ips();
+                redirect_count = ips.size();
+                redirected = redirect_count > 0;
+                for (auto const& ip : ips)
                 {
+                    auto normalized =
+                        EndpointTracker::normalize_discovered_host(ip, port);
+                    if (!normalized)
+                    {
+                        ++filtered;
+                        continue;
+                    }
+                    tracker_->add_discovered(
+                        *normalized, DiscoverySource::Redirect);
+                }
+                if (redirected)
+                {
+                    auto detail = trim_connect_failure_detail(e.detail);
                     PLOGI(
                         log_,
                         "[",
                         net_label_,
-                        "] Ignored ",
-                        filtered,
-                        " non-public redirect peers from ",
-                        key);
+                        "] Connect redirected by ",
+                        key,
+                        ": ",
+                        detail.empty() ? std::string("redirect_peers=") +
+                                std::to_string(redirect_count)
+                                       : detail);
+                    if (filtered > 0)
+                    {
+                        PLOGI(
+                            log_,
+                            "[",
+                            net_label_,
+                            "] Ignored ",
+                            filtered,
+                            " non-public redirect peers from ",
+                            key);
+                    }
+                    // Immediately try the redirect peers
+                    try_undiscovered();
                 }
-                // Immediately try the redirect peers
-                try_undiscovered();
             }
-        }
 
-        if (!redirected)
-        {
-            auto const detail = trim_connect_failure_detail(e.detail);
-            PLOGW(
-                log_,
-                "[",
-                net_label_,
-                "] Failed to connect to ",
-                key,
-                ": ",
-                e.what());
-            note_connect_failure(key, detail.empty() ? e.what() : detail);
-        }
-        else
-        {
-            auto const detail = trim_connect_failure_detail(e.detail);
-            note_connect_failure(key, detail.empty() ? e.what() : detail);
-        }
-        failed_at_[key] = std::chrono::steady_clock::now();
-        if (endpoint_cache_)
-        {
-            try
+            if (!redirected)
             {
-                endpoint_cache_->remember_connect_failure(network_id_, key);
-            }
-            catch (std::exception const& cache_error)
-            {
+                auto const detail = trim_connect_failure_detail(e.detail);
                 PLOGW(
                     log_,
                     "[",
                     net_label_,
-                    "] ",
-                    "Peer cache write failed for ",
+                    "] Failed to connect to ",
                     key,
                     ": ",
-                    cache_error.what());
+                    e.what());
+                note_connect_failure(key, detail.empty() ? e.what() : detail);
+            }
+            else
+            {
+                auto const detail = trim_connect_failure_detail(e.detail);
+                note_connect_failure(key, detail.empty() ? e.what() : detail);
+            }
+            failed_at_[key] = std::chrono::steady_clock::now();
+            if (endpoint_cache_)
+            {
+                try
+                {
+                    endpoint_cache_->remember_connect_failure(network_id_, key);
+                }
+                catch (std::exception const& cache_error)
+                {
+                    PLOGW(
+                        log_,
+                        "[",
+                        net_label_,
+                        "] ",
+                        "Peer cache write failed for ",
+                        key,
+                        ": ",
+                        cache_error.what());
+                }
             }
         }
     }
