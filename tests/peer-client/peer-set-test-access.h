@@ -715,6 +715,17 @@ public:
     }
 
     static void
+    set_before_crawl_fallback_stop_check(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::function<void()> hook)
+    {
+        run_on_strand(io, peers, [hook = std::move(hook)](auto& set) mutable {
+            set.before_crawl_fallback_stop_check_for_test_ = std::move(hook);
+        });
+    }
+
+    static void
     set_before_crawl_https_fallback(
         boost::asio::io_context& io,
         std::shared_ptr<catl::peer_client::PeerSet> const& peers,
@@ -723,6 +734,14 @@ public:
         run_on_strand(io, peers, [hook = std::move(hook)](auto& set) mutable {
             set.before_crawl_https_fallback_for_test_ = std::move(hook);
         });
+    }
+
+    static bool
+    crawl_stop_fact_and_ingress_seal_published(
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        return peers->crawl_stop_source_.stop_requested() &&
+            peers->shutdown_ingress_sealed_.load(std::memory_order_acquire);
     }
 
     static void

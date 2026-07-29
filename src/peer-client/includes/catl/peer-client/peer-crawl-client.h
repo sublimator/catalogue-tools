@@ -40,6 +40,7 @@ co_fetch_peer_crawl(
     std::string host,
     uint16_t port,
     std::stop_token stop,
+    std::function<void()> before_stop_check = {},
     std::function<void()> before_https_fallback = {});
 
 }  // namespace catl::peer_client

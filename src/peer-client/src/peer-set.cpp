@@ -353,13 +353,24 @@ PeerSet::start()
 //@@authority transition=prv.T0084 status=provisional scope=function
 // bind=catl::peer_client::co_stop@a62dab8774ffc758
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
-// touches=prv.S0034,prv.S0035,prv.S0036,prv.S0037,prv.S0038
+// touches=prv.S0034,prv.S0035,prv.S0036,prv.S0037,prv.S0038,prv.S0062
 // label=seal_and_join_peer_sessions_connects_crawls_and_pins
 asio::awaitable<void>
 PeerSet::co_stop()
 {
     co_await asio::this_coro::reset_cancellation_state(
         asio::disable_cancellation());
+
+    // Publish retained stop policy before making the cross-thread seal
+    // observable. A crawl already resuming from HTTP failure can then never
+    // cross into HTTPS after it observes the sealed boundary.
+    //@@authority transition=prv.T0190 status=provisional scope=statement bind=expression_statement@46b6d04e8bcc7736
+    // owner=unresolved owner_hypothesis=peer_set
+    // commit=caller_thread_stop_state touches=prv.S0062
+    // label=publish_retained_crawl_stop_fact_before_ingress_seal
+    //@@mutation-site crawl-stop-fact-precedes-seal
+    crawl_stop_source_.request_stop(); //@@authority-target ids=prv.T0190
+    //@@mutation-end crawl-stop-fact-precedes-seal
 
     // This is the immediate cross-thread admission boundary. Once committed,
     // no projection failure is allowed to reopen it.
@@ -418,7 +429,7 @@ PeerSet::co_stop()
                     // mutation_class=stop_driver calls=co_disconnect
                     // label=join_exact_session_physical_drain_receipt
                     co_await session
-                        ->co_disconnect();  //@@authority-target ids=prv.T0147
+                        ->co_disconnect(); //@@authority-target ids=prv.T0147
                 }
                 assert(self->strand_.running_in_this_thread());
 
@@ -518,7 +529,7 @@ PeerSet::begin_stop_on_strand()
             // commit=peer_set_strand touches=prv.S0037
             // calls=disconnect
             // label=request_connect_servant_cancellation_without_retirement
-            servant.session->disconnect();  //@@authority-target ids=prv.T0182
+            servant.session->disconnect(); //@@authority-target ids=prv.T0182
         }
         catch (...)
         {
@@ -534,9 +545,9 @@ PeerSet::begin_stop_on_strand()
     // completion funnel delivers the exact T0092 physical receipt.
     for (auto& [_, servant] : crawl_in_flight_)
     {
-        if (!servant.cancellation || servant.stop.stop_requested())
+        if (!servant.cancellation || servant.cancellation_emitted)
             continue;
-        servant.stop.request_stop();
+        servant.cancellation_emitted = true;
         try
         {
             // clang-format off
@@ -554,6 +565,7 @@ PeerSet::begin_stop_on_strand()
         {
             // The retained stop fact still prevents fallback. The exact row
             // remains owned until the operation's bounded terminal receipt.
+            servant.cancellation_emitted = false;
         }
     }
 
@@ -602,7 +614,7 @@ PeerSet::complete_connect_servant(
     // bind=expression_statement@6f2db77abd01a92f
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0037 label=consume_background_connect_servant_receipt
-    in_flight_.erase(key);  //@@authority-target ids=prv.T0091
+    in_flight_.erase(key); //@@authority-target ids=prv.T0091
     notify_shutdown_progress();
 
     try
@@ -696,7 +708,7 @@ PeerSet::finish_connect_servant(
                 // calls=co_disconnect
                 // label=join_escaped_connect_servant_physical_receipt
                 co_await session
-                    ->co_disconnect();  //@@authority-target ids=prv.T0183
+                    ->co_disconnect(); //@@authority-target ids=prv.T0183
             }
             catch (...)
             {
@@ -843,7 +855,7 @@ PeerSet::complete_crawl_servant(
     // bind=expression_statement@660eab6dbbe007d7
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0038 label=consume_background_crawl_servant_receipt
-    crawl_in_flight_.erase(key);  //@@authority-target ids=prv.T0092
+    crawl_in_flight_.erase(key); //@@authority-target ids=prv.T0092
     notify_shutdown_progress();
 
     try
@@ -2138,23 +2150,28 @@ PeerSet::pump_crawls()
 
         auto self = shared_from_this();
         auto cancellation = std::make_shared<asio::cancellation_signal>();
-        auto stop = std::stop_source{};
-        auto stop_token = stop.get_token();
+        auto stop_token = crawl_stop_source_.get_token();
         // Allocate the exact once-only retirement capability before S0038 is
         // visible. Every post-admission failure path can then consume it
         // directly on the owner strand without allocating or scheduling.
         auto receipt_consumed = std::make_shared<std::atomic_bool>(false);
+        auto before_stop_check = before_crawl_fallback_stop_check_for_test_;
         auto before_https_fallback = before_crawl_https_fallback_for_test_;
         auto servant = [self,
                         host,
                         port,
                         stop_token,
+                        before_stop_check = std::move(before_stop_check),
                         before_https_fallback =
                             std::move(before_https_fallback)]() mutable
             -> boost::asio::awaitable<CrawlServantOutcome> {
             CrawlServantOutcome outcome;
             auto response = co_await co_fetch_peer_crawl(
-                host, port, stop_token, std::move(before_https_fallback));
+                host,
+                port,
+                stop_token,
+                std::move(before_stop_check),
+                std::move(before_https_fallback));
 
             outcome.raw = response.peers.size();
             outcome.used_tls = response.used_tls;
@@ -2209,7 +2226,7 @@ PeerSet::pump_crawls()
                 key,
                 CrawlServant{
                     .cancellation = cancellation,
-                    .stop = std::move(stop),
+                    .stop = stop_token,
                     .receipt_consumed = receipt_consumed});
             if (!inserted)
                 continue;

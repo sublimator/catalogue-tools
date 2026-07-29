@@ -373,6 +373,7 @@ co_fetch_peer_crawl(
     std::string host,
     uint16_t port,
     std::stop_token stop,
+    std::function<void()> before_stop_check,
     std::function<void()> before_https_fallback)
 {
     // Try HTTP first — XRPL/Xahau peer crawl endpoints serve plain HTTP
@@ -391,6 +392,9 @@ co_fetch_peer_crawl(
 
     // The Asio cancellation edge can be consumed or translated by the nested
     // HTTP await. The PeerSet-issued stop token is the retained owner fact.
+    if (before_stop_check)
+        before_stop_check();
+
     //@@mutation-site crawl-stop-intent-prevents-https-fallback
     if (stop.stop_requested())
     {

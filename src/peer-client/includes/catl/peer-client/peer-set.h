@@ -33,6 +33,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <stop_token>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -490,6 +491,7 @@ private:
     std::function<void()> connect_failure_classification_hook_for_test_;
     std::function<void()> connect_completion_diagnostic_hook_for_test_;
     std::function<void()> crawl_completion_diagnostic_hook_for_test_;
+    std::function<void()> before_crawl_fallback_stop_check_for_test_;
     std::function<void()> before_crawl_https_fallback_for_test_;
     std::function<void(std::string const&, std::function<void()>)>
         defer_crawl_servant_receipt_for_test_;
@@ -827,6 +829,10 @@ private:
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=cross_thread_peer_ingress_shutdown_seal
     std::atomic<bool> shutdown_ingress_sealed_{false};
+    //@@authority state=prv.S0062 status=provisional scope=field bind=catl::peer_client::PeerSet::crawl_stop_source_@53c130b70c160a7e
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=cross_thread_retained_crawl_stop_fact
+    std::stop_source crawl_stop_source_;
     //@@authority state=prv.S0035 status=provisional scope=field
     // bind=catl::peer_client::PeerSet::lifecycle_@189b670b4df58ed4
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
@@ -944,7 +950,9 @@ private:
         std::shared_ptr<boost::asio::cancellation_signal> cancellation;
         /// Sticky owner-issued intent survives nested coroutine cancellation
         /// state and prevents a cancelled HTTP attempt from minting HTTPS work.
-        std::stop_source stop;
+        std::stop_token stop;
+        /// The transport interrupt is separate from the retained stop fact.
+        bool cancellation_emitted = false;
         /// Allocated before admission and shared with the completion token.
         /// Every post-admission terminal path consumes this exact capability
         /// before the row can retire.

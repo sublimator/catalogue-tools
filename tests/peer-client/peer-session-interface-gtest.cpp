@@ -8,6 +8,7 @@
 #include <catl/core/request-context.h>
 
 #include "../test-support/deterministic-scheduler.h"
+#include "../test-support/io-context-runners.h"
 
 #include "ripple.pb.h"
 
@@ -7095,6 +7096,122 @@ TEST(PeerSetShutdown, ActiveCrawlCancellationWaitsForExactPhysicalReceipt)
     EXPECT_EQ(servant_receipts, 1u);
 }
 //@@end active-crawl-cancellation-before-deadline
+
+//@@start crawl-stop-seal-before-fallback
+TEST(
+    PeerSetShutdown,
+    PublicStopSealPreventsQueuedHttpFailureFromAdmittingHttpsFallback)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
+        io, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
+    auto http = std::make_shared<asio::ip::tcp::socket>(io);
+    auto possible_https = std::make_shared<asio::ip::tcp::socket>(io);
+    auto request = std::make_shared<asio::streambuf>();
+    auto fallback_boundary = std::make_shared<std::promise<void>>();
+    auto fallback_boundary_ready = fallback_boundary->get_future();
+    auto release_boundary = std::make_shared<std::promise<void>>();
+    auto release_boundary_ready = release_boundary->get_future().share();
+    auto https_accepted = std::make_shared<std::atomic_bool>(false);
+
+    acceptor->async_accept(
+        *http,
+        [acceptor, http, possible_https, request, https_accepted](
+            boost::system::error_code accept_error) {
+            if (accept_error)
+                return;
+            asio::async_read_until(
+                *http,
+                *request,
+                "\r\n\r\n",
+                [acceptor, http, possible_https, https_accepted](
+                    boost::system::error_code read_error, std::size_t) {
+                    if (read_error)
+                        return;
+                    acceptor->async_accept(
+                        *possible_https,
+                        [possible_https, https_accepted](
+                            boost::system::error_code https_error) {
+                            if (!https_error)
+                                https_accepted->store(
+                                    true, std::memory_order_release);
+                        });
+                    boost::system::error_code ignored;
+                    http->shutdown(
+                        asio::ip::tcp::socket::shutdown_both, ignored);
+                    http->close(ignored);
+                });
+        });
+
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .endpoint_cache_path = ":memory:",
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 1,
+        });
+    auto const key =
+        "127.0.0.1:" + std::to_string(acceptor->local_endpoint().port());
+    std::size_t https_fallbacks = 0;
+    PeerSetTestAccess::set_before_crawl_fallback_stop_check(
+        io, peers, [fallback_boundary, release_boundary_ready] {
+            fallback_boundary->set_value();
+            release_boundary_ready.wait();
+        });
+    PeerSetTestAccess::set_before_crawl_https_fallback(
+        io, peers, [&https_fallbacks] { ++https_fallbacks; });
+    PeerSetTestAccess::queue_crawl(io, peers, key);
+    PeerSetTestAccess::pump_crawls(io, peers);
+
+    bool boundary_reached = false;
+    bool stop_fact_preceded_release = false;
+    bool stop_completed = false;
+    {
+        catl::test::IoContextRunners runners(io, 2);
+        boundary_reached =
+            fallback_boundary_ready.wait_for(1s) == std::future_status::ready;
+
+        std::future<void> stopped;
+        if (boundary_reached)
+        {
+            stopped = asio::co_spawn(io, peers->co_stop(), asio::use_future);
+            auto const deadline = std::chrono::steady_clock::now() + 1s;
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                if (PeerSetTestAccess::
+                        crawl_stop_fact_and_ingress_seal_published(peers))
+                {
+                    stop_fact_preceded_release = true;
+                    break;
+                }
+                std::this_thread::yield();
+            }
+        }
+
+        release_boundary->set_value();
+        if (boundary_reached)
+        {
+            stop_completed = stopped.wait_for(1s) == std::future_status::ready;
+            if (stop_completed)
+                EXPECT_NO_THROW(stopped.get());
+        }
+    }
+
+    EXPECT_TRUE(boundary_reached)
+        << "the control must hold the real HTTP-to-HTTPS decision boundary";
+    EXPECT_TRUE(stop_fact_preceded_release)
+        << "public co_stop must publish the sticky fact and ingress seal while "
+           "the fallback decision is held";
+    EXPECT_TRUE(stop_completed);
+    EXPECT_EQ(https_fallbacks, 0u);
+    EXPECT_FALSE(https_accepted->load(std::memory_order_acquire))
+        << "a queued HTTP terminal after the public seal must not admit a "
+           "second transport";
+}
+//@@end crawl-stop-seal-before-fallback
 
 TEST(PeerSetShutdown, PostReadyPeerFailureIsClassifiedBeforeServantRetirement)
 {
