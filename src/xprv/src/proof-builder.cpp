@@ -397,8 +397,15 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         catl::core::emit_status(
             "searching for peer advertising ledger " +
             std::to_string(required_ledger));
+        // A targeted connect has a 10-second initial deadline and may receive
+        // up to 15 seconds of bounded post-handshake status grace. Observe the
+        // whole admitted attempt rather than timing out its requester while
+        // the connect servant still owns a potentially useful peer.
+        constexpr int history_peer_search_timeout_seconds = 30;
         auto peer = co_await ctx->peers->wait_for_covering_peer(
-            required_ledger, 15, ctx->cancel_token);
+            required_ledger,
+            history_peer_search_timeout_seconds,
+            ctx->cancel_token);
 
         if (ctx->cancel_token &&
             ctx->cancel_token->load(std::memory_order_relaxed))
@@ -420,8 +427,7 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
                 Error::NoSuitablePeer,
                 "no peer advertising ledger " +
                     std::to_string(required_ledger) + " while trying to " +
-                    purpose + "; " +
-                    describe_peer_history_coverage(coverage));
+                    purpose + "; " + describe_peer_history_coverage(coverage));
         }
 
         PLOGI(
