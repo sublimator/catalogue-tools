@@ -81,6 +81,21 @@ VlCache::do_fetch()
     }
     fetch_in_progress_ = true;
 
+    struct FetchAdmissionRollback
+    {
+        VlCache& owner;
+        bool terminal_producer_committed = false;
+
+        ~FetchAdmissionRollback() noexcept
+        {
+            if (terminal_producer_committed || !owner.fetch_in_progress_)
+                return;
+            auto const operation = owner.active_fetch_;
+            owner.retire_fetch_on_strand(operation);
+            owner.try_finish_stop_on_strand();
+        }
+    } admission_rollback{*this};
+
     auto on_fetch = [self](
                         catl::vl::VlFetchOperationPtr operation,
                         catl::vl::VlResult result) {
@@ -96,16 +111,21 @@ VlCache::do_fetch()
             {
             }
 
-            if (operation && self->active_fetch_ != operation)
+            if (!self->retire_fetch_on_strand(operation))
             {
-                PLOGW(
-                    VlCache::log_,
-                    "Ignoring stale VL fetch terminal from a replaced "
-                    "operation");
+                try
+                {
+                    PLOGW(
+                        VlCache::log_,
+                        "Ignoring stale VL fetch terminal from a replaced "
+                        "operation");
+                }
+                catch (...)
+                {
+                }
                 return;
             }
 
-            self->retire_fetch_on_strand();
             struct FinishStop
             {
                 VlCache& owner;
@@ -261,6 +281,32 @@ VlCache::do_fetch()
             asio::post(self->strand_, std::move(consume));
     };
 
+    auto publish_start_refusal = [&](char const* detail) {
+        catl::vl::VlResult failed;
+        try
+        {
+            if (initiation_failure_diagnostic_for_test_)
+                initiation_failure_diagnostic_for_test_();
+            failed.error = "VL fetch initiation failed";
+            if (detail && *detail)
+            {
+                failed.error += ": ";
+                failed.error += detail;
+            }
+        }
+        catch (...)
+        {
+        }
+        //@@authority transition=prv.T0216 status=provisional scope=statement bind=expression_statement@04751e2fe4506cda
+        // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
+        // boundary_ref=vl_fetch.operation_terminal
+        // receipt=vl_fetch.operation_terminal
+        // label=publish_synchronous_fetch_start_refusal_terminal
+        on_fetch(
+            active_fetch_,
+            std::move(failed)); //@@authority-target ids=prv.T0216
+    };
+
     try
     {
         if (fetch_for_test_)
@@ -268,6 +314,7 @@ VlCache::do_fetch()
             fetch_for_test_([on_fetch](catl::vl::VlResult result) mutable {
                 on_fetch({}, std::move(result));
             });
+            admission_rollback.terminal_producer_committed = true;
         }
         else
         {
@@ -278,44 +325,48 @@ VlCache::do_fetch()
             // scope=statement owner=unresolved owner_hypothesis=vl_cache
             // commit=vl_cache_strand touches=prv.S0067
             // label=install_exact_validator_list_fetch_cancellation_capability
-            active_fetch_ = operation;  //@@authority-target ids=prv.T0208
+            active_fetch_ = operation; //@@authority-target ids=prv.T0208
             if (fail_fetch_operation_starts_for_test_ != 0)
             {
                 --fail_fetch_operation_starts_for_test_;
                 throw std::runtime_error("VL fetch operation start failpoint");
             }
             operation->start(on_fetch);
+            admission_rollback.terminal_producer_committed = true;
         }
     }
     catch (std::exception const& e)
     {
-        catl::vl::VlResult failed;
-        failed.error = std::string("VL fetch initiation failed: ") + e.what();
-        on_fetch(active_fetch_, std::move(failed));
+        publish_start_refusal(e.what());
     }
     catch (...)
     {
-        catl::vl::VlResult failed;
-        failed.error = "VL fetch initiation failed";
-        on_fetch(active_fetch_, std::move(failed));
+        publish_start_refusal(nullptr);
     }
 }
 
 //@@authority transition=prv.T0075 status=provisional scope=function
-// bind=xprv::retire_fetch_on_strand@caf3ef50232d0dc7
+// bind=xprv::retire_fetch_on_strand@58f2ee55d206538a
 // owner=unresolved owner_hypothesis=vl_cache
 // commit=vl_cache_strand touches=prv.S0025,prv.S0067,prv.S0068
 // boundary_ref=vl_fetch.operation_terminal
 // receipt=vl_fetch.operation_terminal
 // label=consume_exact_validator_list_fetch_terminal_and_retire_owner_homes
-void
-VlCache::retire_fetch_on_strand() noexcept
+bool
+VlCache::retire_fetch_on_strand(
+    catl::vl::VlFetchOperationPtr const& operation) noexcept
 {
     assert(strand_.running_in_this_thread());
+    if (operation ? active_fetch_ != operation
+                  : static_cast<bool>(active_fetch_))
+    {
+        return false;
+    }
     active_fetch_.reset();
     active_fetch_cancel_requested_ = false;
     fetch_in_progress_ = false;
     ++fetch_generation_;
+    return true;
 }
 
 void
@@ -387,7 +438,7 @@ VlCache::begin_stop_on_strand()
             // label=request_active_validator_list_fetch_cancellation
             requested =
                 active_fetch_
-                    ->request_cancel();  //@@authority-target ids=prv.T0209
+                    ->request_cancel(); //@@authority-target ids=prv.T0209
         }
         else if (cancel_fetch_for_test_)
         {
@@ -405,7 +456,7 @@ VlCache::begin_stop_on_strand()
         // commit=vl_cache_strand touches=prv.S0068
         // label=retain_owner_accepted_fetch_cancellation_request
         active_fetch_cancel_requested_ =
-            requested;  //@@authority-target ids=prv.T0214
+            requested; //@@authority-target ids=prv.T0214
     }
     try
     {
@@ -419,12 +470,12 @@ VlCache::begin_stop_on_strand()
 }
 
 //@@authority transition=prv.T0072 status=provisional scope=function
-// bind=xprv::try_finish_stop_on_strand@de9c8c9d34878d72
+// bind=xprv::try_finish_stop_on_strand@bf7a4ce5d9a98cd5
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
 // touches=prv.S0023,prv.S0024,prv.S0025,prv.S0026
 // label=commit_validator_list_cache_stopped_when_children_empty
 void
-VlCache::try_finish_stop_on_strand()
+VlCache::try_finish_stop_on_strand() noexcept
 {
     if (phase_ != Phase::stopping || refresh_wait_outstanding_ != 0 ||
         fetch_in_progress_)

@@ -118,10 +118,11 @@ private:
     begin_stop_on_strand();
 
     void
-    try_finish_stop_on_strand();
+    try_finish_stop_on_strand() noexcept;
 
-    void
-    retire_fetch_on_strand() noexcept;
+    bool
+    retire_fetch_on_strand(
+        catl::vl::VlFetchOperationPtr const& operation) noexcept;
 
     boost::asio::io_context& io_;
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
@@ -179,6 +180,7 @@ private:
     std::function<bool()> cancel_fetch_for_test_;
     std::function<void(catl::vl::VlFetchOperationPtr const&)>
         fetch_terminal_observer_for_test_;
+    std::function<void()> initiation_failure_diagnostic_for_test_;
     std::size_t fail_fetch_operation_starts_for_test_ = 0;
 
     static LogPartition log_;

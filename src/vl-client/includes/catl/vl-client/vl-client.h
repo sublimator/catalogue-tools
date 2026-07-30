@@ -102,6 +102,7 @@ struct VlResult
 using VlCallback = std::function<void(VlResult)>;
 
 class VlFetchOperation;
+class VlFetchOperationTestAccess;
 using VlFetchOperationPtr = std::shared_ptr<VlFetchOperation>;
 
 enum class VlFetchCancellationDisposition : std::uint8_t {
@@ -149,9 +150,13 @@ private:
 
     explicit VlFetchOperation(std::shared_ptr<Impl> impl);
 
+    void
+    set_after_start_admission_for_test(std::function<void()> hook);
+
     std::shared_ptr<Impl> impl_;
 
     friend class VlClient;
+    friend class VlFetchOperationTestAccess;
 };
 
 /// Minimal HTTPS client for fetching Validator Lists.

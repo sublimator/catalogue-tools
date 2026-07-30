@@ -21,6 +21,22 @@
 #include <streambuf>
 #include <utility>
 
+namespace catl::vl {
+
+class VlFetchOperationTestAccess
+{
+public:
+    static void
+    set_after_start_admission(
+        VlFetchOperationPtr const& operation,
+        std::function<void()> hook)
+    {
+        operation->set_after_start_admission_for_test(std::move(hook));
+    }
+};
+
+}  // namespace catl::vl
+
 namespace xprv {
 
 class VlCacheTestAccess
@@ -94,6 +110,14 @@ public:
     fail_next_operation_start(std::shared_ptr<VlCache> const& cache)
     {
         cache->fail_fetch_operation_starts_for_test_ = 1;
+    }
+
+    static void
+    set_initiation_failure_diagnostic(
+        std::shared_ptr<VlCache> const& cache,
+        std::function<void()> hook)
+    {
+        cache->initiation_failure_diagnostic_for_test_ = std::move(hook);
     }
 };
 
@@ -222,6 +246,42 @@ TEST(VlClientCancellation, TerminalWithoutRequestClosesCancellationAuthority)
 
     io.stop();
     runners.join();
+}
+
+TEST(VlClientCancellation, StartAdmissionRefusalClosesCancellationAuthority)
+{
+    for (bool const cancel_before_start : {false, true})
+    {
+        SCOPED_TRACE(
+            cancel_before_start ? "cancel-before-start" : "no-cancel-request");
+        boost::asio::io_context io;
+        catl::vl::VlClient client(io, "unused.invalid");
+        auto operation = client.prepare_fetch();
+        if (cancel_before_start)
+            ASSERT_TRUE(operation->request_cancel());
+
+        catl::vl::VlFetchOperationTestAccess::set_after_start_admission(
+            operation, [] { throw std::bad_alloc{}; });
+
+        std::size_t callbacks = 0;
+        EXPECT_THROW(
+            operation->start([&callbacks](
+                                 catl::vl::VlFetchOperationPtr,
+                                 catl::vl::VlResult) { ++callbacks; }),
+            std::bad_alloc);
+        EXPECT_EQ(
+            operation->cancellation_disposition(),
+            catl::vl::VlFetchCancellationDisposition::closed_by_terminal);
+        EXPECT_FALSE(operation->request_cancel());
+        EXPECT_THROW(
+            operation->start(
+                [](catl::vl::VlFetchOperationPtr, catl::vl::VlResult) {}),
+            std::logic_error);
+        io.poll();
+        EXPECT_EQ(callbacks, 0u)
+            << "a synchronous start refusal must not counterfeit a physical "
+               "terminal callback";
+    }
 }
 
 TEST(VlClientCancellation, ExactOperationCancelsHeldTlsHandshakeOnce)
@@ -489,6 +549,38 @@ TEST(VlCacheShutdown, PostInstallStartRefusalRetiresExactOperation)
     EXPECT_EQ(after_refusal.refresh_wait_outstanding, 1u)
         << "the exact failed terminal may arm retry only after retiring the "
            "installed operation";
+
+    auto stopped =
+        boost::asio::co_spawn(io, cache->co_stop(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
+}
+
+TEST(VlCacheShutdown, InitiationDiagnosticRefusalCannotOrphanFetch)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+    std::size_t diagnostic_attempts = 0;
+    VlCacheTestAccess::fail_next_operation_start(cache);
+    VlCacheTestAccess::set_initiation_failure_diagnostic(
+        cache, [&diagnostic_attempts] {
+            ++diagnostic_attempts;
+            throw std::bad_alloc{};
+        });
+
+    cache->start();
+    scheduler.run_until_idle();
+
+    EXPECT_EQ(diagnostic_attempts, 1u);
+    auto failed_snapshot = VlCacheTestAccess::snapshot(cache);
+    scheduler.run_until_idle();
+    auto const after_refusal = failed_snapshot.get();
+    EXPECT_FALSE(after_refusal.fetch_in_progress);
+    EXPECT_FALSE(after_refusal.active_fetch);
+    EXPECT_EQ(after_refusal.refresh_wait_outstanding, 1u)
+        << "diagnostic refusal cannot prevent exact rollback and retry";
 
     auto stopped =
         boost::asio::co_spawn(io, cache->co_stop(), boost::asio::use_future);

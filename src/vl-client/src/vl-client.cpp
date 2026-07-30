@@ -81,11 +81,12 @@ struct VlFetchOperation::Impl
     // label=retained_exact_fetch_cancellation_disposition
     std::atomic<VlFetchCancellationDisposition> cancellation_disposition{
         VlFetchCancellationDisposition::not_requested};
+    std::function<void()> after_start_admission_for_test;
 
     //@@authority transition=prv.T0212 status=provisional scope=function
     // bind=catl::vl::VlFetchOperation::Impl::dispatch_retained_cancel@76a6576f8ee07b69
     // owner=unresolved owner_hypothesis=vl_fetch_operation
-    // commit=vl_fetch_executor touches=prv.S0069,prv.S0070,prv.S0071,prv.S0072
+    // commit=vl_fetch_executor touches=prv.S0069,prv.S0070,prv.S0071
     // label=emit_retained_cancellation_once_after_slot_installation
     static void
     dispatch_retained_cancel(std::shared_ptr<Impl> const& self) noexcept
@@ -146,9 +147,7 @@ struct VlFetchOperation::Impl
     //@@authority transition=prv.T0213 status=provisional scope=function
     // bind=catl::vl::VlFetchOperation::Impl::mark_terminal@ed6cee959b876b6f
     // owner=unresolved owner_hypothesis=vl_fetch_operation
-    // commit=vl_fetch_executor touches=prv.S0069,prv.S0070,prv.S0071,prv.S0072
-    // boundary_ref=vl_fetch.operation_terminal
-    // receipt=vl_fetch.operation_terminal
+    // commit=vl_fetch_executor touches=prv.S0069,prv.S0070
     // label=retain_exact_fetch_terminal_and_close_cancellation_authority
     static void
     mark_terminal(std::shared_ptr<Impl> const& self) noexcept
@@ -219,6 +218,12 @@ VlFetchOperation::cancellation_disposition() const noexcept
     if (!impl_)
         return VlFetchCancellationDisposition::failed;
     return impl_->cancellation_disposition.load(std::memory_order_acquire);
+}
+
+void
+VlFetchOperation::set_after_start_admission_for_test(std::function<void()> hook)
+{
+    impl_->after_start_admission_for_test = std::move(hook);
 }
 
 //------------------------------------------------------------------------------
@@ -557,10 +562,6 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
         throw std::logic_error("VL fetch operation already started");
     }
 
-    auto operation = shared_from_this();
-    auto host = impl->host;
-    auto port = impl->port;
-
     struct StartRefusalGuard
     {
         std::shared_ptr<Impl> impl;
@@ -572,6 +573,13 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
                 Impl::mark_terminal(impl);
         }
     } start_refusal{impl};
+
+    if (impl->after_start_admission_for_test)
+        impl->after_start_admission_for_test();
+
+    auto operation = shared_from_this();
+    auto host = impl->host;
+    auto port = impl->port;
 
     PLOGI(VlClient::log_, "Fetching VL from ", impl->host, ":", impl->port);
     boost::asio::co_spawn(
@@ -845,7 +853,20 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
                 try
                 {
                     if (callback)
-                        callback(std::move(operation), std::move(result));
+                    {
+                        //@@authority transition=prv.T0215 bind=expression_statement@6d242c61b90ab506
+                        // status=provisional scope=statement
+                        // owner=unresolved
+                        // owner_hypothesis=vl_fetch_operation
+                        // commit=vl_fetch_executor touches=prv.S0072
+                        // boundary_ref=vl_fetch.operation_terminal
+                        // receipt=vl_fetch.operation_terminal
+                        // label=publish_exact_physical_fetch_terminal_callback
+                        callback(
+                            std::move(operation),
+                            std::move(
+                                result)); //@@authority-target ids=prv.T0215
+                    }
                 }
                 catch (...)
                 {
