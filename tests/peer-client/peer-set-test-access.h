@@ -156,10 +156,10 @@ public:
                 auto const failure_count = stats != set.endpoint_stats_.end()
                     ? std::max<std::uint64_t>(1, stats->second.failure_count)
                     : 1;
-                set.retry_gates_[endpoint] = {
-                    .failed_at = at,
-                    .failure_count = failure_count,
-                };
+                auto& gate = set.retry_gates_[endpoint];
+                gate.failed_at = at;
+                gate.failure_count =
+                    std::max(gate.failure_count, failure_count);
             });
     }
 
@@ -244,6 +244,51 @@ public:
             }
         });
         return count;
+    }
+
+    static std::string
+    first_retry_gate_without_stats(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        std::string endpoint;
+        run_on_strand(io, peers, [&endpoint](auto& set) {
+            for (auto const& [key, _] : set.retry_gates_)
+            {
+                if (!set.endpoint_stats_.contains(key))
+                {
+                    endpoint = key;
+                    return;
+                }
+            }
+        });
+        return endpoint;
+    }
+
+    static void
+    queue_connect(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string endpoint)
+    {
+        run_on_strand(io, peers, [endpoint = std::move(endpoint)](auto& set) {
+            set.queue_connect(endpoint);
+        });
+    }
+
+    static void
+    fail_queued_connect_servant_launch(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        run_on_strand(io, peers, [](auto& set) {
+            auto const original_limit = set.options_.max_in_flight_connects;
+            set.options_.max_in_flight_connects = 1;
+            set.fail_connect_servant_launches_for_test_ = 1;
+            set.pump_connects();
+            set.fail_connect_servant_launches_for_test_ = 0;
+            set.options_.max_in_flight_connects = original_limit;
+        });
     }
 
     static bool

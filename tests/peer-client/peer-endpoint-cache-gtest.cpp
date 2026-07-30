@@ -721,6 +721,59 @@ TEST(PeerEndpointCache, FullFailureProjectionSurvivesRepeatedRuntimePruning)
         PeerSetTestAccess::retry_gate_failure_count(
             io, peers, "failed-0006.example.com:51235"),
         7u);
+
+    auto const without_stats =
+        PeerSetTestAccess::first_retry_gate_without_stats(io, peers);
+    ASSERT_FALSE(without_stats.empty())
+        << "the control requires the 4096 retry population to exceed the "
+           "independent 2000-row diagnostic population";
+    auto const retained_count =
+        PeerSetTestAccess::retry_gate_failure_count(io, peers, without_stats);
+    ASSERT_GT(retained_count, 0u);
+    ASSERT_EQ(
+        PeerSetTestAccess::endpoint_failure_count(io, peers, without_stats),
+        0u);
+
+    PeerSetTestAccess::set_failed_at(
+        io,
+        peers,
+        without_stats,
+        std::chrono::steady_clock::now() - std::chrono::minutes(10));
+    PeerSetTestAccess::queue_connect(io, peers, without_stats);
+    EXPECT_EQ(
+        PeerSetTestAccess::retry_gate_failure_count(io, peers, without_stats),
+        retained_count)
+        << "expiry authorizes another attempt; it does not erase history";
+
+    PeerSetTestAccess::set_failed_at(
+        io,
+        peers,
+        without_stats,
+        std::chrono::steady_clock::now() - std::chrono::minutes(31));
+    PeerSetTestAccess::prune_discovery_state(io, peers);
+    EXPECT_EQ(
+        PeerSetTestAccess::retry_gate_failure_count(io, peers, without_stats),
+        retained_count)
+        << "TTL expiry cannot retire history while the retry attempt is "
+           "still queued";
+
+    PeerSetTestAccess::fail_queued_connect_servant_launch(io, peers);
+    EXPECT_EQ(
+        PeerSetTestAccess::retry_gate_failure_count(io, peers, without_stats),
+        retained_count)
+        << "servant admission retains history until success or failure";
+
+    PeerSetTestAccess::note_connect_failure(io, peers, without_stats);
+
+    EXPECT_EQ(
+        PeerSetTestAccess::retry_gate_failure_count(io, peers, without_stats),
+        retained_count + 1)
+        << "a later failure must increment the authoritative retained "
+           "magnitude rather than restart from an evicted stats row";
+    EXPECT_EQ(
+        PeerSetTestAccess::endpoint_failure_count(io, peers, without_stats),
+        retained_count + 1)
+        << "the recreated diagnostic row projects the authoritative count";
 }
 
 TEST(PeerEndpointCache, DisabledQueryNeverDegradesToHealthyEmpty)

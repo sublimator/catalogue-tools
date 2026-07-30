@@ -8558,6 +8558,8 @@ TEST(PeerSetEndpointIdentity, PureIpv6RemainsOneKeyThroughConnectFailure)
         EndpointTracker::normalize_endpoint_identity("[::1]", port), key);
     EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity("", port));
     EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity("::1", 0));
+    EXPECT_FALSE(
+        EndpointTracker::normalize_endpoint_identity("[[::1]]", port));
 
     auto peers = PeerSet::create(
         io,
@@ -8584,6 +8586,7 @@ TEST(PeerSetEndpointIdentity, PureIpv6RemainsOneKeyThroughConnectFailure)
     peers->start_connect("[::1]", port);
     peers->start_connect("", port);
     peers->start_connect("::1", 0);
+    peers->start_connect("[[::1]]", port);
     io.run_for(10ms);
     io.restart();
     EXPECT_EQ(PeerSetTestAccess::snapshot(io, peers).queued_connects, 0u)

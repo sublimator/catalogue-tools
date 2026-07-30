@@ -458,7 +458,8 @@ EndpointTracker::normalize_endpoint_identity(
             return std::nullopt;
         unwrapped = host.substr(1, host.size() - 2);
     }
-    if (unwrapped.empty())
+    if (unwrapped.empty() || unwrapped.find('[') != std::string::npos ||
+        unwrapped.find(']') != std::string::npos)
         return std::nullopt;
     return format_endpoint(canonicalize_host(std::move(unwrapped)), port);
 }

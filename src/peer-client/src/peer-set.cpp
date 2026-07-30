@@ -1232,6 +1232,11 @@ PeerSet::note_peer_headers(
     }
 }
 
+//@@authority transition=prv.T0225 status=provisional scope=function
+// bind=catl::peer_client::note_connect_failure@2ef93397e1fa8ae8
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0008,prv.S0076
+// label=increment_retry_gate_from_its_retained_magnitude
 void
 PeerSet::note_connect_failure(std::string const& endpoint, std::string detail)
 {
@@ -1251,12 +1256,11 @@ PeerSet::note_connect_failure(std::string const& endpoint, std::string detail)
     auto const now = std::chrono::steady_clock::now();
     stats.last_failure_at = now_unix();
     stats.last_seen_at = stats.last_failure_at;
-    stats.failure_count++;
     stats.connected_ok = false;
-    retry_gates_[key] = EndpointRetryGate{
-        .failed_at = now,
-        .failure_count = stats.failure_count,
-    };
+    auto& gate = retry_gates_[key];
+    gate.failed_at = now;
+    gate.failure_count = std::max(gate.failure_count, stats.failure_count) + 1;
+    stats.failure_count = gate.failure_count;
     record_failure_event(key, classify_failure_kind(detail, false), now);
     sort_pending_connects();
     notify_waiters();
@@ -2082,7 +2086,6 @@ PeerSet::queue_connect(std::string const& endpoint)
         {
             return;
         }
-        retry_gates_.erase(failed);
     }
 
     pending_connects_.push_back(key);
@@ -2192,7 +2195,6 @@ PeerSet::pump_connects()
             {
                 continue;
             }
-            retry_gates_.erase(failed);
         }
 
         auto self = shared_from_this();
@@ -5455,7 +5457,7 @@ PeerSet::prune_endpoint_stats()
 }
 
 //@@authority transition=prv.T0223 status=provisional scope=function
-//bind=catl::peer_client::prune_discovery_state@2e89ccf0752f0eab
+// bind=catl::peer_client::prune_discovery_state@2e89ccf0752f0eab
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
 // touches=prv.S0076
 // label=expire_and_bound_owned_endpoint_retry_gates
@@ -5468,6 +5470,16 @@ PeerSet::prune_discovery_state()
     size_t tracker_removed = 0;
     size_t crawled_removed = 0;
     size_t failed_removed = 0;
+
+    std::unordered_set<std::string> active;
+    for (auto const& [key, _] : connections_)
+        active.insert(key);
+    for (auto const& [key, _] : in_flight_)
+        active.insert(key);
+    active.insert(queued_.begin(), queued_.end());
+    for (auto const& [key, _] : crawl_in_flight_)
+        active.insert(key);
+    active.insert(crawl_queued_.begin(), crawl_queued_.end());
 
     for (auto it = crawled_.begin(); it != crawled_.end();)
     {
@@ -5484,7 +5496,8 @@ PeerSet::prune_discovery_state()
 
     for (auto it = retry_gates_.begin(); it != retry_gates_.end();)
     {
-        if (now - it->second.failed_at >= kFailedEndpointRetention)
+        if (!active.count(it->first) &&
+            now - it->second.failed_at >= kFailedEndpointRetention)
         {
             it = retry_gates_.erase(it);
             ++failed_removed;
@@ -5494,16 +5507,6 @@ PeerSet::prune_discovery_state()
             ++it;
         }
     }
-
-    std::unordered_set<std::string> active;
-    for (auto const& [key, _] : connections_)
-        active.insert(key);
-    for (auto const& [key, _] : in_flight_)
-        active.insert(key);
-    active.insert(queued_.begin(), queued_.end());
-    for (auto const& [key, _] : crawl_in_flight_)
-        active.insert(key);
-    active.insert(crawl_queued_.begin(), crawl_queued_.end());
 
     if (tracker_->size() > kMaxTrackedEndpoints)
     {
