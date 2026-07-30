@@ -120,6 +120,9 @@ private:
     void
     try_finish_stop_on_strand();
 
+    void
+    retire_fetch_on_strand() noexcept;
+
     boost::asio::io_context& io_;
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     std::string vl_host_;
@@ -157,8 +160,12 @@ private:
     //@@authority state=prv.S0067 status=provisional scope=field
     // bind=xprv::VlCache::active_fetch_@4f2904e878920aea
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
-    // label=exact_active_validator_list_fetch_cancellation_capability_and_intent
+    // label=exact_active_validator_list_fetch_operation_capability
     catl::vl::VlFetchOperationPtr active_fetch_;
+    //@@authority state=prv.S0068 status=provisional scope=field
+    // bind=xprv::VlCache::active_fetch_cancel_requested_@30b746823bdea8a5
+    // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
+    // label=accepted_active_fetch_cancellation_request_latch
     bool active_fetch_cancel_requested_ = false;
     uint64_t fetch_generation_ = 0;
     bool last_fetch_ok_ = false;

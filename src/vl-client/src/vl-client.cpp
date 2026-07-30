@@ -45,23 +45,137 @@ LogPartition VlClient::log_("vl-client", LogLevel::INHERIT);
 
 struct VlFetchOperation::Impl
 {
-    Impl(
-        asio::any_io_executor owner_executor,
-        std::string host_,
-        uint16_t port_)
+    enum class Phase : std::uint8_t {
+        prepared,
+        starting,
+        slot_installed,
+        terminal,
+    };
+
+    Impl(VlFetchExecutor owner_executor, std::string host_, uint16_t port_)
         : executor(std::move(owner_executor))
         , host(std::move(host_))
         , port(port_)
     {
     }
 
-    asio::any_io_executor executor;
+    VlFetchExecutor executor;
     std::string host;
     uint16_t port;
+    //@@authority state=prv.S0071 status=provisional scope=field
+    // bind=catl::vl::VlFetchOperation::Impl::cancellation@3006935393e4ee10
+    // owner=unresolved owner_hypothesis=vl_fetch_operation
+    // observed_home=VlFetchOperation::Impl
+    // label=exact_physical_fetch_cancellation_slot
     asio::cancellation_signal cancellation;
-    std::atomic_bool started{false};
+    //@@authority state=prv.S0069 status=provisional scope=field
+    // bind=catl::vl::VlFetchOperation::Impl::phase@f73a6dd6781aeef2
+    // owner=unresolved owner_hypothesis=vl_fetch_operation
+    // observed_home=VlFetchOperation::Impl
+    // label=prepared_started_slot_installed_terminal_phase
+    std::atomic<Phase> phase{Phase::prepared};
+    //@@authority state=prv.S0070 status=provisional scope=field
+    // bind=catl::vl::VlFetchOperation::Impl::cancellation_disposition@2236e126d7d84979
+    // owner=unresolved owner_hypothesis=vl_fetch_operation
+    // observed_home=VlFetchOperation::Impl
+    // label=retained_exact_fetch_cancellation_disposition
     std::atomic<VlFetchCancellationDisposition> cancellation_disposition{
         VlFetchCancellationDisposition::not_requested};
+
+    //@@authority transition=prv.T0212 status=provisional scope=function
+    // bind=catl::vl::VlFetchOperation::Impl::dispatch_retained_cancel@76a6576f8ee07b69
+    // owner=unresolved owner_hypothesis=vl_fetch_operation
+    // commit=vl_fetch_executor touches=prv.S0069,prv.S0070,prv.S0071,prv.S0072
+    // label=emit_retained_cancellation_once_after_slot_installation
+    static void
+    dispatch_retained_cancel(std::shared_ptr<Impl> const& self) noexcept
+    {
+        if (self->phase.load(std::memory_order_acquire) !=
+            Phase::slot_installed)
+        {
+            return;
+        }
+
+        auto expected = VlFetchCancellationDisposition::submitted;
+        if (!self->cancellation_disposition.compare_exchange_strong(
+                expected,
+                VlFetchCancellationDisposition::dispatching,
+                std::memory_order_acq_rel))
+        {
+            return;
+        }
+
+        try
+        {
+            asio::dispatch(self->executor, [self]() noexcept {
+                if (self->phase.load(std::memory_order_acquire) ==
+                    Phase::terminal)
+                {
+                    auto dispatching =
+                        VlFetchCancellationDisposition::dispatching;
+                    self->cancellation_disposition.compare_exchange_strong(
+                        dispatching,
+                        VlFetchCancellationDisposition::closed_by_terminal,
+                        std::memory_order_acq_rel);
+                    return;
+                }
+
+                try
+                {
+                    self->cancellation.emit(asio::cancellation_type::all);
+                    self->cancellation_disposition.store(
+                        VlFetchCancellationDisposition::emitted,
+                        std::memory_order_release);
+                }
+                catch (...)
+                {
+                    self->cancellation_disposition.store(
+                        VlFetchCancellationDisposition::failed,
+                        std::memory_order_release);
+                }
+            });
+        }
+        catch (...)
+        {
+            self->cancellation_disposition.store(
+                VlFetchCancellationDisposition::failed,
+                std::memory_order_release);
+        }
+    }
+
+    //@@authority transition=prv.T0213 status=provisional scope=function
+    // bind=catl::vl::VlFetchOperation::Impl::mark_terminal@ed6cee959b876b6f
+    // owner=unresolved owner_hypothesis=vl_fetch_operation
+    // commit=vl_fetch_executor touches=prv.S0069,prv.S0070,prv.S0071,prv.S0072
+    // boundary_ref=vl_fetch.operation_terminal
+    // receipt=vl_fetch.operation_terminal
+    // label=retain_exact_fetch_terminal_and_close_cancellation_authority
+    static void
+    mark_terminal(std::shared_ptr<Impl> const& self) noexcept
+    {
+        self->phase.store(Phase::terminal, std::memory_order_release);
+
+        auto disposition =
+            self->cancellation_disposition.load(std::memory_order_acquire);
+        for (;;)
+        {
+            if (disposition == VlFetchCancellationDisposition::emitted ||
+                disposition == VlFetchCancellationDisposition::failed ||
+                disposition ==
+                    VlFetchCancellationDisposition::closed_by_terminal)
+            {
+                return;
+            }
+
+            if (self->cancellation_disposition.compare_exchange_weak(
+                    disposition,
+                    VlFetchCancellationDisposition::closed_by_terminal,
+                    std::memory_order_acq_rel))
+            {
+                return;
+            }
+        }
+    }
 };
 
 VlFetchOperation::VlFetchOperation(std::shared_ptr<Impl> impl)
@@ -69,11 +183,17 @@ VlFetchOperation::VlFetchOperation(std::shared_ptr<Impl> impl)
 {
 }
 
+//@@authority transition=prv.T0211 status=provisional scope=function
+// bind=catl::vl::request_cancel@cc84368e8cc32266
+// owner=unresolved owner_hypothesis=vl_fetch_operation
+// commit=atomic_request_then_vl_fetch_executor touches=prv.S0069,prv.S0070
+// label=retain_exact_fetch_cancellation_intent_before_or_after_start
 bool
 VlFetchOperation::request_cancel() noexcept
 {
     auto impl = impl_;
-    if (!impl)
+    if (!impl ||
+        impl->phase.load(std::memory_order_acquire) == Impl::Phase::terminal)
         return false;
 
     auto expected = VlFetchCancellationDisposition::not_requested;
@@ -82,35 +202,15 @@ VlFetchOperation::request_cancel() noexcept
             VlFetchCancellationDisposition::submitted,
             std::memory_order_acq_rel))
     {
-        return expected != VlFetchCancellationDisposition::failed;
+        return expected != VlFetchCancellationDisposition::failed &&
+            expected != VlFetchCancellationDisposition::closed_by_terminal;
     }
 
-    try
-    {
-        asio::dispatch(impl->executor, [impl]() noexcept {
-            try
-            {
-                impl->cancellation.emit(asio::cancellation_type::all);
-                impl->cancellation_disposition.store(
-                    VlFetchCancellationDisposition::emitted,
-                    std::memory_order_release);
-            }
-            catch (...)
-            {
-                impl->cancellation_disposition.store(
-                    VlFetchCancellationDisposition::failed,
-                    std::memory_order_release);
-            }
-        });
-        return impl->cancellation_disposition.load(std::memory_order_acquire) !=
-            VlFetchCancellationDisposition::failed;
-    }
-    catch (...)
-    {
-        impl->cancellation_disposition.store(
-            VlFetchCancellationDisposition::failed, std::memory_order_release);
-        return false;
-    }
+    Impl::dispatch_retained_cancel(impl);
+    auto const disposition =
+        impl->cancellation_disposition.load(std::memory_order_acquire);
+    return disposition != VlFetchCancellationDisposition::failed &&
+        disposition != VlFetchCancellationDisposition::closed_by_terminal;
 }
 
 VlFetchCancellationDisposition
@@ -431,26 +531,49 @@ VlClient::VlClient(asio::io_context& io, std::string host, uint16_t port)
 {
 }
 
+//@@authority state=prv.S0072 status=provisional scope=function
+// bind=catl::vl::start@18a79824cb2cfd08
+// owner=unresolved owner_hypothesis=vl_fetch_operation
+// observed_home=VlFetchOperation::co_spawn_frame_and_completion_handler
+// label=admitted_physical_fetch_and_exact_terminal_callback_home
+//@@authority transition=prv.T0210 status=provisional scope=function
+// bind=catl::vl::start@18a79824cb2cfd08
+// owner=unresolved owner_hypothesis=vl_fetch_operation
+// commit=vl_fetch_executor touches=prv.S0069,prv.S0071,prv.S0072
+// label=start_once_and_install_exact_physical_terminal_callback
 void
 VlFetchOperation::start(VlFetchTerminalCallback callback)
 {
     auto impl = impl_;
     if (!impl)
         throw std::logic_error("VL fetch operation has no implementation");
+    if (!callback)
+        throw std::invalid_argument("VL fetch terminal callback is required");
 
-    bool expected = false;
-    if (!impl->started.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel))
+    auto expected = Impl::Phase::prepared;
+    if (!impl->phase.compare_exchange_strong(
+            expected, Impl::Phase::starting, std::memory_order_acq_rel))
     {
         throw std::logic_error("VL fetch operation already started");
     }
 
     auto operation = shared_from_this();
-    PLOGI(VlClient::log_, "Fetching VL from ", impl->host, ":", impl->port);
-
     auto host = impl->host;
     auto port = impl->port;
 
+    struct StartRefusalGuard
+    {
+        std::shared_ptr<Impl> impl;
+        bool committed = false;
+
+        ~StartRefusalGuard()
+        {
+            if (!committed)
+                Impl::mark_terminal(impl);
+        }
+    } start_refusal{impl};
+
+    PLOGI(VlClient::log_, "Fetching VL from ", impl->host, ":", impl->port);
     boost::asio::co_spawn(
         impl->executor,
         [host, port]() mutable -> asio::awaitable<VlResult> {
@@ -460,12 +583,12 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
             {
                 auto executor = co_await asio::this_coro::executor;
 
-                // Authenticate the server certificate and hostname. The caller
-                // independently authenticates the response content against the
-                // configured publisher key.
+                // Authenticate the server certificate and hostname. The
+                // caller independently authenticates the response content
+                // against the configured publisher key.
                 //
-                // Prefer an explicit CA bundle when available, then fall back
-                // to the TLS library's configured trust paths.
+                // Prefer an explicit CA bundle when available, then fall
+                // back to the TLS library's configured trust paths.
                 ssl::context ctx(ssl::context::tlsv12_client);
                 ctx.set_verify_mode(ssl::verify_peer);
                 {
@@ -633,7 +756,8 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
                         {
                             if (!v.is_object())
                                 throw std::runtime_error(
-                                    "validator list entry is not an object");
+                                    "validator list entry is not an "
+                                    "object");
                             auto const& vobj = v.as_object();
                             if (!vobj.contains("manifest") ||
                                 !vobj.at("manifest").is_string() ||
@@ -666,7 +790,8 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
                         !vl.has_validators)
                     {
                         throw std::runtime_error(
-                            "validator list blob is missing required fields");
+                            "validator list blob is missing required "
+                            "fields");
                     }
 
                     PLOGI(
@@ -696,8 +821,9 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
         },
         asio::bind_cancellation_slot(
             impl->cancellation.slot(),
-            [operation, callback = std::move(callback)](
+            [operation, impl, callback = std::move(callback)](
                 std::exception_ptr failure, VlResult result) mutable noexcept {
+                Impl::mark_terminal(impl);
                 if (failure)
                 {
                     try
@@ -734,6 +860,12 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
                     }
                 }
             }));
+    start_refusal.committed = true;
+
+    expected = Impl::Phase::starting;
+    impl->phase.compare_exchange_strong(
+        expected, Impl::Phase::slot_installed, std::memory_order_acq_rel);
+    Impl::dispatch_retained_cancel(impl);
 }
 
 VlFetchOperationPtr
@@ -743,7 +875,7 @@ VlClient::prepare_fetch()
 }
 
 VlFetchOperationPtr
-VlClient::prepare_fetch(asio::any_io_executor owner_executor)
+VlClient::prepare_fetch(VlFetchExecutor owner_executor)
 {
     auto impl = std::make_shared<VlFetchOperation::Impl>(
         std::move(owner_executor), std::string(host_), port_);

@@ -16,6 +16,9 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <new>
+#include <ostream>
+#include <streambuf>
 #include <utility>
 
 namespace xprv {
@@ -112,6 +115,115 @@ successful_vl_result()
     return result;
 }
 
+class ThrowingLogBuffer final : public std::streambuf
+{
+    int_type
+    overflow(int_type) override
+    {
+        throw std::bad_alloc{};
+    }
+
+    std::streamsize
+    xsputn(char const*, std::streamsize) override
+    {
+        throw std::bad_alloc{};
+    }
+};
+
+class ScopedThrowingInfoLog final
+{
+public:
+    ScopedThrowingInfoLog()
+    {
+        stream_.exceptions(std::ios::badbit | std::ios::failbit);
+        Logger::set_output_stream(&stream_);
+    }
+
+    ~ScopedThrowingInfoLog()
+    {
+        Logger::set_output_stream(nullptr);
+    }
+
+private:
+    ThrowingLogBuffer buffer_;
+    std::ostream stream_{&buffer_};
+    ScopedLogPartitionLevel partition_{"vl-cache", LogLevel::INFO};
+};
+
+TEST(VlClientCancellation, CancelBeforeStartIsRetainedAndEmittedOnce)
+{
+    boost::asio::io_context io;
+    auto acceptor = std::make_shared<boost::asio::ip::tcp::acceptor>(
+        io,
+        boost::asio::ip::tcp::endpoint(
+            boost::asio::ip::make_address("127.0.0.1"), 0));
+
+    catl::vl::VlClient client(
+        io, "127.0.0.1", acceptor->local_endpoint().port());
+    auto operation = client.prepare_fetch();
+    ASSERT_TRUE(operation->request_cancel());
+    EXPECT_TRUE(operation->request_cancel())
+        << "duplicate retained intent must remain idempotent before start";
+    EXPECT_EQ(
+        operation->cancellation_disposition(),
+        catl::vl::VlFetchCancellationDisposition::submitted);
+
+    std::promise<catl::vl::VlResult> fetch_terminal;
+    auto fetch_future = fetch_terminal.get_future();
+    operation->start(
+        [&fetch_terminal](
+            catl::vl::VlFetchOperationPtr, catl::vl::VlResult result) {
+            fetch_terminal.set_value(std::move(result));
+        });
+
+    catl::test::IoContextRunners runners(io, 2);
+    ASSERT_EQ(fetch_future.wait_for(5s), std::future_status::ready);
+    EXPECT_FALSE(fetch_future.get().success);
+    EXPECT_EQ(
+        operation->cancellation_disposition(),
+        catl::vl::VlFetchCancellationDisposition::emitted);
+    EXPECT_FALSE(operation->request_cancel())
+        << "terminality must close cancellation authority";
+
+    boost::system::error_code ignored;
+    acceptor->close(ignored);
+    io.stop();
+    runners.join();
+}
+
+TEST(VlClientCancellation, TerminalWithoutRequestClosesCancellationAuthority)
+{
+    boost::asio::io_context io;
+    boost::asio::ip::tcp::acceptor acceptor(
+        io,
+        boost::asio::ip::tcp::endpoint(
+            boost::asio::ip::make_address("127.0.0.1"), 0));
+    auto const unused_port = acceptor.local_endpoint().port();
+    boost::system::error_code ignored;
+    acceptor.close(ignored);
+
+    catl::vl::VlClient client(io, "127.0.0.1", unused_port);
+    auto operation = client.prepare_fetch();
+    std::promise<catl::vl::VlResult> fetch_terminal;
+    auto fetch_future = fetch_terminal.get_future();
+    operation->start(
+        [&fetch_terminal](
+            catl::vl::VlFetchOperationPtr, catl::vl::VlResult result) {
+            fetch_terminal.set_value(std::move(result));
+        });
+
+    catl::test::IoContextRunners runners(io, 2);
+    ASSERT_EQ(fetch_future.wait_for(5s), std::future_status::ready);
+    EXPECT_FALSE(fetch_future.get().success);
+    EXPECT_EQ(
+        operation->cancellation_disposition(),
+        catl::vl::VlFetchCancellationDisposition::closed_by_terminal);
+    EXPECT_FALSE(operation->request_cancel());
+
+    io.stop();
+    runners.join();
+}
+
 TEST(VlClientCancellation, ExactOperationCancelsHeldTlsHandshakeOnce)
 {
     boost::asio::io_context io;
@@ -159,6 +271,50 @@ TEST(VlClientCancellation, ExactOperationCancelsHeldTlsHandshakeOnce)
     acceptor->close(ignored);
     io.stop();
     runners.join();
+}
+
+TEST(VlCacheShutdown, DiagnosticFailureBeforeAdmissionCannotOrphanFetch)
+{
+    catl::test::DeterministicScheduler scheduler;
+    auto& io = scheduler.io();
+    auto cache = VlCache::create(io, "unused.invalid");
+    catl::vl::VlCallback pending;
+    std::size_t fetches = 0;
+    VlCacheTestAccess::set_fetcher(
+        cache, [&pending, &fetches](catl::vl::VlCallback callback) {
+            ++fetches;
+            pending = std::move(callback);
+        });
+
+    {
+        ScopedThrowingInfoLog throwing_log;
+        cache->start();
+        ASSERT_TRUE(scheduler.step());
+    }
+
+    ASSERT_EQ(fetches, 1u)
+        << "fallible diagnostics must not sit after admission and before "
+           "launch";
+    ASSERT_TRUE(pending);
+
+    auto active_snapshot = VlCacheTestAccess::snapshot(cache);
+    scheduler.run_until_idle();
+    EXPECT_TRUE(active_snapshot.get().fetch_in_progress);
+
+    pending(successful_vl_result());
+    scheduler.run_until_idle();
+
+    auto terminal_snapshot = VlCacheTestAccess::snapshot(cache);
+    scheduler.run_until_idle();
+    auto const after_terminal = terminal_snapshot.get();
+    EXPECT_FALSE(after_terminal.fetch_in_progress);
+    EXPECT_FALSE(after_terminal.active_fetch);
+
+    auto stopped =
+        boost::asio::co_spawn(io, cache->co_stop(), boost::asio::use_future);
+    scheduler.run_until_idle();
+    ASSERT_EQ(stopped.wait_for(0ms), std::future_status::ready);
+    EXPECT_NO_THROW(stopped.get());
 }
 
 TEST(VlCacheShutdown, PublicStopCancelsProductionFetchAndJoinsItsCallback)

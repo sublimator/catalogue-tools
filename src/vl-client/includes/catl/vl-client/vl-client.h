@@ -14,8 +14,8 @@
 #include <catl/core/logger.h>
 #include <catl/core/types.h>
 
-#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/json.hpp>
 #include <cstdint>
 #include <functional>
@@ -107,10 +107,13 @@ using VlFetchOperationPtr = std::shared_ptr<VlFetchOperation>;
 enum class VlFetchCancellationDisposition : std::uint8_t {
     not_requested,
     submitted,
+    dispatching,
     emitted,
     failed,
+    closed_by_terminal,
 };
 
+using VlFetchExecutor = asio::strand<asio::io_context::executor_type>;
 using VlFetchTerminalCallback =
     std::function<void(VlFetchOperationPtr, VlResult)>;
 
@@ -131,9 +134,10 @@ public:
     void
     start(VlFetchTerminalCallback callback);
 
-    /// Submit cancellation on the fetch's private strand. A true result means
-    /// only that owner intent was retained or already present; terminality is
-    /// still proved exclusively by the terminal callback.
+    /// Retain cancellation intent and emit it once the fetch slot exists.
+    /// This is safe before or after start(). A true result means only that
+    /// owner intent was retained or already present; terminality is still
+    /// proved exclusively by the terminal callback.
     bool
     request_cancel() noexcept;
 
@@ -161,11 +165,11 @@ public:
     VlFetchOperationPtr
     prepare_fetch();
 
-    /// Prepare the operation on an existing owner executor. Callers may
-    /// install the returned capability before start() without introducing a
+    /// Prepare the operation on an existing serialized owner executor. Callers
+    /// may install the returned capability before start() without introducing a
     /// second strand between terminal completion and owner-state retirement.
     VlFetchOperationPtr
-    prepare_fetch(asio::any_io_executor owner_executor);
+    prepare_fetch(VlFetchExecutor owner_executor);
 
     std::string const&
     host() const

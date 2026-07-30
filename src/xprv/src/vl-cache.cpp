@@ -60,18 +60,26 @@ VlCache::start()
 //@@authority transition=prv.T0069 status=provisional scope=function
 // bind=xprv::do_fetch@08fae73c5cc51d45
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-// touches=prv.S0023,prv.S0025,prv.S0067
+// touches=prv.S0023,prv.S0025,prv.S0067,prv.S0068
 // label=admit_validator_list_fetch_and_install_terminal_callback
 void
 VlCache::do_fetch()
 {
     if (phase_ != Phase::running || fetch_in_progress_)
         return;
-    fetch_in_progress_ = true;
 
     auto self = shared_from_this();
 
-    PLOGI(log_, "Fetching VL from ", vl_host_, ":", vl_port_, "...");
+    // Diagnostics are observers, never fetch-admission authority. Contain
+    // every failure before the operation census becomes visible.
+    try
+    {
+        PLOGI(log_, "Fetching VL from ", vl_host_, ":", vl_port_, "...");
+    }
+    catch (...)
+    {
+    }
+    fetch_in_progress_ = true;
 
     auto on_fetch = [self](
                         catl::vl::VlFetchOperationPtr operation,
@@ -97,15 +105,7 @@ VlCache::do_fetch()
                 return;
             }
 
-            //@@authority transition=prv.T0075 status=provisional
-            // scope=statement bind=expression_statement@832778b418493c42
-            // owner=unresolved owner_hypothesis=vl_cache
-            // commit=vl_cache_strand touches=prv.S0025,prv.S0067
-            // label=consume_validator_list_fetch_terminal_callback
-            self->active_fetch_.reset();  //@@authority-target ids=prv.T0075
-            self->active_fetch_cancel_requested_ = false;
-            self->fetch_in_progress_ = false;
-            self->fetch_generation_++;
+            self->retire_fetch_on_strand();
             struct FinishStop
             {
                 VlCache& owner;
@@ -301,6 +301,23 @@ VlCache::do_fetch()
     }
 }
 
+//@@authority transition=prv.T0075 status=provisional scope=function
+// bind=xprv::retire_fetch_on_strand@caf3ef50232d0dc7
+// owner=unresolved owner_hypothesis=vl_cache
+// commit=vl_cache_strand touches=prv.S0025,prv.S0067,prv.S0068
+// boundary_ref=vl_fetch.operation_terminal
+// receipt=vl_fetch.operation_terminal
+// label=consume_exact_validator_list_fetch_terminal_and_retire_owner_homes
+void
+VlCache::retire_fetch_on_strand() noexcept
+{
+    assert(strand_.running_in_this_thread());
+    active_fetch_.reset();
+    active_fetch_cancel_requested_ = false;
+    fetch_in_progress_ = false;
+    ++fetch_generation_;
+}
+
 void
 VlCache::stop()
 {
@@ -334,7 +351,7 @@ VlCache::co_stop()
 //@@authority transition=prv.T0071 status=provisional scope=function
 // bind=xprv::begin_stop_on_strand@47e9653c14d73494
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-// touches=prv.S0023,prv.S0024,prv.S0025,prv.S0067
+// touches=prv.S0023,prv.S0024,prv.S0025,prv.S0067,prv.S0068
 // label=seal_validator_list_refresh_admission_and_request_child_cancel
 void
 VlCache::begin_stop_on_strand()
@@ -382,7 +399,13 @@ VlCache::begin_stop_on_strand()
             {
             }
         }
-        active_fetch_cancel_requested_ = requested;
+        //@@authority transition=prv.T0214 status=provisional scope=statement
+        // bind=expression_statement@36c9154a7737ee7d
+        // owner=unresolved owner_hypothesis=vl_cache
+        // commit=vl_cache_strand touches=prv.S0068
+        // label=retain_owner_accepted_fetch_cancellation_request
+        active_fetch_cancel_requested_ =
+            requested;  //@@authority-target ids=prv.T0214
     }
     try
     {
