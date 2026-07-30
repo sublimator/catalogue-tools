@@ -204,21 +204,21 @@ prune_all_networks(sqlite3* db, std::string_view table)
 }
 
 //@@authority transition=prv.T0224 status=provisional scope=function
-//bind=catl::peer_client::migrate_v1_to_v2@55d4344c8ba4ab48
+// bind=catl::peer_client::migrate_legacy_to_v3@9f7d938f183e6691
 // owner=unresolved owner_hypothesis=peer_endpoint_cache
 // commit=sqlite_immediate_transaction touches=prv.S0073
-// label=coalesce_v1_endpoint_aliases_and_conserve_retry_evidence
+// label=canonicalize_legacy_endpoint_identities_and_conserve_retry_evidence
 void
-migrate_v1_to_v2(sqlite3* db)
+migrate_legacy_to_v3(sqlite3* db)
 {
     exec_sql(db, "BEGIN IMMEDIATE;");
     try
     {
-        exec_sql(db, "DROP TABLE IF EXISTS peer_endpoints_v1_migration;");
+        exec_sql(db, "DROP TABLE IF EXISTS peer_endpoints_identity_migration;");
         exec_sql(
             db,
             "ALTER TABLE peer_endpoints RENAME TO "
-            "peer_endpoints_v1_migration;");
+            "peer_endpoints_identity_migration;");
         exec_sql(db, kCreatePeerEndpoints);
 
         Statement rows(
@@ -227,7 +227,7 @@ migrate_v1_to_v2(sqlite3* db)
             "       last_seen_at, last_success_at, last_failure_at, "
             "       success_count, failure_count, seen_crawl, seen_endpoints, "
             "       seen_redirect, connected_ok "
-            "FROM peer_endpoints_v1_migration;");
+            "FROM peer_endpoints_identity_migration;");
         Statement merge(
             db,
             "INSERT INTO peer_endpoints("
@@ -317,8 +317,8 @@ migrate_v1_to_v2(sqlite3* db)
         }
         require_rows_complete(db, rc);
 
-        exec_sql(db, "DROP TABLE peer_endpoints_v1_migration;");
-        exec_sql(db, "PRAGMA user_version = 2;");
+        exec_sql(db, "DROP TABLE peer_endpoints_identity_migration;");
+        exec_sql(db, "PRAGMA user_version = 3;");
         exec_sql(db, "COMMIT;");
     }
     catch (...)
@@ -393,7 +393,7 @@ PeerEndpointCache::~PeerEndpointCache()
 void
 PeerEndpointCache::initialize_schema()
 {
-    static constexpr int schema_version_current = 2;
+    static constexpr int schema_version_current = 3;
     int schema_version = 0;
     {
         Statement version(db_, "PRAGMA user_version");
@@ -422,7 +422,7 @@ PeerEndpointCache::initialize_schema()
         {
             exec_sql(db_, "DROP TABLE IF EXISTS peer_endpoints;");
             exec_sql(db_, kCreatePeerEndpoints);
-            exec_sql(db_, "PRAGMA user_version = 2;");
+            exec_sql(db_, "PRAGMA user_version = 3;");
             exec_sql(db_, "COMMIT;");
         }
         catch (...)
@@ -437,13 +437,14 @@ PeerEndpointCache::initialize_schema()
     else
     {
         exec_sql(db_, kCreatePeerEndpoints);
-        if (schema_version == 1)
+        if (schema_version == 1 || schema_version == 2)
         {
-            // V1 has complete retry columns, but its endpoint canonicalizer
-            // did not lowercase DNS names or compress pure IPv6. Rewrite it
-            // once under one transaction, coalescing aliases and conserving
-            // their counters before the v2 retention bound is applied.
-            migrate_v1_to_v2(db_);
+            // V1 did not canonicalize DNS names or pure IPv6. Rejected V2
+            // predecessors additionally admitted malformed host spellings.
+            // Rewrite either version once under one transaction, coalescing
+            // valid aliases, conserving their counters, and dropping invalid
+            // rows before the retention bound is applied.
+            migrate_legacy_to_v3(db_);
         }
     }
 

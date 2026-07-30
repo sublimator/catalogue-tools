@@ -1157,6 +1157,18 @@ TEST(PeerClientTypes, CanonicalEndpointNormalizesMappedIpv4AndIpv6)
         "[2001:db8::1]:51235");
 }
 
+TEST(PeerClientTypes, EndpointTrackerRefusesMalformedStateKeys)
+{
+    EndpointTracker tracker;
+    tracker.add_discovered("[::g]:51235");
+    tracker.update(
+        "bad/host:51235",
+        PeerStatus{.first_seq = 1, .last_seq = 2, .current_seq = 2});
+
+    EXPECT_EQ(tracker.size(), 0u);
+    EXPECT_TRUE(tracker.all_endpoints().empty());
+}
+
 TEST(
     PeerClientTypes,
     NormalizeDiscoveredEndpointRejectsPrivateAndSpecialLiterals)
@@ -1172,6 +1184,13 @@ TEST(
     EXPECT_FALSE(
         EndpointTracker::normalize_discovered_endpoint("[fc00::1]:51235")
             .has_value());
+    EXPECT_FALSE(EndpointTracker::normalize_discovered_endpoint("[::g]:51235")
+                     .has_value());
+    EXPECT_FALSE(
+        EndpointTracker::normalize_discovered_endpoint("bad/host:51235")
+            .has_value());
+    EXPECT_FALSE(
+        EndpointTracker::normalize_discovered_host("::g", 51235).has_value());
 }
 
 TEST(
@@ -1218,6 +1237,10 @@ TEST(
         "217.182.197.33:21337", 21337);
     ASSERT_TRUE(prequalified.has_value());
     EXPECT_EQ(*prequalified, "217.182.197.33:21337");
+    EXPECT_FALSE(EndpointTracker::normalize_discovered_host(
+                     "217.182.197.33:21337", 51235)
+                     .has_value())
+        << "embedded endpoint text must not override the supplied port";
 }
 
 TEST(PeerClientLifecycle, SubmissionThenDisconnectDrainsDeferredRequest)

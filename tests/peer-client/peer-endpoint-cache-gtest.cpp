@@ -183,13 +183,43 @@ TEST(PeerEndpointCache, SupportedSchemaUpgradePreservesRetryEvidence)
 
     auto cache = PeerEndpointCache::open(temp.string());
     EXPECT_EQ(cache->count_endpoints(network_id), 2u)
-        << "v1 aliases must coalesce before the v2 bound is installed";
+        << "v1 aliases must coalesce before the v3 bound is installed";
     auto failures = index_entries(cache->load_active_failures(network_id));
     ASSERT_EQ(failures.size(), 2u);
     ASSERT_TRUE(failures.contains("history.example.com:51235"));
     EXPECT_EQ(failures.at("history.example.com:51235").failure_count, 5u);
     ASSERT_TRUE(failures.contains("[2001:4860:4860::8888]:51235"));
     EXPECT_EQ(failures.at("[2001:4860:4860::8888]:51235").failure_count, 9u);
+}
+
+TEST(PeerEndpointCache, RejectedV2MalformedRowsAreScrubbedBeforeBounding)
+{
+    TempCachePath temp{"peer-endpoint-cache-v2-malformed-scrub"};
+    constexpr uint32_t network_id = 42;
+
+    {
+        auto cache = PeerEndpointCache::open(temp.string());
+        EXPECT_EQ(cache->count_endpoints(network_id), 0u);
+    }
+    exec_sql(
+        temp.string(),
+        "INSERT INTO peer_endpoints("
+        "  network_id, endpoint, last_seen_at, failure_count, connected_ok"
+        ") VALUES"
+        "  (42, 'History.Example.COM:51235', 100, 2, 0),"
+        "  (42, 'history.example.com:51235', 101, 3, 0),"
+        "  (42, '[::g]:51235', 102, 4, 0),"
+        "  (42, 'bad/host:51235', 103, 5, 0);"
+        "PRAGMA user_version = 2;");
+
+    auto cache = PeerEndpointCache::open(temp.string());
+    EXPECT_EQ(cache->count_endpoints(network_id), 1u)
+        << "malformed predecessor rows must not consume the bounded v3 "
+           "population";
+    auto failures = index_entries(cache->load_active_failures(network_id));
+    ASSERT_EQ(failures.size(), 1u);
+    ASSERT_TRUE(failures.contains("history.example.com:51235"));
+    EXPECT_EQ(failures.at("history.example.com:51235").failure_count, 5u);
 }
 
 TEST(PeerEndpointCache, FutureSchemaVersionIsRefusedWithoutDowngrade)
@@ -204,7 +234,7 @@ TEST(PeerEndpointCache, FutureSchemaVersionIsRefusedWithoutDowngrade)
     EXPECT_THROW(
         (void)PeerEndpointCache::open(temp.string()), std::runtime_error);
 
-    exec_sql(temp.string(), "PRAGMA user_version = 2;");
+    exec_sql(temp.string(), "PRAGMA user_version = 3;");
     auto cache = PeerEndpointCache::open(temp.string());
     auto failures = cache->load_active_failures(42);
     ASSERT_EQ(failures.size(), 1u)
@@ -231,6 +261,8 @@ TEST(PeerEndpointCache, CanonicalIdentityCoversHostnamesAndNumericAddresses)
     cache->remember_status(network_id, "45.139.107.65:21337", covering);
     cache->remember_connect_failure(
         network_id, "[0:0:0:0:0:ffff:2d8b:6b41]:21337");
+    cache->remember_discovered(network_id, "[::g]:51235");
+    cache->remember_connect_failure(network_id, "bad/host:51235");
 
     EXPECT_EQ(cache->count_endpoints(network_id), 3u);
     auto failures = index_entries(cache->load_active_failures(network_id));
@@ -238,6 +270,11 @@ TEST(PeerEndpointCache, CanonicalIdentityCoversHostnamesAndNumericAddresses)
     EXPECT_TRUE(failures.contains("history.example.com:51235"));
     EXPECT_TRUE(failures.contains("[2001:4860:4860::8888]:51235"));
     EXPECT_TRUE(failures.contains("45.139.107.65:21337"));
+    auto bootstrap =
+        index_entries(cache->load_bootstrap_candidates(network_id, 8));
+    EXPECT_FALSE(bootstrap.contains("[::g]:51235"));
+    EXPECT_FALSE(bootstrap.contains("bad/host:51235"))
+        << "malformed identities must never consume durable selection capacity";
 }
 
 TEST(PeerEndpointCache, RetentionAndQueryPopulationAreHardBounded)

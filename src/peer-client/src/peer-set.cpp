@@ -2070,9 +2070,10 @@ PeerSet::queue_connect(std::string const& endpoint)
         });
         return;
     }
-    auto key = canonical_endpoint(endpoint);
-    if (key.empty())
+    auto normalized = EndpointTracker::normalize_endpoint_identity(endpoint);
+    if (!normalized)
         return;
+    auto key = std::move(*normalized);
     auto const now = std::chrono::steady_clock::now();
 
     if (connections_.count(key) || in_flight_.count(key) || queued_.count(key))
@@ -2108,9 +2109,12 @@ PeerSet::queue_crawl(std::string const& endpoint)
     if (options_.max_in_flight_crawls == 0)
         return;
 
-    auto key = canonical_endpoint(endpoint);
+    auto normalized = EndpointTracker::normalize_endpoint_identity(endpoint);
+    if (!normalized)
+        return;
+    auto key = std::move(*normalized);
     auto const now = std::chrono::steady_clock::now();
-    if (key.empty() || crawl_in_flight_.count(key) || crawl_queued_.count(key))
+    if (crawl_in_flight_.count(key) || crawl_queued_.count(key))
     {
         return;
     }

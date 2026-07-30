@@ -8560,6 +8560,31 @@ TEST(PeerSetEndpointIdentity, PureIpv6RemainsOneKeyThroughConnectFailure)
     EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity("::1", 0));
     EXPECT_FALSE(
         EndpointTracker::normalize_endpoint_identity("[[::1]]", port));
+    EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity("::g", port));
+    EXPECT_FALSE(
+        EndpointTracker::normalize_endpoint_identity("bad/host", port));
+    EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity(
+        "::ffff:not-an-ip", port));
+    EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity(
+        "[history.example.com]", port));
+    EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity(
+        "[history.example.com]:" + std::to_string(port)));
+    EXPECT_EQ(
+        EndpointTracker::normalize_endpoint_identity(
+            "[::ffff:192.0.2.10]", port),
+        "192.0.2.10:" + std::to_string(port));
+    EXPECT_FALSE(
+        EndpointTracker::normalize_endpoint_identity("bad..host", port));
+    EXPECT_FALSE(
+        EndpointTracker::normalize_endpoint_identity("-bad.example", port));
+    EXPECT_FALSE(
+        EndpointTracker::normalize_endpoint_identity("bad-.example", port));
+    EXPECT_FALSE(
+        EndpointTracker::normalize_endpoint_identity("bad_host", port));
+    EXPECT_EQ(
+        EndpointTracker::normalize_endpoint_identity(
+            "History.Example.COM.", port),
+        "history.example.com:" + std::to_string(port));
 
     auto peers = PeerSet::create(
         io,
@@ -8587,6 +8612,12 @@ TEST(PeerSetEndpointIdentity, PureIpv6RemainsOneKeyThroughConnectFailure)
     peers->start_connect("", port);
     peers->start_connect("::1", 0);
     peers->start_connect("[[::1]]", port);
+    peers->start_connect("::g", port);
+    peers->start_connect("bad/host", port);
+    PeerSetTestAccess::queue_connect(
+        io, peers, "[::g]:" + std::to_string(port));
+    PeerSetTestAccess::queue_connect(
+        io, peers, "bad/host:" + std::to_string(port));
     io.run_for(10ms);
     io.restart();
     EXPECT_EQ(PeerSetTestAccess::snapshot(io, peers).queued_connects, 0u)
