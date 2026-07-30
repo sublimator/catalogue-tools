@@ -1,6 +1,7 @@
 #include "xprv/peer-json.h"
 
 #include <cctype>
+#include <charconv>
 #include <string_view>
 
 namespace xprv {
@@ -35,6 +36,17 @@ parse_bool_value(std::string_view value)
     return std::nullopt;
 }
 
+std::optional<uint32_t>
+parse_uint32_value(std::string_view value)
+{
+    uint32_t parsed = 0;
+    auto const [end, error] =
+        std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (error != std::errc{} || end != value.data() + value.size())
+        return std::nullopt;
+    return parsed;
+}
+
 std::string
 network_slug_for_id(uint32_t network_id)
 {
@@ -55,6 +67,8 @@ filters_to_json(PeerSnapshotFilters const& filters)
     boost::json::object out;
     if (filters.connected.has_value())
         out["connected"] = *filters.connected;
+    if (filters.ledger.has_value())
+        out["ledger"] = *filters.ledger;
     return out;
 }
 
@@ -79,6 +93,8 @@ parse_peer_snapshot_filters(std::map<std::string, std::string> const& params)
 
     if (auto it = params.find("connected"); it != params.end())
         filters.connected = parse_bool_value(it->second);
+    if (auto it = params.find("ledger"); it != params.end())
+        filters.ledger = parse_uint32_value(it->second);
 
     return filters;
 }
@@ -90,6 +106,12 @@ matches_peer_snapshot_filters(
 {
     if (filters.connected.has_value() && peer.connected != *filters.connected)
         return false;
+    if (filters.ledger.has_value() &&
+        (peer.first_seq == 0 || peer.last_seq == 0 ||
+         *filters.ledger < peer.first_seq || *filters.ledger > peer.last_seq))
+    {
+        return false;
+    }
 
     return true;
 }
@@ -120,6 +142,10 @@ peer_snapshot_to_json(
     body["queued_connects"] = snapshot.queued_connects;
     body["crawl_in_flight"] = snapshot.crawl_in_flight;
     body["queued_crawls"] = snapshot.queued_crawls;
+    body["targeted_connects"] = snapshot.targeted_connects;
+    body["cached_endpoint_limit"] = snapshot.cached_endpoint_limit;
+    body["max_targeted_connect_attempts"] =
+        snapshot.max_targeted_connect_attempts;
 
     boost::json::array wanted_ledgers;
     for (auto ledger_seq : snapshot.wanted_ledgers)
@@ -141,9 +167,18 @@ peer_snapshot_to_json(
         item["crawl_in_flight"] = peer.crawl_in_flight;
         item["queued_crawl"] = peer.queued_crawl;
         item["crawled"] = peer.crawled;
+        item["targeted_connect"] = peer.targeted_connect;
         item["first_seq"] = peer.first_seq;
         item["last_seq"] = peer.last_seq;
         item["current_seq"] = peer.current_seq;
+        if (peer.ready)
+            item["range_source"] = "live_handshake";
+        else if (peer.range_is_persistent_hint)
+            item["range_source"] = "persistent_hint";
+        else if (peer.first_seq != 0 && peer.last_seq != 0)
+            item["range_source"] = "observed";
+        else
+            item["range_source"] = "unknown";
         item["last_seen_at"] = peer.last_seen_at;
         item["last_success_at"] = peer.last_success_at;
         item["last_failure_at"] = peer.last_failure_at;
@@ -153,6 +188,10 @@ peer_snapshot_to_json(
         item["recent_failed_ledgers"] = peer.recent_failed_ledgers;
         item["selection_count"] = peer.selection_count;
         item["last_selected_ticket"] = peer.last_selected_ticket;
+        boost::json::array targeted_ledgers;
+        for (auto ledger_seq : peer.targeted_ledgers)
+            targeted_ledgers.push_back(ledger_seq);
+        item["targeted_ledgers"] = std::move(targeted_ledgers);
         if (!peer.peer_headers.empty())
         {
             boost::json::object headers;

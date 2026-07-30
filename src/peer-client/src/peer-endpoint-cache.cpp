@@ -58,6 +58,42 @@ private:
     sqlite3_stmt* stmt_ = nullptr;
 };
 
+PeerEndpointCache::Entry
+read_entry(sqlite3_stmt* stmt)
+{
+    PeerEndpointCache::Entry entry;
+    auto const* endpoint_text = sqlite3_column_text(stmt, 0);
+    entry.endpoint =
+        endpoint_text ? reinterpret_cast<char const*>(endpoint_text) : "";
+    entry.status.first_seq = static_cast<uint32_t>(sqlite3_column_int(stmt, 1));
+    entry.status.last_seq = static_cast<uint32_t>(sqlite3_column_int(stmt, 2));
+    entry.status.current_seq =
+        static_cast<uint32_t>(sqlite3_column_int(stmt, 3));
+    entry.status.last_seen = std::chrono::steady_clock::now();
+    entry.last_seen_at =
+        static_cast<std::int64_t>(sqlite3_column_int64(stmt, 4));
+    entry.last_success_at =
+        static_cast<std::int64_t>(sqlite3_column_int64(stmt, 5));
+    entry.last_failure_at =
+        static_cast<std::int64_t>(sqlite3_column_int64(stmt, 6));
+    entry.success_count =
+        static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 7));
+    entry.failure_count =
+        static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 8));
+    entry.seen_crawl = sqlite3_column_int(stmt, 9) != 0;
+    entry.seen_endpoints = sqlite3_column_int(stmt, 10) != 0;
+    entry.seen_redirect = sqlite3_column_int(stmt, 11) != 0;
+    entry.connected_ok = sqlite3_column_int(stmt, 12) != 0;
+    return entry;
+}
+
+void
+require_rows_complete(sqlite3* db, int rc)
+{
+    if (rc != SQLITE_DONE)
+        throw std::runtime_error(sqlite3_errmsg(db));
+}
+
 }  // namespace
 
 std::shared_ptr<PeerEndpointCache>
@@ -157,6 +193,10 @@ PeerEndpointCache::initialize_schema()
         "  success_count DESC,"
         "  failure_count ASC"
         ");");
+    exec_sql(
+        db_,
+        "CREATE INDEX IF NOT EXISTS peer_endpoints_range_idx "
+        "ON peer_endpoints(network_id, first_seq, last_seq);");
 }
 
 bool
@@ -222,37 +262,64 @@ PeerEndpointCache::load_bootstrap_candidates(
         sqlite3_bind_int64(stmt.get(), 2, static_cast<sqlite3_int64>(limit));
 
         std::vector<Entry> result;
-        while (sqlite3_step(stmt.get()) == SQLITE_ROW)
-        {
-            Entry entry;
-            auto const* endpoint_text = sqlite3_column_text(stmt.get(), 0);
-            entry.endpoint = endpoint_text
-                ? reinterpret_cast<char const*>(endpoint_text)
-                : "";
-            entry.status.first_seq =
-                static_cast<uint32_t>(sqlite3_column_int(stmt.get(), 1));
-            entry.status.last_seq =
-                static_cast<uint32_t>(sqlite3_column_int(stmt.get(), 2));
-            entry.status.current_seq =
-                static_cast<uint32_t>(sqlite3_column_int(stmt.get(), 3));
-            entry.status.last_seen = std::chrono::steady_clock::now();
-            entry.last_seen_at =
-                static_cast<std::int64_t>(sqlite3_column_int64(stmt.get(), 4));
-            entry.last_success_at =
-                static_cast<std::int64_t>(sqlite3_column_int64(stmt.get(), 5));
-            entry.last_failure_at =
-                static_cast<std::int64_t>(sqlite3_column_int64(stmt.get(), 6));
-            entry.success_count =
-                static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 7));
-            entry.failure_count =
-                static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 8));
-            entry.seen_crawl = sqlite3_column_int(stmt.get(), 9) != 0;
-            entry.seen_endpoints = sqlite3_column_int(stmt.get(), 10) != 0;
-            entry.seen_redirect = sqlite3_column_int(stmt.get(), 11) != 0;
-            entry.connected_ok = sqlite3_column_int(stmt.get(), 12) != 0;
-            result.push_back(std::move(entry));
-        }
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(stmt.get())) == SQLITE_ROW)
+            result.push_back(read_entry(stmt.get()));
+        require_rows_complete(db_, rc);
 
+        return result;
+    }
+    catch (...)
+    {
+        const_cast<PeerEndpointCache*>(this)->disable();
+        throw;
+    }
+}
+
+std::vector<PeerEndpointCache::Entry>
+PeerEndpointCache::load_covering_candidates(
+    uint32_t network_id,
+    uint32_t ledger_seq,
+    std::size_t limit) const
+{
+    std::lock_guard lock(mutex_);
+    if (is_disabled() || limit == 0)
+        return {};
+
+    try
+    {
+        Statement stmt(
+            db_,
+            "SELECT endpoint, first_seq, last_seq, current_seq, last_seen_at, "
+            "       last_success_at, last_failure_at, success_count, "
+            "       failure_count, seen_crawl, seen_endpoints, "
+            "       seen_redirect, connected_ok "
+            "FROM peer_endpoints "
+            "WHERE network_id = ? "
+            "  AND first_seq > 0 AND last_seq > 0 "
+            "  AND first_seq <= ? AND last_seq >= ? "
+            "ORDER BY "
+            "  connected_ok DESC, "
+            "  CASE WHEN last_success_at > 0 THEN 1 ELSE 0 END DESC, "
+            "  last_success_at DESC, "
+            "  last_seen_at DESC, "
+            "  failure_count ASC, "
+            "  success_count DESC, "
+            "  endpoint ASC "
+            "LIMIT ?");
+
+        sqlite3_bind_int(stmt.get(), 1, static_cast<int>(network_id));
+        sqlite3_bind_int64(
+            stmt.get(), 2, static_cast<sqlite3_int64>(ledger_seq));
+        sqlite3_bind_int64(
+            stmt.get(), 3, static_cast<sqlite3_int64>(ledger_seq));
+        sqlite3_bind_int64(stmt.get(), 4, static_cast<sqlite3_int64>(limit));
+
+        std::vector<Entry> result;
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(stmt.get())) == SQLITE_ROW)
+            result.push_back(read_entry(stmt.get()));
+        require_rows_complete(db_, rc);
         return result;
     }
     catch (...)

@@ -465,7 +465,7 @@ PeerSet::co_stop()
                     // mutation_class=stop_driver calls=co_disconnect
                     // label=join_exact_session_physical_drain_receipt
                     co_await session
-                        ->co_disconnect(); //@@authority-target ids=prv.T0147
+                        ->co_disconnect();  //@@authority-target ids=prv.T0147
                 }
                 assert(self->strand_.running_in_this_thread());
 
@@ -565,7 +565,7 @@ PeerSet::begin_stop_on_strand()
             // commit=peer_set_strand touches=prv.S0037
             // calls=disconnect
             // label=request_connect_servant_cancellation_without_retirement
-            servant.session->disconnect(); //@@authority-target ids=prv.T0182
+            servant.session->disconnect();  //@@authority-target ids=prv.T0182
         }
         catch (...)
         {
@@ -650,7 +650,7 @@ PeerSet::complete_connect_servant(
     // bind=expression_statement@6f2db77abd01a92f
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0037 label=consume_background_connect_servant_receipt
-    in_flight_.erase(key); //@@authority-target ids=prv.T0091
+    in_flight_.erase(key);  //@@authority-target ids=prv.T0091
     notify_shutdown_progress();
 
     try
@@ -744,7 +744,7 @@ PeerSet::finish_connect_servant(
                 // calls=co_disconnect
                 // label=join_escaped_connect_servant_physical_receipt
                 co_await session
-                    ->co_disconnect(); //@@authority-target ids=prv.T0183
+                    ->co_disconnect();  //@@authority-target ids=prv.T0183
             }
             catch (...)
             {
@@ -891,7 +891,7 @@ PeerSet::complete_crawl_servant(
     // bind=expression_statement@660eab6dbbe007d7
     // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
     // touches=prv.S0038 label=consume_background_crawl_servant_receipt
-    crawl_in_flight_.erase(key); //@@authority-target ids=prv.T0092
+    crawl_in_flight_.erase(key);  //@@authority-target ids=prv.T0092
     notify_shutdown_progress();
 
     try
@@ -1079,6 +1079,8 @@ PeerSet::update_endpoint_stats(PeerEndpointCache::Entry const& entry)
     stats.seen_endpoints = entry.seen_endpoints;
     stats.seen_redirect = entry.seen_redirect;
     stats.connected_ok = entry.connected_ok;
+    stats.range_is_persistent_hint =
+        entry.status.first_seq != 0 && entry.status.last_seq != 0;
 }
 
 void
@@ -1138,6 +1140,7 @@ PeerSet::note_status(std::string const& endpoint, PeerStatus const& status)
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     stats.status = status;
+    stats.range_is_persistent_hint = false;
     stats.last_seen_at = now_unix();
     queue_crawl(key);
     if (should_connect_endpoint(key))
@@ -1168,6 +1171,7 @@ PeerSet::note_connect_success(
     auto& stats = endpoint_stats_[key];
     auto const now = now_unix();
     stats.status = status;
+    stats.range_is_persistent_hint = false;
     stats.last_seen_at = now;
     stats.last_success_at = now;
     stats.success_count++;
@@ -3349,10 +3353,93 @@ PeerSet::finish_targeted_authorization(
     }
 }
 
+//@@authority transition=prv.T0217 status=provisional scope=function
+// bind=catl::peer_client::load_cached_candidates_for@75f0027fce6aa348
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0008
+// label=merge_bounded_persistent_history_hints_without_overwriting_live_state
+std::vector<std::string>
+PeerSet::load_cached_candidates_for(uint32_t ledger_seq)
+{
+    ASSERT_ON_STRAND();
+    if (!endpoint_cache_ || options_.cached_endpoint_limit == 0)
+        return {};
+
+    std::vector<PeerEndpointCache::Entry> cached;
+    try
+    {
+        cached = endpoint_cache_->load_covering_candidates(
+            network_id_, ledger_seq, options_.cached_endpoint_limit);
+    }
+    catch (std::exception const& e)
+    {
+        PLOGW(
+            log_,
+            "[",
+            net_label_,
+            "] Targeted peer cache lookup failed for ledger ",
+            ledger_seq,
+            ": ",
+            e.what());
+        return {};
+    }
+
+    std::vector<std::string> candidates;
+    std::unordered_set<std::string> seen;
+    candidates.reserve(cached.size());
+    for (auto const& entry : cached)
+    {
+        auto normalized =
+            EndpointTracker::normalize_discovered_endpoint(entry.endpoint);
+        if (!normalized || !seen.insert(*normalized).second)
+            continue;
+
+        auto const& key = *normalized;
+        // A persisted range is a search hint, not a fresh observation. Keep
+        // any current owner-local range intact, but let the hint fill an
+        // otherwise unknown range so a recently rediscovered endpoint can be
+        // ranked for this bounded search. Do not publish the imported range
+        // through EndpointTracker's live-status observer.
+        auto const current = endpoint_stats_.find(key);
+        if (current == endpoint_stats_.end())
+        {
+            auto normalized_entry = entry;
+            normalized_entry.endpoint = key;
+            update_endpoint_stats(normalized_entry);
+        }
+        else if (
+            current->second.status.first_seq == 0 ||
+            current->second.status.last_seq == 0)
+        {
+            current->second.status = entry.status;
+            current->second.range_is_persistent_hint = true;
+            current->second.last_success_at = std::max(
+                current->second.last_success_at, entry.last_success_at);
+            current->second.last_failure_at = std::max(
+                current->second.last_failure_at, entry.last_failure_at);
+            current->second.success_count =
+                std::max(current->second.success_count, entry.success_count);
+            current->second.failure_count =
+                std::max(current->second.failure_count, entry.failure_count);
+            current->second.seen_crawl =
+                current->second.seen_crawl || entry.seen_crawl;
+            current->second.seen_endpoints =
+                current->second.seen_endpoints || entry.seen_endpoints;
+            current->second.seen_redirect =
+                current->second.seen_redirect || entry.seen_redirect;
+            current->second.connected_ok =
+                current->second.connected_ok || entry.connected_ok;
+        }
+        candidates.push_back(key);
+    }
+    return candidates;
+}
+
 //@@authority transition=prv.T0027 status=provisional scope=function
 // bind=catl::peer_client::try_candidates_for@2f8a29b36dd49275
 // owner=unresolved owner_hypothesis=peer_set commit=strand
-// touches=prv.S0009 label=queue_bounded_history_targeted_connections
+// touches=prv.S0008,prv.S0009
+// label=queue_bounded_history_targeted_connections
 std::vector<std::string>
 PeerSet::try_candidates_for(
     TargetedConnectAuthorizationPtr const& authorization,
@@ -3361,12 +3448,67 @@ PeerSet::try_candidates_for(
 {
     ASSERT_ON_STRAND();
     if (shutdown_ingress_sealed_.load(std::memory_order_acquire))
+    {
+        PLOGI(
+            log_,
+            "[",
+            net_label_,
+            "] Targeted peer search suppressed: shutdown ingress is sealed");
         return {};
-    if (!authorization || !authorization->is_active())
+    }
+    if (!authorization)
+    {
+        PLOGW(
+            log_,
+            "[",
+            net_label_,
+            "] Targeted peer search suppressed: missing authorization");
         return {};
+    }
+    if (!authorization->is_active())
+    {
+        PLOGI(
+            log_,
+            "[",
+            net_label_,
+            "] Targeted peer search for ledger ",
+            authorization->ledger_seq,
+            " suppressed: authorization is inactive");
+        return {};
+    }
     auto const ledger_seq = authorization->ledger_seq;
 
     auto candidates = tracker_->all_endpoints();
+    auto cached_candidates = load_cached_candidates_for(ledger_seq);
+    candidates.insert(
+        candidates.end(),
+        std::make_move_iterator(cached_candidates.begin()),
+        std::make_move_iterator(cached_candidates.end()));
+
+    std::vector<std::string> unique_candidates;
+    std::unordered_set<std::string> seen_candidates;
+    unique_candidates.reserve(candidates.size());
+    for (auto const& endpoint : candidates)
+    {
+        auto key = canonical_endpoint(endpoint);
+        if (!key.empty() && seen_candidates.insert(key).second)
+            unique_candidates.push_back(std::move(key));
+    }
+    candidates = std::move(unique_candidates);
+
+    PLOGI(
+        log_,
+        "[",
+        net_label_,
+        "] Targeted peer search for ledger ",
+        ledger_seq,
+        ": ",
+        cached_candidates.size(),
+        " persistent covering hint(s), ",
+        candidates.size(),
+        " canonical candidate(s), budget=",
+        connect_budget);
+
     for (auto const& endpoint : candidates)
         queue_crawl(endpoint);
 
@@ -4093,9 +4235,26 @@ PeerSet::wait_for_covering_peer_on_strand(
 
     std::unordered_set<std::string> targeted_candidates;
     std::size_t targeted_connects = 0;
+    bool targeted_budget_reported = false;
     auto queue_targeted_candidate = [&]() {
         if (targeted_connects >= options_.max_targeted_connect_attempts)
+        {
+            if (!targeted_budget_reported)
+            {
+                targeted_budget_reported = true;
+                PLOGI(
+                    log_,
+                    "[",
+                    net_label_,
+                    "] Targeted peer search for ledger ",
+                    ledger_seq,
+                    " suppressed: attempted=",
+                    targeted_connects,
+                    ", limit=",
+                    options_.max_targeted_connect_attempts);
+            }
             return;
+        }
         auto connect_excluded = excluded;
         connect_excluded.insert(
             targeted_candidates.begin(), targeted_candidates.end());
@@ -4132,6 +4291,35 @@ PeerSet::wait_for_covering_peer_on_strand(
     // Probe a bounded number of disconnected candidates while this wait is
     // active. Admission may rotate one unsuitable peer in the same pool.
     queue_targeted_candidate();
+
+    auto log_no_covering_peer = [&]() {
+        std::vector<std::string> selected_candidates(
+            targeted_candidates.begin(), targeted_candidates.end());
+        std::sort(selected_candidates.begin(), selected_candidates.end());
+        std::ostringstream candidates_text;
+        candidates_text << '[';
+        for (std::size_t index = 0; index < selected_candidates.size(); ++index)
+        {
+            if (index != 0)
+                candidates_text << ", ";
+            candidates_text << selected_candidates[index];
+        }
+        candidates_text << ']';
+        PLOGW(
+            log_,
+            "[",
+            net_label_,
+            "] No peer advertising ledger ",
+            ledger_seq,
+            " after ",
+            timeout_secs,
+            "s; targeted_candidates=",
+            selected_candidates.size(),
+            '/',
+            options_.max_targeted_connect_attempts,
+            ' ',
+            candidates_text.str());
+    };
 
     PLOGI(
         log_,
@@ -4224,15 +4412,7 @@ PeerSet::wait_for_covering_peer_on_strand(
             }
             case PeerDecision::give_up:
                 cleanup.clean_now();
-                PLOGW(
-                    log_,
-                    "[",
-                    net_label_,
-                    "] No peer advertising ledger ",
-                    ledger_seq,
-                    " after ",
-                    timeout_secs,
-                    "s");
+                log_no_covering_peer();
                 co_return nullptr;
 
             case PeerDecision::wait:
@@ -4286,15 +4466,7 @@ PeerSet::wait_for_covering_peer_on_strand(
     }
 
     cleanup.clean_now();
-    PLOGW(
-        log_,
-        "[",
-        net_label_,
-        "] No peer advertising ledger ",
-        ledger_seq,
-        " after ",
-        timeout_secs,
-        "s");
+    log_no_covering_peer();
 
     co_return nullptr;
 }
@@ -4618,6 +4790,9 @@ PeerSet::snapshot_unsafe() const
     out.queued_connects = pending_connects_.size();
     out.crawl_in_flight = crawl_in_flight_.size();
     out.queued_crawls = pending_crawls_.size();
+    out.targeted_connects = targeted_connects_.size();
+    out.cached_endpoint_limit = options_.cached_endpoint_limit;
+    out.max_targeted_connect_attempts = options_.max_targeted_connect_attempts;
     out.wanted_ledgers.reserve(wanted_ledgers_.size());
     for (auto const& [ledger_seq, _] : wanted_ledgers_)
         out.wanted_ledgers.push_back(ledger_seq);
@@ -4693,6 +4868,23 @@ PeerSet::snapshot_unsafe() const
         entry.crawl_in_flight = crawl_in_flight_.count(key) > 0;
         entry.queued_crawl = crawl_queued_.count(key) > 0;
         entry.crawled = crawled_.count(key) > 0;
+        if (auto targeted = targeted_connects_.find(key);
+            targeted != targeted_connects_.end())
+        {
+            for (auto const& authorization : targeted->second)
+            {
+                if (authorization && authorization->is_active())
+                    entry.targeted_ledgers.push_back(authorization->ledger_seq);
+            }
+            std::sort(
+                entry.targeted_ledgers.begin(), entry.targeted_ledgers.end());
+            entry.targeted_ledgers.erase(
+                std::unique(
+                    entry.targeted_ledgers.begin(),
+                    entry.targeted_ledgers.end()),
+                entry.targeted_ledgers.end());
+            entry.targeted_connect = !entry.targeted_ledgers.empty();
+        }
 
         if (auto stats_it = endpoint_stats_.find(key);
             stats_it != endpoint_stats_.end())
@@ -4701,6 +4893,7 @@ PeerSet::snapshot_unsafe() const
             entry.first_seq = stats.status.first_seq;
             entry.last_seq = stats.status.last_seq;
             entry.current_seq = stats.status.current_seq;
+            entry.range_is_persistent_hint = stats.range_is_persistent_hint;
             entry.last_seen_at = stats.last_seen_at;
             entry.last_success_at = stats.last_success_at;
             entry.last_failure_at = stats.last_failure_at;
@@ -4727,6 +4920,12 @@ PeerSet::snapshot_unsafe() const
             if (conn_it->second.session && conn_it->second.session->is_ready())
             {
                 entry.ready = true;
+                auto const range =
+                    conn_it->second.session->advertised_ledger_range();
+                entry.first_seq = range.first_seq;
+                entry.last_seq = range.last_seq;
+                entry.current_seq = conn_it->second.session->peer_ledger_seq();
+                entry.range_is_persistent_hint = false;
                 out.ready_peers++;
             }
         }

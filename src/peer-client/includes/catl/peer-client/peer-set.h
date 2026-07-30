@@ -261,6 +261,8 @@ public:
         bool crawl_in_flight = false;
         bool queued_crawl = false;
         bool crawled = false;
+        bool targeted_connect = false;
+        bool range_is_persistent_hint = false;
         uint32_t first_seq = 0;
         uint32_t last_seq = 0;
         uint32_t current_seq = 0;
@@ -273,6 +275,7 @@ public:
         std::size_t recent_failed_ledgers = 0;
         std::uint64_t selection_count = 0;
         std::uint64_t last_selected_ticket = 0;
+        std::vector<uint32_t> targeted_ledgers;
         std::map<std::string, std::string> peer_headers;
     };
 
@@ -300,6 +303,9 @@ public:
         size_t queued_connects = 0;
         size_t crawl_in_flight = 0;
         size_t queued_crawls = 0;
+        size_t targeted_connects = 0;
+        size_t cached_endpoint_limit = 0;
+        size_t max_targeted_connect_attempts = 0;
         uint64_t total_connects = 0;
         uint64_t total_disconnects = 0;
         size_t crawled_size = 0;
@@ -740,6 +746,9 @@ private:
     start_tracked_endpoints();
 
     std::vector<std::string>
+    load_cached_candidates_for(uint32_t ledger_seq);
+
+    std::vector<std::string>
     try_candidates_for(
         TargetedConnectAuthorizationPtr const& authorization,
         std::unordered_set<std::string> const& selection_excluded,
@@ -883,6 +892,7 @@ private:
         bool seen_endpoints = false;
         bool seen_redirect = false;
         bool connected_ok = false;
+        bool range_is_persistent_hint = false;
         std::chrono::steady_clock::time_point crawl_private_until{};
 
         // Ledger seqs this peer has failed to serve. Entries expire

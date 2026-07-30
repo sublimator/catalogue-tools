@@ -15,9 +15,9 @@ namespace catl::peer_client {
 
 /// Persistent cache of peer endpoints discovered during bootstrap.
 ///
-/// This is intentionally small and synchronous. xprv drives peers from a
-/// single io_context thread, so immediate event-driven writes are simple and
-/// keep the bootstrap state fresh across process runs.
+/// This is intentionally small, synchronous, and internally mutex-protected.
+/// Immediate event-driven writes keep bootstrap state fresh across process
+/// runs without introducing another asynchronous owner.
 class PeerEndpointCache
 {
 public:
@@ -43,6 +43,15 @@ public:
 
     std::vector<Entry>
     load_bootstrap_candidates(uint32_t network_id, std::size_t limit) const;
+
+    /// Load bounded persistent hints whose last observed range covered the
+    /// requested ledger. These rows authorize search only; a live handshake
+    /// must still revalidate coverage before the peer can be used.
+    std::vector<Entry>
+    load_covering_candidates(
+        uint32_t network_id,
+        uint32_t ledger_seq,
+        std::size_t limit) const;
 
     std::size_t
     count_endpoints(uint32_t network_id) const;
@@ -99,6 +108,11 @@ private:
     now_unix();
 
     std::string path_;
+    //@@authority state=prv.S0073 status=provisional scope=field
+    // bind=catl::peer_client::PeerEndpointCache::db_@ea77b8c353c4656e
+    // owner=unresolved owner_hypothesis=peer_endpoint_cache
+    // observed_home=peer_endpoint_cache
+    // label=persistent_peer_endpoint_range_search_hints
     sqlite3* db_ = nullptr;
     mutable std::mutex mutex_;
     bool disabled_ = false;
