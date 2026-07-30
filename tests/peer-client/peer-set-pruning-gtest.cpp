@@ -662,6 +662,37 @@ TEST(PeerSetPruning, TargetedCandidateProbeExcludesKnownNonCoveringPeer)
         io, peers, "recent.example.com:1"));
 }
 
+TEST(PeerSetPruning, RediscoveredUnknownEndpointIsNotExcludedByStaleRange)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    constexpr uint32_t ledger_seq = 500;
+    auto const endpoint = std::string("rediscovered.example.com:1");
+
+    PeerSetTestAccess::set_status(
+        io,
+        peers,
+        endpoint,
+        {.first_seq = 800, .last_seq = 1800, .current_seq = 1800});
+    peers->tracker()->remove(endpoint);
+    PeerSetTestAccess::add_discovered(io, peers, endpoint);
+    PeerSetTestAccess::post_note_discovered(peers, endpoint);
+    io.run();
+    io.restart();
+
+    auto queued =
+        PeerSetTestAccess::try_candidates_for(io, peers, ledger_seq, {}, 1);
+    ASSERT_EQ(queued.size(), 1u);
+    EXPECT_EQ(queued.front(), endpoint);
+    EXPECT_TRUE(PeerSetTestAccess::is_targeted_connect(io, peers, endpoint));
+}
+
 TEST(PeerSetPruning, TargetedCandidateUpgradesExistingQueuedConnect)
 {
     asio::io_context io;
@@ -717,6 +748,46 @@ TEST(PeerSetPruning, TimedOutWaitRevokesQueuedReplacementProbe)
     io.run();
 
     EXPECT_FALSE(result);
+    io.restart();
+    EXPECT_FALSE(PeerSetTestAccess::is_targeted_connect(io, peers, endpoint));
+    EXPECT_FALSE(PeerSetTestAccess::has_wanted_ledger(io, peers, ledger_seq));
+}
+
+TEST(PeerSetPruning, TargetedQueuedCandidateExtendsVisibleWaitBound)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    constexpr uint32_t ledger_seq = 500;
+    auto const endpoint = std::string("queued-target.example.com:1");
+    PeerSetTestAccess::set_status(
+        io,
+        peers,
+        endpoint,
+        {.first_seq = 400, .last_seq = 600, .current_seq = 600});
+
+    PeerGenerationPin result;
+    auto const started = std::chrono::steady_clock::now();
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            result = co_await peers->wait_for_covering_peer(ledger_seq, 1);
+        },
+        asio::detached);
+    io.run();
+    auto const elapsed = std::chrono::steady_clock::now() - started;
+
+    EXPECT_FALSE(result);
+    EXPECT_GE(elapsed, 1500ms)
+        << "a selected queued targeted candidate must not report terminality "
+           "at the first requester deadline";
     io.restart();
     EXPECT_FALSE(PeerSetTestAccess::is_targeted_connect(io, peers, endpoint));
     EXPECT_FALSE(PeerSetTestAccess::has_wanted_ledger(io, peers, ledger_seq));

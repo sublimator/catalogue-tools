@@ -1084,6 +1084,7 @@ PeerSet::update_endpoint_stats(PeerEndpointCache::Entry const& entry)
     stats.seen_endpoints = entry.seen_endpoints;
     stats.seen_redirect = entry.seen_redirect;
     stats.connected_ok = entry.connected_ok;
+    stats.range_is_current_live = false;
     stats.range_is_persistent_hint =
         entry.status.first_seq != 0 && entry.status.last_seq != 0;
 }
@@ -1102,6 +1103,15 @@ PeerSet::note_discovered(std::string const& endpoint, DiscoverySource source)
     }
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
+    auto const current_status = tracker_->get_status(key);
+    auto const current_range_known = current_status &&
+        current_status->first_seq != 0 && current_status->last_seq != 0;
+    if (!current_range_known)
+    {
+        stats.status = {};
+        stats.range_is_current_live = false;
+        stats.range_is_persistent_hint = false;
+    }
     stats.last_seen_at = now_unix();
     switch (source)
     {
@@ -1145,6 +1155,7 @@ PeerSet::note_status(std::string const& endpoint, PeerStatus const& status)
     auto key = canonical_endpoint(endpoint);
     auto& stats = endpoint_stats_[key];
     stats.status = status;
+    stats.range_is_current_live = true;
     stats.range_is_persistent_hint = false;
     stats.last_seen_at = now_unix();
     queue_crawl(key);
@@ -1176,6 +1187,7 @@ PeerSet::note_connect_success(
     auto& stats = endpoint_stats_[key];
     auto const now = now_unix();
     stats.status = status;
+    stats.range_is_current_live = true;
     stats.range_is_persistent_hint = false;
     stats.last_seen_at = now;
     stats.last_success_at = now;
@@ -3538,6 +3550,7 @@ PeerSet::load_cached_candidates_for(uint32_t ledger_seq)
             if (stats.status.first_seq == 0 || stats.status.last_seq == 0)
             {
                 stats.status = entry.status;
+                stats.range_is_current_live = false;
                 stats.range_is_persistent_hint = true;
             }
 
@@ -3651,11 +3664,15 @@ PeerSet::try_candidates_for(
         " canonical candidate(s), budget=",
         connect_budget);
 
-    auto range_for = [&](std::string const& raw_endpoint) {
+    auto stats_for =
+        [&](std::string const& raw_endpoint) -> EndpointStats const* {
         auto const key = canonical_endpoint(raw_endpoint);
         auto stats = endpoint_stats_.find(key);
-        return stats != endpoint_stats_.end() ? stats->second.status
-                                              : PeerStatus{};
+        return stats != endpoint_stats_.end() ? &stats->second : nullptr;
+    };
+    auto range_for = [&](std::string const& raw_endpoint) {
+        auto const* stats = stats_for(raw_endpoint);
+        return stats ? stats->status : PeerStatus{};
     };
     auto const now = std::chrono::steady_clock::now();
     candidates.erase(
@@ -3664,10 +3681,15 @@ PeerSet::try_candidates_for(
             candidates.end(),
             [&](std::string const& raw_endpoint) {
                 auto const key = canonical_endpoint(raw_endpoint);
-                auto const status = range_for(key);
+                auto const* stats = stats_for(key);
+                auto const status = stats ? stats->status : PeerStatus{};
                 auto const has_known_range =
                     status.first_seq != 0 && status.last_seq != 0;
-                auto const known_not_covering = has_known_range &&
+                auto const range_authorizes_hard_exclusion = stats &&
+                    (stats->range_is_current_live ||
+                     stats->range_is_persistent_hint);
+                auto const known_not_covering =
+                    range_authorizes_hard_exclusion && has_known_range &&
                     (ledger_seq < status.first_seq ||
                      ledger_seq > status.last_seq);
                 if (key.empty() || selection_excluded.count(key) ||
@@ -4386,13 +4408,48 @@ PeerSet::wait_for_covering_peer_on_strand(
     std::unordered_set<std::string> targeted_candidates;
     std::size_t targeted_connects = 0;
     bool targeted_budget_reported = false;
+    auto const completion_deadline = timeout_secs > 0
+        ? deadline + std::chrono::milliseconds(timeout_ms)
+        : deadline;
+    auto selected_targeted_outstanding = [&]() {
+        for (auto const& key : targeted_candidates)
+        {
+            if (auto queued = targeted_connects_.find(key);
+                queued != targeted_connects_.end() && queued_.count(key))
+            {
+                if (std::ranges::any_of(
+                        queued->second, [&](auto const& current) {
+                            return current && current == authorization &&
+                                current->is_active();
+                        }))
+                {
+                    return true;
+                }
+            }
+            if (auto active = in_flight_.find(key); active != in_flight_.end())
+            {
+                if (std::ranges::find(
+                        active->second.targeted_ledgers, ledger_seq) !=
+                    active->second.targeted_ledgers.end())
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
     auto emit_search_progress = [&](std::chrono::steady_clock::time_point now) {
+        auto const active_deadline =
+            selected_targeted_outstanding() ? completion_deadline : deadline;
         auto const remaining_ms = std::max<std::int64_t>(
             0,
             std::chrono::duration_cast<std::chrono::milliseconds>(
-                deadline - now)
+                active_deadline - now)
                 .count());
         auto const remaining_secs = (remaining_ms + 999) / 1000;
+        auto const targeted_queued = std::ranges::count_if(
+            targeted_candidates,
+            [&](auto const& key) { return queued_.count(key) != 0; });
         auto const targeted_in_flight =
             std::ranges::count_if(in_flight_, [&](auto const& row) {
                 return std::ranges::find(
@@ -4403,6 +4460,7 @@ PeerSet::wait_for_covering_peer_on_strand(
         status << "peer history search ledger " << ledger_seq
                << ": candidates=" << targeted_candidates.size() << '/'
                << options_.max_targeted_connect_attempts
+               << ", queued=" << targeted_queued
                << ", in_flight=" << targeted_in_flight
                << ", connected=" << connections_.size()
                << ", remaining=" << remaining_secs << 's';
@@ -4467,6 +4525,10 @@ PeerSet::wait_for_covering_peer_on_strand(
     emit_search_progress(start);
 
     auto log_no_covering_peer = [&]() {
+        auto const elapsed_secs =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - start)
+                .count();
         std::vector<std::string> selected_candidates(
             targeted_candidates.begin(), targeted_candidates.end());
         std::sort(selected_candidates.begin(), selected_candidates.end());
@@ -4486,7 +4548,7 @@ PeerSet::wait_for_covering_peer_on_strand(
             "] No peer advertising ledger ",
             ledger_seq,
             " after ",
-            timeout_secs,
+            elapsed_secs,
             "s; targeted_candidates=",
             selected_candidates.size(),
             '/',
@@ -4495,7 +4557,7 @@ PeerSet::wait_for_covering_peer_on_strand(
             candidates_text.str());
         std::ostringstream status;
         status << "peer history search ledger " << ledger_seq
-               << ": no covering peer after " << timeout_secs
+               << ": no covering peer after " << elapsed_secs
                << "s; candidates=" << selected_candidates.size() << '/'
                << options_.max_targeted_connect_attempts;
         catl::core::emit_status(status.str());
@@ -4590,9 +4652,14 @@ PeerSet::wait_for_covering_peer_on_strand(
                 break;  // selected peer vanished, keep polling
             }
             case PeerDecision::give_up:
-                cleanup.clean_now();
-                log_no_covering_peer();
-                co_return nullptr;
+                if (now < deadline || !selected_targeted_outstanding() ||
+                    now >= completion_deadline)
+                {
+                    cleanup.clean_now();
+                    log_no_covering_peer();
+                    co_return nullptr;
+                }
+                break;
 
             case PeerDecision::wait:
                 break;
@@ -4600,7 +4667,8 @@ PeerSet::wait_for_covering_peer_on_strand(
 
         if (now >= deadline)
         {
-            break;
+            if (!selected_targeted_outstanding() || now >= completion_deadline)
+                break;
         }
 
         if (now >= next_log)
@@ -4622,7 +4690,10 @@ PeerSet::wait_for_covering_peer_on_strand(
                 next_log += std::chrono::seconds(5);
         }
 
-        auto wait_until = std::min({deadline, next_maintenance, next_log});
+        auto const active_deadline =
+            selected_targeted_outstanding() ? completion_deadline : deadline;
+        auto wait_until =
+            std::min({active_deadline, next_maintenance, next_log});
         auto wait_signal = attach_wait_signal();
         auto const wait_for =
             std::chrono::duration_cast<std::chrono::milliseconds>(

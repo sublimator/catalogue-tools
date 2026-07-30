@@ -572,6 +572,8 @@ public:
                     catl::peer_client::EndpointTracker::canonical_endpoint(
                         endpoint);
                 set.endpoint_stats_[key].status = status;
+                set.endpoint_stats_[key].range_is_current_live = true;
+                set.endpoint_stats_[key].range_is_persistent_hint = false;
                 set.tracker_->add_discovered(key);
             });
     }

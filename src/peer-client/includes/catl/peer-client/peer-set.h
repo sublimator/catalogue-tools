@@ -903,6 +903,7 @@ private:
         bool seen_endpoints = false;
         bool seen_redirect = false;
         bool connected_ok = false;
+        bool range_is_current_live = false;
         bool range_is_persistent_hint = false;
         std::chrono::steady_clock::time_point crawl_private_until{};
 
