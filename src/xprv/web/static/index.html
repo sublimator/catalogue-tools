@@ -1490,6 +1490,7 @@ function finishProve(json, hash) {
 let activeSSE = null;
 let activeProveToken = 0;
 let activeProveTimeout = null;
+const proveInactivityTimeoutMs = 15000;
 
 function cancelActiveProof() {
   activeProveToken++;
@@ -1550,22 +1551,28 @@ async function prove(hash, {history = 'push'} = {}) {
   return new Promise((resolve) => {
     const es = new EventSource(`/prove?tx=${hash}&xrid=${rid}`);
     activeSSE = es;
-    activeProveTimeout = setTimeout(() => {
-      if (proveToken !== activeProveToken) return;
-      es.close(); activeSSE = null;
-      activeProveTimeout = null;
-      settled = true;
-      statusEl.className = 'status error';
-      statusEl.textContent = 'timed out';
-      showModalError('timed out', hash);
-      resolve();
-    }, 60000);
 
     let settled = false;  // true once done/error handled
+    const armInactivityTimeout = () => {
+      if (activeProveTimeout) clearTimeout(activeProveTimeout);
+      activeProveTimeout = setTimeout(() => {
+        if (proveToken !== activeProveToken) return;
+        if (settled) return;
+        es.close(); activeSSE = null;
+        activeProveTimeout = null;
+        settled = true;
+        statusEl.className = 'status error';
+        statusEl.textContent = 'connection stalled';
+        showModalError('connection stalled', hash);
+        resolve();
+      }, proveInactivityTimeoutMs);
+    };
+    armInactivityTimeout();
 
     es.onmessage = async (e) => {
       try {
         if (proveToken !== activeProveToken) return;
+        armInactivityTimeout();
         const msg = JSON.parse(e.data);
 
         if (msg.type === 'log') {
