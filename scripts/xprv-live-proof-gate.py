@@ -24,7 +24,9 @@ Example:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import shlex
@@ -44,6 +46,9 @@ CANONICAL_CASES = (
     "prove_binary_header_and_network",
 )
 CANONICAL_FILTER = " or ".join(CANONICAL_CASES)
+EXPECTED_NODEIDS = tuple(
+    f"xprv-serve-smoke-v2.py::test_{case}" for case in CANONICAL_CASES
+)
 DEFAULT_TMP_ROOT = Path(os.environ.get("XPRV_LIVE_GATE_TMP_ROOT", "/private/tmp"))
 
 
@@ -53,6 +58,13 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def file_sha256_if_readable(path: Path) -> str | None:
+    try:
+        return file_sha256(path)
+    except OSError:
+        return None
 
 
 def snapshot_sqlite(source: Path, destination: Path) -> None:
@@ -102,7 +114,6 @@ def build_command(
     artifact_dir: Path,
     network: int,
     threads: int,
-    pytest_args: list[str],
 ) -> list[str]:
     return [
         sys.executable,
@@ -120,8 +131,57 @@ def build_command(
         "-q",
         "-k",
         CANONICAL_FILTER,
-        *pytest_args,
     ]
+
+
+def inspect_index(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    rows: list[dict[str, Any]] = []
+    findings: list[str] = []
+    if not path.is_file():
+        return rows, [f"index missing: {path}"]
+
+    for line_number, text in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        try:
+            row = json.loads(text)
+        except json.JSONDecodeError as error:
+            findings.append(f"index line {line_number} is invalid JSON: {error}")
+            continue
+        if not isinstance(row, dict):
+            findings.append(f"index line {line_number} is not an object")
+            continue
+        rows.append(row)
+
+    expected = set(EXPECTED_NODEIDS)
+    observed = [row.get("nodeid") for row in rows]
+    for nodeid in EXPECTED_NODEIDS:
+        matches = [row for row in rows if row.get("nodeid") == nodeid]
+        if len(matches) != 1:
+            findings.append(f"{nodeid}: expected once, observed {len(matches)}")
+        elif matches[0].get("outcome") != "passed":
+            findings.append(
+                f"{nodeid}: expected passed, observed {matches[0].get('outcome')!r}"
+            )
+
+    for nodeid in sorted({str(value) for value in observed if value not in expected}):
+        findings.append(f"unexpected index node: {nodeid}")
+    if len(rows) != len(EXPECTED_NODEIDS):
+        findings.append(
+            f"index population: expected {len(EXPECTED_NODEIDS)}, observed {len(rows)}"
+        )
+    return rows, findings
+
+
+def child_environment() -> tuple[dict[str, str], list[str]]:
+    """Remove ambient xprv policy; the command owns the effective configuration."""
+    cleared = sorted(name for name in os.environ if name.startswith("XPRV_"))
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith("XPRV_")
+    }
+    return environment, cleared
 
 
 def write_receipt(path: Path, receipt: dict[str, Any]) -> None:
@@ -171,17 +231,50 @@ def run_self_test() -> int:
             artifact_dir=root / "artifacts",
             network=0,
             threads=2,
-            pytest_args=["--maxfail=1"],
         )
         checks.append(
             (
                 "command binds canonical inputs",
                 command.count("-k") == 1
                 and CANONICAL_FILTER in command
-                and str(snapshot) in command
-                and "--maxfail=1" in command,
+                and str(snapshot) in command,
             )
         )
+
+        index = root / "index.jsonl"
+        index.write_text(
+            "".join(
+                json.dumps({"nodeid": nodeid, "outcome": "passed"}) + "\n"
+                for nodeid in EXPECTED_NODEIDS
+            ),
+            encoding="utf-8",
+        )
+        _, findings = inspect_index(index)
+        checks.append(("exact index population passes", not findings))
+
+        index.write_text("", encoding="utf-8")
+        _, findings = inspect_index(index)
+        checks.append(("zero executed tests refuse", bool(findings)))
+
+        index.write_text(
+            "".join(
+                json.dumps({"nodeid": nodeid, "outcome": "passed"}) + "\n"
+                for nodeid in (*EXPECTED_NODEIDS, EXPECTED_NODEIDS[0])
+            ),
+            encoding="utf-8",
+        )
+        _, findings = inspect_index(index)
+        checks.append(("duplicate execution refuses", bool(findings)))
+
+        parser = build_parser()
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                parser.parse_args(["--collect-only"])
+            except SystemExit as error:
+                rejected = error.code != 0
+            else:
+                rejected = False
+        checks.append(("pytest execution override refuses", rejected))
 
     failures = [name for name, passed in checks if not passed]
     if failures:
@@ -222,11 +315,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Test preparation mechanics without starting xprv",
     )
-    parser.add_argument(
-        "pytest_args",
-        nargs=argparse.REMAINDER,
-        help="Additional pytest arguments after --",
-    )
     return parser
 
 
@@ -254,16 +342,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         run_dir = prepare_run_dir(args.run_dir, args.tmp_root)
+        peer_cache_input = run_dir / "peer-endpoints.input.sqlite3"
         peer_cache = run_dir / "peer-endpoints.sqlite3"
         artifact_dir = run_dir / "smoke"
         artifact_dir.mkdir()
-        snapshot_sqlite(peer_cache_seed, peer_cache)
+        snapshot_sqlite(peer_cache_seed, peer_cache_input)
+        snapshot_sqlite(peer_cache_input, peer_cache)
     except (OSError, sqlite3.Error, ValueError, RuntimeError) as error:
         parser.error(str(error))
 
-    pytest_args = list(args.pytest_args)
-    if pytest_args[:1] == ["--"]:
-        pytest_args.pop(0)
     command = build_command(
         runner=runner,
         xprv=xprv,
@@ -271,28 +358,35 @@ def main(argv: list[str] | None = None) -> int:
         artifact_dir=artifact_dir,
         network=args.network,
         threads=args.threads,
-        pytest_args=pytest_args,
     )
+    environment, cleared_ambient_xprv_keys = child_environment()
 
     receipt_path = run_dir / "run.json"
+    input_hashes = {
+        "peer_cache": file_sha256(peer_cache_input),
+        "runner": file_sha256(runner),
+        "xprv": file_sha256(xprv),
+    }
     receipt: dict[str, Any] = {
         "artifact_dir": str(artifact_dir),
         "canonical_cases": list(CANONICAL_CASES),
+        "cleared_ambient_xprv_keys": cleared_ambient_xprv_keys,
         "command": command,
         "finished_at": None,
         "network": args.network,
         "peer_cache_seed": str(peer_cache_seed),
-        "peer_cache_seed_sha256": file_sha256(peer_cache_seed),
-        "peer_cache_snapshot": str(peer_cache),
-        "peer_cache_snapshot_sha256": file_sha256(peer_cache),
+        "peer_cache_input": str(peer_cache_input),
+        "peer_cache_input_sha256": input_hashes["peer_cache"],
+        "peer_cache_working": str(peer_cache),
+        "peer_cache_working_pre_sha256": file_sha256(peer_cache),
         "result": "running",
         "runner": str(runner),
-        "runner_sha256": file_sha256(runner),
+        "runner_sha256": input_hashes["runner"],
         "run_dir": str(run_dir),
         "started_at": utc_now(),
         "threads": args.threads,
         "xprv": str(xprv),
-        "xprv_sha256": file_sha256(xprv),
+        "xprv_sha256": input_hashes["xprv"],
     }
     write_receipt(receipt_path, receipt)
 
@@ -302,20 +396,52 @@ def main(argv: list[str] | None = None) -> int:
     print(f"COMMAND: {shlex.join(command)}", flush=True)
 
     started = time.monotonic()
+    launch_error: str | None = None
     try:
-        completed = subprocess.run(command, check=False)
-        return_code = completed.returncode
-        result = "passed" if return_code == 0 else "failed"
+        completed = subprocess.run(command, check=False, env=environment)
+        runner_return_code = completed.returncode
     except KeyboardInterrupt:
-        return_code = 130
+        runner_return_code = 130
+        launch_error = "interrupted"
+    except OSError as error:
+        runner_return_code = None
+        launch_error = f"{type(error).__name__}: {error}"
+
+    index_path = artifact_dir / "index.jsonl"
+    index_rows, index_findings = inspect_index(index_path)
+    post_hashes = {
+        "peer_cache": file_sha256_if_readable(peer_cache_input),
+        "runner": file_sha256_if_readable(runner),
+        "xprv": file_sha256_if_readable(xprv),
+    }
+    changed_inputs = sorted(
+        name for name, digest in input_hashes.items() if post_hashes[name] != digest
+    )
+    if runner_return_code == 0 and not index_findings and not changed_inputs:
+        result = "passed"
+        return_code = 0
+    elif launch_error == "interrupted":
         result = "interrupted"
+        return_code = 130
+    else:
+        result = "failed"
+        return_code = 1
 
     receipt.update(
         {
+            "changed_inputs": changed_inputs,
             "duration_seconds": round(time.monotonic() - started, 3),
             "exit_code": return_code,
             "finished_at": utc_now(),
+            "index_findings": index_findings,
+            "index_rows": index_rows,
+            "launch_error": launch_error,
+            "peer_cache_input_post_sha256": post_hashes["peer_cache"],
+            "peer_cache_working_post_sha256": file_sha256_if_readable(peer_cache),
             "result": result,
+            "runner_post_sha256": post_hashes["runner"],
+            "runner_return_code": runner_return_code,
+            "xprv_post_sha256": post_hashes["xprv"],
         }
     )
     write_receipt(receipt_path, receipt)
