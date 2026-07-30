@@ -245,6 +245,7 @@ struct WalkBranchAbsent
 struct WalkNoSuitablePeer
 {
     std::uint32_t ledger_seq = 0;
+    PeerHistoryCoverage coverage;
 };
 
 struct WalkTransportExhausted

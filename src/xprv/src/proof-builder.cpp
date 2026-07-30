@@ -54,7 +54,8 @@ require_walk_transport(WalkResult result)
         throw PeerClientException(
             Error::NoSuitablePeer,
             "no eligible peer advertises ledger " +
-                std::to_string(unavailable->ledger_seq));
+                std::to_string(unavailable->ledger_seq) + "; " +
+                describe_peer_history_coverage(unavailable->coverage));
     }
     if (auto const* exhausted =
             std::get_if<WalkTransportExhausted>(&result.terminal()))
@@ -164,8 +165,6 @@ sle_hashes_contain(
         return false;
     }
 }
-
-
 // ═══════════════════════════════════════════════════════════════════════
 // build_proof(BuildServices) — uses shared PeerSet, VL, validations
 // ═══════════════════════════════════════════════════════════════════════
@@ -408,11 +407,21 @@ build_proof(BuildServices svc, std::string const& tx_hash_str)
         }
         if (!advertises_ledger(peer.get(), required_ledger))
         {
+            PeerHistoryCoverage coverage;
+            try
+            {
+                coverage = co_await ctx->peers->co_history_coverage();
+            }
+            catch (...)
+            {
+                // Diagnostics must not replace the typed selection refusal.
+            }
             throw PeerClientException(
                 Error::NoSuitablePeer,
                 "no peer advertising ledger " +
                     std::to_string(required_ledger) + " while trying to " +
-                    purpose);
+                    purpose + "; " +
+                    describe_peer_history_coverage(coverage));
         }
 
         PLOGI(

@@ -2983,7 +2983,16 @@ TEST(PeerSessionInterface, NodeWalkSseReportsCoveringPeerSearchAndExhaustion)
         });
     auto noncovering = std::make_shared<FakePeerSession>(
         io, "fake-sse-noncovering:1", true, 900, 800, 950);
+    auto overlapping = std::make_shared<FakePeerSession>(
+        io, "fake-sse-overlapping:1", true, 950, 900, 1000);
+    auto disjoint = std::make_shared<FakePeerSession>(
+        io, "fake-sse-disjoint:1", true, 1300, 1200, 1300);
+    auto unknown = std::make_shared<FakePeerSession>(
+        io, "fake-sse-unknown:1", true, 1400, 0, 0);
     PeerSetTestAccess::insert_connected_peer(io, peers, noncovering);
+    PeerSetTestAccess::insert_connected_peer(io, peers, overlapping);
+    PeerSetTestAccess::insert_connected_peer(io, peers, disjoint);
+    PeerSetTestAccess::insert_connected_peer(io, peers, unknown);
     auto cache = NodeCache::create(
         io,
         NodeCache::Options{
@@ -3011,7 +3020,25 @@ TEST(PeerSessionInterface, NodeWalkSseReportsCoveringPeerSearchAndExhaustion)
                 std::get_if<WalkNoSuitablePeer>(&result.terminal());
             EXPECT_NE(unavailable, nullptr);
             if (unavailable)
+            {
                 EXPECT_EQ(unavailable->ledger_seq, 500u);
+                EXPECT_TRUE(unavailable->coverage.observed);
+                EXPECT_EQ(unavailable->coverage.connected_peers, 4u);
+                EXPECT_EQ(unavailable->coverage.ready_peers, 4u);
+                EXPECT_EQ(unavailable->coverage.advertising_peers, 3u);
+                EXPECT_EQ(unavailable->coverage.advertised_ranges.size(), 2u);
+                if (unavailable->coverage.advertised_ranges.size() == 2)
+                {
+                    EXPECT_EQ(
+                        unavailable->coverage.advertised_ranges[0],
+                        (AdvertisedLedgerRange{
+                            .first_seq = 800, .last_seq = 1000}));
+                    EXPECT_EQ(
+                        unavailable->coverage.advertised_ranges[1],
+                        (AdvertisedLedgerRange{
+                            .first_seq = 1200, .last_seq = 1300}));
+                }
+            }
             completed = true;
         },
         asio::detached);
@@ -3026,7 +3053,9 @@ TEST(PeerSessionInterface, NodeWalkSseReportsCoveringPeerSearchAndExhaustion)
         }));
     EXPECT_TRUE(
         std::any_of(events.begin(), events.end(), [](std::string const& event) {
-            return event == "no peer advertising ledger 500";
+            return event ==
+                "no peer advertising ledger 500; peers=4, advertising=3, "
+                "advertised_history=[800-1000, 1200-1300]";
         }));
 }
 

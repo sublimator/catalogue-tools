@@ -836,20 +836,32 @@ NodeCache::walk_to_impl(
             co_return finish(WalkCancelled{});
         if (!advertises_ledger(peer, ledger_seq))
         {
+            PeerHistoryCoverage coverage;
+            try
+            {
+                coverage = co_await peers->co_history_coverage();
+            }
+            catch (...)
+            {
+                // This snapshot is diagnostic only. Failure to allocate or
+                // schedule it cannot replace the typed selection refusal.
+            }
             PLOGW(log_, "walk_to: no peer advertising ledger ", ledger_seq);
             catl::core::emit_status(
-                "no peer advertising ledger " + std::to_string(ledger_seq));
+                "no peer advertising ledger " + std::to_string(ledger_seq) +
+                "; " + describe_peer_history_coverage(coverage));
             publish_node_progress(
                 cursor, ProgressKind::no_covering_peer, ledger_seq, 0, 0, 0);
             //@@authority transition=prv.T0037 status=provisional
-            // bind=co_return_statement@c5f17f8209bb7009
+            // bind=co_return_statement@beeb3f0a2ca170b1
             // scope=statement
             // owner=unresolved owner_hypothesis=ledger_data_control
             // commit=walk_coroutine
             // touches=prv.S0063
             // label=terminate_walk_when_history_covered_peer_search_exhausts
             co_return finish(WalkNoSuitablePeer{
-                ledger_seq});  //@@authority-target ids=prv.T0037
+                ledger_seq,
+                std::move(coverage)});  //@@authority-target ids=prv.T0037
         }
     }
 

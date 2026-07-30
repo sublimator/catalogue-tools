@@ -14,6 +14,7 @@
 #include <cctype>
 #include <limits>
 #include <new>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -62,6 +63,36 @@ enum class WaitOutcome {
     timed_out,
     canceled,
 };
+
+std::string
+describe_peer_history_coverage(PeerHistoryCoverage const& coverage)
+{
+    if (!coverage.observed)
+        return "peer coverage unavailable";
+
+    std::ostringstream out;
+    out << "peers=" << coverage.ready_peers;
+    if (coverage.connected_peers != coverage.ready_peers)
+        out << " ready/" << coverage.connected_peers << " connected";
+    out << ", advertising=" << coverage.advertising_peers
+        << ", advertised_history=";
+    if (coverage.advertised_ranges.empty())
+    {
+        out << "none";
+        return out.str();
+    }
+
+    out << '[';
+    for (std::size_t i = 0; i < coverage.advertised_ranges.size(); ++i)
+    {
+        if (i != 0)
+            out << ", ";
+        auto const& range = coverage.advertised_ranges[i];
+        out << range.first_seq << '-' << range.last_seq;
+    }
+    out << ']';
+    return out.str();
+}
 
 static asio::awaitable<WaitOutcome>
 wait_for_signal_or_timeout(
@@ -1440,6 +1471,71 @@ PeerSet::co_size()
         strand_,
         [self]() -> asio::awaitable<size_t> {
             co_return self->connections_.size();
+        },
+        asio::use_awaitable);
+}
+
+boost::asio::awaitable<PeerHistoryCoverage>
+PeerSet::co_history_coverage()
+{
+    auto self = shared_from_this();
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self]() -> asio::awaitable<PeerHistoryCoverage> {
+            PeerHistoryCoverage coverage;
+            coverage.observed = true;
+            coverage.advertised_ranges.reserve(self->connections_.size());
+
+            for (auto const& [_, entry] : self->connections_)
+            {
+                auto const& peer = entry.session;
+                if (!peer)
+                    continue;
+                ++coverage.connected_peers;
+                if (!peer->is_ready())
+                    continue;
+                ++coverage.ready_peers;
+
+                auto const range = peer->advertised_ledger_range();
+                if (!range.valid())
+                    continue;
+                ++coverage.advertising_peers;
+                coverage.advertised_ranges.push_back(range);
+            }
+
+            std::sort(
+                coverage.advertised_ranges.begin(),
+                coverage.advertised_ranges.end(),
+                [](AdvertisedLedgerRange const& lhs,
+                   AdvertisedLedgerRange const& rhs) {
+                    if (lhs.first_seq != rhs.first_seq)
+                        return lhs.first_seq < rhs.first_seq;
+                    return lhs.last_seq < rhs.last_seq;
+                });
+
+            std::vector<AdvertisedLedgerRange> merged;
+            merged.reserve(coverage.advertised_ranges.size());
+            for (auto const& range : coverage.advertised_ranges)
+            {
+                if (merged.empty())
+                {
+                    merged.push_back(range);
+                    continue;
+                }
+
+                auto& tail = merged.back();
+                auto const adjacent = tail.last_seq !=
+                        std::numeric_limits<std::uint32_t>::max() &&
+                    range.first_seq == tail.last_seq + 1;
+                if (range.first_seq <= tail.last_seq || adjacent)
+                {
+                    tail.last_seq = std::max(tail.last_seq, range.last_seq);
+                    continue;
+                }
+                merged.push_back(range);
+            }
+            coverage.advertised_ranges = std::move(merged);
+            co_return coverage;
         },
         asio::use_awaitable);
 }

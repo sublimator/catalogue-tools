@@ -78,6 +78,23 @@ struct PeerSetOptions
     std::size_t max_targeted_connect_attempts = 3;
 };
 
+/// Read-only diagnostic projection of the currently connected peer set.
+///
+/// The ranges are the merged union advertised by ready peers at snapshot time.
+/// This value owns no selection authority and is never retained by PeerSet.
+struct PeerHistoryCoverage
+{
+    bool observed = false;
+    std::size_t connected_peers = 0;
+    std::size_t ready_peers = 0;
+    std::size_t advertising_peers = 0;
+    std::vector<AdvertisedLedgerRange> advertised_ranges;
+};
+
+/// Compact human-readable form suitable for status and terminal diagnostics.
+std::string
+describe_peer_history_coverage(PeerHistoryCoverage const& coverage);
+
 class PeerSet : public std::enable_shared_from_this<PeerSet>
 {
     friend class ::PeerSetTestAccess;
@@ -229,6 +246,10 @@ public:
     /// Awaitable peer count — runs the read on the strand.
     boost::asio::awaitable<size_t>
     co_size();
+
+    /// Snapshot current ready-peer history coverage on the PeerSet strand.
+    boost::asio::awaitable<PeerHistoryCoverage>
+    co_history_coverage();
 
     struct SnapshotEntry
     {
