@@ -3439,42 +3439,54 @@ PeerSet::load_cached_candidates_for(uint32_t ledger_seq)
             normalized_entry.endpoint = key;
             update_endpoint_stats(normalized_entry);
         }
-        else if (
-            current->second.status.first_seq == 0 ||
-            current->second.status.last_seq == 0)
+        else
         {
-            current->second.status = entry.status;
-            current->second.range_is_persistent_hint = true;
-            current->second.last_success_at = std::max(
-                current->second.last_success_at, entry.last_success_at);
-            current->second.last_failure_at = std::max(
-                current->second.last_failure_at, entry.last_failure_at);
-            current->second.success_count =
-                std::max(current->second.success_count, entry.success_count);
-            current->second.failure_count =
-                std::max(current->second.failure_count, entry.failure_count);
-            current->second.seen_crawl =
-                current->second.seen_crawl || entry.seen_crawl;
-            current->second.seen_endpoints =
-                current->second.seen_endpoints || entry.seen_endpoints;
-            current->second.seen_redirect =
-                current->second.seen_redirect || entry.seen_redirect;
-            current->second.connected_ok =
-                current->second.connected_ok || entry.connected_ok;
+            auto& stats = current->second;
+            if (stats.status.first_seq == 0 || stats.status.last_seq == 0)
+            {
+                stats.status = entry.status;
+                stats.range_is_persistent_hint = true;
+            }
+
+            // Range provenance and durable retry evidence are independent.
+            // A current live range must win without erasing a more recent
+            // persisted failure for the same logical endpoint.
+            stats.last_success_at =
+                std::max(stats.last_success_at, entry.last_success_at);
+            stats.last_failure_at =
+                std::max(stats.last_failure_at, entry.last_failure_at);
+            stats.success_count =
+                std::max(stats.success_count, entry.success_count);
+            stats.failure_count =
+                std::max(stats.failure_count, entry.failure_count);
+            stats.seen_crawl = stats.seen_crawl || entry.seen_crawl;
+            stats.seen_endpoints = stats.seen_endpoints || entry.seen_endpoints;
+            stats.seen_redirect = stats.seen_redirect || entry.seen_redirect;
+            if (entry.failure_count > 0 &&
+                (entry.last_failure_at > entry.last_success_at ||
+                 (entry.last_failure_at == entry.last_success_at &&
+                  !entry.connected_ok)))
+            {
+                stats.connected_ok = false;
+            }
+            else if (entry.last_success_at > entry.last_failure_at)
+            {
+                stats.connected_ok = true;
+            }
         }
 
         // Reconstruct the monotonic retry gate from the durable failure
         // timestamp. The persistent row authorizes search, not immediate
         // retry, and a later discovery prune must not erase this evidence
         // merely because the endpoint was never in the live tracker.
-        auto const stats = endpoint_stats_.find(key);
-        if (stats != endpoint_stats_.end() &&
-            stats->second.last_failure_at > 0 &&
-            (stats->second.last_success_at == 0 ||
-             stats->second.last_failure_at > stats->second.last_success_at))
+        auto const durable_failure_active = entry.failure_count > 0 &&
+            (entry.last_failure_at > entry.last_success_at ||
+             (entry.last_failure_at == entry.last_success_at &&
+              !entry.connected_ok));
+        if (durable_failure_active)
         {
-            auto const age_seconds = std::max<std::int64_t>(
-                0, unix_now - stats->second.last_failure_at);
+            auto const age_seconds =
+                std::max<std::int64_t>(0, unix_now - entry.last_failure_at);
             auto const reconstructed =
                 steady_now - std::chrono::seconds(age_seconds);
             auto failed = failed_at_.find(key);
@@ -4335,8 +4347,6 @@ PeerSet::wait_for_covering_peer_on_strand(
         auto queued = try_candidates_for(authorization, connect_excluded, 1);
         targeted_connects += queued.size();
         targeted_candidates.insert(queued.begin(), queued.end());
-        if (!queued.empty())
-            emit_search_progress(std::chrono::steady_clock::now());
         return !queued.empty();
     };
 
@@ -4367,8 +4377,8 @@ PeerSet::wait_for_covering_peer_on_strand(
 
     // Probe a bounded number of disconnected candidates while this wait is
     // active. Admission may rotate one unsuitable peer in the same pool.
-    if (!queue_targeted_candidate())
-        emit_search_progress(start);
+    queue_targeted_candidate();
+    emit_search_progress(start);
 
     auto log_no_covering_peer = [&]() {
         std::vector<std::string> selected_candidates(
@@ -4445,6 +4455,7 @@ PeerSet::wait_for_covering_peer_on_strand(
         if (now >= next_maintenance)
         {
             queue_targeted_candidate();
+            emit_search_progress(now);
             while (next_maintenance <= now)
                 next_maintenance += std::chrono::seconds(1);
         }
@@ -4508,7 +4519,6 @@ PeerSet::wait_for_covering_peer_on_strand(
 
         if (now >= next_log)
         {
-            emit_search_progress(now);
             PLOGI(
                 log_,
                 "[",

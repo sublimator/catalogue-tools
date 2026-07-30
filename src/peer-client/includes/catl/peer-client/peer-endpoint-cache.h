@@ -107,6 +107,9 @@ private:
     void
     initialize_schema();
 
+    void
+    migrate_canonical_endpoints();
+
     [[nodiscard]] bool
     is_disabled() const;
 

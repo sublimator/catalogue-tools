@@ -158,6 +158,103 @@ TEST(PeerEndpointCache, RankingPenalizesLegacyStaleConnectedOkRows)
     EXPECT_EQ(candidates.front().endpoint, "healthy.example.com:51235");
 }
 
+TEST(PeerEndpointCache, CanonicalIdentityMigratesAliasesBeforeBoundedLookup)
+{
+    TempCachePath temp{"peer-endpoint-cache-canonical-identity"};
+    constexpr uint32_t network_id = 42;
+    constexpr uint32_t wanted = 500;
+    auto const direct = std::string{"45.139.107.65:21337"};
+    auto const mapped = std::string{"[::ffff:45.139.107.65]:21337"};
+    auto const distinct = std::string{"46.139.107.65:21337"};
+    auto const covering = PeerStatus{
+        .first_seq = 1,
+        .last_seq = 1000,
+        .current_seq = 1000,
+    };
+
+    {
+        auto cache = PeerEndpointCache::open(temp.string());
+        cache->remember_status(network_id, direct, covering);
+        cache->remember_status(network_id, mapped, covering);
+        cache->remember_status(network_id, distinct, covering);
+        EXPECT_EQ(cache->count_endpoints(network_id), 2u)
+            << "aliases must share the persistent primary-key identity";
+    }
+
+    exec_sql(
+        temp.string(),
+        "INSERT INTO peer_endpoints("
+        " network_id, endpoint, first_seq, last_seq, current_seq, "
+        " last_seen_at, last_failure_at, failure_count, connected_ok"
+        ") VALUES("
+        " 42, '[::ffff:45.139.107.65]:21337', 1, 1000, 1000, "
+        " 200, 200, 1, 0"
+        ");"
+        "PRAGMA user_version = 0;");
+
+    auto cache = PeerEndpointCache::open(temp.string());
+    EXPECT_EQ(cache->count_endpoints(network_id), 2u)
+        << "the transactional legacy migration must coalesce existing aliases";
+
+    auto candidates = cache->load_covering_candidates(network_id, wanted, 2);
+    ASSERT_EQ(candidates.size(), 2u);
+    auto const migrated = std::ranges::find_if(
+        candidates,
+        [&](auto const& entry) { return entry.endpoint == direct; });
+    ASSERT_NE(migrated, candidates.end());
+    EXPECT_EQ(migrated->failure_count, 1u);
+    EXPECT_FALSE(migrated->connected_ok)
+        << "conservative failure evidence must survive alias coalescing";
+}
+
+TEST(PeerEndpointCache, SameSecondLaterFailureRemainsActive)
+{
+    TempCachePath temp{"peer-endpoint-cache-same-second-failure"};
+    constexpr uint32_t network_id = 42;
+    constexpr uint32_t wanted = 500;
+    auto const failed = std::string{"failed.example.com:51235"};
+    auto const healthy = std::string{"healthy.example.com:51235"};
+    auto const covering = PeerStatus{
+        .first_seq = 1,
+        .last_seq = 1000,
+        .current_seq = 1000,
+    };
+
+    auto cache = PeerEndpointCache::open(temp.string());
+    cache->remember_connect_success(network_id, failed, covering);
+    cache->remember_connect_failure(network_id, failed);
+    cache->remember_status(network_id, healthy, covering);
+    exec_sql(
+        temp.string(),
+        "UPDATE peer_endpoints "
+        "SET last_success_at = CAST(strftime('%s','now') AS INTEGER), "
+        "    last_failure_at = CAST(strftime('%s','now') AS INTEGER), "
+        "    success_count = 1, failure_count = 1, connected_ok = 0 "
+        "WHERE network_id = 42 AND endpoint = "
+        "'failed.example.com:51235';");
+
+    auto ranked = cache->load_covering_candidates(network_id, wanted, 1);
+    ASSERT_EQ(ranked.size(), 1u);
+    EXPECT_EQ(ranked.front().endpoint, healthy)
+        << "connected_ok breaks equal-second event ties";
+
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = network_id,
+            .endpoint_cache_path = temp.string(),
+            .cached_endpoint_limit = 8,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    auto queued =
+        PeerSetTestAccess::try_candidates_for(io, peers, wanted, {}, 2);
+    EXPECT_EQ(std::ranges::count(queued, failed), 0u);
+    EXPECT_TRUE(PeerSetTestAccess::has_failed(io, peers, failed))
+        << "equal-second durable failure must reconstruct retry backoff";
+}
+
 TEST(
     PeerEndpointCache,
     TargetedLookupEscapesBootstrapWindowAndRemainsOnlyASearchHint)
@@ -340,6 +437,7 @@ TEST(PeerEndpointCache, TargetedLookupRetainsPersistentFailureBackoff)
             .max_in_flight_crawls = 0,
         });
 
+    PeerSetTestAccess::set_status(io, peers, failed, covering);
     auto queued =
         PeerSetTestAccess::try_candidates_for(io, peers, wanted, {}, 2);
     EXPECT_EQ(std::ranges::count(queued, failed), 0u)

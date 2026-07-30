@@ -3074,6 +3074,46 @@ TEST(PeerSessionInterface, NodeWalkSseReportsCoveringPeerSearchAndExhaustion)
         }));
 }
 
+TEST(PeerSessionInterface, CoveringPeerProgressTicksAgainstAbsoluteDeadline)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_targeted_connect_attempts = 0,
+        });
+    auto request = std::make_shared<catl::core::RequestContext>(
+        "history-progress", "transaction", std::chrono::steady_clock::now());
+    auto request_executor =
+        catl::core::ContextExecutor(asio::make_strand(io), request);
+    bool completed = false;
+    asio::co_spawn(
+        request_executor,
+        [&, peers]() -> asio::awaitable<void> {
+            EXPECT_FALSE(co_await peers->wait_for_covering_peer(500, 2));
+            completed = true;
+        },
+        asio::detached);
+
+    io.run();
+
+    EXPECT_TRUE(completed);
+    auto const events = request->drain();
+    auto contains = [&](std::string_view needle) {
+        return std::ranges::any_of(events, [&](std::string const& event) {
+            return event.find(needle) != std::string::npos;
+        });
+    };
+    EXPECT_TRUE(contains("remaining=2s"));
+    EXPECT_TRUE(contains("remaining=1s"))
+        << "progress must follow the absolute deadline every second, "
+           "independently of the five-second diagnostic log";
+    EXPECT_TRUE(contains("remaining=0s"));
+}
+
 TEST(PeerSessionInterface, WaitForPeerIgnoresUnsuitableThenSelectsCovering)
 {
     asio::io_context io;
