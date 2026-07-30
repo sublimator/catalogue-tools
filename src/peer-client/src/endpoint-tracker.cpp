@@ -450,7 +450,17 @@ EndpointTracker::normalize_endpoint_identity(
 {
     if (host.empty() || port == 0)
         return std::nullopt;
-    return format_endpoint(canonicalize_host(host), port);
+
+    auto unwrapped = host;
+    if (host.front() == '[' || host.back() == ']')
+    {
+        if (host.size() < 3 || host.front() != '[' || host.back() != ']')
+            return std::nullopt;
+        unwrapped = host.substr(1, host.size() - 2);
+    }
+    if (unwrapped.empty())
+        return std::nullopt;
+    return format_endpoint(canonicalize_host(std::move(unwrapped)), port);
 }
 
 std::optional<std::string>

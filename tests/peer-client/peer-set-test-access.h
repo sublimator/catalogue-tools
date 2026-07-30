@@ -152,7 +152,14 @@ public:
     {
         run_on_strand(
             io, peers, [endpoint = std::move(endpoint), at](auto& set) {
-                set.failed_at_[endpoint] = at;
+                auto const stats = set.endpoint_stats_.find(endpoint);
+                auto const failure_count = stats != set.endpoint_stats_.end()
+                    ? std::max<std::uint64_t>(1, stats->second.failure_count)
+                    : 1;
+                set.retry_gates_[endpoint] = {
+                    .failed_at = at,
+                    .failure_count = failure_count,
+                };
             });
     }
 
@@ -188,9 +195,55 @@ public:
         bool found = false;
         run_on_strand(
             io, peers, [&found, endpoint = std::move(endpoint)](auto& set) {
-                found = set.failed_at_.count(endpoint) > 0;
+                found = set.retry_gates_.count(endpoint) > 0;
             });
         return found;
+    }
+
+    static std::size_t
+    retry_gate_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        std::size_t count = 0;
+        run_on_strand(io, peers, [&count](auto& set) {
+            count = set.retry_gates_.size();
+        });
+        return count;
+    }
+
+    static std::uint64_t
+    retry_gate_failure_count(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+        std::string const& endpoint)
+    {
+        std::uint64_t count = 0;
+        run_on_strand(io, peers, [&count, endpoint](auto& set) {
+            auto const gate = set.retry_gates_.find(endpoint);
+            if (gate != set.retry_gates_.end())
+                count = gate->second.failure_count;
+        });
+        return count;
+    }
+
+    static std::size_t
+    retry_gates_with_zero_backoff(
+        boost::asio::io_context& io,
+        std::shared_ptr<catl::peer_client::PeerSet> const& peers)
+    {
+        std::size_t count = 0;
+        run_on_strand(io, peers, [&count](auto& set) {
+            for (auto const& [endpoint, _] : set.retry_gates_)
+            {
+                if (set.retry_backoff_for(endpoint) ==
+                    std::chrono::steady_clock::duration::zero())
+                {
+                    ++count;
+                }
+            }
+        });
+        return count;
     }
 
     static bool

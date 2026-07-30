@@ -24,7 +24,8 @@ public:
     /// Hard per-network retention bound. It bounds both durable storage and
     /// the population a synchronous ranked query may inspect. Active failures
     /// displace reconstructible healthy hints; if failures alone exceed the
-    /// bound, the newest failure evidence wins.
+    /// bound, later persisted failure timestamps win and equal-second ties use
+    /// stable endpoint order.
     static constexpr std::size_t max_endpoints_per_network = 4096;
 
     struct Health

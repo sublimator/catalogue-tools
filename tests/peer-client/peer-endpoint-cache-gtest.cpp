@@ -163,30 +163,33 @@ TEST(PeerEndpointCache, SupportedSchemaUpgradePreservesRetryEvidence)
 {
     TempCachePath temp{"peer-endpoint-cache-schema-upgrade"};
     constexpr uint32_t network_id = 42;
-    auto const direct = std::string{"45.139.107.65:21337"};
-    auto const mapped = std::string{"[::ffff:45.139.107.65]:21337"};
-    auto const covering = PeerStatus{
-        .first_seq = 1,
-        .last_seq = 1000,
-        .current_seq = 1000,
-    };
 
     {
         auto cache = PeerEndpointCache::open(temp.string());
-        cache->remember_status(network_id, direct, covering);
-        cache->remember_connect_failure(network_id, mapped);
-        EXPECT_EQ(cache->count_endpoints(network_id), 1u);
+        EXPECT_EQ(cache->count_endpoints(network_id), 0u);
     }
-
-    exec_sql(temp.string(), "PRAGMA user_version = 1;");
+    exec_sql(
+        temp.string(),
+        "INSERT INTO peer_endpoints("
+        "  network_id, endpoint, last_seen_at, last_failure_at, "
+        "  failure_count, connected_ok"
+        ") VALUES"
+        "  (42, 'History.Example.COM:51235', 100, 100, 2, 0),"
+        "  (42, 'history.example.com:51235', 101, 101, 3, 0),"
+        "  (42, '[2001:4860:4860:0:0:0:0:8888]:51235', "
+        "       102, 102, 4, 0),"
+        "  (42, '[2001:4860:4860::8888]:51235', 103, 103, 5, 0);"
+        "PRAGMA user_version = 1;");
 
     auto cache = PeerEndpointCache::open(temp.string());
-    EXPECT_EQ(cache->count_endpoints(network_id), 1u)
-        << "the bounded-schema upgrade must preserve the canonical row";
-    auto failures = cache->load_active_failures(network_id);
-    ASSERT_EQ(failures.size(), 1u);
-    EXPECT_EQ(failures.front().endpoint, direct);
-    EXPECT_EQ(failures.front().failure_count, 1u);
+    EXPECT_EQ(cache->count_endpoints(network_id), 2u)
+        << "v1 aliases must coalesce before the v2 bound is installed";
+    auto failures = index_entries(cache->load_active_failures(network_id));
+    ASSERT_EQ(failures.size(), 2u);
+    ASSERT_TRUE(failures.contains("history.example.com:51235"));
+    EXPECT_EQ(failures.at("history.example.com:51235").failure_count, 5u);
+    ASSERT_TRUE(failures.contains("[2001:4860:4860::8888]:51235"));
+    EXPECT_EQ(failures.at("[2001:4860:4860::8888]:51235").failure_count, 9u);
 }
 
 TEST(PeerEndpointCache, FutureSchemaVersionIsRefusedWithoutDowngrade)
@@ -662,6 +665,62 @@ TEST(PeerEndpointCache, ZeroCandidateLimitStillRestoresRetryEvidence)
     EXPECT_EQ(PeerSetTestAccess::snapshot(io, peers).queued_connects, 0u)
         << "a configured private peer must observe its durable backoff even "
            "when cached candidate import is disabled";
+}
+
+TEST(PeerEndpointCache, FullFailureProjectionSurvivesRepeatedRuntimePruning)
+{
+    TempCachePath temp{"peer-endpoint-cache-full-failure-projection"};
+    constexpr uint32_t network_id = 42;
+    {
+        auto cache = PeerEndpointCache::open(temp.string());
+    }
+    exec_sql(
+        temp.string(),
+        "WITH RECURSIVE n(value) AS ("
+        "  SELECT 0 UNION ALL SELECT value + 1 FROM n WHERE value < 4095"
+        ") "
+        "INSERT INTO peer_endpoints("
+        "  network_id, endpoint, last_seen_at, last_failure_at, "
+        "  failure_count, connected_ok"
+        ") "
+        "SELECT 42, printf('failed-%04d.example.com:51235', value), "
+        "       CAST(strftime('%s','now') AS INTEGER), "
+        "       CAST(strftime('%s','now') AS INTEGER), "
+        "       (value % 7) + 1, 0 "
+        "FROM n;");
+
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = network_id,
+            .endpoint_cache_path = temp.string(),
+            .cached_endpoint_limit = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    peers->start();
+    drain_io(io);
+
+    ASSERT_EQ(
+        PeerSetTestAccess::retry_gate_count(io, peers),
+        PeerEndpointCache::max_endpoints_per_network);
+    EXPECT_EQ(PeerSetTestAccess::retry_gates_with_zero_backoff(io, peers), 0u);
+
+    PeerSetTestAccess::prune_discovery_state(io, peers);
+    PeerSetTestAccess::prune_discovery_state(io, peers);
+
+    EXPECT_EQ(
+        PeerSetTestAccess::retry_gate_count(io, peers),
+        PeerEndpointCache::max_endpoints_per_network)
+        << "runtime pruning must conserve the complete bounded retry "
+           "population before its TTL";
+    EXPECT_EQ(PeerSetTestAccess::retry_gates_with_zero_backoff(io, peers), 0u)
+        << "stats eviction cannot erase retry magnitude";
+    EXPECT_EQ(
+        PeerSetTestAccess::retry_gate_failure_count(
+            io, peers, "failed-0006.example.com:51235"),
+        7u);
 }
 
 TEST(PeerEndpointCache, DisabledQueryNeverDegradesToHealthyEmpty)

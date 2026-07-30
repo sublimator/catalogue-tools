@@ -181,7 +181,7 @@ TEST(PeerSetPruning, WaitSignalWakesOnStatusUpdate)
     EXPECT_TRUE(woke_on_signal);
 }
 
-TEST(PeerSetPruning, RemovesExpiredAndOrphanedDiscoveryState)
+TEST(PeerSetPruning, RemovesExpiredStateButRetainsFreshRetryEvidence)
 {
     asio::io_context io;
     auto peers = PeerSet::create(
@@ -228,8 +228,10 @@ TEST(PeerSetPruning, RemovesExpiredAndOrphanedDiscoveryState)
         io, peers, "tracked-fail.example.com:51235"));
     EXPECT_FALSE(PeerSetTestAccess::has_failed(
         io, peers, "expired-fail.example.com:51235"));
-    EXPECT_FALSE(PeerSetTestAccess::has_failed(
-        io, peers, "orphan-fail.example.com:51235"));
+    EXPECT_TRUE(PeerSetTestAccess::has_failed(
+        io, peers, "orphan-fail.example.com:51235"))
+        << "the unified retry gate is itself owned evidence; unlike crawl "
+           "history, it does not require a tracker row to remain valid";
 }
 
 TEST(PeerSetPruning, CapsTrackerAndDeduplicatesCanonicalEndpoints)

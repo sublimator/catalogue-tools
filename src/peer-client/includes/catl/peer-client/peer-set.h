@@ -947,11 +947,16 @@ private:
     std::uint64_t next_peer_pin_id_ = 0;
     uint64_t total_connects_ = 0;
     uint64_t total_disconnects_ = 0;
+    struct EndpointRetryGate
+    {
+        std::chrono::steady_clock::time_point failed_at;
+        std::uint64_t failure_count = 0;
+    };
     //@@authority state=prv.S0076 status=provisional scope=field
-    // bind=catl::peer_client::PeerSet::failed_at_@d6f5f8d8432f0e33
+    // bind=catl::peer_client::PeerSet::retry_gates_@97a0e0015b5350d2
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
-    // label=monotonic_endpoint_retry_backoff_gate
-    std::map<std::string, std::chrono::steady_clock::time_point> failed_at_;
+    // label=bounded_endpoint_retry_age_and_magnitude_gate
+    std::map<std::string, EndpointRetryGate> retry_gates_;
     struct FailureEvent
     {
         std::chrono::steady_clock::time_point at;

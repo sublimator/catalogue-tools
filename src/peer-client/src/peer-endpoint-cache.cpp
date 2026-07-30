@@ -124,10 +124,10 @@ require_rows_complete(sqlite3* db, int rc)
 }
 
 //@@authority transition=prv.T0222 status=provisional scope=function
-//bind=catl::peer_client::prune_network_rows@3ee6bd2dd9577aa6
+// bind=catl::peer_client::prune_network_rows@3ee6bd2dd9577aa6
 // owner=unresolved owner_hypothesis=peer_endpoint_cache
 // commit=cache_writer_serialization touches=prv.S0073
-// label=retain_newest_active_failures_before_reconstructible_history_hints
+// label=retain_active_failures_by_timestamp_before_reconstructible_hints
 void
 prune_network_rows(sqlite3* db, std::string_view table, uint32_t network_id)
 {
@@ -201,6 +201,134 @@ prune_all_networks(sqlite3* db, std::string_view table)
 
     for (auto network_id : network_ids)
         prune_network_rows(db, table, network_id);
+}
+
+//@@authority transition=prv.T0224 status=provisional scope=function
+//bind=catl::peer_client::migrate_v1_to_v2@55d4344c8ba4ab48
+// owner=unresolved owner_hypothesis=peer_endpoint_cache
+// commit=sqlite_immediate_transaction touches=prv.S0073
+// label=coalesce_v1_endpoint_aliases_and_conserve_retry_evidence
+void
+migrate_v1_to_v2(sqlite3* db)
+{
+    exec_sql(db, "BEGIN IMMEDIATE;");
+    try
+    {
+        exec_sql(db, "DROP TABLE IF EXISTS peer_endpoints_v1_migration;");
+        exec_sql(
+            db,
+            "ALTER TABLE peer_endpoints RENAME TO "
+            "peer_endpoints_v1_migration;");
+        exec_sql(db, kCreatePeerEndpoints);
+
+        Statement rows(
+            db,
+            "SELECT network_id, endpoint, first_seq, last_seq, current_seq, "
+            "       last_seen_at, last_success_at, last_failure_at, "
+            "       success_count, failure_count, seen_crawl, seen_endpoints, "
+            "       seen_redirect, connected_ok "
+            "FROM peer_endpoints_v1_migration;");
+        Statement merge(
+            db,
+            "INSERT INTO peer_endpoints("
+            "  network_id, endpoint, first_seq, last_seq, current_seq, "
+            "  last_seen_at, last_success_at, last_failure_at, "
+            "  success_count, failure_count, seen_crawl, seen_endpoints, "
+            "  seen_redirect, connected_ok"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(network_id, endpoint) DO UPDATE SET "
+            "  first_seq = CASE "
+            "    WHEN excluded.first_seq > 0 AND excluded.last_seq > 0 AND "
+            "         (peer_endpoints.first_seq = 0 OR "
+            "          peer_endpoints.last_seq = 0 OR "
+            "          excluded.last_seen_at >= peer_endpoints.last_seen_at) "
+            "    THEN excluded.first_seq ELSE peer_endpoints.first_seq END, "
+            "  last_seq = CASE "
+            "    WHEN excluded.first_seq > 0 AND excluded.last_seq > 0 AND "
+            "         (peer_endpoints.first_seq = 0 OR "
+            "          peer_endpoints.last_seq = 0 OR "
+            "          excluded.last_seen_at >= peer_endpoints.last_seen_at) "
+            "    THEN excluded.last_seq ELSE peer_endpoints.last_seq END, "
+            "  current_seq = CASE "
+            "    WHEN excluded.first_seq > 0 AND excluded.last_seq > 0 AND "
+            "         (peer_endpoints.first_seq = 0 OR "
+            "          peer_endpoints.last_seq = 0 OR "
+            "          excluded.last_seen_at >= peer_endpoints.last_seen_at) "
+            "    THEN excluded.current_seq "
+            "    ELSE peer_endpoints.current_seq END, "
+            "  last_seen_at = MAX("
+            "      peer_endpoints.last_seen_at, excluded.last_seen_at), "
+            "  last_success_at = MAX("
+            "      peer_endpoints.last_success_at, excluded.last_success_at), "
+            "  last_failure_at = MAX("
+            "      peer_endpoints.last_failure_at, excluded.last_failure_at), "
+            "  success_count = peer_endpoints.success_count + "
+            "      excluded.success_count, "
+            "  failure_count = peer_endpoints.failure_count + "
+            "      excluded.failure_count, "
+            "  seen_crawl = MAX(peer_endpoints.seen_crawl, "
+            "excluded.seen_crawl), "
+            "  seen_endpoints = MAX("
+            "      peer_endpoints.seen_endpoints, excluded.seen_endpoints), "
+            "  seen_redirect = MAX("
+            "      peer_endpoints.seen_redirect, excluded.seen_redirect), "
+            "  connected_ok = CASE "
+            "    WHEN MAX(peer_endpoints.last_failure_at, "
+            "             excluded.last_failure_at) > "
+            "         MAX(peer_endpoints.last_success_at, "
+            "             excluded.last_success_at) "
+            "    THEN 0 "
+            "    WHEN MAX(peer_endpoints.last_success_at, "
+            "             excluded.last_success_at) > "
+            "         MAX(peer_endpoints.last_failure_at, "
+            "             excluded.last_failure_at) "
+            "    THEN 1 "
+            "    WHEN MAX(peer_endpoints.last_failure_at, "
+            "             excluded.last_failure_at) > 0 "
+            "    THEN 0 "
+            "    ELSE MAX(peer_endpoints.connected_ok, "
+            "             excluded.connected_ok) END;");
+
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(rows.get())) == SQLITE_ROW)
+        {
+            auto const* endpoint_text = sqlite3_column_text(rows.get(), 1);
+            auto const normalized = persistent_cache_endpoint(
+                endpoint_text ? reinterpret_cast<char const*>(endpoint_text)
+                              : "");
+            if (!normalized)
+                continue;
+
+            sqlite3_bind_value(
+                merge.get(), 1, sqlite3_column_value(rows.get(), 0));
+            sqlite3_bind_text(
+                merge.get(), 2, normalized->c_str(), -1, SQLITE_TRANSIENT);
+            for (int column = 2; column < 14; ++column)
+            {
+                sqlite3_bind_value(
+                    merge.get(),
+                    column + 1,
+                    sqlite3_column_value(rows.get(), column));
+            }
+            if (sqlite3_step(merge.get()) != SQLITE_DONE)
+                throw std::runtime_error(sqlite3_errmsg(db));
+            sqlite3_reset(merge.get());
+            sqlite3_clear_bindings(merge.get());
+        }
+        require_rows_complete(db, rc);
+
+        exec_sql(db, "DROP TABLE peer_endpoints_v1_migration;");
+        exec_sql(db, "PRAGMA user_version = 2;");
+        exec_sql(db, "COMMIT;");
+    }
+    catch (...)
+    {
+        char* ignored = nullptr;
+        sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, &ignored);
+        if (ignored)
+            sqlite3_free(ignored);
+        throw;
+    }
 }
 
 }  // namespace
@@ -311,11 +439,11 @@ PeerEndpointCache::initialize_schema()
         exec_sql(db_, kCreatePeerEndpoints);
         if (schema_version == 1)
         {
-            // V1 already owns canonical endpoint identities and the complete
-            // retry evidence columns. V2 adds the hard population/query bound,
-            // so preserve the rows and let the bounded retention policy below
-            // select the surviving population.
-            exec_sql(db_, "PRAGMA user_version = 2;");
+            // V1 has complete retry columns, but its endpoint canonicalizer
+            // did not lowercase DNS names or compress pure IPv6. Rewrite it
+            // once under one transaction, coalescing aliases and conserving
+            // their counters before the v2 retention bound is applied.
+            migrate_v1_to_v2(db_);
         }
     }
 

@@ -859,7 +859,6 @@ PeerSet::classify_unadmitted_connect_terminal(
     }
 
     note_connect_failure(key, detail);
-    failed_at_[key] = std::chrono::steady_clock::now();
     if (endpoint_cache_)
     {
         try
@@ -1254,6 +1253,10 @@ PeerSet::note_connect_failure(std::string const& endpoint, std::string detail)
     stats.last_seen_at = stats.last_failure_at;
     stats.failure_count++;
     stats.connected_ok = false;
+    retry_gates_[key] = EndpointRetryGate{
+        .failed_at = now,
+        .failure_count = stats.failure_count,
+    };
     record_failure_event(key, classify_failure_kind(detail, false), now);
     sort_pending_connects();
     notify_waiters();
@@ -1283,9 +1286,9 @@ PeerSet::retry_backoff_for(std::string const& endpoint) const
 {
     ASSERT_ON_STRAND();
     auto const key = canonical_endpoint(endpoint);
-    auto stats_it = endpoint_stats_.find(key);
-    uint64_t failures =
-        stats_it != endpoint_stats_.end() ? stats_it->second.failure_count : 0;
+    auto const gate = retry_gates_.find(key);
+    auto const failures =
+        gate != retry_gates_.end() ? gate->second.failure_count : 0;
 
     if (failures == 0)
         return std::chrono::steady_clock::duration::zero();
@@ -2064,20 +2067,22 @@ PeerSet::queue_connect(std::string const& endpoint)
         return;
     }
     auto key = canonical_endpoint(endpoint);
+    if (key.empty())
+        return;
     auto const now = std::chrono::steady_clock::now();
 
     if (connections_.count(key) || in_flight_.count(key) || queued_.count(key))
         return;
 
-    auto failed = failed_at_.find(key);
-    if (failed != failed_at_.end())
+    auto failed = retry_gates_.find(key);
+    if (failed != retry_gates_.end())
     {
         auto backoff = retry_backoff_for(key);
-        if (now - failed->second < backoff)
+        if (now - failed->second.failed_at < backoff)
         {
             return;
         }
-        failed_at_.erase(failed);
+        retry_gates_.erase(failed);
     }
 
     pending_connects_.push_back(key);
@@ -2180,14 +2185,14 @@ PeerSet::pump_connects()
         if (connections_.count(key) || in_flight_.count(key))
             continue;
 
-        auto failed = failed_at_.find(key);
-        if (failed != failed_at_.end())
+        auto failed = retry_gates_.find(key);
+        if (failed != retry_gates_.end())
         {
-            if (now - failed->second < retry_backoff_for(key))
+            if (now - failed->second.failed_at < retry_backoff_for(key))
             {
                 continue;
             }
-            failed_at_.erase(failed);
+            retry_gates_.erase(failed);
         }
 
         auto self = shared_from_this();
@@ -2627,9 +2632,9 @@ PeerSet::restore_persistent_failure(
     if (!durable_failure_active)
         return;
 
-    // Retry time and retry magnitude are one fact. Restoring failed_at_
-    // without the durable failure count would derive a zero-length backoff
-    // and immediately erase the apparently restored gate.
+    // Retry time and retry magnitude are one fact. Keep them in the same
+    // bounded gate so endpoint_stats_ eviction cannot silently reduce an
+    // admitted backoff to zero.
     auto& stats = endpoint_stats_[endpoint];
     stats.last_success_at =
         std::max(stats.last_success_at, entry.last_success_at);
@@ -2642,9 +2647,9 @@ PeerSet::restore_persistent_failure(
     auto const age_seconds =
         std::max<std::int64_t>(0, unix_now - entry.last_failure_at);
     auto const reconstructed = steady_now - std::chrono::seconds(age_seconds);
-    auto failed = failed_at_.find(endpoint);
-    if (failed == failed_at_.end() || failed->second < reconstructed)
-        failed_at_[endpoint] = reconstructed;
+    auto& gate = retry_gates_[endpoint];
+    gate.failed_at = std::max(gate.failed_at, reconstructed);
+    gate.failure_count = std::max(gate.failure_count, entry.failure_count);
 }
 
 void
@@ -2976,7 +2981,7 @@ PeerSet::try_connect_on_strand(
 
         connections_[key] = ConnectionEntry{client, generation};
         ++total_connects_;
-        failed_at_.erase(key);
+        retry_gates_.erase(key);
         auto const advertised_range = client->advertised_ledger_range();
         note_connect_success(
             key,
@@ -3120,7 +3125,6 @@ PeerSet::try_connect_on_strand(
                 auto const detail = trim_connect_failure_detail(e.detail);
                 note_connect_failure(key, detail.empty() ? e.what() : detail);
             }
-            failed_at_[key] = std::chrono::steady_clock::now();
             if (endpoint_cache_)
             {
                 try
@@ -3152,7 +3156,6 @@ PeerSet::try_connect_on_strand(
             key,
             ": ",
             e.what());
-        failed_at_[key] = std::chrono::steady_clock::now();
         note_connect_failure(key, e.what());
         if (endpoint_cache_)
         {
@@ -3655,9 +3658,9 @@ PeerSet::try_candidates_for(
                 {
                     return true;
                 }
-                auto failed = failed_at_.find(key);
-                return failed != failed_at_.end() &&
-                    now - failed->second < retry_backoff_for(key);
+                auto failed = retry_gates_.find(key);
+                return failed != retry_gates_.end() &&
+                    now - failed->second.failed_at < retry_backoff_for(key);
             }),
         candidates.end());
 
@@ -4943,7 +4946,7 @@ PeerSet::snapshot_unsafe() const
     out.known_endpoints = tracker_->size();
     out.tracked_endpoints = endpoint_stats_.size();
     out.crawled_size = crawled_.size();
-    out.failed_at_size = failed_at_.size();
+    out.failed_at_size = retry_gates_.size();
     out.connected_peers = connections_.size();
     out.hub_peers = hub_peer_count();
     out.archival_peers = archival_peer_count();
@@ -5451,6 +5454,11 @@ PeerSet::prune_endpoint_stats()
     }
 }
 
+//@@authority transition=prv.T0223 status=provisional scope=function
+//bind=catl::peer_client::prune_discovery_state@2e89ccf0752f0eab
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0076
+// label=expire_and_bound_owned_endpoint_retry_gates
 void
 PeerSet::prune_discovery_state()
 {
@@ -5474,11 +5482,11 @@ PeerSet::prune_discovery_state()
         }
     }
 
-    for (auto it = failed_at_.begin(); it != failed_at_.end();)
+    for (auto it = retry_gates_.begin(); it != retry_gates_.end();)
     {
-        if (now - it->second >= kFailedEndpointRetention)
+        if (now - it->second.failed_at >= kFailedEndpointRetention)
         {
-            it = failed_at_.erase(it);
+            it = retry_gates_.erase(it);
             ++failed_removed;
         }
         else
@@ -5544,17 +5552,6 @@ PeerSet::prune_discovery_state()
     std::unordered_set<std::string> tracked_keys;
     for (auto const& endpoint : tracker_->all_endpoints())
         tracked_keys.insert(canonical_endpoint(endpoint));
-    auto const has_retained_endpoint_evidence = [&](std::string const& key) {
-        auto const stats = endpoint_stats_.find(key);
-        if (stats == endpoint_stats_.end())
-            return false;
-        auto const& value = stats->second;
-        auto const has_active_retry_evidence = value.failure_count > 0 &&
-            (value.last_failure_at > value.last_success_at ||
-             (value.last_failure_at == value.last_success_at &&
-              !value.connected_ok));
-        return value.range_is_persistent_hint || has_active_retry_evidence;
-    };
 
     for (auto it = crawled_.begin(); it != crawled_.end();)
     {
@@ -5602,21 +5599,7 @@ PeerSet::prune_discovery_state()
         }
     }
 
-    for (auto it = failed_at_.begin(); it != failed_at_.end();)
-    {
-        if (!active.count(it->first) && !tracked_keys.count(it->first) &&
-            !has_retained_endpoint_evidence(it->first))
-        {
-            it = failed_at_.erase(it);
-            ++failed_removed;
-        }
-        else
-        {
-            ++it;
-        }
-    }
-
-    if (failed_at_.size() > kMaxTrackedEndpoints)
+    if (retry_gates_.size() > kMaxTrackedEndpoints)
     {
         struct Candidate
         {
@@ -5624,11 +5607,11 @@ PeerSet::prune_discovery_state()
             std::chrono::steady_clock::time_point at;
         };
         std::vector<Candidate> candidates;
-        candidates.reserve(failed_at_.size());
-        for (auto const& [key, at] : failed_at_)
+        candidates.reserve(retry_gates_.size());
+        for (auto const& [key, gate] : retry_gates_)
         {
             if (!active.count(key))
-                candidates.push_back({key, at});
+                candidates.push_back({key, gate.failed_at});
         }
         std::sort(
             candidates.begin(),
@@ -5636,12 +5619,12 @@ PeerSet::prune_discovery_state()
             [](Candidate const& lhs, Candidate const& rhs) {
                 return lhs.at < rhs.at;
             });
-        auto to_remove = failed_at_.size() - kMaxTrackedEndpoints;
+        auto to_remove = retry_gates_.size() - kMaxTrackedEndpoints;
         for (auto const& candidate : candidates)
         {
             if (to_remove == 0)
                 break;
-            if (failed_at_.erase(candidate.key) > 0)
+            if (retry_gates_.erase(candidate.key) > 0)
             {
                 --to_remove;
                 ++failed_removed;
@@ -5666,7 +5649,7 @@ PeerSet::prune_discovery_state()
             " crawled=",
             crawled_.size(),
             " failed=",
-            failed_at_.size(),
+            retry_gates_.size(),
             ")");
     }
 

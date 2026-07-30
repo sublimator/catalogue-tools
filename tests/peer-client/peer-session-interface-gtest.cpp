@@ -8554,6 +8554,10 @@ TEST(PeerSetEndpointIdentity, PureIpv6RemainsOneKeyThroughConnectFailure)
     auto const port = acceptor->local_endpoint().port();
     auto const key = "[::1]:" + std::to_string(port);
     auto const split_key = "::1:" + std::to_string(port);
+    EXPECT_EQ(
+        EndpointTracker::normalize_endpoint_identity("[::1]", port), key);
+    EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity("", port));
+    EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity("::1", 0));
 
     auto peers = PeerSet::create(
         io,
@@ -8576,6 +8580,15 @@ TEST(PeerSetEndpointIdentity, PureIpv6RemainsOneKeyThroughConnectFailure)
         << "the bracketed queue/census identity must survive host/port "
            "reconstruction";
     EXPECT_FALSE(PeerSetTestAccess::in_flight_contains(io, peers, split_key));
+
+    peers->start_connect("[::1]", port);
+    peers->start_connect("", port);
+    peers->start_connect("::1", 0);
+    io.run_for(10ms);
+    io.restart();
+    EXPECT_EQ(PeerSetTestAccess::snapshot(io, peers).queued_connects, 0u)
+        << "equivalent bracket syntax deduplicates while invalid identities "
+           "never enter the queue";
 
     asio::post(client->strand(), [client] {
         PeerClientTestAccess::fail_initial_connect_on_strand(*client);
