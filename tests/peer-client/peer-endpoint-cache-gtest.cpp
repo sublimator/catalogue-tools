@@ -5,6 +5,7 @@
 #include <catl/peer-client/peer-set.h>
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
 #include <gtest/gtest.h>
 #include <sqlite3.h>
 
@@ -186,10 +187,10 @@ TEST(
 
     auto const direct = std::string{"45.139.107.65:21337"};
     auto const mapped = std::string{"[::ffff:45.139.107.65]:21337"};
+    auto const distinct = std::string{"46.139.107.65:21337"};
     cache->remember_status(network_id, direct, covering);
-    cache->remember_connect_failure(network_id, direct);
     cache->remember_status(network_id, mapped, covering);
-    cache->remember_connect_failure(network_id, mapped);
+    cache->remember_status(network_id, distinct, covering);
     cache->remember_status(network_id + 1, "other-network:1", covering);
 
     auto bootstrap = cache->load_bootstrap_candidates(network_id, 64);
@@ -201,6 +202,12 @@ TEST(
 
     auto targeted = cache->load_covering_candidates(network_id, wanted, 64);
     ASSERT_EQ(targeted.size(), 2u);
+    EXPECT_EQ(
+        std::ranges::count_if(
+            targeted,
+            [&](auto const& entry) { return entry.endpoint == direct; }),
+        1u)
+        << "aliases must be deduplicated before applying the logical limit";
     EXPECT_TRUE(std::ranges::all_of(targeted, [wanted](auto const& entry) {
         return entry.status.first_seq <= wanted &&
             wanted <= entry.status.last_seq;
@@ -233,6 +240,9 @@ TEST(
     EXPECT_TRUE(PeerSetTestAccess::is_targeted_connect(io, peers, direct));
     EXPECT_FALSE(PeerSetTestAccess::tracker_contains(io, peers, direct))
         << "loading a persistent hint must not counterfeit live observation";
+    auto const after = PeerSetTestAccess::snapshot(io, peers);
+    EXPECT_EQ(after.queued_crawls, 0u)
+        << "a target wait must not mint an uncensused crawl population";
 }
 
 TEST(PeerEndpointCache, TargetedHintCannotOverwriteNewerLiveRange)
@@ -297,6 +307,155 @@ TEST(PeerEndpointCache, TargetedHintCannotOverwriteNewerLiveRange)
     EXPECT_EQ(live->last_seq, 900u);
 }
 
+TEST(PeerEndpointCache, TargetedLookupRetainsPersistentFailureBackoff)
+{
+    TempCachePath temp{"peer-endpoint-cache-targeted-backoff"};
+    auto cache = PeerEndpointCache::open(temp.string());
+    constexpr uint32_t network_id = 42;
+    constexpr uint32_t wanted = 500;
+    auto const failed = std::string{"failed-history.example.com:51235"};
+    auto const healthy = std::string{"healthy-history.example.com:51235"};
+    auto const covering = PeerStatus{
+        .first_seq = 1,
+        .last_seq = 1000,
+        .current_seq = 1000,
+    };
+    cache->remember_status(network_id, failed, covering);
+    cache->remember_connect_failure(network_id, failed);
+    cache->remember_status(network_id, healthy, covering);
+
+    auto ranked = cache->load_covering_candidates(network_id, wanted, 1);
+    ASSERT_EQ(ranked.size(), 1u);
+    EXPECT_EQ(ranked.front().endpoint, healthy)
+        << "a newer failure than success must be a leading ranking penalty";
+
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = network_id,
+            .endpoint_cache_path = temp.string(),
+            .cached_endpoint_limit = 64,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+
+    auto queued =
+        PeerSetTestAccess::try_candidates_for(io, peers, wanted, {}, 2);
+    EXPECT_EQ(std::ranges::count(queued, failed), 0u)
+        << "the durable failure timestamp must reconstruct active backoff";
+    EXPECT_TRUE(PeerSetTestAccess::has_failed(io, peers, failed));
+
+    PeerSetTestAccess::prune_discovery_state(io, peers);
+    EXPECT_TRUE(PeerSetTestAccess::has_failed(io, peers, failed))
+        << "cache-only backoff must not depend on live tracker membership";
+}
+
+TEST(PeerEndpointCache, DisabledQueryNeverDegradesToHealthyEmpty)
+{
+    TempCachePath temp{"peer-endpoint-cache-disabled-query"};
+    auto cache = PeerEndpointCache::open(temp.string());
+    cache->remember_status(
+        42,
+        "history.example.com:51235",
+        PeerStatus{
+            .first_seq = 1,
+            .last_seq = 1000,
+            .current_seq = 1000,
+        });
+    exec_sql(temp.string(), "DROP TABLE peer_endpoints;");
+
+    EXPECT_THROW(cache->load_covering_candidates(42, 500, 4), std::exception);
+    auto const health = cache->health();
+    EXPECT_FALSE(health.available);
+    EXPECT_FALSE(health.error.empty());
+    EXPECT_THROW(cache->load_covering_candidates(42, 500, 4), std::exception)
+        << "the latched failure must not become a later empty success";
+}
+
+TEST(PeerEndpointCache, InFlightTargetRetainsLedgerForSnapshot)
+{
+    TempCachePath temp{"peer-endpoint-cache-target-in-flight"};
+    auto cache = PeerEndpointCache::open(temp.string());
+    constexpr uint32_t network_id = 42;
+    constexpr uint32_t wanted = 500;
+    auto const endpoint = std::string{"45.139.107.65:21337"};
+    cache->remember_status(
+        network_id,
+        endpoint,
+        PeerStatus{
+            .first_seq = 1,
+            .last_seq = 1000,
+            .current_seq = 1000,
+        });
+
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = network_id,
+            .endpoint_cache_path = temp.string(),
+            .cached_endpoint_limit = 64,
+            .max_in_flight_connects = 1,
+            .max_in_flight_crawls = 0,
+        });
+
+    auto [queued, snapshot] =
+        PeerSetTestAccess::try_candidates_and_snapshot_in_same_owner_turn(
+            io, peers, wanted, 1);
+    ASSERT_EQ(queued.size(), 1u);
+    EXPECT_EQ(queued.front(), endpoint);
+    EXPECT_EQ(snapshot.targeted_connects, 1u);
+
+    auto const peer = std::ranges::find_if(
+        snapshot.peers,
+        [&](auto const& entry) { return entry.endpoint == endpoint; });
+    ASSERT_NE(peer, snapshot.peers.end());
+    EXPECT_TRUE(peer->in_flight);
+    EXPECT_TRUE(peer->targeted_connect);
+    EXPECT_EQ(peer->targeted_ledgers, (std::vector<uint32_t>{wanted}));
+}
+
+TEST(PeerEndpointCache, PublicTargetWaitLeavesNoCrawlOrAuthorizationResidue)
+{
+    TempCachePath temp{"peer-endpoint-cache-public-target-wait"};
+    auto cache = PeerEndpointCache::open(temp.string());
+    constexpr uint32_t network_id = 42;
+    constexpr uint32_t wanted = 500;
+    cache->remember_status(
+        network_id,
+        "45.139.107.65:21337",
+        PeerStatus{
+            .first_seq = 1,
+            .last_seq = 1000,
+            .current_seq = 1000,
+        });
+
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = network_id,
+            .endpoint_cache_path = temp.string(),
+            .cached_endpoint_limit = 64,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 4,
+            .max_targeted_connect_attempts = 1,
+        });
+
+    auto waited = boost::asio::co_spawn(
+        io, peers->wait_for_covering_peer(wanted, 0), boost::asio::use_future);
+    io.run();
+    EXPECT_FALSE(waited.get());
+
+    io.restart();
+    auto const snapshot = PeerSetTestAccess::snapshot(io, peers);
+    EXPECT_EQ(snapshot.queued_crawls, 0u);
+    EXPECT_EQ(snapshot.crawl_in_flight, 0u);
+    EXPECT_EQ(snapshot.targeted_connects, 0u);
+    EXPECT_TRUE(snapshot.wanted_ledgers.empty());
+}
+
 TEST(
     PeerEndpointCache,
     TargetedLookupDeduplicatesKnownUnknownAliasWithoutPublishingCachedRange)
@@ -326,9 +485,7 @@ TEST(
     auto const direct = std::string{"45.139.107.65:21337"};
     auto const mapped = std::string{"[::ffff:45.139.107.65]:21337"};
     cache->remember_status(network_id, direct, covering);
-    cache->remember_connect_failure(network_id, direct);
     cache->remember_status(network_id, mapped, covering);
-    cache->remember_connect_failure(network_id, mapped);
 
     boost::asio::io_context io;
     auto peers = PeerSet::create(

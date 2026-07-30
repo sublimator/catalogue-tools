@@ -503,6 +503,29 @@ public:
         return queued;
     }
 
+    static std::
+        pair<std::vector<std::string>, catl::peer_client::PeerSet::Snapshot>
+        try_candidates_and_snapshot_in_same_owner_turn(
+            boost::asio::io_context& io,
+            std::shared_ptr<catl::peer_client::PeerSet> const& peers,
+            uint32_t ledger_seq,
+            std::size_t connect_budget)
+    {
+        std::
+            pair<std::vector<std::string>, catl::peer_client::PeerSet::Snapshot>
+                result;
+        run_on_strand(
+            io, peers, [&result, ledger_seq, connect_budget](auto& set) {
+                auto authorization = std::make_shared<
+                    catl::peer_client::PeerSet::TargetedConnectAuthorization>(
+                    ledger_seq, std::unordered_set<std::string>{});
+                result.first =
+                    set.try_candidates_for(authorization, {}, connect_budget);
+                result.second = set.snapshot_unsafe();
+            });
+        return result;
+    }
+
     static bool
     is_targeted_connect(
         boost::asio::io_context& io,

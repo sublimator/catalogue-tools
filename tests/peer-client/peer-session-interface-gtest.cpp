@@ -3057,6 +3057,21 @@ TEST(PeerSessionInterface, NodeWalkSseReportsCoveringPeerSearchAndExhaustion)
                 "no peer advertising ledger 500; peers=4, advertising=3, "
                 "advertised_history=[800-1000, 1200-1300]";
         }));
+    EXPECT_TRUE(std::any_of(
+        events.begin(),
+        events.end(),
+        [](std::string const& event) {
+            return event ==
+                "peer history search ledger 500: candidates=0/0, "
+                "in_flight=0, connected=4, remaining=0s";
+        }))
+        << "the request context must survive the PeerSet strand hop";
+    EXPECT_TRUE(
+        std::any_of(events.begin(), events.end(), [](std::string const& event) {
+            return event ==
+                "peer history search ledger 500: no covering peer after 0s; "
+                "candidates=0/0";
+        }));
 }
 
 TEST(PeerSessionInterface, WaitForPeerIgnoresUnsuitableThenSelectsCovering)

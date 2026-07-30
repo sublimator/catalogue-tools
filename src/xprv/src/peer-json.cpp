@@ -146,6 +146,9 @@ peer_snapshot_to_json(
     body["cached_endpoint_limit"] = snapshot.cached_endpoint_limit;
     body["max_targeted_connect_attempts"] =
         snapshot.max_targeted_connect_attempts;
+    body["endpoint_cache_state"] = snapshot.endpoint_cache_state;
+    if (!snapshot.endpoint_cache_error.empty())
+        body["endpoint_cache_error"] = snapshot.endpoint_cache_error;
 
     boost::json::array wanted_ledgers;
     for (auto ledger_seq : snapshot.wanted_ledgers)

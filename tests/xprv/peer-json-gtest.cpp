@@ -93,6 +93,8 @@ TEST(PeerJson, DistinguishesPersistentHintsFromLiveAdvertisedRanges)
     snapshot.targeted_connects = 1;
     snapshot.cached_endpoint_limit = 64;
     snapshot.max_targeted_connect_attempts = 3;
+    snapshot.endpoint_cache_state = "disabled";
+    snapshot.endpoint_cache_error = "database disk image is malformed";
 
     auto hint = make_peer("hint.example:51235", false, false);
     hint.first_seq = 1;
@@ -114,6 +116,10 @@ TEST(PeerJson, DistinguishesPersistentHintsFromLiveAdvertisedRanges)
     EXPECT_EQ(body.at("cached_endpoint_limit").to_number<std::size_t>(), 64u);
     EXPECT_EQ(
         body.at("max_targeted_connect_attempts").to_number<std::size_t>(), 3u);
+    EXPECT_EQ(body.at("endpoint_cache_state").as_string(), "disabled");
+    EXPECT_EQ(
+        body.at("endpoint_cache_error").as_string(),
+        "database disk image is malformed");
     auto const& peers = body.at("peers").as_array();
     ASSERT_EQ(peers.size(), 2u);
     auto const& hint_json = peers[0].as_object();

@@ -2,9 +2,11 @@
 
 #include <catl/core/logger.h>
 
+#include <exception>
 #include <filesystem>
 #include <sqlite3.h>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace catl::peer_client {
 
@@ -206,9 +208,48 @@ PeerEndpointCache::is_disabled() const
 }
 
 void
+PeerEndpointCache::throw_if_disabled() const
+{
+    if (!is_disabled())
+        return;
+
+    auto message = std::string{"peer endpoint cache unavailable"};
+    if (!disabled_reason_.empty())
+        message += ": " + disabled_reason_;
+    throw std::runtime_error(std::move(message));
+}
+
+//@@authority transition=prv.T0219 status=provisional scope=function
+// bind=catl::peer_client::disable@f799d8ec54c20dfb
+// owner=unresolved owner_hypothesis=peer_endpoint_cache commit=cache_mutex
+// touches=prv.S0075
+// label=latch_peer_endpoint_cache_failure_before_future_queries
+void
 PeerEndpointCache::disable()
 {
     disabled_ = true;
+    if (!disabled_reason_.empty())
+        return;
+
+    auto failure = std::current_exception();
+    if (!failure)
+    {
+        disabled_reason_ = "unknown cache failure";
+        return;
+    }
+
+    try
+    {
+        std::rethrow_exception(std::move(failure));
+    }
+    catch (std::exception const& e)
+    {
+        disabled_reason_ = e.what();
+    }
+    catch (...)
+    {
+        disabled_reason_ = "unknown cache failure";
+    }
 }
 
 std::int64_t
@@ -226,8 +267,7 @@ PeerEndpointCache::load_bootstrap_candidates(
     std::size_t limit) const
 {
     std::lock_guard lock(mutex_);
-    if (is_disabled())
-        return {};
+    throw_if_disabled();
 
     try
     {
@@ -283,8 +323,9 @@ PeerEndpointCache::load_covering_candidates(
     std::size_t limit) const
 {
     std::lock_guard lock(mutex_);
-    if (is_disabled() || limit == 0)
+    if (limit == 0)
         return {};
+    throw_if_disabled();
 
     try
     {
@@ -299,26 +340,42 @@ PeerEndpointCache::load_covering_candidates(
             "  AND first_seq > 0 AND last_seq > 0 "
             "  AND first_seq <= ? AND last_seq >= ? "
             "ORDER BY "
+            "  CASE "
+            "    WHEN last_failure_at > 0 AND "
+            "         (last_success_at = 0 OR last_failure_at > "
+            "last_success_at) "
+            "    THEN 1 ELSE 0 "
+            "  END ASC, "
             "  connected_ok DESC, "
             "  CASE WHEN last_success_at > 0 THEN 1 ELSE 0 END DESC, "
             "  last_success_at DESC, "
             "  last_seen_at DESC, "
             "  failure_count ASC, "
             "  success_count DESC, "
-            "  endpoint ASC "
-            "LIMIT ?");
+            "  endpoint ASC");
 
         sqlite3_bind_int(stmt.get(), 1, static_cast<int>(network_id));
         sqlite3_bind_int64(
             stmt.get(), 2, static_cast<sqlite3_int64>(ledger_seq));
         sqlite3_bind_int64(
             stmt.get(), 3, static_cast<sqlite3_int64>(ledger_seq));
-        sqlite3_bind_int64(stmt.get(), 4, static_cast<sqlite3_int64>(limit));
 
         std::vector<Entry> result;
+        std::unordered_set<std::string> seen;
         int rc = SQLITE_OK;
         while ((rc = sqlite3_step(stmt.get())) == SQLITE_ROW)
-            result.push_back(read_entry(stmt.get()));
+        {
+            auto entry = read_entry(stmt.get());
+            auto normalized =
+                EndpointTracker::normalize_discovered_endpoint(entry.endpoint);
+            if (!normalized || !seen.insert(*normalized).second ||
+                result.size() >= limit)
+            {
+                continue;
+            }
+            entry.endpoint = std::move(*normalized);
+            result.push_back(std::move(entry));
+        }
         require_rows_complete(db_, rc);
         return result;
     }
@@ -333,8 +390,7 @@ std::size_t
 PeerEndpointCache::count_endpoints(uint32_t network_id) const
 {
     std::lock_guard lock(mutex_);
-    if (is_disabled())
-        return 0;
+    throw_if_disabled();
 
     try
     {
@@ -354,6 +410,16 @@ PeerEndpointCache::count_endpoints(uint32_t network_id) const
         const_cast<PeerEndpointCache*>(this)->disable();
         throw;
     }
+}
+
+PeerEndpointCache::Health
+PeerEndpointCache::health() const
+{
+    std::lock_guard lock(mutex_);
+    return Health{
+        .available = !is_disabled(),
+        .error = disabled_reason_,
+    };
 }
 
 void

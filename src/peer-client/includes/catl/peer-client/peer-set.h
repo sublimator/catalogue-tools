@@ -306,6 +306,8 @@ public:
         size_t targeted_connects = 0;
         size_t cached_endpoint_limit = 0;
         size_t max_targeted_connect_attempts = 0;
+        std::string endpoint_cache_state;
+        std::string endpoint_cache_error;
         uint64_t total_connects = 0;
         uint64_t total_disconnects = 0;
         size_t crawled_size = 0;
@@ -961,6 +963,10 @@ private:
         /// Consumed before recording/suppressing the post-Ready terminal cause
         /// of a candidate which never reached connections_.
         bool terminal_classified = false;
+        /// Immutable diagnostic projection of the target authorizations which
+        /// caused or joined this physical servant. These values grant no pool
+        /// rotation or completion authority.
+        std::vector<uint32_t> targeted_ledgers;
     };
     //@@authority state=prv.S0037 status=provisional scope=field
     // bind=catl::peer_client::PeerSet::in_flight_@8017d2247e9adce2
@@ -1013,6 +1019,7 @@ private:
     // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
     // label=live_history_target_authorization_rows
     std::vector<TargetedConnectAuthorizationPtr> active_target_authorizations_;
+    std::string endpoint_cache_error_;
     // Persistent one-shot priorities registered through prioritize_ledger().
     std::set<uint32_t> prioritized_ledgers_;
     std::shared_ptr<boost::asio::steady_timer> wait_signal_;

@@ -21,6 +21,12 @@ namespace catl::peer_client {
 class PeerEndpointCache
 {
 public:
+    struct Health
+    {
+        bool available = false;
+        std::string error;
+    };
+
     struct Entry
     {
         std::string endpoint;
@@ -55,6 +61,9 @@ public:
 
     std::size_t
     count_endpoints(uint32_t network_id) const;
+
+    Health
+    health() const;
 
     void
     remember_discovered(uint32_t network_id, std::string const& endpoint);
@@ -102,6 +111,9 @@ private:
     is_disabled() const;
 
     void
+    throw_if_disabled() const;
+
+    void
     disable();
 
     static std::int64_t
@@ -115,7 +127,13 @@ private:
     // label=persistent_peer_endpoint_range_search_hints
     sqlite3* db_ = nullptr;
     mutable std::mutex mutex_;
+    //@@authority state=prv.S0075 status=provisional scope=field
+    //bind=catl::peer_client::PeerEndpointCache::disabled_@ff731b30e8046e6b
+    // owner=unresolved owner_hypothesis=peer_endpoint_cache
+    // observed_home=peer_endpoint_cache
+    // label=latched_peer_endpoint_cache_unavailable_fact
     bool disabled_ = false;
+    std::string disabled_reason_;
 };
 
 }  // namespace catl::peer_client

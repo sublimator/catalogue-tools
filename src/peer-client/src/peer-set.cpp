@@ -2,7 +2,9 @@
 #include <catl/peer-client/peer-selector.h>
 #include <catl/peer-client/peer-set.h>
 
+#include <catl/core/context-executor.h>
 #include <catl/core/logger.h>
+#include <catl/core/request-context.h>
 
 #include <algorithm>
 #include <boost/asio/bind_cancellation_slot.hpp>
@@ -343,6 +345,7 @@ PeerSet::PeerSet(boost::asio::io_context& io, PeerSetOptions const& options)
         }
         catch (std::exception const& e)
         {
+            endpoint_cache_error_ = e.what();
             PLOGW(
                 log_,
                 "[",
@@ -2153,6 +2156,17 @@ PeerSet::pump_connects()
             }
             targeted_connects_.erase(targeted);
         }
+        std::vector<uint32_t> targeted_ledgers;
+        targeted_ledgers.reserve(admission_leases.size());
+        for (auto const& lease : admission_leases)
+        {
+            if (lease && lease->authorization)
+                targeted_ledgers.push_back(lease->authorization->ledger_seq);
+        }
+        std::sort(targeted_ledgers.begin(), targeted_ledgers.end());
+        targeted_ledgers.erase(
+            std::unique(targeted_ledgers.begin(), targeted_ledgers.end()),
+            targeted_ledgers.end());
 
         std::string host;
         uint16_t port = 0;
@@ -2197,7 +2211,11 @@ PeerSet::pump_connects()
         bool census_committed = false;
         try
         {
-            in_flight_.try_emplace(key);
+            in_flight_.try_emplace(
+                key,
+                ConnectServant{
+                    .targeted_ledgers = std::move(targeted_ledgers),
+                });
             census_committed = true;
             if (fail_connect_servant_launches_for_test_ != 0)
             {
@@ -3363,7 +3381,15 @@ PeerSet::load_cached_candidates_for(uint32_t ledger_seq)
 {
     ASSERT_ON_STRAND();
     if (!endpoint_cache_ || options_.cached_endpoint_limit == 0)
+    {
+        if (!endpoint_cache_error_.empty())
+        {
+            catl::core::emit_status(
+                "peer history cache unavailable; searching live discoveries "
+                "only");
+        }
         return {};
+    }
 
     std::vector<PeerEndpointCache::Entry> cached;
     try
@@ -3373,6 +3399,7 @@ PeerSet::load_cached_candidates_for(uint32_t ledger_seq)
     }
     catch (std::exception const& e)
     {
+        endpoint_cache_error_ = e.what();
         PLOGW(
             log_,
             "[",
@@ -3381,12 +3408,17 @@ PeerSet::load_cached_candidates_for(uint32_t ledger_seq)
             ledger_seq,
             ": ",
             e.what());
+        catl::core::emit_status(
+            "peer history cache unavailable; searching live discoveries "
+            "only");
         return {};
     }
 
     std::vector<std::string> candidates;
     std::unordered_set<std::string> seen;
     candidates.reserve(cached.size());
+    auto const steady_now = std::chrono::steady_clock::now();
+    auto const unix_now = now_unix();
     for (auto const& entry : cached)
     {
         auto normalized =
@@ -3429,6 +3461,25 @@ PeerSet::load_cached_candidates_for(uint32_t ledger_seq)
                 current->second.seen_redirect || entry.seen_redirect;
             current->second.connected_ok =
                 current->second.connected_ok || entry.connected_ok;
+        }
+
+        // Reconstruct the monotonic retry gate from the durable failure
+        // timestamp. The persistent row authorizes search, not immediate
+        // retry, and a later discovery prune must not erase this evidence
+        // merely because the endpoint was never in the live tracker.
+        auto const stats = endpoint_stats_.find(key);
+        if (stats != endpoint_stats_.end() &&
+            stats->second.last_failure_at > 0 &&
+            (stats->second.last_success_at == 0 ||
+             stats->second.last_failure_at > stats->second.last_success_at))
+        {
+            auto const age_seconds = std::max<std::int64_t>(
+                0, unix_now - stats->second.last_failure_at);
+            auto const reconstructed =
+                steady_now - std::chrono::seconds(age_seconds);
+            auto failed = failed_at_.find(key);
+            if (failed == failed_at_.end() || failed->second < reconstructed)
+                failed_at_[key] = reconstructed;
         }
         candidates.push_back(key);
     }
@@ -3508,9 +3559,6 @@ PeerSet::try_candidates_for(
         candidates.size(),
         " canonical candidate(s), budget=",
         connect_budget);
-
-    for (auto const& endpoint : candidates)
-        queue_crawl(endpoint);
 
     auto const now = std::chrono::steady_clock::now();
     candidates.erase(
@@ -4089,8 +4137,10 @@ PeerSet::wait_for_covering_peer(
         co_return PeerGenerationPin{};
 
     auto self = shared_from_this();
+    auto request_executor = catl::core::ContextExecutor(
+        strand_, catl::core::retain_current_request());
     co_return co_await asio::co_spawn(
-        strand_,
+        request_executor,
         [self,
          ledger_seq,
          timeout_secs,
@@ -4200,6 +4250,8 @@ PeerSet::wait_for_covering_peer_on_strand(
     acquire_wanted_ledger(ledger_seq, authorization);
 
     auto const timeout_ms = timeout_secs * 1000;
+    auto const start = std::chrono::steady_clock::now();
+    auto const deadline = start + std::chrono::milliseconds(timeout_ms);
 
     auto snapshot_peers = [&]() -> std::vector<PeerCandidate> {
         auto const now = std::chrono::steady_clock::now();
@@ -4236,7 +4288,29 @@ PeerSet::wait_for_covering_peer_on_strand(
     std::unordered_set<std::string> targeted_candidates;
     std::size_t targeted_connects = 0;
     bool targeted_budget_reported = false;
-    auto queue_targeted_candidate = [&]() {
+    auto emit_search_progress = [&](std::chrono::steady_clock::time_point now) {
+        auto const remaining_ms = std::max<std::int64_t>(
+            0,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - now)
+                .count());
+        auto const remaining_secs = (remaining_ms + 999) / 1000;
+        auto const targeted_in_flight =
+            std::ranges::count_if(in_flight_, [&](auto const& row) {
+                return std::ranges::find(
+                           row.second.targeted_ledgers, ledger_seq) !=
+                    row.second.targeted_ledgers.end();
+            });
+        std::ostringstream status;
+        status << "peer history search ledger " << ledger_seq
+               << ": candidates=" << targeted_candidates.size() << '/'
+               << options_.max_targeted_connect_attempts
+               << ", in_flight=" << targeted_in_flight
+               << ", connected=" << connections_.size()
+               << ", remaining=" << remaining_secs << 's';
+        catl::core::emit_status(status.str());
+    };
+    auto queue_targeted_candidate = [&]() -> bool {
         if (targeted_connects >= options_.max_targeted_connect_attempts)
         {
             if (!targeted_budget_reported)
@@ -4253,7 +4327,7 @@ PeerSet::wait_for_covering_peer_on_strand(
                     ", limit=",
                     options_.max_targeted_connect_attempts);
             }
-            return;
+            return false;
         }
         auto connect_excluded = excluded;
         connect_excluded.insert(
@@ -4261,6 +4335,9 @@ PeerSet::wait_for_covering_peer_on_strand(
         auto queued = try_candidates_for(authorization, connect_excluded, 1);
         targeted_connects += queued.size();
         targeted_candidates.insert(queued.begin(), queued.end());
+        if (!queued.empty())
+            emit_search_progress(std::chrono::steady_clock::now());
+        return !queued.empty();
     };
 
     // Initial check before entering the poll loop
@@ -4290,7 +4367,8 @@ PeerSet::wait_for_covering_peer_on_strand(
 
     // Probe a bounded number of disconnected candidates while this wait is
     // active. Admission may rotate one unsuitable peer in the same pool.
-    queue_targeted_candidate();
+    if (!queue_targeted_candidate())
+        emit_search_progress(start);
 
     auto log_no_covering_peer = [&]() {
         std::vector<std::string> selected_candidates(
@@ -4319,6 +4397,12 @@ PeerSet::wait_for_covering_peer_on_strand(
             options_.max_targeted_connect_attempts,
             ' ',
             candidates_text.str());
+        std::ostringstream status;
+        status << "peer history search ledger " << ledger_seq
+               << ": no covering peer after " << timeout_secs
+               << "s; candidates=" << selected_candidates.size() << '/'
+               << options_.max_targeted_connect_attempts;
+        catl::core::emit_status(status.str());
     };
 
     PLOGI(
@@ -4335,8 +4419,6 @@ PeerSet::wait_for_covering_peer_on_strand(
         tracker_->size(),
         " known)");
 
-    auto const start = std::chrono::steady_clock::now();
-    auto const deadline = start + std::chrono::milliseconds(timeout_ms);
     auto next_maintenance = start + std::chrono::seconds(1);
     auto next_log = start + std::chrono::seconds(5);
 
@@ -4426,6 +4508,7 @@ PeerSet::wait_for_covering_peer_on_strand(
 
         if (now >= next_log)
         {
+            emit_search_progress(now);
             PLOGI(
                 log_,
                 "[",
@@ -4790,9 +4873,39 @@ PeerSet::snapshot_unsafe() const
     out.queued_connects = pending_connects_.size();
     out.crawl_in_flight = crawl_in_flight_.size();
     out.queued_crawls = pending_crawls_.size();
-    out.targeted_connects = targeted_connects_.size();
+    std::unordered_set<std::string> targeted_endpoints;
+    for (auto const& [key, authorizations] : targeted_connects_)
+    {
+        if (std::ranges::any_of(authorizations, [](auto const& authorization) {
+                return authorization && authorization->is_active();
+            }))
+        {
+            targeted_endpoints.insert(key);
+        }
+    }
+    for (auto const& [key, servant] : in_flight_)
+    {
+        if (!servant.targeted_ledgers.empty())
+            targeted_endpoints.insert(key);
+    }
+    out.targeted_connects = targeted_endpoints.size();
     out.cached_endpoint_limit = options_.cached_endpoint_limit;
     out.max_targeted_connect_attempts = options_.max_targeted_connect_attempts;
+    if (options_.endpoint_cache_path.empty())
+    {
+        out.endpoint_cache_state = "not_configured";
+    }
+    else if (!endpoint_cache_)
+    {
+        out.endpoint_cache_state = "unavailable";
+        out.endpoint_cache_error = endpoint_cache_error_;
+    }
+    else
+    {
+        auto health = endpoint_cache_->health();
+        out.endpoint_cache_state = health.available ? "available" : "disabled";
+        out.endpoint_cache_error = std::move(health.error);
+    }
     out.wanted_ledgers.reserve(wanted_ledgers_.size());
     for (auto const& [ledger_seq, _] : wanted_ledgers_)
         out.wanted_ledgers.push_back(ledger_seq);
@@ -4876,15 +4989,21 @@ PeerSet::snapshot_unsafe() const
                 if (authorization && authorization->is_active())
                     entry.targeted_ledgers.push_back(authorization->ledger_seq);
             }
-            std::sort(
-                entry.targeted_ledgers.begin(), entry.targeted_ledgers.end());
-            entry.targeted_ledgers.erase(
-                std::unique(
-                    entry.targeted_ledgers.begin(),
-                    entry.targeted_ledgers.end()),
-                entry.targeted_ledgers.end());
-            entry.targeted_connect = !entry.targeted_ledgers.empty();
         }
+        if (auto in_flight = in_flight_.find(key);
+            in_flight != in_flight_.end())
+        {
+            entry.targeted_ledgers.insert(
+                entry.targeted_ledgers.end(),
+                in_flight->second.targeted_ledgers.begin(),
+                in_flight->second.targeted_ledgers.end());
+        }
+        std::sort(entry.targeted_ledgers.begin(), entry.targeted_ledgers.end());
+        entry.targeted_ledgers.erase(
+            std::unique(
+                entry.targeted_ledgers.begin(), entry.targeted_ledgers.end()),
+            entry.targeted_ledgers.end());
+        entry.targeted_connect = !entry.targeted_ledgers.empty();
 
         if (auto stats_it = endpoint_stats_.find(key);
             stats_it != endpoint_stats_.end())
@@ -5345,6 +5464,11 @@ PeerSet::prune_discovery_state()
     std::unordered_set<std::string> tracked_keys;
     for (auto const& endpoint : tracker_->all_endpoints())
         tracked_keys.insert(canonical_endpoint(endpoint));
+    auto const has_persistent_hint = [&](std::string const& key) {
+        auto const stats = endpoint_stats_.find(key);
+        return stats != endpoint_stats_.end() &&
+            stats->second.range_is_persistent_hint;
+    };
 
     for (auto it = crawled_.begin(); it != crawled_.end();)
     {
@@ -5394,7 +5518,8 @@ PeerSet::prune_discovery_state()
 
     for (auto it = failed_at_.begin(); it != failed_at_.end();)
     {
-        if (!active.count(it->first) && !tracked_keys.count(it->first))
+        if (!active.count(it->first) && !tracked_keys.count(it->first) &&
+            !has_persistent_hint(it->first))
         {
             it = failed_at_.erase(it);
             ++failed_removed;

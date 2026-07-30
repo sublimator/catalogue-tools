@@ -21,14 +21,19 @@ namespace catl::core {
 
 struct RequestContext
 {
-    std::string request_id;    // 8-char hex, unique per request
-    std::string tx_hash;       // abbreviated tx hash for log context
+    std::string request_id;  // 8-char hex, unique per request
+    std::string tx_hash;     // abbreviated tx hash for log context
     std::chrono::steady_clock::time_point started_at;
 
     // ── Status event bus ────────────────────────────────────────
     // Any code running in this request's coroutine chain can push
     // status messages. The SSE handler drains them periodically.
     mutable std::mutex status_mutex;
+    //@@authority state=prv.S0074 status=provisional scope=field
+    //bind=catl::core::RequestContext::status_events@52d5358cb4a3d5fc
+    // owner=unresolved owner_hypothesis=request_context
+    // observed_home=request_context
+    // label=request_owned_status_event_queue
     mutable std::vector<std::string> status_events;
 
     RequestContext() = default;
@@ -43,6 +48,11 @@ struct RequestContext
     {
     }
 
+    //@@authority transition=prv.T0218 status=provisional scope=function
+    //bind=catl::core::RequestContext::emit@e6c1f1a8c2b8b6f0
+    // owner=unresolved owner_hypothesis=request_context commit=status_mutex
+    // touches=prv.S0074
+    // label=publish_request_owned_status_observation
     void
     emit(std::string msg) const
     {
@@ -107,7 +117,8 @@ struct RequestContextGuard
     }
 
     RequestContextGuard(RequestContextGuard const&) = delete;
-    RequestContextGuard& operator=(RequestContextGuard const&) = delete;
+    RequestContextGuard&
+    operator=(RequestContextGuard const&) = delete;
 };
 
 }  // namespace catl::core
