@@ -21,6 +21,10 @@ namespace catl::peer_client {
 class PeerEndpointCache
 {
 public:
+    /// Hard per-network retention bound. It bounds both durable storage and
+    /// the population a synchronous ranked query may inspect.
+    static constexpr std::size_t max_endpoints_per_network = 4096;
+
     struct Health
     {
         bool available = false;
@@ -58,6 +62,12 @@ public:
         uint32_t network_id,
         uint32_t ledger_seq,
         std::size_t limit) const;
+
+    /// Load every currently active durable failure. The storage population is
+    /// hard-bounded, so this is a bounded startup projection rather than an
+    /// unbounded request-time scan.
+    std::vector<Entry>
+    load_active_failures(uint32_t network_id) const;
 
     std::size_t
     count_endpoints(uint32_t network_id) const;
@@ -106,9 +116,6 @@ private:
 
     void
     initialize_schema();
-
-    void
-    migrate_canonical_endpoints();
 
     [[nodiscard]] bool
     is_disabled() const;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <limits>
 
 namespace catl::peer_client {
 
@@ -27,6 +28,43 @@ strip_ipv4_mapped(std::string const& host)
         if (match)
             return host.substr(prefix.size());
     }
+    return host;
+}
+
+bool
+is_ipv4_mapped(boost::asio::ip::address_v6 const& addr)
+{
+    auto const bytes = addr.to_bytes();
+    return std::all_of(
+               bytes.begin(),
+               bytes.begin() + 10,
+               [](auto byte) { return byte == 0; }) &&
+        bytes[10] == 0xff && bytes[11] == 0xff;
+}
+
+std::string
+canonicalize_host(std::string host)
+{
+    host = strip_ipv4_mapped(host);
+
+    boost::system::error_code ec;
+    auto const addr = boost::asio::ip::make_address(host, ec);
+    if (!ec)
+    {
+        if (addr.is_v6() && is_ipv4_mapped(addr.to_v6()))
+        {
+            auto const bytes = addr.to_v6().to_bytes();
+            boost::asio::ip::address_v4::bytes_type v4_bytes{
+                bytes[12], bytes[13], bytes[14], bytes[15]};
+            return boost::asio::ip::address_v4(v4_bytes).to_string();
+        }
+        return addr.to_string();
+    }
+
+    std::transform(
+        host.begin(), host.end(), host.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
     return host;
 }
 
@@ -101,7 +139,7 @@ normalize_discovered_host_impl(std::string host, uint16_t port)
     if (port == 0)
         return std::nullopt;
 
-    host = strip_ipv4_mapped(host);
+    host = canonicalize_host(std::move(host));
 
     boost::system::error_code ec;
     auto const addr = boost::asio::ip::make_address(host, ec);
@@ -115,6 +153,31 @@ normalize_discovered_host_impl(std::string host, uint16_t port)
     }
 
     return format_endpoint(host, port);
+}
+
+bool
+parse_port(std::string_view text, uint16_t& port)
+{
+    if (text.empty() ||
+        !std::all_of(text.begin(), text.end(), [](unsigned char ch) {
+            return std::isdigit(ch) != 0;
+        }))
+    {
+        return false;
+    }
+
+    try
+    {
+        auto const value = std::stoul(std::string(text));
+        if (value > std::numeric_limits<uint16_t>::max())
+            return false;
+        port = static_cast<uint16_t>(value);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
 }
 
 }  // namespace
@@ -318,18 +381,10 @@ EndpointTracker::parse_endpoint(
             return false;
         host = endpoint.substr(1, close - 1);
         // Expect ]:port
-        if (close + 1 >= endpoint.size() || endpoint[close + 1] != ':')
+        if (host.empty() || close + 1 >= endpoint.size() ||
+            endpoint[close + 1] != ':')
             return false;
-        try
-        {
-            port =
-                static_cast<uint16_t>(std::stoul(endpoint.substr(close + 2)));
-            return true;
-        }
-        catch (...)
-        {
-            return false;
-        }
+        return parse_port(std::string_view(endpoint).substr(close + 2), port);
     }
 
     // Count colons — if more than one, it may be IPv4-mapped IPv6 with an
@@ -358,15 +413,7 @@ EndpointTracker::parse_endpoint(
             return false;
         }
 
-        try
-        {
-            port = static_cast<uint16_t>(std::stoul(port_part));
-            return true;
-        }
-        catch (...)
-        {
-            return false;
-        }
+        return !host.empty() && parse_port(port_part, port);
     }
 
     // IPv4 or hostname: host:port
@@ -374,26 +421,25 @@ EndpointTracker::parse_endpoint(
     if (colon == std::string::npos)
         return false;
     host = endpoint.substr(0, colon);
-    try
-    {
-        port = static_cast<uint16_t>(std::stoul(endpoint.substr(colon + 1)));
-        return true;
-    }
-    catch (...)
-    {
-        return false;
-    }
+    return !host.empty() &&
+        parse_port(std::string_view(endpoint).substr(colon + 1), port);
 }
 
 std::string
 EndpointTracker::canonical_endpoint(std::string const& endpoint)
 {
+    auto normalized = normalize_endpoint_identity(endpoint);
+    return normalized ? std::move(*normalized) : endpoint;
+}
+
+std::optional<std::string>
+EndpointTracker::normalize_endpoint_identity(std::string const& endpoint)
+{
     std::string host;
     uint16_t port = 0;
-    if (!parse_endpoint(endpoint, host, port))
-        return endpoint;
-
-    host = strip_ipv4_mapped(host);
+    if (!parse_endpoint(endpoint, host, port) || port == 0)
+        return std::nullopt;
+    host = canonicalize_host(std::move(host));
     return format_endpoint(host, port);
 }
 

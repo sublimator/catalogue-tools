@@ -1103,8 +1103,8 @@ public:
         run_on_strand(io, peers, [&count, key](auto& set) {
             if (!set.endpoint_cache_)
                 return;
-            auto entries = set.endpoint_cache_->load_bootstrap_candidates(
-                set.network_id_, 1024);
+            auto entries =
+                set.endpoint_cache_->load_active_failures(set.network_id_);
             auto const entry = std::ranges::find(
                 entries,
                 key,

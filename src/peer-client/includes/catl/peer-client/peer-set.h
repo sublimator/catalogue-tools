@@ -742,6 +742,13 @@ private:
     load_cached_endpoints();
 
     void
+    restore_persistent_failure(
+        std::string const& endpoint,
+        PeerEndpointCache::Entry const& entry,
+        std::chrono::steady_clock::time_point steady_now,
+        std::int64_t unix_now);
+
+    void
     configure_tracker_persistence();
 
     void
@@ -938,6 +945,10 @@ private:
     std::uint64_t next_peer_pin_id_ = 0;
     uint64_t total_connects_ = 0;
     uint64_t total_disconnects_ = 0;
+    //@@authority state=prv.S0076 status=provisional scope=field
+    // bind=catl::peer_client::PeerSet::failed_at_@d6f5f8d8432f0e33
+    // owner=unresolved owner_hypothesis=peer_set observed_home=peer_set
+    // label=monotonic_endpoint_retry_backoff_gate
     std::map<std::string, std::chrono::steady_clock::time_point> failed_at_;
     struct FailureEvent
     {

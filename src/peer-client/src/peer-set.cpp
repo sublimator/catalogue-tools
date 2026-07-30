@@ -336,6 +336,9 @@ PeerSet::PeerSet(boost::asio::io_context& io, PeerSetOptions const& options)
     , net_label_(peer_net_label(options.network_id))
     , tracker_(std::make_shared<EndpointTracker>())
 {
+    options_.cached_endpoint_limit = std::min(
+        options_.cached_endpoint_limit,
+        PeerEndpointCache::max_endpoints_per_network);
     if (!options_.endpoint_cache_path.empty())
     {
         try
@@ -2435,6 +2438,24 @@ PeerSet::load_cached_endpoints()
 
     auto cached = endpoint_cache_->load_bootstrap_candidates(
         network_id_, options_.cached_endpoint_limit);
+    auto active_failures = endpoint_cache_->load_active_failures(network_id_);
+    asio::post(
+        strand_,
+        [self = shared_from_this(),
+         active_failures = std::move(active_failures)]() {
+            auto const steady_now = std::chrono::steady_clock::now();
+            auto const unix_now = self->now_unix();
+            for (auto const& entry : active_failures)
+            {
+                auto normalized = EndpointTracker::normalize_endpoint_identity(
+                    entry.endpoint);
+                if (normalized)
+                {
+                    self->restore_persistent_failure(
+                        *normalized, entry, steady_now, unix_now);
+                }
+            }
+        });
     PLOGI(
         log_,
         "[",
@@ -2563,6 +2584,46 @@ PeerSet::load_cached_endpoints()
             loaded,
             " bootstrap candidates");
     }
+}
+
+//@@authority transition=prv.T0221 status=provisional scope=function
+// bind=catl::peer_client::restore_persistent_failure@812f6c5cac16ae48
+// owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
+// touches=prv.S0008,prv.S0076
+// label=restore_bounded_durable_retry_evidence
+void
+PeerSet::restore_persistent_failure(
+    std::string const& endpoint,
+    PeerEndpointCache::Entry const& entry,
+    std::chrono::steady_clock::time_point steady_now,
+    std::int64_t unix_now)
+{
+    ASSERT_ON_STRAND();
+    auto const durable_failure_active = entry.failure_count > 0 &&
+        (entry.last_failure_at > entry.last_success_at ||
+         (entry.last_failure_at == entry.last_success_at &&
+          !entry.connected_ok));
+    if (!durable_failure_active)
+        return;
+
+    // Retry time and retry magnitude are one fact. Restoring failed_at_
+    // without the durable failure count would derive a zero-length backoff
+    // and immediately erase the apparently restored gate.
+    auto& stats = endpoint_stats_[endpoint];
+    stats.last_success_at =
+        std::max(stats.last_success_at, entry.last_success_at);
+    stats.last_failure_at =
+        std::max(stats.last_failure_at, entry.last_failure_at);
+    stats.success_count = std::max(stats.success_count, entry.success_count);
+    stats.failure_count = std::max(stats.failure_count, entry.failure_count);
+    stats.connected_ok = false;
+
+    auto const age_seconds =
+        std::max<std::int64_t>(0, unix_now - entry.last_failure_at);
+    auto const reconstructed = steady_now - std::chrono::seconds(age_seconds);
+    auto failed = failed_at_.find(endpoint);
+    if (failed == failed_at_.end() || failed->second < reconstructed)
+        failed_at_[endpoint] = reconstructed;
 }
 
 void
@@ -3374,7 +3435,7 @@ PeerSet::finish_targeted_authorization(
 //@@authority transition=prv.T0217 status=provisional scope=function
 // bind=catl::peer_client::load_cached_candidates_for@75f0027fce6aa348
 // owner=unresolved owner_hypothesis=peer_set commit=peer_set_strand
-// touches=prv.S0008
+// touches=prv.S0008,prv.S0076
 // label=merge_bounded_persistent_history_hints_without_overwriting_live_state
 std::vector<std::string>
 PeerSet::load_cached_candidates_for(uint32_t ledger_seq)
@@ -3475,24 +3536,10 @@ PeerSet::load_cached_candidates_for(uint32_t ledger_seq)
             }
         }
 
-        // Reconstruct the monotonic retry gate from the durable failure
-        // timestamp. The persistent row authorizes search, not immediate
-        // retry, and a later discovery prune must not erase this evidence
-        // merely because the endpoint was never in the live tracker.
-        auto const durable_failure_active = entry.failure_count > 0 &&
-            (entry.last_failure_at > entry.last_success_at ||
-             (entry.last_failure_at == entry.last_success_at &&
-              !entry.connected_ok));
-        if (durable_failure_active)
-        {
-            auto const age_seconds =
-                std::max<std::int64_t>(0, unix_now - entry.last_failure_at);
-            auto const reconstructed =
-                steady_now - std::chrono::seconds(age_seconds);
-            auto failed = failed_at_.find(key);
-            if (failed == failed_at_.end() || failed->second < reconstructed)
-                failed_at_[key] = reconstructed;
-        }
+        // A persistent row authorizes bounded search, not immediate retry.
+        // Restore its independent durable failure evidence through the same
+        // owner-strand transition used by startup.
+        restore_persistent_failure(key, entry, steady_now, unix_now);
         candidates.push_back(key);
     }
     return candidates;

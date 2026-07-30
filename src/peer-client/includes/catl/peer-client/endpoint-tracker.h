@@ -110,6 +110,12 @@ public:
     static std::string
     canonical_endpoint(std::string const& endpoint);
 
+    /// Parse and canonicalize one endpoint identity without applying discovery
+    /// policy. This retains configured/private peers while rejecting malformed
+    /// identities and port zero.
+    static std::optional<std::string>
+    normalize_endpoint_identity(std::string const& endpoint);
+
     /// Canonicalize a discovered endpoint and reject non-public literals.
     /// Hostnames are accepted after canonicalization.
     static std::optional<std::string>
