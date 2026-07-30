@@ -154,6 +154,12 @@ private:
     // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
     // label=in_flight_validator_list_fetch_obligation
     bool fetch_in_progress_ = false;
+    //@@authority state=prv.S0067 status=provisional scope=field
+    // bind=xprv::VlCache::active_fetch_@4f2904e878920aea
+    // owner=unresolved owner_hypothesis=vl_cache observed_home=vl_cache
+    // label=exact_active_validator_list_fetch_cancellation_capability_and_intent
+    catl::vl::VlFetchOperationPtr active_fetch_;
+    bool active_fetch_cancel_requested_ = false;
     uint64_t fetch_generation_ = 0;
     bool last_fetch_ok_ = false;
     std::string last_fetch_error_;
@@ -163,6 +169,10 @@ private:
 
     /// Deterministic test seam. Production constructs VlClient directly.
     std::function<void(catl::vl::VlCallback)> fetch_for_test_;
+    std::function<bool()> cancel_fetch_for_test_;
+    std::function<void(catl::vl::VlFetchOperationPtr const&)>
+        fetch_terminal_observer_for_test_;
+    std::size_t fail_fetch_operation_starts_for_test_ = 0;
 
     static LogPartition log_;
 };

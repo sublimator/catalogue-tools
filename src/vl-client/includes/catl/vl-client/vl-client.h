@@ -14,10 +14,12 @@
 #include <catl/core/logger.h>
 #include <catl/core/types.h>
 
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/json.hpp>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -99,6 +101,55 @@ struct VlResult
 
 using VlCallback = std::function<void(VlResult)>;
 
+class VlFetchOperation;
+using VlFetchOperationPtr = std::shared_ptr<VlFetchOperation>;
+
+enum class VlFetchCancellationDisposition : std::uint8_t {
+    not_requested,
+    submitted,
+    emitted,
+    failed,
+};
+
+using VlFetchTerminalCallback =
+    std::function<void(VlFetchOperationPtr, VlResult)>;
+
+/// Owner-held cancellation capability for one exact VL fetch.
+///
+/// Requesting cancellation is intent, not terminality. The fetch callback
+/// remains the exact completion receipt.
+class VlFetchOperation final
+    : public std::enable_shared_from_this<VlFetchOperation>
+{
+public:
+    VlFetchOperation(VlFetchOperation const&) = delete;
+    VlFetchOperation&
+    operator=(VlFetchOperation const&) = delete;
+
+    /// Start this prepared operation exactly once. The terminal callback runs
+    /// only from co_spawn's physical completion boundary.
+    void
+    start(VlFetchTerminalCallback callback);
+
+    /// Submit cancellation on the fetch's private strand. A true result means
+    /// only that owner intent was retained or already present; terminality is
+    /// still proved exclusively by the terminal callback.
+    bool
+    request_cancel() noexcept;
+
+    VlFetchCancellationDisposition
+    cancellation_disposition() const noexcept;
+
+private:
+    struct Impl;
+
+    explicit VlFetchOperation(std::shared_ptr<Impl> impl);
+
+    std::shared_ptr<Impl> impl_;
+
+    friend class VlClient;
+};
+
 /// Minimal HTTPS client for fetching Validator Lists.
 /// One instance per (host, port) pair. Connections are per-call.
 class VlClient
@@ -106,9 +157,15 @@ class VlClient
 public:
     VlClient(asio::io_context& io, std::string host, uint16_t port = 443);
 
-    /// Fetch the VL from the configured host.
-    void
-    fetch(VlCallback callback);
+    /// Prepare one exact operation without launching asynchronous work.
+    VlFetchOperationPtr
+    prepare_fetch();
+
+    /// Prepare the operation on an existing owner executor. Callers may
+    /// install the returned capability before start() without introducing a
+    /// second strand between terminal completion and owner-state retirement.
+    VlFetchOperationPtr
+    prepare_fetch(asio::any_io_executor owner_executor);
 
     std::string const&
     host() const
@@ -122,6 +179,8 @@ private:
     uint16_t port_;
 
     static LogPartition log_;
+
+    friend class VlFetchOperation;
 };
 
 }  // namespace catl::vl

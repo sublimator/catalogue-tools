@@ -12,6 +12,7 @@
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace xprv {
 
@@ -59,7 +60,7 @@ VlCache::start()
 //@@authority transition=prv.T0069 status=provisional scope=function
 // bind=xprv::do_fetch@08fae73c5cc51d45
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-// touches=prv.S0023,prv.S0025
+// touches=prv.S0023,prv.S0025,prv.S0067
 // label=admit_validator_list_fetch_and_install_terminal_callback
 void
 VlCache::do_fetch()
@@ -72,17 +73,38 @@ VlCache::do_fetch()
 
     PLOGI(log_, "Fetching VL from ", vl_host_, ":", vl_port_, "...");
 
-    auto on_fetch = [self](catl::vl::VlResult result) {
-        // VlClient callback — may fire on any thread.
-        // Repost onto our strand to update state.
-        asio::post(self->strand_, [self, result = std::move(result)]() mutable {
+    auto on_fetch = [self](
+                        catl::vl::VlFetchOperationPtr operation,
+                        catl::vl::VlResult result) {
+        auto consume = [self,
+                        operation = std::move(operation),
+                        result = std::move(result)]() mutable {
+            try
+            {
+                if (self->fetch_terminal_observer_for_test_)
+                    self->fetch_terminal_observer_for_test_(operation);
+            }
+            catch (...)
+            {
+            }
+
+            if (operation && self->active_fetch_ != operation)
+            {
+                PLOGW(
+                    VlCache::log_,
+                    "Ignoring stale VL fetch terminal from a replaced "
+                    "operation");
+                return;
+            }
+
             //@@authority transition=prv.T0075 status=provisional
-            // scope=statement bind=expression_statement@9927d359e38a4c49
+            // scope=statement bind=expression_statement@832778b418493c42
             // owner=unresolved owner_hypothesis=vl_cache
-            // commit=vl_cache_strand touches=prv.S0025
+            // commit=vl_cache_strand touches=prv.S0025,prv.S0067
             // label=consume_validator_list_fetch_terminal_callback
-            self->fetch_in_progress_ =
-                false;  //@@authority-target ids=prv.T0075
+            self->active_fetch_.reset();  //@@authority-target ids=prv.T0075
+            self->active_fetch_cancel_requested_ = false;
+            self->fetch_in_progress_ = false;
             self->fetch_generation_++;
             struct FinishStop
             {
@@ -227,32 +249,55 @@ VlCache::do_fetch()
                 PLOGE(VlCache::log_, self->last_fetch_error_);
                 self->wake_waiters();
             }
-        });
+        };
+
+        // Production operations complete from co_spawn's physical terminal
+        // boundary on this exact owner strand. The post is retained only for
+        // the deterministic test seam, whose callback may be injected from
+        // outside the executor.
+        if (self->strand_.running_in_this_thread())
+            consume();
+        else
+            asio::post(self->strand_, std::move(consume));
     };
 
     try
     {
         if (fetch_for_test_)
         {
-            fetch_for_test_(on_fetch);
+            fetch_for_test_([on_fetch](catl::vl::VlResult result) mutable {
+                on_fetch({}, std::move(result));
+            });
         }
         else
         {
             catl::vl::VlClient client(io_, vl_host_, vl_port_);
-            client.fetch(on_fetch);
+            auto operation = client.prepare_fetch(strand_);
+            //@@authority transition=prv.T0208 status=provisional
+            // bind=expression_statement@bf6644464277f70a
+            // scope=statement owner=unresolved owner_hypothesis=vl_cache
+            // commit=vl_cache_strand touches=prv.S0067
+            // label=install_exact_validator_list_fetch_cancellation_capability
+            active_fetch_ = operation;  //@@authority-target ids=prv.T0208
+            if (fail_fetch_operation_starts_for_test_ != 0)
+            {
+                --fail_fetch_operation_starts_for_test_;
+                throw std::runtime_error("VL fetch operation start failpoint");
+            }
+            operation->start(on_fetch);
         }
     }
     catch (std::exception const& e)
     {
         catl::vl::VlResult failed;
         failed.error = std::string("VL fetch initiation failed: ") + e.what();
-        on_fetch(std::move(failed));
+        on_fetch(active_fetch_, std::move(failed));
     }
     catch (...)
     {
         catl::vl::VlResult failed;
         failed.error = "VL fetch initiation failed";
-        on_fetch(std::move(failed));
+        on_fetch(active_fetch_, std::move(failed));
     }
 }
 
@@ -289,13 +334,56 @@ VlCache::co_stop()
 //@@authority transition=prv.T0071 status=provisional scope=function
 // bind=xprv::begin_stop_on_strand@47e9653c14d73494
 // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
-// touches=prv.S0023,prv.S0024 label=seal_validator_list_refresh_admission
+// touches=prv.S0023,prv.S0024,prv.S0025,prv.S0067
+// label=seal_validator_list_refresh_admission_and_request_child_cancel
 void
 VlCache::begin_stop_on_strand()
 {
     if (phase_ == Phase::stopped)
         return;
     phase_ = Phase::stopping;
+    try
+    {
+        PLOGI(
+            log_,
+            "VL cache stop entered: refresh_handlers=",
+            refresh_wait_outstanding_,
+            " fetch_in_progress=",
+            fetch_in_progress_,
+            " cancellation_disposition=",
+            active_fetch_ ? static_cast<unsigned>(
+                                active_fetch_->cancellation_disposition())
+                          : 0u);
+    }
+    catch (...)
+    {
+    }
+    if (fetch_in_progress_ && !active_fetch_cancel_requested_)
+    {
+        bool requested = false;
+        if (active_fetch_)
+        {
+            //@@authority transition=prv.T0209 status=provisional
+            // bind=expression_statement@4d2bd899bf060dde
+            // scope=statement owner=unresolved owner_hypothesis=vl_cache
+            // commit=vl_cache_strand touches=prv.S0067
+            // label=request_active_validator_list_fetch_cancellation
+            requested =
+                active_fetch_
+                    ->request_cancel();  //@@authority-target ids=prv.T0209
+        }
+        else if (cancel_fetch_for_test_)
+        {
+            try
+            {
+                requested = cancel_fetch_for_test_();
+            }
+            catch (...)
+            {
+            }
+        }
+        active_fetch_cancel_requested_ = requested;
+    }
     try
     {
         refresh_.cancel();
@@ -319,6 +407,13 @@ VlCache::try_finish_stop_on_strand()
         fetch_in_progress_)
         return;
     phase_ = Phase::stopped;
+    try
+    {
+        PLOGI(log_, "VL cache drained");
+    }
+    catch (...)
+    {
+    }
     try
     {
         stop_progress_.cancel();

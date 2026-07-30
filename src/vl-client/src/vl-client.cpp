@@ -9,18 +9,23 @@
 #include <catl/xdata/protocol.h>
 #include <catl/xdata/slice-visitor.h>
 
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/connect.hpp>
-#include <boost/asio/detached.hpp>
+#include <boost/asio/dispatch.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/ssl.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <iomanip>
@@ -37,6 +42,84 @@ namespace ssl = asio::ssl;
 using tcp = asio::ip::tcp;
 
 LogPartition VlClient::log_("vl-client", LogLevel::INHERIT);
+
+struct VlFetchOperation::Impl
+{
+    Impl(
+        asio::any_io_executor owner_executor,
+        std::string host_,
+        uint16_t port_)
+        : executor(std::move(owner_executor))
+        , host(std::move(host_))
+        , port(port_)
+    {
+    }
+
+    asio::any_io_executor executor;
+    std::string host;
+    uint16_t port;
+    asio::cancellation_signal cancellation;
+    std::atomic_bool started{false};
+    std::atomic<VlFetchCancellationDisposition> cancellation_disposition{
+        VlFetchCancellationDisposition::not_requested};
+};
+
+VlFetchOperation::VlFetchOperation(std::shared_ptr<Impl> impl)
+    : impl_(std::move(impl))
+{
+}
+
+bool
+VlFetchOperation::request_cancel() noexcept
+{
+    auto impl = impl_;
+    if (!impl)
+        return false;
+
+    auto expected = VlFetchCancellationDisposition::not_requested;
+    if (!impl->cancellation_disposition.compare_exchange_strong(
+            expected,
+            VlFetchCancellationDisposition::submitted,
+            std::memory_order_acq_rel))
+    {
+        return expected != VlFetchCancellationDisposition::failed;
+    }
+
+    try
+    {
+        asio::dispatch(impl->executor, [impl]() noexcept {
+            try
+            {
+                impl->cancellation.emit(asio::cancellation_type::all);
+                impl->cancellation_disposition.store(
+                    VlFetchCancellationDisposition::emitted,
+                    std::memory_order_release);
+            }
+            catch (...)
+            {
+                impl->cancellation_disposition.store(
+                    VlFetchCancellationDisposition::failed,
+                    std::memory_order_release);
+            }
+        });
+        return impl->cancellation_disposition.load(std::memory_order_acquire) !=
+            VlFetchCancellationDisposition::failed;
+    }
+    catch (...)
+    {
+        impl->cancellation_disposition.store(
+            VlFetchCancellationDisposition::failed, std::memory_order_release);
+        return false;
+    }
+}
+
+VlFetchCancellationDisposition
+VlFetchOperation::cancellation_disposition() const noexcept
+{
+    if (!impl_)
+        return VlFetchCancellationDisposition::failed;
+    return impl_->cancellation_disposition.load(std::memory_order_acquire);
+}
 
 //------------------------------------------------------------------------------
 // Helpers
@@ -349,18 +432,28 @@ VlClient::VlClient(asio::io_context& io, std::string host, uint16_t port)
 }
 
 void
-VlClient::fetch(VlCallback callback)
+VlFetchOperation::start(VlFetchTerminalCallback callback)
 {
-    PLOGI(log_, "Fetching VL from ", host_, ":", port_);
+    auto impl = impl_;
+    if (!impl)
+        throw std::logic_error("VL fetch operation has no implementation");
 
-    auto host = host_;
-    auto port = port_;
+    bool expected = false;
+    if (!impl->started.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel))
+    {
+        throw std::logic_error("VL fetch operation already started");
+    }
+
+    auto operation = shared_from_this();
+    PLOGI(VlClient::log_, "Fetching VL from ", impl->host, ":", impl->port);
+
+    auto host = impl->host;
+    auto port = impl->port;
 
     boost::asio::co_spawn(
-        io_,
-        [host,
-         port,
-         callback = std::move(callback)]() mutable -> asio::awaitable<void> {
+        impl->executor,
+        [host, port]() mutable -> asio::awaitable<VlResult> {
             VlResult vl_result;
 
             try
@@ -599,9 +692,62 @@ VlClient::fetch(VlCallback callback)
                 vl_result.success = false;
             }
 
-            callback(std::move(vl_result));
+            co_return vl_result;
         },
-        asio::detached);
+        asio::bind_cancellation_slot(
+            impl->cancellation.slot(),
+            [operation, callback = std::move(callback)](
+                std::exception_ptr failure, VlResult result) mutable noexcept {
+                if (failure)
+                {
+                    try
+                    {
+                        std::rethrow_exception(failure);
+                    }
+                    catch (std::exception const& e)
+                    {
+                        result.success = false;
+                        result.error = e.what();
+                    }
+                    catch (...)
+                    {
+                        result.success = false;
+                        result.error = "VL fetch failed with unknown exception";
+                    }
+                }
+
+                try
+                {
+                    if (callback)
+                        callback(std::move(operation), std::move(result));
+                }
+                catch (...)
+                {
+                    try
+                    {
+                        PLOGE(
+                            VlClient::log_,
+                            "VL fetch terminal callback failed");
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+            }));
+}
+
+VlFetchOperationPtr
+VlClient::prepare_fetch()
+{
+    return prepare_fetch(asio::make_strand(io_));
+}
+
+VlFetchOperationPtr
+VlClient::prepare_fetch(asio::any_io_executor owner_executor)
+{
+    auto impl = std::make_shared<VlFetchOperation::Impl>(
+        std::move(owner_executor), std::string(host_), port_);
+    return VlFetchOperationPtr(new VlFetchOperation(std::move(impl)));
 }
 
 }  // namespace catl::vl
