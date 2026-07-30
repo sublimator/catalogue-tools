@@ -675,7 +675,7 @@ ServiceLifecycle::finish_engine_stop_on_control(
         // owner=unresolved owner_hypothesis=service_lifecycle
         // commit=service_root_strand touches=prv.S0053
         // boundary_ref=proof_engine.drain_receipt
-        // receipt=proof_engine.drain_receipt
+        // receipt=proof_engine.drain_receipt receipt_role=consume
         // label=consume_one_exact_proof_engine_drain_receipt
         // clang-format off
         row.phase = EngineDrainRow::Phase::succeeded; //@@authority-target ids=prv.T0179

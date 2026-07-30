@@ -300,7 +300,7 @@ VlCache::do_fetch()
         //@@authority transition=prv.T0216 status=provisional scope=statement bind=expression_statement@04751e2fe4506cda
         // owner=unresolved owner_hypothesis=vl_cache commit=vl_cache_strand
         // boundary_ref=vl_fetch.operation_terminal
-        // receipt=vl_fetch.operation_terminal
+        // receipt=vl_fetch.operation_terminal receipt_role=publish
         // label=publish_synchronous_fetch_start_refusal_terminal
         on_fetch(
             active_fetch_,
@@ -350,7 +350,7 @@ VlCache::do_fetch()
 // owner=unresolved owner_hypothesis=vl_cache
 // commit=vl_cache_strand touches=prv.S0025,prv.S0067,prv.S0068
 // boundary_ref=vl_fetch.operation_terminal
-// receipt=vl_fetch.operation_terminal
+// receipt=vl_fetch.operation_terminal receipt_role=consume
 // label=consume_exact_validator_list_fetch_terminal_and_retire_owner_homes
 bool
 VlCache::retire_fetch_on_strand(

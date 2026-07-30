@@ -860,7 +860,7 @@ VlFetchOperation::start(VlFetchTerminalCallback callback)
                         // owner_hypothesis=vl_fetch_operation
                         // commit=vl_fetch_executor touches=prv.S0072
                         // boundary_ref=vl_fetch.operation_terminal
-                        // receipt=vl_fetch.operation_terminal
+                        // receipt=vl_fetch.operation_terminal receipt_role=publish
                         // label=publish_exact_physical_fetch_terminal_callback
                         callback(
                             std::move(operation),
