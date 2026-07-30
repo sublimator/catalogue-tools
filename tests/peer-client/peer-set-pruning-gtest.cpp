@@ -635,6 +635,33 @@ TEST(PeerSetPruning, TargetedCandidateProbePrefersCoveringArchivalPeer)
         io, peers, "archive.example.com:1"));
 }
 
+TEST(PeerSetPruning, TargetedCandidateProbeExcludesKnownNonCoveringPeer)
+{
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    constexpr uint32_t ledger_seq = 500;
+
+    PeerSetTestAccess::set_status(
+        io,
+        peers,
+        "recent.example.com:1",
+        {.first_seq = 800, .last_seq = 1800, .current_seq = 1800});
+    PeerSetTestAccess::add_discovered(io, peers, "unknown.example.com:1");
+
+    auto queued =
+        PeerSetTestAccess::try_candidates_for(io, peers, ledger_seq, {}, 3);
+    ASSERT_EQ(queued.size(), 1u);
+    EXPECT_EQ(queued.front(), "unknown.example.com:1");
+    EXPECT_FALSE(PeerSetTestAccess::is_targeted_connect(
+        io, peers, "recent.example.com:1"));
+}
+
 TEST(PeerSetPruning, TargetedCandidateUpgradesExistingQueuedConnect)
 {
     asio::io_context io;

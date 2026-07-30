@@ -3651,6 +3651,12 @@ PeerSet::try_candidates_for(
         " canonical candidate(s), budget=",
         connect_budget);
 
+    auto range_for = [&](std::string const& raw_endpoint) {
+        auto const key = canonical_endpoint(raw_endpoint);
+        auto stats = endpoint_stats_.find(key);
+        return stats != endpoint_stats_.end() ? stats->second.status
+                                              : PeerStatus{};
+    };
     auto const now = std::chrono::steady_clock::now();
     candidates.erase(
         std::remove_if(
@@ -3658,9 +3664,16 @@ PeerSet::try_candidates_for(
             candidates.end(),
             [&](std::string const& raw_endpoint) {
                 auto const key = canonical_endpoint(raw_endpoint);
+                auto const status = range_for(key);
+                auto const has_known_range =
+                    status.first_seq != 0 && status.last_seq != 0;
+                auto const known_not_covering = has_known_range &&
+                    (ledger_seq < status.first_seq ||
+                     ledger_seq > status.last_seq);
                 if (key.empty() || selection_excluded.count(key) ||
                     connections_.count(key) || in_flight_.count(key) ||
-                    peer_failed_for_ledger(key, ledger_seq, now))
+                    peer_failed_for_ledger(key, ledger_seq, now) ||
+                    known_not_covering)
                 {
                     return true;
                 }
@@ -3670,12 +3683,6 @@ PeerSet::try_candidates_for(
             }),
         candidates.end());
 
-    auto range_for = [&](std::string const& raw_endpoint) {
-        auto const key = canonical_endpoint(raw_endpoint);
-        auto stats = endpoint_stats_.find(key);
-        return stats != endpoint_stats_.end() ? stats->second.status
-                                              : PeerStatus{};
-    };
     std::sort(
         candidates.begin(),
         candidates.end(),

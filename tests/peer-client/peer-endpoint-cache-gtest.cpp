@@ -599,8 +599,9 @@ TEST(PeerEndpointCache, TargetedHintCannotOverwriteNewerLiveRange)
     drain_io(io);
     auto queued =
         PeerSetTestAccess::try_candidates_for(io, peers, wanted, {}, 1);
-    ASSERT_EQ(queued.size(), 1u);
-    EXPECT_NE(queued.front(), endpoint);
+    EXPECT_TRUE(queued.empty())
+        << "newer live non-covering ranges must not consume targeted budget";
+    EXPECT_FALSE(PeerSetTestAccess::is_targeted_connect(io, peers, endpoint));
 
     auto const live = peers->tracker()->get_status(endpoint);
     ASSERT_TRUE(live.has_value());
