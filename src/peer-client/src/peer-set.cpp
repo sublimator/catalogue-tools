@@ -4281,10 +4281,16 @@ PeerSet::wait_for_covering_peer(
         asio::use_awaitable);
 }
 
+//@@authority state=prv.S0077 status=provisional scope=function
+// bind=catl::peer_client::wait_for_covering_peer_on_strand@94275c1f11b606ec
+// owner=unresolved owner_hypothesis=peer_history_search_frame
+// observed_home=PeerSet::wait_for_covering_peer_on_strand_coroutine_frame
+// label=request_visible_history_search_deadline_and_zero_publication_latch
 //@@authority transition=prv.T0028 status=provisional scope=function
 // bind=catl::peer_client::wait_for_covering_peer_on_strand@94275c1f11b606ec
 // owner=unresolved owner_hypothesis=peer_set commit=strand
-// touches=prv.S0011 label=own_history_covered_peer_search_lifecycle
+// touches=prv.S0011,prv.S0077
+// label=own_history_covered_peer_search_lifecycle
 boost::asio::awaitable<PeerSessionPtr>
 PeerSet::wait_for_covering_peer_on_strand(
     uint32_t ledger_seq,
@@ -4419,6 +4425,7 @@ PeerSet::wait_for_covering_peer_on_strand(
     auto const progress_deadline = options_.max_targeted_connect_attempts > 0
         ? completion_deadline
         : deadline;
+    bool zero_countdown_published = false;
     auto emit_search_progress = [&](std::chrono::steady_clock::time_point now) {
         auto const remaining_ms = std::max<std::int64_t>(
             0,
@@ -4426,6 +4433,8 @@ PeerSet::wait_for_covering_peer_on_strand(
                 progress_deadline - now)
                 .count());
         auto const remaining_secs = (remaining_ms + 999) / 1000;
+        if (remaining_secs == 0)
+            zero_countdown_published = true;
         auto const targeted_queued = std::ranges::count_if(
             targeted_candidates,
             [&](auto const& key) { return queued_.count(key) != 0; });
@@ -4443,7 +4452,15 @@ PeerSet::wait_for_covering_peer_on_strand(
                << ", in_flight=" << targeted_in_flight
                << ", connected=" << connections_.size()
                << ", remaining=" << remaining_secs << 's';
-        catl::core::emit_status(status.str());
+        //@@authority transition=prv.T0226 status=provisional scope=statement bind=emit_status@5c5110c03f0c10b2
+        // owner=unresolved owner_hypothesis=peer_history_search_frame
+        // commit=status_mutex touches=prv.S0074,prv.S0077 calls=emit_status
+        // label=publish_history_search_progress_and_latch_zero_if_exhausted
+        catl::core::emit_status(status.str()); //@@authority-target ids=prv.T0226
+    };
+    auto emit_terminal_zero_progress = [&]() {
+        if (!zero_countdown_published)
+            emit_search_progress(progress_deadline);
     };
     auto queue_targeted_candidate = [&]() -> bool {
         if (targeted_connects >= options_.max_targeted_connect_attempts)
@@ -4503,7 +4520,13 @@ PeerSet::wait_for_covering_peer_on_strand(
     queue_targeted_candidate();
     emit_search_progress(start);
 
-    auto log_no_covering_peer = [&]() {
+    auto publish_no_covering_peer_after_zero = [&]() {
+        //@@authority transition=prv.T0227 status=provisional scope=statement bind=expression_statement@14b56be20164f4b7
+        // owner=unresolved owner_hypothesis=peer_history_search_frame
+        // commit=peer_set_strand touches=prv.S0077
+        // label=establish_zero_countdown_before_no_covering_peer_status
+        emit_terminal_zero_progress(); //@@authority-target ids=prv.T0227
+        cleanup.clean_now();
         auto const elapsed_secs =
             std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - start)
@@ -4539,7 +4562,11 @@ PeerSet::wait_for_covering_peer_on_strand(
                << ": no covering peer after " << elapsed_secs
                << "s; candidates=" << selected_candidates.size() << '/'
                << options_.max_targeted_connect_attempts;
-        catl::core::emit_status(status.str());
+        //@@authority transition=prv.T0228 status=provisional scope=statement bind=emit_status@5c5110c03f0c10b2
+        // owner=unresolved owner_hypothesis=peer_history_search_frame
+        // commit=status_mutex touches=prv.S0074,prv.S0077 calls=emit_status
+        // label=publish_no_covering_peer_status_after_zero_countdown
+        catl::core::emit_status(status.str()); //@@authority-target ids=prv.T0228
     };
 
     PLOGI(
@@ -4633,8 +4660,7 @@ PeerSet::wait_for_covering_peer_on_strand(
             case PeerDecision::give_up:
                 if (now >= progress_deadline)
                 {
-                    cleanup.clean_now();
-                    log_no_covering_peer();
+                    publish_no_covering_peer_after_zero();
                     co_return nullptr;
                 }
                 break;
@@ -4691,8 +4717,7 @@ PeerSet::wait_for_covering_peer_on_strand(
         }
     }
 
-    cleanup.clean_now();
-    log_no_covering_peer();
+    publish_no_covering_peer_after_zero();
 
     co_return nullptr;
 }

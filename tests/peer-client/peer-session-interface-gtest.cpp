@@ -3138,6 +3138,8 @@ TEST(PeerSessionInterface, CoveringPeerProgressCountdownNeverIncreases)
     auto const events = request->drain();
     std::vector<int> remaining_values;
     std::optional<std::size_t> first_zero_remaining_index;
+    std::optional<std::size_t> last_remaining_index;
+    std::optional<int> last_remaining_value;
     std::optional<std::size_t> terminal_index;
     for (std::size_t event_index = 0; event_index < events.size();
          ++event_index)
@@ -3158,6 +3160,8 @@ TEST(PeerSessionInterface, CoveringPeerProgressCountdownNeverIncreases)
         auto const remaining_value =
             std::stoi(event.substr(value_begin, value_end - value_begin));
         remaining_values.push_back(remaining_value);
+        last_remaining_index = event_index;
+        last_remaining_value = remaining_value;
         if (remaining_value == 0 && !first_zero_remaining_index)
             first_zero_remaining_index = event_index;
     }
@@ -3176,6 +3180,14 @@ TEST(PeerSessionInterface, CoveringPeerProgressCountdownNeverIncreases)
     EXPECT_LE(*first_zero_remaining_index, *terminal_index)
         << "terminal failure must not publish while visible remaining time is "
            "still positive";
+    ASSERT_TRUE(last_remaining_index);
+    ASSERT_TRUE(last_remaining_value);
+    EXPECT_LT(*last_remaining_index, *terminal_index)
+        << "terminal failure must not precede its final visible countdown";
+    EXPECT_EQ(*last_remaining_value, 0)
+        << "last visible countdown before terminal failure must be zero; "
+           "events were: "
+        << testing::PrintToString(events);
 }
 
 TEST(PeerSessionInterface, WaitForPeerIgnoresUnsuitableThenSelectsCovering)
