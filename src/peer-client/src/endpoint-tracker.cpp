@@ -444,6 +444,16 @@ EndpointTracker::normalize_endpoint_identity(std::string const& endpoint)
 }
 
 std::optional<std::string>
+EndpointTracker::normalize_endpoint_identity(
+    std::string const& host,
+    uint16_t port)
+{
+    if (host.empty() || port == 0)
+        return std::nullopt;
+    return format_endpoint(canonicalize_host(host), port);
+}
+
+std::optional<std::string>
 EndpointTracker::normalize_discovered_endpoint(std::string const& endpoint)
 {
     std::string host;

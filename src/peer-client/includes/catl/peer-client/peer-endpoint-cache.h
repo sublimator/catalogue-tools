@@ -22,7 +22,9 @@ class PeerEndpointCache
 {
 public:
     /// Hard per-network retention bound. It bounds both durable storage and
-    /// the population a synchronous ranked query may inspect.
+    /// the population a synchronous ranked query may inspect. Active failures
+    /// displace reconstructible healthy hints; if failures alone exceed the
+    /// bound, the newest failure evidence wins.
     static constexpr std::size_t max_endpoints_per_network = 4096;
 
     struct Health
@@ -138,7 +140,7 @@ private:
     sqlite3* db_ = nullptr;
     mutable std::mutex mutex_;
     //@@authority state=prv.S0075 status=provisional scope=field
-    //bind=catl::peer_client::PeerEndpointCache::disabled_@ff731b30e8046e6b
+    // bind=catl::peer_client::PeerEndpointCache::disabled_@ff731b30e8046e6b
     // owner=unresolved owner_hypothesis=peer_endpoint_cache
     // observed_home=peer_endpoint_cache
     // label=latched_peer_endpoint_cache_unavailable_fact

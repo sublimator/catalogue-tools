@@ -2422,23 +2422,27 @@ PeerSet::pump_crawls()
 void
 PeerSet::load_cached_endpoints()
 {
-    if (!endpoint_cache_ || options_.cached_endpoint_limit == 0)
+    if (!endpoint_cache_)
         return;
 
-    std::size_t total_cached = 0;
+    // Candidate import is optional policy; admitted-endpoint retry evidence
+    // is not. Restore the complete bounded failure projection even when the
+    // configured bootstrap/search candidate limit is zero.
+    std::vector<PeerEndpointCache::Entry> active_failures;
     try
     {
-        total_cached = endpoint_cache_->count_endpoints(network_id_);
+        active_failures = endpoint_cache_->load_active_failures(network_id_);
     }
     catch (std::exception const& e)
     {
-        PLOGW(log_, "[", net_label_, "] Peer cache count failed: ", e.what());
+        PLOGW(
+            log_,
+            "[",
+            net_label_,
+            "] Peer cache failure restore failed: ",
+            e.what());
         return;
     }
-
-    auto cached = endpoint_cache_->load_bootstrap_candidates(
-        network_id_, options_.cached_endpoint_limit);
-    auto active_failures = endpoint_cache_->load_active_failures(network_id_);
     asio::post(
         strand_,
         [self = shared_from_this(),
@@ -2456,6 +2460,23 @@ PeerSet::load_cached_endpoints()
                 }
             }
         });
+
+    if (options_.cached_endpoint_limit == 0)
+        return;
+
+    std::size_t total_cached = 0;
+    try
+    {
+        total_cached = endpoint_cache_->count_endpoints(network_id_);
+    }
+    catch (std::exception const& e)
+    {
+        PLOGW(log_, "[", net_label_, "] Peer cache count failed: ", e.what());
+        return;
+    }
+
+    auto cached = endpoint_cache_->load_bootstrap_candidates(
+        network_id_, options_.cached_endpoint_limit);
     PLOGI(
         log_,
         "[",
@@ -2772,6 +2793,8 @@ PeerSet::try_connect_on_strand(
         co_return nullptr;
 
     auto key = make_key(host, port);
+    if (key.empty())
+        co_return nullptr;
 
     // Already connected? This can change while co_connect() is suspended,
     // so the result is checked again before insertion below.
@@ -5521,10 +5544,16 @@ PeerSet::prune_discovery_state()
     std::unordered_set<std::string> tracked_keys;
     for (auto const& endpoint : tracker_->all_endpoints())
         tracked_keys.insert(canonical_endpoint(endpoint));
-    auto const has_persistent_hint = [&](std::string const& key) {
+    auto const has_retained_endpoint_evidence = [&](std::string const& key) {
         auto const stats = endpoint_stats_.find(key);
-        return stats != endpoint_stats_.end() &&
-            stats->second.range_is_persistent_hint;
+        if (stats == endpoint_stats_.end())
+            return false;
+        auto const& value = stats->second;
+        auto const has_active_retry_evidence = value.failure_count > 0 &&
+            (value.last_failure_at > value.last_success_at ||
+             (value.last_failure_at == value.last_success_at &&
+              !value.connected_ok));
+        return value.range_is_persistent_hint || has_active_retry_evidence;
     };
 
     for (auto it = crawled_.begin(); it != crawled_.end();)
@@ -5576,7 +5605,7 @@ PeerSet::prune_discovery_state()
     for (auto it = failed_at_.begin(); it != failed_at_.end();)
     {
         if (!active.count(it->first) && !tracked_keys.count(it->first) &&
-            !has_persistent_hint(it->first))
+            !has_retained_endpoint_evidence(it->first))
         {
             it = failed_at_.erase(it);
             ++failed_removed;

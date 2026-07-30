@@ -123,6 +123,11 @@ require_rows_complete(sqlite3* db, int rc)
         throw std::runtime_error(sqlite3_errmsg(db));
 }
 
+//@@authority transition=prv.T0222 status=provisional scope=function
+//bind=catl::peer_client::prune_network_rows@3ee6bd2dd9577aa6
+// owner=unresolved owner_hypothesis=peer_endpoint_cache
+// commit=cache_writer_serialization touches=prv.S0073
+// label=retain_newest_active_failures_before_reconstructible_history_hints
 void
 prune_network_rows(sqlite3* db, std::string_view table, uint32_t network_id)
 {
@@ -147,12 +152,17 @@ prune_network_rows(sqlite3* db, std::string_view table, uint32_t network_id)
         std::string(table) +
         "  WHERE network_id = ? "
         "  ORDER BY "
-        "    CASE WHEN first_seq > 0 AND last_seq > 0 THEN 1 ELSE 0 END DESC, "
         "    CASE WHEN failure_count > 0 AND "
         "              (last_failure_at > last_success_at OR "
         "               (last_failure_at = last_success_at AND "
         "                connected_ok = 0)) "
-        "         THEN 0 ELSE 1 END DESC, "
+        "         THEN 1 ELSE 0 END DESC, "
+        "    CASE WHEN failure_count > 0 AND "
+        "              (last_failure_at > last_success_at OR "
+        "               (last_failure_at = last_success_at AND "
+        "                connected_ok = 0)) "
+        "         THEN last_failure_at ELSE 0 END DESC, "
+        "    CASE WHEN first_seq > 0 AND last_seq > 0 THEN 1 ELSE 0 END DESC, "
         "    connected_ok DESC, "
         "    CASE WHEN last_seq > first_seq THEN last_seq - first_seq "
         "         ELSE 0 END DESC, "
@@ -226,8 +236,17 @@ PeerEndpointCache::PeerEndpointCache(std::string path) : path_(std::move(path))
         throw std::runtime_error(message);
     }
 
-    sqlite3_busy_timeout(db_, 2000);
-    initialize_schema();
+    try
+    {
+        sqlite3_busy_timeout(db_, 2000);
+        initialize_schema();
+    }
+    catch (...)
+    {
+        sqlite3_close(db_);
+        db_ = nullptr;
+        throw;
+    }
 }
 
 PeerEndpointCache::~PeerEndpointCache()
@@ -255,8 +274,21 @@ PeerEndpointCache::initialize_schema()
         schema_version = sqlite3_column_int(version.get(), 0);
     }
 
-    if (schema_version != schema_version_current)
+    if (schema_version > schema_version_current)
     {
+        throw std::runtime_error(
+            "peer endpoint cache schema version " +
+            std::to_string(schema_version) +
+            " is newer than supported version " +
+            std::to_string(schema_version_current));
+    }
+
+    if (schema_version == 0)
+    {
+        // The unversioned table predates the canonical endpoint identity.
+        // It contains reconstructible discovery hints and has no supported
+        // migration contract, so reset it once rather than guessing which
+        // legacy aliases name the same peer.
         exec_sql(db_, "BEGIN IMMEDIATE;");
         try
         {
@@ -277,6 +309,14 @@ PeerEndpointCache::initialize_schema()
     else
     {
         exec_sql(db_, kCreatePeerEndpoints);
+        if (schema_version == 1)
+        {
+            // V1 already owns canonical endpoint identities and the complete
+            // retry evidence columns. V2 adds the hard population/query bound,
+            // so preserve the rows and let the bounded retention policy below
+            // select the surviving population.
+            exec_sql(db_, "PRAGMA user_version = 2;");
+        }
     }
 
     prune_all_networks(db_, "peer_endpoints");

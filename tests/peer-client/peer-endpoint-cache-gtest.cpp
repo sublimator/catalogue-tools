@@ -159,9 +159,9 @@ TEST(PeerEndpointCache, RankingPenalizesLegacyStaleConnectedOkRows)
     EXPECT_EQ(candidates.front().endpoint, "healthy.example.com:51235");
 }
 
-TEST(PeerEndpointCache, SchemaMismatchResetsReconstructibleHintCache)
+TEST(PeerEndpointCache, SupportedSchemaUpgradePreservesRetryEvidence)
 {
-    TempCachePath temp{"peer-endpoint-cache-schema-reset"};
+    TempCachePath temp{"peer-endpoint-cache-schema-upgrade"};
     constexpr uint32_t network_id = 42;
     auto const direct = std::string{"45.139.107.65:21337"};
     auto const mapped = std::string{"[::ffff:45.139.107.65]:21337"};
@@ -174,23 +174,39 @@ TEST(PeerEndpointCache, SchemaMismatchResetsReconstructibleHintCache)
     {
         auto cache = PeerEndpointCache::open(temp.string());
         cache->remember_status(network_id, direct, covering);
+        cache->remember_connect_failure(network_id, mapped);
         EXPECT_EQ(cache->count_endpoints(network_id), 1u);
     }
 
     exec_sql(temp.string(), "PRAGMA user_version = 1;");
 
     auto cache = PeerEndpointCache::open(temp.string());
-    EXPECT_EQ(cache->count_endpoints(network_id), 0u)
-        << "reconstructible hints must reset instead of growing permanent "
-           "runtime migration machinery";
-
-    cache->remember_status(network_id, direct, covering);
-    cache->remember_connect_failure(network_id, mapped);
     EXPECT_EQ(cache->count_endpoints(network_id), 1u)
-        << "current-schema writes must still share canonical identity";
+        << "the bounded-schema upgrade must preserve the canonical row";
     auto failures = cache->load_active_failures(network_id);
     ASSERT_EQ(failures.size(), 1u);
     EXPECT_EQ(failures.front().endpoint, direct);
+    EXPECT_EQ(failures.front().failure_count, 1u);
+}
+
+TEST(PeerEndpointCache, FutureSchemaVersionIsRefusedWithoutDowngrade)
+{
+    TempCachePath temp{"peer-endpoint-cache-future-schema"};
+    {
+        auto cache = PeerEndpointCache::open(temp.string());
+        cache->remember_connect_failure(42, "failure.example.com:51235");
+    }
+    exec_sql(temp.string(), "PRAGMA user_version = 999;");
+
+    EXPECT_THROW(
+        (void)PeerEndpointCache::open(temp.string()), std::runtime_error);
+
+    exec_sql(temp.string(), "PRAGMA user_version = 2;");
+    auto cache = PeerEndpointCache::open(temp.string());
+    auto failures = cache->load_active_failures(42);
+    ASSERT_EQ(failures.size(), 1u)
+        << "refusing a future schema must not destructively reinterpret it";
+    EXPECT_EQ(failures.front().endpoint, "failure.example.com:51235");
 }
 
 TEST(PeerEndpointCache, CanonicalIdentityCoversHostnamesAndNumericAddresses)
@@ -291,6 +307,68 @@ TEST(
     EXPECT_EQ(candidates.front().endpoint, public_search)
         << "a high-ranked private row cannot consume the bounded public "
            "search result";
+}
+
+TEST(PeerEndpointCache, ActiveFailureDisplacesHealthyHintAtHardBound)
+{
+    TempCachePath temp{"peer-endpoint-cache-failure-retention-bound"};
+    constexpr uint32_t network_id = 42;
+    {
+        auto cache = PeerEndpointCache::open(temp.string());
+    }
+    exec_sql(
+        temp.string(),
+        "WITH RECURSIVE n(value) AS ("
+        "  SELECT 0 UNION ALL SELECT value + 1 FROM n WHERE value < 4095"
+        ") "
+        "INSERT INTO peer_endpoints("
+        "  network_id, endpoint, first_seq, last_seq, current_seq, "
+        "  last_seen_at, last_success_at, success_count, connected_ok"
+        ") "
+        "SELECT 42, printf('healthy-%04d.example.com:51235', value), "
+        "       1, 1000, 1000, value + 1, value + 1, 1, 1 "
+        "FROM n;");
+
+    auto cache = PeerEndpointCache::open(temp.string());
+    ASSERT_EQ(
+        cache->count_endpoints(network_id),
+        PeerEndpointCache::max_endpoints_per_network);
+    cache->remember_connect_failure(network_id, "127.0.0.2:51235");
+
+    EXPECT_EQ(
+        cache->count_endpoints(network_id),
+        PeerEndpointCache::max_endpoints_per_network);
+    auto failures = index_entries(cache->load_active_failures(network_id));
+    ASSERT_TRUE(failures.contains("127.0.0.2:51235"))
+        << "active failure evidence must displace a reconstructible healthy "
+           "hint at capacity";
+}
+
+TEST(PeerEndpointCache, NewestFailuresWinWhenFailuresExceedHardBound)
+{
+    TempCachePath temp{"peer-endpoint-cache-all-failures-bound"};
+    constexpr uint32_t network_id = 42;
+    {
+        auto cache = PeerEndpointCache::open(temp.string());
+    }
+    exec_sql(
+        temp.string(),
+        "WITH RECURSIVE n(value) AS ("
+        "  SELECT 0 UNION ALL SELECT value + 1 FROM n WHERE value < 4096"
+        ") "
+        "INSERT INTO peer_endpoints("
+        "  network_id, endpoint, last_seen_at, last_failure_at, "
+        "  failure_count, connected_ok"
+        ") "
+        "SELECT 42, printf('failed-%04d.example.com:51235', value), "
+        "       value + 1, value + 1, 1, 0 "
+        "FROM n;");
+
+    auto cache = PeerEndpointCache::open(temp.string());
+    auto failures = index_entries(cache->load_active_failures(network_id));
+    EXPECT_EQ(failures.size(), PeerEndpointCache::max_endpoints_per_network);
+    EXPECT_FALSE(failures.contains("failed-0000.example.com:51235"));
+    EXPECT_TRUE(failures.contains("failed-4096.example.com:51235"));
 }
 
 TEST(PeerEndpointCache, SameSecondLaterFailureRemainsActive)
@@ -537,6 +615,53 @@ TEST(PeerEndpointCache, TargetedLookupRetainsPersistentFailureBackoff)
     PeerSetTestAccess::prune_discovery_state(io, peers);
     EXPECT_TRUE(PeerSetTestAccess::has_failed(io, peers, failed))
         << "cache-only backoff must not depend on live tracker membership";
+}
+
+TEST(PeerEndpointCache, ZeroCandidateLimitStillRestoresRetryEvidence)
+{
+    TempCachePath temp{"peer-endpoint-cache-zero-candidates-backoff"};
+    constexpr uint32_t network_id = 42;
+    constexpr uint32_t wanted = 500;
+    auto const failed = std::string{"failed-history.example.com:51235"};
+    auto const private_failed = std::string{"127.0.0.2:51235"};
+    auto const covering = PeerStatus{
+        .first_seq = 1,
+        .last_seq = 1000,
+        .current_seq = 1000,
+    };
+    {
+        auto cache = PeerEndpointCache::open(temp.string());
+        cache->remember_status(network_id, failed, covering);
+        cache->remember_connect_failure(network_id, failed);
+        cache->remember_connect_failure(network_id, private_failed);
+    }
+
+    boost::asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = network_id,
+            .endpoint_cache_path = temp.string(),
+            .cached_endpoint_limit = 0,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+        });
+    peers->start();
+    drain_io(io);
+
+    PeerSetTestAccess::set_status(io, peers, failed, covering);
+    auto queued =
+        PeerSetTestAccess::try_candidates_for(io, peers, wanted, {}, 2);
+    EXPECT_EQ(std::ranges::count(queued, failed), 0u)
+        << "zero candidate import cannot erase independent retry evidence";
+    EXPECT_TRUE(PeerSetTestAccess::has_failed(io, peers, failed));
+
+    peers->start_connect("127.0.0.2", 51235);
+    drain_io(io);
+    EXPECT_TRUE(PeerSetTestAccess::has_failed(io, peers, private_failed));
+    EXPECT_EQ(PeerSetTestAccess::snapshot(io, peers).queued_connects, 0u)
+        << "a configured private peer must observe its durable backoff even "
+           "when cached candidate import is disabled";
 }
 
 TEST(PeerEndpointCache, DisabledQueryNeverDegradesToHealthyEmpty)

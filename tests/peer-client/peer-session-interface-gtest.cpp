@@ -8542,6 +8542,55 @@ TEST(PeerSetShutdown, PostReadyPeerFailureIsClassifiedBeforeServantRetirement)
         << "later shutdown cannot classify the same servant twice";
 }
 
+TEST(PeerSetEndpointIdentity, PureIpv6RemainsOneKeyThroughConnectFailure)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
+        io, asio::ip::tcp::endpoint(asio::ip::make_address("::1"), 0));
+    auto accepted = std::make_shared<asio::ip::tcp::socket>(io);
+    acceptor->async_accept(*accepted, [accepted](boost::system::error_code) {});
+    auto const port = acceptor->local_endpoint().port();
+    auto const key = "[::1]:" + std::to_string(port);
+    auto const split_key = "::1:" + std::to_string(port);
+
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .endpoint_cache_path = ":memory:",
+            .max_in_flight_connects = 1,
+            .max_in_flight_crawls = 0,
+        });
+    peers->start_connect("::1", port);
+
+    std::shared_ptr<PeerClient> client;
+    for (std::size_t attempt = 0; attempt < 100 && !client; ++attempt)
+    {
+        io.run_for(1ms);
+        io.restart();
+        client = PeerSetTestAccess::connect_servant_client(io, peers, key);
+    }
+    ASSERT_TRUE(client)
+        << "the bracketed queue/census identity must survive host/port "
+           "reconstruction";
+    EXPECT_FALSE(PeerSetTestAccess::in_flight_contains(io, peers, split_key));
+
+    asio::post(client->strand(), [client] {
+        PeerClientTestAccess::fail_initial_connect_on_strand(*client);
+    });
+    io.run_for(1s);
+    io.restart();
+
+    EXPECT_TRUE(PeerSetTestAccess::has_failed(io, peers, key));
+    EXPECT_FALSE(PeerSetTestAccess::has_failed(io, peers, split_key));
+    EXPECT_EQ(PeerSetTestAccess::endpoint_failure_count(io, peers, key), 1u);
+    EXPECT_EQ(
+        PeerSetTestAccess::cached_endpoint_failure_count(io, peers, key), 1u);
+    EXPECT_FALSE(PeerSetTestAccess::in_flight_contains(io, peers, key));
+}
+
 TEST(PeerSetShutdown, OwnerStopWinsInPostReadyPreAdmissionWindow)
 {
     using namespace std::chrono_literals;

@@ -851,7 +851,9 @@ private:
     static std::string
     make_key(std::string const& host, uint16_t port)
     {
-        return host + ":" + std::to_string(port);
+        auto normalized =
+            EndpointTracker::normalize_endpoint_identity(host, port);
+        return normalized ? std::move(*normalized) : std::string{};
     }
 
     boost::asio::io_context& io_;
