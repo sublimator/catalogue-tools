@@ -41,6 +41,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <unordered_set>
@@ -732,9 +733,7 @@ public:
     }
 
     static void
-    set_header_request_timeout(
-        NodeCache& cache,
-        std::chrono::seconds timeout)
+    set_header_request_timeout(NodeCache& cache, std::chrono::seconds timeout)
     {
         cache.header_request_timeout_for_test_ = timeout;
     }
@@ -1151,8 +1150,7 @@ TEST(PeerSessionInterface, DefaultWalkResultCarriesOnlyInertFailure)
 {
     WalkResult result;
     EXPECT_FALSE(result.found());
-    EXPECT_TRUE(
-        std::holds_alternative<WalkInternalFailure>(result.terminal()));
+    EXPECT_TRUE(std::holds_alternative<WalkInternalFailure>(result.terminal()));
     EXPECT_TRUE(result.path().empty());
     EXPECT_TRUE(result.placeholders().empty());
 }
@@ -1399,11 +1397,7 @@ TEST(
 
     asio::post(client->strand(), [&, client, payload, callback] {
         ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
-            *client,
-            ledger_hash,
-            protocol::liTX_NODE,
-            {first_node},
-            callback));
+            *client, ledger_hash, protocol::liTX_NODE, {first_node}, callback));
         ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
             *client,
             ledger_hash,
@@ -1440,15 +1434,9 @@ TEST(
 
     asio::post(client->strand(), [&, client, payload, callback] {
         ASSERT_TRUE(PeerClientTestAccess::seed_pending_header_by_sequence(
-            *client,
-            ledger_seq,
-            protocol::liBASE,
-            callback));
+            *client, ledger_seq, protocol::liBASE, callback));
         ASSERT_TRUE(PeerClientTestAccess::seed_pending_header_by_hash(
-            *client,
-            ledger_hash,
-            protocol::liBASE,
-            callback));
+            *client, ledger_hash, protocol::liBASE, callback));
         PeerClientTestAccess::dispatch_ledger_data(*client, payload);
         EXPECT_TRUE(completions.empty());
         EXPECT_EQ(client->pending_count(), 2u);
@@ -1475,8 +1463,7 @@ TEST(PeerSessionInterface, UnexpectedRelayCookieCarriesNoLocalAuthority)
         serialize(*make_node_response(ledger_hash, node_id, true));
     std::vector<Error> completions;
     client->set_node_response_observer(
-        [cache](
-            std::shared_ptr<protocol::TMLedgerData> const& message) {
+        [cache](std::shared_ptr<protocol::TMLedgerData> const& message) {
             return NodeCacheTestAccess::on_node_response(*cache, message);
         });
 
@@ -1520,8 +1507,7 @@ TEST(
     std::vector<Error> completions;
     std::size_t cache_observations = 0;
     client->set_node_response_observer(
-        [&cache_observations](
-            std::shared_ptr<protocol::TMLedgerData> const&) {
+        [&cache_observations](std::shared_ptr<protocol::TMLedgerData> const&) {
             ++cache_observations;
             return NodeResponseObservation{.accepted = true};
         });
@@ -1531,17 +1517,9 @@ TEST(
 
     asio::post(client->strand(), [&, client, payload, callback] {
         ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
-            *client,
-            ledger_hash,
-            protocol::liTX_NODE,
-            {root},
-            callback));
+            *client, ledger_hash, protocol::liTX_NODE, {root}, callback));
         ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
-            *client,
-            ledger_hash,
-            protocol::liTX_NODE,
-            {child},
-            callback));
+            *client, ledger_hash, protocol::liTX_NODE, {child}, callback));
         PeerClientTestAccess::dispatch_ledger_data(*client, payload);
         EXPECT_EQ(cache_observations, 1u);
         EXPECT_TRUE(completions.empty());
@@ -1571,33 +1549,35 @@ TEST(
         serialize(*make_node_response(ledger_hash, node_id, true));
     std::vector<Error> completions;
     client->set_node_response_observer(
-        [cache](
-            std::shared_ptr<protocol::TMLedgerData> const& message) {
+        [cache](std::shared_ptr<protocol::TMLedgerData> const& message) {
             return NodeCacheTestAccess::on_node_response(*cache, message);
         });
 
-    asio::post(client->strand(), [&, client, partial_payload, complete_payload] {
-        ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
-            *client,
-            ledger_hash,
-            protocol::liTX_NODE,
-            {node_id},
-            [&completions](Error error, LedgerNodesResult) {
-                completions.push_back(error);
-            }));
-        PeerClientTestAccess::dispatch_ledger_data(*client, partial_payload);
-        EXPECT_EQ(cache->size(), 1u)
-            << "the valid content-addressed node remains useful";
-        EXPECT_TRUE(completions.empty());
-        EXPECT_EQ(client->pending_count(), 1u);
+    asio::post(
+        client->strand(), [&, client, partial_payload, complete_payload] {
+            ASSERT_TRUE(PeerClientTestAccess::seed_pending_nodes(
+                *client,
+                ledger_hash,
+                protocol::liTX_NODE,
+                {node_id},
+                [&completions](Error error, LedgerNodesResult) {
+                    completions.push_back(error);
+                }));
+            PeerClientTestAccess::dispatch_ledger_data(
+                *client, partial_payload);
+            EXPECT_EQ(cache->size(), 1u)
+                << "the valid content-addressed node remains useful";
+            EXPECT_TRUE(completions.empty());
+            EXPECT_EQ(client->pending_count(), 1u);
 
-        PeerClientTestAccess::dispatch_ledger_data(*client, complete_payload);
-        ASSERT_EQ(completions.size(), 1u);
-        EXPECT_EQ(completions.front(), Error::Success);
-        EXPECT_EQ(client->pending_count(), 0u);
-        EXPECT_EQ(cache->size(), 1u)
-            << "the malformed node never became a second cache entry";
-    });
+            PeerClientTestAccess::dispatch_ledger_data(
+                *client, complete_payload);
+            ASSERT_EQ(completions.size(), 1u);
+            EXPECT_EQ(completions.front(), Error::Success);
+            EXPECT_EQ(client->pending_count(), 0u);
+            EXPECT_EQ(cache->size(), 1u)
+                << "the malformed node never became a second cache entry";
+        });
     io.run();
 
     ASSERT_EQ(completions.size(), 1u);
@@ -1844,8 +1824,7 @@ TEST(
                 predecessor_completions.push_back(error);
             }));
         PeerClientTestAccess::set_before_ledger_attempt_consume(
-            *client,
-            [&, client] {
+            *client, [&, client] {
                 ASSERT_TRUE(
                     PeerClientTestAccess::replace_pending_nodes_same_key(
                         *client,
@@ -2716,8 +2695,7 @@ TEST(PeerSessionInterface, ManagedUnknownPublicationConsumesCoveredPeerRetry)
     auto exhausted = result.get();
     EXPECT_FALSE(exhausted.found());
     EXPECT_TRUE(
-        std::holds_alternative<WalkTransportExhausted>(
-            exhausted.terminal()));
+        std::holds_alternative<WalkTransportExhausted>(exhausted.terminal()));
     EXPECT_EQ(cache->stats().managed_fetches_reserved, 3u)
         << "the first two-peer round plus one covered-peer retry must consume "
            "the bounded retry budget";
@@ -3114,6 +3092,73 @@ TEST(PeerSessionInterface, CoveringPeerProgressTicksAgainstAbsoluteDeadline)
     EXPECT_TRUE(contains("remaining=0s"));
 }
 
+TEST(PeerSessionInterface, CoveringPeerProgressCountdownNeverIncreases)
+{
+    using namespace std::chrono_literals;
+
+    asio::io_context io;
+    auto peers = PeerSet::create(
+        io,
+        PeerSetOptions{
+            .network_id = 42,
+            .max_in_flight_connects = 0,
+            .max_in_flight_crawls = 0,
+            .max_targeted_connect_attempts = 1,
+        });
+    auto request = std::make_shared<catl::core::RequestContext>(
+        "history-progress", "transaction", std::chrono::steady_clock::now());
+    auto request_executor =
+        catl::core::ContextExecutor(asio::make_strand(io), request);
+
+    constexpr uint32_t wanted = 500;
+    bool completed = false;
+    asio::co_spawn(
+        request_executor,
+        [&, peers]() -> asio::awaitable<void> {
+            EXPECT_FALSE(co_await peers->wait_for_covering_peer(wanted, 2));
+            completed = true;
+        },
+        asio::detached);
+
+    asio::steady_timer introduce_candidate(io);
+    introduce_candidate.expires_after(500ms);
+    introduce_candidate.async_wait([peers](boost::system::error_code ec) {
+        if (ec)
+            return;
+        PeerSetTestAccess::post_note_status(
+            peers,
+            "late-history.example.com:1",
+            {.first_seq = 400, .last_seq = 600, .current_seq = 600});
+    });
+
+    io.run();
+
+    EXPECT_TRUE(completed);
+    auto const events = request->drain();
+    std::vector<int> remaining_values;
+    for (auto const& event : events)
+    {
+        auto const prefix = event.find("peer history search ledger 500:");
+        auto const remaining = event.find("remaining=");
+        if (prefix == std::string::npos || remaining == std::string::npos)
+            continue;
+        auto value_begin = remaining + std::string_view("remaining=").size();
+        auto value_end = event.find('s', value_begin);
+        ASSERT_NE(value_end, std::string::npos) << event;
+        remaining_values.push_back(
+            std::stoi(event.substr(value_begin, value_end - value_begin)));
+    }
+
+    ASSERT_GE(remaining_values.size(), 3u);
+    for (std::size_t index = 1; index < remaining_values.size(); ++index)
+    {
+        EXPECT_LE(remaining_values[index], remaining_values[index - 1])
+            << "browser-visible countdown must be one stable request fact; "
+               "events were: "
+            << testing::PrintToString(remaining_values);
+    }
+}
+
 TEST(PeerSessionInterface, WaitForPeerIgnoresUnsuitableThenSelectsCovering)
 {
     asio::io_context io;
@@ -3383,8 +3428,8 @@ TEST(PeerSessionInterface, NodeCacheWalkToCompletesAgainstScriptedFake)
     ASSERT_EQ(result.path().size(), 1u);
     auto const& leaf = result.leaf();
     ASSERT_EQ(leaf.leaf_data.size() + 1u, wire.size());
-    EXPECT_TRUE(std::equal(
-        leaf.leaf_data.begin(), leaf.leaf_data.end(), wire.begin()));
+    EXPECT_TRUE(
+        std::equal(leaf.leaf_data.begin(), leaf.leaf_data.end(), wire.begin()));
 
     io.stop();
     runner.join();
@@ -3554,11 +3599,11 @@ TEST(PeerSessionInterface, NodeCacheWalkFailureExcludesEveryAttemptedPeer)
     auto const* exhausted =
         std::get_if<WalkTransportExhausted>(&result.terminal());
     ASSERT_NE(exhausted, nullptr);
-    EXPECT_TRUE(std::ranges::find(
-                    exhausted->attempted_peers, first->endpoint()) !=
+    EXPECT_TRUE(
+        std::ranges::find(exhausted->attempted_peers, first->endpoint()) !=
         exhausted->attempted_peers.end());
-    EXPECT_TRUE(std::ranges::find(
-                    exhausted->attempted_peers, second->endpoint()) !=
+    EXPECT_TRUE(
+        std::ranges::find(exhausted->attempted_peers, second->endpoint()) !=
         exhausted->attempted_peers.end());
     EXPECT_FALSE(remaining);
     EXPECT_GE(first_requests.load(std::memory_order_relaxed), 1);
@@ -6170,8 +6215,7 @@ TEST(
     EXPECT_TRUE(terminal.get());
     EXPECT_EQ(writes.size(), 1u)
         << "the header request must still be queued behind the predecessor";
-    EXPECT_EQ(
-        PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 0u)
+    EXPECT_EQ(PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 0u)
         << "T0204 must classify a deadline before S0065 as local "
            "SendNotInitiated, not peer failure";
 
@@ -6253,20 +6297,17 @@ TEST(
     EXPECT_TRUE(terminal.get());
     ASSERT_EQ(writes.size(), 1u)
         << "the exact header write must have crossed transport initiation";
-    EXPECT_EQ(
-        PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 1u)
+    EXPECT_EQ(PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 1u)
         << "a post-S0065 response timeout carries peer-failure evidence";
 
     auto header_write = std::move(writes.front());
     asio::post(
-        client->strand(),
-        [header_write = std::move(header_write)]() mutable {
+        client->strand(), [header_write = std::move(header_write)]() mutable {
             header_write({});
         });
     io.run();
     io.restart();
-    EXPECT_EQ(
-        PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 1u)
+    EXPECT_EQ(PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 1u)
         << "late physical completion cannot double-retire the terminal";
 }
 
@@ -6323,16 +6364,14 @@ TEST(PeerSessionInterface, HeaderRoundExpiryDoesNotInventPeerFailure)
     ASSERT_EQ(terminal.wait_for(0ms), std::future_status::ready);
     EXPECT_TRUE(terminal.get());
     ASSERT_TRUE(withheld);
-    EXPECT_EQ(
-        PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 0u)
+    EXPECT_EQ(PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 0u)
         << "aggregate S0066 round expiry is a local bound, not an endpoint "
            "terminal";
 
     withheld(Error::Timeout, LedgerHeaderResult{});
     io.run();
     io.restart();
-    EXPECT_EQ(
-        PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 0u)
+    EXPECT_EQ(PeerSetTestAccess::ledger_failure_count(io, peers, endpoint), 0u)
         << "a late stale terminal cannot retroactively blame the endpoint";
 }
 
@@ -8554,17 +8593,15 @@ TEST(PeerSetEndpointIdentity, PureIpv6RemainsOneKeyThroughConnectFailure)
     auto const port = acceptor->local_endpoint().port();
     auto const key = "[::1]:" + std::to_string(port);
     auto const split_key = "::1:" + std::to_string(port);
-    EXPECT_EQ(
-        EndpointTracker::normalize_endpoint_identity("[::1]", port), key);
+    EXPECT_EQ(EndpointTracker::normalize_endpoint_identity("[::1]", port), key);
     EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity("", port));
     EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity("::1", 0));
-    EXPECT_FALSE(
-        EndpointTracker::normalize_endpoint_identity("[[::1]]", port));
+    EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity("[[::1]]", port));
     EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity("::g", port));
     EXPECT_FALSE(
         EndpointTracker::normalize_endpoint_identity("bad/host", port));
-    EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity(
-        "::ffff:not-an-ip", port));
+    EXPECT_FALSE(
+        EndpointTracker::normalize_endpoint_identity("::ffff:not-an-ip", port));
     EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity(
         "[history.example.com]", port));
     EXPECT_FALSE(EndpointTracker::normalize_endpoint_identity(

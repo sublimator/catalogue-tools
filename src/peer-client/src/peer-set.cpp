@@ -4411,6 +4411,14 @@ PeerSet::wait_for_covering_peer_on_strand(
     auto const completion_deadline = timeout_secs > 0
         ? deadline + std::chrono::milliseconds(timeout_ms)
         : deadline;
+    // This deadline is request-visible through SSE progress events. It must
+    // be a stable fact for the whole search; otherwise the browser can observe
+    // a countdown jump when selected targeted work first appears. The ordinary
+    // requester deadline still controls early give-up when no selected
+    // targeted candidate remains outstanding.
+    auto const progress_deadline = options_.max_targeted_connect_attempts > 0
+        ? completion_deadline
+        : deadline;
     auto selected_targeted_outstanding = [&]() {
         for (auto const& key : targeted_candidates)
         {
@@ -4439,12 +4447,10 @@ PeerSet::wait_for_covering_peer_on_strand(
         return false;
     };
     auto emit_search_progress = [&](std::chrono::steady_clock::time_point now) {
-        auto const active_deadline =
-            selected_targeted_outstanding() ? completion_deadline : deadline;
         auto const remaining_ms = std::max<std::int64_t>(
             0,
             std::chrono::duration_cast<std::chrono::milliseconds>(
-                active_deadline - now)
+                progress_deadline - now)
                 .count());
         auto const remaining_secs = (remaining_ms + 999) / 1000;
         auto const targeted_queued = std::ranges::count_if(
