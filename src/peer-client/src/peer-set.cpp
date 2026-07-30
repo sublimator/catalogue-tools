@@ -4411,41 +4411,14 @@ PeerSet::wait_for_covering_peer_on_strand(
     auto const completion_deadline = timeout_secs > 0
         ? deadline + std::chrono::milliseconds(timeout_ms)
         : deadline;
-    // This deadline is request-visible through SSE progress events. It must
-    // be a stable fact for the whole search; otherwise the browser can observe
-    // a countdown jump when selected targeted work first appears. The ordinary
-    // requester deadline still controls early give-up when no selected
-    // targeted candidate remains outstanding.
+    // This deadline is request-visible through SSE progress events and
+    // therefore also gates terminal failure. It must be a stable fact for the
+    // whole search; otherwise the browser can observe either a countdown jump
+    // when selected targeted work first appears, or a terminal error while the
+    // displayed countdown still has time remaining.
     auto const progress_deadline = options_.max_targeted_connect_attempts > 0
         ? completion_deadline
         : deadline;
-    auto selected_targeted_outstanding = [&]() {
-        for (auto const& key : targeted_candidates)
-        {
-            if (auto queued = targeted_connects_.find(key);
-                queued != targeted_connects_.end() && queued_.count(key))
-            {
-                if (std::ranges::any_of(
-                        queued->second, [&](auto const& current) {
-                            return current && current == authorization &&
-                                current->is_active();
-                        }))
-                {
-                    return true;
-                }
-            }
-            if (auto active = in_flight_.find(key); active != in_flight_.end())
-            {
-                if (std::ranges::find(
-                        active->second.targeted_ledgers, ledger_seq) !=
-                    active->second.targeted_ledgers.end())
-                {
-                    return true;
-                }
-            }
-        }
-        return false;
-    };
     auto emit_search_progress = [&](std::chrono::steady_clock::time_point now) {
         auto const remaining_ms = std::max<std::int64_t>(
             0,
@@ -4658,8 +4631,7 @@ PeerSet::wait_for_covering_peer_on_strand(
                 break;  // selected peer vanished, keep polling
             }
             case PeerDecision::give_up:
-                if (now < deadline || !selected_targeted_outstanding() ||
-                    now >= completion_deadline)
+                if (now >= progress_deadline)
                 {
                     cleanup.clean_now();
                     log_no_covering_peer();
@@ -4673,7 +4645,7 @@ PeerSet::wait_for_covering_peer_on_strand(
 
         if (now >= deadline)
         {
-            if (!selected_targeted_outstanding() || now >= completion_deadline)
+            if (now >= progress_deadline)
                 break;
         }
 
@@ -4696,10 +4668,8 @@ PeerSet::wait_for_covering_peer_on_strand(
                 next_log += std::chrono::seconds(5);
         }
 
-        auto const active_deadline =
-            selected_targeted_outstanding() ? completion_deadline : deadline;
         auto wait_until =
-            std::min({active_deadline, next_maintenance, next_log});
+            std::min({progress_deadline, next_maintenance, next_log});
         auto wait_signal = attach_wait_signal();
         auto const wait_for =
             std::chrono::duration_cast<std::chrono::milliseconds>(

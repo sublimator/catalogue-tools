@@ -39,6 +39,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -3136,8 +3137,17 @@ TEST(PeerSessionInterface, CoveringPeerProgressCountdownNeverIncreases)
     EXPECT_TRUE(completed);
     auto const events = request->drain();
     std::vector<int> remaining_values;
-    for (auto const& event : events)
+    std::optional<std::size_t> first_zero_remaining_index;
+    std::optional<std::size_t> terminal_index;
+    for (std::size_t event_index = 0; event_index < events.size();
+         ++event_index)
     {
+        auto const& event = events[event_index];
+        if (event.find("peer history search ledger 500: no covering peer") !=
+            std::string::npos)
+        {
+            terminal_index = event_index;
+        }
         auto const prefix = event.find("peer history search ledger 500:");
         auto const remaining = event.find("remaining=");
         if (prefix == std::string::npos || remaining == std::string::npos)
@@ -3145,8 +3155,11 @@ TEST(PeerSessionInterface, CoveringPeerProgressCountdownNeverIncreases)
         auto value_begin = remaining + std::string_view("remaining=").size();
         auto value_end = event.find('s', value_begin);
         ASSERT_NE(value_end, std::string::npos) << event;
-        remaining_values.push_back(
-            std::stoi(event.substr(value_begin, value_end - value_begin)));
+        auto const remaining_value =
+            std::stoi(event.substr(value_begin, value_end - value_begin));
+        remaining_values.push_back(remaining_value);
+        if (remaining_value == 0 && !first_zero_remaining_index)
+            first_zero_remaining_index = event_index;
     }
 
     ASSERT_GE(remaining_values.size(), 3u);
@@ -3157,6 +3170,12 @@ TEST(PeerSessionInterface, CoveringPeerProgressCountdownNeverIncreases)
                "events were: "
             << testing::PrintToString(remaining_values);
     }
+    ASSERT_TRUE(first_zero_remaining_index)
+        << "terminal failure must be preceded by a visible zero countdown";
+    ASSERT_TRUE(terminal_index);
+    EXPECT_LE(*first_zero_remaining_index, *terminal_index)
+        << "terminal failure must not publish while visible remaining time is "
+           "still positive";
 }
 
 TEST(PeerSessionInterface, WaitForPeerIgnoresUnsuitableThenSelectsCovering)
