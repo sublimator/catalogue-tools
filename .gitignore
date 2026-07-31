@@ -44,3 +44,8 @@ server-logs.txt
 results.txt
 proof-*.bin
 proof-*.json
+
+# Local agent/editor tooling (never repository inputs)
+.agent-work/
+.mcp.json
+scripts/uv.lock
